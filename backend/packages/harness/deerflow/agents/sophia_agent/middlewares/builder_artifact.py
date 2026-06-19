@@ -2638,6 +2638,29 @@ def _classify_image_generation_error(text: str, exists: bool, bytes_count: int) 
     return "missing_output"
 
 
+def _image_generation_segment_status(
+    *,
+    segment: str,
+    text: str,
+    state: dict[str, Any],
+) -> tuple[str | None, bool, int, str | None, str | None]:
+    output_path = _command_flag_value(segment, "--output-file")
+    exists, bytes_count, status_reason = _virtual_output_status(state, output_path)
+    suffix = PurePosixPath(str(output_path or "")).suffix.lower()
+    valid_image = exists and bytes_count > 0 and suffix in _PPTX_IMAGE_EXTENSIONS
+    error_class = None if valid_image else _classify_image_generation_error(text, valid_image, bytes_count)
+    logger.info(
+        "[BuilderImageGeneration] model=gpt-image-2 success=%s output_ext=%s "
+        "bytes=%d error_class=%s status_reason=%s",
+        valid_image,
+        suffix.lstrip(".") or None,
+        bytes_count,
+        error_class,
+        status_reason,
+    )
+    return output_path, valid_image, bytes_count, error_class, status_reason
+
+
 def _image_generation_metadata_from_state(state: dict[str, Any]) -> tuple[str | None, str | None]:
     diagnostics = _pptx_diagnostics(state)
     attempts = int(diagnostics.get("image_generation_attempt_count", 0) or 0)
@@ -6690,31 +6713,39 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         ]
         if not billable_segments:
             return preflight_delta
-        image_command = " && ".join(billable_segments)
-        output_path = _command_flag_value(image_command, "--output-file")
-        exists, bytes_count, status_reason = _virtual_output_status(state, output_path)
-        suffix = PurePosixPath(str(output_path or "")).suffix.lower()
-        valid_image = exists and bytes_count > 0 and suffix in _PPTX_IMAGE_EXTENSIONS
-        error_class = _classify_image_generation_error(text, valid_image, bytes_count)
-        logger.info(
-            "[BuilderImageGeneration] model=gpt-image-2 success=%s output_ext=%s "
-            "bytes=%d error_class=%s status_reason=%s",
-            valid_image,
-            suffix.lstrip(".") or None,
-            bytes_count,
-            error_class,
-            status_reason,
-        )
+        statuses = [
+            _image_generation_segment_status(segment=segment, text=text, state=state)
+            for segment in billable_segments
+        ]
         in_command = max(1, len(billable_segments))
+        successful_paths = [
+            output_path
+            for output_path, valid_image, _bytes_count, _error_class, _status_reason in statuses
+            if output_path and valid_image
+        ]
+        success_count = len(successful_paths)
+        bytes_total = sum(
+            bytes_count
+            for _output_path, valid_image, bytes_count, _error_class, _status_reason in statuses
+            if valid_image
+        )
+        error_class = next(
+            (
+                status_error
+                for _output_path, valid_image, _bytes_count, status_error, _status_reason in statuses
+                if not valid_image and status_error
+            ),
+            None,
+        )
         delta: dict[str, Any] = {
             **preflight_delta,
             "image_generation_attempt_count": in_command,
-            "image_generation_success_count": 1 if valid_image else 0,
-            "image_generation_bytes_total": bytes_count if valid_image else 0,
+            "image_generation_success_count": success_count,
+            "image_generation_bytes_total": bytes_total,
             "image_generation_error_class": error_class,
         }
-        if output_path and valid_image:
-            delta["image_output_paths"] = [output_path]
+        if successful_paths:
+            delta["image_output_paths"] = successful_paths
         return delta
 
     @staticmethod

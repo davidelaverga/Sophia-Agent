@@ -104,8 +104,10 @@ def test_image_generation_bash_result_parses_machine_readable_failure(tmp_path: 
 def test_chained_preflight_and_image_generation_records_both_diagnostics(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
-    image = outputs / "slide-01.png"
-    image.write_bytes(b"png-bytes")
+    image_1 = outputs / "slide-01.png"
+    image_1.write_bytes(b"png-1")
+    image_2 = outputs / "slide-02.png"
+    image_2.write_bytes(b"png-2-bytes")
     request = SimpleNamespace(
         state={"thread_data": {"outputs_path": str(outputs)}},
         tool_call={
@@ -116,6 +118,10 @@ def test_chained_preflight_and_image_generation_records_both_diagnostics(tmp_pat
                     "python /mnt/skills/public/image-generation/scripts/generate.py "
                     "--prompt-file /mnt/user-data/workspace/slide-01.json "
                     "--output-file /mnt/user-data/outputs/slide-01.png "
+                    "--slide-visual && "
+                    "python /mnt/skills/public/image-generation/scripts/generate.py "
+                    "--prompt-file /mnt/user-data/workspace/slide-02.json "
+                    "--output-file /mnt/user-data/outputs/slide-02.png "
                     "--slide-visual"
                 )
             },
@@ -128,10 +134,14 @@ def test_chained_preflight_and_image_generation_records_both_diagnostics(tmp_pat
     )
 
     assert delta["image_generation_preflight"] == "ok"
-    assert delta["image_generation_attempt_count"] == 1
-    assert delta["image_generation_success_count"] == 1
-    assert delta["image_generation_bytes_total"] == len(b"png-bytes")
-    assert delta["image_output_paths"] == ["/mnt/user-data/outputs/slide-01.png"]
+    assert delta["image_generation_attempt_count"] == 2
+    assert delta["image_generation_success_count"] == 2
+    assert delta["image_generation_bytes_total"] == len(b"png-1") + len(b"png-2-bytes")
+    assert delta["image_generation_error_class"] is None
+    assert delta["image_output_paths"] == [
+        "/mnt/user-data/outputs/slide-01.png",
+        "/mnt/user-data/outputs/slide-02.png",
+    ]
 
 
 def test_failed_preflight_in_chain_does_not_count_unrun_generation(tmp_path: Path) -> None:
@@ -162,6 +172,40 @@ def test_failed_preflight_in_chain_does_not_count_unrun_generation(tmp_path: Pat
         "image_generation_preflight": "failed",
         "image_generation_skip_reason": "env_missing",
     }
+
+
+def test_chained_image_generation_records_successful_paths_when_later_output_missing(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    image = outputs / "slide-01.png"
+    image.write_bytes(b"png-bytes")
+    request = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs)}},
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/image-generation/scripts/generate.py "
+                    "--prompt-file /mnt/user-data/workspace/slide-01.json "
+                    "--output-file /mnt/user-data/outputs/slide-01.png && "
+                    "python /mnt/skills/public/image-generation/scripts/generate.py "
+                    "--prompt-file /mnt/user-data/workspace/slide-02.json "
+                    "--output-file /mnt/user-data/outputs/slide-02.png"
+                )
+            },
+        },
+    )
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(
+        request,
+        _tool_message("Successfully generated first image\nIMAGEGEN_FAIL reason=api_error"),
+    )
+
+    assert delta["image_generation_attempt_count"] == 2
+    assert delta["image_generation_success_count"] == 1
+    assert delta["image_generation_bytes_total"] == len(b"png-bytes")
+    assert delta["image_generation_error_class"] == "api_error"
+    assert delta["image_output_paths"] == ["/mnt/user-data/outputs/slide-01.png"]
 
 
 def test_pptx_generation_bash_result_classifies_missing_output(tmp_path: Path) -> None:
