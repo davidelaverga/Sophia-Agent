@@ -2096,7 +2096,10 @@ def _image_generation_invoked_seen(state: dict[str, Any]) -> bool:
 
 def _command_parts(command: str) -> list[str]:
     try:
-        return shlex.split(command)
+        lexer = shlex.shlex(command, posix=True, punctuation_chars=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        return list(lexer)
     except ValueError:
         return []
 
@@ -2144,7 +2147,7 @@ def _command_segment_for_marker(command: str, markers: tuple[str, ...]) -> str:
     )
     if marker_index is None:
         return command
-    separators = {"&&", "||", ";", "|"}
+    separators = {"&&", "||", ";", "|", "&"}
     start = marker_index
     while start > 0 and parts[start - 1] not in separators:
         start -= 1
@@ -2158,7 +2161,7 @@ def _command_segments_for_marker(command: str, markers: tuple[str, ...]) -> list
     parts = _command_parts(command)
     if not parts:
         return [command] if any(marker in command for marker in markers) else []
-    separators = {"&&", "||", ";", "|"}
+    separators = {"&&", "||", ";", "|", "&"}
     segments: list[str] = []
     start = 0
     for index, part in enumerate([*parts, "&&"]):

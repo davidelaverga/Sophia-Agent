@@ -210,6 +210,44 @@ def test_chained_image_generation_records_successful_paths_when_later_output_mis
     assert delta["image_output_paths"] == ["/mnt/user-data/outputs/slide-01.png"]
 
 
+def test_adjacent_shell_separators_split_image_generation_segments(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    image_1 = outputs / "slide-01.png"
+    image_1.write_bytes(b"png-1")
+    image_2 = outputs / "slide-02.png"
+    image_2.write_bytes(b"png-2")
+    request = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs)}},
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/image-generation/scripts/generate.py "
+                    "--prompt-file /mnt/user-data/workspace/slide-01.json "
+                    "--output-file /mnt/user-data/outputs/slide-01.png&&"
+                    "python /mnt/skills/public/image-generation/scripts/generate.py "
+                    "--prompt-file /mnt/user-data/workspace/slide-02.json "
+                    "--output-file /mnt/user-data/outputs/slide-02.png"
+                )
+            },
+        },
+    )
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(
+        request,
+        _tool_message("Successfully generated first image\nSuccessfully generated second image"),
+    )
+
+    assert delta["image_generation_attempt_count"] == 2
+    assert delta["image_generation_success_count"] == 2
+    assert delta["image_generation_bytes_total"] == len(b"png-1") + len(b"png-2")
+    assert delta["image_output_paths"] == [
+        "/mnt/user-data/outputs/slide-01.png",
+        "/mnt/user-data/outputs/slide-02.png",
+    ]
+
+
 def test_pptx_generation_bash_result_classifies_missing_output(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
