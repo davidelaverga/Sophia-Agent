@@ -114,6 +114,25 @@ def disable_langsmith_tracing_for_runnable(runnable: Any) -> LangSmithTraceDisab
     return LangSmithTraceDisabledRunnable(runnable)
 
 
+def _is_langgraph_pregel(runnable: Any) -> bool:
+    """Return whether LangGraph API will accept this object as a graph."""
+
+    try:
+        from langgraph.pregel import Pregel
+
+        if isinstance(runnable, Pregel):
+            return True
+    except Exception:  # noqa: BLE001 - optional import/version guard.
+        pass
+
+    try:
+        from langgraph.pregel.remote import BaseRemotePregel
+
+        return isinstance(runnable, BaseRemotePregel)
+    except Exception:  # noqa: BLE001 - optional import/version guard.
+        return False
+
+
 class LangSmithBuilderTraceRunnable(Runnable[Any, Any]):
     """Proxy the builder graph while enabling LangSmith only for that runnable."""
 
@@ -161,7 +180,13 @@ class LangSmithBuilderTraceRunnable(Runnable[Any, Any]):
         return LangSmithBuilderTraceRunnable(self._runnable.bind_tools(*args, **kwargs))
 
 
-def enable_langsmith_tracing_for_builder_runnable(runnable: Any) -> LangSmithBuilderTraceRunnable:
+def enable_langsmith_tracing_for_builder_runnable(runnable: Any) -> Any:
+    if _is_langgraph_pregel(runnable):
+        # langgraph-api validates graph factories by concrete Pregel type before
+        # execution. A Runnable proxy forwards methods but fails that production
+        # check, so keep compiled graphs native and rely on normal LangGraph/
+        # LangSmith tracing configuration for server runs.
+        return runnable
     return LangSmithBuilderTraceRunnable(runnable)
 
 

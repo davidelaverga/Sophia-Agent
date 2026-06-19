@@ -234,6 +234,31 @@ def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:
     assert captured["kwargs"]["max_tokens"] == 32768
 
 
+def test_builder_factory_returns_langgraph_compatible_graph(monkeypatch) -> None:
+    """The LangGraph server rejects Runnable proxies around compiled graphs."""
+
+    import deerflow.agents.sophia_agent.builder_agent as builder_module
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from langgraph.pregel import Pregel
+
+    monkeypatch.setattr(
+        builder_module,
+        "ChatAnthropic",
+        lambda **_kwargs: FakeListChatModel(responses=["ok"]),
+    )
+    monkeypatch.setattr(
+        builder_module,
+        "get_app_config",
+        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
+    )
+    monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+
+    builder_agent = builder_module._create_builder_agent(user_id="user_123")
+
+    assert isinstance(builder_agent, Pregel)
+    assert type(builder_agent).__name__ != "LangSmithBuilderTraceRunnable"
+
+
 # ---------------------------------------------------------------------------
 # PR-B (2026-05) — deepagents v0.5 AsyncSubAgentMiddleware always-on
 #

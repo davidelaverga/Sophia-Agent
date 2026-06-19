@@ -187,3 +187,31 @@ def test_builder_trace_runnable_honors_global_langsmith_false(monkeypatch) -> No
 
     assert wrapped.invoke({}) == "invoke"
     assert events == []
+
+
+def test_builder_trace_runnable_preserves_langgraph_graphs(monkeypatch) -> None:
+    from langchain.agents import create_agent
+    from langchain_core.language_models.fake_chat_models import FakeListChatModel
+    from langgraph.pregel import Pregel
+
+    events: list[tuple[str, bool | None]] = []
+
+    @contextmanager
+    def fake_tracing_context(*, enabled: bool | None = None, **_kwargs: Any):
+        events.append(("enter", enabled))
+        try:
+            yield
+        finally:
+            events.append(("exit", enabled))
+
+    graph = create_agent(model=FakeListChatModel(responses=["ok"]), tools=[])
+    assert isinstance(graph, Pregel)
+
+    monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+    monkeypatch.setattr(observability, "_tracing_context_factory", lambda: fake_tracing_context)
+
+    wrapped = observability.enable_langsmith_tracing_for_builder_runnable(graph)
+
+    assert wrapped is graph
+    assert isinstance(wrapped, Pregel)
+    assert events == []
