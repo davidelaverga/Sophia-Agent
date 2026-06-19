@@ -338,7 +338,38 @@ def _load_plan_slides(host_plan: Path) -> tuple[dict | None, list | None]:
     return plan, slides
 
 
-def _drop_invalid_slide_image_refs(slides: list, state: dict[str, Any]) -> tuple[int, bool]:
+def _relative_plan_asset_status(plan_dir: Path, ref: str) -> tuple[bool, int, str | None]:
+    normalized = ref.replace("\\", "/").strip()
+    pure = PurePosixPath(normalized)
+    if pure.is_absolute() or ".." in pure.parts:
+        return False, 0, "unsafe_relative_plan_asset"
+    host_path = plan_dir / normalized
+    if not host_path.is_file():
+        return False, 0, "missing_relative_plan_asset"
+    try:
+        return True, int(host_path.stat().st_size), None
+    except OSError:
+        return False, 0, "relative_plan_asset_stat_failed"
+
+
+def _slide_visual_ref_status(
+    state: dict[str, Any],
+    ref: str,
+    *,
+    plan_dir: Path | None = None,
+) -> tuple[bool, int, str | None]:
+    exists, bytes_count, reason = _virtual_output_status(state, ref)
+    if exists or plan_dir is None:
+        return exists, bytes_count, reason
+    return _relative_plan_asset_status(plan_dir, ref)
+
+
+def _drop_invalid_slide_image_refs(
+    slides: list,
+    state: dict[str, Any],
+    *,
+    plan_dir: Path | None = None,
+) -> tuple[int, bool]:
     """Strip refs to nonexistent files; return (valid_ref_count, changed)."""
     referenced = 0
     changed = False
@@ -349,7 +380,7 @@ def _drop_invalid_slide_image_refs(slides: list, state: dict[str, Any]) -> tuple
             ref = slide.get(key)
             if not isinstance(ref, str) or not ref.strip():
                 continue
-            exists, _bytes, _reason = _virtual_output_status(state, ref.strip())
+            exists, _bytes, _reason = _slide_visual_ref_status(state, ref.strip(), plan_dir=plan_dir)
             if exists:
                 referenced += 1
             else:
@@ -6885,7 +6916,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if plan is None or slides is None:
             return
 
-        referenced, changed = _drop_invalid_slide_image_refs(slides, state)
+        referenced, changed = _drop_invalid_slide_image_refs(slides, state, plan_dir=host_plan.parent)
         if referenced == 0 and _visuals_requested(state) and _outputs_root_from_state(state) is not None:
             changed = _wire_plan_visual_assets(slides, state) or changed
 

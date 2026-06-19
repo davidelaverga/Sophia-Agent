@@ -298,6 +298,7 @@ def test_autowire_drops_refs_to_missing_files(tmp_path) -> None:
             {"type": "title", "title": "Deck"},
             {"title": "Roadmap", "image": "/mnt/user-data/outputs/visuals/missing.png"},
             {"title": "Generated full-slide", "image_path": "/mnt/user-data/outputs/slides/missing.png"},
+            {"title": "Relative missing", "image_path": "assets/missing.png"},
         ],
     }
     plan_file = workspace / "plan.json"
@@ -318,6 +319,46 @@ def test_autowire_drops_refs_to_missing_files(tmp_path) -> None:
     rewritten = _json.loads(plan_file.read_text(encoding="utf-8"))
     assert "image" not in rewritten["slides"][1]
     assert "image_path" not in rewritten["slides"][2]
+    assert "image_path" not in rewritten["slides"][3]
+
+
+def test_autowire_preserves_valid_relative_image_path_refs(tmp_path) -> None:
+    import json as _json
+
+    outputs = tmp_path / "outputs"
+    workspace = tmp_path / "workspace"
+    assets = workspace / "assets"
+    outputs.mkdir()
+    assets.mkdir(parents=True)
+    (assets / "slide-1.png").write_bytes(b"\x89PNG relative")
+    plan = {
+        "title": "Deck",
+        "slides": [
+            {"type": "title", "title": "Deck"},
+            {
+                "title": "Generated full-slide",
+                "layout": "image_forward",
+                "image_path": "assets/slide-1.png",
+            },
+        ],
+    }
+    plan_file = workspace / "plan.json"
+    original = _json.dumps(plan)
+    plan_file.write_text(original, encoding="utf-8")
+
+    state = _visual_state(outputs, target="/mnt/user-data/outputs/deck.pptx")
+    state["thread_data"]["workspace_path"] = str(workspace)
+    command = (
+        "python /mnt/skills/public/ppt-generation/scripts/generate.py "
+        "--plan-file /mnt/user-data/workspace/plan.json "
+        "--output-file /mnt/user-data/outputs/deck.pptx"
+    )
+
+    BuilderArtifactMiddleware._maybe_autowire_pptx_plan_visuals(
+        _autowire_request(state, command)
+    )
+
+    assert plan_file.read_text(encoding="utf-8") == original
 
 
 def test_autowire_leaves_valid_plans_untouched(tmp_path) -> None:
