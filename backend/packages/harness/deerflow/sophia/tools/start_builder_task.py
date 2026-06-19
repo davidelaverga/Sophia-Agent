@@ -809,15 +809,59 @@ def _resolve_thread_id(runtime: ToolRuntime[ContextT, SophiaState] | None) -> st
         return None
 
 
+def _drop_builder_task_history(snippets: list[str]) -> list[str]:
+    """Drop policy-rejected memory snippets before they reach the builder.
+
+    The companion injects broad-category memories (fact/preference/…) into
+    ``injected_memory_contents``; a stored "user asked for a report about X"
+    task-history snippet would otherwise be embedded verbatim into the builder
+    brief and hijack the build subject (the OpenClaw-vs-Hermes contamination).
+    The builder-side retrieval path is already restricted to ``preference``;
+    this closes the companion-embedding path with the same policy classifier, so
+    task-history can't reach the builder even when a record slipped past
+    write-time filtering or predates this fix. See
+    fix/builder-memory-contamination + codex review on PR #137.
+
+    Drops ANY non-``None`` policy reason, not just ``task_history``:
+    ``_candidate_policy_rejection_reason`` returns the FIRST matching reason
+    (credential → non_durable → task_history), so a build request whose subject
+    contains a credential marker ("a report about API key rotation") reports as
+    ``credential_like`` and would otherwise mask the task-history signal; such
+    snippets must not reach the builder brief either.
+    """
+    # Lazy import keeps the deerflow.sophia.tools → deerflow.sophia.extraction
+    # edge out of module load and avoids any import cycle.
+    try:
+        from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+    except Exception:
+        return snippets
+
+    kept: list[str] = []
+    for snippet in snippets:
+        try:
+            reason = _candidate_policy_rejection_reason(snippet)
+        except Exception:
+            reason = None
+        if reason is not None:
+            logger.info("[start_builder_task] dropped policy-rejected memory snippet (%s) from builder brief", reason)
+            continue
+        kept.append(snippet)
+    return kept
+
+
 def _resolve_memory_snippets(state: SophiaState) -> list[str]:
     """Return human-readable memory snippets for the builder context.
 
     Preference order:
       1. ``injected_memory_contents`` (explicit human-readable snippets)
       2. ``injected_memories`` values that do not look like opaque IDs
+
+    Deliverable build-request (task-history) snippets are filtered out either
+    way so the companion path can't re-contaminate the builder brief.
     """
     snippets_raw = state.get("injected_memory_contents") or []
     snippets = [str(item).strip() for item in snippets_raw if str(item).strip()]
+    snippets = _drop_builder_task_history(snippets)
     if snippets:
         return snippets
 
@@ -828,7 +872,7 @@ def _resolve_memory_snippets(state: SophiaState) -> list[str]:
             continue
         if text:
             fallbacks.append(text)
-    return fallbacks
+    return _drop_builder_task_history(fallbacks)
 
 
 def _latest_emit_artifact_payload(messages: list[Any]) -> dict[str, Any] | None:

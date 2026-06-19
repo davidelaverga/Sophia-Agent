@@ -71,6 +71,25 @@ _DEFAULT_TIMEOUT_SECONDS = 2.0
 # multi-paragraph memories that would dominate the prompt.
 _MAX_SNIPPET_CHARS = 600
 
+# Builder retrieval fetches ALL categories (so Mem0's custom/context categories —
+# project, deadline, career, colleague, … — and the standard durable ones reach a
+# direct Builder-as-Main run) and filters task-history by CONTENT, not by an
+# allow-list. The episodic "user requested creation of X" rows that cause the
+# OpenClaw-vs-Hermes contamination are removed by the policy-content filter
+# (``_candidate_policy_rejection_reason``) regardless of which category they were
+# written under, so an allow-list adds no protection and only starves builds of
+# useful durable context (the "preference only" rule lost a daughter's name; the
+# later allow-list still dropped `project`/`decision`/etc.). Only the
+# companion-emotional categories are excluded as noise for a build brief. See
+# fix/builder-memory-contamination + codex review on PR #137.
+_BUILDER_EXCLUDED_CATEGORIES = frozenset({"feeling", "pattern", "ritual_context"})
+# Mem0 fetches `limit` rows by score and applies the category filter LOCALLY
+# afterwards, so asking for only top_k rows means a brief whose top matches are all
+# task-history would discard every row and surface zero durable memories even when
+# they rank just below. Over-fetch a larger pool, then trim to top_k after the
+# category + content filter. See codex review on PR #137.
+_BUILDER_SEARCH_POOL = 25
+
 
 class BuilderMem0RetrievalState(AgentState):
     user_id: NotRequired[str]
@@ -165,15 +184,19 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
         # module-load time) until the first real call.
         from deerflow.sophia.mem0_client import search_memories
 
+        # Over-fetch a pool so the category + content filter (applied locally
+        # after the score-ranked fetch) still has candidates when the top rows are
+        # task-history; we trim back to top_k below.
+        pool = max(_BUILDER_SEARCH_POOL, self.top_k)
         try:
-            return await asyncio.wait_for(
+            results = await asyncio.wait_for(
                 asyncio.to_thread(
                     search_memories,
                     user_id,
                     query,
-                    None,  # categories — None keeps all
+                    None,  # all categories — task-history filtered by content below
                     None,  # context_mode — None keeps all
-                    self.top_k,
+                    pool,  # over-fetch; trimmed to top_k after the content filter
                 ),
                 timeout=self.timeout_seconds,
             )
@@ -188,6 +211,38 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
         except Exception:
             logger.warning("mem0_retrieval.error user_id=%s", user_id, exc_info=True)
             return None
+
+        if not results:
+            return results
+
+        # Two-stage filter at the injection point:
+        #   1. drop only the companion-emotional NOISE categories (feeling /
+        #      pattern / ritual_context) — everything else (durable + custom
+        #      context categories) is build-relevant.
+        #   2. content is NOT task-history / policy-rejected — this is what keeps a
+        #      "user requested creation of X" row (written under ANY category, incl.
+        #      a blank/mislabeled one) from re-contaminating the brief, while
+        #      letting durable facts/decisions/projects through. Lexical-only, lazy
+        #      import (mirrors the companion + start_builder_task read filters).
+        # Then keep only the best top_k (score-ordered) for the prompt budget.
+        # See fix/builder-memory-contamination + codex review on PR #137.
+        try:
+            from deerflow.sophia.extraction import _candidate_policy_rejection_reason
+        except Exception:
+            _candidate_policy_rejection_reason = None
+
+        def _is_durable(entry: dict) -> bool:
+            if (entry.get("category") or "") in _BUILDER_EXCLUDED_CATEGORIES:
+                return False
+            if _candidate_policy_rejection_reason is None:
+                return True
+            try:
+                return _candidate_policy_rejection_reason(str(entry.get("content") or "")) is None
+            except Exception:
+                return True
+
+        durable = [m for m in results if isinstance(m, dict) and _is_durable(m)]
+        return durable[: self.top_k]
 
     @staticmethod
     def _collect_snippets(results: list) -> tuple[list[str], list[str]]:

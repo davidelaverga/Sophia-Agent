@@ -117,6 +117,8 @@ Per-turn retrieval uses rule-based category selection in Python (zero latency), 
 
 Writes happen only in the offline pipeline — never in-turn. Every write includes full entity scoping: `user_id`, `agent_id`, `run_id` (session), `timestamp`, and metadata including `tone_estimate` (required for `feeling` category).
 
+Build/deliverable requests ("make me a report about X") are transient task history, not durable facts — they are skip-listed at extraction and never stored, and every builder-feeding path filters task-history by **content** (not by excluding categories): the Builder retrieves durable build-relevant categories (`preference`, `fact`, `relationship`) and drops any row a content classifier flags as a build request, so a direct build still gets durable facts (a daughter's name) while a prior task's subject can't contaminate a new build. See `backend/CLAUDE.md` → "Builder memory-contamination guard".
+
 Implementation note: backend memory timestamps are emitted as timezone-aware UTC ISO-8601 values (with `Z`) to avoid deprecated naive datetime usage.
 
 ---

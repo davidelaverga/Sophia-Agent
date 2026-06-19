@@ -55,6 +55,573 @@ _CREDENTIAL_MARKERS = (
     "recovery code",
 )
 _NON_DURABLE_MARKERS = ("temporary", "one-time", "one time", "codename")
+# Task-history backstop: a build *request* made to Sophia ("user asked for a
+# report about X", "user wants a deck about Y") is transient task history, not a
+# durable fact, and pollutes the builder. The prompt (mem0_extraction.md) is the
+# primary lever; this catches what the model still emits. It fires on a request
+# verb + deliverable noun, but only when the noun is a *strong* "make me a ___"
+# deliverable (report, presentation, deck, slide, webpage) OR a weak/ambiguous
+# noun (document, pdf, material, …) paired with an explicit create/build cue —
+# and never when the requester is a third party ("boss asked for a status report")
+# or it is a delivery preference. This keeps durable memories ("user asked for HR
+# documents", "anxious about a board presentation") while dropping "user asked for
+# a report about Hermes". See fix/builder-memory-contamination.
+#
+# Request verbs span ask / request / want / need. "ask" requires "for" (with an
+# optional recipient: "asked for", "asked me/you/us/sophia for"), a recipient +
+# "to" ("asked me to"), or "to <create>" ("asked to build") — so it never matches
+# "asked about the report" or "asked to see the report"; want/need are bare (they
+# govern the deliverable directly: "wants a report"). The noun + third-party +
+# preference guards bound the recall.
+#
+# An optional TIME phrase may sit between "asked"/recipient and "for"/"to"
+# ("asked on Tuesday for a report", "asked on June 12 for a deck", "asked me
+# yesterday to build") — a legacy memory often records when the ask happened, and
+# the extraction prompt resolves temporals to ABSOLUTE dates. The phrase is a
+# tightly scoped temporal adverbial (the "on" form only matches a weekday or a
+# date), so it cannot swallow a topic phrase: "asked about the report for the
+# team" and "asked on pricing for clarity" still do NOT match the for-arm.
+# Absolute-date forms after "on": "June 12(, 2026)", ISO "2026-06-12", "06/12",
+# "the 12th".
+_ABSOLUTE_DATE = (
+    r"(?:jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\w*\s+\d{1,2}(?:,?\s+\d{4})?"
+    r"|\d{4}-\d{1,2}-\d{1,2}"
+    r"|\d{1,2}/\d{1,2}(?:/\d{2,4})?"
+    # "the 5th" — ordinal suffix REQUIRED so "the 3 options" (a count) is not a date.
+    r"|the\s+\d{1,2}(?:st|nd|rd|th)\b"
+)
+_REQUEST_TIME_PHRASE = (
+    r"(?:on\s+\w+day"
+    r"|on\s+(?:" + _ABSOLUTE_DATE + r")"
+    r"|yesterday|today|earlier|again|recently|just\s+now|just"
+    r"|this\s+(?:morning|afternoon|evening|week|month)"
+    r"|last\s+(?:week|month|night|time)"
+    r"|the\s+other\s+(?:day|week)"
+    r"|(?:a\s+)?(?:while|moment|day|week|month)s?\s+ago"
+    r"|\d+\s+(?:days?|weeks?|months?|hours?)\s+ago)"
+)
+# "asked [recipient] if/whether <subject> could/can [be] <create>" — an indirect
+# build request. An optional recipient may sit between the verb and "if/whether",
+# but ONLY the assistant (sophia|me|you|us) — "asked ME if I could make…", "asked
+# YOU whether we could build…". Third-party pronoun recipients (him|her|them) are
+# deliberately excluded: "User asked THEM if they could make a deck" is work
+# delegated to other people, a durable relationship/delegation fact to KEEP, and
+# _THIRD_PARTY_REQUEST_RE does not cover bare pronouns. The optional "be/get" covers
+# PASSIVE phrasing where the modal is not immediately followed by the creation verb
+# ("asked whether a report could BE created", "… can BE made"). Defined standalone
+# so the topic-scoped resolver can recognize this whole-string pattern even after
+# the topic split strips the trailing modal+verb out of the request intent.
+_ASKED_IF_BUILD_RE = re.compile(
+    r"\bask(?:ed|s)\s+(?:(?:sophia|me|you|us)\s+)?(?:if|whether)\b"
+    r"[^.?!]{0,40}?\b(?:could|can|would|will)\s+"
+    r"(?:be\s+|get\s+)?(?:creat|buil[dt]|mak|made|draft|generat|design|produc|"
+    r"prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|"
+    r"assembl|convert|export|render)"
+)
+# "asked that <subject> be/get <created>" — the passive/subjunctive indirect build
+# request ("asked that a report about Hermes BE created", "asked that the deck BE
+# made"). Gated on a passive creation verb so non-build subjunctives ("asked that a
+# report be REVIEWED", "asked that the team be INFORMED") do NOT match. Like
+# _ASKED_IF_BUILD_RE, defined standalone so the topic-scoped resolver can recognize
+# the whole-string pattern after the split strips the trailing "be <verb>".
+_ASKED_THAT_BUILD_RE = re.compile(
+    r"\bask(?:ed|s)\s+that\b[^.?!]{0,40}?\b(?:be|get)\s+"
+    r"(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|"
+    r"wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|"
+    r"assembl|convert|export|render)"
+)
+_DELIVERABLE_REQUEST_RE = re.compile(
+    # "requested/requests" only as a VERB governing a deliverable (followed by a
+    # determiner/number/possessive, "to", or "creation of") — NOT the plural noun
+    # ("feature requests", "support requests in a spreadsheet").
+    # "that" must be followed by an article/recipient ("requested THAT A report")
+    # so a noun-relative clause ("feature requests THAT MENTION reports") is not a
+    # verb match.
+    r"\brequest(?:ed|s)\s+(?:(?:an?|the|some|several|multiple|few|two|three|four|\d+|another|its|their|his|her|our|my|your|sophia|me|you|us)\s+|that\s+(?:an?|the|sophia|me|you|us)\b|to\b|creation\s+of\b)"
+    # "asked for" / "asked {sophia,me,you,us} for" (recipient optional) with an
+    # optional intervening time phrase: "asked on Tuesday for", "asked me yesterday for"
+    r"|\bask(?:ed|s)\s+(?:(?:sophia|me|you|us)\s+)?(?:" + _REQUEST_TIME_PHRASE + r"\s+)?for\b"
+    # "asked {sophia,me,you,us} to <anything>" (recipient-directed), optional time phrase
+    r"|\bask(?:ed|s)\s+(?:sophia|me|you|us)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\b"
+    # bare "asked sophia" (Sophia-directed)
+    r"|\bask(?:ed|s)\s+sophia\b"
+    # bare "asked to <create>" — gated on a creation stem so "asked to see/review"
+    # an existing artifact is NOT a build request. Optional time phrase: "asked on Monday to build"
+    r"|\bask(?:ed|s)\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
+    # "asked if/whether <assistant> could/can [be] <create>" — indirect/passive build
+    # request (see _ASKED_IF_BUILD_RE). "asked that <subject> be <create>" — passive
+    # subjunctive build request (see _ASKED_THAT_BUILD_RE).
+    + r"|" + _ASKED_IF_BUILD_RE.pattern
+    + r"|" + _ASKED_THAT_BUILD_RE.pattern
+    + r"|\bwant(?:ed|s)?\b"
+    r"|\bneed(?:ed|s)?\b"
+    # polite request forms: "would like a report", "user'd like a deck", "would love"
+    r"|\bwould\s+(?:like|love)\b"
+    r"|\b'?d\s+(?:like|love)\b"
+    # directed forms at Sophia/me/you/us with non-ask verbs ("told Sophia to build",
+    # "had me create", "got Sophia to …") — so the gate doesn't drop them before the
+    # Sophia-directed check; ask/request are already covered above.
+    r"|\b(?:told|tells|tasked|tasks|got|gets|had|has|expect(?:ed|s|ing)?|instruct(?:ed|s)?|direct(?:ed|s)?)\s+(?:sophia|me|you|us)\b"
+)
+_DELIVERABLE_NOUNS = (
+    "presentation", "report", "deck", "slide", "document", "pdf",
+    "html", "material", "deliverable", "artifact", "webpage",
+    "infographic", "spreadsheet", "write-up",
+    # WEAK deliverable types the builder dispatches (HTML/PDF output regexes):
+    # summary/brief/article/explainer. Ambiguous (verb "brief me", adjective
+    # "brief chat", "read an article"), so they are NOT in the STRONG set — they
+    # drop only when topic-scoped ("a brief about X") or with a create cue, and a
+    # bare/verbal/adjectival use is kept. "to brief" is exempted as a verb below.
+    "summary", "brief", "article", "explainer",
+    # Common document deliverables (weak — could name an existing doc): proposal,
+    # memo, whitepaper, newsletter, essay.
+    "proposal", "memo", "whitepaper", "newsletter", "essay",
+    # Visual deliverables the builder produces (generate_visual_asset /
+    # generate_excalidraw_diagram; companion_provider_fallback treats them as build
+    # intent). Weak — "an image of my cat" could be an existing photo.
+    "chart", "image", "diagram", "graph", "illustration", "mockup", "wireframe", "flowchart",
+    # Remaining builder visual-request markers
+    # (BuilderTaskMiddleware._VISUAL_REQUEST_MARKERS) not already named above. Weak —
+    # "a timeline of events", "a map of the area", "the org matrix", "a quadrant
+    # chart" are ordinary nouns, so they drop only when topic-scoped ("a timeline
+    # about X") or with a create cue; bare/ordinary uses are kept.
+    "timeline", "map", "matrix", "quadrant", "visual", "visualization", "visualisation",
+    # Format/extension deliverables the dispatch recognizes
+    # (start_builder_task._REQUESTED_OUTPUT_EXTENSION_PATTERNS): csv/json/markdown/
+    # docx/xlsx/excel. Weak. (Bare "md" is omitted — too ambiguous: doctor/state.)
+    "csv", "json", "markdown", "docx", "xlsx", "excel",
+    # Document aliases the companion build-intent path treats as artifacts. Weak.
+    # ("doc"/"page" are document build nouns in BuilderCommandMiddleware's one-page
+    # command regex; weak so a journal/web "page" without a request verb stays.)
+    "outline", "file", "canvas", "doc", "page",
+)
+# Frontend / web deliverables. The frontend dispatch path
+# (``start_builder_task._HTML_OUTPUT_RE``) treats these bare nouns as build
+# targets, so a legacy "user asked Sophia to build a website about X" memory must
+# also drop as task_history — otherwise the prior frontend subject contaminates a
+# new build. These are STRONG deliverables (an unambiguous "make me a ___").
+# Kept as a regex fragment (not re.escape'd tuple entries) so the spaced forms
+# allow flexible whitespace; the single-word "webpage" already lives in
+# ``_DELIVERABLE_NOUNS``. The outer ``s?`` in each consuming pattern pluralizes
+# (website → websites, landing page → landing pages, web app → web apps).
+_WEB_DELIVERABLE_FRAGMENT = (
+    r"website|web\s+site|web\s+page|landing\s+page|web\s+app(?:lication)?"
+    r"|single[-\s]page\s+(?:app|site)"
+)
+# PowerPoint presentation aliases. The dispatch path
+# (``start_builder_task._PPTX_OUTPUT_RE``) routes "PowerPoint"/"pptx"/"power
+# point" as a presentation build, so a legacy "user asked for a PowerPoint about
+# X" memory must drop as task_history too. STRONG deliverables. ("slide deck" /
+# "slides" are already covered by the "slide"/"deck" nouns.)
+_PPTX_DELIVERABLE_FRAGMENT = r"powerpoints?|pptx|power\s*points?|slide\s+decks?"
+# A deliverable word that MODIFIES a skill/activity ("presentation coaching",
+# "presentation practice", "report-writing skills") is not the requested
+# deliverable — it names a goal/context. This negative lookahead keeps the noun
+# from matching when it is immediately followed by such an activity word or a
+# hyphen-compound, so those durable memories are not dropped as task_history.
+# Singular support-role words (a presentation *coach*/*mentor*/*tutor*) are
+# exempted too — "user wants a presentation coach" is a support goal, not a build
+# request — alongside the gerund "coaching". Emotional/support states modifying
+# the noun ("presentation confidence/anxiety/nerves/fear/stress") name a feeling
+# goal, not a requested artifact, so they are exempted as well. Person/role
+# compounds ("website developer", "presentation designer") are a request for a
+# PERSON, not the artifact, so they are exempted regardless of direction.
+# NOTE: project/product words ("report generator/tool/app") are NOT here — a
+# compound like "report generator" is the user's own project ONLY when there is
+# no Sophia-directed build subject, so it is exempted by
+# ``_PROJECT_PRODUCT_COMPOUND_RE`` in the no-subject branch only (a Sophia-directed
+# "build a report generator ABOUT X" must still drop).
+_NOT_SKILL_MODIFIER = (
+    r"(?!\s+(?:coach(?:ing|es)?|mentor(?:s|ing|ship)?|tutor(?:s|ing)?|trainers?|"
+    r"instructors?|teachers?|practice|prep|preparation|skills?|training|tips?|feedback|"
+    r"advice|help|anxiet(?:y|ies)|nerves|nervousness|jitters|confiden\w+|fear\w*|"
+    r"stress\w*|dread\w*|panic\w*|worr\w+|developers?|designers?|"
+    r"class(?:es)?|courses?|lessons?)|-)"
+)
+# Match the deliverable nouns on WORD BOUNDARIES (optional trailing plural).
+# A bare ``noun in content`` substring test silently fires inside unrelated
+# words — "report" in "reported", "material" in "immaterial", "document" in
+# "documented" — which, combined with a common request verb, would wrongly
+# drop durable feeling/relationship/lesson memories as task_history (an
+# abuse-disclosure case was reproduced in review). Anchoring keeps every
+# intended case (the real "...educational materials..." build-request snippet
+# still matches) while removing that false-positive class.
+_DELIVERABLE_NOUN_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\b" + _NOT_SKILL_MODIFIER
+)
+# "requested/requests" directly followed by a PLURAL deliverable noun ("requested
+# slides about X", "requested reports about Hermes"). _DELIVERABLE_REQUEST_RE's
+# "requested" arm only accepts a determiner/number/possessive, "to", or "creation
+# of" after the verb (to avoid matching the plural NOUN "feature requests"), so a
+# bare plural deliverable slips through. Requiring the trailing plural "s"
+# immediately after the verb keeps the noun forms out: "feature requests about X" /
+# "support requests in a spreadsheet" have a preposition (not a deliverable) after
+# "requests", so they do not match. (This regex is defined here, after the noun
+# fragments, and folded into the request gate via ``_has_request_verb``.)
+_REQUESTED_PLURAL_DELIVERABLE_RE = re.compile(
+    r"\brequest(?:ed|s)\s+(?:(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + r")s|" + _PPTX_DELIVERABLE_FRAGMENT + r")\b"
+)
+# A genuine delivery *preference* ("prefers concise reports") is not a build
+# request. Match the preference VERB on a word boundary so a topic noun like
+# "report on consumer preferences" does NOT exempt itself (the bare substring
+# "prefer" did — letting a real build request escape the filter).
+_DELIVERY_PREFERENCE_RE = re.compile(r"\bprefer(?:s|red|ring)?\b")
+# A standing preference can also be phrased with want/need ("user wants reports
+# to be concise and include citations") — the prompt says these belong in
+# `preference`, so the classifier must not drop them. Recognize the STYLE/format
+# phrasing: a "<deliverable> to be/should be …" construction or a quality/format
+# descriptor. Gated (in _is_delivery_preference) to fire only when there is NO
+# build signal (no create/build cue, no "about <topic>"), so "make a concise
+# report about Hermes" is still a build request, not a preference.
+_DELIVERY_STYLE_RE = re.compile(
+    r"\bto\s+(?:be|include|have|contain|use|avoid|cover)\b|\bshould\s+(?:be|include|have)\b"
+    r"|\b(?:concise|succinct|brief|shorter|longer|detailed|thorough|formal|informal|casual|"
+    r"polished|minimal|skimmable|scannable|punchy|high-level)\b"
+    r"|\b(?:bullet|bullets|citations?|footnotes?|headlines?)\b|\bno\s+(?:jargon|bullets?|paragraphs?|fluff)\b"
+    r"|\bplain\s+language\b|\bexecutive\s+summary\b|\bone[\s-]pager?\b"
+)
+# The PREDICATE subset of the style phrasing ("… to be/include/have …", "… should
+# be/…"). Used in the topic branch to recognize a STANDING style preference scoped
+# to a category of deliverables ("wants reports about competitors TO BE concise") —
+# distinct from a styled one-off build ("a concise report about Hermes"), which the
+# bare style adjectives would over-match. The bare adjectives are deliberately
+# excluded here because "concise report about X" is a build, not a preference.
+_DELIVERY_STYLE_PREDICATE_RE = re.compile(
+    r"\bto\s+(?:be|include|have|contain|use|avoid|cover)\b|\bshould\s+(?:be|include|have)\b"
+)
+# A topic marker introduces the deliverable's *subject* ("report ABOUT X",
+# "presentation ON Y"). It does double duty: (1) it tells a styled deliverable
+# noun apart from a standing style preference ("concise report about Hermes" is a
+# build, "reports to be concise" is a preference), and (2) it splits the request
+# *intent* (before the marker) from the *subject* (after) so the preference /
+# third-party guards only scan who-is-asking, never incidental words in the topic
+# ("report about what the CLIENT REQUESTED"). "for" is excluded (a recipient, not
+# a subject: "report for the board").
+#
+# Subject-introducing PARTICIPLES count too: "a PDF summarizing X", "a document
+# outlining Y", "a report detailing Z" scope the deliverable to a subject exactly
+# like "about X" (covering/comparing were already here). Without them a weak noun
+# in this shape ("requested a PDF summarizing Hermes") had no subject marker AND
+# no create cue, so the no-subject branch kept it and the prior subject leaked.
+#
+# "on" is special: it introduces a subject ("report ON Hermes") OR a TIME ("asked
+# ON Tuesday for a report"). A temporal "on <weekday/date>" is NOT a subject — if
+# treated as one it leaves the topic split with no deliverable before it and the
+# request is wrongly kept (the deliverable is after the date). So "on" only counts
+# as a topic marker when it is NOT followed by a temporal expression.
+_TEMPORAL_AFTER_ON = (
+    r"(?:(?:mon|tues|wednes|thurs|fri|satur|sun)days?\b"
+    # An ORDINAL day ("on the 5th"); the suffix is REQUIRED so a bare cardinal that
+    # counts the subject ("on 10 competitors", "on 3 options") stays a topic
+    # marker, not a date.
+    r"|\d{1,2}(?:st|nd|rd|th)\b"
+    r"|" + _ABSOLUTE_DATE + r")"
+)
+_TOPIC_MARKER_RE = re.compile(
+    r"\b(?:about|regarding|concerning|covering|comparing|"
+    r"summari[sz]ing|outlining|detailing|describing|explaining|analy[sz]ing|highlighting)\b"
+    r"|\bon\b(?!\s+" + _TEMPORAL_AFTER_ON + r")"
+)
+# One-off build signals — distinguish a SINGULAR styled request ("a detailed deck
+# by Monday", "a concise report for the board") from a standing/generic style
+# preference ("reports to be concise"). A singular article directly governing a
+# deliverable, or a deadline, marks a one-off build that must NOT be exempted as a
+# preference (see _is_delivery_preference). Generic/plural deliverables and the
+# "to be …" construction carry neither and stay preferences.
+_SINGULAR_DELIVERABLE_RE = re.compile(
+    r"\ban?\s+(?:[\w-]+\s+){0,3}?(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\b"
+)
+# A SINGULAR INDEFINITE deliverable immediately governing a "for <X>" phrase
+# ("a PDF for Hermes", "a summary for OpenClaw"). "for" is not a topic marker (it
+# is often an audience: "a report for the board"), so a weak deliverable scoped by
+# "for" is only treated as a build when it carries the indefinite article — a NEW
+# one — which separates it from retrieving an existing artifact ("the onboarding
+# PDF for new hires", "HR documents for the audit").
+_SINGULAR_DELIVERABLE_FOR_RE = re.compile(
+    r"\ban?\s+(?:[\w-]+\s+){0,3}?(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\s+for\s+\w"
+)
+# A build-VISUAL deliverable scoped by "of <subject>" ("chart OF Q2 revenue",
+# "diagram OF the architecture", "timeline OF milestones", "matrix OF features") —
+# "of" introduces the data the visual depicts, so it is a build. Covers the same
+# visual markers BuilderTaskMiddleware._VISUAL_REQUEST_MARKERS dispatches on;
+# "image" is excluded because "image of my cat" is usually an existing photo, not a
+# generated visual.
+_VISUAL_OF_RE = re.compile(
+    r"\b(?:charts?|diagrams?|graphs?|infographics?|flowcharts?|illustrations?|"
+    r"mockups?|wireframes?|timelines?|maps?|matrix|matrices|quadrants?|"
+    r"visualizations?|visualisations?)\s+of\s+\w"
+)
+# A weak DOCUMENT deliverable scoped by "of <subject>" ("a summary OF Q3 revenue",
+# "an outline OF the proposal") is a one-off build — the builder treats summary as a
+# buildable document type, and "of" introduces the subject. Limited to singular,
+# indefinite forms ("a/an … summary of …"): plural ("summaries of the meetings") or
+# definite ("the summary of the book club") read as existing-artifact retrieval and
+# are kept. Only nouns that are themselves in _DELIVERABLE_NOUNS qualify, so the
+# subjectless noun gate is already satisfied when this fires.
+_DOCUMENT_OF_RE = re.compile(
+    r"\ban?\s+(?:[\w-]+\s+){0,3}?(?:summary|outline)\s+of\s+\w"
+)
+_DEADLINE_RE = re.compile(
+    # "by <temporal>" — note bare "by the" is NOT a deadline (it is often a passive
+    # actor: "reviewed BY THE team"); "the" only counts before a temporal noun.
+    r"\bdue\b|\btomorrow\b|\bby\s+(?:\w+day|tomorrow|tonight|noon|eod|cob|next\b|end\b|\d"
+    r"|the\s+(?:end|eod|cob|close|deadline|weekend|morning|afternoon|evening|\d"
+    r"|mon|tues|wednes|thurs|fri|satur|sun))"
+)
+# An explicit create/build cue. Combined with a request verb + deliverable noun
+# it marks a build request made *of Sophia*, and distinguishes it from a request
+# to a third party for an existing artifact ("asked for HR documents") or the
+# user's own work ("user is building a report tool" — has no request verb).
+# ``buil[dt]s?`` matches build / builds / built (incl. the passive "a PDF built
+# about X") while word boundaries keep it out of "building". ``wr(ite|…)``
+# matches bare write / writes / writing / wrote / written (and "write up") so
+# "asked Sophia to write a PDF about X" is recognized as a build cue — the
+# request-verb gate keeps it off the user's own writing ("user wrote a report").
+# Content-production verbs (summarize/compile/collate/assemble) and the
+# transformation phrase "turn/convert <X> into/to" are build cues too, so a weak
+# deliverable phrased as "summarize Hermes in a PDF" / "turn the notes into a
+# document" is recognized without an explicit "about <topic>".
+_DELIVERABLE_CREATION_RE = re.compile(
+    r"\bcreat(?:e|es|ed|ing)\b|\bcreation\s+of\b|\bbuil[dt]s?\b|"
+    r"\bmake\b|\bmakes\b|\bmaking\b|\bmade\b|\bdraft(?:s|ed|ing)?\b|"
+    r"\bgenerat(?:e|es|ed|ing)\b|\bdesign(?:s|ed|ing)?\b|\bproduc(?:e|es|ed|ing)\b|"
+    r"\bprepar(?:e|es|ed|ing)\b|\bput\s+together\b|\bwr(?:ite|ites|iting|ote|itten)\b|"
+    r"\bsummari[sz](?:e|es|ed|ing)\b|\bcompil(?:e|es|ed|ing)\b|"
+    r"\bcollat(?:e|es|ed|ing)\b|\bassembl(?:e|es|ed|ing)\b|"
+    r"\bexport(?:s|ed|ing)?\b|\brender(?:s|ed|ing)?\b|"
+    r"\b(?:turn|convert)(?:s|ed|ing)?\s+[^.?!]{0,40}?\b(?:in)?to\b"
+)
+# STRONG deliverable nouns: things one asks Sophia to *produce*. A request verb
+# alone is enough to mark these as task history ("user asked for a report about
+# X"), no separate creation cue needed — that distinguishes them from weak nouns
+# (document/pdf/material/…) that could name an existing artifact.
+_STRONG_DELIVERABLE_NOUN_RE = re.compile(
+    r"\b(?:presentation|report|deck|slide|webpage|infographic|spreadsheet|write-up|"
+    + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\b" + _NOT_SKILL_MODIFIER
+)
+# A request involving a third party is a relationship fact, NOT a build request
+# made of Sophia — never drop it. Two shapes: the third party is the asker
+# ("boss asked for a status report", "user's manager requested a deck"), or the
+# third party is the one asked to act — the *redirected requestee*
+# ("user wants their boss to deliver the report", "user asked the team to build a
+# deck"). The redirect shape requires the party to directly follow a request /
+# causative verb (+ optional determiner) so it does NOT match an audience phrase
+# where the party merely *receives* the deliverable ("asked Sophia to build a
+# report FOR the team to review" — Sophia is still the requester → must drop).
+# Sophia / me / you are NOT third parties, so genuine user→Sophia requests match.
+_THIRD_PARTY = (
+    r"boss|manager|supervisor|colleague|co-?worker|client|customer|teammate|"
+    r"recruiter|director|investor|stakeholder|ceo|cto|cfo|hr|team|lead|"
+    # External producers — "a report FROM the vendor/supplier/contractor" is a
+    # deliverable the third party makes, not a build of Sophia, so it is kept.
+    r"vendor|supplier|contractor|agency|freelancer|consultant|partner"
+)
+# Content/source-material nouns. In "from <party>", a party (esp. client/customer)
+# immediately followed by one of these is a SOURCE the deliverable is built FROM
+# ("a report from customer FEEDBACK", "from the client NOTES"), NOT a person who
+# produces it — so the producer arm below must not exempt that Sophia build.
+_SOURCE_MATERIAL_NOUNS = (
+    r"feedback|notes?|data|materials?|info(?:rmation)?|input|research|insights?|"
+    r"comments?|reviews?|surveys?|tickets?|complaints?|interviews?|transcripts?|"
+    r"records?|logs?|metrics?|analytics|emails?|messages?|docs?|files?|"
+    r"requirements?|specs?|specifications?|guidelines?|criteria|instructions?|briefs?|requests?"
+)
+_THIRD_PARTY_REQUEST_RE = re.compile(
+    # (1) third party is the asker: "boss asked", "manager requested"
+    rf"\b(?:{_THIRD_PARTY})\b\s+"
+    r"(?:asked|asks|requested|requests|wanted|wants|told|tells|needs|needed|demanded|demands|require[sd]?)\b"
+    # (2) third party is the redirected requestee: "wants their boss to", "asked the team to",
+    # "requested their manager to" — include requested/requests so a user→third-party
+    # redirect ("user requested their manager to create a report") is preserved.
+    rf"|\b(?:asked|asks|requested|requests|wanted|wants|needed|needs|told|tells|got|had)\s+"
+    rf"(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b\s+to\b"
+    # (3) third party is the PRODUCER: "a report FROM their manager" — the user
+    # asked for a deliverable the third party makes, not a build of Sophia. The
+    # negative lookahead excludes source-material phrases ("from customer
+    # feedback", "from the client notes", and the possessive "from the client's
+    # notes" / "from their manager's feedback"), where the party modifies a content
+    # noun and Sophia is still the one building — those must still drop.
+    rf"|\bfrom\s+(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b"
+    rf"(?!(?:'s|’s)?\s+(?:{_SOURCE_MATERIAL_NOUNS}))"
+    # (4) PASSIVE: the third party is the asker in passive voice ("was requested
+    # BY their boss", "asked by HR", "tasked by the client") — a work obligation,
+    # not a request made of Sophia.
+    rf"|\b(?:asked|requested|told|tasked|assigned|instructed|directed)\s+by\s+"
+    rf"(?:(?:the|their|a|an|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b"
+)
+# "asked [recipient] if/whether <named third party> could/can …" — the user is
+# wondering whether a THIRD PARTY (client/boss/HR/team/…) could produce the
+# deliverable, i.e. delegation/relationship context, NOT a build request made of
+# Sophia. _ASKED_IF_BUILD_RE's free-form gap would otherwise match this shape and
+# drop it. Limited to NAMED parties: pronoun subjects ("asked if SHE could …") are
+# ambiguous with Sophia ("asked Sophia whether she could …") and still drop.
+_ASKED_IF_THIRD_PARTY_RE = re.compile(
+    rf"\bask(?:ed|s)\s+(?:(?:sophia|me|you|us)\s+)?(?:if|whether)\s+"
+    rf"(?:(?:the|a|an|their|our|my|your|his|her|its)\s+)?(?:{_THIRD_PARTY})\b"
+)
+# A singular deliverable built FROM source material ("a PDF FROM customer feedback",
+# "a summary FROM client notes", "a deck FROM the survey responses") is a build —
+# the "from <source-material>" phrase is the input Sophia synthesizes into the
+# artifact. Distinct from a third-party PRODUCER ("a PDF from the vendor"), which
+# _THIRD_PARTY_REQUEST_RE keeps: _SOURCE_MATERIAL_NOUNS names inputs, not people, and
+# this build signal is only consulted AFTER the third-party exemption.
+_DELIVERABLE_FROM_SOURCE_RE = re.compile(
+    r"\ban?\s+(?:[\w-]+\s+){0,3}?(?:"
+    + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT
+    + r")s?\s+from\s+(?:[\w'-]+\s+){0,3}?(?:" + _SOURCE_MATERIAL_NOUNS + r")\b"
+)
+# The deliverable WORD is not a requested artifact when it is used as a VERB
+# ("wants to report on harassment", "to document the abuse", "to brief them") —
+# report/document/brief double as verbs — so a request verb + "report on X" /
+# "brief them" is not a build request.
+_DELIVERABLE_AS_VERB_RE = re.compile(r"\bto\s+report\b|\bto\s+documents?\b|\bto\s+brief\b")
+# "brief" is also an ADJECTIVE when it modifies a conversation / interaction word
+# ("brief conversations about work stress", "brief daily check-ins", "a brief chat
+# about the project") — that is a communication preference, not a "brief" document
+# deliverable, so the memory is kept. Up to two adjectives may sit between "brief"
+# and the interaction noun ("brief daily syncs"). A real "brief" document ("a brief
+# about the merger", "a brief report about Q3") has no interaction word and still
+# drops as a build request.
+_ADJECTIVAL_BRIEF_RE = re.compile(
+    r"\bbrief\s+(?:[\w-]+\s+){0,2}?(?:chats?|conversations?|convos?|check[-\s]?ins?|"
+    r"catch[-\s]?ups?|calls?|talks?|syncs?|discussions?|huddles?|stand[-\s]?ups?|"
+    r"meetings?|messages?|chit[-\s]?chats?|hellos?|one[-\s]on[-\s]ones?)\b"
+)
+# …or when the deliverable is the OBJECT of a help / practice / prep request
+# ("asked for help with a presentation", "needs help preparing for a report",
+# "practicing for the deck") — the user wants support with an existing/upcoming
+# deliverable, not for Sophia to build one. (Mirrors the skill-modifier exemption
+# for the pre-noun framing.)
+# The first arm also covers gerund / direct-object and "to"-infinitive prep +
+# revision forms ("help preparing the presentation", "help revising the report",
+# "help TO prepare a presentation", "help to edit the deck") — these are coaching /
+# support on an EXISTING deliverable, so the memory is preserved. Note the verb set
+# is deliberately prep/revision only — creation verbs (create/build/make) are NOT
+# here, so "needs help to CREATE a deck about X" still drops as a build request. The
+# optional "to" applies only to the verb stems, not to "with"/"on".
+_HELP_OR_PRACTICE_RE = re.compile(
+    r"\bhelp(?:\s+(?:me|them|us|him|her))?\s+(?:with|on|(?:to\s+)?(?:prepar\w*|prep|"
+    r"practic\w+|rehears\w+|revis\w+|edit\w*|review\w*|polish\w*|finaliz\w+|finalis\w+|"
+    r"refin\w+|proofread\w*))\b"
+    r"|\b(?:practic\w+|rehears\w+|prepar\w+|prep)\s+for\b"
+)
+# A request whose OBJECT is feedback/advice/support — not the deliverable. "wants
+# feedback on their presentation", "needs support after reading a report" — the
+# user wants input/support about an existing artifact, not for Sophia to build it.
+# The trailing negative lookahead ensures the support word is the actual request
+# OBJECT, not an ADJECTIVE on a deliverable noun: "wants a feedback report",
+# "asked for a critique report" are one-off report builds and must still drop.
+_SUPPORT_REQUEST_RE = re.compile(
+    r"\b(?:want(?:ed|s)?|need(?:ed|s)?|ask(?:ed|s)|request(?:ed|s)|look(?:ing|ed|s)?|"
+    r"get(?:ting|s)?|seek(?:ing|s)?|'?d\s+like|would\s+like|hop(?:e|es|ed|ing))\s+"
+    r"(?:for\s+|some\s+|more\s+|[\w']+\s+){0,2}?"
+    r"(?:feedback|advice|input|thoughts?|opinions?|guidance|support|critique|"
+    r"reassurance|encouragement|validation|perspective|pointers?|tips?)\b"
+    # The trailing "s?" must cover the web fragment too ("feedback websites",
+    # "critique web apps"), so NOUNS|WEB share one "s?"; the pptx fragment carries
+    # its own internal plural.
+    r"(?!\s+(?:(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + r"|" + _WEB_DELIVERABLE_FRAGMENT + r")s?|" + _PPTX_DELIVERABLE_FRAGMENT + r")\b)"
+)
+# A STRONG noun inside a common NON-DELIVERABLE compound is not a build target:
+# a school "report card", a playing-card "deck of cards" / "card deck", a "deck
+# chair"/"deck shoes"/"deck hand" (furniture/nautical), a "slide rule"
+# (calculator). These satisfy the request-verb + strong-noun test ("needs a deck
+# of cards", "wants a deck chair") but are durable facts, not deliverables. A real
+# "slide deck about X" does not match these compounds and still drops.
+_NON_DELIVERABLE_COMPOUND_RE = re.compile(
+    r"\breport\s+cards?\b"
+    r"|\bdecks?\s+of\s+cards?\b"
+    r"|\bcard\s+decks?\b"
+    r"|\bdecks?\s+(?:chairs?|hands?|shoes?)\b"
+    r"|\bslide\s+rules?\b"
+)
+# A deliverable word used only as a MODIFIER of a system / output-channel /
+# preference noun ("document storage", "report notifications", "presentation
+# backups", "report alerts") names a durable preference about where/how artifacts
+# live or how the user is notified — NOT a request to build an artifact. The "on X"
+# in "document storage on Google Drive" / "report notifications on Slack" is a
+# platform, which _TOPIC_MARKER_RE otherwise treats as a subject. This is gated on
+# the absence of a creation cue by its caller, so a genuine "create a report
+# dashboard about Q3" still drops.
+# The suffix set is deliberately limited to PURE storage/notification/sync/config
+# features — you "store/notify/sync", not "build", these. Build-target-capable
+# nouns (dashboard/portal/hub/tracker/workspace) are NOT here: "a web app dashboard
+# about Q3", "a report portal" are one-off builds and must still drop.
+_DELIVERABLE_MODIFIER_COMPOUND_RE = re.compile(
+    r"\b(?:(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + r"|" + _WEB_DELIVERABLE_FRAGMENT + r")s?|" + _PPTX_DELIVERABLE_FRAGMENT + r")\s+"
+    r"(?:storage|notifications?|reminders?|alerts?|digests?|folders?|drives?|"
+    r"channels?|backups?|syncs?|subscriptions?|management|settings|integrations?|"
+    r"automations?|feeds?|inbox(?:es)?)\b"
+)
+# An emotional/support GOAL where a deliverable is the activity context, not the
+# requested artifact: "wants confidence FOR presentations", "scared OF giving
+# presentations", "calm BEFORE the presentation". The emotional word comes BEFORE
+# the deliverable (via a connector), which distinguishes it from a real build
+# whose subject happens to be an emotion ("a report ABOUT anxiety" — there the
+# deliverable precedes the feeling, so this does NOT match and it still drops).
+_EMOTIONAL_STATE = (
+    r"confiden\w+|anxiet(?:y|ies)|anxious|nervous\w*|nerves|scared|afraid|fearful|fear|"
+    r"stress\w*|worr\w+|calm\w*|comfortable|jitters|dread\w*|panic\w*|courage|imposter|impostor"
+)
+_EMOTIONAL_SUPPORT_RE = re.compile(
+    r"\b(?:" + _EMOTIONAL_STATE + r")\b"
+    r"[^.?!]{0,25}?\b(?:for|with|about|around|during|giving|delivering|before|ahead\s+of|of)\b"
+    r"[^.?!]{0,25}?\b(?:"
+    + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + r")s?\b"
+)
+# A deliverable word naming the user's OWN software project/product: "report
+# generator", "presentation app", "slide builder", "PDF tool". This is exempted
+# ONLY in the no-subject branch AND only when the request is NOT Sophia-directed —
+# a Sophia-directed build of one ("asked Sophia to build a report generator for
+# OpenClaw", "build a report generator ABOUT OpenClaw") is still a build request
+# and must drop. The user's OWN work ("wants to create a report generator for
+# their startup") has no Sophia direction, so it stays.
+_PROJECT_PRODUCT_COMPOUND_RE = re.compile(
+    r"\b(?:" + "|".join(re.escape(noun) for noun in _DELIVERABLE_NOUNS)
+    + "|" + _WEB_DELIVERABLE_FRAGMENT + "|" + _PPTX_DELIVERABLE_FRAGMENT + r")s?\s+"
+    r"(?:generators?|tools?|apps?|applications?|platforms?|builders?|engines?|software|"
+    r"bots?|pipelines?|frameworks?|librar(?:y|ies)|plugins?|extensions?|saas)\b"
+)
+# A request explicitly directed at Sophia: any directing verb (ask/request/want/
+# need/tell/have/get/expect/'d like) aimed at Sophia/me/you/us — including
+# causative delegation ("wants to HAVE Sophia build", "GET Sophia to build") and
+# want/need-phrased ("wants Sophia to build", "needs you to create") — or the bare
+# "asked/requested to <create>". Used to deny the project/product and own-work
+# exemptions (a build Sophia is directed to do is task history, even if the
+# deliverable is a "generator" or framed as the user's intent).
+_SOPHIA_DIRECTED_RE = re.compile(
+    r"\b(?:ask(?:ed|s)?|request(?:ed|s)?|want(?:ed|s)?|need(?:ed|s)?|tell(?:s|ing)?|told|"
+    r"tasked|tasks?|instruct(?:ed|s)?|direct(?:ed|s)?|"
+    r"have|having|had|get(?:s|ting)?|got|expect(?:ed|s|ing)?|'?d\s+like|would\s+like)\s+(?:sophia|me|you|us)\b"
+    r"|\b(?:ask(?:ed|s)|request(?:ed|s))\s+(?:" + _REQUEST_TIME_PHRASE + r"\s+)?to\s+(?:creat|buil[dt]|mak|made|draft|generat|design|produc|prepar|wr(?:ite|ote|itten)|put\s+together|summari[sz]|compil|collat|assembl|convert|export|render)"
+)
+# An OWN-WORK goal/commitment: the user states THEIR OWN intent to act on a
+# deliverable ("needs to prepare a presentation by Monday", "wants to finish the
+# report by Friday") — the user does it, not Sophia. The infinitive "to <verb>"
+# right after want/need/plan/… is the tell ("wants TO finish" vs "wants A
+# report"). Combined (in _is_non_artifact_deliverable_use) with a NOT-Sophia-
+# directed check so "wants Sophia to build a deck" / "asked Sophia to …" still
+# drop. "to ask" is excluded (delegating the ask is not own work).
+# RECEIPT verbs ("to GET a report", "to RECEIVE a presentation", "to OBTAIN/ACQUIRE
+# a deck") are NOT own work — they want the artifact delivered, i.e. a build — so
+# they are excluded when followed by an article. The article gate keeps genuine
+# self-improvement goals ("wants to GET BETTER at presentations") as own work.
+_OWN_WORK_RE = re.compile(
+    r"\b(?:want(?:ed|s)?|need(?:ed|s)?|plan(?:ned|s|ning)?|hop(?:e|ed|es|ing)|"
+    r"aim(?:ed|s|ing)?|tr(?:y|ies|ied|ying)|going|wish(?:ed|es)?|intend(?:ed|s)?|"
+    r"would\s+like)\s+to\s+(?!ask\b)"
+    r"(?!(?:get|gets|getting|receiv\w+|obtain\w*|acquir\w+)\s+"
+    r"(?:an?|the|some|several|multiple|few|two|three|four|\d+|another|its|their|his|her|our|my|your)\b)"
+    r"\w"
+)
 _DUPLICATE_STOPWORDS = {
     "a",
     "an",
@@ -517,17 +1084,55 @@ def _content_tokens(content: str) -> set[str]:
     }
 
 
-def _filter_policy_rejected_entries(extracted: list[dict]) -> list[dict]:
-    filtered: list[dict] = []
+def _filter_policy_rejected_entries(extracted: list[dict], *, llm_classifier=None) -> list[dict]:
+    """Drop policy-rejected extraction candidates.
+
+    ``credential_like`` and ``non_durable`` are unambiguous, deterministic hard
+    drops (never sent to the LLM). ``task_history`` (build/deliverable requests)
+    is decided by ``llm_classifier`` — authoritative — over ALL of the remaining
+    *reviewable* candidates, so a lexical false positive (e.g. "wants presentation
+    coaching") can't pre-empt the LLM by being dropped before it is reviewed. The
+    lexical ``_is_deliverable_request`` signal is the fallback used only when the
+    LLM is unavailable or errors. ``llm_classifier`` takes the reviewable contents
+    and returns the set of indices to drop (best-effort — see
+    ``_classify_task_history_with_llm``).
+    """
     rejection_counts: dict[str, int] = {}
+    reviewable: list[dict] = []
+    reviewable_contents: list[str] = []
+    lexical_task_history: set[int] = set()
 
     for entry in extracted:
         if not isinstance(entry, dict):
             continue
         content = str(entry.get("content") or "")
         reason = _candidate_policy_rejection_reason(content)
-        if reason:
+        if reason in ("credential_like", "non_durable"):
             rejection_counts[reason] = rejection_counts.get(reason, 0) + 1
+            continue
+        if reason == "task_history":
+            lexical_task_history.add(len(reviewable))
+        reviewable.append(entry)
+        reviewable_contents.append(content)
+
+    # task_history is LLM-authoritative when the classifier returns a set (incl.
+    # empty). It returns None — or raises — when classification is UNAVAILABLE, in
+    # which case we fall back to the lexical signal. Critically, a None/failure is
+    # NOT treated as "drop nothing": that would let a lexical build-request hit be
+    # written to Mem0 and reopen the contamination bug.
+    llm_drop: set[int] | None = None
+    if llm_classifier is not None and reviewable_contents:
+        try:
+            llm_drop = llm_classifier(reviewable_contents)
+        except Exception:
+            logger.warning("extraction task-history LLM classifier failed; lexical result stands", exc_info=True)
+            llm_drop = None
+    task_history_drop = llm_drop if llm_drop is not None else set(lexical_task_history)
+
+    filtered: list[dict] = []
+    for idx, entry in enumerate(reviewable):
+        if idx in task_history_drop:
+            rejection_counts["task_history"] = rejection_counts.get("task_history", 0) + 1
             continue
         filtered.append(entry)
 
@@ -546,7 +1151,342 @@ def _candidate_policy_rejection_reason(content: str) -> str | None:
         return "credential_like"
     if "codename" in lowered or "temporary" in lowered:
         return "non_durable"
+    if _is_deliverable_request(lowered):
+        return "task_history"
     return None
+
+
+def _has_request_verb(text: str) -> bool:
+    """True when ``text`` carries a deliverable request verb.
+
+    Combines the main ``_DELIVERABLE_REQUEST_RE`` gate with the
+    ``requested <plural deliverable>`` arm (which lives in a separate regex because
+    it is built from the deliverable-noun fragments defined later in the module).
+    """
+    return bool(
+        _DELIVERABLE_REQUEST_RE.search(text) or _REQUESTED_PLURAL_DELIVERABLE_RE.search(text)
+    )
+
+
+def _is_deliverable_request(lowered: str) -> bool:
+    """True for 'user asked for a <deliverable>' task-history snippets.
+
+    Tuned across several review rounds to drop genuine build requests while never
+    dropping a durable memory that merely shares a verb and a noun.
+
+    A build request must carry a request verb (``_DELIVERABLE_REQUEST_RE``) —
+    this separates a request from the user's own work ("user is building a report
+    tool"). It must also be a request for the deliverable as an ARTIFACT: a
+    deliverable word used as a verb ("wants to report on harassment"), as the
+    object of a help/practice/prep request ("asked for help with a presentation"),
+    a strong noun inside a non-deliverable compound ("a deck of cards", "a report
+    card"), or the activity context of an emotional/support goal ("wants
+    confidence for presentations") is exempted (``_is_non_artifact_deliverable_use``).
+    That exemption is scoped to the request INTENT, never the subject — a real
+    "deck about practicing for interviews" must still drop, since "practicing for"
+    is the topic, not the request. The rest splits the request *intent* from the
+    deliverable's *subject* at the first topic marker ("report ABOUT X"), because
+    the guards below describe the request itself and must NOT be tripped by
+    incidental words in the subject ("report about what customers PREFER", "report
+    about what the CLIENT REQUESTED"):
+
+    - With a subject ("<deliverable> about <topic>"): the requested deliverable
+      noun must appear in the intent; the third-party and delivery-preference
+      *verb* guards scan only the intent; then ANY deliverable noun in the intent —
+      STRONG (report/presentation/deck) or weak (pdf/html/document/material) —
+      marks it task history. The subject-scoping IS the build signal ("a PDF about
+      X" = "make me a PDF on X"), so no separate create/build cue is required here
+      (unlike the no-subject branch). Style words ("concise") do NOT exempt a
+      deliverable about a topic.
+    - Without a subject: a standing delivery preference ("prefers concise reports",
+      "wants reports to be concise") is kept (``_is_delivery_preference``); a
+      third-party request ("boss asked for a status report") is kept; otherwise a
+      STRONG noun, or a weak noun + create/build cue, marks it task history.
+    """
+    if not _has_request_verb(lowered):
+        return False
+
+    topic_markers = list(_TOPIC_MARKER_RE.finditer(lowered))
+    if topic_markers:
+        return _topic_scoped_request_is_build(lowered, topic_markers)
+    return _subjectless_request_is_build(lowered)
+
+
+def _is_non_artifact_deliverable_use(lowered: str) -> bool:
+    """The deliverable word is present but is NOT a requested artifact — keep it.
+
+    Shapes: a deliverable word used as a verb ("wants to report on harassment");
+    the object of a help/practice/prep request ("asked for help with a
+    presentation"); a request whose object is feedback/advice/support, not the
+    deliverable ("wants feedback on their presentation", "needs support after
+    reading a report"); a strong noun inside a non-deliverable compound ("a deck of
+    cards", "a report card"); the activity context of an emotional/support goal
+    ("wants confidence for presentations"); or an OWN-WORK goal where the user
+    states their own intent to act ("needs to prepare a presentation by Monday",
+    "wants to finish the report") — unless the request is Sophia-directed.
+    """
+    if (
+        _DELIVERABLE_AS_VERB_RE.search(lowered)
+        or _ADJECTIVAL_BRIEF_RE.search(lowered)
+        or _HELP_OR_PRACTICE_RE.search(lowered)
+        or _SUPPORT_REQUEST_RE.search(lowered)
+        or _NON_DELIVERABLE_COMPOUND_RE.search(lowered)
+        or _EMOTIONAL_SUPPORT_RE.search(lowered)
+        or _ASKED_IF_THIRD_PARTY_RE.search(lowered)
+    ):
+        return True
+    # Deliverable-as-modifier preference ("document storage", "report
+    # notifications") — only when there is no creation cue, so a genuine
+    # "create a report dashboard about X" still drops.
+    if _DELIVERABLE_MODIFIER_COMPOUND_RE.search(lowered) and not _DELIVERABLE_CREATION_RE.search(
+        lowered
+    ):
+        return True
+    return bool(_OWN_WORK_RE.search(lowered) and not _SOPHIA_DIRECTED_RE.search(lowered))
+
+
+def _topic_scoped_preference_exempts(intent: str, lowered: str) -> bool:
+    """True when a topic-scoped request is actually a standing delivery preference.
+
+    Two forms, neither of which exempts a one-off (singular article / deadline) or
+    an explicit build (creation cue):
+    - a preference VERB in the INTENT ("prefers reports about X") — checked on the
+      intent so a "preferred" inside the SUBJECT ("reports about their preferred
+      vendor") does not exempt a build; mirrors _is_delivery_preference's one-off
+      precedence.
+    - a style PREDICATE over the whole snippet ("wants reports about competitors TO
+      BE concise", "… should include citations") — the predicate trails the
+      subject, so it is scanned over ``lowered``. Bare style adjectives are excluded
+      (a "concise report about X" is a styled build, not a preference).
+    """
+    if _DELIVERY_PREFERENCE_RE.search(intent) and not (
+        _SINGULAR_DELIVERABLE_RE.search(intent) or _DEADLINE_RE.search(intent)
+    ):
+        return True
+    if _DELIVERY_STYLE_PREDICATE_RE.search(lowered) and not (
+        _SINGULAR_DELIVERABLE_RE.search(lowered)
+        or _DEADLINE_RE.search(lowered)
+        or _DELIVERABLE_CREATION_RE.search(lowered)
+    ):
+        return True
+    return False
+
+
+def _topic_scoped_request_is_build(lowered: str, topic_markers: list) -> bool:
+    """Resolve a request that carries a subject marker ("<deliverable> about X").
+
+    Splits at the first topic marker with the requested deliverable named BEFORE
+    it — earlier markers can be temporal ("asked Sophia ON MONDAY to build a report
+    about X"), so the split must land on "about", not "on Monday", or the intent
+    has no noun. A subject marker present is itself the build signal ("a PDF about
+    OpenClaw" = "make me a PDF on OpenClaw"), so ANY deliverable noun in the intent
+    — strong or weak — marks task history, unless the intent is a third-party or
+    delivery-preference request.
+    """
+    intent = None
+    for marker in topic_markers:
+        candidate = lowered[: marker.start()]
+        if _DELIVERABLE_NOUN_RE.search(candidate):
+            intent = candidate
+            break
+    if intent is None:
+        # A subject is present but the deliverable noun is only AFTER it
+        # ("wants to focus on the presentation") — not a build request.
+        return False
+    # The request VERB must be in the intent, not only in the subject. The global
+    # gate in _is_deliverable_request accepts a request verb anywhere, so a durable
+    # existing-artifact fact whose SUBJECT happens to mention one ("keeps a report
+    # about what the client REQUESTED in Q3") would otherwise drop — require it in
+    # the intent so only an actual request of the deliverable counts.
+    # Exception: an indirect/passive "asked whether <deliverable> about X could be
+    # created" carries the modal+verb AFTER the topic, so it never survives the
+    # split into the intent — recognize that whole-string pattern explicitly.
+    if (
+        not _has_request_verb(intent)
+        and not _ASKED_IF_BUILD_RE.search(lowered)
+        and not _ASKED_THAT_BUILD_RE.search(lowered)
+    ):
+        return False
+    # Scope the non-artifact exemptions to the request INTENT, never the subject:
+    # "asked for a deck about practicing for interviews" is a real deck build — the
+    # "practicing for" lives in the topic and must not exempt the request.
+    if _is_non_artifact_deliverable_use(intent):
+        return False
+    # A deliverable built FROM source material ("a PDF from customer support tickets
+    # about refunds") is a build even with a trailing topic marker — check it BEFORE
+    # the third-party producer exemption, which would otherwise read "from customer
+    # support" as a producer and keep it. Mirrors the subjectless ordering. Scanned
+    # over the whole snippet so the source phrase is found regardless of the split.
+    if _DELIVERABLE_FROM_SOURCE_RE.search(lowered):
+        return True
+    if _THIRD_PARTY_REQUEST_RE.search(intent):
+        return False
+    if _topic_scoped_preference_exempts(intent, lowered):
+        return False
+    return True
+
+
+def _subjectless_request_is_build(lowered: str) -> bool:
+    """Resolve a request with no subject marker.
+
+    A standing delivery preference ("prefers concise reports") or a third-party
+    request ("boss asked for a status report") is kept; otherwise a STRONG noun, or
+    a weak noun + create/build cue, marks it task history. (Weak nouns alone could
+    name an existing artifact — "asked for HR documents" — so they stay.)
+    """
+    if not _DELIVERABLE_NOUN_RE.search(lowered):
+        return False
+    # No subject marker, so the whole snippet IS the request — apply the
+    # non-artifact exemptions here ("wants confidence for presentations",
+    # "a deck of cards", "help with a presentation").
+    if _is_non_artifact_deliverable_use(lowered):
+        return False
+    # A project/product compound with NO subject is the user's own work
+    # ("a report generator for their startup") — keep — UNLESS the request is
+    # Sophia-directed ("asked Sophia to build a report generator for OpenClaw"),
+    # which is a build request and must drop even though "for OpenClaw" is not a
+    # topic marker. (A subject-marked "… about OpenClaw" already drops via the
+    # topic branch, which never consults this exemption.)
+    if _PROJECT_PRODUCT_COMPOUND_RE.search(lowered) and not _SOPHIA_DIRECTED_RE.search(lowered):
+        return False
+    # A deliverable built FROM source material ("a PDF from customer support
+    # tickets") is a build — checked BEFORE the third-party exemption because the
+    # producer guard there only excludes a source noun IMMEDIATELY after the party
+    # word, so a modified source phrase ("from customer support TICKETS", "from
+    # client discovery-call NOTES") would otherwise be kept as a producer request.
+    # _DELIVERABLE_FROM_SOURCE_RE tolerates up to three modifier words but still
+    # requires the phrase to lead from "from" to a source-material noun, so a true
+    # producer ("from the vendor", "from the manager about the feedback") does not
+    # match and falls through to the third-party keep.
+    if _DELIVERABLE_FROM_SOURCE_RE.search(lowered):
+        return True
+    if _THIRD_PARTY_REQUEST_RE.search(lowered):
+        return False
+    if _is_delivery_preference(lowered):
+        return False
+    if _STRONG_DELIVERABLE_NOUN_RE.search(lowered):
+        return True
+    if _DELIVERABLE_CREATION_RE.search(lowered):
+        return True
+    # A singular-indefinite weak deliverable scoped by a trailing "for <X>"
+    # ("a PDF for Hermes") is a one-off build — drop it. (Plural/definite forms,
+    # which read as existing-artifact retrieval, do not match.)
+    if _SINGULAR_DELIVERABLE_FOR_RE.search(lowered):
+        return True
+    # A build-visual ("chart of Q2 revenue") or a singular weak document deliverable
+    # scoped by "of <subject>" ("a summary of Q3 revenue") is a build. (The
+    # "from <source material>" signal is handled above, before the third-party keep.)
+    return bool(_VISUAL_OF_RE.search(lowered) or _DOCUMENT_OF_RE.search(lowered))
+
+
+def _is_delivery_preference(lowered: str) -> bool:
+    """True when the snippet is a standing *delivery preference*, not a build request.
+
+    Two forms: the explicit preference verb ("prefers concise reports"), or a
+    style/format phrasing ("wants reports to be concise and include citations").
+    The style form is recognized only when there is NO build signal:
+    - no explicit create/build cue and no "about <topic>" subject (so a styled
+      build request "make a concise report about Hermes" is still task history); and
+    - not a SINGULAR one-off request — a singular article governing a deliverable
+      ("a detailed deck") or a deadline ("by Monday") marks a one-off styled build
+      ("needs a detailed deck by Monday", "wants a concise report for the board"),
+      which is task history, not a standing preference about how deliverables look.
+
+    The SINGULAR/deadline one-off check runs FIRST — before the preference verb —
+    so an adjectival "preferred" inside a concrete build ("requested a report in
+    their preferred format for OpenClaw", "a deck using their preferred template")
+    does not let `prefer*` short-circuit it into a kept preference. A standing
+    preference is generic ("prefers concise reports", "wants their reports
+    concise"), carrying no singular article or deadline, so it is unaffected.
+    """
+    if _SINGULAR_DELIVERABLE_RE.search(lowered) or _DEADLINE_RE.search(lowered):
+        return False
+    if _DELIVERY_PREFERENCE_RE.search(lowered):
+        return True
+    if _DELIVERABLE_CREATION_RE.search(lowered) or _TOPIC_MARKER_RE.search(lowered):
+        return False
+    if not _DELIVERY_STYLE_RE.search(lowered):
+        return False
+    return True
+
+
+# Focused Haiku classifier — the authoritative task-history backstop. The lexical
+# `_is_deliverable_request` is a fast deterministic approximation; natural-language
+# phrasing of "is this a build request about a subject" is genuinely hard for
+# regexes (seven review rounds of edge cases), so a small dedicated LLM call is
+# more reliable. Runs only in the offline extraction pipeline (no voice latency),
+# batched over all lexical-survivor candidates in one call.
+_TASK_HISTORY_CLASSIFIER_INSTRUCTION = (
+    "You are a strict classifier for a personal AI companion's long-term memory.\n"
+    "\n"
+    "Each numbered statement is a candidate memory written in the third person about a user. "
+    "Identify the ones that are TRANSIENT BUILD/DELIVERABLE REQUESTS: a request that a deliverable be "
+    "produced — a report, presentation, deck, slides, document, PDF, write-up, infographic, webpage, "
+    "spreadsheet, and the like — about some subject. This includes \"asked Sophia to build/create/draft "
+    "<deliverable> about X\", \"asked to build a report about Y\", \"wants a deck on Z\", \"needs a "
+    "presentation about W\". These are one-off task history; the subject of the deliverable must NOT "
+    "become a durable memory because it contaminates future builds.\n"
+    "\n"
+    "Do NOT flag these (they are durable and must be kept):\n"
+    "- Facts, decisions, feelings, relationships, behavioral patterns, lessons, commitments.\n"
+    "- Delivery PREFERENCES — how the user likes deliverables made (\"prefers concise reports\", "
+    "\"wants reports to be short and include citations\").\n"
+    "- The user's OWN work or projects (\"user is building a report tool for their startup\").\n"
+    "- A deliverable requested BY or FROM a third party (\"boss asked for a status report\"; "
+    "\"user's manager requested a deck\").\n"
+    "\n"
+    "Return ONLY a JSON array of the 0-based indices of the statements that ARE transient "
+    "build/deliverable requests. If none qualify, return [].\n"
+    "\n"
+    "Statements:\n"
+    "{statements}"
+)
+
+
+def _classify_task_history_with_llm(contents: list[str], *, client=None) -> set[int] | None:
+    """Haiku pass flagging build/deliverable-request task history.
+
+    Returns a *set* of flagged indices (into ``contents``) on a SUCCESSFUL
+    classification — possibly empty (the model ran and flagged nothing). Returns
+    ``None`` when classification is UNAVAILABLE: missing client, API error,
+    non-JSON / non-list response, or a non-empty response carrying no integer
+    indices. ``None`` is the critical signal — it tells ``_filter_policy_rejected_entries``
+    to fall back to the lexical heuristic rather than treating a failure as
+    "drop nothing" (which would let a lexical build-request hit slip into Mem0).
+    An empty ``contents`` list is a no-op success (empty set).
+    """
+    if not contents:
+        return set()
+    try:
+        client = client or anthropic.Anthropic()
+        numbered = "\n".join(f"{i}. {content}" for i, content in enumerate(contents))
+        prompt = _TASK_HISTORY_CLASSIFIER_INSTRUCTION.replace("{statements}", numbered)
+        response = client.messages.create(
+            model=_PIPELINE_MODEL,
+            max_tokens=256,
+            messages=[{"role": "user", "content": prompt}],
+        )
+        parsed = json.loads(_strip_markdown_fences(response.content[0].text))
+    except Exception:
+        return None  # classifier unavailable → caller falls back to lexical
+
+    if not isinstance(parsed, list):
+        return None
+    flagged: set[int] = set()
+    saw_valid_index = False
+    for item in parsed:
+        # bool is an int subclass — exclude True/False from being read as indices.
+        if isinstance(item, bool):
+            continue
+        if isinstance(item, int) and 0 <= item < len(contents):
+            saw_valid_index = True
+            flagged.add(item)
+    if parsed and not saw_valid_index:
+        # Non-empty list with no VALID in-range indices (objects, prose, or only
+        # out-of-range numbers like [5] for one candidate) — treat as a malformed
+        # response and fall back to lexical, NOT "flag nothing".
+        return None
+    return flagged
 
 
 def _write_extracted_memories(
@@ -797,7 +1737,13 @@ def extract_session_memories(
             return []
         extracted = deterministic_entries
 
-    extracted = _filter_policy_rejected_entries(extracted)
+    # Lexical policy filter + an authoritative Haiku task-history pass (reusing the
+    # extraction client). Runs only over LLM candidates; deterministic entries are
+    # merged in afterwards and bypass the filter.
+    extracted = _filter_policy_rejected_entries(
+        extracted,
+        llm_classifier=lambda survivor_contents: _classify_task_history_with_llm(survivor_contents, client=client),
+    )
     extracted = _merge_deterministic_entries(extracted, deterministic_entries)
 
     logger.info(

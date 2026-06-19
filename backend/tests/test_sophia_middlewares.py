@@ -1956,17 +1956,28 @@ class TestMem0MemoryMiddleware:
         yield
         mem0_memory._VOICE_FASTCACHE.clear()
 
-    def test_voice_uses_smaller_limit(self):
+    def test_overfetches_pool_but_caps_injection_to_platform_budget(self):
+        """The search over-fetches a shared candidate pool (so the in-turn
+        task-history drop has headroom) while injection is still capped at the
+        platform budget — 4 for voice. Previously voice fetched only 4, which a
+        contaminated store could fill entirely with build-requests."""
         from unittest.mock import patch
 
-        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import (
+            _MEMORY_SEARCH_POOL,
+            Mem0MemoryMiddleware,
+        )
 
+        results = [
+            {"id": f"m{i}", "content": f"Durable fact number {i}", "category": "fact"}
+            for i in range(8)
+        ]
         mw = Mem0MemoryMiddleware("user-1")
         with patch(
             "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
-            return_value=[],
+            return_value=results,
         ) as mock_search:
-            mw.before_agent(
+            result = mw.before_agent(
                 {
                     "messages": [_make_message("tell me more about training")],
                     "platform": "voice",
@@ -1975,7 +1986,119 @@ class TestMem0MemoryMiddleware:
                 _make_runtime(thread_id="thread-1", platform="voice"),
             )
 
-        assert mock_search.call_args.kwargs["limit"] == 4
+        assert mock_search.call_args.kwargs["limit"] == _MEMORY_SEARCH_POOL  # over-fetch pool
+        assert len(result["injected_memories"]) == 4  # voice injection budget
+
+    def test_overfetch_pool_lets_genuine_memories_survive_task_history(self):
+        """Codex P2 (finding 2): the companion over-fetches before the
+        task-history drop, so genuine memories ranked just below the
+        build-request rows still reach the prompt. With the old memory_limit-sized
+        fetch, a contaminated store could return a budget's worth of build-requests
+        that the drop empties — starving the prompt of real memories."""
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import (
+            _MEMORY_SEARCH_POOL,
+            Mem0MemoryMiddleware,
+        )
+
+        # The first 4 rows (the voice budget) are all task-history; genuine
+        # memories follow only because we over-fetch the pool.
+        results = [
+            {"id": f"t{i}", "content": f"User asked for a report about Topic{i}", "category": "fact"}
+            for i in range(4)
+        ] + [
+            {"id": "g1", "content": "User's name is Davide", "category": "fact"},
+            {"id": "g2", "content": "Prefers concise replies", "category": "preference"},
+        ]
+        mw = Mem0MemoryMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            return_value=results,
+        ) as mock_search:
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("how am I doing today?")],
+                    "platform": "voice",
+                    "context_mode": "work",
+                },
+                _make_runtime(thread_id="thread-x", platform="voice"),
+            )
+
+        assert mock_search.call_args.kwargs["limit"] == _MEMORY_SEARCH_POOL
+        block = result["system_prompt_blocks"][-1]
+        assert "report about Topic" not in block  # every task-history row dropped
+        assert "Davide" in block
+        assert "concise replies" in block
+        assert result["injected_memories"] == ["g1", "g2"]
+
+    def test_task_history_memories_dropped_before_companion_injection(self):
+        """Codex P1: a stored build-request fact must NOT reach the companion
+        prompt — otherwise the model could echo the prior subject into a new
+        build's start_builder_task description before any downstream filter runs.
+        Durable facts and preferences are still injected."""
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+
+        results = [
+            {"id": "m1", "content": "User asked for a report about OpenClaw", "category": "fact"},
+            {"id": "m2", "content": "User's name is Davide", "category": "fact"},
+            {"id": "m3", "content": "Prefers concise replies", "category": "preference"},
+        ]
+        mw = Mem0MemoryMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            return_value=results,
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("build me a report on Hermes")],
+                    "platform": "text",
+                    "context_mode": "work",
+                },
+                _make_runtime(thread_id="thread-th", platform="text"),
+            )
+
+        block = result["system_prompt_blocks"][-1]
+        assert "OpenClaw" not in block  # task-history fact removed
+        assert "Davide" in block
+        assert "concise replies" in block
+        assert result["injected_memories"] == ["m2", "m3"]
+
+    def test_credential_masked_build_request_dropped_before_injection(self):
+        """Codex P2: a build request whose subject contains a credential marker
+        ("a report about API key rotation") is classified credential_like first
+        (priority order in _candidate_policy_rejection_reason), which would mask
+        the task-history signal. The read filter drops ANY non-None policy reason,
+        so this build request — and standalone credential/non-durable records —
+        never reach the companion prompt."""
+        from unittest.mock import patch
+
+        from deerflow.agents.sophia_agent.middlewares.mem0_memory import Mem0MemoryMiddleware
+
+        results = [
+            {"id": "c1", "content": "User asked for a report about API key rotation", "category": "fact"},
+            {"id": "m2", "content": "User's name is Davide", "category": "fact"},
+        ]
+        mw = Mem0MemoryMiddleware("user-1")
+        with patch(
+            "deerflow.agents.sophia_agent.middlewares.mem0_memory.search_memories",
+            return_value=results,
+        ):
+            result = mw.before_agent(
+                {
+                    "messages": [_make_message("how's it going?")],
+                    "platform": "text",
+                    "context_mode": "work",
+                },
+                _make_runtime(thread_id="thread-cred", platform="text"),
+            )
+
+        block = result["system_prompt_blocks"][-1]
+        assert "API key rotation" not in block  # credential-masked build request removed
+        assert "Davide" in block
+        assert result["injected_memories"] == ["m2"]
 
     def test_voice_reuses_recent_similar_results(self):
         from unittest.mock import patch
