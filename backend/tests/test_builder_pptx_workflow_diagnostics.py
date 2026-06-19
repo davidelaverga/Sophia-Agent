@@ -7,6 +7,7 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
+from langchain.agents.middleware.types import ExtendedModelResponse, ModelResponse
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 from PIL import Image
@@ -558,6 +559,53 @@ def test_visual_skill_force_count_persists_from_wrap_model_call_update() -> None
     assert result.update["builder_visual_force_count"] == 1
     assert result.update["messages"][0].content == "reading"
     assert "builder_visual_force_count" not in state
+
+
+def test_visual_skill_force_count_persists_for_model_response() -> None:
+    middleware = BuilderArtifactMiddleware()
+    state = {
+        "delegation_context": {"task": "Create a visual presentation with diagrams"},
+    }
+    request = SimpleNamespace(
+        state=state,
+        runtime=None,
+        model=object(),
+    )
+    request.override = lambda **_kwargs: request
+    model_response = ModelResponse(result=[AIMessage(content="reading")])
+
+    result = middleware.wrap_model_call(request, lambda _request: model_response)
+
+    assert isinstance(result, ExtendedModelResponse)
+    assert result.model_response is model_response
+    assert result.command is not None
+    assert result.command.update["builder_visual_force_count"] == 1
+
+
+def test_visual_skill_force_count_merges_existing_extended_model_response_command() -> None:
+    middleware = BuilderArtifactMiddleware()
+    state = {
+        "delegation_context": {"task": "Create a visual presentation with diagrams"},
+    }
+    request = SimpleNamespace(
+        state=state,
+        runtime=None,
+        model=object(),
+    )
+    request.override = lambda **_kwargs: request
+    model_response = ModelResponse(result=[AIMessage(content="reading")])
+    extended = ExtendedModelResponse(
+        model_response=model_response,
+        command=Command(update={"existing": True}),
+    )
+
+    result = middleware.wrap_model_call(request, lambda _request: extended)
+
+    assert isinstance(result, ExtendedModelResponse)
+    assert result.model_response is model_response
+    assert result.command is not None
+    assert result.command.update["existing"] is True
+    assert result.command.update["builder_visual_force_count"] == 1
 
 
 def test_visual_skill_force_count_uses_persisted_state_to_stop_after_cap() -> None:

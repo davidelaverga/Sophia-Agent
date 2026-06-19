@@ -23,7 +23,7 @@ from typing import Annotated, Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import ModelRequest, hook_config
+from langchain.agents.middleware.types import ExtendedModelResponse, ModelRequest, ModelResponse, hook_config
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
@@ -5450,28 +5450,42 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return None, None
 
     @staticmethod
-    def _model_result_with_state_update(result: Any, update: dict[str, Any] | None) -> Any:
+    def _command_with_merged_update(command: Command | None, update: dict[str, Any]) -> Command:
+        if command is None:
+            return Command(update=update)
+        command_update = command.update
+        if isinstance(command_update, dict):
+            command_update = {**command_update, **update}
+        elif command_update is None:
+            command_update = update
+        else:
+            command_update = update
+        return Command(
+            graph=command.graph,
+            update=command_update,
+            resume=command.resume,
+            goto=command.goto,
+        )
+
+    @classmethod
+    def _model_result_with_state_update(cls, result: Any, update: dict[str, Any] | None) -> Any:
         if not update:
             return result
-        if isinstance(result, Command):
-            command_update = result.update
-            if isinstance(command_update, dict):
-                command_update = {**command_update, **update}
-            elif command_update is None:
-                command_update = update
-            else:
-                command_update = update
-            return Command(
-                graph=result.graph,
-                update=command_update,
-                resume=result.resume,
-                goto=result.goto,
+        if isinstance(result, ExtendedModelResponse):
+            return ExtendedModelResponse(
+                model_response=result.model_response,
+                command=cls._command_with_merged_update(result.command, update),
             )
-        return (
-            Command(update={"messages": [result], **update})
-            if isinstance(result, AIMessage)
-            else result
-        )
+        if isinstance(result, ModelResponse):
+            return ExtendedModelResponse(
+                model_response=result,
+                command=Command(update=update),
+            )
+        if isinstance(result, Command):
+            return cls._command_with_merged_update(result, update)
+        if isinstance(result, AIMessage):
+            return Command(update={"messages": [result], **update})
+        return result
 
     def _simple_pdf_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_simple_pdf_artifact(state):
