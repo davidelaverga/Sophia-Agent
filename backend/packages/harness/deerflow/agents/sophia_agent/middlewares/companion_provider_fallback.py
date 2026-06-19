@@ -31,11 +31,11 @@ Decision table on a primary-model exception:
    missing → log ``fallback_result=fallback_not_configured``, re-raise.
    OpenAI is never called.
 4. Classified + enabled + configured → retry ONCE with
-   ``request.override(model=ChatOpenAI(...))``. On success the response is
-   returned wrapped in an ``ExtendedModelResponse`` whose ``Command`` writes a
-   sanitized ``companion_provider_fallback`` snapshot into state. On fallback
-   failure, the fallback exception propagates (chained to the primary) and the
-   run fails as it would today.
+   ``request.override(model=<LangSmith-disabled ChatOpenAI>)``. On success the
+   response is returned wrapped in an ``ExtendedModelResponse`` whose
+   ``Command`` writes a sanitized ``companion_provider_fallback`` snapshot into
+   state. On fallback failure, the fallback exception propagates (chained to the
+   primary) and the run fails as it would today.
 
 Primary-provider cooldown (latency):
 
@@ -109,6 +109,7 @@ from deerflow.sophia.companion_provider_fallback import (
     openai_api_key_present,
     primary_cooldown_seconds,
 )
+from deerflow.sophia.observability import disable_langsmith_tracing_for_runnable
 
 logger = logging.getLogger(__name__)
 
@@ -226,6 +227,10 @@ class CompanionProviderFallbackMiddleware(AgentMiddleware[CompanionProviderFallb
     # ------------------------------------------------------------------
 
     @staticmethod
+    def _tracing_disabled_fallback_model() -> Any:
+        return disable_langsmith_tracing_for_runnable(build_fallback_chat_model())
+
+    @staticmethod
     def _fallback_model_or_none(error_class: str) -> Any | None:
         """Return the configured fallback model, or None when fallback must
         not run (disabled / not configured). Logs the safe reason either way.
@@ -249,7 +254,7 @@ class CompanionProviderFallbackMiddleware(AgentMiddleware[CompanionProviderFallb
             )
             return None
         try:
-            return build_fallback_chat_model()
+            return CompanionProviderFallbackMiddleware._tracing_disabled_fallback_model()
         except Exception:
             logger.warning(
                 "[CompanionProviderFallback] could not construct the OpenAI fallback model "
@@ -686,7 +691,7 @@ class CompanionProviderFallbackMiddleware(AgentMiddleware[CompanionProviderFallb
         if not (fallback_enabled() and openai_api_key_present() and fallback_model_name()):
             return None
         try:
-            return error_class, build_fallback_chat_model()
+            return error_class, self._tracing_disabled_fallback_model()
         except Exception:
             return None
 

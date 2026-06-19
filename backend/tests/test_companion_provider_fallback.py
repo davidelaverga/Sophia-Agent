@@ -52,6 +52,7 @@ from deerflow.sophia.companion_provider_fallback import (
     classify_provider_error,
     companion_provider_fallback_snapshot,
 )
+from deerflow.sophia.observability import LangSmithTraceDisabledRunnable
 
 _PLACEHOLDER_KEY = "sk-test-openai-key-placeholder-never-real"
 
@@ -105,6 +106,11 @@ class _FakeRequest:
 
 
 _FALLBACK_MODEL_SENTINEL = object()
+
+
+def _assert_tracing_disabled_fallback_model(model: object) -> None:
+    assert isinstance(model, LangSmithTraceDisabledRunnable)
+    assert getattr(model, "_runnable") is _FALLBACK_MODEL_SENTINEL
 
 
 def _enable_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -260,7 +266,7 @@ class TestFallbackEnabledAndConfigured:
 
         assert len(handler.calls) == 2  # exactly one retry
         retry_request = handler.calls[1]
-        assert retry_request.model is _FALLBACK_MODEL_SENTINEL
+        _assert_tracing_disabled_fallback_model(retry_request.model)
         # Tool contract preserved verbatim — start_builder_task included.
         assert retry_request.tools == request.tools
         assert "start_builder_task" in retry_request.tools
@@ -312,7 +318,7 @@ class TestFallbackEnabledAndConfigured:
 
         result = asyncio.run(run())
         assert len(sync_handler.calls) == 2
-        assert sync_handler.calls[1].model is _FALLBACK_MODEL_SENTINEL
+        _assert_tracing_disabled_fallback_model(sync_handler.calls[1].model)
         assert (
             result.command.update["companion_provider_fallback"]["companion_fallback_result"]
             == "success"
@@ -491,7 +497,7 @@ class TestErrorHandlingOrdering:
         # The fallback retried via OpenAI and produced the visible reply —
         # the generic quota message never fired.
         assert len(model_call.calls) == 2
-        assert model_call.calls[1].model is _FALLBACK_MODEL_SENTINEL
+        _assert_tracing_disabled_fallback_model(model_call.calls[1].model)
         update = result.command.update["companion_provider_fallback"]
         assert update["companion_fallback_result"] == "success"
         assert result.model_response.result[-1] is reply
@@ -818,7 +824,9 @@ class TestConversationalProseRetry:
 
         # Exactly one prose retry on top of the provider fallback retry.
         assert len(handler.calls) == 3
+        _assert_tracing_disabled_fallback_model(handler.calls[1].model)
         prose_request = handler.calls[2]
+        _assert_tracing_disabled_fallback_model(prose_request.model)
         # Tools disabled and prose instruction appended for the retry only.
         assert prose_request.tools == []
         assert prose_request.tool_choice is None
@@ -864,6 +872,8 @@ class TestConversationalProseRetry:
 
         result = asyncio.run(run())
         assert len(sync_handler.calls) == 3
+        _assert_tracing_disabled_fallback_model(sync_handler.calls[1].model)
+        _assert_tracing_disabled_fallback_model(sync_handler.calls[2].model)
         final_message = result.model_response.result[-1]
         assert final_message.content == "Right here with you."
         assert [tc["name"] for tc in final_message.tool_calls] == ["emit_artifact"]
@@ -1036,7 +1046,7 @@ class TestConversationalLightPath:
         # One failed primary + ONE light fallback call — no extra prose retry.
         assert len(handler.calls) == 2
         light_request = handler.calls[1]
-        assert light_request.model is _FALLBACK_MODEL_SENTINEL
+        _assert_tracing_disabled_fallback_model(light_request.model)
         assert light_request.tools == []
         assert light_request.tool_choice is None
         # Builder/artifact guidance blocks dropped; companion context kept.
@@ -1133,7 +1143,7 @@ class TestPrimaryProviderCooldown:
 
         # ONE call only — straight to the fallback model, no Anthropic attempt.
         assert len(second_handler.calls) == 1
-        assert second_handler.calls[0].model is _FALLBACK_MODEL_SENTINEL
+        _assert_tracing_disabled_fallback_model(second_handler.calls[0].model)
         assert "companionFallbackPrimaryBypassed=true" in caplog.text
         assert "companionFallbackBypassReason=provider_credit_depleted" in caplog.text
         update = result.command.update["companion_provider_fallback"]
@@ -1157,7 +1167,7 @@ class TestPrimaryProviderCooldown:
 
         result = asyncio.run(run())
         assert len(sync_handler.calls) == 1
-        assert sync_handler.calls[0].model is _FALLBACK_MODEL_SENTINEL
+        _assert_tracing_disabled_fallback_model(sync_handler.calls[0].model)
         update = result.command.update["companion_provider_fallback"]
         assert update["companion_fallback_primary_bypassed"] is True
         assert update["companion_fallback_bypass_reason"] == "provider_unavailable"
