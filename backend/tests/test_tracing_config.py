@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from deerflow.config import tracing_config as tracing_module
 
 
@@ -11,11 +13,20 @@ def _reset_tracing_cache() -> None:
     tracing_module._tracing_config = None
 
 
+@pytest.fixture(autouse=True)
+def _isolate_tracing_config():
+    _reset_tracing_cache()
+    yield
+    _reset_tracing_cache()
+
+
 def test_prefers_langsmith_env_names(monkeypatch):
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
     monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
     monkeypatch.setenv("LANGSMITH_PROJECT", "smith-project")
     monkeypatch.setenv("LANGSMITH_ENDPOINT", "https://smith.example.com")
+    monkeypatch.setenv("LANGSMITH_WORKSPACE_ID", "workspace-1")
+    monkeypatch.setenv("LANGSMITH_PROJECT_UUID", "project-uuid-1")
 
     _reset_tracing_cache()
     cfg = tracing_module.get_tracing_config()
@@ -24,6 +35,8 @@ def test_prefers_langsmith_env_names(monkeypatch):
     assert cfg.api_key == "lsv2_key"
     assert cfg.project == "smith-project"
     assert cfg.endpoint == "https://smith.example.com"
+    assert cfg.workspace_id == "workspace-1"
+    assert cfg.project_uuid == "project-uuid-1"
     assert tracing_module.is_tracing_enabled() is True
 
 
@@ -71,6 +84,19 @@ def test_defaults_when_project_not_set(monkeypatch):
     cfg = tracing_module.get_tracing_config()
 
     assert cfg.project == "deer-flow"
+
+
+def test_optional_langsmith_workspace_and_project_uuid_default_to_none(monkeypatch):
+    monkeypatch.setenv("LANGSMITH_TRACING", "yes")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "key")
+    monkeypatch.delenv("LANGSMITH_WORKSPACE_ID", raising=False)
+    monkeypatch.delenv("LANGSMITH_PROJECT_UUID", raising=False)
+
+    _reset_tracing_cache()
+    cfg = tracing_module.get_tracing_config()
+
+    assert cfg.workspace_id is None
+    assert cfg.project_uuid is None
 
 
 def test_compose_allows_env_file_to_disable_langsmith_tracing() -> None:

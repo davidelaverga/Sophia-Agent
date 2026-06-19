@@ -65,7 +65,7 @@ def make_sophia_builder(config: RunnableConfig):
         raw_user_id if isinstance(raw_user_id, str) and raw_user_id.strip() else "default_user"
     )
     model_name = cfg.get("model_name")
-    return _create_builder_agent(user_id=user_id, model_name=model_name)
+    return _create_builder_agent(user_id=user_id, model_name=model_name, trace_config=config)
 
 
 def _resolve_builder_model_name(model_name: str | None) -> tuple[str, str]:
@@ -89,7 +89,11 @@ def _resolve_builder_model_name(model_name: str | None) -> tuple[str, str]:
     return DEFAULT_BUILDER_MODEL, "default"
 
 
-def _create_builder_agent(user_id: str, model_name: str | None = None):
+def _create_builder_agent(
+    user_id: str,
+    model_name: str | None = None,
+    trace_config: RunnableConfig | None = None,
+):
     """Create the Sophia builder agent with its dedicated middleware chain.
 
     Called by make_sophia_builder (LangGraph entry) or directly by
@@ -224,4 +228,9 @@ def _create_builder_agent(user_id: str, model_name: str | None = None):
     # The delegated Builder path still enforces its runtime budget through
     # switch_to_builder -> SubagentExecutor.config.max_turns.
     agent.recursion_limit = 80
-    return wrap_builder_agent_for_observability(agent)
+    return wrap_builder_agent_for_observability(
+        agent,
+        model_name=resolved_model,
+        model_source=model_source,
+        trace_config=trace_config,
+    )

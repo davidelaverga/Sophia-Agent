@@ -15,6 +15,8 @@ class TracingConfig(BaseModel):
     api_key: str | None = Field(...)
     project: str = Field(...)
     endpoint: str = Field(...)
+    workspace_id: str | None = Field(default=None)
+    project_uuid: str | None = Field(default=None)
 
     @property
     def is_configured(self) -> bool:
@@ -66,6 +68,8 @@ def get_tracing_config() -> TracingConfig:
         api_key  : LANGSMITH_API_KEY  > LANGCHAIN_API_KEY
         project  : LANGSMITH_PROJECT  > LANGCHAIN_PROJECT   (default: "deer-flow")
         endpoint : LANGSMITH_ENDPOINT > LANGCHAIN_ENDPOINT  (default: https://api.smith.langchain.com)
+        workspace_id : LANGSMITH_WORKSPACE_ID (optional)
+        project_uuid : LANGSMITH_PROJECT_UUID (optional)
 
     Returns:
         TracingConfig with current settings.
@@ -82,6 +86,8 @@ def get_tracing_config() -> TracingConfig:
             api_key=_first_env_value("LANGSMITH_API_KEY", "LANGCHAIN_API_KEY"),
             project=_first_env_value("LANGSMITH_PROJECT", "LANGCHAIN_PROJECT") or "deer-flow",
             endpoint=_first_env_value("LANGSMITH_ENDPOINT", "LANGCHAIN_ENDPOINT") or "https://api.smith.langchain.com",
+            workspace_id=_first_env_value("LANGSMITH_WORKSPACE_ID"),
+            project_uuid=_first_env_value("LANGSMITH_PROJECT_UUID"),
         )
         return _tracing_config
 

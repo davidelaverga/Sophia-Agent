@@ -8,6 +8,12 @@ from unittest.mock import MagicMock
 import pytest
 from langgraph.types import Command
 
+from deerflow.config import tracing_config as tracing_module
+
+
+def _reset_tracing_cache() -> None:
+    tracing_module._tracing_config = None
+
 
 def _make_runtime(state: dict, thread_id: str = "thread-1", user_id: str | None = None, context_user_id: str | None = None) -> SimpleNamespace:
     configurable = {"thread_id": thread_id}
@@ -48,6 +54,9 @@ def _payload_from_builder_response(response: str | Command) -> dict:
 def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     companion_module = importlib.import_module("deerflow.agents.sophia_agent.agent")
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.delenv("SOPHIA_BUILDER_MODEL", raising=False)
+    _reset_tracing_cache()
 
     captured_companion = {}
     captured_builder = {}
@@ -134,7 +143,7 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
 
     builder_types = [type(mw).__name__ for mw in captured_builder["middleware"]]
     builder_tool_names = [getattr(tool, "name", None) for tool in captured_builder["tools"]]
-    assert type(builder_agent).__name__ == "LangSmithBuilderTraceRunnable"
+    assert type(builder_agent).__name__ == "DummyAgent"
     assert "SandboxMiddleware" in builder_types
     assert "ToolErrorHandlingMiddleware" in builder_types
     assert "LLMErrorHandlingMiddleware" in builder_types
@@ -211,6 +220,9 @@ def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:
     import deerflow.agents.sophia_agent.builder_agent as builder_module
 
     captured: dict[str, object] = {}
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.delenv("SOPHIA_BUILDER_MODEL", raising=False)
+    _reset_tracing_cache()
 
     def _capture_chat_anthropic(**kwargs):
         captured["kwargs"] = kwargs
@@ -237,9 +249,10 @@ def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:
 def test_builder_factory_returns_langgraph_compatible_graph(monkeypatch) -> None:
     """The LangGraph server rejects Runnable proxies around compiled graphs."""
 
-    import deerflow.agents.sophia_agent.builder_agent as builder_module
     from langchain_core.language_models.fake_chat_models import FakeListChatModel
     from langgraph.pregel import Pregel
+
+    import deerflow.agents.sophia_agent.builder_agent as builder_module
 
     monkeypatch.setattr(
         builder_module,
@@ -251,12 +264,23 @@ def test_builder_factory_returns_langgraph_compatible_graph(monkeypatch) -> None
         "get_app_config",
         lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
     )
+    monkeypatch.delenv("SOPHIA_BUILDER_MODEL", raising=False)
     monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "Sophia")
+    _reset_tracing_cache()
 
     builder_agent = builder_module._create_builder_agent(user_id="user_123")
 
     assert isinstance(builder_agent, Pregel)
     assert type(builder_agent).__name__ != "LangSmithBuilderTraceRunnable"
+    assert builder_agent.config["run_name"] == "Sophia Builder"
+    assert len(builder_agent.config["callbacks"]) == 1
+    assert "sophia_builder" in builder_agent.config["tags"]
+    assert builder_agent.config["metadata"]["sophia_component"] == "builder"
+    assert builder_agent.config["metadata"]["builder_model_name"] == "claude-sonnet-4-6"
+    assert builder_agent.config["metadata"]["builder_model_source"] == "config-sonnet"
 
 
 # ---------------------------------------------------------------------------

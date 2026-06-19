@@ -61,6 +61,9 @@ services:
       # Uncomment only if the write key spans multiple LangSmith workspaces.
       # - key: LANGSMITH_WORKSPACE_ID
       #   sync: false
+      # Optional read/export shortcut for code-agent trace fetchers.
+      # - key: LANGSMITH_PROJECT_UUID
+      #   sync: false
 
   # ─────────────────────────────────────────────────────────────────
   # 2. Gateway API (REST + SSE proxy)

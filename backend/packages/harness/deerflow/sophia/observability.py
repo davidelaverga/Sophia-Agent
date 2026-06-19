@@ -7,10 +7,16 @@ import logging
 import os
 from contextlib import nullcontext
 from typing import Any
+from urllib.parse import urlparse
 
 from langchain_core.runnables import Runnable
 
+from deerflow.config.tracing_config import get_tracing_config
+
 logger = logging.getLogger(__name__)
+
+_BUILDER_RUN_NAME = "Sophia Builder"
+_BUILDER_BASE_TAG = "sophia_builder"
 
 
 def _tracing_context_factory() -> Any | None:
@@ -49,10 +55,152 @@ def langsmith_builder_tracing_enabled() -> bool:
 
     if _env_flag_is_false("LANGSMITH_TRACING"):
         return False
-    return _env_flag("SOPHIA_BUILDER_LANGSMITH_TRACING")
+    if not _env_flag("SOPHIA_BUILDER_LANGSMITH_TRACING"):
+        return False
+    try:
+        return get_tracing_config().is_configured
+    except Exception:  # noqa: BLE001 - config should never block builder execution.
+        logger.warning("Could not resolve LangSmith tracing config", exc_info=True)
+        return False
 
 
-def langsmith_builder_tracing_context() -> Any:
+def _safe_metadata_value(value: Any) -> str | int | float | bool | None:
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        return value
+    if isinstance(value, (int, float)):
+        return value
+    if isinstance(value, str):
+        stripped = value.strip()
+        return stripped[:512] if stripped else None
+    return None
+
+
+def _merge_safe_metadata(target: dict[str, Any], key: str, value: Any) -> None:
+    safe_value = _safe_metadata_value(value)
+    if safe_value is not None:
+        target[key] = safe_value
+
+
+def _safe_tags(tags: list[str] | tuple[str, ...] | None) -> list[str]:
+    deduped: list[str] = []
+    for tag in [_BUILDER_BASE_TAG, *(tags or [])]:
+        if not isinstance(tag, str):
+            continue
+        clean = tag.strip()
+        if clean and clean not in deduped:
+            deduped.append(clean[:256])
+    return deduped
+
+
+def _endpoint_host(endpoint: str) -> str:
+    parsed = urlparse(endpoint)
+    return parsed.netloc or parsed.path or endpoint
+
+
+def _langsmith_log_context() -> dict[str, Any]:
+    config = get_tracing_config()
+    return {
+        "project": config.project,
+        "endpoint_host": _endpoint_host(config.endpoint),
+        "api_key_present": bool(config.api_key),
+        "workspace_id_present": bool(config.workspace_id),
+        "project_uuid_present": bool(config.project_uuid),
+        "langsmith_tracing_enabled": config.enabled,
+        "builder_tracing_flag": _env_flag("SOPHIA_BUILDER_LANGSMITH_TRACING"),
+    }
+
+
+def _langsmith_client(config: Any | None = None) -> Any:
+    from langsmith import Client
+
+    tracing_config = config or get_tracing_config()
+    kwargs: dict[str, Any] = {
+        "api_url": tracing_config.endpoint,
+        "api_key": tracing_config.api_key,
+    }
+    if tracing_config.workspace_id:
+        kwargs["workspace_id"] = tracing_config.workspace_id
+    return Client(**kwargs)
+
+
+def builder_trace_metadata(
+    *,
+    model_name: str | None = None,
+    model_source: str | None = None,
+    config: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Build safe metadata for the root Sophia builder trace."""
+
+    metadata: dict[str, Any] = {"sophia_component": "builder"}
+    _merge_safe_metadata(metadata, "builder_model_name", model_name)
+    _merge_safe_metadata(metadata, "builder_model_source", model_source)
+
+    render_service = os.getenv("RENDER_SERVICE_NAME")
+    render_region = os.getenv("RENDER_REGION")
+    render_commit = os.getenv("RENDER_GIT_COMMIT")
+    _merge_safe_metadata(metadata, "render_service_name", render_service)
+    _merge_safe_metadata(metadata, "render_region", render_region)
+    _merge_safe_metadata(metadata, "render_git_commit", render_commit)
+
+    runtime_config = config if isinstance(config, dict) else {}
+    configurable = _as_dict(runtime_config.get("configurable"))
+    config_metadata = _as_dict(runtime_config.get("metadata"))
+    for source in (configurable, config_metadata):
+        for key in ("thread_id", "task_id", "run_id", "parent_thread_id"):
+            if key not in metadata:
+                _merge_safe_metadata(metadata, key, source.get(key))
+    if "parent_trace_id" not in metadata:
+        _merge_safe_metadata(metadata, "parent_trace_id", config_metadata.get("trace_id"))
+    return metadata
+
+
+def builder_trace_tags(
+    *,
+    model_name: str | None = None,
+    model_source: str | None = None,
+) -> list[str]:
+    tags = []
+    if model_source:
+        tags.append(f"builder_model_source:{model_source}")
+    if model_name:
+        tags.append(f"builder_model:{model_name}")
+    return _safe_tags(tags)
+
+
+def _builder_langsmith_tracer(
+    *,
+    metadata: dict[str, Any],
+    tags: list[str],
+) -> Any | None:
+    if not langsmith_builder_tracing_enabled():
+        return None
+    try:
+        from langchain_core.tracers.langchain import LangChainTracer
+
+        tracing_config = get_tracing_config()
+        client = _langsmith_client(tracing_config)
+        return LangChainTracer(
+            project_name=tracing_config.project,
+            client=client,
+            tags=tags,
+            metadata=metadata,
+        )
+    except Exception:  # noqa: BLE001 - tracing must not break builder creation.
+        logger.warning(
+            "Sophia builder LangSmith tracer creation failed: %s",
+            _langsmith_log_context(),
+            exc_info=True,
+        )
+        return None
+
+
+def langsmith_builder_tracing_context(
+    *,
+    metadata: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+) -> Any:
     """Context manager that enables tracing only for builder graph execution."""
 
     if not langsmith_builder_tracing_enabled():
@@ -60,7 +208,22 @@ def langsmith_builder_tracing_context() -> Any:
     tracing_context = _tracing_context_factory()
     if tracing_context is None:
         return nullcontext()
-    return tracing_context(enabled=True)
+    try:
+        tracing_config = get_tracing_config()
+        return tracing_context(
+            enabled=True,
+            project_name=tracing_config.project,
+            client=_langsmith_client(tracing_config),
+            tags=_safe_tags(tags),
+            metadata=metadata or {},
+        )
+    except Exception:  # noqa: BLE001 - tracing must not break builder execution.
+        logger.warning(
+            "Sophia builder LangSmith tracing context creation failed: %s",
+            _langsmith_log_context(),
+            exc_info=True,
+        )
+        return nullcontext()
 
 
 class LangSmithTraceDisabledRunnable(Runnable[Any, Any]):
@@ -136,58 +299,104 @@ def _is_langgraph_pregel(runnable: Any) -> bool:
 class LangSmithBuilderTraceRunnable(Runnable[Any, Any]):
     """Proxy the builder graph while enabling LangSmith only for that runnable."""
 
-    def __init__(self, runnable: Any) -> None:
+    def __init__(
+        self,
+        runnable: Any,
+        *,
+        metadata: dict[str, Any] | None = None,
+        tags: list[str] | None = None,
+    ) -> None:
         object.__setattr__(self, "_runnable", runnable)
+        object.__setattr__(self, "_metadata", metadata or {})
+        object.__setattr__(self, "_tags", _safe_tags(tags))
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._runnable, name)
 
     def __setattr__(self, name: str, value: Any) -> None:
-        if name == "_runnable":
+        if name in {"_runnable", "_metadata", "_tags"}:
             object.__setattr__(self, name, value)
             return
         setattr(self._runnable, name, value)
 
     def invoke(self, *args: Any, **kwargs: Any) -> Any:
-        with langsmith_builder_tracing_context():
+        with langsmith_builder_tracing_context(metadata=self._metadata, tags=self._tags):
             return self._runnable.invoke(*args, **kwargs)
 
     async def ainvoke(self, *args: Any, **kwargs: Any) -> Any:
-        with langsmith_builder_tracing_context():
+        with langsmith_builder_tracing_context(metadata=self._metadata, tags=self._tags):
             return await self._runnable.ainvoke(*args, **kwargs)
 
     def batch(self, *args: Any, **kwargs: Any) -> Any:
-        with langsmith_builder_tracing_context():
+        with langsmith_builder_tracing_context(metadata=self._metadata, tags=self._tags):
             return self._runnable.batch(*args, **kwargs)
 
     async def abatch(self, *args: Any, **kwargs: Any) -> Any:
-        with langsmith_builder_tracing_context():
+        with langsmith_builder_tracing_context(metadata=self._metadata, tags=self._tags):
             return await self._runnable.abatch(*args, **kwargs)
 
     def stream(self, *args: Any, **kwargs: Any) -> Any:
-        with langsmith_builder_tracing_context():
+        with langsmith_builder_tracing_context(metadata=self._metadata, tags=self._tags):
             yield from self._runnable.stream(*args, **kwargs)
 
     async def astream(self, *args: Any, **kwargs: Any) -> Any:
-        with langsmith_builder_tracing_context():
+        with langsmith_builder_tracing_context(metadata=self._metadata, tags=self._tags):
             async for item in self._runnable.astream(*args, **kwargs):
                 yield item
 
     def bind(self, *args: Any, **kwargs: Any) -> LangSmithBuilderTraceRunnable:
-        return LangSmithBuilderTraceRunnable(self._runnable.bind(*args, **kwargs))
+        return LangSmithBuilderTraceRunnable(
+            self._runnable.bind(*args, **kwargs),
+            metadata=self._metadata,
+            tags=self._tags,
+        )
 
     def bind_tools(self, *args: Any, **kwargs: Any) -> LangSmithBuilderTraceRunnable:
-        return LangSmithBuilderTraceRunnable(self._runnable.bind_tools(*args, **kwargs))
+        return LangSmithBuilderTraceRunnable(
+            self._runnable.bind_tools(*args, **kwargs),
+            metadata=self._metadata,
+            tags=self._tags,
+        )
 
 
-def enable_langsmith_tracing_for_builder_runnable(runnable: Any) -> Any:
-    if _is_langgraph_pregel(runnable):
-        # langgraph-api validates graph factories by concrete Pregel type before
-        # execution. A Runnable proxy forwards methods but fails that production
-        # check, so keep compiled graphs native and rely on normal LangGraph/
-        # LangSmith tracing configuration for server runs.
+def enable_langsmith_tracing_for_builder_runnable(
+    runnable: Any,
+    *,
+    metadata: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+) -> Any:
+    metadata = dict(metadata or {})
+    tags = _safe_tags(tags)
+    if not langsmith_builder_tracing_enabled():
+        logger.info(
+            "Sophia builder LangSmith tracing disabled: %s",
+            _langsmith_log_context(),
+        )
         return runnable
-    return LangSmithBuilderTraceRunnable(runnable)
+    tracer = _builder_langsmith_tracer(metadata=metadata, tags=tags)
+    if tracer is None:
+        return runnable
+    if _is_langgraph_pregel(runnable):
+        configured = runnable.with_config(
+            {
+                "callbacks": [tracer],
+                "run_name": _BUILDER_RUN_NAME,
+                "tags": tags,
+                "metadata": metadata,
+            }
+        )
+        if hasattr(runnable, "recursion_limit"):
+            configured.recursion_limit = runnable.recursion_limit
+        logger.info(
+            "Sophia builder LangSmith tracing attached to Pregel graph: %s",
+            _langsmith_log_context(),
+        )
+        return configured
+    logger.info(
+        "Sophia builder LangSmith tracing attached to runnable proxy: %s",
+        _langsmith_log_context(),
+    )
+    return LangSmithBuilderTraceRunnable(runnable, metadata=metadata, tags=tags)
 
 
 def _current_run_tree() -> Any | None:
@@ -205,9 +414,7 @@ def _current_run_tree() -> Any | None:
 
 
 def _feedback_client() -> Any:
-    from langsmith import Client
-
-    return Client()
+    return _langsmith_client()
 
 
 def _as_dict(value: Any) -> dict[str, Any]:
@@ -268,6 +475,8 @@ def builder_observability_payload(
     """Build LangSmith metadata, tags, and QC feedback payloads."""
 
     diagnostics = _as_dict(state.get("builder_pptx_diagnostics"))
+    delegation_context = _as_dict(state.get("delegation_context"))
+    builder_task = _as_dict(state.get("builder_task"))
     slide_count = _first_positive_int(
         diagnostics.get("pptx_plan_slide_count"),
         diagnostics.get("pptx_generator_slide_count"),
@@ -285,6 +494,14 @@ def builder_observability_payload(
         "qc_pass_count": _as_int(diagnostics.get("qc_pass_count")),
         "qc_failure_count": _as_int(diagnostics.get("qc_failure_count")),
     }
+    for key in ("thread_id", "task_id", "run_id", "parent_thread_id"):
+        for source in (artifact, builder_task, delegation_context):
+            if key not in metadata:
+                _merge_safe_metadata(metadata, key, source.get(key))
+    _merge_safe_metadata(metadata, "artifact_type", artifact.get("artifact_type"))
+    _merge_safe_metadata(metadata, "requested_artifact_ext", artifact.get("requested_artifact_ext"))
+    _merge_safe_metadata(metadata, "final_artifact_ext", artifact.get("artifact_ext") or _final_artifact_ext(artifact))
+    metadata["artifact_is_fallback"] = bool(artifact.get("artifact_is_fallback"))
     if diagnostics.get("pptx_plan_json") is not None:
         metadata["deck_plan"] = diagnostics["pptx_plan_json"]
     for key in ("quality_warning", "fallback_reason", "image_generation_error_class"):
@@ -344,9 +561,19 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
 
     run_tree = _current_run_tree()
     if run_tree is None:
+        if langsmith_builder_tracing_enabled():
+            logger.warning(
+                "Sophia builder LangSmith completion annotation skipped; no active run tree: %s",
+                _langsmith_log_context(),
+            )
         return False
     metadata, tags, qc_results = builder_observability_payload(state, artifact)
     _add_run_metadata(run_tree, metadata)
     _add_run_tags(run_tree, tags)
     _create_qc_feedback(run_tree, qc_results)
+    logger.info(
+        "Sophia builder LangSmith completion annotation attached: run_id=%s project=%s",
+        getattr(run_tree, "id", None),
+        get_tracing_config().project,
+    )
     return True

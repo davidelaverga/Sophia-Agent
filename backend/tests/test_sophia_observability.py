@@ -4,7 +4,21 @@ import asyncio
 from contextlib import contextmanager
 from typing import Any
 
+import pytest
+
+from deerflow.config import tracing_config as tracing_module
 from deerflow.sophia import observability
+
+
+def _reset_tracing_cache() -> None:
+    tracing_module._tracing_config = None
+
+
+@pytest.fixture(autouse=True)
+def _isolate_tracing_config():
+    _reset_tracing_cache()
+    yield
+    _reset_tracing_cache()
 
 
 class _FakeRunTree:
@@ -51,6 +65,9 @@ def test_builder_completion_adds_metadata_tags_and_qc_feedback(monkeypatch) -> N
     }
     artifact = {
         "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+        "artifact_type": "presentation",
+        "requested_artifact_ext": "pptx",
+        "artifact_ext": "pptx",
         "artifact_is_fallback": False,
     }
 
@@ -61,6 +78,10 @@ def test_builder_completion_adds_metadata_tags_and_qc_feedback(monkeypatch) -> N
     assert run_tree.metadata["image_count"] == 2
     assert run_tree.metadata["image_forward"] is True
     assert run_tree.metadata["degraded"] is False
+    assert run_tree.metadata["artifact_type"] == "presentation"
+    assert run_tree.metadata["requested_artifact_ext"] == "pptx"
+    assert run_tree.metadata["final_artifact_ext"] == "pptx"
+    assert run_tree.metadata["artifact_is_fallback"] is False
     assert "artifact:pptx" in run_tree.tags
     assert "image_forward" in run_tree.tags
     assert "qc_ran" in run_tree.tags
@@ -144,20 +165,32 @@ def test_trace_disabled_runnable_wraps_sync_and_async_execution(monkeypatch) -> 
     ]
 
 
-def test_builder_trace_runnable_uses_builder_only_env(monkeypatch) -> None:
+def test_builder_trace_runnable_uses_explicit_builder_context(monkeypatch) -> None:
     events: list[tuple[str, bool | None]] = []
+    context_kwargs: list[dict[str, Any]] = []
 
     @contextmanager
-    def fake_tracing_context(*, enabled: bool | None = None, **_kwargs: Any):
+    def fake_tracing_context(*, enabled: bool | None = None, **kwargs: Any):
         events.append(("enter", enabled))
+        context_kwargs.append(kwargs)
         try:
             yield
         finally:
             events.append(("exit", enabled))
 
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "Sophia")
     monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+    _reset_tracing_cache()
     monkeypatch.setattr(observability, "_tracing_context_factory", lambda: fake_tracing_context)
-    wrapped = observability.enable_langsmith_tracing_for_builder_runnable(_FakeRunnable())
+    monkeypatch.setattr(observability, "_langsmith_client", lambda *_args, **_kwargs: "client")
+    monkeypatch.setattr(observability, "_builder_langsmith_tracer", lambda **_kwargs: object())
+    wrapped = observability.enable_langsmith_tracing_for_builder_runnable(
+        _FakeRunnable(),
+        metadata={"thread_id": "thread-1"},
+        tags=["custom-tag"],
+    )
 
     assert wrapped.invoke({}) == "invoke"
     assert list(wrapped.stream({})) == ["stream-1", "stream-2"]
@@ -167,6 +200,10 @@ def test_builder_trace_runnable_uses_builder_only_env(monkeypatch) -> None:
         ("enter", True),
         ("exit", True),
     ]
+    assert context_kwargs[0]["project_name"] == "Sophia"
+    assert context_kwargs[0]["client"] == "client"
+    assert context_kwargs[0]["metadata"] == {"thread_id": "thread-1"}
+    assert context_kwargs[0]["tags"] == ["sophia_builder", "custom-tag"]
 
 
 def test_builder_trace_runnable_honors_global_langsmith_false(monkeypatch) -> None:
@@ -181,12 +218,29 @@ def test_builder_trace_runnable_honors_global_langsmith_false(monkeypatch) -> No
             events.append(("exit", enabled))
 
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
     monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+    _reset_tracing_cache()
     monkeypatch.setattr(observability, "_tracing_context_factory", lambda: fake_tracing_context)
-    wrapped = observability.enable_langsmith_tracing_for_builder_runnable(_FakeRunnable())
+    runnable = _FakeRunnable()
+    wrapped = observability.enable_langsmith_tracing_for_builder_runnable(runnable)
 
+    assert wrapped is runnable
     assert wrapped.invoke({}) == "invoke"
     assert events == []
+
+
+def test_builder_trace_runnable_requires_api_key(monkeypatch) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+    monkeypatch.delenv("LANGCHAIN_API_KEY", raising=False)
+    monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+    _reset_tracing_cache()
+
+    runnable = _FakeRunnable()
+    wrapped = observability.enable_langsmith_tracing_for_builder_runnable(runnable)
+
+    assert wrapped is runnable
 
 
 def test_builder_trace_runnable_preserves_langgraph_graphs(monkeypatch) -> None:
@@ -194,24 +248,40 @@ def test_builder_trace_runnable_preserves_langgraph_graphs(monkeypatch) -> None:
     from langchain_core.language_models.fake_chat_models import FakeListChatModel
     from langgraph.pregel import Pregel
 
-    events: list[tuple[str, bool | None]] = []
-
-    @contextmanager
-    def fake_tracing_context(*, enabled: bool | None = None, **_kwargs: Any):
-        events.append(("enter", enabled))
-        try:
-            yield
-        finally:
-            events.append(("exit", enabled))
-
     graph = create_agent(model=FakeListChatModel(responses=["ok"]), tools=[])
+    graph.recursion_limit = 80
     assert isinstance(graph, Pregel)
 
+    tracer = object()
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
     monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
-    monkeypatch.setattr(observability, "_tracing_context_factory", lambda: fake_tracing_context)
+    _reset_tracing_cache()
+    monkeypatch.setattr(observability, "_builder_langsmith_tracer", lambda **_kwargs: tracer)
 
-    wrapped = observability.enable_langsmith_tracing_for_builder_runnable(graph)
+    wrapped = observability.enable_langsmith_tracing_for_builder_runnable(
+        graph,
+        metadata={"thread_id": "thread-1"},
+        tags=["custom-tag"],
+    )
 
-    assert wrapped is graph
+    assert wrapped is not graph
     assert isinstance(wrapped, Pregel)
-    assert events == []
+    assert wrapped.recursion_limit == 80
+    assert wrapped.config["callbacks"] == [tracer]
+    assert wrapped.config["run_name"] == "Sophia Builder"
+    assert wrapped.config["tags"] == ["sophia_builder", "custom-tag"]
+    assert wrapped.config["metadata"]["thread_id"] == "thread-1"
+
+
+def test_builder_completion_logs_missing_run_tree_when_tracing_expected(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "Sophia")
+    monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+    _reset_tracing_cache()
+    monkeypatch.setattr(observability, "_current_run_tree", lambda: None)
+
+    assert observability.annotate_builder_completion({}, {"artifact_path": "deck.pptx"}) is False
+
+    assert "no active run tree" in caplog.text
