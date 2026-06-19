@@ -176,7 +176,10 @@ def _env_flag_preferred(*names: str) -> bool:
 
 
 def _langsmith_tracing_configured() -> bool:
-    if not _env_flag_preferred("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING"):
+    tracing_requested = _env_flag_preferred("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING") or (
+        os.getenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "").strip().lower() in _TRUTHY_VALUES
+    )
+    if not tracing_requested:
         return False
     return bool((os.getenv("LANGSMITH_API_KEY") or os.getenv("LANGCHAIN_API_KEY") or "").strip())
 

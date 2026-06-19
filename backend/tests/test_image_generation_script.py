@@ -193,6 +193,35 @@ class TestGeneratePathWithoutReferenceImages:
         }
         fake_client.images.edit.assert_called_once()
 
+    def test_langsmith_tracing_honors_builder_flag_without_global_autotracing(
+        self, script_module, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        for name in (
+            "LANGSMITH_TRACING",
+            "LANGCHAIN_TRACING_V2",
+            "LANGCHAIN_TRACING",
+            "SOPHIA_BUILDER_LANGSMITH_TRACING",
+            "LANGSMITH_API_KEY",
+            "LANGCHAIN_API_KEY",
+        ):
+            monkeypatch.delenv(name, raising=False)
+
+        monkeypatch.setenv("LANGSMITH_TRACING", "false")
+        monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+        monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2-test")
+
+        assert script_module._langsmith_tracing_configured() is True
+
+        monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)
+        assert script_module._langsmith_tracing_configured() is False
+
+        monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "false")
+        monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2-test")
+        assert script_module._langsmith_tracing_configured() is False
+
+        monkeypatch.setenv("LANGSMITH_TRACING", "true")
+        assert script_module._langsmith_tracing_configured() is True
+
 
 class TestEditPathWithReferenceImages:
     def test_calls_images_edit_when_one_reference_image_provided(
