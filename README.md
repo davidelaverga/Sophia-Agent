@@ -400,7 +400,7 @@ Sophia sends traces to the EU LangSmith endpoint under project `Sophia` so runs 
 Set these only on the `sophia-langgraph` worker service:
 
 ```bash
-LANGSMITH_TRACING=true
+LANGSMITH_TRACING=false
 LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
 LANGSMITH_PROJECT=Sophia
 LANGSMITH_API_KEY=<write key>
@@ -515,7 +515,7 @@ Editing the local `config.yaml` does NOTHING to production. Always edit `config.
 | Service | Env vars |
 |---|---|
 | `sophia-gateway` | `ANTHROPIC_API_KEY`, `MEM0_API_KEY`, `STREAM_API_KEY`, `STREAM_API_SECRET`, `LANGGRAPH_URL`, `SOPHIA_VOICE_SERVER_URL`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_BOT_USERNAME`, `TELEGRAM_WORKER_BOT_TOKEN` (Work bot only) |
-| `sophia-langgraph` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MEM0_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WORKER_BOT_TOKEN` (Work bot only), `LANGSMITH_TRACING=true`, `LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com`, `SOPHIA_BUILDER_LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT=Sophia`, optional `LANGSMITH_WORKSPACE_ID` (any token referenced by `config.production.yaml` must be set here too) |
+| `sophia-langgraph` | `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `MEM0_API_KEY`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_WORKER_BOT_TOKEN` (Work bot only), `LANGSMITH_TRACING=false`, `LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com`, `SOPHIA_BUILDER_LANGSMITH_TRACING=true`, `LANGSMITH_API_KEY`, `LANGSMITH_PROJECT=Sophia`, optional `LANGSMITH_WORKSPACE_ID` (any token referenced by `config.production.yaml` must be set here too) |
 | `sophia-voice` | (see `render.yaml` — STT/TTS keys, Stream credentials, etc.) |
 
 **To verify a deploy** worked, SSH into the Render service shell and run:
