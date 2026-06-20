@@ -22,14 +22,24 @@ def _runtime(outputs_path):
     )
 
 
-def _presentation_runtime(outputs_path):
+def _presentation_runtime(outputs_path, *, task: str = "Build a deck"):
     return SimpleNamespace(
         state={
             "thread_data": {"outputs_path": str(outputs_path)},
-            "delegation_context": {"task_type": "presentation"},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "delegation_context": {
+                "task": task,
+                "task_type": "presentation",
+                "artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            },
         },
         context={},
-        config={"configurable": {"task_type": "presentation"}},
+        config={
+            "configurable": {
+                "task_type": "presentation",
+                "artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            }
+        },
     )
 
 
@@ -118,6 +128,28 @@ def test_generate_visual_asset_restricts_structural_visuals_for_presentations(tm
     assert payload["success"] is False
     assert payload["error_type"] == "presentation_visual_asset_restricted"
     assert "--slide-visual" in payload["hint"]
+
+
+def test_generate_visual_asset_allows_structural_visuals_for_no_image_presentations(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+
+    payload = _payload(
+        generate_visual_asset.func(
+            runtime=_presentation_runtime(
+                outputs,
+                task="Build a no images architecture deck with an editable system flow diagram",
+            ),
+            visual_type="architecture_diagram",
+            title="System flow",
+            data=["Agent", "Memory"],
+            edges=[{"from": "Agent", "to": "Memory"}],
+            output_name="system-flow",
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["svg_path"] == "/mnt/user-data/outputs/visuals/system-flow.svg"
+    assert (outputs / "visuals" / "system-flow.svg").is_file()
 
 
 def test_generate_visual_asset_allows_data_charts_for_presentations(tmp_path) -> None:

@@ -23,6 +23,14 @@ _DEFAULT_PALETTE = ("#14b8a6", "#8b5cf6", "#f59e0b", "#ef4444", "#0ea5e9", "#22c
 _REGISTRY_FILENAME = ".registry.json"
 _PRESENTATION_TASK_TYPES = {"presentation", "slides", "slide_deck", "deck"}
 _PRESENTATION_DATA_CHART_KINDS = {"bar_chart", "line_chart", "pie_chart", "donut_chart"}
+_PRESENTATION_STRUCTURAL_VISUAL_KINDS = {
+    "timeline",
+    "process_flow",
+    "architecture_diagram",
+    "comparison_matrix",
+    "quadrant",
+    "concept_map",
+}
 
 _LINE_SPACING = 1.25
 _CHAR_WIDTH_RATIO = 0.58
@@ -72,10 +80,56 @@ def _runtime_task_type(runtime: ToolRuntime | None) -> str:
     return value.strip().lower() if isinstance(value, str) else ""
 
 
+def _runtime_delegation_context(runtime: ToolRuntime | None) -> dict[str, Any]:
+    state = getattr(runtime, "state", None) or {}
+    if isinstance(state, dict):
+        context = state.get("delegation_context")
+        if isinstance(context, dict):
+            return context
+    return {}
+
+
+def _runtime_artifact_target_ext(runtime: ToolRuntime | None) -> str:
+    state = getattr(runtime, "state", None) or {}
+    if isinstance(state, dict):
+        for key in ("builder_artifact_target_path", "artifact_target_path"):
+            value = state.get(key)
+            if isinstance(value, str) and value.strip():
+                return Path(value).suffix.lower()
+        context = state.get("delegation_context")
+        if isinstance(context, dict):
+            value = context.get("artifact_target_path")
+            if isinstance(value, str) and value.strip():
+                return Path(value).suffix.lower()
+    config = getattr(runtime, "config", None) or {}
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    value = configurable.get("artifact_target_path")
+    return Path(value).suffix.lower() if isinstance(value, str) and value.strip() else ""
+
+
+def _presentation_image_generation_disabled(runtime: ToolRuntime | None) -> bool:
+    try:
+        from deerflow.agents.sophia_agent.middlewares.builder_task import (
+            _image_generation_enabled,
+        )
+    except Exception:
+        return False
+    return not _image_generation_enabled(
+        _runtime_delegation_context(runtime),
+        artifact_target_ext=_runtime_artifact_target_ext(runtime),
+        task_type=_runtime_task_type(runtime),
+    )
+
+
 def _presentation_visual_asset_rejection(visual_type: str, runtime: ToolRuntime | None) -> str | None:
     if _runtime_task_type(runtime) not in _PRESENTATION_TASK_TYPES:
         return None
     if visual_type in _PRESENTATION_DATA_CHART_KINDS:
+        return None
+    if (
+        visual_type in _PRESENTATION_STRUCTURAL_VISUAL_KINDS
+        and _presentation_image_generation_disabled(runtime)
+    ):
         return None
     allowed = ", ".join(sorted(_PRESENTATION_DATA_CHART_KINDS))
     return _result(
