@@ -17,6 +17,8 @@ logger = logging.getLogger(__name__)
 
 _BUILDER_RUN_NAME = "Sophia Builder"
 _BUILDER_BASE_TAG = "sophia_builder"
+_BUILDER_TRACING_ENV = "SOPHIA_BUILDER_LANGSMITH_TRACING"
+_startup_status_logged = False
 
 
 def _tracing_context_factory() -> Any | None:
@@ -42,18 +44,30 @@ def langsmith_tracing_disabled() -> Any:
     return tracing_context(enabled=False)
 
 
-def _env_flag(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in {"1", "true", "yes", "on"}
+def _env_flag_value(name: str) -> bool | None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _env_flag_is_false(name: str) -> bool:
-    return os.getenv(name, "").strip().lower() in {"0", "false", "no", "off"}
+def langsmith_builder_tracing_requested() -> bool:
+    """Resolve the builder-specific tracing flag, inheriting global tracing when unset."""
+
+    builder_flag = _env_flag_value(_BUILDER_TRACING_ENV)
+    if builder_flag is not None:
+        return builder_flag
+    try:
+        return bool(get_tracing_config().enabled)
+    except Exception:  # noqa: BLE001 - config should never block builder execution.
+        logger.warning("Could not resolve LangSmith tracing config", exc_info=True)
+        return False
 
 
 def langsmith_builder_tracing_enabled() -> bool:
     """Return whether the builder graph should opt into LangSmith tracing."""
 
-    if not _env_flag("SOPHIA_BUILDER_LANGSMITH_TRACING"):
+    if not langsmith_builder_tracing_requested():
         return False
     try:
         return bool(get_tracing_config().api_key)
@@ -106,8 +120,31 @@ def _langsmith_log_context() -> dict[str, Any]:
         "workspace_id_present": bool(config.workspace_id),
         "project_uuid_present": bool(config.project_uuid),
         "langsmith_tracing_enabled": config.enabled,
-        "builder_tracing_flag": _env_flag("SOPHIA_BUILDER_LANGSMITH_TRACING"),
+        "builder_tracing_flag": langsmith_builder_tracing_requested(),
+        "builder_tracing_env_present": _env_flag_value(_BUILDER_TRACING_ENV) is not None,
     }
+
+
+def log_builder_tracing_startup_status() -> None:
+    """Emit the resolved builder tracing state once per worker process."""
+
+    global _startup_status_logged
+    if _startup_status_logged:
+        return
+    _startup_status_logged = True
+    try:
+        config = get_tracing_config()
+        logger.info(
+            "[tracing] builder_tracing_flag=%s langsmith_tracing_enabled=%s "
+            "project=%s endpoint=%s api_key_present=%s",
+            langsmith_builder_tracing_requested(),
+            config.enabled,
+            config.project,
+            config.endpoint,
+            bool(config.api_key),
+        )
+    except Exception:  # noqa: BLE001 - startup logging must never block graph import.
+        logger.warning("[tracing] builder tracing startup status unavailable", exc_info=True)
 
 
 def _langsmith_client(config: Any | None = None) -> Any:

@@ -43,6 +43,7 @@ from deerflow.agents.sophia_agent.builder_chain_support import (
     BuilderProgressMiddleware,
     LoopDetectionMiddleware,
     create_builder_todo_middleware,
+    log_builder_tracing_startup_status,
     wrap_builder_agent_for_observability,
 )
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -58,7 +59,11 @@ from deerflow.agents.sophia_agent.middlewares.view_image import (
 )
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 
-__all__ = ["build_builder_middleware_chain", "wrap_builder_agent_for_observability"]
+__all__ = [
+    "build_builder_middleware_chain",
+    "log_builder_tracing_startup_status",
+    "wrap_builder_agent_for_observability",
+]
 
 
 def build_builder_middleware_chain(

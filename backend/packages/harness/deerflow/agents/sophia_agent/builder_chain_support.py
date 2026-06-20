@@ -16,6 +16,7 @@ from deerflow.sophia.observability import (
     builder_trace_metadata,
     builder_trace_tags,
     enable_langsmith_tracing_for_builder_runnable,
+    log_builder_tracing_startup_status,
 )
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "BuilderProgressMiddleware",
     "LoopDetectionMiddleware",
     "create_builder_todo_middleware",
+    "log_builder_tracing_startup_status",
     "wrap_builder_agent_for_observability",
 ]
 

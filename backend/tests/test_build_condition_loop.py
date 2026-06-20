@@ -17,6 +17,7 @@ from langgraph.types import Command
 import deerflow.sophia.build_condition as build_condition
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
+    _error_tool_content_text_only,
     _repair_iteration_grantable,
     _unmet_conditions_from_state,
 )
@@ -182,6 +183,56 @@ def test_repair_turn_content_attaches_rasters(tmp_path, monkeypatch):
     assert isinstance(content, list)
     assert content[0] == {"type": "text", "text": "fix it"}
     assert any(block.get("type") == "image" for block in content)
+
+
+def test_error_tool_content_strips_preview_image_blocks() -> None:
+    content = _error_tool_content_text_only(
+        [
+            {"type": "text", "text": "fix the deck"},
+            {"type": "image", "source": {"type": "base64", "data": "ZmFrZQ=="}},
+        ]
+    )
+
+    assert isinstance(content, list)
+    assert content == [{"type": "text", "text": "fix the deck"}]
+
+
+def test_visual_gate_error_tool_message_is_text_only(tmp_path, monkeypatch):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "deck.pptx").write_bytes(b"pptx")
+    mw = BuilderArtifactMiddleware()
+    state = _deck_state(
+        thread_data={"outputs_path": str(outputs)},
+        build_iterations=0,
+        builder_pptx_diagnostics={},
+    )
+    monkeypatch.setattr(
+        BuilderArtifactMiddleware,
+        "_repair_turn_content",
+        classmethod(
+            lambda cls, rejection_text, _args, _state: [
+                {"type": "text", "text": rejection_text},
+                {"type": "image", "source": {"type": "base64", "data": "ZmFrZQ=="}},
+            ]
+        ),
+    )
+    request = SimpleNamespace(
+        tool_call={"id": "tc", "name": "emit_builder_artifact", "args": {}},
+        state=state,
+        runtime=None,
+    )
+
+    command = mw._visual_gate_rejection_command(
+        request,
+        {"artifact_path": "/mnt/user-data/outputs/deck.pptx"},
+    )
+
+    assert isinstance(command, Command)
+    tool_message = command.update["messages"][0]
+    assert tool_message.status == "error"
+    assert isinstance(tool_message.content, list)
+    assert all(block.get("type") == "text" for block in tool_message.content)
 
 
 # ---- advisory pass ------------------------------------------------------------

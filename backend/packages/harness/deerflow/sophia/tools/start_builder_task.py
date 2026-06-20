@@ -150,13 +150,22 @@ _PDF_OUTPUT_RE = re.compile(
     r"|(?:document|file|report|summary|brief|article|explainer|presentation|slides?|deck|deliverable|artifact|output|final|export)"
     r"\s+(?:as|in|to)\s+(?:an?\s+)?pdf"
     r"|(?:build|create|make|generate|produce|write|render|export)\s+(?:an?\s+)?pdf\b"
+    r"|(?:build|create|make|generate|produce|write|render|export|draft|prepare)\s+"
+    r"(?:an?\s+|the\s+)?(?:report|write[- ]?up)\b"
     r"|(?:build|create|make|generate|produce|write|render|export)\s+[^.?!\n]{0,80}?\s+as\s+(?:an?\s+)?pdf\b"
     r"|\.pdf\b"
     r")",
     re.IGNORECASE,
 )
 _PPTX_OUTPUT_RE = re.compile(
-    r"\b(?:pptx|powerpoint|power\s*point|slide\s+deck|slides?)\b",
+    r"\b(?:"
+    r"pptx|\.pptx|power\s*point"
+    r"|(?:build|create|make|generate|produce|write|draft|design|prepare|compose)\s+"
+    r"(?:me\s+)?(?:an?\s+|the\s+)?[^.?!\n]{0,80}?"
+    r"\b(?:slide\s+deck|\d+\s*[- ]?\s*slides?|slides?|deck|presentation|power\s*point)\b"
+    r"|(?:slide\s+deck|\d+\s*[- ]?\s*slides?|slides?|deck|presentation)\s+"
+    r"(?:as|in|to|into)\s+(?:an?\s+)?(?:pptx|power\s*point)(?:\s+format)?"
+    r")\b",
     re.IGNORECASE,
 )
 _PDF_DECK_DELIVERY_RE = re.compile(
@@ -319,8 +328,14 @@ _SOURCE_CONTEXT_BEFORE_MATCH_RE = re.compile(
     r"\s*(?:existing\s+|current\s+|previous\s+|prior\s+|old\s+)?(?:an?\s+|the\s+)?$",
     re.IGNORECASE,
 )
+_STATUS_CONTEXT_AFTER_MATCH_RE = re.compile(
+    r"^\s*(?:is|are|was|were|look|looks|looking|seem|seems|seemed|aren'?t|isn'?t|not)\s+"
+    r"(?:failing|broken|bad|wrong|off|poor|ugly|rough|stale|not\s+working|missing|miscomposed)\b",
+    re.IGNORECASE,
+)
 _SOURCE_VETO_RULES = frozenset({"explicit_presentation_deck"})
 _NEGATION_LOOKBACK_CHARS = 32
+_STATUS_LOOKAHEAD_CHARS = 48
 
 
 def _pattern_affirmative_match(
@@ -334,6 +349,10 @@ def _pattern_affirmative_match(
             continue
         if source_veto and _SOURCE_CONTEXT_BEFORE_MATCH_RE.search(prefix):
             continue
+        if source_veto:
+            suffix = text[match.end() : match.end() + _STATUS_LOOKAHEAD_CHARS]
+            if _STATUS_CONTEXT_AFTER_MATCH_RE.search(suffix):
+                continue
         return True
     return False
 

@@ -7,6 +7,7 @@ from types import SimpleNamespace
 
 from deerflow.sophia.tools import generate_report_chart as chart_module
 from deerflow.sophia.tools.generate_report_chart import generate_report_chart
+from deerflow.agents.sophia_agent.builder_tools import build_builder_tools_for_task_type
 
 
 def _payload(raw: str) -> dict:
@@ -73,3 +74,22 @@ def test_generate_report_chart_rejects_empty_args(tmp_path, monkeypatch) -> None
     assert payload["success"] is False
     assert payload["error_type"] == "chart_args_required"
     assert payload["chart_family"] == "time_series"
+
+
+def test_generate_report_chart_schema_excludes_runtime() -> None:
+    schema = generate_report_chart.tool_call_schema.model_json_schema()
+
+    properties = schema.get("properties", {})
+    assert "runtime" not in properties
+    assert {"chart_tool", "args", "rationale"}.issubset(properties)
+
+
+def test_report_builder_tool_schemas_generate_for_all_tools() -> None:
+    failures = {}
+    for tool in build_builder_tools_for_task_type("document", vision_enabled=False):
+        try:
+            tool.tool_call_schema.model_json_schema()
+        except Exception as exc:  # noqa: BLE001 - assertion reports every broken tool.
+            failures[getattr(tool, "name", type(tool).__name__)] = f"{type(exc).__name__}: {exc}"
+
+    assert failures == {}

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from contextlib import contextmanager
 from typing import Any
 
@@ -280,6 +281,50 @@ def test_builder_trace_runnable_allows_global_langsmith_false(monkeypatch) -> No
     assert wrapped.invoke({}) == "invoke"
     assert events == [("enter", True), ("exit", True)]
     assert context_kwargs[0]["project_name"] == "Sophia"
+
+
+def test_builder_trace_runnable_inherits_global_tracing_when_builder_flag_missing(monkeypatch) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "Sophia")
+    monkeypatch.delenv("SOPHIA_BUILDER_LANGSMITH_TRACING", raising=False)
+    _reset_tracing_cache()
+    monkeypatch.setattr(observability, "_builder_langsmith_tracer", lambda **_kwargs: object())
+
+    runnable = _FakeRunnable()
+    wrapped = observability.enable_langsmith_tracing_for_builder_runnable(runnable)
+
+    assert wrapped is not runnable
+
+
+def test_builder_trace_runnable_builder_false_overrides_global_tracing(monkeypatch) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
+    monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "false")
+    _reset_tracing_cache()
+
+    runnable = _FakeRunnable()
+    wrapped = observability.enable_langsmith_tracing_for_builder_runnable(runnable)
+
+    assert wrapped is runnable
+
+
+def test_builder_tracing_startup_status_logs_resolved_config(monkeypatch, caplog) -> None:
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "Sophia")
+    monkeypatch.setenv("LANGSMITH_ENDPOINT", "https://eu.api.smith.langchain.com")
+    monkeypatch.delenv("SOPHIA_BUILDER_LANGSMITH_TRACING", raising=False)
+    _reset_tracing_cache()
+    monkeypatch.setattr(observability, "_startup_status_logged", False)
+    caplog.set_level(logging.INFO, logger=observability.__name__)
+
+    observability.log_builder_tracing_startup_status()
+
+    assert "[tracing] builder_tracing_flag=True" in caplog.text
+    assert "langsmith_tracing_enabled=True" in caplog.text
+    assert "project=Sophia" in caplog.text
+    assert "api_key_present=True" in caplog.text
 
 
 def test_builder_trace_runnable_requires_api_key(monkeypatch) -> None:

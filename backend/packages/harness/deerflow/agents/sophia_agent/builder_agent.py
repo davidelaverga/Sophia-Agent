@@ -25,6 +25,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.sophia_agent.builder_middlewares import (
     build_builder_middleware_chain,
+    log_builder_tracing_startup_status,
     wrap_builder_agent_for_observability,
 )
 from deerflow.agents.sophia_agent.builder_tools import build_builder_tools_for_task_type
@@ -35,6 +36,8 @@ from deerflow.config.app_config import get_app_config
 
 logger = logging.getLogger(__name__)
 DEFAULT_BUILDER_MODEL = "claude-sonnet-4-6"
+
+log_builder_tracing_startup_status()
 
 
 def make_sophia_builder(config: RunnableConfig):

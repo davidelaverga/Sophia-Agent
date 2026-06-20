@@ -12,6 +12,7 @@ from typing import Any, Literal
 
 import httpx
 from langchain.tools import ToolRuntime, tool
+from pydantic import BaseModel, Field
 
 from deerflow.sandbox.tools import get_thread_data
 
@@ -77,6 +78,26 @@ _CHART_TOOL_FAMILIES: dict[str, str] = {
     "generate_fishbone_diagram": "cause_effect",
     "generate_flow_diagram": "flow",
 }
+
+
+class GenerateReportChartInput(BaseModel):
+    chart_tool: ChartTool = Field(
+        description=(
+            "Chart-visualization tool name, e.g. generate_line_chart, "
+            "generate_sankey_chart, generate_treemap_chart, or generate_radar_chart."
+        )
+    )
+    args: dict[str, Any] = Field(
+        description=(
+            "Exact chart-visualization arguments, including data, labels, title, "
+            "and style/theme fields needed by the selected chart tool."
+        )
+    )
+    rationale: str = Field(description="Brief reason this chart family fits the report evidence.")
+    output_name: str | None = Field(
+        default=None,
+        description="Optional output filename or /mnt/user-data/outputs/... path.",
+    )
 
 
 def _result(*, success: bool, **fields: Any) -> str:
@@ -326,13 +347,13 @@ def _download_result_payload(
     )
 
 
-@tool("generate_report_chart", parse_docstring=True)
+@tool("generate_report_chart", args_schema=GenerateReportChartInput, parse_docstring=False)
 def generate_report_chart(
+    runtime: ToolRuntime,
     chart_tool: ChartTool,
     args: dict[str, Any],
     rationale: str,
     output_name: str | None = None,
-    runtime: ToolRuntime | None = None,
 ) -> str:
     """Generate a local chart image for PDF/report artifacts.
 
@@ -343,13 +364,13 @@ def generate_report_chart(
     and downloads the rendered chart under /mnt/user-data/outputs/visuals/.
 
     Args:
+        runtime: Tool runtime supplied by LangGraph.
         chart_tool: Chart-visualization tool name, e.g. generate_line_chart,
             generate_sankey_chart, generate_treemap_chart, or generate_radar_chart.
         args: Exact chart-visualization arguments, including data, labels, title,
             and style/theme fields needed by the selected chart tool.
         rationale: Brief reason this chart family fits the report evidence.
         output_name: Optional output filename or /mnt/user-data/outputs/... path.
-        runtime: Tool runtime supplied by LangGraph.
     """
 
     family = _CHART_TOOL_FAMILIES.get(chart_tool)

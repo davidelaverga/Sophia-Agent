@@ -75,6 +75,59 @@ except Exception:  # noqa: BLE001
 logger = logging.getLogger(__name__)
 
 
+def _blocks_to_plaintext(content: Any) -> str:
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        parts: list[str] = []
+        for block in content:
+            if isinstance(block, dict):
+                block_type = str(block.get("type") or "content")
+                if block_type == "text":
+                    parts.append(str(block.get("text") or ""))
+                else:
+                    parts.append(f"[omitted {block_type} block]")
+            elif isinstance(block, str):
+                parts.append(block)
+            elif block is not None:
+                parts.append(str(block))
+        return "\n".join(part for part in parts if part).strip()
+    if content is None:
+        return ""
+    return str(content)
+
+
+def _error_tool_content_text_only(content: Any) -> str | list[dict[str, str]]:
+    """Anthropic requires ``is_error`` tool results to contain text only."""
+
+    if isinstance(content, str):
+        return content
+    if isinstance(content, list):
+        text_blocks: list[dict[str, str]] = []
+        for block in content:
+            if isinstance(block, dict) and block.get("type") == "text":
+                text_blocks.append({"type": "text", "text": str(block.get("text") or "")})
+            elif isinstance(block, str):
+                text_blocks.append({"type": "text", "text": block})
+        if text_blocks:
+            return text_blocks
+    return [{"type": "text", "text": _blocks_to_plaintext(content)}]
+
+
+def _error_tool_message(
+    *,
+    content: Any,
+    tool_call_id: Any,
+    name: str | None = None,
+) -> ToolMessage:
+    return ToolMessage(
+        content=_error_tool_content_text_only(content),
+        tool_call_id=str(tool_call_id or ""),
+        name=name,
+        status="error",
+    )
+
+
 def _skill_name_from_path(path: str) -> str | None:
     for marker in ("/skills/public/", "/mnt/skills/public/", "/skills/", "/mnt/skills/"):
         if marker in path:
@@ -6817,7 +6870,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return Command(
             update={
                 "messages": [
-                    ToolMessage(
+                    _error_tool_message(
                         content=(
                             "Error: research-before-write enforcement blocked this tool call. "
                             "You may keep your plan, but before writing, editing, running "
@@ -6829,7 +6882,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         ),
                         tool_call_id=tool_call_id,
                         name=str(tool_name),
-                        status="error",
                     ),
                 ],
             },
@@ -6857,7 +6909,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return Command(
             update={
                 "messages": [
-                    ToolMessage(
+                    _error_tool_message(
                         content=(
                             "Error: visual asset creation is blocked until you read "
                             "`/mnt/skills/public/visual-design/SKILL.md`. Then retry "
@@ -6865,7 +6917,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         ),
                         tool_call_id=tool_call_id,
                         name=str(tool_name),
-                        status="error",
                     )
                 ],
                 "builder_visual_design_correction_emitted": True,
@@ -6905,7 +6956,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return Command(
             update={
                 "messages": [
-                    ToolMessage(
+                    _error_tool_message(
                         content=(
                             f"Error: emit_builder_artifact is blocked until you read the "
                             f"{skill_name} skill for this {target_ext} deliverable. Call "
@@ -6914,7 +6965,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         ),
                         tool_call_id=tool_call_id,
                         name="emit_builder_artifact",
-                        status="error",
                     )
                 ],
                 "builder_target_skill_read_forced": True,
@@ -7438,11 +7488,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return Command(
             update={
                 "messages": [
-                    ToolMessage(
+                    _error_tool_message(
                         content=self._emit_rejection_message(args, request.state),
                         tool_call_id=tool_call_id,
                         name="emit_builder_artifact",
-                        status="error",
                     ),
                 ],
                 "builder_failure_diagnostics": diagnostics,
@@ -7515,11 +7564,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return Command(
             update={
                 "messages": [
-                    ToolMessage(
+                    _error_tool_message(
                         content=rejection,
                         tool_call_id=request.tool_call.get("id", ""),
                         name=tool_name,
-                        status="error",
                     ),
                 ],
             },
@@ -7553,11 +7601,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         content = self._repair_turn_content(rejection_text, args, state)
         update: dict[str, Any] = {
             "messages": [
-                ToolMessage(
+                _error_tool_message(
                     content=content,
                     tool_call_id=tool_call_id,
                     name="emit_builder_artifact",
-                    status="error",
                 ),
             ],
             "build_iterations": iterations_used(state) + 1,
@@ -7743,11 +7790,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return Command(
             update={
                 "messages": [
-                    ToolMessage(
+                    _error_tool_message(
                         content=self._emit_rejection_message(args, request.state),
                         tool_call_id=tool_call_id,
                         name="emit_builder_artifact",
-                        status="error",
                     ),
                 ],
                 "builder_failure_diagnostics": diagnostics,

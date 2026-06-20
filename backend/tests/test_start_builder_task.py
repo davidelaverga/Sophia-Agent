@@ -447,6 +447,45 @@ def test_presentation_in_pdf_format_targets_pdf():
     assert target.endswith(".pdf")
 
 
+def test_status_context_slides_with_pdf_report_targets_pdf():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    resolution = module._resolve_target_format(
+        current_user_text="The slides are failing, give me a pdf report instead.",
+        description="Create a slide deck about the launch.",
+        task_type="presentation",
+    )
+
+    assert resolution.final_ext == "pdf"
+    assert resolution.source == "current_user_turn"
+
+
+def test_creation_context_slides_still_targets_pptx():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    resolution = module._resolve_target_format(
+        current_user_text="Make me a 6-slide deck for the roadmap review.",
+        description=None,
+        task_type="presentation",
+    )
+
+    assert resolution.final_ext == "pptx"
+    assert resolution.rule == "explicit_presentation_deck"
+
+
+def test_bare_report_creation_targets_pdf():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    resolution = module._resolve_target_format(
+        current_user_text="Write a report on the failed build attempts.",
+        description=None,
+        task_type="document",
+    )
+
+    assert resolution.final_ext == "pdf"
+    assert resolution.rule == "explicit_pdf_deliverable"
+
+
 def test_simple_product_review_pdf_targets_stable_filename():
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 
