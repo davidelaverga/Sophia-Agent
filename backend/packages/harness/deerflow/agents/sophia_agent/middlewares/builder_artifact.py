@@ -39,7 +39,9 @@ from deerflow.agents.sophia_agent.middlewares.builder_budget import (
 )
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
     BuilderTaskMiddleware,
+    _PLAIN_DECK_IMAGE_OPT_OUT_MARKERS,
     _image_generation_enabled,
+    _plain_deck_image_opt_out_requested,
 )
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.sophia.build_condition import (
@@ -2443,6 +2445,13 @@ def _visuals_requested(state: dict[str, Any]) -> bool:
         str(delegation.get(key) or "").lower()
         for key in ("task", "description", "artifact_brief", "original_task")
     )
+    if _plain_deck_image_opt_out_requested(combined):
+        for marker in _PLAIN_DECK_IMAGE_OPT_OUT_MARKERS:
+            combined = re.sub(
+                rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])",
+                " ",
+                combined,
+            )
     return any(marker in combined for marker in _VISUAL_REQUEST_MARKERS)
 
 

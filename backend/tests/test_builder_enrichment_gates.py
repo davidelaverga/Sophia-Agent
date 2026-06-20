@@ -17,6 +17,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     _builder_image_enrichment_enabled,
     _image_generation_outcome_from_state,
     _image_generation_preflight_delta,
+    _visuals_requested,
 )
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
     _image_generation_enabled,
@@ -71,6 +72,26 @@ def test_plain_pdf_stays_off():
         artifact_target_ext=".pdf",
         task_type="document",
     ) is False
+
+
+def test_plain_no_image_deck_does_not_request_visual_gate():
+    state = _deck_state()
+    state["delegation_context"]["task"] = "Build a plain text-only deck with no images"
+
+    assert _visuals_requested(state) is False
+    assert BuilderArtifactMiddleware._visual_gate_blocks_emit(
+        {"artifact_path": "/mnt/user-data/outputs/deck.pptx"},
+        state,
+    ) is False
+
+
+def test_no_image_deck_with_deterministic_diagram_still_requests_visual_gate():
+    state = _deck_state()
+    state["delegation_context"]["task"] = (
+        "Build a no images architecture deck with a deterministic timeline diagram"
+    )
+
+    assert _visuals_requested(state) is True
 
 
 def test_enrichment_enabled_mirror_reads_state():
@@ -251,7 +272,7 @@ def test_hero_gate_off_for_plain_decks():
 
 def test_hero_gate_rejection_command_does_not_block_without_render_review():
     mw = BuilderArtifactMiddleware()
-    state = _deck_state(builder_pptx_diagnostics={})
+    state = _deck_state(builder_pptx_diagnostics={"pptx_plan_json": {"slides": []}})
     request = SimpleNamespace(
         tool_call={"id": "tc-emit", "name": "emit_builder_artifact", "args": {}},
         state=state,

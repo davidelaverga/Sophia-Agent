@@ -176,7 +176,7 @@ class TestGeneratePathWithoutReferenceImages:
 
         assert captured["inputs"] == {
             "provider": "openai",
-            "model": "gpt-image-1.5",
+            "model": "gpt-image-2",
             "endpoint": "images.edit",
             "prompt": prompt,
             "prompt_truncated": False,
@@ -187,7 +187,7 @@ class TestGeneratePathWithoutReferenceImages:
         }
         assert captured["outputs"] == {
             "provider": "openai",
-            "model": "gpt-image-1.5",
+            "model": "gpt-image-2",
             "response_data_count": 1,
             "has_b64_payload": True,
         }
@@ -308,13 +308,13 @@ class TestEditPathWithReferenceImages:
         fake_client.images.generate.assert_not_called()
         fake_client.images.edit.assert_called_once()
         kwargs = fake_client.images.edit.call_args.kwargs
-        assert kwargs["model"] == "gpt-image-1.5"
+        assert kwargs["model"] == "gpt-image-2"
         assert kwargs["prompt"] == (
             f"variation of the input\n\n{script_module._SOPHIA_IMAGE_STYLE}\n\n"
             f"{script_module._SOPHIA_IMAGE_AVOID}"
         )
         assert kwargs["size"] == "1024x1024"
-        assert "IMAGEGEN_OK model=gpt-image-1.5" in result
+        assert "IMAGEGEN_OK model=gpt-image-2" in result
         assert "quality" not in kwargs
         # When exactly one reference is provided, pass a single file handle
         # (not a list) — matches the OpenAI SDK's expectation.
@@ -497,7 +497,7 @@ class TestSlideVisualMode:
             )
 
         kwargs = fake_client.images.edit.call_args.kwargs
-        assert kwargs["model"] == "gpt-image-1.5"
+        assert kwargs["model"] == "gpt-image-2"
         assert kwargs["size"] == "1536x1024"
         assert kwargs["quality"] == "high"
         with script_module.Image.open(output_file) as img:

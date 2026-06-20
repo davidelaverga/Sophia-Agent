@@ -3,8 +3,8 @@
 Backed by OpenAI image models. Wraps two endpoints:
 
 - ``client.images.generate(...)`` with ``gpt-image-2`` for prompts without reference images.
-- ``client.images.edit(...)``     for prompts that condition on one or more
-  reference images, using an edit-supported model. This is the path
+- ``client.images.edit(...)``     with ``gpt-image-2`` for prompts that
+  condition on one or more reference images. This is the path
   ``ppt-generation`` uses to keep visual consistency across slides ("use the
   previous slide as a reference for the next slide").
 
@@ -53,7 +53,7 @@ _OPENAI_SUPPORTED_SIZES = {"auto", "1024x1024", "1536x1024", "1024x1536"}
 _SLIDE_VISUAL_ASPECT_RATIO = 16 / 9
 
 _GENERATE_MODEL = "gpt-image-2"
-_EDIT_MODEL = "gpt-image-1.5"
+_EDIT_MODEL = "gpt-image-2"
 _TRUTHY_VALUES = {"1", "true", "yes", "on"}
 _TRACE_PROMPT_MAX = 12000
 _LANGSMITH_CLIENT: Any | None = None

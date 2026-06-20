@@ -7,7 +7,7 @@ description: Use this skill when the user requests to generate, create, imagine,
 
 ## Overview
 
-This skill generates high-quality images using structured prompts and a Python script backed by OpenAI image models. Fresh generations use `gpt-image-2`; reference-conditioned edits use `gpt-image-1.5` because the image edit endpoint does not support `gpt-image-2`. The workflow includes creating JSON-formatted prompts and executing image generation with optional reference images.
+This skill generates high-quality images using structured prompts and a Python script backed by OpenAI image models. Fresh generations use `gpt-image-2`; reference-conditioned edits use `gpt-image-2` with reference images sent through `client.images.edit`. The workflow includes creating JSON-formatted prompts and executing image generation with optional reference images.
 
 ## Core Capabilities
 
@@ -34,7 +34,7 @@ Generate a structured JSON file in `/mnt/user-data/workspace/` with naming patte
 
 ### Step 3: Execute Generation
 
-Call the Python script. It requires `OPENAI_API_KEY` in the builder/LangGraph environment and exits non-zero if the key is missing, the OpenAI request fails, reference images are invalid, or no image bytes land on disk. Calls without `--reference-images` use `gpt-image-2`; calls with references use `gpt-image-1.5` through `client.images.edit`:
+Call the Python script. It requires `OPENAI_API_KEY` in the builder/LangGraph environment and exits non-zero if the key is missing, the OpenAI request fails, reference images are invalid, or no image bytes land on disk. Calls without `--reference-images` use `gpt-image-2` through `client.images.generate`; calls with references use `gpt-image-2` through `client.images.edit`:
 ```bash
 python /mnt/skills/public/image-generation/scripts/generate.py \
   --prompt-file /mnt/user-data/workspace/prompt-file.json \
@@ -125,7 +125,7 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
    and technical drawings WITH text. Wrap rendered copy as "THE TEXT READS: ...", keep labels
    8 words or fewer, put exact data in the prompt, and use `--slide-visual` (quality=high, 16:9).
    Pass the first slide as `--reference-images` to later slides for consistency; the script
-   automatically switches those referenced slides to the edit-supported model.
+   automatically sends those referenced slides through the `gpt-image-2` edit path.
 
 2. **Illustrations (default)** — heroes, section art, concept illustrations, and ALL imagery for
    PDF reports. Describe only the subject; NO text, labels, charts, or diagrams in the image

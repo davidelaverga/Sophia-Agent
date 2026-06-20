@@ -17,8 +17,7 @@ Write a **visual plan** first — one line per slide: `Slide N | the one idea | 
 Default deck builds are image-forward: each slide is generated as a full-slide visual with
 gpt-image-2 for fresh slide generations — including its title, text, and any technical
 drawing — using the structured plan + Sophia's brand style as the spec. Later slides that
-reference slide 1 automatically use the image-generation script's edit-supported
-`gpt-image-1.5` model.
+reference slide 1 use the image-generation script's `gpt-image-2` edit path.
 
 If the user asked for a plain, text-only, no-image, no-imagery, no-illustration, or
 no-visuals deck, preserve that constraint. Do not run the image-generation script, do not
@@ -36,8 +35,8 @@ and anti-patterns, so write only the content):
 - Put EXACT data in the prompt; the model renders what you give it and will not invent numbers.
 - Run `python /mnt/skills/public/image-generation/scripts/generate.py --slide-visual`
   (sets quality=high, 16:9). Generate slide 1 first, then pass it as
-  `--reference-images` to every later slide for one consistent look; the script switches
-  reference-conditioned calls to the edit-supported `gpt-image-1.5` model.
+  `--reference-images` to every later slide for one consistent look; the script keeps
+  reference-conditioned calls on `gpt-image-2` through `client.images.edit`.
 - For image-forward runs, give the cover a generated hero treatment. For plain/no-image runs,
   use a clean typographic cover instead.
 
