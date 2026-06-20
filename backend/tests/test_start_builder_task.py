@@ -144,6 +144,7 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     # server-side for logging but does NOT guarantee it appears in
     # runtime.config["configurable"] at tool-execution time.
     assert config_payload["configurable"]["graph_id"] == "sophia_builder"
+    assert config_payload["configurable"]["task_type"] == "presentation"
 
 
 def test_edit_source_resolves_last_builder_artifact():

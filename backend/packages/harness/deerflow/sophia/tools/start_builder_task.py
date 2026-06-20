@@ -1594,6 +1594,7 @@ def _has_active_builder_task(state: SophiaState) -> str | None:
 async def _dispatch_via_asgi(
     *,
     description: str,
+    task_type: str,
     delegation_context: dict[str, Any],
     allow_web_research: bool,
     explicit_user_urls: list[str],
@@ -2049,6 +2050,7 @@ async def _start_builder_task_impl(
     try:
         task_id, run_id = await _dispatch_via_asgi(
             description=enriched_description,
+            task_type=task_type,
             delegation_context=delegation_context,
             allow_web_research=allow_web_research,
             explicit_user_urls=explicit_user_urls,
