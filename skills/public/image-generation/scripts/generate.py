@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import argparse
 import base64
+import contextlib
 import json as _json
 import os
 import sys
@@ -74,6 +75,11 @@ _SOPHIA_SLIDE_AVOID = (
     "oversaturated stock-photo treatment; clip-art, emoji, or decorative borders; busy, "
     "cluttered, or cramped layouts; tiny or low-contrast text; watermarks or logos; "
     "literal 'AI' clichés (glowing brains, circuit boards, robots, binary)."
+)
+_SOPHIA_SLIDE_AVOID = (
+    _SOPHIA_SLIDE_AVOID
+    + " No purple/pink AI-gradient hero. No single-font template look. "
+    + "No generic stock-deck styling."
 )
 
 _SOPHIA_IMAGE_STYLE = (
@@ -199,6 +205,14 @@ def _langsmith_client() -> Any | None:
     return _LANGSMITH_CLIENT
 
 
+def _langsmith_project_name() -> str:
+    return (
+        os.getenv("LANGSMITH_PROJECT")
+        or os.getenv("LANGCHAIN_PROJECT")
+        or "Sophia"
+    ).strip() or "Sophia"
+
+
 def _truncate_trace_text(value: str, limit: int = _TRACE_PROMPT_MAX) -> tuple[str, bool]:
     if len(value) <= limit:
         return value, False
@@ -244,19 +258,43 @@ def _image_trace_outputs(response: object, *, model: str) -> dict[str, Any]:
     }
 
 
+class _EnabledLangSmithTraceContext:
+    def __init__(self, enabled_context: Any, trace_context: Any) -> None:
+        self._enabled_context = enabled_context
+        self._trace_context = trace_context
+        self._stack = contextlib.ExitStack()
+
+    def __enter__(self) -> Any:
+        self._stack.enter_context(self._enabled_context)
+        return self._stack.enter_context(self._trace_context)
+
+    def __exit__(self, exc_type: object, exc: object, tb: object) -> bool | None:
+        return self._stack.__exit__(exc_type, exc, tb)
+
+
 def _langsmith_trace_context(*, prompt: str, valid_refs: list[str], size: str, quality: str | None) -> Any | None:
     client = _langsmith_client()
     if client is None:
         return None
     model = _image_request_model(valid_refs)
     try:
-        from langsmith import trace
+        from langsmith import trace, tracing_context
 
-        return trace(
+        project_name = _langsmith_project_name()
+        enabled_context = tracing_context(
+            enabled=True,
+            client=client,
+            project_name=project_name,
+            tags=["sophia", "image_generation", "openai"],
+            metadata={"sophia_component": "builder_image_generation"},
+        )
+        trace_context = trace(
             "Sophia Image Generation OpenAI Call",
             run_type="tool",
+            project_name=project_name,
             inputs=_image_trace_inputs(prompt=prompt, valid_refs=valid_refs, size=size, quality=quality),
             metadata={
+                "sophia_component": "builder_image_generation",
                 "ls_provider": "openai",
                 "ls_model_name": model,
                 "image_endpoint": "edit" if valid_refs else "generate",
@@ -264,6 +302,7 @@ def _langsmith_trace_context(*, prompt: str, valid_refs: list[str], size: str, q
             tags=["sophia", "image_generation", "openai"],
             client=client,
         )
+        return _EnabledLangSmithTraceContext(enabled_context, trace_context)
     except Exception:
         return None
 

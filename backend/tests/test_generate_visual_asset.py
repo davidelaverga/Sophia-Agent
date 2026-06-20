@@ -22,6 +22,17 @@ def _runtime(outputs_path):
     )
 
 
+def _presentation_runtime(outputs_path):
+    return SimpleNamespace(
+        state={
+            "thread_data": {"outputs_path": str(outputs_path)},
+            "delegation_context": {"task_type": "presentation"},
+        },
+        context={},
+        config={"configurable": {"task_type": "presentation"}},
+    )
+
+
 def _payload(result: str) -> dict:
     return json.loads(result)
 
@@ -91,6 +102,39 @@ def test_generate_visual_asset_rejects_unlabeled_chart_data(tmp_path) -> None:
     assert payload["success"] is False
     assert payload["error_type"] == "unlabeled_chart_data"
     assert "placeholder" in payload["hint"]
+
+
+def test_generate_visual_asset_restricts_structural_visuals_for_presentations(tmp_path) -> None:
+    payload = _payload(
+        generate_visual_asset.func(
+            runtime=_presentation_runtime(tmp_path / "outputs"),
+            visual_type="architecture_diagram",
+            title="System flow",
+            data=["Agent", "Memory"],
+            output_name="system-flow",
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["error_type"] == "presentation_visual_asset_restricted"
+    assert "--slide-visual" in payload["hint"]
+
+
+def test_generate_visual_asset_allows_data_charts_for_presentations(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+
+    payload = _payload(
+        generate_visual_asset.func(
+            runtime=_presentation_runtime(outputs),
+            visual_type="bar_chart",
+            title="Scorecard",
+            data=[{"label": "Quality", "value": 92}],
+            output_name="scorecard",
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["png_path"] == "/mnt/user-data/outputs/visuals/scorecard.png"
 
 
 def test_bar_chart_preserves_duplicate_labels_zero_and_negative_bars(tmp_path) -> None:

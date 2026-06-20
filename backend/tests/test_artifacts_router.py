@@ -570,7 +570,10 @@ def test_list_artifacts_includes_associated_builder_task_outputs(tmp_path, monke
     task_outputs.mkdir(parents=True)
     builder_file = task_outputs / "builder-demo.md"
     builder_file.write_text("builder artifact", encoding="utf-8")
+    preview_file = task_outputs / "builder-demo.preview.pdf"
+    preview_file.write_bytes(b"preview pdf support artifact")
     os.utime(builder_file, (1_700_000_300, 1_700_000_300))
+    os.utime(preview_file, (1_700_000_400, 1_700_000_400))
 
     async def associated(parent_thread_id: str) -> tuple[str, ...]:
         assert parent_thread_id == "parent-thread"

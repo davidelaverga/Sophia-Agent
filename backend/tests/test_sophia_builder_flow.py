@@ -167,6 +167,7 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "render_markdown_to_pdf" in builder_tool_names
     assert "generate_visual_asset" in builder_tool_names
     assert "generate_excalidraw_diagram" in builder_tool_names
+    assert "generate_report_chart" not in builder_tool_names
     # ``present_files`` must NOT be in the builder's tool list. Its presence
     # invited the model (trained on upstream's pattern) to call
     # ``present_files + emit_builder_artifact`` together on the final turn,
@@ -207,6 +208,61 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
         builder_types.index("BuilderBudgetMiddleware")
         < builder_types.index("BuilderArtifactMiddleware")
     )
+
+
+def test_presentation_builder_toolset_removes_excalidraw_diagram(monkeypatch) -> None:
+    import deerflow.agents.sophia_agent.builder_agent as builder_module
+
+    captured: dict[str, object] = {}
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.delenv("SOPHIA_BUILDER_MODEL", raising=False)
+    _reset_tracing_cache()
+    monkeypatch.setattr(builder_module, "ChatAnthropic", lambda **kwargs: {"model": kwargs["model"]})
+    monkeypatch.setattr(
+        builder_module,
+        "get_app_config",
+        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
+    )
+
+    def _capture_builder(**kwargs):
+        captured["tools"] = kwargs["tools"]
+        return MagicMock()
+
+    monkeypatch.setattr(builder_module, "create_agent", _capture_builder)
+    builder_module._create_builder_agent(user_id="user_123", task_type="presentation")
+
+    tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
+    assert "generate_visual_asset" in tool_names
+    assert "generate_excalidraw_diagram" not in tool_names
+    assert "generate_report_chart" not in tool_names
+
+
+def test_report_builder_toolset_includes_report_chart_wrapper(monkeypatch) -> None:
+    builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    _reset_tracing_cache()
+    monkeypatch.setattr(builder_module, "ChatAnthropic", lambda **kwargs: {"model": kwargs["model"]})
+    monkeypatch.setattr(
+        builder_module,
+        "get_app_config",
+        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
+    )
+    captured = {}
+
+    class DummyAgent:
+        recursion_limit = 0
+
+    def _capture_builder(**kwargs):
+        captured["tools"] = kwargs["tools"]
+        return DummyAgent()
+
+    monkeypatch.setattr(builder_module, "create_agent", _capture_builder)
+
+    builder_module._create_builder_agent(user_id="user_123", task_type="document")
+
+    tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
+    assert "generate_report_chart" in tool_names
+    assert "generate_excalidraw_diagram" in tool_names
 
 
 def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:

@@ -78,6 +78,14 @@ function asString(value, fallback = "") {
   return fallback;
 }
 
+function asBool(value) {
+  if (value === true) return true;
+  if (typeof value === "string") {
+    return ["1", "true", "yes", "on"].includes(value.trim().toLowerCase());
+  }
+  return false;
+}
+
 function listFrom(value) {
   if (!Array.isArray(value)) {
     return [];
@@ -224,6 +232,66 @@ function addTitle(slide, title, theme, box) {
     },
     box,
   ));
+}
+
+function imageForwardTitleConfirmed(slideInfo) {
+  return Boolean(
+    asBool(slideInfo.title_present)
+    || asBool(slideInfo.title_in_image_qc_confirmed)
+    || asBool(slideInfo.title_baked_qc_confirmed)
+    || asBool(slideInfo.baked_title_qc_confirmed)
+  );
+}
+
+function imageForwardTitleText(slideInfo, plan, index) {
+  return firstPresentText(
+    [
+      slideInfo.title,
+      index === 0 ? plan.title : "",
+      slideInfo.heading,
+    ],
+    index === 0 ? "Presentation" : "",
+  );
+}
+
+function addImageForwardTitleOverlay(slide, slideInfo, plan, theme, index) {
+  const title = imageForwardTitleText(slideInfo, plan, index);
+  if (!title || imageForwardTitleConfirmed(slideInfo)) {
+    return false;
+  }
+  const subtitle = asString(slideInfo.subtitle || (index === 0 ? plan.subtitle : ""), "");
+  const bandHeight = subtitle ? 1.42 : 0.96;
+  slide.addShape(SHAPE.roundRect, {
+    x: 0.62,
+    y: 0.48,
+    w: 12.1,
+    h: bandHeight,
+    rectRadius: 0.08,
+    fill: { color: theme.bg, transparency: 8 },
+    line: { color: theme.bg, transparency: 100 },
+  });
+  addTitle(slide, title, theme, {
+    x: 0.86,
+    y: 0.62,
+    w: 11.62,
+    h: 0.48,
+    fontSize: index === 0 ? 30 : 24,
+  });
+  if (subtitle) {
+    slide.addText(subtitle, {
+      x: 0.88,
+      y: 1.13,
+      w: 11.55,
+      h: 0.42,
+      fontFace: FONT_BODY,
+      fontSize: index === 0 ? 15 : 13,
+      color: theme.body,
+      fit: "shrink",
+      breakLine: false,
+      margin: 0,
+    });
+  }
+  return true;
 }
 
 function addBullets(slide, bullets, theme, box) {
@@ -632,9 +700,15 @@ function renderStatement(pptx, slideInfo, theme) {
   return slide;
 }
 
-function renderImageForward(pptx, visualPath, theme) {
+function renderImageForward(pptx, visualPath, slideInfo, plan, theme, index) {
   const slide = newSlide(pptx, theme);
-  return addFullBleedVisual(slide, visualPath) ? slide : null;
+  if (!addFullBleedVisual(slide, visualPath)) {
+    return null;
+  }
+  const titleOverlay = addImageForwardTitleOverlay(slide, slideInfo, plan, theme, index);
+  slide.__sophiaTitlePresent = Boolean(titleOverlay || imageForwardTitleConfirmed(slideInfo));
+  slide.__sophiaTitleOverlay = Boolean(titleOverlay);
+  return slide;
 }
 
 function renderCoverFromContext(ctx) {
@@ -726,7 +800,7 @@ function renderSummary(pptx, slideInfo, theme) {
 
 function renderSlide(pptx, slideInfo, plan, theme, visualPath, imageForward = false) {
   if (imageForward && visualPath) {
-    const imageForwardSlide = renderImageForward(pptx, visualPath, theme);
+    const imageForwardSlide = renderImageForward(pptx, visualPath, slideInfo, plan, theme, 0);
     if (imageForwardSlide) {
       return imageForwardSlide;
     }
@@ -754,11 +828,20 @@ function compiledSlideContext(pptx, args, plan, theme, slidesInfo, slideInfo, in
   const planVisualPath = slideVisualPath(slideInfo, args.planFile, args.outputFile);
   const visualPath = usablePlanVisualPath(cliImagePath || planVisualPath);
   const cliImageForward = Boolean(cliImagePath && visualPath);
-  const imageForward = Boolean(visualPath && (cliImageForward || isImageForwardSlide(slideInfo)));
+  let imageForward = Boolean(visualPath && (cliImageForward || isImageForwardSlide(slideInfo)));
+  let slide = imageForward && visualPath
+    ? renderImageForward(pptx, visualPath, slideInfo, plan, theme, index)
+    : renderSlide(pptx, slideInfo, plan, theme, visualPath, imageForward);
+  if (!slide) {
+    imageForward = false;
+    slide = renderSlide(pptx, slideInfo, plan, theme, null, false);
+  }
   return {
-    slide: renderSlide(pptx, slideInfo, plan, theme, visualPath, imageForward),
+    slide,
     visualPath,
     imageForward,
+    titlePresent: imageForward ? Boolean(slide?.__sophiaTitlePresent) : Boolean(imageForwardTitleText(slideInfo, plan, index)),
+    titleOverlay: Boolean(slide?.__sophiaTitleOverlay),
     totalSlides: slidesInfo.length,
   };
 }
@@ -770,6 +853,9 @@ function renderCompiledSlide(pptx, args, plan, theme, slidesInfo, slideInfo, ind
     addFooter(ctx.slide, theme, index, ctx.totalSlides);
   }
   addNotes(ctx.slide, slideInfo);
+  console.error(
+    `PPTXGEN slide_diagnostics: slide=${index + 1} type=${slideType(slideInfo)} image_forward=${imageForward} title_present=${ctx.titlePresent} title_overlay=${ctx.titleOverlay}`,
+  );
   return ctx;
 }
 
@@ -777,8 +863,8 @@ function incrementPictureCount(count, visualPath) {
   return visualPath ? count + 1 : count;
 }
 
-function incrementTextRunCount(count, slideInfo, imageForward) {
-  if (imageForward) return count;
+function incrementTextRunCount(count, slideInfo, rendered) {
+  if (rendered.imageForward) return count + (rendered.titlePresent ? 1 : 0);
   return count + 1 + slideBullets(slideInfo).length;
 }
 
@@ -807,7 +893,7 @@ async function compilePptx(args) {
   slidesInfo.forEach((slideInfo, index) => {
     const rendered = renderCompiledSlide(pptx, args, plan, theme, slidesInfo, slideInfo, index);
     pictureCount = incrementPictureCount(pictureCount, rendered.visualPath);
-    textRunCount = incrementTextRunCount(textRunCount, slideInfo, rendered.imageForward);
+    textRunCount = incrementTextRunCount(textRunCount, slideInfo, rendered);
   });
 
   fs.mkdirSync(path.dirname(path.resolve(args.outputFile)), { recursive: true });

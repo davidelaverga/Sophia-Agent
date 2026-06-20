@@ -389,6 +389,7 @@ function isSupportArtifactPath(path: string): boolean {
     || filename.endsWith('.source.html')
     || filename.endsWith('.plan.json')
     || filename.endsWith('.manifest.json')
+    || filename.endsWith('.preview.pdf')
     || filename.endsWith('.metadata.json')
     || filename.endsWith('.meta.json')
     || filename.endsWith('.diagnostics.json')

@@ -143,6 +143,46 @@ describe("PresenceArtifactSecondarySurfaces artifact tray", () => {
     }))
   })
 
+  it("hides deck preview PDFs from artifact tray rows", () => {
+    const deckRecord: ArtifactRecord = {
+      ...baseRecord,
+      artifactId: "artifact-deck",
+      stableArtifactIdentity: "stable-deck",
+      logicalArtifactId: "logical-deck",
+      versionId: "logical-deck::v1",
+      title: "Deck",
+      artifactType: "presentation",
+      rendererKind: "download_only",
+      mimeType: "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+      localPath: "mnt/user-data/outputs/deck.pptx",
+    }
+    const previewRecord: ArtifactRecord = {
+      ...baseRecord,
+      artifactId: "artifact-deck-preview",
+      stableArtifactIdentity: "stable-deck-preview",
+      logicalArtifactId: "logical-deck-preview",
+      versionId: "logical-deck-preview::v1",
+      title: "deck.preview.pdf",
+      artifactType: "pdf",
+      rendererKind: "pdf",
+      mimeType: "application/pdf",
+      localPath: "mnt/user-data/outputs/deck.preview.pdf",
+    }
+    renderTray({
+      index: {
+        userId: "user-1",
+        threadId: "thread-1",
+        sessionId: "session-1",
+        artifacts: [previewRecord, deckRecord],
+        activeArtifactId: "artifact-deck",
+        recentlyOpenedArtifactIds: [],
+      },
+    })
+
+    expect(screen.getByText("Deck")).toBeInTheDocument()
+    expect(screen.queryByText("deck.preview.pdf")).not.toBeInTheDocument()
+  })
+
   it("shows a safe unavailable state for missing artifacts", () => {
     renderTray({
       index: {

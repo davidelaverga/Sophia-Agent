@@ -25,6 +25,16 @@ function artifactResponse(threadId: string, path: string, name: string): Respons
   }), { status: 200 });
 }
 
+function artifactListResponse(
+  threadId: string,
+  artifacts: Array<{ path: string; name: string }>,
+): Response {
+  return new Response(JSON.stringify({
+    thread_id: threadId,
+    artifacts,
+  }), { status: 200 });
+}
+
 async function flushAsyncState() {
   await Promise.resolve();
   await Promise.resolve();
@@ -57,6 +67,24 @@ describe('useSessionBuilderArtifactLibrary', () => {
       path: 'mnt/user-data/outputs/brief.md',
       name: 'brief.md',
     }]);
+  });
+
+  it('hides deck preview PDFs from the builder artifact library', async () => {
+    globalThis.fetch = vi.fn(async () => artifactListResponse('thread-1', [
+      { path: '/outputs/deck.preview.pdf', name: 'deck.preview.pdf' },
+      { path: '/outputs/deck.pptx', name: 'deck.pptx' },
+    ])) as typeof fetch;
+
+    const { result } = renderHook(() => useSessionBuilderArtifactLibrary({
+      threadId: 'thread-1',
+      refreshOnFocus: false,
+    }));
+
+    await act(async () => {
+      await flushAsyncState();
+    });
+
+    expect(result.current.items.map((item) => item.name)).toEqual(['deck.pptx']);
   });
 
   it('ignores stale no-signal artifact loads after switching threads', async () => {

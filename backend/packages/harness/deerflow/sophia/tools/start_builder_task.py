@@ -1694,6 +1694,7 @@ async def _dispatch_via_asgi(
             # ``runtime.config["configurable"]`` at tool-execution
             # time — explicit is safe.
             "graph_id": _ASYNC_BUILDER_AGENT_NAME,
+            "task_type": task_type,
         }
     }
     if parent_model:

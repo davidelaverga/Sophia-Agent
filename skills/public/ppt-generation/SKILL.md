@@ -47,6 +47,8 @@ the audience reads) uses a deterministic chart (generate_visual_asset) embedded 
 engine-composed slide instead — accuracy must not depend on image rendering. For plain/no-image
 decks, route every slide through deterministic engine-composed text/shape/chart layouts.
 
+A slide whose entire point is hard quantitative data the audience must read may be a deterministic data chart — set `data_chart: true` on that slide. Everything else (concept, architecture, process, section, cover) is gpt-image-2.
+
 QC: every generated slide is checked; a failed slide is regenerated once, then falls back to a
 deterministic engine-composed slide. Plain/no-image decks skip generated-slide QC because there
 are no generated slide images. Never ship a slide with garbled text or wrong data.
@@ -55,7 +57,7 @@ Run the check with `python /mnt/skills/public/image-generation/scripts/slide_qc.
 Slide types in the plan: `cover` · `agenda` · `section` · `content` (subtype `text+visual` |
 `stat` | `two-column` | `full-visual`) · `statement` · `summary`. Use at least three distinct
 types and vary deliberately — no more than two consecutive slides share a treatment. Full-slide
-gpt-image-2 visuals use `image_path`; deterministic charts/diagrams use `visual_path`; a
+gpt-image-2 visuals use `image_path`; deterministic hard-data charts use `visual_path`; a
 `statement` slide carries a single `statement` string.
 
 ## Per-slide prompt template
@@ -78,8 +80,44 @@ Companion Layer labeled 'THE TEXT READS: talks to'."}
 High-fidelity, sharp, crisp, presentation-grade.
 ```
 
+## Prompting gpt-image-2 for slide visuals (diagrams, charts, infographics)
+
+When creating a full-slide visual, use gpt-image-2 through the image-generation script, not deterministic diagram code.
+
+Use this prompt structure:
+
+1. State: “A professional presentation slide, 16:9.”
+2. Describe the topic and purpose in one sentence.
+3. Specify a title and all important labels as exact text:
+   “THE TEXT READS: …”
+4. Limit slide text:
+   - title: 4–8 words
+   - labels: 1–5 words
+   - at most 20 total words unless the user explicitly requests more
+5. Specify layout:
+   - cover / section divider / process flow / architecture map / timeline /
+     comparison / quadrant / metric story / concept map
+6. Specify hierarchy:
+   - primary focus
+   - secondary supporting details
+   - where the eye should go first
+7. Specify Sophia style:
+   - editorial, premium, clean, high contrast, crisp vector-like rendering,
+     brand palette, no generic AI gradient, no stock template look.
+8. If a later slide, include reference-image continuity:
+   - “Use the reference slide’s palette, typography feeling, spacing discipline,
+     and visual language.”
+
+Then run:
+
+`python /mnt/skills/public/image-generation/scripts/generate.py --slide-visual ...`
+
+If generated text is wrong, regenerate with a stricter prompt. Do not accept garbled text.
+
 ## 7. Workflow
 Plan & art-direct (variety check) → generate visuals (diagrams: short labels; charts: real labels + data; illustrations: one style) → compose the plan JSON → render → **visual QA**, fix once.
 
 ## 8. QA checklist
 Correctness (no overlap/clipping; real chart/diagram labels and values; no "Item N"/blank images) · Legibility (contrast; nothing dark-on-dark) · Variety (≤2 adjacent same treatment; deck has rhythm) · Fit (each visual matches its content) · Cohesion (one illustration style; consistent palette/type). A correct-but-monotonous deck fails QA.
+
+Use the shared Sophia anti-slop rubric (`/mnt/skills/public/sophia/anti_slop.md`) before emitting.

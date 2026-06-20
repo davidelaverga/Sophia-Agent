@@ -158,9 +158,12 @@ function BuilderArtifactLibraryList({
   threadId?: string
   onSelectedBuilderArtifactPathChange?: (path: string | null) => void
 }) {
+  const visibleFiles = builderArtifactLibrary.filter(
+    (file) => classifyBuilderArtifactFileRole(file, builderArtifactLibrary) !== 'preview',
+  )
   return (
     <div className="flex flex-col items-center gap-2">
-      {builderArtifactLibrary.map((file) => (
+      {visibleFiles.map((file) => (
         <BuilderArtifactLibraryRow
           key={file.path}
           file={file}
@@ -219,7 +222,12 @@ function SessionArtifactTray({
   onSessionArtifactOpen?: (artifact: ArtifactRecord) => void
   onSelectedBuilderArtifactPathChange?: (path: string | null) => void
 }) {
-  const artifacts = getSessionArtifactRows(sessionArtifactIndex)
+  const artifacts = getSessionArtifactRows(sessionArtifactIndex).filter(
+    (artifact, _index, allArtifacts) => classifyBuilderArtifactFileRole(
+      { path: artifact.localPath },
+      allArtifacts.map((sibling) => ({ path: sibling.localPath })),
+    ) !== 'preview',
+  )
   if (artifacts.length === 0) {
     return null
   }

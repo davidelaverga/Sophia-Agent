@@ -1420,6 +1420,7 @@ def test_upsert_endpoint_uses_authenticated_user_when_client_user_id_absent(tmp_
         "thread-1/uploads/secret.pdf",
         "thread-1/.builder/state.json",
         "thread-1/outputs/report.plan.json",
+        "thread-1/outputs/deck.preview.pdf",
     ],
 )
 def test_upsert_endpoint_rejects_internal_keyspace_object_path(tmp_path, monkeypatch, object_path) -> None:

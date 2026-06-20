@@ -45,7 +45,7 @@ def test_emit_prints_trace_diagnostic_without_breaking_stdout_json(qc_module, ca
     assert captured.err.strip() == '[qc] PASS=False reasons=["garbled title"]'
 
 
-def test_review_slide_skips_when_anthropic_key_is_unavailable(
+def test_review_slide_fails_closed_when_anthropic_key_is_unavailable(
     qc_module,
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -58,20 +58,20 @@ def test_review_slide_skips_when_anthropic_key_is_unavailable(
 
     payload = qc_module.review_slide(image_file=image_file, spec_file=spec_file)
 
-    assert payload["pass"] is True
+    assert payload["pass"] is False
     assert payload["skipped"] is True
     assert payload["reasons"] == ["slide QC skipped: ANTHROPIC_API_KEY is not set"]
 
 
-def test_emit_treats_qc_skip_as_success(qc_module, capsys: pytest.CaptureFixture[str]) -> None:
+def test_emit_treats_qc_skip_as_failure(qc_module, capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = qc_module._emit(
-        {"pass": True, "skipped": True, "reasons": ["slide QC skipped: ANTHROPIC_API_KEY is not set"]}
+        {"pass": False, "skipped": True, "reasons": ["slide QC skipped: ANTHROPIC_API_KEY is not set"]}
     )
 
     captured = capsys.readouterr()
-    assert exit_code == 0
+    assert exit_code == 1
     assert '"skipped": true' in captured.out
-    assert captured.err.strip() == '[qc] PASS=True reasons=["slide QC skipped: ANTHROPIC_API_KEY is not set"]'
+    assert captured.err.strip() == '[qc] PASS=False reasons=["slide QC skipped: ANTHROPIC_API_KEY is not set"]'
 
 
 def test_review_slide_sends_spec_and_image_to_anthropic(qc_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -107,6 +107,9 @@ def test_review_slide_sends_spec_and_image_to_anthropic(qc_module, tmp_path: Pat
     content = kwargs["messages"][0]["content"]
     assert content[0]["type"] == "text"
     assert "strict slide QC reviewer" in content[0]["text"]
+    assert "Philosophy:" in content[0]["text"]
+    assert "Hierarchy:" in content[0]["text"]
+    assert "Specificity:" in content[0]["text"]
     assert 'Title: "THE TEXT READS: Roadmap"' in content[0]["text"]
     assert content[1]["type"] == "image"
     assert content[1]["source"]["type"] == "base64"

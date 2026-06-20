@@ -9,6 +9,8 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import os
+import shutil
 import subprocess
 import sys
 import zipfile
@@ -23,6 +25,8 @@ from pptx.util import Inches, Pt
 _REPO_ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT_PATH = _REPO_ROOT / "skills" / "public" / "ppt-generation" / "scripts" / "generate.py"
 _JS_COMPILER_PATH = _REPO_ROOT / "backend" / "packages" / "harness" / "deerflow" / "sophia" / "js" / "compile_pptx.mjs"
+_CODEX_NODE_BIN = Path.home() / ".cache/codex-runtimes/codex-primary-runtime/dependencies/node/bin/node"
+_CODEX_NODE_MODULES = Path.home() / ".cache/codex-runtimes/codex-primary-runtime/dependencies/node/node_modules"
 
 _REQUIRED_OFFICE_ENTRIES = {"[Content_Types].xml", "_rels/.rels", "ppt/presentation.xml"}
 _ALL_LAYOUTS = {
@@ -71,6 +75,28 @@ def _slide_paragraphs(slide):
 
 def _slide_texts(slide) -> list[str]:
     return [paragraph.text for paragraph in _slide_paragraphs(slide)]
+
+
+def _pptxgenjs_runtime(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    node_modules_candidates = [
+        _JS_COMPILER_PATH.parent / "node_modules",
+        _CODEX_NODE_MODULES,
+    ]
+    node_modules = next(
+        (path for path in node_modules_candidates if (path / "pptxgenjs" / "package.json").is_file()),
+        None,
+    )
+    if node_modules is None:
+        pytest.skip("pptxgenjs is not installed for local JS compiler tests")
+    runtime_dir = tmp_path / "pptxgenjs-runtime"
+    runtime_dir.mkdir()
+    shutil.copy2(_JS_COMPILER_PATH, runtime_dir / "compile_pptx.mjs")
+    os.symlink(node_modules, runtime_dir / "node_modules", target_is_directory=True)
+    if _CODEX_NODE_BIN.is_file():
+        monkeypatch.setenv("PATH", f"{_CODEX_NODE_BIN.parent}{os.pathsep}{os.environ.get('PATH', '')}")
+    monkeypatch.setenv("SOPHIA_PPTXGENJS", "1")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_JS_RUNTIME", str(runtime_dir))
+    return runtime_dir
 
 
 # ---------------------------------------------------------------------------
@@ -273,9 +299,9 @@ class TestGeneratePptLayouts:
 
         assert "const cliImageForward = Boolean(cliImagePath && visualPath);" in source
         assert (
-            "const imageForward = Boolean(visualPath && (cliImageForward || isImageForwardSlide(slideInfo)));" in source
+            "let imageForward = Boolean(visualPath && (cliImageForward || isImageForwardSlide(slideInfo)));" in source
         )
-        assert "renderSlide(pptx, slideInfo, plan, theme, visualPath, imageForward)" in source
+        assert "renderImageForward(pptx, visualPath, slideInfo, plan, theme, index)" in source
         assert "if (imageForward && visualPath)" in source
 
     def test_js_compiler_treats_legacy_full_bleed_image_refs_as_image_forward(self) -> None:
@@ -361,7 +387,12 @@ class TestGeneratePptLayouts:
         # Legacy dark styles keep resolving to a dark theme.
         assert gen.slide_theme(plan) is gen.THEMES["boardroom"]
 
-    def test_slide_images_are_rendered_image_forward_without_text_overlay(self, tmp_path: Path) -> None:
+    def test_slide_images_get_native_title_overlay_when_not_qc_confirmed(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        _pptxgenjs_runtime(tmp_path, monkeypatch)
         hero = _write_png(tmp_path / "hero.png")
         plan = {
             "title": "Open Claw",
@@ -387,12 +418,12 @@ class TestGeneratePptLayouts:
 
         message = gen.generate_ppt(str(plan_file), [str(hero), str(hero)], str(output))
 
-        assert message == "Successfully generated presentation with 2 slides (picture_count=2)"
+        assert message == "Successfully generated presentation with PptxGenJS"
         prs = Presentation(str(output))
-        assert _slide_texts(prs.slides[0]) == []
-        assert _slide_texts(prs.slides[1]) == []
+        assert "Open Claw Assistant" in _slide_texts(prs.slides[0])
+        assert "Runtime Loop" in _slide_texts(prs.slides[1])
 
-    def test_image_path_is_rendered_image_forward_without_text_overlay(self, tmp_path: Path) -> None:
+    def test_image_path_can_mark_bitmap_title_qc_confirmed_to_skip_overlay(self, tmp_path: Path) -> None:
         hero = _write_png(tmp_path / "slide.png")
         plan = {
             "title": "Image Forward",
@@ -402,6 +433,7 @@ class TestGeneratePptLayouts:
                     "title": "Generated full-slide",
                     "key_points": ["Already rendered inside the image"],
                     "image_path": str(hero),
+                    "title_in_image_qc_confirmed": True,
                 }
             ],
         }
@@ -414,6 +446,38 @@ class TestGeneratePptLayouts:
         assert message == "Successfully generated presentation with 1 slides (picture_count=1)"
         prs = Presentation(str(output))
         assert _slide_texts(prs.slides[0]) == []
+
+    def test_image_forward_compiler_logs_title_presence_diagnostics(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime_dir = _pptxgenjs_runtime(tmp_path, monkeypatch)
+        hero = _write_png(tmp_path / "slide.png")
+        plan = {"title": "Deck", "slides": [{"slide_number": 1, "title": "Visible Title", "image_path": str(hero)}]}
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(json.dumps(plan), encoding="utf-8")
+        output = tmp_path / "deck.pptx"
+
+        result = subprocess.run(
+            [
+                shutil.which("node") or "node",
+                str(runtime_dir / "compile_pptx.mjs"),
+                "--plan-file",
+                str(plan_file),
+                "--output-file",
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "PPTXGEN slide_diagnostics: slide=1" in result.stderr
+        assert "image_forward=true" in result.stderr
+        assert "title_present=true" in result.stderr
+        assert "title_overlay=true" in result.stderr
 
     def test_design_language_deck_terra_and_noir(self, tmp_path: Path) -> None:
         png = _write_png(tmp_path / "visuals" / "chart.png")

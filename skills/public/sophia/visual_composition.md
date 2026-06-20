@@ -38,3 +38,6 @@ You cannot produce an artifact correctly without having read its skill first.
 - Real data, real labels, real sources — always. Never fabricate a number, label, or citation.
 - No blank, placeholder, or broken visuals. If a generator fails, route that element to another treatment and continue.
 - Plan first (art-direct every element) → read the skill → generate → compose → **visually QA before emitting**. A correct-but-monotonous artifact is not finished.
+- Apply the shared anti-slop rubric (`anti_slop.md`): Philosophy, Hierarchy, Execution,
+  Specificity, Restraint, and Variety. Generic stock-deck styling, purple/pink AI-gradient
+  hero slides, and single-font template looks fail even when technically valid.

@@ -365,7 +365,7 @@ def _is_builder_support_artifact_path(relative_path: str) -> bool:
     name = parts[-1].lower()
     return (
         _is_builder_internal(parts[-1])
-        or name.endswith((".source.md", ".source.html", ".plan.json", ".manifest.json"))
+        or name.endswith((".source.md", ".source.html", ".plan.json", ".manifest.json", ".preview.pdf"))
     )
 
 

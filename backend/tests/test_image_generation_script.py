@@ -222,6 +222,66 @@ class TestGeneratePathWithoutReferenceImages:
         monkeypatch.setenv("LANGSMITH_TRACING", "true")
         assert script_module._langsmith_tracing_configured() is True
 
+    def test_langsmith_trace_context_forces_enabled_context_when_global_tracing_false(
+        self, script_module, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls: list[tuple[str, dict[str, Any]]] = []
+        fake_client = object()
+        monkeypatch.setattr(script_module, "_LANGSMITH_CLIENT", fake_client)
+        monkeypatch.setenv("LANGSMITH_TRACING", "false")
+        monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+        monkeypatch.setenv("LANGSMITH_PROJECT", "Sophia")
+        monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2-test")
+
+        class FakeEnabledContext:
+            def __enter__(self):
+                calls.append(("enabled_enter", {}))
+
+            def __exit__(self, *_exc: object) -> None:
+                calls.append(("enabled_exit", {}))
+
+        class FakeTraceContext:
+            def __enter__(self):
+                calls.append(("trace_enter", {}))
+                return SimpleNamespace(end=lambda **kwargs: calls.append(("trace_end", kwargs)))
+
+            def __exit__(self, *_exc: object) -> None:
+                calls.append(("trace_exit", {}))
+
+        def fake_tracing_context(**kwargs: Any):
+            calls.append(("tracing_context", kwargs))
+            return FakeEnabledContext()
+
+        def fake_trace(*args: Any, **kwargs: Any):
+            calls.append(("trace", {"args": args, **kwargs}))
+            return FakeTraceContext()
+
+        monkeypatch.setitem(
+            sys.modules,
+            "langsmith",
+            SimpleNamespace(tracing_context=fake_tracing_context, trace=fake_trace),
+        )
+
+        trace_context = script_module._langsmith_trace_context(
+            prompt="Slide prompt",
+            valid_refs=[],
+            size="1536x864",
+            quality="high",
+        )
+
+        assert trace_context is not None
+        tracing_call = next(payload for name, payload in calls if name == "tracing_context")
+        assert tracing_call["enabled"] is True
+        assert tracing_call["client"] is fake_client
+        assert tracing_call["project_name"] == "Sophia"
+        trace_call = next(payload for name, payload in calls if name == "trace")
+        assert trace_call["project_name"] == "Sophia"
+
+        with trace_context as run:
+            run.end(outputs={"ok": True})
+
+        assert [name for name, _payload in calls if name.endswith("_enter")] == ["enabled_enter", "trace_enter"]
+
 
 class TestEditPathWithReferenceImages:
     def test_calls_images_edit_when_one_reference_image_provided(

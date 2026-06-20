@@ -98,6 +98,20 @@ def test_chained_command_that_would_exceed_cap_is_rejected():
     assert "budget reached" in result.update["messages"][0].content
 
 
+def test_chained_command_without_spaces_around_separator_counts_each_generation():
+    state = _state_with_image_diagnostics(image_generation_attempt_count=_IMAGE_GENERATION_MAX_CALLS - 1)
+    command = f"python {_SCRIPT} --a&&python {_SCRIPT} --b"
+
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(command, state)
+    )
+
+    assert isinstance(result, Command)
+    content = result.update["messages"][0].content
+    assert "budget reached" in content
+    assert "this command adds 2" in content
+
+
 def test_preflight_chained_with_generation_counts_only_real_generation():
     state = _state_with_image_diagnostics(image_generation_attempt_count=_IMAGE_GENERATION_MAX_CALLS)
     command = f"python {_SCRIPT} --preflight && python {_SCRIPT} --slide-visual --prompt-file p.json"
@@ -137,7 +151,8 @@ def test_terminal_error_short_circuits_after_single_failure():
     content = result.update["messages"][0].content
     assert "unavailable" in content
     assert "missing_api_key" in content
-    assert "generate_visual_asset" in content
+    assert "hard-data charts" in content
+    assert "chart/report-diagram/text layouts" in content
 
 
 def test_preflight_chained_with_generation_honors_terminal_error_short_circuit():

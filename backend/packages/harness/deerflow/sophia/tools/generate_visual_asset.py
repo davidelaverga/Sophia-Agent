@@ -21,6 +21,8 @@ _VISUALS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/visuals/"
 _SAFE_NAME_RE = re.compile(r"[^A-Za-z0-9._-]+")
 _DEFAULT_PALETTE = ("#14b8a6", "#8b5cf6", "#f59e0b", "#ef4444", "#0ea5e9", "#22c55e")
 _REGISTRY_FILENAME = ".registry.json"
+_PRESENTATION_TASK_TYPES = {"presentation", "slides", "slide_deck", "deck"}
+_PRESENTATION_DATA_CHART_KINDS = {"bar_chart", "line_chart", "pie_chart", "donut_chart"}
 
 _LINE_SPACING = 1.25
 _CHAR_WIDTH_RATIO = 0.58
@@ -53,6 +55,39 @@ class VisualDataError(ValueError):
 
 def _result(*, success: bool, **fields: Any) -> str:
     return json.dumps({"success": success, **fields}, ensure_ascii=False)
+
+
+def _runtime_task_type(runtime: ToolRuntime | None) -> str:
+    state = getattr(runtime, "state", None) or {}
+    if isinstance(state, dict):
+        for key in ("delegation_context", "builder_task"):
+            source = state.get(key)
+            if isinstance(source, dict):
+                value = source.get("task_type")
+                if isinstance(value, str) and value.strip():
+                    return value.strip().lower()
+    config = getattr(runtime, "config", None) or {}
+    configurable = config.get("configurable", {}) if isinstance(config, dict) else {}
+    value = configurable.get("task_type")
+    return value.strip().lower() if isinstance(value, str) else ""
+
+
+def _presentation_visual_asset_rejection(visual_type: str, runtime: ToolRuntime | None) -> str | None:
+    if _runtime_task_type(runtime) not in _PRESENTATION_TASK_TYPES:
+        return None
+    if visual_type in _PRESENTATION_DATA_CHART_KINDS:
+        return None
+    allowed = ", ".join(sorted(_PRESENTATION_DATA_CHART_KINDS))
+    return _result(
+        success=False,
+        error_type="presentation_visual_asset_restricted",
+        hint=(
+            "For presentation slides, generate_visual_asset is restricted to hard quantitative "
+            f"data charts ({allowed}). Generate architecture, process, timeline, comparison, "
+            "quadrant, concept, and other structural slide visuals as gpt-image-2 full-slide "
+            "visuals using image-generation/scripts/generate.py --slide-visual."
+        ),
+    )
 
 
 def _slug(value: str | None, fallback: str = "visual") -> str:
@@ -1119,6 +1154,9 @@ def generate_visual_asset(
 
     Use this for charts and diagrams that must be embedded into HTML, PDF, or
     PPTX artifacts. Files are written under /mnt/user-data/outputs/visuals/.
+    In presentation builds this tool is restricted to hard quantitative data
+    charts; structural slide visuals must be generated through the image
+    generation skill with --slide-visual.
 
     Args:
         visual_type: The visual family to generate, such as bar_chart,
@@ -1139,6 +1177,8 @@ def generate_visual_asset(
         groups: Optional process_flow lanes. Each group is a dict with a
             "label" key and an "items" list of step labels.
     """
+    if rejection := _presentation_visual_asset_rejection(str(visual_type), runtime):
+        return rejection
     if width < 320 or width > 2400 or height < 240 or height > 1600:
         return _result(success=False, error_type="invalid_dimensions")
     svg_virtual = _canonical_output_path(output_name, visual_type, ".svg")

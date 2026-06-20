@@ -31,6 +31,19 @@ def test_builder_obligations_require_verified_visuals_when_requested() -> None:
     assert "When the user requests charts, diagrams, visuals" in contract
     assert "/mnt/user-data/outputs/visuals/" in contract
     assert "Remote chart URLs" in contract
+    assert "For PPTX presentations" in contract
+    assert "hard quantitative data charts only" in contract
+    assert "Use `generate_excalidraw_diagram`" in contract
+
+
+def test_shared_anti_slop_rubric_is_available_to_builder() -> None:
+    contract = _sophia_prompt("anti_slop.md")
+
+    assert "Sophia Anti-Slop Rubric" in contract
+    for axis in ("Philosophy", "Hierarchy", "Execution", "Specificity", "Restraint", "Variety"):
+        assert axis in contract
+    assert "No purple/pink AI-gradient hero" in contract
+    assert "No single-font" in contract
 
 
 def test_agents_md_is_deprecated_pointer_not_active_contract() -> None:
@@ -79,6 +92,8 @@ def test_visual_composition_directives_carry_the_toolkit() -> None:
     assert "plain, text-only, no-image" in directives
     assert "do not call image-generation" in directives
     assert "editable deterministic PPTX" in directives
+    assert "anti_slop.md" in directives
+    assert "Philosophy, Hierarchy, Execution" in directives
 
 
 def test_ppt_generation_skill_carries_deck_design_system() -> None:
@@ -97,9 +112,13 @@ def test_ppt_generation_skill_carries_deck_design_system() -> None:
     assert "image_path" in text
     assert "visual_path" in text
     assert "generate_visual_asset" in text
+    assert "hard quantitative data" in text
+    assert "data_chart: true" in text
     assert "If the user asked for a plain, text-only, no-image" in text
     assert "Do not run the image-generation script" in text
     assert "deterministic editable PPTX" in text
+    assert "Prompting gpt-image-2 for slide visuals" in text
+    assert "anti_slop.md" in text
 
 
 def test_image_generation_skill_declares_reference_edit_model() -> None:
@@ -110,6 +129,8 @@ def test_image_generation_skill_declares_reference_edit_model() -> None:
     assert "reference-conditioned edits use `gpt-image-1.5`" in text
     assert "the image edit endpoint does not support `gpt-image-2`" in text
     assert "client.images.edit" in text
+    assert "anti_slop.md" in text
+    assert "generic stock-deck styling" in text
 
 
 def test_pdf_report_skill_is_source_first_and_renderer_backed() -> None:
@@ -122,6 +143,7 @@ def test_pdf_report_skill_is_source_first_and_renderer_backed() -> None:
     assert "academic-paper-review" in text
     assert "systematic-literature-review" in text
     assert "chart-visualization" in text
+    assert "generate_report_chart" in text
     assert "render_markdown_to_pdf" in text
     assert "generate_excalidraw_diagram" in text
     assert "Embed PNG, not SVG" in text  # xelatex embeds PNG, not SVG

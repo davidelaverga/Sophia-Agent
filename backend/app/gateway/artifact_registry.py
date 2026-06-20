@@ -68,6 +68,7 @@ _SUPPORT_ARTIFACT_SUFFIXES = (
     ".source.html",
     ".plan.json",
     ".manifest.json",
+    ".preview.pdf",
     ".metadata.json",
     ".meta.json",
     ".diagnostics.json",
@@ -211,7 +212,7 @@ def _storage_object_addresses_internal_keyspace(relative_object_path: str) -> bo
         return True
     name = segments[-1].lower() if segments else ""
     return (
-        name.endswith((".source.md", ".source.html", ".plan.json", ".manifest.json"))
+        name.endswith((".source.md", ".source.html", ".plan.json", ".manifest.json", ".preview.pdf"))
         or (name.startswith("_") and name.endswith(".py"))
         or (name.startswith("test_") and name.endswith((".py", ".sh")))
     )

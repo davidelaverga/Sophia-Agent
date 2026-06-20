@@ -134,6 +134,12 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 For PDF reports, technical diagrams use `generate_excalidraw_diagram` (graphviz) and charts use
 `generate_visual_asset` — NOT this skill. That deterministic path is unchanged.
 
+Before accepting a presentation slide visual, apply the shared Sophia anti-slop rubric
+(`/mnt/skills/public/sophia/anti_slop.md`): Philosophy, Hierarchy, Execution,
+Specificity, Restraint, and Variety. Reject purple/pink AI-gradient hero slides,
+single-font template looks, and generic stock-deck styling even if the image was generated
+successfully.
+
 ## Common Scenarios
 
 Use different JSON schemas for different scenarios.

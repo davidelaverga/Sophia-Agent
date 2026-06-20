@@ -28,7 +28,7 @@ Prose is the default; a visual must beat the paragraph. Connected structure → 
 Vary figure types across sections (don't repeat one diagram style section after section — a real prior defect). Not every section needs a figure; some are pure prose. One consistent figure language (shared chart palette, shared graphviz styling, one illustration style).
 
 ## 5. The substance toolkit
-- **Charts** (`chart-visualization`, `data-analysis`) — the workhorse; **real labels and values**, no "Item N", no fabricated data, no chart without data; clean (no 3-D/chartjunk).
+- **Charts** (`generate_report_chart`, `generate_visual_asset`, `data-analysis`) — the workhorse; **real labels and values**, no "Item N", no fabricated data, no chart without data; clean (no 3-D/chartjunk). Use `generate_report_chart` when the report needs the chart-visualization taxonomy (area, dual axes, sankey, treemap, radar, funnel, distributions, maps, etc.) and log why that chart family fits.
 - **Diagrams** (`generate_excalidraw_diagram`, graphviz) — connected nodes only; short single-line labels.
 - **Illustrations** (`image-generation`) — **sparing accents** (cover, section opener, occasional concept), concrete and beautiful, one style across the document. Heavily-conceptual reports may lean on them more, but they still earn clarity. If preflight fails, drop and let prose/figures carry.
 
@@ -43,7 +43,7 @@ The look comes from the Sophia LaTeX template — the LaTeX expression of `brand
 1. **Plan** (`write_todos`): section spine + figure placements + variety check.
 2. **Research** with the skill matching the request: `deep-research` (general topic), `academic-paper-review` (one paper), `systematic-literature-review` (multi-paper survey). Capture citations as you go.
 3. **Author the Markdown** — clean headings (drive the TOC), prose-first, tables, inline citations, PNG figure refs.
-4. **Generate visuals** — charts (real labels + data), diagrams (short labels, graphviz, PNG for embedding), any illustrations (one style).
+4. **Generate visuals** — charts (real labels + data; prefer `generate_report_chart` for rich report charts), diagrams (short labels, graphviz, PNG for embedding), any illustrations (one style).
 5. **Render** with `render_markdown_to_pdf` — TOC and references auto-generate. After it returns, **check the result**: if it reports `images_missing`/`missing_resources`, fix the image references and render **once more** (the harness allows one repair turn; a visuals-requested PDF with zero embedded images is rejected).
 6. **Inspect & QA** (§8), fix once, then emit the `.pdf` — it is authoritative; do not emit the `.md`/`.html` source.
 

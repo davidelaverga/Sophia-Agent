@@ -16,6 +16,8 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
     _merge_builder_pptx_diagnostics,
     _pptx_skill_read_seen,
+    _validate_deck_plan,
+    _visual_asset_result_delta,
     _visual_design_skill_read_seen,
 )
 
@@ -39,6 +41,27 @@ def _write_minimal_pptx(path: Path) -> None:
         archive.writestr("_rels/.rels", "<Relationships></Relationships>")
         archive.writestr("ppt/presentation.xml", "<p:presentation></p:presentation>")
         archive.writestr("ppt/slides/slide1.xml", "x" * 2048)
+
+
+def test_report_chart_tool_result_records_visual_asset_path() -> None:
+    delta = _visual_asset_result_delta(
+        _tool_message(
+            json.dumps(
+                {
+                    "success": True,
+                    "chart_tool": "generate_sankey_chart",
+                    "image_path": "/mnt/user-data/outputs/visuals/flow.png",
+                    "image_bytes": 128,
+                }
+            )
+        )
+    )
+
+    assert delta is not None
+    assert delta["visual_asset_success_count"] == 1
+    assert delta["visual_asset_bytes_total"] == 128
+    assert delta["visual_asset_paths"] == ["/mnt/user-data/outputs/visuals/flow.png"]
+    assert delta["visual_png_paths"] == ["/mnt/user-data/outputs/visuals/flow.png"]
 
 
 def test_image_generation_bash_result_records_output_bytes(tmp_path: Path) -> None:
@@ -396,6 +419,89 @@ def test_pptx_diagnostic_merge_keeps_latest_absolute_deck_counts() -> None:
     assert merged["pptx_plan_image_ref_count"] == 4
 
 
+def test_pptx_generation_bash_result_records_title_presence_diagnostics(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    deck = outputs / "deck.pptx"
+    _write_minimal_pptx(deck)
+    request = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs)}},
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "node /app/backend/packages/harness/deerflow/sophia/js/compile_pptx.mjs "
+                    "--plan-file /mnt/user-data/workspace/plan.json "
+                    "--output-file /mnt/user-data/outputs/deck.pptx"
+                )
+            },
+        },
+    )
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(
+        request,
+        _tool_message(
+            "Successfully generated presentation with 1 slides (picture_count=1)\n"
+            "PPTXGEN slide_diagnostics: slide=1 type=cover image_forward=true "
+            "title_present=true title_overlay=true"
+        ),
+    )
+
+    assert delta["pptx_slide_title_results"] == [
+        {
+            "slide": 1,
+            "type": "cover",
+            "image_forward": True,
+            "title_present": True,
+            "title_overlay": True,
+        }
+    ]
+
+
+def test_validate_deck_plan_requires_qc_for_each_image_slide() -> None:
+    plan = {
+        "slides": [
+            {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png"},
+            {"type": "content", "subtype": "architecture", "title": "Flow", "image_path": "/mnt/user-data/outputs/slide-2.png"},
+        ]
+    }
+
+    problems = _validate_deck_plan(
+        plan,
+        {
+            "pptx_slide_title_results": [{"slide": 1, "title_present": True}],
+            "qc_results": [
+                {"pass": True, "reasons": [], "image_path": "/mnt/user-data/outputs/slide-1.png"},
+            ],
+        },
+    )
+
+    assert "Slide 2 image was not QC-checked." in problems
+
+
+def test_validate_deck_plan_accepts_image_forward_with_title_and_qc() -> None:
+    plan = {
+        "slides": [
+            {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png"},
+            {"type": "content", "subtype": "architecture", "title": "Flow", "image_path": "/mnt/user-data/outputs/slide-2.png"},
+            {"type": "content", "subtype": "chart", "title": "Data", "data_chart": True, "visual_path": "/mnt/user-data/outputs/visuals/chart.png"},
+        ]
+    }
+
+    problems = _validate_deck_plan(
+        plan,
+        {
+            "pptx_slide_title_results": [{"slide": 1, "title_present": True}],
+            "qc_results": [
+                {"pass": True, "reasons": [], "image_path": "/mnt/user-data/outputs/slide-1.png"},
+                {"pass": True, "reasons": [], "image_path": "/mnt/user-data/outputs/slide-2.png"},
+            ],
+        },
+    )
+
+    assert problems == []
+
+
 def test_slide_qc_bash_result_records_verdict_feedback_payload(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
@@ -422,7 +528,7 @@ def test_slide_qc_bash_result_records_verdict_feedback_payload(tmp_path: Path) -
         "qc_invocation_count": 1,
         "qc_pass_count": 0,
         "qc_failure_count": 1,
-        "qc_results": [{"pass": False, "reasons": ["garbled"]}],
+        "qc_results": [{"pass": False, "reasons": ["garbled"], "image_path": "/mnt/user-data/outputs/slide-01.png"}],
         "qc_reasons": ["garbled"],
     }
 
@@ -464,7 +570,7 @@ def test_image_generation_and_slide_qc_bash_result_merge_diagnostics(tmp_path: P
         "qc_invocation_count": 1,
         "qc_pass_count": 0,
         "qc_failure_count": 1,
-        "qc_results": [{"pass": False, "reasons": ["garbled"]}],
+        "qc_results": [{"pass": False, "reasons": ["garbled"], "image_path": "/mnt/user-data/outputs/slide-01.png"}],
         "qc_reasons": ["garbled"],
     }
 

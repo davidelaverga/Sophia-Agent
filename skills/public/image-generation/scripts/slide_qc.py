@@ -18,16 +18,26 @@ from typing import Any
 
 _DEFAULT_QC_MODEL = "claude-sonnet-4-6"
 
-_REVIEWER_PROMPT = """You are a strict slide QC reviewer. You are shown one rendered presentation slide image
-and the spec it was meant to satisfy. Reply with JSON only: {"pass": true|false, "reasons": ["..."]}.
+_REVIEWER_PROMPT = """You are a strict slide QC reviewer. You are shown one rendered presentation slide and the
+spec it must satisfy. Reply with JSON only: {"pass": true|false, "reasons": ["..."]}.
 
-Mark "pass": false if ANY of these are true:
+Fail (pass=false) if ANY is true:
+
+Reliability:
 - Any text is garbled, misspelled, cut off, overlapping, or hard to read.
-- A title, label, or line required by the spec is missing or altered.
-- The layout is collapsed, severely unbalanced, or has large empty dead zones.
-- It is off-brand: wrong palette, clip-art, emoji, generic AI gradient, glossy 3D, or stock-photo look.
-- It clashes stylistically with the reference slide (if one is provided).
-Otherwise "pass": true. Be concise; list only real defects.
+- A title, label, or value required by the spec is missing or altered.
+- The cover/this slide has no clearly legible title.
+
+Design (the six axes):
+- Philosophy: it looks like a generic template, not a deliberate slide for THIS topic.
+- Hierarchy: a viewer cannot tell in two seconds what is primary vs secondary.
+- Execution: misaligned, cramped, low-contrast, or visually sloppy.
+- Specificity: placeholder, vague, or filler content instead of the real subject.
+- Restraint: cluttered; elements that do not earn their place.
+- Brand: wrong palette, clip-art, emoji, generic AI gradient, glossy 3D, or stock-photo look;
+  or it clashes stylistically with the reference slide.
+
+Otherwise pass=true. List only real defects, concisely.
 
 Slide spec:
 {slide_spec}
@@ -39,7 +49,7 @@ def _json_result(passed: bool, reasons: list[str]) -> dict[str, Any]:
 
 
 def _qc_unavailable_result(reason: str) -> dict[str, Any]:
-    return {"pass": True, "skipped": True, "reasons": [reason[:240]]}
+    return {"pass": False, "skipped": True, "reasons": [reason[:240]]}
 
 
 def _emit(payload: dict[str, Any]) -> int:

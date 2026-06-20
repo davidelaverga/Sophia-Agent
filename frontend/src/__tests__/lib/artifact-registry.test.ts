@@ -94,6 +94,13 @@ describe('artifact registry library visibility candidates', () => {
       artifactType: 'image',
       rendererKind: 'image',
     })).toBe(false);
+
+    expect(isArtifactRegistryLibraryVisibleCandidate({
+      localPath: 'mnt/user-data/outputs/deck.preview.pdf',
+      title: 'deck.preview.pdf',
+      artifactType: 'pdf',
+      rendererKind: 'pdf',
+    })).toBe(false);
   });
 
   it('dedupes visible builder and backfill registry records with builder priority', () => {
