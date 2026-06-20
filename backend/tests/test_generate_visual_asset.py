@@ -193,6 +193,30 @@ def test_bar_chart_preserves_all_nonpositive_data(tmp_path) -> None:
     assert ">-8<" in svg
 
 
+def test_line_chart_preserves_negative_values(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+
+    payload = _payload(
+        generate_visual_asset.func(
+            runtime=_runtime(outputs),
+            visual_type="line_chart",
+            title="Profit/loss deltas",
+            data=[
+                {"label": "Q1", "value": -4},
+                {"label": "Q2", "value": 3},
+                {"label": "Q3", "value": -2},
+            ],
+            output_name="profit-loss-deltas",
+        )
+    )
+
+    assert payload["success"] is True
+    svg = (outputs / "visuals" / "profit-loss-deltas.svg").read_text(encoding="utf-8")
+    assert ">-4<" in svg
+    assert ">3<" in svg
+    assert ">-2<" in svg
+
+
 # --- VQ-1: text-fit engine ----------------------------------------------------
 
 

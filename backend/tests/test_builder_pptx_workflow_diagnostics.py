@@ -520,6 +520,21 @@ def test_validate_deck_plan_accepts_native_stat_slides_without_images() -> None:
         assert _validate_deck_plan(plan, diagnostics) == []
 
 
+def test_validate_deck_plan_accepts_compiler_alias_slides_without_images() -> None:
+    diagnostics = {"pptx_slide_title_results": [{"slide": 1, "title_present": True}]}
+
+    plan = {
+        "slides": [
+            {"type": "cover", "title": "Launch"},
+            {"type": "quote", "title": "Customer voice", "quote": "Adoption is accelerating."},
+            {"type": "divider", "title": "Architecture"},
+            {"type": "conclusion", "title": "Takeaways", "bullets": ["Ship", "Measure"]},
+        ]
+    }
+
+    assert _validate_deck_plan(plan, diagnostics) == []
+
+
 def test_slide_qc_bash_result_records_verdict_feedback_payload(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()

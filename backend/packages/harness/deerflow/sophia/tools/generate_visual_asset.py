@@ -826,7 +826,7 @@ def _svg_for(
             top,
         )
     elif kind == "line_chart":
-        body = _line_body(_coerce_items(data), colors, width, height, top)
+        body = _line_body(_coerce_items(data, preserve_sign=True), colors, width, height, top)
     elif kind in {"pie_chart", "donut_chart"}:
         body = _pie_body(_coerce_items(data), colors, width, height, top, kind == "donut_chart")
     elif kind == "timeline":

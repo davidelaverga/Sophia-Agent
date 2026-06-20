@@ -2790,7 +2790,20 @@ def _plan_image_ref_count(plan: dict[str, Any]) -> int:
 
 
 def _slide_type(slide: dict[str, Any]) -> str:
-    return str(slide.get("type") or slide.get("layout") or "content").strip().lower().replace("-", "_")
+    raw = _slide_layout_key(slide.get("type") or slide.get("layout") or "content")
+    if raw == "title":
+        return "cover"
+    if raw in {"section_divider", "divider"}:
+        return "section"
+    if raw in {"statement", "closing", "quote", "closer"}:
+        return "statement"
+    if raw in {"conclusion", "takeaways"}:
+        return "summary"
+    if raw in {"stat_band", "metrics"}:
+        return "stat"
+    if raw in {"title_visual", "cover"}:
+        return "cover"
+    return raw
 
 
 def _slide_layout_key(value: Any) -> str:
