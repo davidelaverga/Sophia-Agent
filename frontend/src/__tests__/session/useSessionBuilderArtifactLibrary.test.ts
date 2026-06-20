@@ -69,7 +69,7 @@ describe('useSessionBuilderArtifactLibrary', () => {
     }]);
   });
 
-  it('hides deck preview PDFs from the builder artifact library', async () => {
+  it('keeps deck preview PDFs in the shared builder artifact library', async () => {
     globalThis.fetch = vi.fn(async () => artifactListResponse('thread-1', [
       { path: '/outputs/deck.preview.pdf', name: 'deck.preview.pdf' },
       { path: '/outputs/deck.pptx', name: 'deck.pptx' },
@@ -84,7 +84,7 @@ describe('useSessionBuilderArtifactLibrary', () => {
       await flushAsyncState();
     });
 
-    expect(result.current.items.map((item) => item.name)).toEqual(['deck.pptx']);
+    expect(result.current.items.map((item) => item.name)).toEqual(['deck.pptx', 'deck.preview.pdf']);
   });
 
   it('ignores stale no-signal artifact loads after switching threads', async () => {

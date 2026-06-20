@@ -27,29 +27,14 @@ from deerflow.agents.sophia_agent.builder_middlewares import (
     build_builder_middleware_chain,
     wrap_builder_agent_for_observability,
 )
+from deerflow.agents.sophia_agent.builder_tools import build_builder_tools_for_task_type
 from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.agents.sophia_agent.vision_gate import supports_vision
 from deerflow.config.app_config import get_app_config
-from deerflow.sandbox.tools import bash_tool, ls_tool, read_file_tool, str_replace_tool, write_file_tool
-from deerflow.sophia.tools.builder_web_fetch import builder_web_fetch
-from deerflow.sophia.tools.builder_web_search import builder_web_search
-from deerflow.sophia.tools.create_pdf_artifact import create_pdf_artifact
-from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
-from deerflow.sophia.tools.generate_excalidraw_diagram import generate_excalidraw_diagram
-from deerflow.sophia.tools.generate_report_chart import generate_report_chart
-from deerflow.sophia.tools.generate_visual_asset import generate_visual_asset
-from deerflow.sophia.tools.read_session_context import (
-    read_session_context,
-    read_tool_enabled,
-)
-from deerflow.sophia.tools.render_markdown_to_pdf import render_markdown_to_pdf
-from deerflow.tools.builtins.view_image_tool import view_image_tool
 
 logger = logging.getLogger(__name__)
 DEFAULT_BUILDER_MODEL = "claude-sonnet-4-6"
-_PRESENTATION_TASK_TYPES = {"presentation", "slides", "slide_deck", "deck"}
-_REPORT_TASK_TYPES = {"document", "pdf", "report", "research", "research_report", "visual_report", "data_analysis"}
 
 
 def make_sophia_builder(config: RunnableConfig):
@@ -180,7 +165,7 @@ def _create_builder_agent(
     # builder's toolbox eliminates the conflict at the root: the model
     # cannot produce the bad combo, and ``emit_builder_artifact`` remains
     # the single, structured "I'm done" signal.
-    tools = _builder_tools_for_task_type(task_type, vision_enabled=vision_enabled)
+    tools = build_builder_tools_for_task_type(task_type, vision_enabled=vision_enabled)
 
     # D7 / C2 recursion guard (Phase-3 Stage 1 spec):
     # Builder must NEVER spawn AsyncSubAgents (no `start_async_task`) and
@@ -217,46 +202,3 @@ def _create_builder_agent(
         model_source=model_source,
         trace_config=trace_config,
     )
-
-
-def _normalized_task_type(task_type: str | None) -> str:
-    return str(task_type or "").strip().lower()
-
-
-def _builder_tools_for_task_type(task_type: str | None, *, vision_enabled: bool) -> list:
-    """Build the Builder's tool list for the concrete delegated task type."""
-    normalized_task_type = _normalized_task_type(task_type)
-    tools = [
-        bash_tool,
-        ls_tool,
-        read_file_tool,
-        write_file_tool,
-        str_replace_tool,
-        builder_web_search,
-        builder_web_fetch,
-        create_pdf_artifact,
-        generate_visual_asset,
-        render_markdown_to_pdf,
-        emit_builder_artifact,
-    ]
-    if normalized_task_type not in _PRESENTATION_TASK_TYPES:
-        tools.insert(8, generate_excalidraw_diagram)
-    if normalized_task_type in _REPORT_TASK_TYPES:
-        insert_at = tools.index(render_markdown_to_pdf)
-        tools.insert(insert_at, generate_report_chart)
-
-    # Vision is gated by the same `supports_vision` decision that governs
-    # ViewImageMiddleware inclusion — keeping the tool list and the
-    # middleware chain in lock-step. The model can only call view_image
-    # when the middleware that injects the resulting image content blocks
-    # back into the next turn is also in the chain.
-    if vision_enabled:
-        tools.append(view_image_tool)
-
-    # Spec D D-4: scoped recall over the parent companion session's
-    # delegation ledger — the floor beneath the brief. Flag-gated so
-    # SOPHIA_DELEGATION_READ_TOOL=0 removes the tool AND the briefing
-    # line that teaches it (BuilderTaskMiddleware checks the same flag).
-    if read_tool_enabled():
-        tools.append(read_session_context)
-    return tools

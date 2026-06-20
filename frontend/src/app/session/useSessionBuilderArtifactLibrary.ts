@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 
-import { classifyBuilderArtifactFileRole, normalizeBuilderArtifactPath, rankBuilderArtifactLibraryItems } from '../lib/builder-artifacts';
+import { normalizeBuilderArtifactPath, rankBuilderArtifactLibraryItems } from '../lib/builder-artifacts';
 import type { BuilderArtifactLibraryItemV1 } from '../types/builder-artifact';
 
 type BuilderArtifactLibraryResponse = {
@@ -42,10 +42,9 @@ function normalizeBuilderArtifactLibrary(
     .filter((item): item is BuilderArtifactLibraryItemV1 => item !== null);
 
   // The gateway sorts by mtime DESC, which can surface render sources
-  // (report.pdf.md). Rank so the primary deliverable always leads; hide
-  // preview PDFs as support files so a PPTX build does not appear twice.
-  return rankBuilderArtifactLibraryItems(items)
-    .filter((item) => classifyBuilderArtifactFileRole(item, items) !== 'preview');
+  // (report.pdf.md). Rank so the primary deliverable always leads while
+  // keeping support files available for render resolution.
+  return rankBuilderArtifactLibraryItems(items);
 }
 
 async function fetchBuilderArtifactLibrary(
