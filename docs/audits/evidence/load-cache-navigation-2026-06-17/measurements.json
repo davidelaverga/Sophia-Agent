@@ -1,0 +1,302 @@
+[
+  {
+    "viewport": {
+      "name": "desktop",
+      "width": 1440,
+      "height": 900
+    },
+    "route": "/artifacts",
+    "wallMs": 23330,
+    "screenshotPath": "C:\\Users\\zerof\\Sophia-Agent-X\\.worktrees\\ui-coherence-artifacts-journal-session\\docs\\audits\\evidence\\load-cache-navigation-2026-06-17\\desktop-artifacts.png",
+    "screenshotOk": false,
+    "consoleErrors": [],
+    "nav": null,
+    "observedAtMs": 0,
+    "paint": {
+      "entries": [],
+      "fcp": null
+    },
+    "resources": {
+      "apiCount": 0,
+      "apiResources": [],
+      "count": 0,
+      "cssCount": 0,
+      "cssTransfer": 0,
+      "duplicateResources": [],
+      "imageCount": 0,
+      "imageTransfer": 0,
+      "jsCount": 0,
+      "jsTransfer": 0,
+      "topSlow": [],
+      "totalTransfer": 0
+    },
+    "state": {
+      "firstText": "SOPHIA OBSERVATORY Artifact Observatory Artifacts Sophia creates or saves for you, ready to preview, download, and revisit. 6 total durable works Field List Search artifacts All artifacts Made with Sophia Recently opened Documents Visuals TYPE All types HTML PDF Markdown PPTX Ima",
+      "hasArtifactError": false,
+      "hasJournalHeader": false,
+      "hasJournalLoading": false,
+      "hasNewArtifactsCopy": true,
+      "hasRawMnt": false,
+      "hasSessionVoiceHint": false,
+      "looksAuthBlocked": false
+    },
+    "title": "Sophia – Voice-first emotional companion",
+    "url": "https://www.sophia-ei.com/artifacts",
+    "webVitalsApprox": {
+      "cls": null,
+      "lcp": null,
+      "longTaskCount": 0,
+      "tbtApprox": 0
+    }
+  },
+  {
+    "viewport": {
+      "name": "desktop",
+      "width": 1440,
+      "height": 900
+    },
+    "route": "/journal",
+    "wallMs": 22899,
+    "screenshotPath": "C:\\Users\\zerof\\Sophia-Agent-X\\.worktrees\\ui-coherence-artifacts-journal-session\\docs\\audits\\evidence\\load-cache-navigation-2026-06-17\\desktop-journal.png",
+    "screenshotOk": false,
+    "consoleErrors": [],
+    "nav": null,
+    "observedAtMs": 0,
+    "paint": {
+      "entries": [],
+      "fcp": null
+    },
+    "resources": {
+      "apiCount": 0,
+      "apiResources": [],
+      "count": 0,
+      "cssCount": 0,
+      "cssTransfer": 0,
+      "duplicateResources": [],
+      "imageCount": 0,
+      "imageTransfer": 0,
+      "jsCount": 0,
+      "jsTransfer": 0,
+      "topSlow": [],
+      "totalTransfer": 0
+    },
+    "state": {
+      "firstText": "Journal Saved memories from your Sophia sessions Ctrl K All Decisions Patterns Lessons Feelings Relationships Commitments Preferences Facts Rituals All time Pool List 65 memories 65 shown 4 emerging patterns Today65 memoriesdrag to explore Nov Dec Jan Feb Mar Apr May Jun Emerging",
+      "hasArtifactError": false,
+      "hasJournalHeader": true,
+      "hasJournalLoading": false,
+      "hasNewArtifactsCopy": false,
+      "hasRawMnt": false,
+      "hasSessionVoiceHint": false,
+      "looksAuthBlocked": false
+    },
+    "title": "Sophia – Voice-first emotional companion",
+    "url": "https://www.sophia-ei.com/journal",
+    "webVitalsApprox": {
+      "cls": null,
+      "lcp": null,
+      "longTaskCount": 0,
+      "tbtApprox": 0
+    }
+  },
+  {
+    "viewport": {
+      "name": "desktop",
+      "width": 1440,
+      "height": 900
+    },
+    "route": "/session",
+    "wallMs": 6357,
+    "screenshotPath": "C:\\Users\\zerof\\Sophia-Agent-X\\.worktrees\\ui-coherence-artifacts-journal-session\\docs\\audits\\evidence\\load-cache-navigation-2026-06-17\\desktop-session.png",
+    "screenshotOk": true,
+    "consoleErrors": [],
+    "nav": null,
+    "observedAtMs": 0,
+    "paint": {
+      "entries": [],
+      "fcp": null
+    },
+    "resources": {
+      "apiCount": 0,
+      "apiResources": [],
+      "count": 0,
+      "cssCount": 0,
+      "cssTransfer": 0,
+      "duplicateResources": [],
+      "imageCount": 0,
+      "imageTransfer": 0,
+      "jsCount": 0,
+      "jsTransfer": 0,
+      "topSlow": [],
+      "totalTransfer": 0
+    },
+    "state": {
+      "firstText": "Back End Settings Telemetry I'm creating that markdown artifact for you now.Starting the build now — I'll have it back to you shortly. voice text Sophia — Here when you need sophia_test.md Page 1 of 1 Open in new tab Download original DOCUMENT sophia_test.md sophia artifact smoke",
+      "hasArtifactError": false,
+      "hasJournalHeader": false,
+      "hasJournalLoading": false,
+      "hasNewArtifactsCopy": false,
+      "hasRawMnt": false,
+      "hasSessionVoiceHint": false,
+      "looksAuthBlocked": false
+    },
+    "title": "Sophia – Voice-first emotional companion",
+    "url": "https://www.sophia-ei.com/session",
+    "webVitalsApprox": {
+      "cls": null,
+      "lcp": null,
+      "longTaskCount": 0,
+      "tbtApprox": 0
+    }
+  },
+  {
+    "viewport": {
+      "name": "mobile",
+      "width": 390,
+      "height": 844
+    },
+    "route": "/artifacts",
+    "wallMs": 2860,
+    "screenshotPath": "C:\\Users\\zerof\\Sophia-Agent-X\\.worktrees\\ui-coherence-artifacts-journal-session\\docs\\audits\\evidence\\load-cache-navigation-2026-06-17\\mobile-artifacts.png",
+    "screenshotOk": true,
+    "consoleErrors": [],
+    "nav": null,
+    "observedAtMs": 0,
+    "paint": {
+      "entries": [],
+      "fcp": null
+    },
+    "resources": {
+      "apiCount": 0,
+      "apiResources": [],
+      "count": 0,
+      "cssCount": 0,
+      "cssTransfer": 0,
+      "duplicateResources": [],
+      "imageCount": 0,
+      "imageTransfer": 0,
+      "jsCount": 0,
+      "jsTransfer": 0,
+      "topSlow": [],
+      "totalTransfer": 0
+    },
+    "state": {
+      "firstText": "SOPHIA OBSERVATORY Artifact Observatory Search artifacts All artifacts Made with Sophia Recently opened Documents Visuals TYPE All types HTML PDF Markdown PPTX Image SOURCE All sources Builder Upload Quick edit Coreview Backfill DATE Updated Created Opened sophia_test.md FOCUS Ma",
+      "hasArtifactError": false,
+      "hasJournalHeader": false,
+      "hasJournalLoading": false,
+      "hasNewArtifactsCopy": false,
+      "hasRawMnt": false,
+      "hasSessionVoiceHint": false,
+      "looksAuthBlocked": false
+    },
+    "title": "Sophia – Voice-first emotional companion",
+    "url": "https://www.sophia-ei.com/artifacts",
+    "webVitalsApprox": {
+      "cls": null,
+      "lcp": null,
+      "longTaskCount": 0,
+      "tbtApprox": 0
+    }
+  },
+  {
+    "viewport": {
+      "name": "mobile",
+      "width": 390,
+      "height": 844
+    },
+    "route": "/journal",
+    "wallMs": 2870,
+    "screenshotPath": "C:\\Users\\zerof\\Sophia-Agent-X\\.worktrees\\ui-coherence-artifacts-journal-session\\docs\\audits\\evidence\\load-cache-navigation-2026-06-17\\mobile-journal.png",
+    "screenshotOk": true,
+    "consoleErrors": [],
+    "nav": null,
+    "observedAtMs": 0,
+    "paint": {
+      "entries": [],
+      "fcp": null
+    },
+    "resources": {
+      "apiCount": 0,
+      "apiResources": [],
+      "count": 0,
+      "cssCount": 0,
+      "cssTransfer": 0,
+      "duplicateResources": [],
+      "imageCount": 0,
+      "imageTransfer": 0,
+      "jsCount": 0,
+      "jsTransfer": 0,
+      "topSlow": [],
+      "totalTransfer": 0
+    },
+    "state": {
+      "firstText": "Loading journal Bringing Sophia's saved memories into view.",
+      "hasArtifactError": false,
+      "hasJournalHeader": false,
+      "hasJournalLoading": true,
+      "hasNewArtifactsCopy": false,
+      "hasRawMnt": false,
+      "hasSessionVoiceHint": false,
+      "looksAuthBlocked": false
+    },
+    "title": "Sophia – Voice-first emotional companion",
+    "url": "https://www.sophia-ei.com/journal",
+    "webVitalsApprox": {
+      "cls": null,
+      "lcp": null,
+      "longTaskCount": 0,
+      "tbtApprox": 0
+    }
+  },
+  {
+    "viewport": {
+      "name": "mobile",
+      "width": 390,
+      "height": 844
+    },
+    "route": "/session",
+    "wallMs": 3151,
+    "screenshotPath": "C:\\Users\\zerof\\Sophia-Agent-X\\.worktrees\\ui-coherence-artifacts-journal-session\\docs\\audits\\evidence\\load-cache-navigation-2026-06-17\\mobile-session.png",
+    "screenshotOk": true,
+    "consoleErrors": [],
+    "nav": null,
+    "observedAtMs": 0,
+    "paint": {
+      "entries": [],
+      "fcp": null
+    },
+    "resources": {
+      "apiCount": 0,
+      "apiResources": [],
+      "count": 0,
+      "cssCount": 0,
+      "cssTransfer": 0,
+      "duplicateResources": [],
+      "imageCount": 0,
+      "imageTransfer": 0,
+      "jsCount": 0,
+      "jsTransfer": 0,
+      "topSlow": [],
+      "totalTransfer": 0
+    },
+    "state": {
+      "firstText": "Back End Settings Telemetry please create a downloadable markdown artifact named sophia_test.md. content: # sophia artifact smoke test. this confirms artifact upsert and durable canvas url after run id retry cleanup. I'm creating that markdown artifact for you now.Starting the bu",
+      "hasArtifactError": false,
+      "hasJournalHeader": false,
+      "hasJournalLoading": false,
+      "hasNewArtifactsCopy": false,
+      "hasRawMnt": false,
+      "hasSessionVoiceHint": false,
+      "looksAuthBlocked": false
+    },
+    "title": "Sophia – Voice-first emotional companion",
+    "url": "https://www.sophia-ei.com/session",
+    "webVitalsApprox": {
+      "cls": null,
+      "lcp": null,
+      "longTaskCount": 0,
+      "tbtApprox": 0
+    }
+  }
+]

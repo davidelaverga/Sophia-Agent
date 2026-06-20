@@ -1,0 +1,80 @@
+[
+  {
+    "viewport": "desktop",
+    "route": "/artifacts",
+    "domContentLoadedMs": 1084,
+    "readyMs": 2807,
+    "readyState": {
+      "excerpt": "SOPHIA OBSERVATORY Artifact Observatory Artifacts Sophia creates or saves for you, ready to preview, download, and revisit. 0 total durable ",
+      "hasArtifactCopy": true,
+      "hasJournalLoading": false,
+      "hasRawMnt": false,
+      "hasReady": true
+    }
+  },
+  {
+    "viewport": "desktop",
+    "route": "/journal",
+    "domContentLoadedMs": 235,
+    "readyMs": null,
+    "readyState": {
+      "excerpt": "Loading journal Bringing Sophia's saved memories into view.",
+      "hasArtifactCopy": false,
+      "hasJournalLoading": true,
+      "hasRawMnt": false,
+      "hasReady": false
+    }
+  },
+  {
+    "viewport": "desktop",
+    "route": "/session",
+    "domContentLoadedMs": 463,
+    "readyMs": 838,
+    "readyState": {
+      "excerpt": "Back End Settings Telemetry please create a downloadable markdown artifact named sophia_test.md. content: # sophia artifact smoke test. this",
+      "hasArtifactCopy": false,
+      "hasJournalLoading": false,
+      "hasRawMnt": false,
+      "hasReady": true
+    }
+  },
+  {
+    "viewport": "mobile",
+    "route": "/artifacts",
+    "domContentLoadedMs": 790,
+    "readyMs": null,
+    "readyState": {
+      "excerpt": "SOPHIA OBSERVATORY Artifact Observatory Search artifacts All artifacts Made with Sophia Recently opened Documents Visuals TYPE All types HTM",
+      "hasArtifactCopy": false,
+      "hasJournalLoading": false,
+      "hasRawMnt": false,
+      "hasReady": false
+    }
+  },
+  {
+    "viewport": "mobile",
+    "route": "/journal",
+    "domContentLoadedMs": 196,
+    "readyMs": null,
+    "readyState": {
+      "excerpt": "Loading journal Bringing Sophia's saved memories into view.",
+      "hasArtifactCopy": false,
+      "hasJournalLoading": true,
+      "hasRawMnt": false,
+      "hasReady": false
+    }
+  },
+  {
+    "viewport": "mobile",
+    "route": "/session",
+    "domContentLoadedMs": 941,
+    "readyMs": 1323,
+    "readyState": {
+      "excerpt": "Back End Settings Telemetry please create a downloadable markdown artifact named sophia_test.md. content: # sophia artifact smoke test. this",
+      "hasArtifactCopy": false,
+      "hasJournalLoading": false,
+      "hasRawMnt": false,
+      "hasReady": true
+    }
+  }
+]
