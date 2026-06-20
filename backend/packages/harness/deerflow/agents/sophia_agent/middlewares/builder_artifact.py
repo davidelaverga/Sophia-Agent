@@ -3182,13 +3182,26 @@ def _slide_qc_bash_delta(command: str, text: str) -> dict[str, Any]:
             result["image_path"] = image_files[index]
     invocations = max(len(results), _slide_qc_invocations_in_command(command))
     if invocations > len(results):
-        results.extend(
-            {
-                "pass": False,
-                "reasons": ["QC subprocess did not emit a parseable verdict"],
-            }
-            for _ in range(invocations - len(results))
+        skipped_reason = next(
+            (
+                str(reason)
+                for result in results
+                if isinstance(result, dict) and result.get("skipped") is True
+                for reason in (result.get("reasons") or [])
+                if isinstance(reason, str)
+            ),
+            None,
         )
+        for index in range(len(results), invocations):
+            result = {
+                "pass": False,
+                "reasons": [skipped_reason or "QC subprocess did not emit a parseable verdict"],
+            }
+            if skipped_reason:
+                result["skipped"] = True
+            if index < len(image_files):
+                result["image_path"] = image_files[index]
+            results.append(result)
     passed = sum(1 for result in results if result.get("pass") is True)
     failures = max(0, invocations - passed)
     reasons = [

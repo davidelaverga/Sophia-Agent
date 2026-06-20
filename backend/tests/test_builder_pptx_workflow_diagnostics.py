@@ -632,6 +632,57 @@ def test_slide_qc_bash_result_preserves_skipped_json_payload(tmp_path: Path) -> 
     }
 
 
+def test_slide_qc_bash_result_pads_chained_skipped_qc_as_unavailable(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    request = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs)}},
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/image-generation/scripts/slide_qc.py "
+                    "--spec-file /mnt/user-data/workspace/slide-01.txt "
+                    "--image-file /mnt/user-data/outputs/slide-01.png && "
+                    "python /mnt/skills/public/image-generation/scripts/slide_qc.py "
+                    "--spec-file /mnt/user-data/workspace/slide-02.txt "
+                    "--image-file /mnt/user-data/outputs/slide-02.png"
+                )
+            },
+        },
+    )
+    reason = "slide QC skipped: ANTHROPIC_API_KEY is not set"
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(
+        request,
+        _tool_message(
+            f'{{"pass": false, "skipped": true, "reasons": ["{reason}"]}}\n'
+            f'Std Error:\n[qc] PASS=False reasons=["{reason}"]'
+        ),
+    )
+
+    assert delta == {
+        "qc_invocation_count": 2,
+        "qc_pass_count": 0,
+        "qc_failure_count": 2,
+        "qc_results": [
+            {
+                "pass": False,
+                "reasons": [reason],
+                "skipped": True,
+                "image_path": "/mnt/user-data/outputs/slide-01.png",
+            },
+            {
+                "pass": False,
+                "reasons": [reason],
+                "skipped": True,
+                "image_path": "/mnt/user-data/outputs/slide-02.png",
+            },
+        ],
+        "qc_reasons": [reason],
+    }
+
+
 def test_slide_qc_bash_result_maps_chained_invocations_to_their_images(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()
