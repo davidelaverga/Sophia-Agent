@@ -165,6 +165,52 @@ def test_trace_disabled_runnable_wraps_sync_and_async_execution(monkeypatch) -> 
     ]
 
 
+def test_trace_disabled_runnable_preserves_anthropic_prompt_caching() -> None:
+    from langchain_anthropic import ChatAnthropic
+    from langchain_anthropic.middleware.prompt_caching import (
+        AnthropicPromptCachingMiddleware,
+    )
+
+    class _Request:
+        def __init__(self, *, model: Any, model_settings: dict[str, Any] | None = None) -> None:
+            self.model = model
+            self.model_settings = model_settings or {}
+            self.messages = []
+            self.system_message = None
+            self.tools = []
+
+        def override(self, **overrides: Any) -> _Request:
+            clone = _Request(
+                model=overrides.get("model", self.model),
+                model_settings=overrides.get("model_settings", self.model_settings),
+            )
+            clone.messages = overrides.get("messages", self.messages)
+            clone.system_message = overrides.get("system_message", self.system_message)
+            clone.tools = overrides.get("tools", self.tools)
+            return clone
+
+    wrapped_model = observability.disable_langsmith_tracing_for_runnable(
+        ChatAnthropic(model="claude-haiku-4-5-20251001", api_key="test-key")
+    )
+    middleware = AnthropicPromptCachingMiddleware(
+        ttl="5m", unsupported_model_behavior="raise"
+    )
+    captured: dict[str, Any] = {}
+
+    assert isinstance(wrapped_model, ChatAnthropic)
+
+    result = middleware.wrap_model_call(
+        _Request(model=wrapped_model),
+        lambda request: captured.setdefault("request", request),
+    )
+
+    assert result is captured["request"]
+    assert captured["request"].model_settings["cache_control"] == {
+        "type": "ephemeral",
+        "ttl": "5m",
+    }
+
+
 def test_builder_trace_runnable_uses_explicit_builder_context(monkeypatch) -> None:
     events: list[tuple[str, bool | None]] = []
     context_kwargs: list[dict[str, Any]] = []

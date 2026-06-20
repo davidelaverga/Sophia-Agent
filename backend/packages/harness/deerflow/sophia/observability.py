@@ -230,6 +230,12 @@ class LangSmithTraceDisabledRunnable(Runnable[Any, Any]):
     def __init__(self, runnable: Any) -> None:
         object.__setattr__(self, "_runnable", runnable)
 
+    @property
+    def __class__(self) -> type[Any]:  # type: ignore[override]
+        """Expose the wrapped type to middleware that checks model classes."""
+
+        return self._runnable.__class__
+
     def __getattr__(self, name: str) -> Any:
         return getattr(self._runnable, name)
 
