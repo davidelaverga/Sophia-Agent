@@ -533,6 +533,47 @@ def test_slide_qc_bash_result_records_verdict_feedback_payload(tmp_path: Path) -
     }
 
 
+def test_slide_qc_bash_result_maps_chained_invocations_to_their_images(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    request = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs)}},
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/image-generation/scripts/slide_qc.py "
+                    "--spec-file /mnt/user-data/workspace/slide-01.txt "
+                    "--image-file /mnt/user-data/outputs/slide-01.png && "
+                    "python /mnt/skills/public/image-generation/scripts/slide_qc.py "
+                    "--spec-file /mnt/user-data/workspace/slide-02.txt "
+                    "--image-file /mnt/user-data/outputs/slide-02.png"
+                )
+            },
+        },
+    )
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(
+        request,
+        _tool_message(
+            "\n".join(
+                [
+                    '[qc] PASS=True reasons=[]',
+                    '[qc] PASS=True reasons=[]',
+                ]
+            )
+        ),
+    )
+
+    assert delta["qc_invocation_count"] == 2
+    assert delta["qc_pass_count"] == 2
+    assert delta["qc_failure_count"] == 0
+    assert delta["qc_results"] == [
+        {"pass": True, "reasons": [], "image_path": "/mnt/user-data/outputs/slide-01.png"},
+        {"pass": True, "reasons": [], "image_path": "/mnt/user-data/outputs/slide-02.png"},
+    ]
+
+
 def test_image_generation_and_slide_qc_bash_result_merge_diagnostics(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()

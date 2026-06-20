@@ -190,6 +190,7 @@ _SLIDE_QC_PATH_MARKERS = (
     "/skills/image-generation/scripts/slide_qc.py",
     "/mnt/skills/image-generation/scripts/slide_qc.py",
 )
+_SHELL_SEPARATORS = {"&&", "||", ";", "|", "&"}
 # Enrichment discipline (product decision 2026-06-11): generated imagery is
 # on by default for decks, bounded by a hard per-build call cap enforced at
 # bash interception time. Terminal error classes short-circuit retries —
@@ -2156,7 +2157,7 @@ def _command_flag_values(command: str, flag: str) -> list[str]:
     collect = False
     for part in parts:
         if collect:
-            if part.startswith("--"):
+            if part in _SHELL_SEPARATORS or part.startswith("--"):
                 collect = False
             else:
                 values.append(part)
@@ -2183,12 +2184,11 @@ def _command_segment_for_marker(command: str, markers: tuple[str, ...]) -> str:
     )
     if marker_index is None:
         return command
-    separators = {"&&", "||", ";", "|", "&"}
     start = marker_index
-    while start > 0 and parts[start - 1] not in separators:
+    while start > 0 and parts[start - 1] not in _SHELL_SEPARATORS:
         start -= 1
     end = marker_index + 1
-    while end < len(parts) and parts[end] not in separators:
+    while end < len(parts) and parts[end] not in _SHELL_SEPARATORS:
         end += 1
     return shlex.join(parts[start:end])
 
@@ -2197,11 +2197,10 @@ def _command_segments_for_marker(command: str, markers: tuple[str, ...]) -> list
     parts = _command_parts(command)
     if not parts:
         return [command] if any(marker in command for marker in markers) else []
-    separators = {"&&", "||", ";", "|", "&"}
     segments: list[str] = []
     start = 0
     for index, part in enumerate([*parts, "&&"]):
-        if part not in separators:
+        if part not in _SHELL_SEPARATORS:
             continue
         segment = parts[start:index]
         if segment and any(any(marker in item for marker in markers) for item in segment):
@@ -3026,7 +3025,20 @@ def _pptx_plan_diagnostics_from_command(command: str, state: dict[str, Any]) -> 
 
 
 def _slide_qc_invocations_in_command(command: str) -> int:
-    return command.count("image-generation/scripts/slide_qc.py")
+    segments = _command_segments_for_marker(command, _SLIDE_QC_PATH_MARKERS)
+    return len(segments) if segments else command.count("image-generation/scripts/slide_qc.py")
+
+
+def _slide_qc_image_files_in_command(command: str) -> list[str]:
+    segments = _command_segments_for_marker(command, _SLIDE_QC_PATH_MARKERS)
+    if not segments:
+        return _command_flag_values(command, "--image-file")
+    image_files: list[str] = []
+    for segment in segments:
+        values = _command_flag_values(segment, "--image-file")
+        if values:
+            image_files.append(values[0])
+    return image_files
 
 
 def _slide_qc_results_from_text(text: str) -> list[dict[str, Any]]:
@@ -3053,7 +3065,7 @@ def _slide_qc_results_from_text(text: str) -> list[dict[str, Any]]:
 
 def _slide_qc_bash_delta(command: str, text: str) -> dict[str, Any]:
     results = _slide_qc_results_from_text(text)
-    image_files = _command_flag_values(command, "--image-file")
+    image_files = _slide_qc_image_files_in_command(command)
     for index, result in enumerate(results):
         if index < len(image_files):
             result["image_path"] = image_files[index]
