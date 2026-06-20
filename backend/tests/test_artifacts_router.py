@@ -500,6 +500,45 @@ def test_list_artifacts_filters_supabase_visual_support_assets(tmp_path, monkeyp
     assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/deck.pptx"]
 
 
+def test_list_artifacts_keeps_supabase_deck_preview_pdf_for_canvas_resolution(tmp_path, monkeypatch) -> None:
+    missing_outputs = tmp_path / "missing" / "outputs"
+    supabase_items = [
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename="deck.pptx",
+            size_bytes=1234,
+            modified_at="2026-05-26T22:46:50Z",
+            content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ),
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename="deck.preview.pdf",
+            size_bytes=4321,
+            modified_at="2026-05-26T22:46:51Z",
+            content_type="application/pdf",
+        ),
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename="visuals/openclaw_workflow.png",
+            size_bytes=100,
+            modified_at="2026-05-26T22:46:52Z",
+            content_type="image/png",
+        ),
+    ]
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: missing_outputs)
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "list_artifacts",
+        lambda *, thread_id: supabase_items,
+    )
+
+    response = asyncio.run(artifacts_router.list_artifacts("thread-1"))
+
+    assert [item.path for item in response.artifacts] == [
+        "mnt/user-data/outputs/deck.preview.pdf",
+        "mnt/user-data/outputs/deck.pptx",
+    ]
+    assert response.artifacts[0].mime_type == "application/pdf"
+
+
 def test_list_artifacts_merges_and_dedupes_local_and_supabase(tmp_path, monkeypatch) -> None:
     outputs_dir = tmp_path / "outputs"
     outputs_dir.mkdir()

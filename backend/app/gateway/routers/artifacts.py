@@ -369,6 +369,20 @@ def _is_builder_support_artifact_path(relative_path: str) -> bool:
     )
 
 
+def _is_supabase_thread_list_support_artifact_path(relative_path: str) -> bool:
+    """Return True for Supabase artifacts hidden from the thread render library.
+
+    PPTX preview PDFs are support files for tray/card display, but the canvas
+    resolver needs them in the thread artifact list when only durable storage
+    survives a deploy.
+    """
+    normalized = relative_path.strip().lstrip("/").replace("\\", "/")
+    name = PurePosixPath(normalized).name.lower()
+    if name.endswith(".preview.pdf"):
+        return False
+    return _is_builder_support_artifact_path(normalized)
+
+
 def _is_office_download(filename: str | Path) -> bool:
     return Path(filename).suffix.lower() in _OFFICE_DOWNLOAD_EXTENSIONS
 
@@ -1291,7 +1305,7 @@ def _merge_supabase_artifacts(
 ) -> int:
     count = 0
     for artifact in supabase_artifacts:
-        if _is_builder_support_artifact_path(artifact.filename):
+        if _is_supabase_thread_list_support_artifact_path(artifact.filename):
             continue
         path = f"{_OUTPUTS_VIRTUAL_PATH}/{artifact.filename}"
         if path in artifacts_by_path:
