@@ -22,7 +22,7 @@ def _runtime(outputs_path):
     )
 
 
-def _presentation_runtime(outputs_path, *, task: str = "Build a deck"):
+def _presentation_runtime(outputs_path, *, task: str = "Build a deck", **state_overrides):
     return SimpleNamespace(
         state={
             "thread_data": {"outputs_path": str(outputs_path)},
@@ -32,6 +32,7 @@ def _presentation_runtime(outputs_path, *, task: str = "Build a deck"):
                 "task_type": "presentation",
                 "artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
             },
+            **state_overrides,
         },
         context={},
         config={
@@ -150,6 +151,63 @@ def test_generate_visual_asset_allows_structural_visuals_for_no_image_presentati
     assert payload["success"] is True
     assert payload["svg_path"] == "/mnt/user-data/outputs/visuals/system-flow.svg"
     assert (outputs / "visuals" / "system-flow.svg").is_file()
+
+
+def test_generate_visual_asset_allows_structural_visuals_after_failed_slide_qc(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+
+    payload = _payload(
+        generate_visual_asset.func(
+            runtime=_presentation_runtime(
+                outputs,
+                builder_pptx_diagnostics={
+                    "qc_results": [
+                        {
+                            "pass": False,
+                            "reasons": ["garbled title"],
+                            "image_path": "/mnt/user-data/outputs/slide-02.png",
+                        }
+                    ]
+                },
+            ),
+            visual_type="architecture_diagram",
+            title="System flow",
+            data=["Agent", "Memory"],
+            edges=[{"from": "Agent", "to": "Memory"}],
+            output_name="system-flow",
+        )
+    )
+
+    assert payload["success"] is True
+    assert payload["svg_path"] == "/mnt/user-data/outputs/visuals/system-flow.svg"
+    assert (outputs / "visuals" / "system-flow.svg").is_file()
+
+
+def test_generate_visual_asset_keeps_structural_restriction_when_slide_qc_skipped(tmp_path) -> None:
+    payload = _payload(
+        generate_visual_asset.func(
+            runtime=_presentation_runtime(
+                tmp_path / "outputs",
+                builder_pptx_diagnostics={
+                    "qc_results": [
+                        {
+                            "pass": False,
+                            "skipped": True,
+                            "reasons": ["slide QC skipped: ANTHROPIC_API_KEY is not set"],
+                            "image_path": "/mnt/user-data/outputs/slide-02.png",
+                        }
+                    ]
+                },
+            ),
+            visual_type="architecture_diagram",
+            title="System flow",
+            data=["Agent", "Memory"],
+            output_name="system-flow",
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["error_type"] == "presentation_visual_asset_restricted"
 
 
 def test_generate_visual_asset_allows_data_charts_for_presentations(tmp_path) -> None:

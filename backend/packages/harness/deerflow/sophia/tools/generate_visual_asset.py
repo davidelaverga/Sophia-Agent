@@ -121,6 +121,25 @@ def _presentation_image_generation_disabled(runtime: ToolRuntime | None) -> bool
     )
 
 
+def _presentation_qc_fallback_active(runtime: ToolRuntime | None) -> bool:
+    state = getattr(runtime, "state", None) or {}
+    diagnostics = state.get("builder_pptx_diagnostics") if isinstance(state, dict) else None
+    if not isinstance(diagnostics, dict):
+        return False
+    results = diagnostics.get("qc_results")
+    if isinstance(results, list):
+        return any(
+            isinstance(result, dict)
+            and result.get("pass") is not True
+            and result.get("skipped") is not True
+            for result in results
+        )
+    try:
+        return int(diagnostics.get("qc_failure_count", 0) or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
 def _presentation_visual_asset_rejection(visual_type: str, runtime: ToolRuntime | None) -> str | None:
     if _runtime_task_type(runtime) not in _PRESENTATION_TASK_TYPES:
         return None
@@ -128,7 +147,10 @@ def _presentation_visual_asset_rejection(visual_type: str, runtime: ToolRuntime 
         return None
     if (
         visual_type in _PRESENTATION_STRUCTURAL_VISUAL_KINDS
-        and _presentation_image_generation_disabled(runtime)
+        and (
+            _presentation_image_generation_disabled(runtime)
+            or _presentation_qc_fallback_active(runtime)
+        )
     ):
         return None
     allowed = ", ".join(sorted(_PRESENTATION_DATA_CHART_KINDS))
