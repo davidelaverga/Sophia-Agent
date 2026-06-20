@@ -502,6 +502,24 @@ def test_validate_deck_plan_accepts_image_forward_with_title_and_qc() -> None:
     assert problems == []
 
 
+def test_validate_deck_plan_accepts_native_stat_slides_without_images() -> None:
+    diagnostics = {"pptx_slide_title_results": [{"slide": 1, "title_present": True}]}
+
+    for stat_slide in (
+        {"type": "stat", "title": "Momentum", "stat": "87%", "label": "adoption"},
+        {
+            "type": "content",
+            "subtype": "stat",
+            "title": "Momentum",
+            "value": "87%",
+            "label": "adoption",
+        },
+    ):
+        plan = {"slides": [{"type": "cover", "title": "Launch"}, stat_slide]}
+
+        assert _validate_deck_plan(plan, diagnostics) == []
+
+
 def test_slide_qc_bash_result_records_verdict_feedback_payload(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()

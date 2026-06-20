@@ -2793,6 +2793,10 @@ def _slide_type(slide: dict[str, Any]) -> str:
     return str(slide.get("type") or slide.get("layout") or "content").strip().lower().replace("-", "_")
 
 
+def _slide_layout_key(value: Any) -> str:
+    return str(value or "").strip().lower().replace("-", "_").replace(" ", "_")
+
+
 def _slide_treatment(slide: dict[str, Any]) -> str:
     return str(
         slide.get("subtype")
@@ -2816,6 +2820,14 @@ def _slide_is_data_chart(slide: dict[str, Any]) -> bool:
         return True
     visual_kind = str(slide.get("visual_kind") or slide.get("chart_type") or "").strip().lower()
     return visual_kind in {"bar_chart", "line_chart", "pie_chart", "donut_chart"}
+
+
+def _slide_is_stat_layout(slide: dict[str, Any]) -> bool:
+    slide_type = _slide_type(slide)
+    subtype = _slide_layout_key(slide.get("subtype"))
+    return slide_type in {"stat", "stat_band", "metrics"} or (
+        slide_type == "content" and subtype == "stat"
+    )
 
 
 def _content_slides(slides: list[Any]) -> list[dict[str, Any]]:
@@ -2911,9 +2923,13 @@ def _validate_deck_plan(plan: dict[str, Any], diagnostics: dict[str, Any]) -> li
 
 def _deck_content_problems(slides: list[Any]) -> list[str]:
     return [
-        f"Content slide {index} is neither image-forward nor a flagged data chart."
+        f"Content slide {index} is neither image-forward nor a flagged data/stat slide."
         for index, slide in enumerate(_content_slides(slides), 1)
-        if not _slide_image_ref(slide) and not _slide_is_data_chart(slide)
+        if (
+            not _slide_image_ref(slide)
+            and not _slide_is_data_chart(slide)
+            and not _slide_is_stat_layout(slide)
+        )
     ]
 
 
