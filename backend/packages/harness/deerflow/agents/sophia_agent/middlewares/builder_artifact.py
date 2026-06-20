@@ -3065,7 +3065,9 @@ def _deck_qc_ordered_problems(image_slides: list[tuple[int, str]], qc_results: l
     return [
         f"Slide {index} failed QC: {result.get('reasons')}"
         for (index, _image_ref), result in zip(image_slides, qc_results, strict=False)
-        if isinstance(result, dict) and result.get("pass") is not True
+        if isinstance(result, dict)
+        and result.get("pass") is not True
+        and result.get("skipped") is not True
     ]
 
 
@@ -3078,6 +3080,8 @@ def _deck_qc_reference_problems(
         result = _qc_result_for_image(qc_by_ref, image_ref)
         if result is None:
             problems.append(f"Slide {index} image was not QC-checked.")
+        elif result.get("skipped") is True:
+            continue
         elif result.get("pass") is not True:
             problems.append(f"Slide {index} failed QC: {result.get('reasons')}")
     return problems
@@ -3133,9 +3137,25 @@ def _slide_qc_image_files_in_command(command: str) -> list[str]:
 
 
 def _slide_qc_results_from_text(text: str) -> list[dict[str, Any]]:
-    results: list[dict[str, Any]] = []
+    json_results: list[dict[str, Any]] = []
+    summary_results: list[dict[str, Any]] = []
     for line in (text or "").splitlines():
         line = line.strip()
+        if line.startswith("{"):
+            try:
+                payload = json.loads(line)
+            except json.JSONDecodeError:
+                payload = None
+            if isinstance(payload, dict) and "pass" in payload:
+                reasons = payload.get("reasons")
+                result = {
+                    "pass": payload.get("pass") is True,
+                    "reasons": [str(reason) for reason in reasons] if isinstance(reasons, list) else [],
+                }
+                if payload.get("skipped") is True:
+                    result["skipped"] = True
+                json_results.append(result)
+            continue
         if not line.startswith("[qc]"):
             continue
         match = re.match(r"^\[qc\]\s+PASS=(true|false|True|False)\s+reasons=(.*)$", line)
@@ -3145,13 +3165,13 @@ def _slide_qc_results_from_text(text: str) -> list[dict[str, Any]]:
             reasons = json.loads(match.group(2))
         except json.JSONDecodeError:
             reasons = [match.group(2)] if match.group(2) else []
-        results.append(
+        summary_results.append(
             {
                 "pass": match.group(1).lower() == "true",
                 "reasons": [str(reason) for reason in reasons] if isinstance(reasons, list) else [],
             }
         )
-    return results
+    return json_results or summary_results
 
 
 def _slide_qc_bash_delta(command: str, text: str) -> dict[str, Any]:

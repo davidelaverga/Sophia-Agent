@@ -502,6 +502,31 @@ def test_validate_deck_plan_accepts_image_forward_with_title_and_qc() -> None:
     assert problems == []
 
 
+def test_validate_deck_plan_treats_skipped_qc_as_unavailable() -> None:
+    plan = {
+        "slides": [
+            {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png"},
+        ]
+    }
+
+    problems = _validate_deck_plan(
+        plan,
+        {
+            "pptx_slide_title_results": [{"slide": 1, "title_present": True}],
+            "qc_results": [
+                {
+                    "pass": False,
+                    "skipped": True,
+                    "reasons": ["slide QC skipped: ANTHROPIC_API_KEY is not set"],
+                    "image_path": "/mnt/user-data/outputs/slide-1.png",
+                },
+            ],
+        },
+    )
+
+    assert problems == []
+
+
 def test_validate_deck_plan_accepts_native_stat_slides_without_images() -> None:
     diagnostics = {"pptx_slide_title_results": [{"slide": 1, "title_present": True}]}
 
@@ -563,6 +588,47 @@ def test_slide_qc_bash_result_records_verdict_feedback_payload(tmp_path: Path) -
         "qc_failure_count": 1,
         "qc_results": [{"pass": False, "reasons": ["garbled"], "image_path": "/mnt/user-data/outputs/slide-01.png"}],
         "qc_reasons": ["garbled"],
+    }
+
+
+def test_slide_qc_bash_result_preserves_skipped_json_payload(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    request = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs)}},
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/image-generation/scripts/slide_qc.py "
+                    "--image-file /mnt/user-data/outputs/slide-01.png "
+                    "--spec-file /mnt/user-data/workspace/slide-01.txt"
+                )
+            },
+        },
+    )
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(
+        request,
+        _tool_message(
+            '{"pass": false, "skipped": true, "reasons": ["slide QC skipped: ANTHROPIC_API_KEY is not set"]}\n'
+            'Std Error:\n[qc] PASS=False reasons=["slide QC skipped: ANTHROPIC_API_KEY is not set"]'
+        ),
+    )
+
+    assert delta == {
+        "qc_invocation_count": 1,
+        "qc_pass_count": 0,
+        "qc_failure_count": 1,
+        "qc_results": [
+            {
+                "pass": False,
+                "reasons": ["slide QC skipped: ANTHROPIC_API_KEY is not set"],
+                "skipped": True,
+                "image_path": "/mnt/user-data/outputs/slide-01.png",
+            }
+        ],
+        "qc_reasons": ["slide QC skipped: ANTHROPIC_API_KEY is not set"],
     }
 
 
