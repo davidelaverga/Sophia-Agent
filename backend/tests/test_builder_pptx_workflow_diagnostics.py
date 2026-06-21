@@ -639,6 +639,32 @@ def test_deck_plan_validation_repairs_known_chart_visual_metadata() -> None:
     assert state["builder_pptx_plan_deterministic_repair_attempted"] is True
 
 
+def test_deck_plan_validation_does_not_repair_missing_image_refs_from_unused_outputs() -> None:
+    diagnostics = {
+        "pptx_plan_json": {
+            "slides": [
+                {"type": "cover", "title": "Launch"},
+                {"type": "content", "title": "Architecture"},
+            ]
+        },
+        "pptx_slide_title_results": [{"slide": 1, "title_present": True}],
+        "image_output_paths": ["/mnt/user-data/outputs/visuals/architecture.png"],
+    }
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation", "task": "Create a visual deck"},
+        "builder_pptx_diagnostics": diagnostics,
+    }
+
+    problems = _deck_plan_validation_problems(state)
+
+    assert problems == [
+        "Content slide 1 is neither image-forward nor a flagged data/stat slide.",
+    ]
+    assert diagnostics["pptx_plan_json"]["slides"][1].get("image_path") is None
+    assert "builder_pptx_plan_deterministic_repair_attempted" not in state
+
+
 def test_validate_deck_plan_treats_skipped_qc_as_unavailable() -> None:
     plan = {
         "slides": [

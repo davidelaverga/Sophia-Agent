@@ -3327,33 +3327,6 @@ def _repair_slide_chart_flag(slide: dict[str, Any]) -> bool:
     return True
 
 
-def _repair_slide_image_ref(slide: dict[str, Any], image_candidates: list[str]) -> bool:
-    if (
-        _slide_image_ref(slide)
-        or _slide_is_data_chart(slide)
-        or _slide_is_stat_layout(slide)
-        or not image_candidates
-    ):
-        return False
-    slide["image_path"] = image_candidates.pop(0)
-    return True
-
-
-def _unused_image_candidates(diagnostics: dict[str, Any], slides: list[Any]) -> list[str]:
-    used_images = {
-        image_ref
-        for slide in slides
-        if isinstance(slide, dict)
-        for image_ref in [_slide_image_ref(slide)]
-        if image_ref
-    }
-    return [
-        image_ref
-        for image_ref in (diagnostics.get("image_output_paths") or [])
-        if isinstance(image_ref, str) and image_ref.strip() and image_ref not in used_images
-    ]
-
-
 def _repair_deck_plan_for_validation(
     plan: dict[str, Any],
     diagnostics: dict[str, Any],
@@ -3366,13 +3339,11 @@ def _repair_deck_plan_for_validation(
         return None
     changed = False
     title_by_slide = _title_present_by_slide(diagnostics)
-    image_candidates = _unused_image_candidates(diagnostics, slides_raw)
     for index, slide in enumerate(slides_raw, 1):
         if not isinstance(slide, dict):
             continue
         changed = _repair_slide_title_flag(slide, index, title_by_slide) or changed
         changed = _repair_slide_chart_flag(slide) or changed
-        changed = _repair_slide_image_ref(slide, image_candidates) or changed
     return repaired if changed else None
 
 
