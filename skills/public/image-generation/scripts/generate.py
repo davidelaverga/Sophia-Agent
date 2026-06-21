@@ -47,7 +47,7 @@ _ASPECT_TO_SIZE = {
     "3:2": "1536x1024",
 }
 _DEFAULT_SIZE = "1536x1024"
-_SLIDE_VISUAL_SIZE = "1536x864"
+_SLIDE_VISUAL_SIZE = "1536x1024"
 _SLIDE_VISUAL_EDIT_SIZE = "1536x1024"
 _OPENAI_SUPPORTED_SIZES = {"auto", "1024x1024", "1536x1024", "1024x1536"}
 _SLIDE_VISUAL_ASPECT_RATIO = 16 / 9
@@ -350,7 +350,7 @@ def _resolve_request_size(
     has_references: bool,
 ) -> str:
     resolved = explicit_size or (_SLIDE_VISUAL_SIZE if slide_visual else _resolve_size(aspect_ratio))
-    if has_references and resolved not in _OPENAI_SUPPORTED_SIZES:
+    if resolved not in _OPENAI_SUPPORTED_SIZES:
         return _SLIDE_VISUAL_EDIT_SIZE if slide_visual else _DEFAULT_SIZE
     return resolved
 

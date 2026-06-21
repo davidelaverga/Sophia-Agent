@@ -759,6 +759,11 @@ def _nested_trace_env_for_request(request: ToolCallRequest) -> dict[str, str]:
     return env
 
 
+def _image_trace_export_command(env: dict[str, str]) -> str:
+    assignments = " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items())
+    return f"export {assignments};"
+
+
 def _maybe_attach_image_trace_env(request: ToolCallRequest) -> None:
     if request.tool_call.get("name") not in {"bash", "bash_tool"}:
         return
@@ -769,11 +774,12 @@ def _maybe_attach_image_trace_env(request: ToolCallRequest) -> None:
     if not isinstance(command, str) or not any(marker in command for marker in _IMAGE_GENERATION_PATH_MARKERS):
         return
     env = _nested_trace_env_for_request(request)
-    if not env or any(f"{name}=" in command for name in env):
+    if not env or (
+        command.lstrip().startswith("export ") and all(f"{name}=" in command for name in env)
+    ):
         return
     updated_args = dict(args)
-    prefix = " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items())
-    updated_args["command"] = f"{prefix} {command}"
+    updated_args["command"] = f"{_image_trace_export_command(env)} {command}"
     request.tool_call["args"] = updated_args
 
 

@@ -268,7 +268,7 @@ class TestGeneratePathWithoutReferenceImages:
         trace_context = script_module._langsmith_trace_context(
             prompt="Slide prompt",
             valid_refs=[],
-            size="1536x864",
+            size="1536x1024",
             quality="high",
         )
 
@@ -434,7 +434,7 @@ class TestSlideVisualMode:
                 aspect_ratio="16:9",
                 has_references=False,
             )
-            == "1536x864"
+            == "1536x1024"
         )
 
     def test_slide_visual_reference_size_uses_supported_edit_size(self, script_module) -> None:
@@ -473,13 +473,13 @@ class TestSlideVisualMode:
 
         fake_client.images.generate.assert_called_once()
         kwargs = fake_client.images.generate.call_args.kwargs
-        assert kwargs["size"] == "1536x864"
+        assert kwargs["size"] == "1536x1024"
         assert kwargs["quality"] == "high"
         assert kwargs["prompt"].startswith('A professional slide. Title: "THE TEXT READS: Roadmap".')
         assert script_module._SOPHIA_SLIDE_STYLE in kwargs["prompt"]
         assert script_module._SOPHIA_SLIDE_AVOID in kwargs["prompt"]
         captured = capsys.readouterr()
-        assert "[gen] slide_visual=True quality=high size=1536x864" in captured.out
+        assert "[gen] slide_visual=True quality=high size=1536x1024" in captured.out
         assert '[gen] PROMPT_SENT: A professional slide. Title: "THE TEXT READS: Roadmap".' in captured.out
         assert "[gen] result: ext=.png bytes=" in captured.out
         assert "ref_images=0" in captured.out

@@ -136,9 +136,40 @@ def test_image_generation_bash_command_gets_builder_trace_env() -> None:
 
     command = request.tool_call["args"]["command"]
     assert command.startswith(
-        "SOPHIA_PARENT_TRACE_ID=trace-1 SOPHIA_PARENT_RUN_ID=run-1 SOPHIA_THREAD_ID=thread-1 "
+        "export SOPHIA_PARENT_TRACE_ID=trace-1 SOPHIA_PARENT_RUN_ID=run-1 SOPHIA_THREAD_ID=thread-1; "
     )
     assert "image-generation/scripts/generate.py" in command
+
+
+def test_attach_image_trace_env_exports_for_chained_generation() -> None:
+    request = SimpleNamespace(
+        state={
+            "thread_id": "thread-1",
+            "builder_task": {"run_id": "run-1"},
+        },
+        runtime=SimpleNamespace(config={"metadata": {"trace_id": "trace-1"}}),
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/image-generation/scripts/generate.py "
+                    "--prompt-file /mnt/user-data/workspace/slide-01.json "
+                    "--output-file /mnt/user-data/outputs/slide-01.png && "
+                    "python /mnt/skills/public/image-generation/scripts/generate.py "
+                    "--prompt-file /mnt/user-data/workspace/slide-02.json "
+                    "--output-file /mnt/user-data/outputs/slide-02.png"
+                )
+            },
+        },
+    )
+
+    _maybe_attach_image_trace_env(request)
+
+    command = request.tool_call["args"]["command"]
+    assert command.startswith("export SOPHIA_PARENT_TRACE_ID=trace-1 ")
+    assert " SOPHIA_PARENT_RUN_ID=run-1 " in command
+    assert " SOPHIA_THREAD_ID=thread-1; python " in command
+    assert command.count("image-generation/scripts/generate.py") == 2
 
 
 def test_image_generation_bash_result_parses_machine_readable_failure(tmp_path: Path) -> None:
