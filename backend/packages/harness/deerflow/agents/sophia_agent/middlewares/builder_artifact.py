@@ -631,6 +631,10 @@ _VISUAL_DESIGN_SKILL_PATH_MARKERS = (
     "/mnt/skills/hallmark/SKILL.md",
 )
 
+
+def _text_marker_present(text: str, marker: str) -> bool:
+    return re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", text) is not None
+
 # Artifact Visual System Phase 5c: the report skill the .pdf target requires.
 _PDF_REPORT_SKILL_PATH_MARKERS = (
     "/skills/public/pdf-report/SKILL.md",
@@ -2452,7 +2456,7 @@ def _visuals_requested(state: dict[str, Any]) -> bool:
                 " ",
                 combined,
             )
-    return any(marker in combined for marker in _VISUAL_REQUEST_MARKERS)
+    return any(_text_marker_present(combined, marker) for marker in _VISUAL_REQUEST_MARKERS)
 
 
 def _visual_asset_success_count(state: dict[str, Any]) -> int:

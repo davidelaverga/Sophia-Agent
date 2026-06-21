@@ -120,15 +120,17 @@ class TestVisualCapabilityPrompt:
         result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
 
         briefing = _briefing(result)
-        assert "image-generation" not in _skill_names_section(briefing)
+        skill_names = _available_skills_section(briefing)
+        assert "image-generation" not in skill_names
+        assert "visual-design" not in skill_names
         assert "Image generation is disabled for this run" in briefing
         assert "do not run the image-generation script" in briefing
         assert "Slides use gpt-image-2 full-slide visuals" not in briefing
 
 
-def _skill_names_section(briefing: str) -> str:
-    start = briefing.find("<skill_system>")
-    end = briefing.find("</skill_system>")
+def _available_skills_section(briefing: str) -> str:
+    start = briefing.find("<available_skills>")
+    end = briefing.find("</available_skills>")
     if start == -1 or end == -1:
         return ""
     return briefing[start:end]

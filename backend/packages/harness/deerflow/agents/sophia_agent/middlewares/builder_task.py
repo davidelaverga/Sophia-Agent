@@ -428,6 +428,10 @@ def _plain_deck_image_opt_out_requested(text: str) -> bool:
     )
 
 
+def _text_marker_present(text: str, marker: str) -> bool:
+    return re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", text) is not None
+
+
 def _image_generation_enabled(
     delegation_context: dict[str, Any],
     *,
@@ -460,10 +464,18 @@ def _is_pptx_image_generation_target(artifact_target_ext: str, task_type: str) -
 
 
 def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
-    task = str(delegation_context.get("task") or "").lower()
-    description = str(delegation_context.get("description") or "").lower()
-    combined = f"{task}\n{description}"
-    return any(marker in combined for marker in _VISUAL_REQUEST_MARKERS)
+    combined = "\n".join(
+        str(delegation_context.get(key) or "").lower()
+        for key in ("task", "description", "artifact_brief", "original_task")
+    )
+    if _plain_deck_image_opt_out_requested(combined):
+        for marker in _PLAIN_DECK_IMAGE_OPT_OUT_MARKERS:
+            combined = re.sub(
+                rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])",
+                " ",
+                combined,
+            )
+    return any(_text_marker_present(combined, marker) for marker in _VISUAL_REQUEST_MARKERS)
 
 
 def _polished_deck_images_requested(delegation_context: dict[str, Any]) -> bool:
