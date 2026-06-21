@@ -234,19 +234,39 @@ def _page_image_count(page: Any) -> int:
     return count
 
 
-def _layout_quality(page_count: int, blank_count: int, short_count: int) -> tuple[str, str | None]:
+def _layout_quality(
+    page_count: int,
+    blank_count: int,
+    short_count: int,
+    *,
+    requested_pages: int | None = None,
+    requested_min_pages: int | None = None,
+    requested_max_pages: int | None = None,
+) -> tuple[str, str | None]:
     if page_count <= 0:
         return "unknown", "pdf_layout_unreadable"
     if blank_count >= page_count:
         return "unusable", "all_pages_blank"
     if blank_count > 0:
         return "warning", "blank_pages_detected"
+    if requested_pages is not None and page_count != requested_pages:
+        return "warning", "page_count_off_target"
+    if requested_min_pages is not None and page_count < requested_min_pages:
+        return "warning", "page_count_off_target"
+    if requested_max_pages is not None and page_count > requested_max_pages:
+        return "warning", "page_count_off_target"
     if page_count > _DEFAULT_MAX_PAGES and short_count > 0:
         return "warning", "sparse_long_pdf"
     return "ok", None
 
 
-def _inspect_pdf_layout(pdf_file: Path) -> dict[str, int | str | None]:
+def _inspect_pdf_layout(
+    pdf_file: Path,
+    *,
+    requested_pages: int | None = None,
+    requested_min_pages: int | None = None,
+    requested_max_pages: int | None = None,
+) -> dict[str, int | str | None]:
     if PdfReader is None:
         return {
             "page_count": 0,
@@ -255,6 +275,9 @@ def _inspect_pdf_layout(pdf_file: Path) -> dict[str, int | str | None]:
             "image_count": 0,
             "layout_quality": "unknown",
             "layout_warning": "pypdf_unavailable",
+            "requested_page_count": requested_pages,
+            "requested_min_pages": requested_min_pages,
+            "requested_max_pages": requested_max_pages,
         }
     try:
         reader = PdfReader(str(pdf_file))
@@ -269,11 +292,21 @@ def _inspect_pdf_layout(pdf_file: Path) -> dict[str, int | str | None]:
             "image_count": 0,
             "layout_quality": "unknown",
             "layout_warning": "pdf_layout_unreadable",
+            "requested_page_count": requested_pages,
+            "requested_min_pages": requested_min_pages,
+            "requested_max_pages": requested_max_pages,
         }
     page_count = len(counts)
     blank_count = sum(1 for count in counts if count <= 1)
     short_count = sum(1 for count in counts if 1 < count < _SHORT_PAGE_WORD_THRESHOLD)
-    quality, warning = _layout_quality(page_count, blank_count, short_count)
+    quality, warning = _layout_quality(
+        page_count,
+        blank_count,
+        short_count,
+        requested_pages=requested_pages,
+        requested_min_pages=requested_min_pages,
+        requested_max_pages=requested_max_pages,
+    )
     return {
         "page_count": page_count,
         "blank_page_count": blank_count,
@@ -281,7 +314,50 @@ def _inspect_pdf_layout(pdf_file: Path) -> dict[str, int | str | None]:
         "image_count": image_count,
         "layout_quality": quality,
         "layout_warning": warning,
+        "requested_page_count": requested_pages,
+        "requested_min_pages": requested_min_pages,
+        "requested_max_pages": requested_max_pages,
     }
+
+
+def _inspect_pdf_layout_with_targets(
+    pdf_file: Path,
+    *,
+    requested_pages: int | None = None,
+    requested_min_pages: int | None = None,
+    requested_max_pages: int | None = None,
+) -> dict[str, int | str | None]:
+    try:
+        return _inspect_pdf_layout(
+            pdf_file,
+            requested_pages=requested_pages,
+            requested_min_pages=requested_min_pages,
+            requested_max_pages=requested_max_pages,
+        )
+    except TypeError:
+        # Some tests and older embedders monkeypatch _inspect_pdf_layout with
+        # the historical one-arg callable. Preserve compatibility and still
+        # attach page-target fields to the payload.
+        layout = dict(_inspect_pdf_layout(pdf_file))
+        layout.setdefault("requested_page_count", requested_pages)
+        layout.setdefault("requested_min_pages", requested_min_pages)
+        layout.setdefault("requested_max_pages", requested_max_pages)
+        page_count = layout.get("page_count")
+        blank_count = layout.get("blank_page_count")
+        short_count = layout.get("short_page_count")
+        if isinstance(page_count, int) and isinstance(blank_count, int) and isinstance(short_count, int):
+            quality, warning = _layout_quality(
+                page_count,
+                blank_count,
+                short_count,
+                requested_pages=requested_pages,
+                requested_min_pages=requested_min_pages,
+                requested_max_pages=requested_max_pages,
+            )
+            if warning == "page_count_off_target":
+                layout["layout_quality"] = quality
+                layout["layout_warning"] = warning
+        return layout
 
 
 def _path_validation_error(markdown_path: str, pdf_path: str) -> str | None:
@@ -624,9 +700,17 @@ def _pdf_success_result(
     template_used: bool = False,
     theme: str | None = None,
     template_fallback: bool = False,
+    requested_pages: int | None = None,
+    requested_min_pages: int | None = None,
+    requested_max_pages: int | None = None,
 ) -> str:
     size_bytes = _pdf_size(pdf_file)
-    layout = _inspect_pdf_layout(pdf_file)
+    layout = _inspect_pdf_layout_with_targets(
+        pdf_file,
+        requested_pages=requested_pages,
+        requested_min_pages=requested_min_pages,
+        requested_max_pages=requested_max_pages,
+    )
     images_missing = source_image_ref_count > 0 and int(layout.get("image_count") or 0) == 0
     masked_missing = [
         _mask_local_output(item, thread_data) for item in (missing_resources or [])
@@ -636,7 +720,7 @@ def _pdf_success_result(
         "final_artifact_ext=%s size_bytes=%s page_count=%s "
         "blank_page_count=%s short_page_count=%s image_count=%s "
         "source_image_ref_count=%s images_missing=%s missing_resources=%s "
-        "layout_quality=%s layout_warning=%s "
+        "layout_quality=%s layout_warning=%s requested_pages=%s requested_min_pages=%s requested_max_pages=%s "
         "template_used=%s theme=%s template_fallback=%s",
         engine or "pandoc_default",
         pdf_file.suffix.lower().lstrip(".") or "unknown",
@@ -650,6 +734,9 @@ def _pdf_success_result(
         ",".join(masked_missing) or "none",
         layout.get("layout_quality"),
         layout.get("layout_warning"),
+        layout.get("requested_page_count"),
+        layout.get("requested_min_pages"),
+        layout.get("requested_max_pages"),
         template_used,
         theme,
         template_fallback,
@@ -686,6 +773,9 @@ def _impl(
     pdf_engine: str | None,
     thread_data: dict[str, Any] | None = None,
     theme: str | None = None,
+    requested_pages: int | None = None,
+    requested_min_pages: int | None = None,
+    requested_max_pages: int | None = None,
 ) -> str:
     """Concrete pandoc invocation. Tested independently of the @tool wrapper."""
     # ---- Path validation -----------------------------------------------
@@ -807,6 +897,9 @@ def _impl(
         template_used=template_used,
         theme=theme_name if template_used else None,
         template_fallback=template_fallback,
+        requested_pages=requested_pages,
+        requested_min_pages=requested_min_pages,
+        requested_max_pages=requested_max_pages,
     )
 
 
@@ -817,6 +910,9 @@ def render_markdown_to_pdf(
     pdf_path: str,
     pdf_engine: str | None = None,
     theme: str | None = None,
+    requested_pages: int | None = None,
+    requested_min_pages: int | None = None,
+    requested_max_pages: int | None = None,
 ) -> str:
     """Convert a Markdown file to a PDF using pandoc.
 
@@ -837,7 +933,10 @@ def render_markdown_to_pdf(
 
     On success, returns a JSON object with ``success: true``, the PDF path,
     and safe layout metrics (page_count, blank_page_count,
-    short_page_count, layout_quality). After success, call
+    short_page_count, layout_quality). If the user requested an exact
+    or ranged page count, pass requested_pages or requested_min_pages /
+    requested_max_pages so page_count_off_target can trigger one repair.
+    After success, call
     emit_builder_artifact with ``artifact_path`` set to the PDF path unless
     Sophia injects a one-time layout repair instruction.
 
@@ -861,6 +960,9 @@ def render_markdown_to_pdf(
             (terracotta, personal documents). Can also be set with a
             sophia-theme key in the source's YAML frontmatter; this
             parameter wins when both are present.
+        requested_pages: Exact page count requested by the user, when any.
+        requested_min_pages: Lower bound for a requested page range, when any.
+        requested_max_pages: Upper bound for a requested page range, when any.
     """
     return _impl(
         markdown_path=markdown_path,
@@ -868,4 +970,7 @@ def render_markdown_to_pdf(
         pdf_engine=pdf_engine,
         thread_data=get_thread_data(runtime),
         theme=theme,
+        requested_pages=requested_pages,
+        requested_min_pages=requested_min_pages,
+        requested_max_pages=requested_max_pages,
     )

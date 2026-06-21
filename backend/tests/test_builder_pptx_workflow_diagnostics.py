@@ -535,8 +535,8 @@ def test_pptx_generation_bash_result_records_title_presence_diagnostics(tmp_path
 def test_validate_deck_plan_requires_qc_for_each_image_slide() -> None:
     plan = {
         "slides": [
-            {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png"},
-            {"type": "content", "subtype": "architecture", "title": "Flow", "image_path": "/mnt/user-data/outputs/slide-2.png"},
+            {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png", "visual_style": "clean_flat_vector"},
+            {"type": "content", "subtype": "architecture", "title": "Flow", "image_path": "/mnt/user-data/outputs/slide-2.png", "visual_style": "clean_flat_vector"},
         ]
     }
 
@@ -556,8 +556,8 @@ def test_validate_deck_plan_requires_qc_for_each_image_slide() -> None:
 def test_validate_deck_plan_accepts_image_forward_with_title_and_qc() -> None:
     plan = {
         "slides": [
-            {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png"},
-            {"type": "content", "subtype": "architecture", "title": "Flow", "image_path": "/mnt/user-data/outputs/slide-2.png"},
+            {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png", "visual_style": "clean_flat_vector"},
+            {"type": "content", "subtype": "architecture", "title": "Flow", "image_path": "/mnt/user-data/outputs/slide-2.png", "visual_style": "clean_flat_vector"},
             {"type": "content", "subtype": "chart", "title": "Data", "data_chart": True, "visual_path": "/mnt/user-data/outputs/visuals/chart.png"},
         ]
     }
@@ -588,6 +588,7 @@ def test_validate_deck_plan_accepts_qc_coverage_by_image_hash(tmp_path: Path) ->
                 "type": "cover",
                 "title": "Launch",
                 "image_path": "/mnt/user-data/outputs/regenerated.png",
+                "visual_style": "clean_flat_vector",
             }
         ]
     }
@@ -668,7 +669,7 @@ def test_deck_plan_validation_does_not_repair_missing_image_refs_from_unused_out
 def test_validate_deck_plan_treats_skipped_qc_as_unavailable() -> None:
     plan = {
         "slides": [
-            {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png"},
+            {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png", "visual_style": "clean_flat_vector"},
         ]
     }
 

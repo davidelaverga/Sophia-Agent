@@ -19,8 +19,9 @@ be generated locally under `/mnt/user-data/outputs/`.
 2. Choose the minimum useful visual set: one clear chart/diagram is better
    than several decorative weak ones.
 3. Create local visual assets with `generate_excalidraw_diagram` for
-   technical diagrams or `generate_visual_asset` for numeric/data visuals; do
-   not treat remote chart URLs as deliverable assets.
+   technical diagrams and `generate_report_chart` or `generate_visual_asset`
+   for numeric/data visuals; do not treat remote chart URLs as deliverable
+   assets.
 4. Embed or reference the local visual assets in the final HTML, PDF source, or
    PPTX plan before emitting the artifact.
 
@@ -34,6 +35,7 @@ be generated locally under `/mnt/user-data/outputs/`.
 - Keep layout density balanced: avoid mostly empty pages/slides, oversized
   tables, or one tiny chart on a full page.
 - Use a consistent palette and typography across the artifact.
+- For PDF reports, use no more than two figures from any one figure family.
 - Make charts self-contained with title, legend/labels, source context when
   appropriate, and units when numeric.
 

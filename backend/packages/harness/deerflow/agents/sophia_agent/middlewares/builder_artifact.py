@@ -18,6 +18,7 @@ import re
 import shlex
 import time
 import zipfile
+from collections import Counter
 from collections.abc import Awaitable, Callable
 from pathlib import Path, PurePosixPath
 from typing import Annotated, Any, NotRequired, override
@@ -719,6 +720,17 @@ def _runtime_config_dict(runtime: Runtime | None) -> dict[str, Any]:
     return config if isinstance(config, dict) else {}
 
 
+def _current_langsmith_dotted_order() -> str | None:
+    try:
+        from langsmith.run_helpers import get_current_run_tree
+
+        run_tree = get_current_run_tree()
+    except Exception:  # noqa: BLE001
+        return None
+    dotted_order = getattr(run_tree, "dotted_order", None)
+    return dotted_order.strip() if isinstance(dotted_order, str) and dotted_order.strip() else None
+
+
 def _nested_trace_env_for_request(request: ToolCallRequest) -> dict[str, str]:
     state = request.state or {}
     delegation_context = state.get("delegation_context") if isinstance(state.get("delegation_context"), dict) else {}
@@ -754,6 +766,8 @@ def _nested_trace_env_for_request(request: ToolCallRequest) -> dict[str, str]:
         env["SOPHIA_PARENT_TRACE_ID"] = parent_trace_id
     if parent_run_id:
         env["SOPHIA_PARENT_RUN_ID"] = parent_run_id
+    if dotted_order := _current_langsmith_dotted_order():
+        env["SOPHIA_PARENT_DOTTED_ORDER"] = dotted_order
     if thread_id:
         env["SOPHIA_THREAD_ID"] = thread_id
     return env
@@ -841,14 +855,30 @@ def _merge_builder_visual_diagnostics(
         return dict(current)
     merged = dict(current)
     for key, value in update.items():
-        if (key.endswith("_count") or key.endswith("_bytes_total")) and isinstance(value, int):
-            merged[key] = int(merged.get(key, 0) or 0) + value
-            continue
-        if key in {"visual_asset_paths", "visual_svg_paths", "visual_png_paths"} and isinstance(value, list):
-            merged[key] = _merge_string_list(merged.get(key), value)
-            continue
-        merged[key] = value
+        _merge_builder_visual_diagnostic_value(merged, key, value)
     return merged
+
+
+def _merge_builder_visual_diagnostic_value(merged: dict, key: str, value: object) -> None:
+    if (key.endswith("_count") or key.endswith("_bytes_total")) and isinstance(value, int):
+        merged[key] = int(merged.get(key, 0) or 0) + value
+        return
+    if key in _VISUAL_DIAGNOSTIC_LIST_KEYS and isinstance(value, list):
+        merged[key] = _merge_string_list(merged.get(key), value)
+        return
+    if key == "visual_figure_records" and isinstance(value, list):
+        existing = merged.get(key) if isinstance(merged.get(key), list) else []
+        merged[key] = [*existing, *value]
+        return
+    merged[key] = value
+
+
+_VISUAL_DIAGNOSTIC_LIST_KEYS = frozenset({
+    "visual_asset_paths",
+    "visual_svg_paths",
+    "visual_png_paths",
+    "visual_figure_families",
+})
 
 
 def _extract_output_relative_path(artifact_path: str | None) -> str | None:
@@ -1974,17 +2004,68 @@ def _successful_pdf_ready_to_emit(state: dict[str, Any]) -> bool:
     return _canonical_outputs_artifact_path(result.get("pdf_path")) is not None
 
 
-def _pdf_layout_repair_message(result: dict[str, Any]) -> str:
+def _pdf_requested_page_bounds(state_or_result: dict[str, Any]) -> tuple[int | None, int | None]:
+    exact = state_or_result.get("requested_page_count") or state_or_result.get("builder_pdf_requested_page_count")
+    if isinstance(exact, int) and exact > 0:
+        return exact, exact
+    low = state_or_result.get("requested_min_pages") or state_or_result.get("builder_pdf_requested_min_pages")
+    high = state_or_result.get("requested_max_pages") or state_or_result.get("builder_pdf_requested_max_pages")
+    if isinstance(low, int) and isinstance(high, int) and low > 0 and high >= low:
+        return low, high
+    return None, None
+
+
+def _pdf_page_target_text(state_or_result: dict[str, Any]) -> str:
+    low, high = _pdf_requested_page_bounds(state_or_result)
+    if low is None or high is None:
+        return "10-15 pages when the user did not ask for a different length"
+    if low == high:
+        return f"exactly {low} pages"
+    return f"{low}-{high} pages"
+
+
+def _pdf_page_count_off_target(payload: dict[str, Any]) -> bool:
+    low, high = _pdf_requested_page_bounds(payload)
+    if low is None or high is None:
+        return False
+    page_count = payload.get("page_count")
+    return isinstance(page_count, int) and not (low <= page_count <= high)
+
+
+def _enrich_pdf_render_result_with_requested_pages(
+    payload: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    low, high = _pdf_requested_page_bounds(state)
+    if low is None or high is None:
+        return payload
+    enriched = dict(payload)
+    if low == high:
+        enriched.setdefault("requested_page_count", low)
+    else:
+        enriched.setdefault("requested_min_pages", low)
+        enriched.setdefault("requested_max_pages", high)
+    if (
+        enriched.get("success") is True
+        and _pdf_page_count_off_target(enriched)
+        and enriched.get("layout_warning") not in {"all_pages_blank", "blank_pages_detected", "pdf_layout_unreadable"}
+    ):
+        enriched["layout_quality"] = "warning"
+        enriched["layout_warning"] = "page_count_off_target"
+    return enriched
+
+
+def _pdf_layout_repair_message(result: dict[str, Any], state: dict[str, Any] | None = None) -> str:
     page_count = result.get("page_count")
     blank_count = result.get("blank_page_count")
     short_count = result.get("short_page_count")
     warning = result.get("layout_warning") or "layout_quality_warning"
+    target = _pdf_page_target_text({**(state or {}), **result})
     return (
         "[Sophia/PDF layout repair]\n"
-        "The PDF rendered successfully, but the layout quality check found a sparse document. "
+        "The PDF rendered successfully, but the layout/page-count quality check found an issue. "
         f"Metrics: page_count={page_count}, blank_page_count={blank_count}, "
-        f"short_page_count={short_count}, warning={warning}. Target length is 10-15 pages "
-        "when the user did not ask for a longer PDF.\n\n"
+        f"short_page_count={short_count}, warning={warning}. Target length is {target}.\n\n"
         "Revise the Markdown source once: compact sparse tables or continuation pages, remove "
         "unnecessary page breaks, combine thin sections, then call render_markdown_to_pdf again. "
         "After this single repair pass, emit the best PDF rather than looping."
@@ -2575,6 +2656,39 @@ def _visual_asset_paths(state: dict[str, Any]) -> list[str]:
     return [path for path in paths if isinstance(path, str)]
 
 
+def _visual_figure_family_counts(state: dict[str, Any]) -> Counter[str]:
+    diagnostics = state.get("builder_visual_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return Counter()
+    families: list[str] = []
+    records = diagnostics.get("visual_figure_records")
+    if isinstance(records, list):
+        families.extend(
+            str(record.get("family")).strip()
+            for record in records
+            if isinstance(record, dict) and str(record.get("family") or "").strip()
+        )
+    if not families:
+        raw_families = diagnostics.get("visual_figure_families") or []
+        families.extend(
+            str(family).strip()
+            for family in raw_families
+            if isinstance(family, str) and family.strip()
+        )
+    return Counter(families)
+
+
+def _report_figure_family_problems(state: dict[str, Any]) -> list[str]:
+    if not _requested_pdf_artifact(state):
+        return []
+    counts = _visual_figure_family_counts(state)
+    return [
+        f"PDF report repeats figure family '{family}' {count} times; use no more than two figures from any one family."
+        for family, count in sorted(counts.items())
+        if count > 2
+    ]
+
+
 def _local_output_file_for_artifact(state: dict[str, Any], artifact_path: object) -> Path | None:
     canonical = _canonical_outputs_artifact_path(artifact_path)
     relative = _extract_output_relative_path(canonical)
@@ -2810,40 +2924,146 @@ def _apply_hero_missing_quality_metadata(
     return updated
 
 
+def _apply_report_figure_quality_metadata(
+    artifact: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    problems = _report_figure_family_problems(state)
+    if not problems:
+        return artifact
+    updated = dict(artifact)
+    updated["figure_family_warning"] = True
+    updated["figure_family_problems"] = problems[:6]
+    updated.setdefault("quality_warning", "monotone_figures")
+    confidence = updated.get("confidence")
+    if isinstance(confidence, (int, float)):
+        updated["confidence"] = min(float(confidence), 0.72)
+    tone_hint = str(updated.get("companion_tone_hint") or "").strip()
+    warning = "Note that the report's figures repeat one family more than intended."
+    updated["companion_tone_hint"] = f"{tone_hint} {warning}".strip()
+    logger.warning(
+        "[BuilderVisualDiagnostics] phase=figure_family_quality_warning problems=%s",
+        problems,
+    )
+    return updated
+
+
 def _visual_asset_result_delta(result: ToolMessage) -> dict[str, Any] | None:
+    payload = _visual_tool_payload(result)
+    if payload is None:
+        return None
+    delta = _visual_tool_payload_delta(payload)
+    logger.info(
+        "[BuilderVisualDiagnostics] phase=tool_result success=%s visual_type=%s "
+        "svg_bytes=%s png_bytes=%s png_error=%s",
+        delta["visual_asset_success_count"] > 0,
+        _visual_payload_kind(payload),
+        payload.get("svg_bytes"),
+        payload.get("png_bytes") or payload.get("image_bytes"),
+        payload.get("png_error"),
+    )
+    return delta
+
+
+def _visual_tool_payload(result: ToolMessage) -> dict[str, Any] | None:
     if not isinstance(result.content, str):
         return None
     try:
         payload = json.loads(result.content)
     except json.JSONDecodeError:
         return None
-    if not isinstance(payload, dict):
-        return None
+    return payload if isinstance(payload, dict) else None
+
+
+def _visual_tool_payload_delta(payload: dict[str, Any]) -> dict[str, Any]:
     success = payload.get("success") is True
     svg_path, png_path = _visual_payload_paths(payload)
-    paths = [path for path in (svg_path, png_path) if isinstance(path, str) and path]
-    logger.info(
-        "[BuilderVisualDiagnostics] phase=tool_result success=%s visual_type=%s "
-        "svg_bytes=%s png_bytes=%s png_error=%s",
-        success,
-        _visual_payload_kind(payload),
-        payload.get("svg_bytes"),
-        payload.get("png_bytes") or payload.get("image_bytes"),
-        payload.get("png_error"),
-    )
+    paths, svg_paths, png_paths = _successful_visual_paths(success, svg_path, png_path)
+    figure_families, figure_records = _visual_figure_diagnostics(success, payload, paths)
     return {
         "visual_asset_attempt_count": 1,
         "visual_asset_success_count": 1 if success else 0,
         "visual_asset_bytes_total": _visual_payload_bytes(payload),
         "visual_asset_error_class": None if success else payload.get("error_type", "visual_asset_error"),
-        "visual_asset_paths": paths if success else [],
-        "visual_svg_paths": [svg_path] if success and isinstance(svg_path, str) else [],
-        "visual_png_paths": [png_path] if success and isinstance(png_path, str) else [],
+        "visual_asset_paths": paths,
+        "visual_svg_paths": svg_paths,
+        "visual_png_paths": png_paths,
+        "visual_figure_families": figure_families,
+        "visual_figure_records": figure_records,
     }
+
+
+def _successful_visual_paths(
+    success: bool,
+    svg_path: Any,
+    png_path: Any,
+) -> tuple[list[str], list[str], list[str]]:
+    if not success:
+        return [], [], []
+    paths = [path for path in (svg_path, png_path) if isinstance(path, str) and path]
+    svg_paths = [svg_path] if isinstance(svg_path, str) else []
+    png_paths = [png_path] if isinstance(png_path, str) else []
+    return paths, svg_paths, png_paths
+
+
+def _visual_figure_diagnostics(
+    success: bool,
+    payload: dict[str, Any],
+    paths: list[str],
+) -> tuple[list[str], list[dict[str, Any]]]:
+    figure_family = _figure_family_for_payload(payload) if success else None
+    if not figure_family:
+        return [], []
+    return [figure_family], [_figure_record_for_payload(payload, figure_family, paths)]
 
 
 def _visual_payload_kind(payload: dict[str, Any]) -> Any:
     return payload.get("visual_type") or payload.get("chart_tool")
+
+
+def _normalized_figure_family(prefix: str, value: object) -> str | None:
+    text = str(value or "").strip().lower().replace(" ", "_").replace("-", "_")
+    return f"{prefix}:{text}" if text else None
+
+
+def _figure_family_for_payload(payload: dict[str, Any]) -> str | None:
+    if payload.get("chart_family"):
+        return _normalized_figure_family("chart", payload.get("chart_family"))
+    if payload.get("chart_tool"):
+        return _normalized_figure_family("chart", payload.get("chart_tool"))
+    kind = payload.get("visual_type") or payload.get("diagram_type")
+    if kind:
+        text = str(kind).strip().lower()
+        prefix = "diagram" if text in _DIAGRAM_FIGURE_KINDS else "visual"
+        return _normalized_figure_family(prefix, text)
+    return None
+
+
+_DIAGRAM_FIGURE_KINDS = frozenset({
+    "architecture",
+    "comparison",
+    "concept_map",
+    "cycle",
+    "flow",
+    "lifecycle",
+    "process_flow",
+    "sequence",
+    "system_map",
+    "timeline",
+    "tree",
+})
+
+
+def _figure_record_for_payload(
+    payload: dict[str, Any],
+    figure_family: str,
+    paths: list[str],
+) -> dict[str, Any]:
+    return {
+        "family": figure_family,
+        "kind": _visual_payload_kind(payload),
+        "path": paths[0] if paths else None,
+    }
 
 
 def _visual_payload_paths(payload: dict[str, Any]) -> tuple[Any, Any]:
@@ -3197,6 +3417,7 @@ def _validate_deck_plan(
         *_deck_treatment_problems(slides),
         *_deck_cover_title_problems(slides, diagnostics),
         *_deck_duplicate_image_problems(slides),
+        *_deck_style_consistency_problems(slides),
         *_deck_qc_problems(slides, diagnostics, state),
     ]
 
@@ -3246,6 +3467,34 @@ def _deck_duplicate_image_problems(slides: list[Any]) -> list[str]:
     ]
     if len(used) != len(set(used)):
         return ["The same generated image is used on more than one slide."]
+    return []
+
+
+def _slide_visual_style(slide: dict[str, Any]) -> str:
+    style = slide.get("visual_style") or slide.get("visualStyle")
+    return str(style or "").strip()
+
+
+def _deck_style_consistency_problems(slides: list[Any]) -> list[str]:
+    image_styles: list[tuple[int, str]] = [
+        (index, _slide_visual_style(slide))
+        for index, slide in enumerate(slides, 1)
+        if isinstance(slide, dict) and _slide_image_ref(slide)
+    ]
+    if not image_styles:
+        return []
+    missing = [index for index, style in image_styles if not style]
+    if missing:
+        return [
+            "Generated slide images are missing visual_style on slides "
+            f"{', '.join(str(index) for index in missing[:6])}; pick one deck style and stamp it on every image-forward slide."
+        ]
+    styles = {style for _index, style in image_styles}
+    if len(styles) > 1:
+        return [
+            "Deck mixes generated image styles "
+            f"({', '.join(sorted(styles)[:6])}); use one visual_style across the deck and vary the diagram type instead."
+        ]
     return []
 
 
@@ -3314,10 +3563,30 @@ def _chart_visual_evidence(slide: dict[str, Any]) -> bool:
 
 
 def _repair_slide_title_flag(slide: dict[str, Any], index: int, title_by_slide: dict[int, bool]) -> bool:
-    if title_by_slide.get(index) is not True or slide.get("title_present") is True:
-        return False
-    slide["title_present"] = True
-    return True
+    title_qc_confirmed = title_by_slide.get(index) is True
+    declared_strategy = str(slide.get("title_strategy") or slide.get("titleStrategy") or "").strip().lower()
+    changed = False
+    if title_qc_confirmed:
+        if slide.get("title_present") is not True:
+            slide["title_present"] = True
+            changed = True
+        if declared_strategy in {"", "baked"}:
+            if slide.get("title_strategy") != "baked":
+                slide["title_strategy"] = "baked"
+                changed = True
+            if slide.get("title_baked_qc_confirmed") is not True:
+                slide["title_baked_qc_confirmed"] = True
+                changed = True
+        return changed
+    if declared_strategy == "baked":
+        if slide.get("title_strategy") != "native":
+            slide["title_strategy"] = "native"
+            changed = True
+        for key in ("title_baked_qc_confirmed", "baked_title_qc_confirmed", "title_in_image_qc_confirmed"):
+            if slide.get(key):
+                slide[key] = False
+                changed = True
+    return changed
 
 
 def _repair_slide_chart_flag(slide: dict[str, Any]) -> bool:
@@ -3880,6 +4149,9 @@ class BuilderArtifactState(AgentState):
     builder_advisory_consumed: NotRequired[bool]
     builder_recovered_deliverable_emitted: NotRequired[bool]
     builder_pdf_render_result: NotRequired[dict | None]
+    builder_pdf_requested_page_count: NotRequired[int]
+    builder_pdf_requested_min_pages: NotRequired[int]
+    builder_pdf_requested_max_pages: NotRequired[int]
     builder_pdf_layout_repair_attempts: NotRequired[int]
     builder_pdf_layout_repair_requested: NotRequired[bool]
     builder_pdf_render_correction_emitted: NotRequired[bool]
@@ -5566,6 +5838,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 deck_problems,
             )
             return False
+        figure_family_problems = _report_figure_family_problems(state)
+        if figure_family_problems:
+            if int(state.get("builder_visual_embed_rejections", 0) or 0) < 1 and _repair_iteration_grantable(state):
+                logger.warning(
+                    "[BuilderReportFigureGate] phase=emit_blocked problems=%s",
+                    figure_family_problems,
+                )
+                return True
+            logger.warning(
+                "[BuilderReportFigureGate] phase=emit_soft_pass_after_repair problems=%s",
+                figure_family_problems,
+            )
+            return False
         if not _visuals_requested(state):
             return False
         if not _visual_design_skill_read_seen(state):
@@ -5801,19 +6086,59 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         artifact_args: dict[str, Any],
         state: BuilderArtifactState,
     ) -> str:
+        for message in (
+            cls._deck_plan_rejection_message(state),
+            cls._figure_family_rejection_message(state),
+            cls._hero_rejection_message(artifact_args, state),
+            cls._visual_presence_rejection_message(artifact_args, state),
+            cls._pdf_request_rejection_message(artifact_args, state),
+            cls._pptx_request_rejection_message(state),
+            cls._html_request_rejection_message(state),
+        ):
+            if message:
+                return message
+        return cls._missing_artifact_rejection_message(artifact_args, state)
+
+    @staticmethod
+    def _deck_plan_rejection_message(state: BuilderArtifactState) -> str:
         deck_problems = _deck_plan_validation_problems(state)
-        if deck_problems:
-            listing = "\n".join(f"- {problem}" for problem in deck_problems[:8])
-            return (
-                "Error: emit_builder_artifact rejected — the PPTX deck plan failed Sophia "
-                "slide quality validation:\n"
-                f"{listing}\n\n"
-                "Repair the deck now: regenerate or replace failed image-forward slides, run "
-                "`slide_qc.py` for every generated slide image, ensure slide 1 has a confirmed "
-                "native or bitmap title, avoid duplicate slide images, mark true hard-data "
-                "slides with `data_chart: true`, then re-run the ppt-generation script and emit "
-                "the regenerated .pptx."
-            )
+        if not deck_problems:
+            return ""
+        listing = "\n".join(f"- {problem}" for problem in deck_problems[:8])
+        return (
+            "Error: emit_builder_artifact rejected — the PPTX deck plan failed Sophia "
+            "slide quality validation:\n"
+            f"{listing}\n\n"
+            "Repair the deck now: regenerate or replace failed image-forward slides, run "
+            "`slide_qc.py` for every generated slide image, ensure slide 1 has a confirmed "
+            "native or bitmap title, avoid duplicate slide images, mark true hard-data "
+            "slides with `data_chart: true`, then re-run the ppt-generation script and emit "
+            "the regenerated .pptx."
+        )
+
+    @staticmethod
+    def _figure_family_rejection_message(state: BuilderArtifactState) -> str:
+        figure_family_problems = _report_figure_family_problems(state)
+        if not figure_family_problems:
+            return ""
+        listing = "\n".join(f"- {problem}" for problem in figure_family_problems[:8])
+        return (
+            "Error: emit_builder_artifact rejected — the PDF report repeats the same "
+            "figure family too often:\n"
+            f"{listing}\n\n"
+            "Repair the report once: keep at most two figures from any one family, "
+            "replace repeats with a different supported family such as timeline, "
+            "comparison, architecture, hierarchy, sankey, treemap, radar, funnel, "
+            "distribution, or annotated evidence table when the data warrants it. "
+            "Then update the Markdown, re-run render_markdown_to_pdf, and emit."
+        )
+
+    @classmethod
+    def _hero_rejection_message(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+    ) -> str:
         if cls._hero_gate_blocks_emit(artifact_args, state) and not (
             _visuals_requested(state) and not _visual_presence_validated(artifact_args, state)
         ):
@@ -5841,6 +6166,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 f"{subject} image per the image-generation skill's Business Deck "
                 f"section, generate it, {wiring}; (3) emit the regenerated deliverable."
             )
+        return ""
+
+    @staticmethod
+    def _visual_presence_rejection_message(
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+    ) -> str:
         if _visuals_requested(state) and not _visual_presence_validated(artifact_args, state):
             asset_paths = [path for path in _visual_asset_paths(state) if path.endswith(".png")]
             if asset_paths:
@@ -5877,6 +6209,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "(presentation image-forward slide visual, hard-data chart, report "
                 "diagram, or inline SVG in HTML), then embed or reference it before emitting."
             )
+        return ""
+
+    @staticmethod
+    def _pdf_request_rejection_message(
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+    ) -> str:
         if _requested_pdf_artifact(state):
             primary = artifact_args.get("artifact_path")
             reason = _pdf_artifact_path_rejection_reason(primary, state)
@@ -5900,6 +6239,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "scripts, bare paths, or files outside /mnt/user-data/outputs/ "
                     "as the user-ready artifact."
                 )
+        return ""
+
+    @staticmethod
+    def _pptx_request_rejection_message(state: BuilderArtifactState) -> str:
         if _requested_pptx_artifact(state):
             return (
                 "Error: emit_builder_artifact rejected — this is a slide-deck "
@@ -5911,6 +6254,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "safe fallback_reason. Do not emit Python files, placeholder decks, "
                 "tiny/corrupt .pptx files, bare paths, or files outside outputs."
             )
+        return ""
+
+    @staticmethod
+    def _html_request_rejection_message(state: BuilderArtifactState) -> str:
         if _requested_html_artifact(state):
             return (
                 "Error: emit_builder_artifact rejected — this is an HTML request. "
@@ -5920,6 +6267,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "HTML text, generator scripts, bare paths, or files outside outputs "
                 "as the user-ready HTML artifact."
             )
+        return ""
+
+    @classmethod
+    def _missing_artifact_rejection_message(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+    ) -> str:
         recovery_hint = cls._missing_artifact_recovery_hint(artifact_args, state)
         return (
             "Error: emit_builder_artifact rejected — the referenced "
@@ -5951,6 +6306,57 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             Path(recovered_path).suffix.lower().lstrip(".") or None,
         )
         return recovered_args
+
+    @classmethod
+    def _recover_emit_args_from_output_scan(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+        *,
+        reason: str,
+    ) -> dict[str, Any] | None:
+        try:
+            candidates = cls._promotable_output_candidates(
+                state,
+                requested_pdf=_requested_pdf_artifact(state),
+                requested_pptx=_requested_pptx_artifact(state),
+                requested_html=_requested_html_artifact(state),
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "BuilderArtifact: emit_path_missing output_scan_failed reason=%s error=%s",
+                reason,
+                exc,
+            )
+            return None
+        if not candidates:
+            logger.info(
+                "BuilderArtifact: emit_path_missing output_scan_empty reason=%s requested_ext=%s",
+                reason,
+                _requested_artifact_ext(state),
+            )
+            return None
+        for candidate in candidates[:5]:
+            recovered_path = cls._virtual_output_path(candidate, state)
+            recovered_args = dict(artifact_args)
+            recovered_args["artifact_path"] = recovered_path
+            if cls._artifact_files_exist(recovered_args, state, runtime):
+                logger.warning(
+                    "BuilderArtifact: emit_path_missing recovered_from_output_scan "
+                    "reason=%s path=%s ext=%s",
+                    reason,
+                    recovered_path,
+                    candidate.suffix.lower().lstrip(".") or None,
+                )
+                return recovered_args
+        logger.info(
+            "BuilderArtifact: emit_path_missing output_scan_no_valid_candidate "
+            "reason=%s candidates=%d",
+            reason,
+            len(candidates),
+        )
+        return None
 
     @classmethod
     def _authoritative_pdf_emit_args(
@@ -6171,7 +6577,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return authoritative_pdf
         if cls._artifact_files_exist(artifact_args, state, runtime):
             return artifact_args
-        return cls._recover_emit_args_from_last_write(artifact_args, state, runtime) or artifact_args
+        return (
+            cls._recover_emit_args_from_last_write(artifact_args, state, runtime)
+            or cls._recover_emit_args_from_output_scan(
+                artifact_args,
+                state,
+                runtime,
+                reason="after_model_missing_emit_path",
+            )
+            or artifact_args
+        )
 
     def _force_choice_for_state(
         self,
@@ -6881,7 +7296,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             result.get("layout_quality"),
         )
         return {
-            "messages": [HumanMessage(content=_pdf_layout_repair_message(result))],
+            "messages": [HumanMessage(content=_pdf_layout_repair_message(result, state))],
             "builder_pdf_render_result": None,
             "builder_pdf_layout_repair_requested": True,
             "builder_pdf_layout_repair_attempts": _pdf_layout_repair_attempts(state) + 1,
@@ -7522,7 +7937,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         delta = self._render_pdf_result_delta(result)
         if delta is None:
             return result
-        payload = delta["builder_pdf_render_result"]
+        payload = _enrich_pdf_render_result_with_requested_pages(
+            delta["builder_pdf_render_result"],
+            request.state,
+        )
+        delta["builder_pdf_render_result"] = payload
         if (
             request.tool_call.get("name") == _SIMPLE_PDF_TOOL_NAME
             and payload.get("success") is False
@@ -7539,16 +7958,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state: dict[str, Any],
     ) -> dict[str, Any]:
         image_segments = _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS)
-        preflight_delta: dict[str, Any] = {}
-        if any("--preflight" in _command_parts(segment) for segment in image_segments):
-            preflight_delta = _image_generation_preflight_delta(text)
-            if preflight_delta.get("image_generation_preflight") != "ok":
-                return preflight_delta
-        billable_segments = [
-            segment
-            for segment in image_segments
-            if "--preflight" not in _command_parts(segment)
-        ]
+        preflight_delta, preflight_blocked = BuilderArtifactMiddleware._image_generation_preflight_result(
+            image_segments,
+            text,
+        )
+        if preflight_blocked:
+            return preflight_delta
+        billable_segments = BuilderArtifactMiddleware._billable_image_generation_segments(image_segments)
         if not billable_segments:
             return preflight_delta
         statuses = [
@@ -7584,6 +8000,24 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         }
         delta.update(_image_generation_success_path_delta(state, successful_paths))
         return delta
+
+    @staticmethod
+    def _image_generation_preflight_result(
+        image_segments: list[str],
+        text: str,
+    ) -> tuple[dict[str, Any], bool]:
+        if not any("--preflight" in _command_parts(segment) for segment in image_segments):
+            return {}, False
+        preflight_delta = _image_generation_preflight_delta(text)
+        return preflight_delta, preflight_delta.get("image_generation_preflight") != "ok"
+
+    @staticmethod
+    def _billable_image_generation_segments(image_segments: list[str]) -> list[str]:
+        return [
+            segment
+            for segment in image_segments
+            if "--preflight" not in _command_parts(segment)
+        ]
 
     @staticmethod
     def _attach_pptx_canvas_preview(
@@ -7850,6 +8284,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 return visual_rejection
             return handler(request)
         recovered_args = self._recover_emit_args_from_last_write(args, request.state, request.runtime)
+        if recovered_args is not None:
+            request.tool_call["args"] = recovered_args
+            return handler(request)
+        recovered_args = self._recover_emit_args_from_output_scan(
+            args,
+            request.state,
+            request.runtime,
+            reason="wrap_tool_call_missing_emit_path",
+        )
         if recovered_args is not None:
             request.tool_call["args"] = recovered_args
             return handler(request)
@@ -8153,6 +8596,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 return visual_rejection
             return await handler(request)
         recovered_args = self._recover_emit_args_from_last_write(args, request.state, request.runtime)
+        if recovered_args is not None:
+            request.tool_call["args"] = recovered_args
+            return await handler(request)
+        recovered_args = self._recover_emit_args_from_output_scan(
+            args,
+            request.state,
+            request.runtime,
+            reason="awrap_tool_call_missing_emit_path",
+        )
         if recovered_args is not None:
             request.tool_call["args"] = recovered_args
             return await handler(request)
@@ -8507,6 +8959,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     )
                     args = _apply_visual_missing_quality_metadata(args, state)
                     args = _apply_hero_missing_quality_metadata(args, state)
+                    args = _apply_report_figure_quality_metadata(args, state)
                     args = self._attach_pptx_canvas_preview(args, state)
                     _log_pptx_diagnostics(
                         phase="emit_accepted",

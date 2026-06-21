@@ -135,16 +135,19 @@ For PDF reports, technical diagrams use `generate_excalidraw_diagram` (graphviz)
 `generate_visual_asset` — NOT this skill. That deterministic path is unchanged.
 
 Reference library: for Excalidraw-style technical slide visuals, first inspect
-`/mnt/skills/public/image-generation/references/manifest.json` and pass the matching seed image
-with `--reference-images`:
+`/mnt/skills/public/image-generation/references/manifest.json`. It is a v2 style manifest:
+choose one `visual_style` for the whole deck, use the matching `prompt_anchor` in every slide
+prompt, and vary `diagram_type` within that style. Pass a seed image with `--reference-images`
+only when the chosen style lists a real ref for the target diagram type. If the chosen style has
+no ref for that type, do not invent a path; rely on the text prompt anchor.
 
-- nested-container architecture -> `architecture_nested.png`
-- comparison panels -> `comparison_panels.png` or `two_panel_comparison.png`
-- swimlane / staged process -> `process_guards.png`
-- conceptual loop/metaphor -> `experiment_loop.png`
+- nested-container architecture -> `architecture_nested`
+- comparison panels -> `comparison_panels` or `two_panel_comparison`
+- swimlane / staged process -> `process_guards`
+- conceptual loop/metaphor -> `experiment_loop`
 
-The reference sets the hand-drawn look; the prompt still supplies the exact structure, labels,
-brand palette, and "THE TEXT READS: ..." strings.
+The reference sets the look; the prompt still supplies the exact structure, labels, brand
+palette, and "THE TEXT READS: ..." strings. Keep one visual style per deck.
 
 Before accepting a presentation slide visual, apply the shared Sophia anti-slop rubric
 (`/mnt/skills/public/sophia/anti_slop.md`): Philosophy, Hierarchy, Execution,

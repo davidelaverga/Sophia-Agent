@@ -357,6 +357,75 @@ def _artifact_target_extension(artifact_target_path: object) -> str:
     return Path(artifact_target_path).suffix.lower()
 
 
+_PAGE_RANGE_RE = re.compile(r"(?<!\d)(\d{1,2})\s*(?:-|to)\s*(\d{1,2})\s*pages?\b", re.IGNORECASE)
+_PAGE_COUNT_RE = re.compile(r"(?<!\d)(\d{1,2})\s*(?:-| )?\s*pages?\b", re.IGNORECASE)
+
+
+def _valid_page_count(value: str) -> int | None:
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    return count if 1 <= count <= 60 else None
+
+
+def _pdf_page_target_updates(
+    delegation_context: dict[str, Any],
+    *,
+    companion_artifact: dict[str, Any],
+    artifact_target_path: object,
+) -> dict[str, Any]:
+    text_parts: list[str] = []
+    for source in (delegation_context, companion_artifact):
+        for key in ("task", "description", "artifact_brief", "original_task", "title", "artifact_title"):
+            value = source.get(key) if isinstance(source, dict) else None
+            if isinstance(value, str) and value.strip():
+                text_parts.append(value)
+    if isinstance(artifact_target_path, str):
+        text_parts.append(artifact_target_path)
+    combined = "\n".join(text_parts)
+    if not combined:
+        return {}
+    if match := _PAGE_RANGE_RE.search(combined):
+        low = _valid_page_count(match.group(1))
+        high = _valid_page_count(match.group(2))
+        if low is not None and high is not None:
+            lo, hi = sorted((low, high))
+            return {
+                "builder_pdf_requested_min_pages": lo,
+                "builder_pdf_requested_max_pages": hi,
+            }
+    if match := _PAGE_COUNT_RE.search(combined):
+        count = _valid_page_count(match.group(1))
+        if count is not None:
+            return {"builder_pdf_requested_page_count": count}
+    return {}
+
+
+def _pdf_page_target_section(page_updates: dict[str, Any]) -> str | None:
+    count = page_updates.get("builder_pdf_requested_page_count")
+    if isinstance(count, int):
+        return (
+            "<pdf_length_target>\n"
+            f"- Requested PDF length: exactly {count} pages.\n"
+            f"- When calling render_markdown_to_pdf, pass requested_pages={count}.\n"
+            "- If layout_quality warns about page_count_off_target, revise once and re-render.\n"
+            "</pdf_length_target>"
+        )
+    low = page_updates.get("builder_pdf_requested_min_pages")
+    high = page_updates.get("builder_pdf_requested_max_pages")
+    if isinstance(low, int) and isinstance(high, int):
+        return (
+            "<pdf_length_target>\n"
+            f"- Requested PDF length: {low}-{high} pages.\n"
+            "- When calling render_markdown_to_pdf, pass "
+            f"requested_min_pages={low} and requested_max_pages={high}.\n"
+            "- If layout_quality warns about page_count_off_target, revise once and re-render.\n"
+            "</pdf_length_target>"
+        )
+    return None
+
+
 _IMAGE_OUTPUT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _EXPLICIT_IMAGE_GENERATION_MARKERS = (
     "generated image",
@@ -661,6 +730,9 @@ class BuilderTaskState(AgentState):
     builder_non_artifact_turns: NotRequired[int]
     builder_last_tool_names: NotRequired[list[str]]
     builder_artifact_target_path: NotRequired[str]
+    builder_pdf_requested_page_count: NotRequired[int]
+    builder_pdf_requested_min_pages: NotRequired[int]
+    builder_pdf_requested_max_pages: NotRequired[int]
     # Spec D D-4: read_session_context's self-enforced call counter — the
     # tool's Command update persists only because the key is declared here.
     builder_session_context_reads: NotRequired[int]
@@ -725,6 +797,22 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             or delegation_context.get("artifact_target_path")
         )
         artifact_target_ext = _artifact_target_extension(artifact_target_path)
+        page_target_updates: dict[str, Any] = {}
+        if artifact_target_ext == ".pdf":
+            for key in (
+                "builder_pdf_requested_page_count",
+                "builder_pdf_requested_min_pages",
+                "builder_pdf_requested_max_pages",
+            ):
+                value = state.get(key)
+                if isinstance(value, int):
+                    page_target_updates[key] = value
+            if not page_target_updates:
+                page_target_updates = _pdf_page_target_updates(
+                    delegation_context,
+                    companion_artifact=companion_artifact,
+                    artifact_target_path=artifact_target_path,
+                )
         tracked_sources = [
             source for source in (state.get("builder_search_sources") or []) if isinstance(source, dict)
         ]
@@ -838,6 +926,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             sections.append(
                 _terminal_artifact_handoff_section(artifact_target_path, artifact_target_ext)
             )
+
+        if page_target_section := _pdf_page_target_section(page_target_updates):
+            sections.append(page_target_section)
 
         edit_context = delegation_context.get("edit_context")
         if isinstance(edit_context, dict) and edit_context.get("mode") == "edit_existing_artifact":
@@ -958,8 +1049,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             )
         pptx_visual_guidance = (
             "Slides use gpt-image-2 full-slide visuals when image-generation is listed for this run; "
-            "hard quantitative charts and QC-failed image slides fall back to deterministic chart/diagram/text composition "
-            "with honest diagnostics."
+            "hard quantitative charts are the only deterministic exception. If a generated slide fails QC, regenerate "
+            "or replace that image-forward slide instead of downgrading the deck to deterministic diagrams/text."
             if image_generation_enabled
             else "Image generation is disabled for this run. For PPTX/presentation output, preserve any plain/text-only/no-image constraint: "
             "build an editable deterministic deck with slide text, shapes, simple diagrams, tables, and charts; do not run the image-generation script "
@@ -1156,7 +1247,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             f"non_artifact_turns={non_artifact_turns}",
             _t0,
         )
-        return {"system_prompt_blocks": blocks, **boundary_state_updates}
+        return {"system_prompt_blocks": blocks, **boundary_state_updates, **page_target_updates}
 
     # ------------------------------------------------------------------
     # Private helpers

@@ -118,9 +118,10 @@ deliverable.
   `generate_visual_asset` for hard quantitative data charts only. For PDF/HTML
   reports, use `generate_visual_asset` for numeric/data charts and compact
   matrices with explicit labeled data; never invent placeholder labels or fake
-  values. Use `generate_excalidraw_diagram` with raw Mermaid for report
-  architecture diagrams, process flows, timelines, concept maps, system maps,
-  cycles, comparisons, and sequences; use the image-generation skill for
+  values. Use `generate_excalidraw_diagram` with structured nodes and edges for
+  report architecture diagrams, process flows, timelines, concept maps, system
+  maps, cycles, comparisons, and sequences; use at most two figures from any
+  one report figure family. Use the image-generation skill for
   illustrative report content such as hero images, section covers, or
   conceptual scenes. Image-generation failure must never stall the deliverable
   — continue with charts, report diagrams, and text.

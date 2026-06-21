@@ -10,6 +10,7 @@ Use this check before creating or emitting any visual artifact. A technically va
 - **Specificity**: Use the real subject, real claims, real labels, and real data. Placeholder language, "Item 1", vague icons, and fake values fail.
 - **Restraint**: Remove anything that does not earn its place. Avoid clutter, redundant decorations, crowded legends, and repeated visual tricks.
 - **Variety**: Do not repeat the same treatment section after section or slide after slide. Vary structure while keeping one coherent visual language.
+- **Cohesion**: A slide deck uses one generated-image `visual_style`; a PDF report uses one figure language. Variety comes from diagram/chart family and composition, not random style switching.
 
 ## Universal Anti-Patterns
 
@@ -19,5 +20,6 @@ Use this check before creating or emitting any visual artifact. A technically va
 - Glossy 3D, clip-art, emoji, literal AI cliches, busy tech textures, or decorative borders.
 - Data visuals without explicit labeled data.
 - Decorative diagrams where a paragraph, table, or stat callout would be clearer.
+- Three or more report figures from the same family when other appropriate families are available.
 
 Fail the artifact and repair it if any of these are present.

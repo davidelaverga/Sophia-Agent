@@ -59,15 +59,16 @@ _TRACE_PROMPT_MAX = 12000
 _LANGSMITH_CLIENT: Any | None = None
 
 _SOPHIA_SLIDE_STYLE = (
-    "Visual system: a premium, editorial presentation slide. Generous white space, "
-    "clear visual hierarchy, one confident focal element. "
+    "Visual system: a premium presentation slide with a single coherent style chosen "
+    "by the prompt. Preserve that named style faithfully across the whole deck. "
+    "Use generous white space, clear visual hierarchy, and one confident focal element. "
     "Brand palette: deep ink navy (#1F2A37) for primary text; considered blue (#2E5AAC) "
     "as the lead accent; warm teal (#2A9D8F) and restrained gold (#D4AF37) as secondary "
-    "accents; soft coral (#E76F51) sparingly; on light paper (#FFFFFF / #F5F7FA) with "
-    "hairline dividers (#E3E8EF). Modern editorial typography: clean sans-serif body with "
-    "a strong, refined headline; crisp, high-contrast, perfectly legible. Flat, tasteful, "
-    "calm, with quiet depth — Sophia's warm, humane, faintly cosmic character. Looks like a "
-    "slide from a deck that took real design care."
+    "accents; soft coral (#E76F51) sparingly; on light paper (#FFFFFF / #F5F7FA) or a "
+    "purposeful dark canvas when the chosen style requires it. Typography must be crisp, "
+    "high-contrast, and perfectly legible. Avoid template sameness; vary diagram structure "
+    "while keeping the deck's chosen style cohesive. Looks like a slide from a deck that "
+    "took real design care."
 )
 
 _SOPHIA_SLIDE_AVOID = (
@@ -222,12 +223,17 @@ def _langsmith_parent_metadata() -> dict[str, str]:
     for env_name, metadata_key in (
         ("SOPHIA_PARENT_TRACE_ID", "parent_trace_id"),
         ("SOPHIA_PARENT_RUN_ID", "parent_run_id"),
+        ("SOPHIA_PARENT_DOTTED_ORDER", "parent_dotted_order"),
         ("SOPHIA_THREAD_ID", "thread_id"),
     ):
         value = _env_value(env_name)
         if value:
             metadata[metadata_key] = value
     return metadata
+
+
+def _langsmith_parent_for_trace() -> Any | None:
+    return _env_value("SOPHIA_PARENT_DOTTED_ORDER", "LANGSMITH_DOTTED_ORDER")
 
 
 def _truncate_trace_text(value: str, limit: int = _TRACE_PROMPT_MAX) -> tuple[str, bool]:
@@ -302,10 +308,12 @@ def _langsmith_trace_context(*, prompt: str, valid_refs: list[str], size: str, q
             "sophia_component": "builder_image_generation",
             **_langsmith_parent_metadata(),
         }
+        parent = _langsmith_parent_for_trace()
         enabled_context = tracing_context(
             enabled=True,
             client=client,
             project_name=project_name,
+            parent=parent,
             tags=["sophia", "image_generation", "openai"],
             metadata=metadata,
         )
@@ -322,6 +330,7 @@ def _langsmith_trace_context(*, prompt: str, valid_refs: list[str], size: str, q
             },
             tags=["sophia", "image_generation", "openai"],
             client=client,
+            parent=parent,
         )
         return _EnabledLangSmithTraceContext(enabled_context, trace_context)
     except Exception:

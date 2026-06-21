@@ -15,14 +15,18 @@ You are building an artifact for someone — a deck, a report, a page. Your job 
 ## 2. How a visual gets realized — by medium
 - **Slides (`.pptx`)** — default visual decks generate full-slide visuals and technical
   drawings with gpt-image-2 (`--slide-visual`, "THE TEXT READS:" technique, brand style
-  appended). Hard quantitative charts use a deterministic chart embedded in an engine slide.
-  Every generated slide is QC-checked with a deterministic fallback. If the user asks for a
+  appended). Choose one `visual_style` per deck from the image-generation reference manifest;
+  vary diagram type and composition within that style. Hard quantitative charts use a
+  deterministic chart embedded in an engine slide. Every generated slide is QC-checked and
+  regenerated/re-prompted once if needed; do not downgrade failed generated concept/process/
+  architecture slides to deterministic diagrams. If the user asks for a
   plain, text-only, no-image, no-imagery, no-illustration, or no-visuals deck, preserve that
   opt-out: do not call image-generation, do not create generated hero slides, and build an
   editable deterministic PPTX with text, shapes, tables, simple diagrams, and charts.
-- **PDF reports (`.pdf`)** — UNCHANGED: graphviz (`generate_excalidraw_diagram`) for connected
-  diagrams, `generate_visual_asset` for charts, image-generation for decorative illustrations
-  only (no text). Do not use gpt-image-2 for report diagrams or charts.
+- **PDF reports (`.pdf`)** — graphviz (`generate_excalidraw_diagram`) for connected diagrams,
+  `generate_report_chart`/`generate_visual_asset` for charts, image-generation for decorative
+  or conceptual illustrations only (no dense text). Do not use gpt-image-2 for precise report
+  diagrams or charts. Use at most two figures from the same family in one report.
 - **Web (`.html`)** — you can **code visuals directly** (SVG/CSS); the design language is **hallmark**. Don't outsource a simple visual to image-gen when you can build it.
 All three express one brand language (`brand/tokens.md`); each medium implements it natively.
 
@@ -66,8 +70,7 @@ Route by complexity x text-density x structural-precision:
 Enforce diagram-TYPE variety across a report the way slides enforce treatment variety: do not
 render the same diagram style for every architecture.
 
-Excalidraw style anchor (for hand-drawn architecture/concept diagrams via gpt-image-2):
-open the prompt with "a hand-drawn diagram in the style of Excalidraw - rough sketchy rounded
-outlines with a marker quality, casual handwritten-style labels, soft flat fills", then spell out
-containers/nodes/arrows with "THE TEXT READS: ...", then the brand palette. Pass a reference image
-of the target type (see reference library). Reference sets the look; the prompt sets the structure.
+Slide visual style anchor: read `/mnt/skills/public/image-generation/references/manifest.json`,
+choose one `visual_style` for the deck, and use that style's `prompt_anchor`. Pass a reference
+image only when the manifest lists a real ref for the chosen style and diagram type. Reference
+sets the look; the prompt still sets the exact structure and "THE TEXT READS: ..." strings.

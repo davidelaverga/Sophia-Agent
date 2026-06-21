@@ -55,7 +55,7 @@ def test_generate_excalidraw_diagram_renders_via_graphviz(tmp_path) -> None:
 
     assert payload["success"] is True
     assert payload["visual_type"] == "architecture"
-    assert payload["layout_engine"] == "graphviz"
+    assert payload["layout_engine"] == "graphviz-dot:architecture"
     assert payload["svg_path"] == "/mnt/user-data/outputs/visuals/agent-runtime.svg"
     assert payload["png_path"] == "/mnt/user-data/outputs/visuals/agent-runtime.png"
     assert payload["node_count"] == 3

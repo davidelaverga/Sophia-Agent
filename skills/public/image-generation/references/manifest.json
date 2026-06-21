@@ -1,31 +1,55 @@
 {
-  "version": 1,
-  "style": "excalidraw_hand_drawn",
+  "version": 2,
+  "default_style": "excalidraw_hand_drawn",
+  "deck_rule": "choose one visual_style per deck; vary diagram_type within that style",
+  "styles": {
+    "clean_flat_vector": {
+      "prompt_anchor": "clean flat vector technical illustration; precise geometry; crisp sans-serif labels; restrained Sophia palette; generous whitespace; no sketch texture",
+      "refs": {}
+    },
+    "excalidraw_hand_drawn": {
+      "prompt_anchor": "hand-drawn Excalidraw-style technical diagram; rough rounded outlines; marker-like strokes; casual handwritten-style labels; soft flat fills; premium and legible",
+      "refs": {
+        "architecture_nested": "architecture_nested.png",
+        "comparison_panels": "comparison_panels.png",
+        "process_guards": "process_guards.png",
+        "experiment_loop": "experiment_loop.png",
+        "two_panel_comparison": "two_panel_comparison.png"
+      }
+    },
+    "blueprint_technical": {
+      "prompt_anchor": "blueprint-style technical schematic; dark or pale technical drawing field; thin precise linework; grid discipline; labeled callouts; restrained accent color",
+      "refs": {}
+    },
+    "soft_editorial_3d": {
+      "prompt_anchor": "soft editorial 3D technical composition; matte materials; shallow but legible depth; diagrammatic layout; no glossy plastic; labels remain crisp",
+      "refs": {}
+    },
+    "dashboard_data_story": {
+      "prompt_anchor": "high-end dashboard/data-story visual; modular panels; clear metric hierarchy; restrained chart forms; dense but readable; no generic SaaS gradients",
+      "refs": {}
+    }
+  },
   "diagram_types": {
-    "nested-container architecture": {
-      "path": "architecture_nested.png",
+    "architecture_nested": {
       "use_for": ["systems", "gateway nodes", "component groups", "agent harnesses"],
-      "prompt_anchor": "a hand-drawn diagram in the style of Excalidraw - rough sketchy rounded outlines with a marker quality, casual handwritten-style labels, soft flat fills"
+      "reference_key": "architecture_nested"
     },
-    "comparison panels": {
-      "path": "comparison_panels.png",
+    "comparison_panels": {
       "use_for": ["paradigm comparison", "framework contrast", "side-by-side tradeoffs"],
-      "prompt_anchor": "a hand-drawn diagram in the style of Excalidraw - rough sketchy rounded outlines with a marker quality, casual handwritten-style labels, soft flat fills"
+      "reference_key": "comparison_panels"
     },
-    "swimlane / gantt": {
-      "path": "process_guards.png",
+    "process_guards": {
       "use_for": ["staged process", "parallel pipeline", "guardrail sequence"],
-      "prompt_anchor": "a hand-drawn diagram in the style of Excalidraw - rough sketchy rounded outlines with a marker quality, casual handwritten-style labels, soft flat fills"
+      "reference_key": "process_guards"
     },
-    "conceptual metaphor": {
-      "path": "experiment_loop.png",
+    "experiment_loop": {
       "use_for": ["abstract loop", "decision cycle", "agent memory"],
-      "prompt_anchor": "a hand-drawn diagram in the style of Excalidraw - rough sketchy rounded outlines with a marker quality, casual handwritten-style labels, soft flat fills"
+      "reference_key": "experiment_loop"
     },
-    "two-panel comparison": {
-      "path": "two_panel_comparison.png",
+    "two_panel_comparison": {
       "use_for": ["before-after", "binary contrast", "mechanism comparison"],
-      "prompt_anchor": "a hand-drawn diagram in the style of Excalidraw - rough sketchy rounded outlines with a marker quality, casual handwritten-style labels, soft flat fills"
+      "reference_key": "two_panel_comparison"
     }
   }
 }

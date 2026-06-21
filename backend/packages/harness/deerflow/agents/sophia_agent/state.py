@@ -205,17 +205,30 @@ def _merge_builder_visual_diagnostics(
 
     merged = dict(current)
     for key, value in update.items():
-        if key.endswith("_count") and isinstance(value, int):
-            merged[key] = int(merged.get(key, 0) or 0) + value
-            continue
-        if key in {"visual_asset_paths", "visual_svg_paths", "visual_png_paths"} and isinstance(value, list):
-            merged[key] = _merge_string_list(merged.get(key), value)
-            continue
-        if key.endswith("_bytes_total") and isinstance(value, int):
-            merged[key] = int(merged.get(key, 0) or 0) + value
-            continue
-        merged[key] = value
+        _merge_builder_visual_diagnostic_value(merged, key, value)
     return merged
+
+
+def _merge_builder_visual_diagnostic_value(merged: dict, key: str, value: object) -> None:
+    if (key.endswith("_count") or key.endswith("_bytes_total")) and isinstance(value, int):
+        merged[key] = int(merged.get(key, 0) or 0) + value
+        return
+    if key in _VISUAL_DIAGNOSTIC_LIST_KEYS and isinstance(value, list):
+        merged[key] = _merge_string_list(merged.get(key), value)
+        return
+    if key == "visual_figure_records" and isinstance(value, list):
+        existing = merged.get(key) if isinstance(merged.get(key), list) else []
+        merged[key] = [*existing, *value]
+        return
+    merged[key] = value
+
+
+_VISUAL_DIAGNOSTIC_LIST_KEYS = frozenset({
+    "visual_asset_paths",
+    "visual_svg_paths",
+    "visual_png_paths",
+    "visual_figure_families",
+})
 
 
 def _merge_string_list(current: object, update: list) -> list[str]:
@@ -289,6 +302,9 @@ class SophiaState(AgentState):
     builder_update_epoch: NotRequired[int]
     builder_update_required_urls: NotRequired[Annotated[list[str], _union_string_list]]
     builder_artifact_target_path: NotRequired[str]
+    builder_pdf_requested_page_count: NotRequired[int]
+    builder_pdf_requested_min_pages: NotRequired[int]
+    builder_pdf_requested_max_pages: NotRequired[int]
     builder_last_successful_output_path: NotRequired[str | None]
     builder_write_diagnostics: NotRequired[Annotated[dict, _merge_builder_write_diagnostics]]
     builder_pptx_diagnostics: NotRequired[Annotated[dict, _merge_builder_pptx_diagnostics]]

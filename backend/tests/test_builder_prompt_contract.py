@@ -96,7 +96,8 @@ def test_visual_composition_directives_carry_the_toolkit() -> None:
     assert "Philosophy, Hierarchy, Execution" in directives
     assert "Diagram vocabulary and routing" in directives
     assert "Nested-container architecture" in directives
-    assert "Excalidraw style anchor" in directives
+    assert "Slide visual style anchor" in directives
+    assert "one `visual_style` per deck" in directives
 
 
 def test_ppt_generation_skill_carries_deck_design_system() -> None:
@@ -124,7 +125,8 @@ def test_ppt_generation_skill_carries_deck_design_system() -> None:
     assert "anti_slop.md" in text
     assert "Diagram vocabulary and routing" in text
     assert "Nested-container architecture" in text
-    assert "Excalidraw style anchor" in text
+    assert "Style anchor" in text
+    assert "choose one `visual_style`" in text
 
 
 def test_image_generation_skill_declares_reference_edit_model() -> None:
@@ -137,7 +139,7 @@ def test_image_generation_skill_declares_reference_edit_model() -> None:
     assert "anti_slop.md" in text
     assert "generic stock-deck styling" in text
     assert "references/manifest.json" in text
-    assert "architecture_nested.png" in text
+    assert "architecture_nested" in text
 
 
 def test_image_generation_reference_manifest_declares_excalidraw_seeds() -> None:

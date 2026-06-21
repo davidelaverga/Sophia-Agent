@@ -32,7 +32,18 @@ DIAGRAM = {
     "neutral": ("#F1F5F9", "#6B7787"),
 }
 INK, EDGE, EDGE_EMPH = "#1F2A37", "#6B7787", "#2E5AAC"
-RANKDIR = {"flow": "TB", "architecture": "TB", "lifecycle": "LR", "tree": "TB"}
+DIAGRAM_LAYOUT = {
+    "flow": {"rankdir": "TB", "shape": "box", "splines": "ortho", "nodesep": "0.45", "ranksep": "0.60"},
+    "architecture": {"rankdir": "TB", "shape": "box", "splines": "ortho", "nodesep": "0.55", "ranksep": "0.70"},
+    "system_map": {"rankdir": "LR", "shape": "box", "splines": "ortho", "nodesep": "0.55", "ranksep": "0.80"},
+    "lifecycle": {"rankdir": "LR", "shape": "ellipse", "splines": "curved", "nodesep": "0.50", "ranksep": "0.70"},
+    "cycle": {"rankdir": "LR", "shape": "ellipse", "splines": "curved", "nodesep": "0.45", "ranksep": "0.65"},
+    "timeline": {"rankdir": "LR", "shape": "box", "splines": "polyline", "nodesep": "0.35", "ranksep": "0.80"},
+    "sequence": {"rankdir": "LR", "shape": "box", "splines": "polyline", "nodesep": "0.40", "ranksep": "0.75"},
+    "comparison": {"rankdir": "LR", "shape": "box", "splines": "line", "nodesep": "0.85", "ranksep": "0.85"},
+    "concept_map": {"rankdir": "LR", "shape": "ellipse", "splines": "curved", "nodesep": "0.60", "ranksep": "0.75"},
+    "tree": {"rankdir": "TB", "shape": "box", "splines": "polyline", "nodesep": "0.45", "ranksep": "0.75"},
+}
 
 # Legacy diagram_type values -> new kind.
 _KIND_ALIASES = {
@@ -41,12 +52,12 @@ _KIND_ALIASES = {
     "lifecycle": "lifecycle",
     "tree": "tree",
     "process_flow": "flow",
-    "timeline": "lifecycle",
-    "sequence": "lifecycle",
-    "cycle": "lifecycle",
-    "system_map": "architecture",
-    "concept_map": "architecture",
-    "comparison": "tree",
+    "timeline": "timeline",
+    "sequence": "sequence",
+    "cycle": "cycle",
+    "system_map": "system_map",
+    "concept_map": "concept_map",
+    "comparison": "comparison",
 }
 
 DiagramKind = Literal[
@@ -102,21 +113,31 @@ def _clean_nodes(nodes: list[dict[str, Any]] | None) -> list[dict[str, str]]:
     clean: list[dict[str, str]] = []
     seen: set[str] = set()
     for index, node in enumerate(nodes or [], start=1):
-        if not isinstance(node, dict):
-            continue
-        label = str(node.get("label") or node.get("title") or node.get("name") or "").strip()
-        if not label:
-            continue
-        node_id = str(node.get("id") or f"n{index}").strip() or f"n{index}"
-        node_id = re.sub(r"[^A-Za-z0-9_]+", "_", node_id).strip("_") or f"n{index}"
-        if node_id in seen:
-            node_id = f"{node_id}-{index}"
-        seen.add(node_id)
-        group = str(node.get("group") or node.get("role") or "").strip().lower()
-        if group not in DIAGRAM:
-            group = "neutral"
-        clean.append({"id": node_id, "label": label[:40], "group": group})
+        clean_node = _clean_node_record(node, index, seen)
+        if clean_node is not None:
+            clean.append(clean_node)
     return clean[:14]
+
+
+def _clean_node_record(
+    node: dict[str, Any],
+    index: int,
+    seen: set[str],
+) -> dict[str, str] | None:
+    if not isinstance(node, dict):
+        return None
+    label = str(node.get("label") or node.get("title") or node.get("name") or "").strip()
+    if not label:
+        return None
+    node_id = str(node.get("id") or f"n{index}").strip() or f"n{index}"
+    node_id = re.sub(r"[^A-Za-z0-9_]+", "_", node_id).strip("_") or f"n{index}"
+    if node_id in seen:
+        node_id = f"{node_id}-{index}"
+    seen.add(node_id)
+    group = str(node.get("group") or node.get("role") or "").strip().lower()
+    if group not in DIAGRAM:
+        group = "neutral"
+    return {"id": node_id, "label": label[:40], "group": group}
 
 
 def _clean_edges(edges: list[dict[str, Any]] | None, node_ids: set[str]) -> list[dict[str, str]]:
@@ -169,24 +190,28 @@ def build_dot(
     kind: str,
     title: str,
 ) -> str:
-    rankdir = RANKDIR.get(kind, "TB")
+    layout = DIAGRAM_LAYOUT.get(kind, DIAGRAM_LAYOUT["flow"])
+    rankdir = layout["rankdir"]
     lines = ["digraph G {"]
     lines.append(f"  rankdir={rankdir};")
     lines.append("  bgcolor=white;")
+    lines.append(f"  splines={layout['splines']};")
     lines.append("  labelloc=t;")
     if title.strip():
         lines.append(f'  label=<<b>{_xml(title.strip()[:90])}</b>>;')
         lines.append('  fontname="Helvetica";')
         lines.append("  fontsize=16;")
         lines.append(f'  fontcolor="{INK}";')
-    lines.append("  nodesep=0.45;")
-    lines.append("  ranksep=0.55;")
+    lines.append(f"  nodesep={layout['nodesep']};")
+    lines.append(f"  ranksep={layout['ranksep']};")
     lines.append("  pad=0.3;")
     lines.append(
-        '  node [shape=box, style="rounded,filled", fontname="Helvetica", '
+        f'  node [shape={layout["shape"]}, style="rounded,filled", fontname="Helvetica", '
         'fontsize=11, penwidth=1.6, margin="0.20,0.12", color="#94A3B8"];'
     )
-    lines.append(f'  edge [fontname="Helvetica", fontsize=9, color="{EDGE}", arrowsize=0.8];')
+    lines.append(
+        f'  edge [fontname="Helvetica", fontsize=9, color="{EDGE}", arrowsize=0.8];'
+    )
     for node in nodes:
         fill, border = DIAGRAM.get(node["group"], DIAGRAM["neutral"])
         lines.append(
@@ -329,7 +354,7 @@ def generate_excalidraw_diagram(
             node_count=len(clean_nodes),
             edge_count=len(clean_edges),
             validation_status="ok",
-            layout_engine="graphviz",
+            layout_engine=f"graphviz-dot:{resolved_kind}",
             theme=theme,
         )
     except Exception as exc:  # noqa: BLE001

@@ -19,6 +19,13 @@ gpt-image-2 for fresh slide generations — including its title, text, and any t
 drawing — using the structured plan + Sophia's brand style as the spec. Later slides that
 reference slide 1 use the image-generation script's `gpt-image-2` edit path.
 
+Before generating slide 1, choose exactly one `visual_style` for the deck from
+`/mnt/skills/public/image-generation/references/manifest.json`. Use that same
+`visual_style` on every generated slide; vary the `diagram_type`/composition inside the
+style instead of mixing styles across the deck. If the chosen style has a matching
+reference image for the diagram type, pass it with `--reference-images`; if not, rely on
+the style's prompt anchor and no reference.
+
 If the user asked for a plain, text-only, no-image, no-imagery, no-illustration, or
 no-visuals deck, preserve that constraint. Do not run the image-generation script, do not
 make generated hero slides, and do not add `image_path` / `--slide-images` just because this
@@ -33,6 +40,9 @@ and anti-patterns, so write only the content):
 - State the layout in one explicit sentence (columns, sections, where the visual sits).
 - For a technical drawing, list nodes and labeled connections, each wrapped "THE TEXT READS: ...".
 - Put EXACT data in the prompt; the model renders what you give it and will not invent numbers.
+- Include the chosen `visual_style` and diagram family in every prompt.
+- Add concise `speaker_notes` for every content slide: 1-2 sentences that narrate the
+  slide. These notes are not visible on the slide canvas.
 - Run `python /mnt/skills/public/image-generation/scripts/generate.py --slide-visual`
   (sets quality=high, 16:9). Generate slide 1 first, then pass it as
   `--reference-images` to every later slide for one consistent look; the script keeps
@@ -48,8 +58,10 @@ decks, route every slide through deterministic engine-composed text/shape/chart 
 
 A slide whose entire point is hard quantitative data the audience must read may be a deterministic data chart — set `data_chart: true` on that slide. Everything else (concept, architecture, process, section, cover) is gpt-image-2.
 
-QC: every generated slide is checked; a failed slide is regenerated once, then falls back to a
-deterministic engine-composed slide. Plain/no-image decks skip generated-slide QC because there
+QC: every generated slide is checked; a failed slide is regenerated or re-prompted once. Do not
+downgrade a concept, architecture, process, section, cover, or qualitative comparison slide to a
+deterministic engine-composed slide. The only deterministic exception is a true hard-data chart
+whose point is exact numeric reading. Plain/no-image decks skip generated-slide QC because there
 are no generated slide images. Never ship a slide with garbled text or wrong data.
 Run the check with `python /mnt/skills/public/image-generation/scripts/slide_qc.py --image-file <slide.png> --spec-file <slide-spec.txt>`; pass slide 1 as `--reference-image` for later slides.
 
@@ -57,7 +69,11 @@ Slide types in the plan: `cover` · `agenda` · `section` · `content` (subtype 
 `stat` | `two-column` | `full-visual`) · `statement` · `summary`. Use at least three distinct
 types and vary deliberately — no more than two consecutive slides share a treatment. Full-slide
 gpt-image-2 visuals use `image_path`; deterministic hard-data charts use `visual_path`; a
-`statement` slide carries a single `statement` string.
+`statement` slide carries a single `statement` string. Every generated slide in the plan must
+carry the same `visual_style`. Set `title_strategy: "baked"` only when the title is intentionally
+rendered into the image and QC confirms the title is present; otherwise use
+`title_strategy: "native"` so the compiler owns the title overlay. Keep `speaker_notes` for
+concise narration.
 
 ## Per-slide prompt template
 
@@ -101,8 +117,8 @@ Use this prompt structure:
    - secondary supporting details
    - where the eye should go first
 7. Specify Sophia style:
-   - editorial, premium, clean, high contrast, crisp vector-like rendering,
-     brand palette, no generic AI gradient, no stock template look.
+   - the deck's chosen `visual_style`, brand palette, high contrast, no generic
+     AI gradient, no stock template look.
 8. If a later slide, include reference-image continuity:
    - “Use the reference slide’s palette, typography feeling, spacing discipline,
      and visual language.”
@@ -114,7 +130,9 @@ Then run:
 If generated text is wrong, regenerate with a stricter prompt. Do not accept garbled text.
 
 ## 7. Workflow
-Plan & art-direct (variety check) → generate visuals (diagrams: short labels; charts: real labels + data; illustrations: one style) → compose the plan JSON → render → **visual QA**, fix once.
+Plan & art-direct (choose one deck `visual_style`, vary diagram types) → generate visuals
+(diagrams: short labels; hard-data charts: real labels + data) → compose the plan JSON with
+`visual_style`, `title_strategy`, and `speaker_notes` → render → **visual QA**, fix once.
 
 ## 8. QA checklist
 Correctness (no overlap/clipping; real chart/diagram labels and values; no "Item N"/blank images) · Legibility (contrast; nothing dark-on-dark) · Variety (≤2 adjacent same treatment; deck has rhythm) · Fit (each visual matches its content) · Cohesion (one illustration style; consistent palette/type). A correct-but-monotonous deck fails QA.
@@ -142,11 +160,10 @@ Route by complexity x text-density x structural-precision:
 - Too complex for one figure (>9 nodes)  -> DECOMPOSE into 2-3 focused sub-diagrams first, then
   route each piece by the rule above.
 
-Enforce diagram-TYPE variety across a report the way slides enforce treatment variety: do not
-render the same diagram style for every architecture.
+Enforce diagram-TYPE variety across a deck while preserving one visual style.
 
-Excalidraw style anchor (for hand-drawn architecture/concept diagrams via gpt-image-2):
-open the prompt with "a hand-drawn diagram in the style of Excalidraw - rough sketchy rounded
-outlines with a marker quality, casual handwritten-style labels, soft flat fills", then spell out
-containers/nodes/arrows with "THE TEXT READS: ...", then the brand palette. Pass a reference image
-of the target type (see reference library). Reference sets the look; the prompt sets the structure.
+Style anchor (for technical slide visuals via gpt-image-2): read
+`/mnt/skills/public/image-generation/references/manifest.json`, choose one `visual_style`, use
+that style's `prompt_anchor`, then spell out containers/nodes/arrows with "THE TEXT READS: ...",
+then the brand palette. Pass a reference image only when the manifest lists a real ref for that
+style and diagram type. Reference sets the look; the prompt sets the structure.
