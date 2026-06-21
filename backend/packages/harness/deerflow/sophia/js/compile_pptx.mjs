@@ -236,10 +236,9 @@ function addTitle(slide, title, theme, box) {
 
 function imageForwardTitleConfirmed(slideInfo) {
   return Boolean(
-    asString(slideInfo.title_strategy).toLowerCase() === "baked"
-    || asString(slideInfo.titleStrategy).toLowerCase() === "baked"
-    || asBool(slideInfo.title_baked_qc_confirmed)
+    asBool(slideInfo.title_baked_qc_confirmed)
     || asBool(slideInfo.baked_title_qc_confirmed)
+    || asBool(slideInfo.title_in_image_qc_confirmed)
   );
 }
 

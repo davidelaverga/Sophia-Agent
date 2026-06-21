@@ -447,6 +447,30 @@ class TestGeneratePptLayouts:
         prs = Presentation(str(output))
         assert _slide_texts(prs.slides[0]) == []
 
+    def test_python_image_forward_adds_native_title_when_not_qc_confirmed(self, tmp_path: Path) -> None:
+        hero = _write_png(tmp_path / "slide.png")
+        plan = {
+            "title": "Image Forward",
+            "slides": [
+                {
+                    "slide_number": 1,
+                    "title": "Generated full-slide",
+                    "subtitle": "Native title overlay",
+                    "image_path": str(hero),
+                }
+            ],
+        }
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(json.dumps(plan), encoding="utf-8")
+        output = tmp_path / "deck.pptx"
+
+        message = gen.generate_ppt(str(plan_file), [], str(output))
+
+        assert message == "Successfully generated presentation with 1 slides (picture_count=1)"
+        prs = Presentation(str(output))
+        assert "Generated full-slide" in _slide_texts(prs.slides[0])
+        assert "Native title overlay" in _slide_texts(prs.slides[0])
+
     def test_image_forward_compiler_logs_title_presence_diagnostics(
         self,
         tmp_path: Path,
@@ -479,7 +503,7 @@ class TestGeneratePptLayouts:
         assert "title_present=true" in result.stderr
         assert "title_overlay=true" in result.stderr
 
-    def test_image_forward_title_strategy_baked_suppresses_overlay(
+    def test_image_forward_title_strategy_baked_without_qc_keeps_overlay(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -494,6 +518,48 @@ class TestGeneratePptLayouts:
                     "title": "Visible Title",
                     "image_path": str(hero),
                     "title_strategy": "baked",
+                }
+            ],
+        }
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(json.dumps(plan), encoding="utf-8")
+        output = tmp_path / "deck.pptx"
+
+        result = subprocess.run(
+            [
+                shutil.which("node") or "node",
+                str(runtime_dir / "compile_pptx.mjs"),
+                "--plan-file",
+                str(plan_file),
+                "--output-file",
+                str(output),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=20,
+        )
+
+        assert result.returncode == 0, result.stderr
+        assert "title_present=true" in result.stderr
+        assert "title_overlay=true" in result.stderr
+        assert "Visible Title" in _slide_texts(Presentation(str(output)).slides[0])
+
+    def test_image_forward_title_baked_qc_confirmed_suppresses_overlay(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        runtime_dir = _pptxgenjs_runtime(tmp_path, monkeypatch)
+        hero = _write_png(tmp_path / "slide.png")
+        plan = {
+            "title": "Deck",
+            "slides": [
+                {
+                    "slide_number": 1,
+                    "title": "Visible Title",
+                    "image_path": str(hero),
+                    "title_strategy": "baked",
+                    "title_baked_qc_confirmed": True,
                 }
             ],
         }
