@@ -120,3 +120,33 @@ Plan & art-direct (variety check) → generate visuals (diagrams: short labels; 
 Correctness (no overlap/clipping; real chart/diagram labels and values; no "Item N"/blank images) · Legibility (contrast; nothing dark-on-dark) · Variety (≤2 adjacent same treatment; deck has rhythm) · Fit (each visual matches its content) · Cohesion (one illustration style; consistent palette/type). A correct-but-monotonous deck fails QA.
 
 Use the shared Sophia anti-slop rubric (`/mnt/skills/public/sophia/anti_slop.md`) before emitting.
+
+## Diagram vocabulary and routing
+
+Match the visual TYPE to the content; do not use one diagram style for everything.
+
+Types:
+- Nested-container architecture: components grouped inside labeled rounded panels (a panel holds
+  its sub-nodes), labeled arrows, dashed boxes for optional parts. Soft palette. Use for systems.
+- Swimlane / Gantt: color-coded blocks across a time axis, staggered to show overlap. Use for
+  parallel or staged processes (pipelines, async stages).
+- Comparison panels: 2-3 side-by-side panels with the same slots, to contrast approaches/paradigms.
+- Multi-panel chart (small multiples): N chart panels + one shared legend, for multi-task data.
+- Conceptual metaphor: an illustrative scene (e.g. a landscape) with annotated paths + a small
+  "term -> term" mapping panel, for abstract ideas.
+
+Route by complexity x text-density x structural-precision:
+- Simple / conceptual / loose structure / sparse text  -> gpt-image-2 (style-anchored, see below).
+- Precise / dense text / exact structure (>9 nodes, math notation) -> deterministic rendering;
+  if it must stay one figure, render it deterministically rather than image-gen.
+- Too complex for one figure (>9 nodes)  -> DECOMPOSE into 2-3 focused sub-diagrams first, then
+  route each piece by the rule above.
+
+Enforce diagram-TYPE variety across a report the way slides enforce treatment variety: do not
+render the same diagram style for every architecture.
+
+Excalidraw style anchor (for hand-drawn architecture/concept diagrams via gpt-image-2):
+open the prompt with "a hand-drawn diagram in the style of Excalidraw - rough sketchy rounded
+outlines with a marker quality, casual handwritten-style labels, soft flat fills", then spell out
+containers/nodes/arrows with "THE TEXT READS: ...", then the brand palette. Pass a reference image
+of the target type (see reference library). Reference sets the look; the prompt sets the structure.

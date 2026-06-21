@@ -11,6 +11,7 @@ Command(goto="model") so the builder gets another turn to retry instead
 of completing with a phantom artifact.
 """
 
+import hashlib
 import json
 import logging
 import re
@@ -692,6 +693,90 @@ def _merge_string_list(current: object, update: list) -> list[str]:
     return list(seen)
 
 
+def _merge_record_list(current: object, update: list) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    if isinstance(current, list):
+        for item in current:
+            if isinstance(item, dict):
+                key = str(item.get("image_hash") or item.get("image_ref") or len(merged))
+                merged[key] = dict(item)
+    for item in update:
+        if isinstance(item, dict):
+            key = str(item.get("image_hash") or item.get("image_ref") or len(merged))
+            merged[key] = dict(item)
+    return list(merged.values())
+
+
+def _first_non_empty(*values: Any) -> str | None:
+    for value in values:
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _runtime_config_dict(runtime: Runtime | None) -> dict[str, Any]:
+    config = getattr(runtime, "config", None)
+    return config if isinstance(config, dict) else {}
+
+
+def _nested_trace_env_for_request(request: ToolCallRequest) -> dict[str, str]:
+    state = request.state or {}
+    delegation_context = state.get("delegation_context") if isinstance(state.get("delegation_context"), dict) else {}
+    builder_task = state.get("builder_task") if isinstance(state.get("builder_task"), dict) else {}
+    config = _runtime_config_dict(getattr(request, "runtime", None))
+    configurable = config.get("configurable") if isinstance(config.get("configurable"), dict) else {}
+    metadata = config.get("metadata") if isinstance(config.get("metadata"), dict) else {}
+    thread_id = _first_non_empty(
+        state.get("thread_id"),
+        builder_task.get("thread_id"),
+        delegation_context.get("thread_id"),
+        configurable.get("thread_id"),
+        metadata.get("thread_id"),
+    )
+    parent_run_id = _first_non_empty(
+        state.get("run_id"),
+        builder_task.get("run_id"),
+        delegation_context.get("run_id"),
+        configurable.get("run_id"),
+        metadata.get("run_id"),
+        metadata.get("parent_run_id"),
+    )
+    parent_trace_id = _first_non_empty(
+        state.get("parent_trace_id"),
+        builder_task.get("parent_trace_id"),
+        delegation_context.get("parent_trace_id"),
+        configurable.get("trace_id"),
+        metadata.get("trace_id"),
+        metadata.get("parent_trace_id"),
+    )
+    env: dict[str, str] = {}
+    if parent_trace_id:
+        env["SOPHIA_PARENT_TRACE_ID"] = parent_trace_id
+    if parent_run_id:
+        env["SOPHIA_PARENT_RUN_ID"] = parent_run_id
+    if thread_id:
+        env["SOPHIA_THREAD_ID"] = thread_id
+    return env
+
+
+def _maybe_attach_image_trace_env(request: ToolCallRequest) -> None:
+    if request.tool_call.get("name") not in {"bash", "bash_tool"}:
+        return
+    args = request.tool_call.get("args")
+    if not isinstance(args, dict):
+        return
+    command = args.get("command")
+    if not isinstance(command, str) or not any(marker in command for marker in _IMAGE_GENERATION_PATH_MARKERS):
+        return
+    env = _nested_trace_env_for_request(request)
+    if not env or any(f"{name}=" in command for name in env):
+        return
+    updated_args = dict(args)
+    prefix = " ".join(f"{name}={shlex.quote(value)}" for name, value in env.items())
+    updated_args["command"] = f"{prefix} {command}"
+    request.tool_call["args"] = updated_args
+
+
 def _merge_builder_pptx_diagnostics(
     current: dict | None, update: dict | None
 ) -> dict:
@@ -726,6 +811,9 @@ def _merge_builder_pptx_diagnostic_value(merged: dict, key: str, value: object) 
         return
     if key in {"image_output_paths", "pptx_output_paths", "qc_reasons"} and isinstance(value, list):
         merged[key] = _merge_string_list(merged.get(key), value)
+        return
+    if key in {"image_output_records", "qc_image_records"} and isinstance(value, list):
+        merged[key] = _merge_record_list(merged.get(key), value)
         return
     if key == "qc_results" and isinstance(value, list):
         merged[key] = [*(merged.get(key) if isinstance(merged.get(key), list) else []), *value]
@@ -2491,6 +2579,51 @@ def _local_output_file_for_artifact(state: dict[str, Any], artifact_path: object
     return candidate if candidate.is_file() else None
 
 
+def _output_file_sha256(state: dict[str, Any], artifact_path: object) -> str | None:
+    host_file = _local_output_file_for_artifact(state, artifact_path)
+    if host_file is None:
+        return None
+    digest = hashlib.sha256()
+    try:
+        with host_file.open("rb") as handle:
+            for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                digest.update(chunk)
+    except OSError:
+        return None
+    return digest.hexdigest()
+
+
+def _image_record_for_path(
+    state: dict[str, Any],
+    image_path: str,
+    *,
+    slide_index: int | None = None,
+    qc_result: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    image_hash = _output_file_sha256(state, image_path)
+    if not image_hash:
+        return None
+    record: dict[str, Any] = {
+        "image_ref": image_path,
+        "image_basename": PurePosixPath(image_path).name,
+        "image_hash": image_hash,
+    }
+    if slide_index is not None:
+        record["slide_index"] = slide_index
+    if qc_result is not None:
+        record["qc_result"] = qc_result
+    return record
+
+
+def _image_output_records(state: dict[str, Any], image_paths: list[str]) -> list[dict[str, Any]]:
+    records: list[dict[str, Any]] = []
+    for index, image_path in enumerate(image_paths, 1):
+        record = _image_record_for_path(state, image_path, slide_index=index)
+        if record is not None:
+            records.append(record)
+    return records
+
+
 def _html_contains_visual_evidence(path: Path) -> bool:
     try:
         text = path.read_text(encoding="utf-8", errors="ignore").lower()
@@ -2967,28 +3100,90 @@ def _title_present_by_slide(diagnostics: dict[str, Any]) -> dict[int, bool]:
     return by_slide
 
 
+def _add_qc_ref(by_ref: dict[str, dict[str, Any]], image_ref: object, result: dict[str, Any]) -> None:
+    if not isinstance(image_ref, str) or not image_ref.strip():
+        return
+    normalized = image_ref.strip()
+    by_ref[normalized] = result
+    by_ref[PurePosixPath(normalized).name] = result
+
+
+def _qc_record_result(record: dict[str, Any]) -> dict[str, Any] | None:
+    result = record.get("qc_result")
+    return result if isinstance(result, dict) else None
+
+
+def _add_qc_record_refs(by_ref: dict[str, dict[str, Any]], record: dict[str, Any]) -> None:
+    result = _qc_record_result(record)
+    if result is None:
+        return
+    _add_qc_ref(by_ref, record.get("image_ref"), result)
+    _add_qc_ref(by_ref, record.get("image_basename"), result)
+
+
 def _qc_results_by_image_ref(diagnostics: dict[str, Any]) -> dict[str, dict[str, Any]]:
-    results = diagnostics.get("qc_results")
-    if not isinstance(results, list):
-        return {}
     by_ref: dict[str, dict[str, Any]] = {}
-    for result in results:
-        if not isinstance(result, dict):
-            continue
-        image_path = result.get("image_path")
-        if not isinstance(image_path, str) or not image_path.strip():
-            continue
-        normalized = image_path.strip()
-        by_ref[normalized] = result
-        by_ref[PurePosixPath(normalized).name] = result
+    for result in diagnostics.get("qc_results") or []:
+        if isinstance(result, dict):
+            _add_qc_ref(by_ref, result.get("image_path"), result)
+    for record in diagnostics.get("qc_image_records") or []:
+        if isinstance(record, dict):
+            _add_qc_record_refs(by_ref, record)
     return by_ref
 
 
-def _qc_result_for_image(qc_by_ref: dict[str, dict[str, Any]], image_ref: str) -> dict[str, Any] | None:
-    return qc_by_ref.get(image_ref) or qc_by_ref.get(PurePosixPath(image_ref).name)
+def _qc_results_by_image_hash(diagnostics: dict[str, Any]) -> dict[str, dict[str, Any]]:
+    by_hash: dict[str, dict[str, Any]] = {}
+    for collection_key in ("qc_image_records", "qc_results"):
+        records = diagnostics.get(collection_key)
+        if not isinstance(records, list):
+            continue
+        for result in records:
+            if not isinstance(result, dict):
+                continue
+            image_hash = result.get("image_hash")
+            qc_result = result.get("qc_result") if isinstance(result.get("qc_result"), dict) else result
+            if not isinstance(image_hash, str) or not image_hash.strip() or not isinstance(qc_result, dict):
+                continue
+            by_hash[image_hash.strip()] = qc_result
+    return by_hash
 
 
-def _validate_deck_plan(plan: dict[str, Any], diagnostics: dict[str, Any]) -> list[str]:
+def _qc_result_for_image(
+    qc_by_ref: dict[str, dict[str, Any]],
+    qc_by_hash: dict[str, dict[str, Any]],
+    image_ref: str,
+    state: dict[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    result = qc_by_ref.get(image_ref) or qc_by_ref.get(PurePosixPath(image_ref).name)
+    if result is not None:
+        return result
+    image_hash = _output_file_sha256(state or {}, image_ref)
+    if image_hash:
+        return qc_by_hash.get(image_hash)
+    return None
+
+
+def _deck_image_slides(slides: list[Any]) -> list[tuple[int, str]]:
+    return [
+        (index, image_ref)
+        for index, slide in enumerate(slides, 1)
+        if isinstance(slide, dict)
+        for image_ref in [_slide_image_ref(slide)]
+        if image_ref
+    ]
+
+
+def _qc_result_list(diagnostics: dict[str, Any]) -> list[Any]:
+    results = diagnostics.get("qc_results")
+    return results if isinstance(results, list) else []
+
+
+def _validate_deck_plan(
+    plan: dict[str, Any],
+    diagnostics: dict[str, Any],
+    state: dict[str, Any] | None = None,
+) -> list[str]:
     slides_raw = plan.get("slides")
     slides = slides_raw if isinstance(slides_raw, list) else []
     return [
@@ -2996,7 +3191,7 @@ def _validate_deck_plan(plan: dict[str, Any], diagnostics: dict[str, Any]) -> li
         *_deck_treatment_problems(slides),
         *_deck_cover_title_problems(slides, diagnostics),
         *_deck_duplicate_image_problems(slides),
-        *_deck_qc_problems(slides, diagnostics),
+        *_deck_qc_problems(slides, diagnostics, state),
     ]
 
 
@@ -3048,21 +3243,20 @@ def _deck_duplicate_image_problems(slides: list[Any]) -> list[str]:
     return []
 
 
-def _deck_qc_problems(slides: list[Any], diagnostics: dict[str, Any]) -> list[str]:
-    image_slides = [
-        (index, image_ref)
-        for index, slide in enumerate(slides, 1)
-        if isinstance(slide, dict)
-        for image_ref in [_slide_image_ref(slide)]
-        if image_ref
-    ]
-    qc_results = diagnostics.get("qc_results") if isinstance(diagnostics.get("qc_results"), list) else []
+def _deck_qc_problems(
+    slides: list[Any],
+    diagnostics: dict[str, Any],
+    state: dict[str, Any] | None = None,
+) -> list[str]:
+    image_slides = _deck_image_slides(slides)
+    qc_results = _qc_result_list(diagnostics)
     qc_by_ref = _qc_results_by_image_ref(diagnostics)
-    if image_slides and not qc_by_ref and len(qc_results) >= len(image_slides):
+    qc_by_hash = _qc_results_by_image_hash(diagnostics)
+    if image_slides and not qc_by_ref and not qc_by_hash and len(qc_results) >= len(image_slides):
         return _deck_qc_ordered_problems(image_slides, qc_results)
-    if image_slides and not qc_by_ref and len(qc_results) < len(image_slides):
+    if image_slides and not qc_by_ref and not qc_by_hash and len(qc_results) < len(image_slides):
         return [f"Slide {len(qc_results) + 1} image was not QC-checked."]
-    return _deck_qc_reference_problems(image_slides, qc_by_ref)
+    return _deck_qc_reference_problems(image_slides, qc_by_ref, qc_by_hash, state)
 
 
 def _deck_qc_ordered_problems(image_slides: list[tuple[int, str]], qc_results: list[Any]) -> list[str]:
@@ -3078,10 +3272,12 @@ def _deck_qc_ordered_problems(image_slides: list[tuple[int, str]], qc_results: l
 def _deck_qc_reference_problems(
     image_slides: list[tuple[int, str]],
     qc_by_ref: dict[str, dict[str, Any]],
+    qc_by_hash: dict[str, dict[str, Any]],
+    state: dict[str, Any] | None = None,
 ) -> list[str]:
     problems: list[str] = []
     for index, image_ref in image_slides:
-        result = _qc_result_for_image(qc_by_ref, image_ref)
+        result = _qc_result_for_image(qc_by_ref, qc_by_hash, image_ref, state)
         if result is None:
             problems.append(f"Slide {index} image was not QC-checked.")
         elif result.get("skipped") is True:
@@ -3091,6 +3287,89 @@ def _deck_qc_reference_problems(
     return problems
 
 
+def _clone_deck_plan(plan: dict[str, Any]) -> dict[str, Any] | None:
+    try:
+        cloned = json.loads(json.dumps(plan))
+    except (TypeError, ValueError):
+        return None
+    return cloned if isinstance(cloned, dict) else None
+
+
+def _chart_visual_evidence(slide: dict[str, Any]) -> bool:
+    visual_path = slide.get("visual_path")
+    if not isinstance(visual_path, str) or not visual_path.strip():
+        return False
+    evidence = " ".join(
+        str(slide.get(key) or "")
+        for key in ("visual_kind", "chart_type", "subtype", "layout", "title")
+    ).lower()
+    basename = PurePosixPath(visual_path.strip()).name.lower()
+    return "chart" in evidence or "graph" in evidence or "chart" in basename
+
+
+def _repair_slide_title_flag(slide: dict[str, Any], index: int, title_by_slide: dict[int, bool]) -> bool:
+    if title_by_slide.get(index) is not True or slide.get("title_present") is True:
+        return False
+    slide["title_present"] = True
+    return True
+
+
+def _repair_slide_chart_flag(slide: dict[str, Any]) -> bool:
+    if not _chart_visual_evidence(slide) or slide.get("data_chart") is True:
+        return False
+    slide["data_chart"] = True
+    return True
+
+
+def _repair_slide_image_ref(slide: dict[str, Any], image_candidates: list[str]) -> bool:
+    if (
+        _slide_image_ref(slide)
+        or _slide_is_data_chart(slide)
+        or _slide_is_stat_layout(slide)
+        or not image_candidates
+    ):
+        return False
+    slide["image_path"] = image_candidates.pop(0)
+    return True
+
+
+def _unused_image_candidates(diagnostics: dict[str, Any], slides: list[Any]) -> list[str]:
+    used_images = {
+        image_ref
+        for slide in slides
+        if isinstance(slide, dict)
+        for image_ref in [_slide_image_ref(slide)]
+        if image_ref
+    }
+    return [
+        image_ref
+        for image_ref in (diagnostics.get("image_output_paths") or [])
+        if isinstance(image_ref, str) and image_ref.strip() and image_ref not in used_images
+    ]
+
+
+def _repair_deck_plan_for_validation(
+    plan: dict[str, Any],
+    diagnostics: dict[str, Any],
+) -> dict[str, Any] | None:
+    repaired = _clone_deck_plan(plan)
+    if repaired is None:
+        return None
+    slides_raw = repaired.get("slides")
+    if not isinstance(slides_raw, list):
+        return None
+    changed = False
+    title_by_slide = _title_present_by_slide(diagnostics)
+    image_candidates = _unused_image_candidates(diagnostics, slides_raw)
+    for index, slide in enumerate(slides_raw, 1):
+        if not isinstance(slide, dict):
+            continue
+        changed = _repair_slide_title_flag(slide, index, title_by_slide) or changed
+        changed = _repair_slide_chart_flag(slide) or changed
+        changed = _repair_slide_image_ref(slide, image_candidates) or changed
+    return repaired if changed else None
+
+
 def _deck_plan_validation_problems(state: dict[str, Any]) -> list[str]:
     if not _requested_pptx_artifact(state) or not _builder_image_enrichment_enabled(state):
         return []
@@ -3098,7 +3377,26 @@ def _deck_plan_validation_problems(state: dict[str, Any]) -> list[str]:
     plan = diagnostics.get("pptx_plan_json")
     if not isinstance(plan, dict):
         return ["PPTX plan metadata was not captured; re-run the ppt-generation script before emitting."]
-    return _validate_deck_plan(plan, diagnostics)
+    problems = _validate_deck_plan(plan, diagnostics, state)
+    if not problems:
+        return []
+    if state.get("builder_pptx_plan_deterministic_repair_attempted"):
+        return problems
+    repaired = _repair_deck_plan_for_validation(plan, diagnostics)
+    if repaired is None:
+        return problems
+    repaired_problems = _validate_deck_plan(repaired, diagnostics, state)
+    if len(repaired_problems) >= len(problems):
+        return problems
+    diagnostics["pptx_plan_json"] = repaired
+    state["builder_pptx_plan_deterministic_repair_attempted"] = True
+    logger.warning(
+        "[BuilderPptxPlanRepair] repaired=%s remaining=%d previous=%d",
+        not repaired_problems,
+        len(repaired_problems),
+        len(problems),
+    )
+    return repaired_problems
 
 
 def _pptx_plan_diagnostics_from_command(command: str, state: dict[str, Any]) -> dict[str, Any]:
@@ -3121,6 +3419,16 @@ def _pptx_plan_diagnostics_from_command(command: str, state: dict[str, Any]) -> 
         "pptx_plan_slide_count": len(slides) if isinstance(slides, list) else 0,
         "pptx_plan_image_ref_count": _plan_image_ref_count(plan),
     }
+
+
+def _image_generation_success_path_delta(state: dict[str, Any], successful_paths: list[str]) -> dict[str, Any]:
+    if not successful_paths:
+        return {}
+    delta: dict[str, Any] = {"image_output_paths": successful_paths}
+    image_records = _image_output_records(state, successful_paths)
+    if image_records:
+        delta["image_output_records"] = image_records
+    return delta
 
 
 def _slide_qc_invocations_in_command(command: str) -> int:
@@ -3178,42 +3486,84 @@ def _slide_qc_results_from_text(text: str) -> list[dict[str, Any]]:
     return json_results or summary_results
 
 
-def _slide_qc_bash_delta(command: str, text: str) -> dict[str, Any]:
-    results = _slide_qc_results_from_text(text)
-    image_files = _slide_qc_image_files_in_command(command)
+def _attach_qc_image_paths(
+    results: list[dict[str, Any]],
+    image_files: list[str],
+    state: dict[str, Any] | None,
+) -> None:
     for index, result in enumerate(results):
+        if index >= len(image_files):
+            continue
+        result["image_path"] = image_files[index]
+        image_hash = _output_file_sha256(state or {}, image_files[index])
+        if image_hash:
+            result["image_hash"] = image_hash
+
+
+def _first_skipped_qc_reason(results: list[dict[str, Any]]) -> str | None:
+    return next(
+        (
+            str(reason)
+            for result in results
+            if isinstance(result, dict) and result.get("skipped") is True
+            for reason in (result.get("reasons") or [])
+            if isinstance(reason, str)
+        ),
+        None,
+    )
+
+
+def _append_missing_qc_results(
+    results: list[dict[str, Any]],
+    image_files: list[str],
+    invocations: int,
+) -> None:
+    if invocations <= len(results):
+        return
+    skipped_reason = _first_skipped_qc_reason(results)
+    for index in range(len(results), invocations):
+        result = {
+            "pass": False,
+            "reasons": [skipped_reason or "QC subprocess did not emit a parseable verdict"],
+        }
+        if skipped_reason:
+            result["skipped"] = True
         if index < len(image_files):
             result["image_path"] = image_files[index]
-    invocations = max(len(results), _slide_qc_invocations_in_command(command))
-    if invocations > len(results):
-        skipped_reason = next(
-            (
-                str(reason)
-                for result in results
-                if isinstance(result, dict) and result.get("skipped") is True
-                for reason in (result.get("reasons") or [])
-                if isinstance(reason, str)
-            ),
-            None,
-        )
-        for index in range(len(results), invocations):
-            result = {
-                "pass": False,
-                "reasons": [skipped_reason or "QC subprocess did not emit a parseable verdict"],
-            }
-            if skipped_reason:
-                result["skipped"] = True
-            if index < len(image_files):
-                result["image_path"] = image_files[index]
-            results.append(result)
-    passed = sum(1 for result in results if result.get("pass") is True)
-    failures = max(0, invocations - passed)
-    reasons = [
+        results.append(result)
+
+
+def _qc_reasons(results: list[dict[str, Any]]) -> list[str]:
+    return [
         reason
         for result in results
         for reason in (result.get("reasons") or [])
         if isinstance(reason, str)
     ]
+
+
+def _qc_image_records_from_results(
+    results: list[dict[str, Any]],
+    state: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    return [
+        record
+        for index, result in enumerate(results, 1)
+        if isinstance(result.get("image_path"), str)
+        for record in [_image_record_for_path(state or {}, result["image_path"], slide_index=index, qc_result=result)]
+        if record is not None
+    ]
+
+
+def _slide_qc_bash_delta(command: str, text: str, state: dict[str, Any] | None = None) -> dict[str, Any]:
+    results = _slide_qc_results_from_text(text)
+    image_files = _slide_qc_image_files_in_command(command)
+    _attach_qc_image_paths(results, image_files, state)
+    invocations = max(len(results), _slide_qc_invocations_in_command(command))
+    _append_missing_qc_results(results, image_files, invocations)
+    passed = sum(1 for result in results if result.get("pass") is True)
+    failures = max(0, invocations - passed)
+    reasons = _qc_reasons(results)
     delta: dict[str, Any] = {
         "qc_invocation_count": invocations,
         "qc_pass_count": passed,
@@ -3222,6 +3572,9 @@ def _slide_qc_bash_delta(command: str, text: str) -> dict[str, Any]:
     }
     if reasons:
         delta["qc_reasons"] = reasons
+    qc_image_records = _qc_image_records_from_results(results, state)
+    if qc_image_records:
+        delta["qc_image_records"] = qc_image_records
     return delta
 
 
@@ -7252,8 +7605,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "image_generation_bytes_total": bytes_total,
             "image_generation_error_class": error_class,
         }
-        if successful_paths:
-            delta["image_output_paths"] = successful_paths
+        delta.update(_image_generation_success_path_delta(state, successful_paths))
         return delta
 
     @staticmethod
@@ -7404,7 +7756,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 ),
             )
         if any(marker in command for marker in _SLIDE_QC_PATH_MARKERS):
-            delta = _merge_builder_pptx_diagnostics(delta, _slide_qc_bash_delta(command, text))
+            delta = _merge_builder_pptx_diagnostics(delta, _slide_qc_bash_delta(command, text, state))
         if any(marker in command for marker in _PPTX_GENERATOR_PATH_MARKERS):
             delta = _merge_builder_pptx_diagnostics(
                 delta,
@@ -7489,6 +7841,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if image_block is not None:
                 return image_block
             self._maybe_autowire_pptx_plan_visuals(request)
+            _maybe_attach_image_trace_env(request)
             return self._tool_result_command(request, handler(request))
 
         args = request.tool_call.get("args", {})
@@ -7793,6 +8146,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if image_block is not None:
                 return image_block
             self._maybe_autowire_pptx_plan_visuals(request)
+            _maybe_attach_image_trace_env(request)
             return self._tool_result_command(request, await handler(request))
 
         args = request.tool_call.get("args", {})

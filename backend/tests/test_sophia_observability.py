@@ -90,6 +90,30 @@ def test_builder_completion_adds_metadata_tags_and_qc_feedback(monkeypatch) -> N
     assert feedback_client.feedback[1]["comment"] == '["garbled title"]'
 
 
+def test_builder_completion_normalizes_successful_pdf_metadata(monkeypatch) -> None:
+    run_tree = _FakeRunTree()
+    monkeypatch.setattr(observability, "_current_run_tree", lambda: run_tree)
+    monkeypatch.setattr(observability, "_feedback_client", lambda: _FakeFeedbackClient())
+
+    artifact = {
+        "artifact_path": "/mnt/user-data/outputs/report.pdf",
+        "artifact_type": "pdf",
+        "requested_artifact_ext": "md",
+        "artifact_ext": "pdf",
+        "artifact_is_fallback": False,
+        "fallback_reason": "md_generation_not_completed",
+    }
+
+    assert observability.annotate_builder_completion({}, artifact) is True
+
+    assert run_tree.metadata["artifact_type"] == "pdf"
+    assert run_tree.metadata["requested_artifact_ext"] == "pdf"
+    assert run_tree.metadata["final_artifact_ext"] == "pdf"
+    assert run_tree.metadata["artifact_is_fallback"] is False
+    assert run_tree.metadata["degraded"] is False
+    assert "fallback_reason" not in run_tree.metadata
+
+
 def test_builder_completion_is_noop_without_active_run(monkeypatch) -> None:
     monkeypatch.setattr(observability, "_current_run_tree", lambda: None)
 

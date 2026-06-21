@@ -230,8 +230,11 @@ class TestGeneratePathWithoutReferenceImages:
         monkeypatch.setattr(script_module, "_LANGSMITH_CLIENT", fake_client)
         monkeypatch.setenv("LANGSMITH_TRACING", "false")
         monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
-        monkeypatch.setenv("LANGSMITH_PROJECT", "Sophia")
+        monkeypatch.setenv("LANGSMITH_PROJECT", '"Sophia"')
         monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2-test")
+        monkeypatch.setenv("SOPHIA_PARENT_TRACE_ID", "trace-1")
+        monkeypatch.setenv("SOPHIA_PARENT_RUN_ID", "run-1")
+        monkeypatch.setenv("SOPHIA_THREAD_ID", "thread-1")
 
         class FakeEnabledContext:
             def __enter__(self):
@@ -274,8 +277,17 @@ class TestGeneratePathWithoutReferenceImages:
         assert tracing_call["enabled"] is True
         assert tracing_call["client"] is fake_client
         assert tracing_call["project_name"] == "Sophia"
+        assert tracing_call["metadata"] == {
+            "sophia_component": "builder_image_generation",
+            "parent_trace_id": "trace-1",
+            "parent_run_id": "run-1",
+            "thread_id": "thread-1",
+        }
         trace_call = next(payload for name, payload in calls if name == "trace")
         assert trace_call["project_name"] == "Sophia"
+        assert trace_call["metadata"]["parent_trace_id"] == "trace-1"
+        assert trace_call["metadata"]["parent_run_id"] == "run-1"
+        assert trace_call["metadata"]["thread_id"] == "thread-1"
 
         with trace_context as run:
             run.end(outputs={"ok": True})

@@ -1,37 +1,40 @@
-# Sophia LangSmith Traces
+# LangSmith Trace Access
 
-Sophia builder traces write to the EU LangSmith endpoint and the `Sophia`
-project. Runtime tracing requires:
+Sophia builder traces land in the EU LangSmith project named `Sophia`.
 
-```bash
-# Keep global LangSmith autotracing disabled so companion/process runs do not
-# leak into LangSmith. Builder tracing is attached explicitly in code.
-export LANGSMITH_TRACING=false
-export SOPHIA_BUILDER_LANGSMITH_TRACING=true
-export LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
-export LANGSMITH_PROJECT=Sophia
-export LANGSMITH_API_KEY=<langsmith-api-key>
-```
-
-Optional values:
+Required runtime configuration:
 
 ```bash
-export LANGSMITH_WORKSPACE_ID=<workspace-id>
-export LANGSMITH_PROJECT_UUID=<project-uuid>
+LANGSMITH_TRACING=false
+SOPHIA_BUILDER_LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
+LANGSMITH_PROJECT=Sophia
+LANGSMITH_API_KEY=<runtime-key>
 ```
 
-`LANGSMITH_WORKSPACE_ID` is only needed when the API key can access multiple
-workspaces. `LANGSMITH_PROJECT_UUID` is useful for code-agent trace readers
-because it avoids a project-name lookup.
-
-For local read-only exports, `langsmith-fetch` can pull recent traces:
+Optional, useful when the key can see multiple workspaces/projects:
 
 ```bash
-langsmith-fetch traces /tmp/sophia-langsmith-traces \
-  --limit 10 \
-  --include-metadata \
-  --include-feedback
+LANGSMITH_WORKSPACE_ID=<workspace-id>
+LANGSMITH_PROJECT_UUID=<project-uuid>
 ```
 
-The upstream `langsmith-fetch` repository is no longer actively maintained, so
-treat it as a convenience export helper rather than a production dependency.
+For read-only code-agent access, register a LangSmith MCP server such as
+`langchain-ai/langsmith-mcp-server` with a read-only API key and the same endpoint/project
+configuration. The expected tool flow is:
+
+1. `ls_list_runs` filtered to project `Sophia`, recent builder tags, or a `thread_id`.
+2. `ls_read_run` for the root run and important child runs.
+3. Cross-reference run metadata with Render/Vercel logs using `thread_id`, `task_id`, and `run_id`.
+
+Local helper fallback:
+
+```bash
+LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com \
+LANGSMITH_PROJECT=Sophia \
+LANGSMITH_API_KEY=<read-only-key> \
+langsmith-fetch traces --include-metadata --include-feedback
+```
+
+`langsmith-fetch` is deprecated upstream, but it is still useful as a read-only export helper
+when MCP tooling is not available. Never commit API keys or signed artifact URLs.

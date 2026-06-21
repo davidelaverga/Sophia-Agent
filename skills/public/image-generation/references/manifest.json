@@ -1,0 +1,31 @@
+{
+  "version": 1,
+  "style": "excalidraw_hand_drawn",
+  "diagram_types": {
+    "nested-container architecture": {
+      "path": "architecture_nested.png",
+      "use_for": ["systems", "gateway nodes", "component groups", "agent harnesses"],
+      "prompt_anchor": "a hand-drawn diagram in the style of Excalidraw - rough sketchy rounded outlines with a marker quality, casual handwritten-style labels, soft flat fills"
+    },
+    "comparison panels": {
+      "path": "comparison_panels.png",
+      "use_for": ["paradigm comparison", "framework contrast", "side-by-side tradeoffs"],
+      "prompt_anchor": "a hand-drawn diagram in the style of Excalidraw - rough sketchy rounded outlines with a marker quality, casual handwritten-style labels, soft flat fills"
+    },
+    "swimlane / gantt": {
+      "path": "process_guards.png",
+      "use_for": ["staged process", "parallel pipeline", "guardrail sequence"],
+      "prompt_anchor": "a hand-drawn diagram in the style of Excalidraw - rough sketchy rounded outlines with a marker quality, casual handwritten-style labels, soft flat fills"
+    },
+    "conceptual metaphor": {
+      "path": "experiment_loop.png",
+      "use_for": ["abstract loop", "decision cycle", "agent memory"],
+      "prompt_anchor": "a hand-drawn diagram in the style of Excalidraw - rough sketchy rounded outlines with a marker quality, casual handwritten-style labels, soft flat fills"
+    },
+    "two-panel comparison": {
+      "path": "two_panel_comparison.png",
+      "use_for": ["before-after", "binary contrast", "mechanism comparison"],
+      "prompt_anchor": "a hand-drawn diagram in the style of Excalidraw - rough sketchy rounded outlines with a marker quality, casual handwritten-style labels, soft flat fills"
+    }
+  }
+}

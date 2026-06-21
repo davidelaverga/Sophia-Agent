@@ -40,6 +40,20 @@ def test_prefers_langsmith_env_names(monkeypatch):
     assert tracing_module.is_tracing_enabled() is True
 
 
+def test_strips_shell_style_quotes_from_langsmith_env_values(monkeypatch):
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "'lsv2_key'")
+    monkeypatch.setenv("LANGSMITH_PROJECT", '"Sophia"')
+    monkeypatch.setenv("LANGSMITH_ENDPOINT", '"https://eu.api.smith.langchain.com"')
+
+    _reset_tracing_cache()
+    cfg = tracing_module.get_tracing_config()
+
+    assert cfg.api_key == "lsv2_key"
+    assert cfg.project == "Sophia"
+    assert cfg.endpoint == "https://eu.api.smith.langchain.com"
+
+
 def test_falls_back_to_langchain_env_names(monkeypatch):
     monkeypatch.delenv("LANGSMITH_TRACING", raising=False)
     monkeypatch.delenv("LANGSMITH_API_KEY", raising=False)

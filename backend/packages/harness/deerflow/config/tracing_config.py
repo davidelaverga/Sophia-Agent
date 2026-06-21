@@ -49,7 +49,7 @@ def _first_env_value(*names: str) -> str | None:
     for name in names:
         value = os.environ.get(name)
         if value and value.strip():
-            return value.strip()
+            return value.strip().strip('"').strip("'").strip()
     return None
 
 

@@ -134,6 +134,18 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 For PDF reports, technical diagrams use `generate_excalidraw_diagram` (graphviz) and charts use
 `generate_visual_asset` — NOT this skill. That deterministic path is unchanged.
 
+Reference library: for Excalidraw-style technical slide visuals, first inspect
+`/mnt/skills/public/image-generation/references/manifest.json` and pass the matching seed image
+with `--reference-images`:
+
+- nested-container architecture -> `architecture_nested.png`
+- comparison panels -> `comparison_panels.png` or `two_panel_comparison.png`
+- swimlane / staged process -> `process_guards.png`
+- conceptual loop/metaphor -> `experiment_loop.png`
+
+The reference sets the hand-drawn look; the prompt still supplies the exact structure, labels,
+brand palette, and "THE TEXT READS: ..." strings.
+
 Before accepting a presentation slide visual, apply the shared Sophia anti-slop rubric
 (`/mnt/skills/public/sophia/anti_slop.md`): Philosophy, Hierarchy, Execution,
 Specificity, Restraint, and Variety. Reject purple/pink AI-gradient hero slides,

@@ -94,6 +94,9 @@ def test_visual_composition_directives_carry_the_toolkit() -> None:
     assert "editable deterministic PPTX" in directives
     assert "anti_slop.md" in directives
     assert "Philosophy, Hierarchy, Execution" in directives
+    assert "Diagram vocabulary and routing" in directives
+    assert "Nested-container architecture" in directives
+    assert "Excalidraw style anchor" in directives
 
 
 def test_ppt_generation_skill_carries_deck_design_system() -> None:
@@ -119,6 +122,9 @@ def test_ppt_generation_skill_carries_deck_design_system() -> None:
     assert "deterministic editable PPTX" in text
     assert "Prompting gpt-image-2 for slide visuals" in text
     assert "anti_slop.md" in text
+    assert "Diagram vocabulary and routing" in text
+    assert "Nested-container architecture" in text
+    assert "Excalidraw style anchor" in text
 
 
 def test_image_generation_skill_declares_reference_edit_model() -> None:
@@ -130,6 +136,25 @@ def test_image_generation_skill_declares_reference_edit_model() -> None:
     assert "client.images.edit" in text
     assert "anti_slop.md" in text
     assert "generic stock-deck styling" in text
+    assert "references/manifest.json" in text
+    assert "architecture_nested.png" in text
+
+
+def test_image_generation_reference_manifest_declares_excalidraw_seeds() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    references = repo_root / "skills/public/image-generation/references"
+    manifest = (references / "manifest.json").read_text()
+
+    assert "excalidraw_hand_drawn" in manifest
+    for image_name in (
+        "architecture_nested.png",
+        "comparison_panels.png",
+        "process_guards.png",
+        "experiment_loop.png",
+        "two_panel_comparison.png",
+    ):
+        assert image_name in manifest
+        assert (references / image_name).is_file()
 
 
 def test_pdf_report_skill_is_source_first_and_renderer_backed() -> None:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 import sys
@@ -14,6 +15,8 @@ from PIL import Image
 
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
+    _deck_plan_validation_problems,
+    _maybe_attach_image_trace_env,
     _merge_builder_pptx_diagnostics,
     _pptx_skill_read_seen,
     _validate_deck_plan,
@@ -32,6 +35,10 @@ def _tool_message(text: str) -> ToolMessage:
 def _write_png(path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     Image.new("RGB", (320, 180), color=(40, 140, 180)).save(path)
+
+
+def _sha256_bytes(value: bytes) -> str:
+    return hashlib.sha256(value).hexdigest()
 
 
 def _write_minimal_pptx(path: Path) -> None:
@@ -95,7 +102,43 @@ def test_image_generation_bash_result_records_output_bytes(tmp_path: Path) -> No
         "image_generation_bytes_total": len(b"jpeg-bytes"),
         "image_generation_error_class": None,
         "image_output_paths": ["/mnt/user-data/outputs/slide-01.jpg"],
+        "image_output_records": [
+            {
+                "image_ref": "/mnt/user-data/outputs/slide-01.jpg",
+                "image_basename": "slide-01.jpg",
+                "image_hash": _sha256_bytes(b"jpeg-bytes"),
+                "slide_index": 1,
+            }
+        ],
     }
+
+
+def test_image_generation_bash_command_gets_builder_trace_env() -> None:
+    request = SimpleNamespace(
+        state={
+            "delegation_context": {"thread_id": "thread-1"},
+            "builder_task": {"run_id": "run-1"},
+        },
+        runtime=SimpleNamespace(config={"metadata": {"trace_id": "trace-1"}}),
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/image-generation/scripts/generate.py "
+                    "--prompt-file /mnt/user-data/workspace/slide-01.json "
+                    "--output-file /mnt/user-data/outputs/slide-01.png"
+                )
+            },
+        },
+    )
+
+    _maybe_attach_image_trace_env(request)
+
+    command = request.tool_call["args"]["command"]
+    assert command.startswith(
+        "SOPHIA_PARENT_TRACE_ID=trace-1 SOPHIA_PARENT_RUN_ID=run-1 SOPHIA_THREAD_ID=thread-1 "
+    )
+    assert "image-generation/scripts/generate.py" in command
 
 
 def test_image_generation_bash_result_parses_machine_readable_failure(tmp_path: Path) -> None:
@@ -502,6 +545,69 @@ def test_validate_deck_plan_accepts_image_forward_with_title_and_qc() -> None:
     assert problems == []
 
 
+def test_validate_deck_plan_accepts_qc_coverage_by_image_hash(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    image = outputs / "regenerated.png"
+    image.write_bytes(b"same-image-bytes")
+    image_hash = _sha256_bytes(b"same-image-bytes")
+    plan = {
+        "slides": [
+            {
+                "type": "cover",
+                "title": "Launch",
+                "image_path": "/mnt/user-data/outputs/regenerated.png",
+            }
+        ]
+    }
+
+    problems = _validate_deck_plan(
+        plan,
+        {
+            "pptx_slide_title_results": [{"slide": 1, "title_present": True}],
+            "qc_image_records": [
+                {
+                    "slide_index": 1,
+                    "image_ref": "/mnt/user-data/outputs/old-name.png",
+                    "image_basename": "old-name.png",
+                    "image_hash": image_hash,
+                    "qc_result": {"pass": True, "reasons": []},
+                }
+            ],
+        },
+        {"thread_data": {"outputs_path": str(outputs)}},
+    )
+
+    assert problems == []
+
+
+def test_deck_plan_validation_repairs_known_chart_visual_metadata() -> None:
+    plan = {
+        "slides": [
+            {"type": "cover", "title": "Launch"},
+            {
+                "type": "content",
+                "title": "Benchmark chart",
+                "visual_path": "/mnt/user-data/outputs/visuals/benchmark-chart.png",
+            },
+        ]
+    }
+    diagnostics = {
+        "pptx_plan_json": plan,
+        "pptx_slide_title_results": [{"slide": 1, "title_present": True}],
+    }
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation", "task": "Create a visual deck"},
+        "builder_pptx_diagnostics": diagnostics,
+    }
+
+    assert _deck_plan_validation_problems(state) == []
+    repaired = diagnostics["pptx_plan_json"]
+    assert repaired["slides"][1]["data_chart"] is True
+    assert state["builder_pptx_plan_deterministic_repair_attempted"] is True
+
+
 def test_validate_deck_plan_treats_skipped_qc_as_unavailable() -> None:
     plan = {
         "slides": [
@@ -751,6 +857,13 @@ def test_image_generation_and_slide_qc_bash_result_merge_diagnostics(tmp_path: P
         request,
         _tool_message('Successfully generated image\n[qc] PASS=False reasons=["garbled"]'),
     )
+    image_hash = _sha256_bytes(b"png-bytes")
+    qc_result = {
+        "pass": False,
+        "reasons": ["garbled"],
+        "image_path": "/mnt/user-data/outputs/slide-01.png",
+        "image_hash": image_hash,
+    }
 
     assert delta == {
         "image_generation_attempt_count": 1,
@@ -758,10 +871,27 @@ def test_image_generation_and_slide_qc_bash_result_merge_diagnostics(tmp_path: P
         "image_generation_bytes_total": len(b"png-bytes"),
         "image_generation_error_class": None,
         "image_output_paths": ["/mnt/user-data/outputs/slide-01.png"],
+        "image_output_records": [
+            {
+                "image_ref": "/mnt/user-data/outputs/slide-01.png",
+                "image_basename": "slide-01.png",
+                "image_hash": image_hash,
+                "slide_index": 1,
+            }
+        ],
         "qc_invocation_count": 1,
         "qc_pass_count": 0,
         "qc_failure_count": 1,
-        "qc_results": [{"pass": False, "reasons": ["garbled"], "image_path": "/mnt/user-data/outputs/slide-01.png"}],
+        "qc_results": [qc_result],
+        "qc_image_records": [
+            {
+                "image_ref": "/mnt/user-data/outputs/slide-01.png",
+                "image_basename": "slide-01.png",
+                "image_hash": image_hash,
+                "slide_index": 1,
+                "qc_result": qc_result,
+            }
+        ],
         "qc_reasons": ["garbled"],
     }
 

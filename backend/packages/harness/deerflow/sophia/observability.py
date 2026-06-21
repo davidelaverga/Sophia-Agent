@@ -480,6 +480,26 @@ def _final_artifact_ext(artifact: dict[str, Any]) -> str | None:
     return path.rsplit(".", 1)[-1].lower().strip() or None
 
 
+def _normalized_artifact_ext(artifact: dict[str, Any]) -> str | None:
+    value = artifact.get("artifact_ext") or _final_artifact_ext(artifact)
+    if not isinstance(value, str):
+        return None
+    return value.strip().lstrip(".").lower() or None
+
+
+def _true_artifact_fallback(artifact: dict[str, Any]) -> bool:
+    return artifact.get("artifact_is_fallback") is True
+
+
+def _requested_artifact_ext_for_metadata(artifact: dict[str, Any], final_ext: str | None) -> str | None:
+    if final_ext and not _true_artifact_fallback(artifact):
+        return final_ext
+    value = artifact.get("requested_artifact_ext")
+    if not isinstance(value, str):
+        return final_ext
+    return value.strip().lstrip(".").lower() or final_ext
+
+
 def _first_positive_int(*values: Any) -> int:
     for value in values:
         parsed = _as_int(value)
@@ -506,7 +526,60 @@ def _qc_results(diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _degraded(artifact: dict[str, Any], diagnostics: dict[str, Any]) -> bool:
-    return bool(artifact.get("artifact_is_fallback") or artifact.get("quality_warning") or artifact.get("fallback_reason") or _as_int(diagnostics.get("dropped_image_refs")) > 0)
+    return bool(
+        _true_artifact_fallback(artifact)
+        or artifact.get("quality_warning")
+        or _as_int(diagnostics.get("dropped_image_refs")) > 0
+    )
+
+
+def _fallback_reason_for_metadata(artifact: dict[str, Any], diagnostics: dict[str, Any]) -> str | None:
+    if not _true_artifact_fallback(artifact):
+        return None
+    value = artifact.get("fallback_reason") or diagnostics.get("fallback_reason")
+    if value:
+        return str(value)
+    return None
+
+
+def _add_identity_metadata(
+    metadata: dict[str, Any],
+    *,
+    artifact: dict[str, Any],
+    builder_task: dict[str, Any],
+    delegation_context: dict[str, Any],
+) -> None:
+    for key in ("thread_id", "task_id", "run_id", "parent_thread_id"):
+        for source in (artifact, builder_task, delegation_context):
+            if key not in metadata:
+                _merge_safe_metadata(metadata, key, source.get(key))
+
+
+def _add_artifact_metadata(
+    metadata: dict[str, Any],
+    artifact: dict[str, Any],
+    diagnostics: dict[str, Any],
+) -> None:
+    final_artifact_ext = _normalized_artifact_ext(artifact)
+    requested_artifact_ext = _requested_artifact_ext_for_metadata(artifact, final_artifact_ext)
+    _merge_safe_metadata(metadata, "artifact_type", artifact.get("artifact_type"))
+    _merge_safe_metadata(metadata, "requested_artifact_ext", requested_artifact_ext)
+    _merge_safe_metadata(metadata, "final_artifact_ext", final_artifact_ext)
+    metadata["artifact_is_fallback"] = bool(artifact.get("artifact_is_fallback"))
+    fallback_reason = _fallback_reason_for_metadata(artifact, diagnostics)
+    if fallback_reason:
+        metadata["fallback_reason"] = fallback_reason
+
+
+def _add_quality_metadata(
+    metadata: dict[str, Any],
+    artifact: dict[str, Any],
+    diagnostics: dict[str, Any],
+) -> None:
+    for key in ("quality_warning", "image_generation_error_class"):
+        value = artifact.get(key) or diagnostics.get(key)
+        if value:
+            metadata[key] = str(value)
 
 
 def builder_observability_payload(
@@ -535,20 +608,16 @@ def builder_observability_payload(
         "qc_pass_count": _as_int(diagnostics.get("qc_pass_count")),
         "qc_failure_count": _as_int(diagnostics.get("qc_failure_count")),
     }
-    for key in ("thread_id", "task_id", "run_id", "parent_thread_id"):
-        for source in (artifact, builder_task, delegation_context):
-            if key not in metadata:
-                _merge_safe_metadata(metadata, key, source.get(key))
-    _merge_safe_metadata(metadata, "artifact_type", artifact.get("artifact_type"))
-    _merge_safe_metadata(metadata, "requested_artifact_ext", artifact.get("requested_artifact_ext"))
-    _merge_safe_metadata(metadata, "final_artifact_ext", artifact.get("artifact_ext") or _final_artifact_ext(artifact))
-    metadata["artifact_is_fallback"] = bool(artifact.get("artifact_is_fallback"))
+    _add_identity_metadata(
+        metadata,
+        artifact=artifact,
+        builder_task=builder_task,
+        delegation_context=delegation_context,
+    )
+    _add_artifact_metadata(metadata, artifact, diagnostics)
     if diagnostics.get("pptx_plan_json") is not None:
         metadata["deck_plan"] = diagnostics["pptx_plan_json"]
-    for key in ("quality_warning", "fallback_reason", "image_generation_error_class"):
-        value = artifact.get(key) or diagnostics.get(key)
-        if value:
-            metadata[key] = str(value)
+    _add_quality_metadata(metadata, artifact, diagnostics)
 
     artifact_ext = _final_artifact_ext(artifact)
     tags = [

@@ -181,6 +181,14 @@ def _env_flag_preferred(*names: str) -> bool:
     return False
 
 
+def _env_value(*names: str) -> str | None:
+    for name in names:
+        value = os.getenv(name)
+        if value and value.strip():
+            return value.strip().strip('"').strip("'").strip()
+    return None
+
+
 def _langsmith_tracing_configured() -> bool:
     tracing_requested = _env_flag_preferred("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING") or (
         os.getenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "").strip().lower() in _TRUTHY_VALUES
@@ -206,11 +214,20 @@ def _langsmith_client() -> Any | None:
 
 
 def _langsmith_project_name() -> str:
-    return (
-        os.getenv("LANGSMITH_PROJECT")
-        or os.getenv("LANGCHAIN_PROJECT")
-        or "Sophia"
-    ).strip() or "Sophia"
+    return _env_value("LANGSMITH_PROJECT", "LANGCHAIN_PROJECT") or "Sophia"
+
+
+def _langsmith_parent_metadata() -> dict[str, str]:
+    metadata: dict[str, str] = {}
+    for env_name, metadata_key in (
+        ("SOPHIA_PARENT_TRACE_ID", "parent_trace_id"),
+        ("SOPHIA_PARENT_RUN_ID", "parent_run_id"),
+        ("SOPHIA_THREAD_ID", "thread_id"),
+    ):
+        value = _env_value(env_name)
+        if value:
+            metadata[metadata_key] = value
+    return metadata
 
 
 def _truncate_trace_text(value: str, limit: int = _TRACE_PROMPT_MAX) -> tuple[str, bool]:
@@ -281,12 +298,16 @@ def _langsmith_trace_context(*, prompt: str, valid_refs: list[str], size: str, q
         from langsmith import trace, tracing_context
 
         project_name = _langsmith_project_name()
+        metadata = {
+            "sophia_component": "builder_image_generation",
+            **_langsmith_parent_metadata(),
+        }
         enabled_context = tracing_context(
             enabled=True,
             client=client,
             project_name=project_name,
             tags=["sophia", "image_generation", "openai"],
-            metadata={"sophia_component": "builder_image_generation"},
+            metadata=metadata,
         )
         trace_context = trace(
             "Sophia Image Generation OpenAI Call",
@@ -294,7 +315,7 @@ def _langsmith_trace_context(*, prompt: str, valid_refs: list[str], size: str, q
             project_name=project_name,
             inputs=_image_trace_inputs(prompt=prompt, valid_refs=valid_refs, size=size, quality=quality),
             metadata={
-                "sophia_component": "builder_image_generation",
+                **metadata,
                 "ls_provider": "openai",
                 "ls_model_name": model,
                 "image_endpoint": "edit" if valid_refs else "generate",
