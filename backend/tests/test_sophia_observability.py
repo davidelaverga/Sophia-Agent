@@ -90,6 +90,40 @@ def test_builder_completion_adds_metadata_tags_and_qc_feedback(monkeypatch) -> N
     assert feedback_client.feedback[1]["comment"] == '["garbled title"]'
 
 
+def test_builder_completion_keeps_skipped_qc_feedback_neutral(monkeypatch) -> None:
+    run_tree = _FakeRunTree()
+    feedback_client = _FakeFeedbackClient()
+    monkeypatch.setattr(observability, "_current_run_tree", lambda: run_tree)
+    monkeypatch.setattr(observability, "_feedback_client", lambda: feedback_client)
+
+    state = {
+        "builder_pptx_diagnostics": {
+            "qc_invocation_count": 1,
+            "qc_results": [
+                {
+                    "pass": False,
+                    "skipped": True,
+                    "reasons": ["slide QC skipped: ANTHROPIC_API_KEY is not set"],
+                },
+            ],
+        }
+    }
+
+    assert observability.annotate_builder_completion(
+        state,
+        {"artifact_path": "/mnt/user-data/outputs/deck.pptx", "artifact_ext": "pptx"},
+    ) is True
+
+    assert feedback_client.feedback == [
+        {
+            "run_id": "run-1",
+            "key": "slide_qc",
+            "score": None,
+            "comment": '["slide QC skipped: ANTHROPIC_API_KEY is not set"]',
+        }
+    ]
+
+
 def test_builder_completion_normalizes_successful_pdf_metadata(monkeypatch) -> None:
     run_tree = _FakeRunTree()
     monkeypatch.setattr(observability, "_current_run_tree", lambda: run_tree)
