@@ -1223,6 +1223,19 @@ def test_plain_deck_brief_gets_opt_out_line():
     assert "do NOT use generated imagery" in line
 
 
+def test_no_image_deck_brief_gets_opt_out_line():
+    from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
+
+    for brief in (
+        "Build a no-image deck",
+        "Build a no image deck",
+        "Build a deck without images",
+    ):
+        line = _visual_expectations_line(brief, "presentation")
+        assert line is not None
+        assert "do NOT use generated imagery" in line
+
+
 def test_bare_plain_style_with_images_keeps_visual_expectations_line():
     from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
 

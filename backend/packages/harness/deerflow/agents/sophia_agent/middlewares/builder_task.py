@@ -412,10 +412,17 @@ _PLAIN_DECK_IMAGE_OPT_OUT_MARKERS = (
     "text only",
     "text-only deck",
     "text only deck",
+    "no-image",
+    "no image",
+    "no-image deck",
+    "no image deck",
     "no images",
     "no imagery",
     "no illustrations",
     "no visuals",
+    "without images",
+    "without imagery",
+    "without illustrations",
     "without visuals",
 )
 

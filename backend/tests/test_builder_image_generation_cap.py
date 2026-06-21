@@ -279,6 +279,19 @@ def test_plain_deck_marker_opts_out():
     ) is False
 
 
+def test_no_image_phrasing_opts_out_of_deck_images():
+    for task in (
+        "Build a no-image deck about our roadmap",
+        "Build a no image deck about our roadmap",
+        "Build a deck without images about our roadmap",
+    ):
+        assert _image_generation_enabled(
+            {"task": task},
+            artifact_target_ext=".pptx",
+            task_type="presentation",
+        ) is False
+
+
 def test_bare_plain_style_does_not_disable_requested_deck_images():
     assert _image_generation_enabled(
         {"task": "Build a plain-English deck with illustrations"},

@@ -85,6 +85,18 @@ def test_plain_no_image_deck_does_not_request_visual_gate():
     ) is False
 
 
+def test_no_image_phrasing_does_not_request_visual_gate():
+    for task in (
+        "Build a no-image deck about our roadmap",
+        "Build a no image deck about our roadmap",
+        "Build a deck without images about our roadmap",
+    ):
+        state = _deck_state()
+        state["delegation_context"]["task"] = task
+
+        assert _visuals_requested(state) is False
+
+
 def test_no_image_deck_with_deterministic_diagram_still_requests_visual_gate():
     state = _deck_state()
     state["delegation_context"]["task"] = (
