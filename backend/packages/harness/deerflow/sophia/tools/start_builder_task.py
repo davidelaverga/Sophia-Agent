@@ -1092,9 +1092,6 @@ def _build_enriched_description(
 
 
 _PLAIN_VISUAL_OPT_OUT_MARKERS = (
-    "plain",
-    "plain deck",
-    "plain slides",
     "text-only",
     "text only",
     "text-only deck",

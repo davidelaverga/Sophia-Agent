@@ -360,11 +360,13 @@ def _artifact_target_extension(artifact_target_path: object) -> str:
 _IMAGE_OUTPUT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 _EXPLICIT_IMAGE_GENERATION_MARKERS = (
     "generated image",
+    "generated images",
     "generate image",
     "generate an image",
     "generate images",
     "ai image",
     "ai-generated image",
+    "ai-generated images",
     "illustration",
     "illustrations",
     "visual scene",
@@ -406,9 +408,6 @@ _POLISHED_DECK_IMAGE_MARKERS = (
 )
 
 _PLAIN_DECK_IMAGE_OPT_OUT_MARKERS = (
-    "plain",
-    "plain deck",
-    "plain slides",
     "text-only",
     "text only",
     "text-only deck",

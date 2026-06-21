@@ -279,6 +279,19 @@ def test_plain_deck_marker_opts_out():
     ) is False
 
 
+def test_bare_plain_style_does_not_disable_requested_deck_images():
+    assert _image_generation_enabled(
+        {"task": "Build a plain-English deck with illustrations"},
+        artifact_target_ext=".pptx",
+        task_type="presentation",
+    ) is True
+    assert _image_generation_enabled(
+        {"task": "Build plain summary slides with generated images"},
+        artifact_target_ext=".pptx",
+        task_type="presentation",
+    ) is True
+
+
 def test_explain_does_not_match_plain_opt_out():
     assert _image_generation_enabled(
         {"task": "Build a presentation explaining the architecture"},
