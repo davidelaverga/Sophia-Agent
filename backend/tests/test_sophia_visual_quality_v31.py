@@ -52,6 +52,30 @@ def test_slide_title_strategy_repair_requires_qc_for_baked_titles() -> None:
     assert repaired["slides"][0]["title_present"] is True
 
 
+def test_deck_plan_accepts_baked_title_qc_when_compiler_diagnostics_missing() -> None:
+    problems = _validate_deck_plan(
+        {
+            "slides": [
+                {
+                    "type": "cover",
+                    "title": "Launch",
+                    "image_path": "/mnt/user-data/outputs/slide-1.png",
+                    "visual_style": "clean_flat_vector",
+                    "title_strategy": "baked",
+                    "title_baked_qc_confirmed": True,
+                }
+            ]
+        },
+        {
+            "qc_results": [
+                {"pass": True, "reasons": [], "image_path": "/mnt/user-data/outputs/slide-1.png"},
+            ],
+        },
+    )
+
+    assert problems == []
+
+
 def test_deck_plan_rejects_mixed_generated_slide_styles() -> None:
     problems = _validate_deck_plan(
         {

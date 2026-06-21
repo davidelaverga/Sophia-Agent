@@ -3451,10 +3451,30 @@ def _deck_treatment_problems(slides: list[Any]) -> list[str]:
 def _deck_cover_title_problems(slides: list[Any], diagnostics: dict[str, Any]) -> list[str]:
     cover = slides[0] if slides and isinstance(slides[0], dict) else {}
     title_by_slide = _title_present_by_slide(diagnostics)
-    cover_title_present = bool(cover.get("title_present")) or title_by_slide.get(1, False)
+    cover_title_present = _slide_has_confirmed_title(cover, 1, title_by_slide)
     if slides and not cover_title_present:
         return ["Cover slide has no confirmed title (native or detected in the image)."]
     return []
+
+
+def _slide_has_confirmed_title(
+    slide: dict[str, Any],
+    index: int,
+    title_by_slide: dict[int, bool],
+) -> bool:
+    return (
+        bool(slide.get("title_present"))
+        or title_by_slide.get(index) is True
+        or _slide_has_baked_title_qc_confirmation(slide)
+    )
+
+
+def _slide_has_baked_title_qc_confirmation(slide: dict[str, Any]) -> bool:
+    declared_strategy = str(slide.get("title_strategy") or slide.get("titleStrategy") or "").strip().lower()
+    return declared_strategy == "baked" and any(
+        slide.get(key) is True
+        for key in ("title_baked_qc_confirmed", "baked_title_qc_confirmed")
+    )
 
 
 def _deck_duplicate_image_problems(slides: list[Any]) -> list[str]:
