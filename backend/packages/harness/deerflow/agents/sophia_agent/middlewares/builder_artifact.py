@@ -2114,6 +2114,36 @@ def _pdf_page_count_off_target(payload: dict[str, Any]) -> bool:
     return isinstance(page_count, int) and not (low <= page_count <= high)
 
 
+def _pdf_page_count_repair_instruction(
+    result: dict[str, Any], state: dict[str, Any]
+) -> str:
+    page_count = result.get("page_count")
+    low, high = _pdf_requested_page_bounds({**state, **result})
+    if (
+        result.get("layout_warning") == "page_count_off_target"
+        and isinstance(page_count, int)
+        and low is not None
+        and high is not None
+    ):
+        if page_count < low:
+            return (
+                "Revise the Markdown source once: expand the report to meet the requested "
+                "length, add substantive narrative paragraphs, examples, evidence, and "
+                "section detail, and preserve useful page breaks before calling "
+                "render_markdown_to_pdf again. "
+            )
+        if page_count > high:
+            return (
+                "Revise the Markdown source once: compact the report to meet the requested "
+                "length, trim redundant prose, combine thin sections, and remove unnecessary "
+                "page breaks before calling render_markdown_to_pdf again. "
+            )
+    return (
+        "Revise the Markdown source once: compact sparse tables or continuation pages, remove "
+        "unnecessary page breaks, combine thin sections, then call render_markdown_to_pdf again. "
+    )
+
+
 def _enrich_pdf_render_result_with_requested_pages(
     payload: dict[str, Any],
     state: dict[str, Any],
@@ -2142,14 +2172,15 @@ def _pdf_layout_repair_message(result: dict[str, Any], state: dict[str, Any] | N
     blank_count = result.get("blank_page_count")
     short_count = result.get("short_page_count")
     warning = result.get("layout_warning") or "layout_quality_warning"
-    target = _pdf_page_target_text({**(state or {}), **result})
+    state_for_target = state or {}
+    target = _pdf_page_target_text({**state_for_target, **result})
+    instruction = _pdf_page_count_repair_instruction(result, state_for_target)
     return (
         "[Sophia/PDF layout repair]\n"
         "The PDF rendered successfully, but the layout/page-count quality check found an issue. "
         f"Metrics: page_count={page_count}, blank_page_count={blank_count}, "
         f"short_page_count={short_count}, warning={warning}. Target length is {target}.\n\n"
-        "Revise the Markdown source once: compact sparse tables or continuation pages, remove "
-        "unnecessary page breaks, combine thin sections, then call render_markdown_to_pdf again. "
+        f"{instruction}"
         "After this single repair pass, emit the best PDF rather than looping."
     )
 

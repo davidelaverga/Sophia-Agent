@@ -6,6 +6,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
     _apply_report_figure_quality_metadata,
     _enrich_pdf_render_result_with_requested_pages,
+    _pdf_layout_repair_message,
     _presentation_completion_ready,
     _repair_deck_plan_for_validation,
     _report_figure_family_problems,
@@ -240,6 +241,43 @@ def test_pdf_requested_page_target_enriches_render_result() -> None:
     assert enriched["requested_page_count"] == 8
     assert enriched["layout_quality"] == "warning"
     assert enriched["layout_warning"] == "page_count_off_target"
+
+
+def test_pdf_page_count_repair_expands_under_target_report() -> None:
+    message = _pdf_layout_repair_message(
+        {
+            "success": True,
+            "page_count": 6,
+            "layout_quality": "warning",
+            "layout_warning": "page_count_off_target",
+            "blank_page_count": 0,
+            "short_page_count": 0,
+        },
+        {"builder_pdf_requested_page_count": 8},
+    )
+
+    assert "Target length is exactly 8 pages" in message
+    assert "expand the report" in message
+    assert "add substantive narrative paragraphs" in message
+    assert "remove unnecessary page breaks" not in message
+
+
+def test_pdf_page_count_repair_compacts_over_target_report() -> None:
+    message = _pdf_layout_repair_message(
+        {
+            "success": True,
+            "page_count": 10,
+            "layout_quality": "warning",
+            "layout_warning": "page_count_off_target",
+            "blank_page_count": 0,
+            "short_page_count": 0,
+        },
+        {"builder_pdf_requested_page_count": 8},
+    )
+
+    assert "Target length is exactly 8 pages" in message
+    assert "compact the report" in message
+    assert "remove unnecessary page breaks" in message
 
 
 def test_builder_task_briefing_extracts_pdf_requested_pages() -> None:
