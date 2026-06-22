@@ -488,6 +488,17 @@ def image_forward_title_qc_confirmed(slide_info: dict) -> bool:
     )
 
 
+def image_forward_overlay_title(slide_info: dict, plan: dict) -> str:
+    slide_title = str(slide_info.get("title") or "").strip()
+    if slide_title:
+        return slide_title
+    slide_number = slide_info.get("slide_number")
+    slide_type = str(slide_info.get("type") or slide_info.get("layout") or "").strip().lower()
+    if slide_number in (1, "1") or slide_type in {"title", "cover"}:
+        return str(plan.get("title") or "").strip()
+    return ""
+
+
 def add_image_forward_slide(slide, slide_info: dict, plan: dict, image_path: str, slide_width, slide_height) -> None:
     theme = slide_theme(plan)
     apply_slide_background(slide, theme)
@@ -498,7 +509,7 @@ def add_image_forward_slide(slide, slide_info: dict, plan: dict, image_path: str
             theme,
             slide_width,
             slide_height,
-            str(slide_info.get("title") or ""),
+            image_forward_overlay_title(slide_info, plan),
             str(slide_info.get("subtitle") or ""),
         )
 

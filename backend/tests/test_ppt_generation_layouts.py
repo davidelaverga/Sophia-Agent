@@ -471,6 +471,30 @@ class TestGeneratePptLayouts:
         assert "Generated full-slide" in _slide_texts(prs.slides[0])
         assert "Native title overlay" in _slide_texts(prs.slides[0])
 
+    def test_python_image_forward_cover_uses_plan_title_for_native_overlay(self, tmp_path: Path) -> None:
+        hero = _write_png(tmp_path / "slide.png")
+        plan = {
+            "title": "Deck-Level Cover",
+            "slides": [
+                {
+                    "slide_number": 1,
+                    "layout": "title",
+                    "subtitle": "Fallback title overlay",
+                    "image_path": str(hero),
+                }
+            ],
+        }
+        plan_file = tmp_path / "plan.json"
+        plan_file.write_text(json.dumps(plan), encoding="utf-8")
+        output = tmp_path / "deck.pptx"
+
+        message = gen.generate_ppt(str(plan_file), [], str(output))
+
+        assert message == "Successfully generated presentation with 1 slides (picture_count=1)"
+        prs = Presentation(str(output))
+        assert "Deck-Level Cover" in _slide_texts(prs.slides[0])
+        assert "Fallback title overlay" in _slide_texts(prs.slides[0])
+
     def test_image_forward_compiler_logs_title_presence_diagnostics(
         self,
         tmp_path: Path,
