@@ -375,11 +375,10 @@ def _has_negated_presentation_format_mention(text: str) -> bool:
     return False
 
 
-def _pattern_affirmative_match(
+def _first_affirmative_match(
     pattern: re.Pattern[str], text: str, *, source_veto: bool = False
-) -> bool:
-    """True when ``pattern`` has at least one hit that is neither negated
-    nor (for source-veto rules) positioned as the source of a conversion."""
+) -> re.Match[str] | None:
+    """First hit that is neither negated nor source-positioned."""
     for match in pattern.finditer(text):
         prefix = text[max(0, match.start() - _NEGATION_LOOKBACK_CHARS) : match.start()]
         if _NEGATION_BEFORE_MATCH_RE.search(prefix):
@@ -392,8 +391,15 @@ def _pattern_affirmative_match(
             suffix = text[match.end() : match.end() + _STATUS_LOOKAHEAD_CHARS]
             if _STATUS_CONTEXT_AFTER_MATCH_RE.search(suffix):
                 continue
-        return True
-    return False
+        return match
+    return None
+
+
+def _pattern_affirmative_match(
+    pattern: re.Pattern[str], text: str, *, source_veto: bool = False
+) -> bool:
+    """True when ``pattern`` has at least one hit that survives vetoes."""
+    return _first_affirmative_match(pattern, text, source_veto=source_veto) is not None
 
 
 def _requested_output_extension_match_with_vetoes(
@@ -405,6 +411,12 @@ def _requested_output_extension_match_with_vetoes(
         return None, None, vetoed
     if _PDF_DECK_DELIVERY_RE.search(text) and _pattern_affirmative_match(_PDF_DECK_DELIVERY_RE, text):
         return "pdf", "explicit_pdf_deck_deliverable", vetoed
+    pdf_match = _first_affirmative_match(_PDF_OUTPUT_RE, text)
+    pptx_match = _first_affirmative_match(_PPTX_OUTPUT_RE, text, source_veto=True)
+    if pdf_match is not None and (pptx_match is None or pdf_match.start() <= pptx_match.start()):
+        if _has_negated_presentation_format_mention(text):
+            vetoed.append("explicit_presentation_deck")
+        return "pdf", "explicit_pdf_deliverable", vetoed
     for ext, reason, pattern in _REQUESTED_OUTPUT_EXTENSION_PATTERNS:
         if not pattern.search(text):
             if (

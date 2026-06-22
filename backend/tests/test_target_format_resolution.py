@@ -85,6 +85,35 @@ def test_pdf_slide_deck_resolves_to_pdf():
     assert reason == "explicit_pdf_deck_deliverable"
 
 
+def test_pdf_about_presentation_topic_resolves_to_pdf():
+    ext, reason = _requested_output_extension_match(
+        "write a PDF summary of presentation skills"
+    )
+    assert ext == "pdf"
+    assert reason == "explicit_pdf_deliverable"
+
+
+def test_pdf_report_about_slide_decks_resolves_to_pdf():
+    resolution = _resolve_target_format(
+        current_user_text="write a PDF report about slide decks",
+        description="write a PDF report about slide decks",
+        task_type="visual_report",
+    )
+    assert resolution.final_ext == "pdf"
+    assert resolution.source == "current_user_turn"
+    assert resolution.rule == "explicit_pdf_deliverable"
+
+
+def test_pptx_about_pdf_report_topic_stays_pptx():
+    resolution = _resolve_target_format(
+        current_user_text="write a presentation deck about PDF reports",
+        description="write a presentation deck about PDF reports",
+        task_type="presentation",
+    )
+    assert resolution.final_ext == "pptx"
+    assert resolution.rule == "explicit_presentation_deck"
+
+
 def test_powerpoint_deck_from_pdf_source_resolves_to_pptx():
     resolution = _resolve_target_format(
         current_user_text="build a PowerPoint deck based on a PDF source document",
