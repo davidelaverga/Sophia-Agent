@@ -124,6 +124,41 @@ def test_builder_completion_keeps_skipped_qc_feedback_neutral(monkeypatch) -> No
     ]
 
 
+def test_builder_completion_keeps_advisory_qc_feedback_neutral(monkeypatch) -> None:
+    run_tree = _FakeRunTree()
+    feedback_client = _FakeFeedbackClient()
+    monkeypatch.setattr(observability, "_current_run_tree", lambda: run_tree)
+    monkeypatch.setattr(observability, "_feedback_client", lambda: feedback_client)
+
+    state = {
+        "builder_pptx_diagnostics": {
+            "qc_invocation_count": 1,
+            "qc_results": [
+                {
+                    "pass": False,
+                    "advisory": True,
+                    "parser_error": True,
+                    "reasons": ["QC reviewer returned invalid JSON"],
+                },
+            ],
+        }
+    }
+
+    assert observability.annotate_builder_completion(
+        state,
+        {"artifact_path": "/mnt/user-data/outputs/deck.pptx", "artifact_ext": "pptx"},
+    ) is True
+
+    assert feedback_client.feedback == [
+        {
+            "run_id": "run-1",
+            "key": "slide_qc",
+            "score": None,
+            "comment": '["QC reviewer returned invalid JSON"]',
+        }
+    ]
+
+
 def test_builder_completion_normalizes_successful_pdf_metadata(monkeypatch) -> None:
     run_tree = _FakeRunTree()
     monkeypatch.setattr(observability, "_current_run_tree", lambda: run_tree)

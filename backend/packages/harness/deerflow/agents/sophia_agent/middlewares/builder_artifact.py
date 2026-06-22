@@ -3679,6 +3679,8 @@ def _deck_image_slides(slides: list[Any]) -> list[tuple[int, str]]:
         (index, image_ref)
         for index, slide in enumerate(slides, 1)
         if isinstance(slide, dict)
+        and not _slide_is_data_chart(slide)
+        and not _slide_is_stat_layout(slide)
         for image_ref in [_slide_image_ref(slide)]
         if image_ref
     ]
@@ -3801,7 +3803,10 @@ def _deck_style_consistency_problems(slides: list[Any]) -> list[str]:
     image_styles: list[tuple[int, str]] = [
         (index, _slide_visual_style(slide))
         for index, slide in enumerate(slides, 1)
-        if isinstance(slide, dict) and _slide_image_ref(slide)
+        if isinstance(slide, dict)
+        and _slide_image_ref(slide)
+        and not _slide_is_data_chart(slide)
+        and not _slide_is_stat_layout(slide)
     ]
     if not image_styles:
         return []

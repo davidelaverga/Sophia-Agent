@@ -521,6 +521,8 @@ def _qc_results(diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
                 {
                     "pass": item.get("pass") is True,
                     "skipped": item.get("skipped") is True,
+                    "advisory": item.get("advisory") is True,
+                    "parser_error": item.get("parser_error") is True,
                     "reasons": [str(reason) for reason in reasons] if isinstance(reasons, list) else [],
                 }
             )
@@ -718,11 +720,15 @@ def _create_qc_feedback(run_tree: Any, qc_results: list[dict[str, Any]]) -> None
         client = _feedback_client()
         for result in qc_results:
             reasons = result.get("reasons")
-            skipped = result.get("skipped") is True
+            neutral = (
+                result.get("skipped") is True
+                or result.get("advisory") is True
+                or result.get("parser_error") is True
+            )
             client.create_feedback(
                 run_id=run_id,
                 key="slide_qc",
-                score=None if skipped else 1.0 if result.get("pass") is True else 0.0,
+                score=None if neutral else 1.0 if result.get("pass") is True else 0.0,
                 comment=_feedback_comment(reasons if isinstance(reasons, list) else []),
             )
     except Exception:  # noqa: BLE001

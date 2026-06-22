@@ -687,6 +687,26 @@ def test_deck_plan_validation_autowires_chart_assets_without_slide_qc(tmp_path: 
     ) == []
 
 
+def test_validate_deck_plan_excludes_data_chart_images_from_slide_qc() -> None:
+    plan = {
+        "slides": [
+            {"type": "cover", "title": "Launch"},
+            {
+                "type": "content",
+                "title": "Benchmark chart",
+                "subtype": "chart",
+                "data_chart": True,
+                "image": "/mnt/user-data/outputs/visuals/benchmark-chart.png",
+            },
+        ]
+    }
+
+    assert _validate_deck_plan(
+        plan,
+        {"pptx_slide_title_results": [{"slide": 1, "title_present": True}]},
+    ) == []
+
+
 def test_deck_plan_validation_does_not_repair_missing_image_refs_from_unused_outputs() -> None:
     diagnostics = {
         "pptx_plan_json": {
