@@ -387,7 +387,7 @@ class TestGeneratePptLayouts:
         # Legacy dark styles keep resolving to a dark theme.
         assert gen.slide_theme(plan) is gen.THEMES["boardroom"]
 
-    def test_slide_images_get_native_title_overlay_when_not_qc_confirmed(
+    def test_slide_images_do_not_get_native_title_overlay_when_not_qc_confirmed(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -420,8 +420,8 @@ class TestGeneratePptLayouts:
 
         assert message == "Successfully generated presentation with PptxGenJS"
         prs = Presentation(str(output))
-        assert "Open Claw Assistant" in _slide_texts(prs.slides[0])
-        assert "Runtime Loop" in _slide_texts(prs.slides[1])
+        assert "Open Claw Assistant" not in _slide_texts(prs.slides[0])
+        assert "Runtime Loop" not in _slide_texts(prs.slides[1])
 
     def test_image_path_can_mark_bitmap_title_qc_confirmed_to_skip_overlay(self, tmp_path: Path) -> None:
         hero = _write_png(tmp_path / "slide.png")
@@ -447,7 +447,7 @@ class TestGeneratePptLayouts:
         prs = Presentation(str(output))
         assert _slide_texts(prs.slides[0]) == []
 
-    def test_python_image_forward_adds_native_title_when_not_qc_confirmed(self, tmp_path: Path) -> None:
+    def test_python_image_forward_does_not_add_native_title_when_not_qc_confirmed(self, tmp_path: Path) -> None:
         hero = _write_png(tmp_path / "slide.png")
         plan = {
             "title": "Image Forward",
@@ -455,7 +455,7 @@ class TestGeneratePptLayouts:
                 {
                     "slide_number": 1,
                     "title": "Generated full-slide",
-                    "subtitle": "Native title overlay",
+                    "subtitle": "Baked title required",
                     "image_path": str(hero),
                 }
             ],
@@ -468,10 +468,10 @@ class TestGeneratePptLayouts:
 
         assert message == "Successfully generated presentation with 1 slides (picture_count=1)"
         prs = Presentation(str(output))
-        assert "Generated full-slide" in _slide_texts(prs.slides[0])
-        assert "Native title overlay" in _slide_texts(prs.slides[0])
+        assert "Generated full-slide" not in _slide_texts(prs.slides[0])
+        assert "Baked title required" not in _slide_texts(prs.slides[0])
 
-    def test_python_image_forward_cover_uses_plan_title_for_native_overlay(self, tmp_path: Path) -> None:
+    def test_python_image_forward_cover_does_not_add_plan_title_overlay(self, tmp_path: Path) -> None:
         hero = _write_png(tmp_path / "slide.png")
         plan = {
             "title": "Deck-Level Cover",
@@ -479,7 +479,7 @@ class TestGeneratePptLayouts:
                 {
                     "slide_number": 1,
                     "layout": "title",
-                    "subtitle": "Fallback title overlay",
+                    "subtitle": "Baked cover title required",
                     "image_path": str(hero),
                 }
             ],
@@ -492,8 +492,8 @@ class TestGeneratePptLayouts:
 
         assert message == "Successfully generated presentation with 1 slides (picture_count=1)"
         prs = Presentation(str(output))
-        assert "Deck-Level Cover" in _slide_texts(prs.slides[0])
-        assert "Fallback title overlay" in _slide_texts(prs.slides[0])
+        assert "Deck-Level Cover" not in _slide_texts(prs.slides[0])
+        assert "Baked cover title required" not in _slide_texts(prs.slides[0])
 
     def test_image_forward_compiler_logs_title_presence_diagnostics(
         self,
@@ -524,10 +524,10 @@ class TestGeneratePptLayouts:
         assert result.returncode == 0, result.stderr
         assert "PPTXGEN slide_diagnostics: slide=1" in result.stderr
         assert "image_forward=true" in result.stderr
-        assert "title_present=true" in result.stderr
-        assert "title_overlay=true" in result.stderr
+        assert "title_present=false" in result.stderr
+        assert "title_overlay=false" in result.stderr
 
-    def test_image_forward_title_strategy_baked_without_qc_keeps_overlay(
+    def test_image_forward_title_strategy_baked_without_qc_does_not_add_overlay(
         self,
         tmp_path: Path,
         monkeypatch: pytest.MonkeyPatch,
@@ -564,9 +564,9 @@ class TestGeneratePptLayouts:
         )
 
         assert result.returncode == 0, result.stderr
-        assert "title_present=true" in result.stderr
-        assert "title_overlay=true" in result.stderr
-        assert "Visible Title" in _slide_texts(Presentation(str(output)).slides[0])
+        assert "title_present=false" in result.stderr
+        assert "title_overlay=false" in result.stderr
+        assert "Visible Title" not in _slide_texts(Presentation(str(output)).slides[0])
 
     def test_image_forward_title_baked_qc_confirmed_suppresses_overlay(
         self,

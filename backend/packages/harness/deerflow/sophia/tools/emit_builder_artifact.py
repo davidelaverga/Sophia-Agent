@@ -16,6 +16,14 @@ class BuilderSourceReference(BaseModel):
     url: str = Field(description="Exact source URL used during research.")
 
 
+class BuilderArtifactFile(BaseModel):
+    path: str = Field(description="File path under /mnt/user-data/outputs/.")
+    role: Literal["primary", "source", "preview", "illustration_asset", "internal"] = Field(
+        description="How the file should be surfaced. Only primary is user-downloadable by default; preview is for canvas rendering."
+    )
+    name: str | None = Field(default=None, description="Optional display filename.")
+
+
 class BuilderArtifactInput(BaseModel):
     artifact_path: str = Field(
         description="Primary output file path. Prefer an absolute sandbox path under /mnt/user-data/outputs/ (e.g., '/mnt/user-data/outputs/investor_deck.pptx')."
@@ -34,7 +42,11 @@ class BuilderArtifactInput(BaseModel):
     artifact_title: str = Field(description="Human-readable title for the deliverable.")
     supporting_files: list[str] | None = Field(
         default=None,
-        description="Additional files created alongside the primary artifact. Prefer absolute sandbox paths under /mnt/user-data/outputs/."
+        description="Legacy internal supporting files created alongside the primary artifact. Prefer artifact_files with roles for new payloads."
+    )
+    artifact_files: list[BuilderArtifactFile] | None = Field(
+        default=None,
+        description="Structured file metadata. Use role=primary for the requested deliverable, preview for render-only preview files, source/internal for non-user-facing support files."
     )
     steps_completed: int = Field(description="Number of major steps executed during building.")
     decisions_made: list[str] = Field(description="2-4 key decisions made during the build process.")

@@ -44,9 +44,9 @@ and anti-patterns, so write only the content):
 - Add concise `speaker_notes` for every content slide: 1-2 sentences that narrate the
   slide. These notes are not visible on the slide canvas.
 - Every image-forward content/diagram slide also carries a visible `caption` or `takeaway`:
-  one short sentence stating the point the slide makes, not a label restatement. The compiler
-  renders it in a reserved bottom band. Cover, section, statement, summary, agenda, and closing
-  slides are exempt.
+  one short sentence stating the point the slide makes, not a label restatement. It must be
+  baked into the generated bitmap's reserved bottom band. Cover, section, statement, summary,
+  agenda, stat, hard-data chart, and closing slides are exempt.
 - Run `python /mnt/skills/public/image-generation/scripts/generate.py --slide-visual`
   (sets quality=high, 16:9). Generate slide 1 first, then pass it as
   `--reference-images` to every later slide for one consistent look; the script keeps
@@ -74,19 +74,21 @@ Slide types in the plan: `cover` · `agenda` · `section` · `content` (subtype 
 types and vary deliberately — no more than two consecutive slides share a treatment. Full-slide
 gpt-image-2 visuals use `image_path`; deterministic hard-data charts use `visual_path`; a
 `statement` slide carries a single `statement` string. Every generated slide in the plan must
-carry the same `visual_style`. Set `title_strategy: "baked"` only when the title is intentionally
-rendered into the image and QC confirms the title is present; otherwise use
-`title_strategy: "native"` so the compiler owns the title overlay. Keep `speaker_notes` for
-concise narration, but do not rely on notes as the only narrative: image-forward content slides
-need a visible `caption`/`takeaway` too.
+carry the same `visual_style`. Every image-forward slide must set `title_strategy: "baked"`;
+the PPTX compiler does not draw a native title or caption fallback over full-slide images. Keep
+`speaker_notes` for concise narration, but do not rely on notes as the only narrative:
+image-forward content slides need a visible baked `caption`/`takeaway` too.
 
 ## Per-slide prompt template
 
 ```
-A professional presentation slide, 16:9. Title at top: "THE TEXT READS: {title}".
+A professional presentation slide, 16:9. Reserve the top 14% for title, bottom 11% for one-line
+caption/takeaway, and center 75% for the visual. Title at top: "THE TEXT READS: {title}".
+Bottom caption band: "THE TEXT READS: {caption_or_takeaway}".
 
-Layout: {one explicit sentence — e.g. "Left third: four short bullet points stacked
-vertically. Right two-thirds: a labeled architecture diagram of boxes connected by arrows."}
+Layout: {one explicit sentence — e.g. "Center safe area: left third has four short bullet
+points stacked vertically; right two-thirds has a labeled architecture diagram of boxes connected
+by arrows. No visual element enters the top title band or bottom caption band."}
 
 Text to render verbatim (each ≤8 words):
 - "THE TEXT READS: {point 1}"

@@ -51,6 +51,16 @@ def test_review_slide_fails_closed_when_anthropic_key_is_unavailable(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(
+        qc_module,
+        "_presence_result",
+        lambda *_args, **_kwargs: {
+            "title_present": True,
+            "caption_present": True,
+            "presence_pass": True,
+            "presence_reasons": [],
+        },
+    )
     image_file = tmp_path / "slide.png"
     image_file.write_bytes(b"fake-png")
     spec_file = tmp_path / "slide.txt"
@@ -77,6 +87,16 @@ def test_emit_treats_qc_skip_as_clean_advisory(qc_module, capsys: pytest.Capture
 def test_review_slide_sends_spec_and_image_to_anthropic(qc_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
     monkeypatch.setenv("SOPHIA_SLIDE_QC_MODEL", "claude-test-vision")
+    monkeypatch.setattr(
+        qc_module,
+        "_presence_result",
+        lambda *_args, **_kwargs: {
+            "title_present": True,
+            "caption_present": True,
+            "presence_pass": True,
+            "presence_reasons": [],
+        },
+    )
 
     image_file = tmp_path / "slide.png"
     image_file.write_bytes(b"fake-png")
@@ -100,7 +120,14 @@ def test_review_slide_sends_spec_and_image_to_anthropic(qc_module, tmp_path: Pat
 
     payload = qc_module.review_slide(image_file=image_file, spec_file=spec_file)
 
-    assert payload == {"pass": True, "reasons": []}
+    assert payload == {
+        "pass": True,
+        "reasons": [],
+        "title_present": True,
+        "caption_present": True,
+        "presence_pass": True,
+        "presence_reasons": [],
+    }
     kwargs = fake_client.messages.create.call_args.kwargs
     assert kwargs["model"] == "claude-test-vision"
     assert kwargs["temperature"] == 0
@@ -113,3 +140,46 @@ def test_review_slide_sends_spec_and_image_to_anthropic(qc_module, tmp_path: Pat
     assert 'Title: "THE TEXT READS: Roadmap"' in content[0]["text"]
     assert content[1]["type"] == "image"
     assert content[1]["source"]["type"] == "base64"
+
+
+def test_presence_result_checks_title_and_caption_bands(qc_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    image_file = tmp_path / "slide.png"
+    image_file.write_bytes(b"fake-png")
+    spec_file = tmp_path / "slide.txt"
+    spec_file.write_text(
+        'Title: "THE TEXT READS: Flow Control"\nCaption: "THE TEXT READS: The loop stops cleanly."',
+        encoding="utf-8",
+    )
+
+    def fake_ocr(_image_file: Path, *, y0: float, y1: float) -> str:
+        return "Flow Control" if y1 <= 0.14 else "The loop stops cleanly."
+
+    monkeypatch.setattr(qc_module, "_ocr_crop_text", fake_ocr)
+
+    assert qc_module._presence_result(image_file, spec_file) == {
+        "title_present": True,
+        "caption_present": True,
+        "presence_pass": True,
+        "presence_reasons": [],
+    }
+
+
+def test_presence_result_blocks_missing_caption_band(qc_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    image_file = tmp_path / "slide.png"
+    image_file.write_bytes(b"fake-png")
+    spec_file = tmp_path / "slide.txt"
+    spec_file.write_text(
+        'Title: Flow Control\nCaption: The loop stops cleanly.',
+        encoding="utf-8",
+    )
+
+    def fake_ocr(_image_file: Path, *, y0: float, y1: float) -> str:
+        return "Flow Control" if y1 <= 0.14 else ""
+
+    monkeypatch.setattr(qc_module, "_ocr_crop_text", fake_ocr)
+
+    payload = qc_module.review_slide(image_file=image_file, spec_file=spec_file)
+
+    assert payload["pass"] is False
+    assert payload["presence_pass"] is False
+    assert "bottom band" in payload["reasons"][0]

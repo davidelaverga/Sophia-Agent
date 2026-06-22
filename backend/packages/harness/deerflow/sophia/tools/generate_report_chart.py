@@ -8,11 +8,10 @@ import re
 import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
 import httpx
-from langchain.tools import InjectedToolArg, ToolRuntime, tool
-from pydantic import BaseModel, Field
+from langchain.tools import ToolRuntime, tool
 
 from deerflow.sandbox.tools import get_thread_data
 
@@ -78,26 +77,6 @@ _CHART_TOOL_FAMILIES: dict[str, str] = {
     "generate_fishbone_diagram": "cause_effect",
     "generate_flow_diagram": "flow",
 }
-
-
-class GenerateReportChartInput(BaseModel):
-    chart_tool: ChartTool = Field(
-        description=(
-            "Chart-visualization tool name, e.g. generate_line_chart, "
-            "generate_sankey_chart, generate_treemap_chart, or generate_radar_chart."
-        )
-    )
-    args: dict[str, Any] = Field(
-        description=(
-            "Exact chart-visualization arguments, including data, labels, title, "
-            "and style/theme fields needed by the selected chart tool."
-        )
-    )
-    rationale: str = Field(description="Brief reason this chart family fits the report evidence.")
-    output_name: str | None = Field(
-        default=None,
-        description="Optional output filename or /mnt/user-data/outputs/... path.",
-    )
 
 
 def _result(*, success: bool, **fields: Any) -> str:
@@ -347,11 +326,11 @@ def _download_result_payload(
     )
 
 
-@tool("generate_report_chart", args_schema=GenerateReportChartInput, parse_docstring=False)
+@tool("generate_report_chart", parse_docstring=True)
 def generate_report_chart(
-    runtime: Annotated[ToolRuntime, InjectedToolArg],
+    runtime: ToolRuntime,
     chart_tool: ChartTool,
-    args: dict[str, Any],
+    chart_args: dict[str, Any],
     rationale: str,
     output_name: str | None = None,
 ) -> str:
@@ -360,20 +339,20 @@ def generate_report_chart(
     Use this report-only wrapper when a PDF or Markdown report needs a richer
     chart than the compact deterministic chart tool provides. Choose the chart
     tool from the chart-visualization taxonomy, pass the exact labeled data in
-    args, and explain the choice in rationale. The tool saves the chart spec
+    chart_args, and explain the choice in rationale. The tool saves the chart spec
     and downloads the rendered chart under /mnt/user-data/outputs/visuals/.
 
     Args:
         chart_tool: Chart-visualization tool name, e.g. generate_line_chart,
             generate_sankey_chart, generate_treemap_chart, or generate_radar_chart.
-        args: Exact chart-visualization arguments, including data, labels, title,
+        chart_args: Exact chart-visualization arguments, including data, labels, title,
             and style/theme fields needed by the selected chart tool.
         rationale: Brief reason this chart family fits the report evidence.
         output_name: Optional output filename or /mnt/user-data/outputs/... path.
     """
 
     family = _CHART_TOOL_FAMILIES.get(chart_tool)
-    error = _input_error(chart_tool, args, family)
+    error = _input_error(chart_tool, chart_args, family)
     if error is not None:
         return error
     assert family is not None
@@ -394,7 +373,7 @@ def generate_report_chart(
     _write_chart_spec(
         spec_host_path,
         chart_tool=chart_tool,
-        args=args,
+        args=chart_args,
         family=family,
         rationale=rationale,
         spec_path=spec_path,

@@ -291,6 +291,8 @@ def _repair_iteration_grantable(state: dict[str, Any]) -> bool:
 
 def _presentation_completion_ready(state: dict[str, Any]) -> bool:
     """Positive stop rule for decks that already have a shippable PPTX."""
+    if state.get("builder_presentation_terminal_ready") is True:
+        return True
     if not _requested_pptx_artifact(state):
         return False
     diagnostics = _pptx_diagnostics(state)
@@ -299,11 +301,15 @@ def _presentation_completion_ready(state: dict[str, Any]) -> bool:
     pptx_file = _latest_valid_pptx_output_file(state)
     if pptx_file is None:
         return False
-    if not preview_path_for(pptx_file).is_file():
-        return False
     if not _pptx_slide_count_matches_plan(diagnostics):
         return False
-    return _presentation_qc_clean_or_advisory_only(diagnostics, state)
+    if not _presentation_qc_clean_or_advisory_only(diagnostics, state):
+        return False
+    state["builder_presentation_terminal_ready"] = True
+    state["builder_terminal_artifact_path"] = _canonical_outputs_artifact_path(
+        f"/mnt/user-data/outputs/{pptx_file.name}"
+    )
+    return True
 
 
 def _latest_valid_pptx_output_file(state: dict[str, Any]) -> Path | None:
@@ -1128,17 +1134,7 @@ def _upload_builder_outputs_to_supabase(
         )
         return "required_context_missing" if required and artifact_args.get("artifact_path") else "skipped"
 
-    candidates: list[str] = []
-    primary = artifact_args.get("artifact_path")
-    if isinstance(primary, str):
-        candidates.append(primary)
-    supporting = artifact_args.get("supporting_files")
-    if isinstance(supporting, list):
-        candidates.extend(
-            path
-            for path in supporting
-            if isinstance(path, str) and not _is_source_sibling_of_primary(path, primary)
-        )
+    candidates = _artifact_file_paths_for_roles(artifact_args, _USER_SURFACE_ARTIFACT_FILE_ROLES)
 
     result = "skipped"
     outputs_root = Path(outputs_host_path)
@@ -1168,6 +1164,8 @@ def _upload_builder_outputs_to_supabase(
 
 
 _SOURCE_SIBLING_SUFFIXES = frozenset({".md", ".html", ".htm"})
+_ARTIFACT_FILE_ROLES = frozenset({"primary", "source", "preview", "illustration_asset", "internal"})
+_USER_SURFACE_ARTIFACT_FILE_ROLES = frozenset({"primary", "preview"})
 
 
 def _is_source_sibling_of_primary(path: str, primary: object) -> bool:
@@ -1189,6 +1187,69 @@ def _is_source_sibling_of_primary(path: str, primary: object) -> bool:
         return False
     candidate_stem = candidate.name[: -len(candidate.suffix)]
     return candidate_stem in {primary_pure.name, primary_pure.stem}
+
+
+def _normalize_artifact_file_role(role: object) -> str:
+    value = str(role or "").strip().lower()
+    return value if value in _ARTIFACT_FILE_ROLES else "internal"
+
+
+def _artifact_file_entry(path: object, role: object, name: object = None) -> dict[str, str] | None:
+    canonical = _canonical_outputs_artifact_path(path)
+    if canonical is None:
+        return None
+    entry = {"path": canonical, "role": _normalize_artifact_file_role(role)}
+    if isinstance(name, str) and name.strip():
+        entry["name"] = name.strip()
+    return entry
+
+
+def _artifact_file_entries(artifact_args: dict[str, Any]) -> list[dict[str, str]]:
+    primary = artifact_args.get("artifact_path")
+    preview_name = str(artifact_args.get("artifact_preview_filename") or "").strip()
+    preview_basename = PurePosixPath(preview_name).name if preview_name else ""
+    entries: list[dict[str, str]] = []
+
+    primary_entry = _artifact_file_entry(primary, "primary")
+    if primary_entry is not None:
+        entries.append(primary_entry)
+
+    raw_entries = artifact_args.get("artifact_files")
+    if isinstance(raw_entries, list):
+        for raw_entry in raw_entries:
+            if not isinstance(raw_entry, dict):
+                continue
+            path = raw_entry.get("path")
+            role = raw_entry.get("role")
+            name = raw_entry.get("name")
+            entry = _artifact_file_entry(path, role, name)
+            if entry is not None:
+                entries.append(entry)
+
+    supporting = artifact_args.get("supporting_files")
+    if isinstance(supporting, list):
+        for raw_path in supporting:
+            role = "preview" if preview_basename and PurePosixPath(str(raw_path)).name == preview_basename else "internal"
+            entry = _artifact_file_entry(raw_path, role)
+            if entry is not None:
+                entries.append(entry)
+
+    deduped: dict[str, dict[str, str]] = {}
+    role_priority = {"primary": 0, "preview": 1, "source": 2, "illustration_asset": 3, "internal": 4}
+    for entry in entries:
+        path = entry["path"]
+        previous = deduped.get(path)
+        if previous is None or role_priority[entry["role"]] < role_priority[previous["role"]]:
+            deduped[path] = entry
+    return list(deduped.values())
+
+
+def _artifact_file_paths_for_roles(artifact_args: dict[str, Any], roles: set[str] | frozenset[str]) -> list[str]:
+    return [
+        entry["path"]
+        for entry in _artifact_file_entries(artifact_args)
+        if entry.get("role") in roles
+    ]
 
 
 def _merge_supabase_mirror_result(current: str, update: str | None) -> str:
@@ -1367,17 +1428,21 @@ def _is_recent_promotable_path(path: Path, min_mtime: float | None) -> bool:
 
 
 def _emit_candidate_paths(artifact_args: dict[str, Any]) -> list[str]:
-    candidates: list[str] = []
-    primary = artifact_args.get("artifact_path")
-    if isinstance(primary, str) and primary.strip():
-        candidates.append(primary.strip())
+    candidates: list[str] = _artifact_file_paths_for_roles(
+        artifact_args,
+        _USER_SURFACE_ARTIFACT_FILE_ROLES,
+    )
     supporting = artifact_args.get("supporting_files")
     if isinstance(supporting, list):
         candidates.extend(
             path for path in supporting
             if isinstance(path, str) and path.strip()
         )
-    return candidates
+    deduped: list[str] = []
+    for candidate in candidates:
+        if candidate not in deduped:
+            deduped.append(candidate)
+    return deduped
 
 
 def _invalid_outputs_candidate(candidate: str) -> bool:
@@ -1811,6 +1876,9 @@ def _apply_artifact_request_metadata(
         artifact["artifact_ext"] = artifact_ext
         if requested_ext == "pptx" and artifact_ext in {"html", "htm"}:
             artifact["artifact_type"] = "webpage"
+    artifact_entries = _artifact_file_entries(artifact)
+    if artifact_entries:
+        artifact["artifact_files"] = artifact_entries
     if _artifact_is_extension_fallback(requested_ext, artifact_ext):
         artifact["artifact_is_fallback"] = True
         artifact["fallback_reason"] = _artifact_fallback_reason(artifact, requested_ext, fallback_reason)
@@ -2754,6 +2822,14 @@ def _visual_asset_success_count(state: dict[str, Any]) -> int:
     return int(diagnostics.get("visual_asset_success_count", 0) or 0)
 
 
+def _embedded_visual_success_count(state: dict[str, Any]) -> int:
+    count = _visual_asset_success_count(state)
+    if _requested_pptx_artifact(state):
+        diagnostics = _pptx_diagnostics(state)
+        count += int(diagnostics.get("pptx_generator_picture_count", 0) or 0)
+    return count
+
+
 def _visual_asset_attempt_count(state: dict[str, Any]) -> int:
     diagnostics = state.get("builder_visual_diagnostics")
     if not isinstance(diagnostics, dict):
@@ -2951,7 +3027,7 @@ def _report_visual_grammar_problems(state: dict[str, Any]) -> list[str]:
         return []
     counts = _visual_grammar_counts(state)
     total = sum(counts.values())
-    if total < 3:
+    if total < 2:
         return []
     problems: list[str] = []
     if len(counts) < 2:
@@ -2959,6 +3035,12 @@ def _report_visual_grammar_problems(state: dict[str, Any]) -> list[str]:
         problems.append(
             f"PDF report uses one visual grammar ({grammar}) across {total} figures; combine charts, tables, generated illustrations, or timelines with diagrams."
         )
+    if total >= 4:
+        for grammar, count in sorted(counts.items()):
+            if count / total > 0.5:
+                problems.append(
+                    f"PDF report overuses visual grammar '{grammar}' for {count}/{total} figures; keep any one grammar at 50% or less."
+                )
     graphviz_count = counts.get("graphviz_node_link", 0)
     if graphviz_count >= 3 and graphviz_count == total:
         problems.append(
@@ -3129,7 +3211,7 @@ def _visual_presence_validated(artifact_args: dict[str, Any], state: dict[str, A
         return _pptx_contains_visual_evidence(artifact_file)
     if suffix == ".pdf" and artifact_file is not None:
         return _pdf_contains_visual_evidence(artifact_file, state)
-    return _visual_asset_success_count(state) > 0
+    return _embedded_visual_success_count(state) > 0
 
 
 def _apply_visual_missing_quality_metadata(
@@ -3695,6 +3777,57 @@ def _qc_result_for_image(
     return None
 
 
+def _qc_result_presence_problem(index: int, result: dict[str, Any]) -> str | None:
+    """Blocking QC for v3.3: deterministic title/caption presence only.
+
+    LLM vision quality verdicts remain useful diagnostics, but they must not
+    reopen a loop after the artifact has a valid package and the baked text
+    bands are present.
+    """
+
+    if result.get("skipped") is True and "presence_pass" not in result:
+        return f"Slide {index} image was not checked for deterministic title/caption presence."
+    if result.get("presence_pass") is True:
+        return None
+    if result.get("presence_pass") is False:
+        reasons = result.get("presence_reasons") or result.get("reasons") or []
+        return f"Slide {index} failed title/caption presence QC: {reasons}"
+    has_presence_fields = "title_present" in result or "caption_present" in result
+    if has_presence_fields:
+        if result.get("title_present") is not True:
+            return f"Slide {index} failed title/caption presence QC: title missing"
+        return None
+    if result.get("pass") is True or _qc_result_is_advisory_parse_failure(result):
+        return None
+    return f"Slide {index} image was not checked for deterministic title/caption presence."
+
+
+def _qc_title_present_by_slide(
+    slides: list[Any],
+    diagnostics: dict[str, Any],
+    state: dict[str, Any] | None = None,
+) -> dict[int, bool]:
+    image_slides = _deck_image_slides(slides)
+    if not image_slides:
+        return {}
+    by_slide: dict[int, bool] = {}
+    qc_by_ref = _qc_results_by_image_ref(diagnostics)
+    qc_by_hash = _qc_results_by_image_hash(diagnostics)
+    if qc_by_ref or qc_by_hash:
+        for index, image_ref in image_slides:
+            result = _qc_result_for_image(qc_by_ref, qc_by_hash, image_ref, state)
+            if isinstance(result, dict) and result.get("title_present") is True:
+                by_slide[index] = True
+        return by_slide
+    qc_results = _qc_result_list(diagnostics)
+    if len(qc_results) < len(image_slides):
+        return by_slide
+    for (index, _image_ref), result in zip(image_slides, qc_results[-len(image_slides) :], strict=False):
+        if isinstance(result, dict) and result.get("title_present") is True:
+            by_slide[index] = True
+    return by_slide
+
+
 def _qc_result_is_advisory_parse_failure(result: dict[str, Any]) -> bool:
     if result.get("parser_error") is True or result.get("advisory") is True:
         return True
@@ -3732,7 +3865,7 @@ def _validate_deck_plan(
     return [
         *_deck_content_problems(slides),
         *_deck_treatment_problems(slides),
-        *_deck_cover_title_problems(slides, diagnostics),
+        *_deck_cover_title_problems(slides, diagnostics, state),
         *_deck_duplicate_image_problems(slides),
         *_deck_style_consistency_problems(slides),
         *_deck_visible_caption_problems(slides),
@@ -3783,9 +3916,14 @@ def _deck_treatment_problems(slides: list[Any]) -> list[str]:
     return problems
 
 
-def _deck_cover_title_problems(slides: list[Any], diagnostics: dict[str, Any]) -> list[str]:
+def _deck_cover_title_problems(
+    slides: list[Any],
+    diagnostics: dict[str, Any],
+    state: dict[str, Any] | None = None,
+) -> list[str]:
     cover = slides[0] if slides and isinstance(slides[0], dict) else {}
     title_by_slide = _title_present_by_slide(diagnostics)
+    title_by_slide.update(_qc_title_present_by_slide(slides, diagnostics, state))
     cover_title_present = _slide_has_confirmed_title(cover, 1, title_by_slide)
     if slides and not cover_title_present:
         return ["Cover slide has no confirmed title (native or detected in the image)."]
@@ -3873,14 +4011,15 @@ def _deck_qc_problems(
 
 
 def _deck_qc_ordered_problems(image_slides: list[tuple[int, str]], qc_results: list[Any]) -> list[str]:
-    return [
-        f"Slide {index} failed QC: {result.get('reasons')}"
-        for (index, _image_ref), result in zip(image_slides, qc_results, strict=False)
-        if isinstance(result, dict)
-        and result.get("pass") is not True
-        and result.get("skipped") is not True
-        and not _qc_result_is_advisory_parse_failure(result)
-    ]
+    problems: list[str] = []
+    for (index, _image_ref), result in zip(image_slides, qc_results, strict=False):
+        if not isinstance(result, dict):
+            problems.append(f"Slide {index} image QC did not emit a structured verdict.")
+            continue
+        problem = _qc_result_presence_problem(index, result)
+        if problem:
+            problems.append(problem)
+    return problems
 
 
 def _deck_qc_reference_problems(
@@ -3894,12 +4033,10 @@ def _deck_qc_reference_problems(
         result = _qc_result_for_image(qc_by_ref, qc_by_hash, image_ref, state)
         if result is None:
             problems.append(f"Slide {index} image was not QC-checked.")
-        elif result.get("skipped") is True:
             continue
-        elif _qc_result_is_advisory_parse_failure(result):
-            continue
-        elif result.get("pass") is not True:
-            problems.append(f"Slide {index} failed QC: {result.get('reasons')}")
+        problem = _qc_result_presence_problem(index, result)
+        if problem:
+            problems.append(problem)
     return problems
 
 
@@ -3950,26 +4087,21 @@ def _repair_slide_title_flag(slide: dict[str, Any], index: int, title_by_slide: 
     title_qc_confirmed = title_by_slide.get(index) is True
     declared_strategy = str(slide.get("title_strategy") or slide.get("titleStrategy") or "").strip().lower()
     changed = False
+    if _slide_image_ref(slide) and declared_strategy != "baked":
+        slide["title_strategy"] = "baked"
+        changed = True
     if title_qc_confirmed:
         if slide.get("title_present") is not True:
             slide["title_present"] = True
             changed = True
-        if declared_strategy in {"", "baked"}:
-            if slide.get("title_strategy") != "baked":
-                slide["title_strategy"] = "baked"
-                changed = True
-            if slide.get("title_baked_qc_confirmed") is not True:
-                slide["title_baked_qc_confirmed"] = True
-                changed = True
-        return changed
-    if declared_strategy == "baked":
-        if slide.get("title_strategy") != "native":
-            slide["title_strategy"] = "native"
+        if slide.get("title_baked_qc_confirmed") is not True:
+            slide["title_baked_qc_confirmed"] = True
             changed = True
-        for key in ("title_baked_qc_confirmed", "baked_title_qc_confirmed", "title_in_image_qc_confirmed"):
-            if slide.get(key):
-                slide[key] = False
-                changed = True
+        return changed
+    for key in ("title_baked_qc_confirmed", "baked_title_qc_confirmed", "title_in_image_qc_confirmed"):
+        if slide.get(key):
+            slide[key] = False
+            changed = True
     return changed
 
 
@@ -4097,6 +4229,14 @@ def _slide_qc_results_from_text(text: str) -> list[dict[str, Any]]:
                 for key in ("skipped", "advisory", "parser_error"):
                     if payload.get(key) is True:
                         result[key] = True
+                for key in ("title_present", "caption_present", "presence_pass"):
+                    if isinstance(payload.get(key), bool):
+                        result[key] = payload[key]
+                presence_reasons = payload.get("presence_reasons")
+                if isinstance(presence_reasons, list):
+                    result["presence_reasons"] = [
+                        str(reason) for reason in presence_reasons if isinstance(reason, str)
+                    ]
                 json_results.append(result)
             continue
         if not line.startswith("[qc]"):
@@ -5151,7 +5291,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._forced_read_tool_choice()
         if (
             state.get("builder_visual_asset_correction_emitted")
-            and _visual_asset_success_count(state) <= 0
+            and _embedded_visual_success_count(state) <= 0
             and _visual_asset_attempt_count(state) <= 0
         ):
             logger.warning(
@@ -6183,11 +6323,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         visual_ok = _visual_presence_validated(artifact_args, state)
         logger.info(
             "[BuilderVisualDiagnostics] phase=emit_validation visuals_requested=%s "
-            "design_skill_read=%s visual_asset_success_count=%d "
+            "design_skill_read=%s embedded_visual_count=%d "
             "visual_presence_validated=%s requested_ext=%s final_ext=%s",
             _visuals_requested(state),
             _visual_design_skill_read_seen(state),
-            _visual_asset_success_count(state),
+            _embedded_visual_success_count(state),
             visual_ok,
             _requested_artifact_ext(state),
             _artifact_path_suffix_label(artifact_args.get("artifact_path")),
@@ -7268,7 +7408,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
         return {
             "builder_result": fallback,
-            "builder_non_artifact_turns": 0,
             "builder_task_started_at_ms": 0,
             "builder_consecutive_empty_emit_rejections": 0,
             "builder_last_missing_emit_path": None,
@@ -7304,7 +7443,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
         return {
             "builder_result": fallback,
-            "builder_non_artifact_turns": 0,
             "builder_task_started_at_ms": 0,
             "builder_consecutive_empty_emit_rejections": 0,
             "builder_last_missing_emit_path": None,
@@ -7690,13 +7828,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         current = int(state.get("builder_non_artifact_turns", 0) or 0)
         update = self._post_interrupt_state_hints(state, messages)
-        if current > 0:
+        if current > 0 and current < soft_warn_at_turn() and not _presentation_completion_ready(state):
             logger.info(
                 "[BuilderArtifact] post-interrupt update detected — resetting "
                 "builder_non_artifact_turns: %d -> 0 (fresh budget for the update)",
                 current,
             )
             update["builder_non_artifact_turns"] = 0
+        elif current >= soft_warn_at_turn() or _presentation_completion_ready(state):
+            logger.info(
+                "[BuilderArtifact] post-interrupt update detected after terminal/late-stage "
+                "progress; preserving builder_non_artifact_turns=%d",
+                current,
+            )
         return update or None
 
     def _maybe_inject_pdf_layout_repair(self, state: BuilderArtifactState) -> dict[str, Any] | None:
@@ -7917,7 +8061,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         if not _visual_design_skill_read_seen(state):
             return None
-        if _visual_asset_success_count(state) > 0:
+        if _embedded_visual_success_count(state) > 0:
             return None
         if state.get("builder_visual_asset_correction_emitted"):
             return None
@@ -7926,7 +8070,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         logger.warning(
             "[BuilderVisualDiagnostics] phase=asset_missing_diagnostic requested_ext=%s "
-            "asset_success_count=0",
+            "embedded_visual_count=0",
             _requested_artifact_ext(state),
         )
         return {
@@ -8469,6 +8613,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if preview_virtual not in supporting:
             supporting.append(preview_virtual)
         updated["supporting_files"] = supporting
+        artifact_files = [
+            entry
+            for entry in (updated.get("artifact_files") or [])
+            if isinstance(entry, dict)
+        ]
+        if not any(entry.get("path") == preview_virtual for entry in artifact_files):
+            artifact_files.append({"path": preview_virtual, "role": "preview", "name": preview.name})
+        updated["artifact_files"] = _artifact_file_entries({**updated, "artifact_files": artifact_files})
         return updated
 
     @staticmethod

@@ -8,6 +8,14 @@
 
 export type BuilderCompletionStatus = 'success' | 'error' | 'timeout' | 'cancelled';
 
+export type BuilderCompletionArtifactFileRole = 'primary' | 'source' | 'preview' | 'illustration_asset' | 'internal';
+
+export type BuilderCompletionArtifactFileV1 = {
+  path: string;
+  role: BuilderCompletionArtifactFileRole;
+  name?: string | null;
+};
+
 export type BuilderFailureDiagnosticsV1 = {
   schema: 'builder_failure_diagnostics_v1';
   task_id?: string | null;
@@ -87,6 +95,7 @@ export type BuilderCompletionEventV1 = {
   artifact_title?: string | null;
   artifact_type?: string | null;
   artifact_filename?: string | null;
+  artifact_files?: BuilderCompletionArtifactFileV1[] | null;
   mime_type?: string | null;
   content_hash?: string | null;
   storage_provider?: 'local' | 'supabase' | 'hybrid' | null;

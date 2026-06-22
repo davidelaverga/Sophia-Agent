@@ -579,6 +579,7 @@ def _completion_from_terminal_task(
         "artifact_title": artifact.get("artifact_title"),
         "artifact_type": artifact.get("artifact_type"),
         "artifact_filename": artifact_filename,
+        "artifact_files": artifact.get("artifact_files"),
         **fallback,
         "image_generation_status": artifact.get("image_generation_status"),
         "image_generation_reason": artifact.get("image_generation_reason"),

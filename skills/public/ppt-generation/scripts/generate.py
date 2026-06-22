@@ -476,9 +476,7 @@ def add_title_slide(slide, slide_info: dict, plan: dict, image_path: str | None,
 def add_full_bleed_image_slide(slide, slide_info: dict, plan: dict, image_path: str, slide_width, slide_height) -> None:
     theme = slide_theme(plan)
     apply_slide_background(slide, theme)
-    # Picture first so the overlay band sits above it in z-order.
     add_full_bleed_picture(slide, image_path, slide_width, slide_height)
-    add_overlay_band(slide, theme, slide_width, slide_height, str(slide_info.get("title") or ""), str(slide_info.get("subtitle") or ""))
 
 
 def image_forward_title_qc_confirmed(slide_info: dict) -> bool:
@@ -503,15 +501,6 @@ def add_image_forward_slide(slide, slide_info: dict, plan: dict, image_path: str
     theme = slide_theme(plan)
     apply_slide_background(slide, theme)
     add_full_bleed_picture(slide, image_path, slide_width, slide_height)
-    if not image_forward_title_qc_confirmed(slide_info):
-        add_overlay_band(
-            slide,
-            theme,
-            slide_width,
-            slide_height,
-            image_forward_overlay_title(slide_info, plan),
-            str(slide_info.get("subtitle") or ""),
-        )
 
 
 def add_section_divider_slide(slide, slide_info: dict, plan: dict, image_path: str | None, slide_width, slide_height) -> None:

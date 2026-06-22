@@ -253,85 +253,6 @@ function imageForwardTitleText(slideInfo, plan, index) {
   );
 }
 
-function addImageForwardTitleOverlay(slide, slideInfo, plan, theme, index) {
-  const title = imageForwardTitleText(slideInfo, plan, index);
-  if (!title || imageForwardTitleConfirmed(slideInfo)) {
-    return false;
-  }
-  const subtitle = asString(slideInfo.subtitle || (index === 0 ? plan.subtitle : ""), "");
-  const bandHeight = subtitle ? 1.42 : 0.96;
-  slide.addShape(SHAPE.roundRect, {
-    x: 0.62,
-    y: 0.48,
-    w: 12.1,
-    h: bandHeight,
-    rectRadius: 0.08,
-    fill: { color: theme.bg, transparency: 8 },
-    line: { color: theme.bg, transparency: 100 },
-  });
-  addTitle(slide, title, theme, {
-    x: 0.86,
-    y: 0.62,
-    w: 11.62,
-    h: 0.48,
-    fontSize: index === 0 ? 30 : 24,
-  });
-  if (subtitle) {
-    slide.addText(subtitle, {
-      x: 0.88,
-      y: 1.13,
-      w: 11.55,
-      h: 0.42,
-      fontFace: FONT_BODY,
-      fontSize: index === 0 ? 15 : 13,
-      color: theme.body,
-      fit: "shrink",
-      breakLine: false,
-      margin: 0,
-    });
-  }
-  return true;
-}
-
-function imageForwardCaptionText(slideInfo) {
-  return firstPresentText([slideInfo.caption, slideInfo.takeaway], "");
-}
-
-function imageForwardCaptionRequired(slideInfo) {
-  return !["cover", "section", "statement", "summary", "stat", "agenda"].includes(slideType(slideInfo));
-}
-
-function addCaptionBand(slide, slideInfo, theme) {
-  const caption = imageForwardCaptionText(slideInfo);
-  if (!caption || !imageForwardCaptionRequired(slideInfo)) {
-    return false;
-  }
-  slide.addShape(SHAPE.roundRect, {
-    x: 0.86,
-    y: 6.48,
-    w: 11.62,
-    h: 0.58,
-    rectRadius: 0.08,
-    fill: { color: theme.bg, transparency: 6 },
-    line: { color: theme.line, transparency: 15, width: 0.7 },
-  });
-  slide.addText(caption, {
-    x: 1.05,
-    y: 6.59,
-    w: 11.24,
-    h: 0.32,
-    fontFace: FONT_BODY,
-    fontSize: 12,
-    color: theme.body,
-    align: "center",
-    valign: "middle",
-    fit: "shrink",
-    breakLine: false,
-    margin: 0,
-  });
-  return true;
-}
-
 function addBullets(slide, bullets, theme, box) {
   if (!bullets.length) return;
   const visibleBullets = bullets.slice(0, box.max || 6);
@@ -743,9 +664,8 @@ function renderImageForward(pptx, visualPath, slideInfo, plan, theme, index) {
   if (!addFullBleedVisual(slide, visualPath)) {
     return null;
   }
-  const titleOverlay = addImageForwardTitleOverlay(slide, slideInfo, plan, theme, index);
-  slide.__sophiaTitlePresent = Boolean(titleOverlay || imageForwardTitleConfirmed(slideInfo));
-  slide.__sophiaTitleOverlay = Boolean(titleOverlay);
+  slide.__sophiaTitlePresent = Boolean(imageForwardTitleConfirmed(slideInfo));
+  slide.__sophiaTitleOverlay = false;
   return slide;
 }
 
@@ -889,8 +809,6 @@ function renderCompiledSlide(pptx, args, plan, theme, slidesInfo, slideInfo, ind
   const imageForward = ctx.imageForward;
   if (!imageForward) {
     addFooter(ctx.slide, theme, index, ctx.totalSlides);
-  } else if (addCaptionBand(ctx.slide, slideInfo, theme)) {
-    ctx.captionPresent = true;
   }
   addNotes(ctx.slide, slideInfo);
   console.error(
@@ -905,7 +823,7 @@ function incrementPictureCount(count, visualPath) {
 
 function incrementTextRunCount(count, slideInfo, rendered) {
   if (rendered.imageForward) {
-    return count + (rendered.titlePresent ? 1 : 0) + (rendered.captionPresent ? 1 : 0);
+    return count;
   }
   return count + 1 + slideBullets(slideInfo).length;
 }

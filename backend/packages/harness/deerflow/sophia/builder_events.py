@@ -724,6 +724,7 @@ def _artifact_completion_fields(
         "artifact_title": artifact.get("artifact_title"),
         "artifact_type": artifact.get("artifact_type"),
         "artifact_filename": artifact_filename,
+        "artifact_files": artifact.get("artifact_files"),
         "artifact_id": artifact.get("artifact_id"),
         "storage_provider": artifact.get("storage_provider"),
         "storage_bucket": artifact.get("storage_bucket"),

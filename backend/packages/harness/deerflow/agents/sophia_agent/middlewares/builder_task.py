@@ -964,7 +964,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "<output_contract>\n"
             "- Write every user-facing deliverable and supporting file under /mnt/user-data/outputs/ using absolute paths.\n"
             "- Do NOT use relative paths like outputs/report.md or ./outputs/report.md.\n"
-            "- When you call emit_builder_artifact, artifact_path and supporting_files must use the same /mnt/user-data/outputs/... absolute paths.\n"
+            "- When you call emit_builder_artifact, artifact_path and any artifact_files/supporting_files must use the same /mnt/user-data/outputs/... absolute paths. Mark only the requested deliverable as artifact_files role=primary; use source/internal for markdown or scripts and preview for render-only previews.\n"
             "</output_contract>"
         )
         if isinstance(artifact_target_path, str) and artifact_target_path.startswith("/mnt/user-data/outputs/"):

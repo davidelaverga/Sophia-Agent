@@ -32,6 +32,22 @@ function sanitizeArtifactPath(value: string): string {
   return value.trim().replace(/\\/g, '/').replace(/^file:\/\//, '');
 }
 
+export type BuilderArtifactFileRole = 'primary' | 'source' | 'preview' | 'illustration_asset' | 'internal';
+
+const ARTIFACT_FILE_ROLES = new Set<BuilderArtifactFileRole>([
+  'primary',
+  'source',
+  'preview',
+  'illustration_asset',
+  'internal',
+]);
+
+function normalizeArtifactFileRole(value: unknown): BuilderArtifactFileRole {
+  return typeof value === 'string' && ARTIFACT_FILE_ROLES.has(value as BuilderArtifactFileRole)
+    ? value as BuilderArtifactFileRole
+    : 'internal';
+}
+
 export function normalizeBuilderArtifactPath(path: string | null | undefined): string | null {
   if (typeof path !== 'string') {
     return null;
@@ -74,6 +90,35 @@ export function normalizeBuilderArtifactPath(path: string | null | undefined): s
   return sanitized.replace(/^\/+/, '');
 }
 
+function normalizeArtifactFileRecords(raw: unknown): BuilderArtifactFileV1[] {
+  if (!Array.isArray(raw)) {
+    return [];
+  }
+  const seen = new Set<string>();
+  const records: BuilderArtifactFileV1[] = [];
+  for (const item of raw) {
+    const record = asRecord(item);
+    if (!record) {
+      continue;
+    }
+    const path = normalizeBuilderArtifactPath(readString(record, 'path'));
+    if (!path || seen.has(path)) {
+      continue;
+    }
+    seen.add(path);
+    const name = readString(record, 'name') ?? getFileLabel(path);
+    const role = normalizeArtifactFileRole(record.role);
+    records.push({
+      path,
+      name,
+      label: name,
+      role,
+      isPrimary: role === 'primary',
+    });
+  }
+  return records;
+}
+
 function getFallbackTitle(artifactPath: string | undefined): string {
   if (!artifactPath) {
     return 'Builder deliverable';
@@ -96,6 +141,7 @@ export function normalizeBuilderArtifactPayload(raw: unknown): BuilderArtifactV1
   const supportingFiles = coerceStringArray(record, 'supporting_files', 'supportingFiles')
     .map((path) => normalizeBuilderArtifactPath(path))
     .filter((path): path is string => typeof path === 'string');
+  const artifactFiles = normalizeArtifactFileRecords(record.artifact_files ?? record.artifactFiles);
   const decisionsMade = coerceStringArray(record, 'decisions_made', 'decisionsMade').slice(0, 4);
   const sourcesUsed = coerceStringArray(record, 'sources_used', 'sourcesUsed');
   const artifactTitle = rawArtifactTitle || getFallbackTitle(artifactPath);
@@ -105,6 +151,7 @@ export function normalizeBuilderArtifactPayload(raw: unknown): BuilderArtifactV1
 
   if (
     !artifactPath &&
+    artifactFiles.length === 0 &&
     supportingFiles.length === 0 &&
     !companionSummary &&
     !userNextAction &&
@@ -118,6 +165,7 @@ export function normalizeBuilderArtifactPayload(raw: unknown): BuilderArtifactV1
     artifactType: coerceString(record, 'artifact_type', 'artifactType') || 'unknown',
     artifactTitle,
     ...(artifactPreviewFilename ? { artifactPreviewFilename } : {}),
+    ...(artifactFiles.length > 0 ? { artifactFiles } : {}),
     ...(supportingFiles.length > 0 ? { supportingFiles } : {}),
     ...(coerceNumber(record, 'steps_completed', 'stepsCompleted') !== undefined
       ? { stepsCompleted: coerceNumber(record, 'steps_completed', 'stepsCompleted') }
@@ -143,12 +191,11 @@ const PPTX_PREVIEW_PDF_SUFFIX = '.preview.pdf';
 const RENDER_SOURCE_SIBLING_PATTERN = /\.(?:pdf|pptx?|docx?|html?)\.(?:md|markdown)$/iu;
 const DELIVERABLE_EXTENSION_PRIORITY = ['pdf', 'pptx', 'ppt', 'html', 'htm', 'md', 'markdown'];
 
-export type BuilderArtifactFileRole = 'deliverable' | 'source' | 'preview';
-
 interface BuilderArtifactFileLike {
   path?: string | null;
   name?: string | null;
   mimeType?: string | null;
+  role?: BuilderArtifactFileRole | null;
 }
 
 function fileBaseName(file: BuilderArtifactFileLike | null | undefined): string {
@@ -203,9 +250,12 @@ export function classifyBuilderArtifactFileRole(
   file: BuilderArtifactFileLike | null | undefined,
   siblings: readonly BuilderArtifactFileLike[] = [],
 ): BuilderArtifactFileRole {
+  if (file?.role && ARTIFACT_FILE_ROLES.has(file.role)) {
+    return file.role;
+  }
   const name = fileBaseName(file).toLowerCase();
   if (!name) {
-    return 'deliverable';
+    return 'primary';
   }
   if (name.endsWith(PPTX_PREVIEW_PDF_SUFFIX)) {
     return 'preview';
@@ -232,7 +282,7 @@ export function classifyBuilderArtifactFileRole(
       return 'source';
     }
   }
-  return 'deliverable';
+  return 'primary';
 }
 
 export function formatBuilderArtifactFileRoleLabel(role: BuilderArtifactFileRole): string | null {
@@ -262,7 +312,7 @@ export function rankBuilderArtifactLibraryItems<T extends BuilderArtifactFileLik
   for (const item of items) {
     roles.set(item, classifyBuilderArtifactFileRole(item, items));
   }
-  const roleRank = (item: T) => (roles.get(item) === 'deliverable' ? 0 : 1);
+  const roleRank = (item: T) => (roles.get(item) === 'primary' ? 0 : 1);
   return [...items].sort((left, right) => {
     const roleDelta = roleRank(left) - roleRank(right);
     if (roleDelta !== 0) {
@@ -311,7 +361,9 @@ export function resolveCanvasRenderFile<T extends BuilderArtifactFileLike & { is
       ? list.find((file) => file !== downloadFile && fileBaseName(file).toLowerCase() === candidateName) ?? null
       : null
   );
-  const previewFile = findByName(explicitPreviewName) ?? findByName(stemPreviewName);
+  const previewFile = findByName(explicitPreviewName)
+    ?? list.find((file) => file !== downloadFile && file.role === 'preview')
+    ?? findByName(stemPreviewName);
   if (!previewFile) {
     return { renderFile: downloadFile, downloadFile, previewKind: null };
   }
@@ -326,23 +378,41 @@ export function getBuilderArtifactFiles(builderArtifact: BuilderArtifactV1 | nul
   const seen = new Set<string>();
   const files: BuilderArtifactFileV1[] = [];
 
-  const addFile = (path: string | undefined, isPrimary: boolean) => {
+  const addFile = (path: string | undefined, isPrimary: boolean, role: BuilderArtifactFileRole = isPrimary ? 'primary' : 'internal', name?: string) => {
     if (!path || seen.has(path)) {
       return;
     }
 
     seen.add(path);
+    const label = name || getFileLabel(path);
     files.push({
       path,
-      name: getFileLabel(path),
-      label: getFileLabel(path),
+      name: label,
+      label,
+      role,
       isPrimary,
     });
   };
 
-  addFile(builderArtifact.artifactPath, true);
+  if (builderArtifact.artifactFiles && builderArtifact.artifactFiles.length > 0) {
+    for (const file of builderArtifact.artifactFiles) {
+      if (file.role === 'primary' || file.role === 'preview') {
+        addFile(file.path, file.role === 'primary', file.role, file.name);
+      }
+    }
+    if (!files.some((file) => file.isPrimary)) {
+      addFile(builderArtifact.artifactPath, true, 'primary');
+    }
+  } else {
+    addFile(builderArtifact.artifactPath, true, 'primary');
+  }
+  const previewName = builderArtifact.artifactPreviewFilename?.trim().split('/').filter(Boolean).pop()?.toLowerCase() ?? '';
   for (const supportingFile of builderArtifact.supportingFiles || []) {
-    addFile(supportingFile, false);
+    const normalized = normalizeBuilderArtifactPath(supportingFile);
+    const basename = normalized?.split('/').filter(Boolean).pop()?.toLowerCase() ?? '';
+    if (previewName && basename === previewName) {
+      addFile(normalized || supportingFile, false, 'preview');
+    }
   }
 
   return files;

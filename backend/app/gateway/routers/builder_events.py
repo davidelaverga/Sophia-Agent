@@ -46,6 +46,7 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "artifact_path",
     "artifact_ext",
     "artifact_title",
+    "artifact_files",
     "requested_artifact_ext",
     "artifact_id",
     "storage_provider",
@@ -95,6 +96,7 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "artifact_title",
         "artifact_type",
         "artifact_filename",
+        "artifact_files",
         "artifact_id",
         "storage_provider",
         "storage_bucket",
@@ -301,6 +303,7 @@ class BuilderCompletionEvent(BaseModel):
     artifact_title: str | None = None
     artifact_type: str | None = None
     artifact_filename: str | None = None
+    artifact_files: list[dict[str, Any]] | None = None
     artifact_id: str | None = None
     storage_provider: str | None = None
     storage_bucket: str | None = None

@@ -745,12 +745,15 @@ def test_validate_deck_plan_treats_skipped_qc_as_unavailable() -> None:
         {
             "pptx_slide_title_results": [{"slide": 1, "title_present": True}],
             "qc_results": [
-                {
-                    "pass": False,
-                    "skipped": True,
-                    "reasons": ["slide QC skipped: ANTHROPIC_API_KEY is not set"],
-                    "image_path": "/mnt/user-data/outputs/slide-1.png",
-                },
+                    {
+                        "pass": False,
+                        "skipped": True,
+                        "presence_pass": True,
+                        "title_present": True,
+                        "caption_present": True,
+                        "reasons": ["slide QC skipped: ANTHROPIC_API_KEY is not set"],
+                        "image_path": "/mnt/user-data/outputs/slide-1.png",
+                    },
             ],
         },
     )

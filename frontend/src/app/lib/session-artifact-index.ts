@@ -393,7 +393,7 @@ export function listSessionArtifacts(index: ArtifactSessionIndex): ArtifactRecor
   // never outrank the deliverable they belong to, so they sort after
   // deliverables unless the user explicitly opened them recently.
   const roleRank = (record: ArtifactRecord) => (
-    classifyBuilderArtifactFileRole({ path: record.localPath }, siblingFiles) === "deliverable" ? 0 : 1
+    classifyBuilderArtifactFileRole({ path: record.localPath }, siblingFiles) === "primary" ? 0 : 1
   )
   return [...index.artifacts].sort((left, right) => {
     const leftRecent = recentOrder.get(left.artifactId)

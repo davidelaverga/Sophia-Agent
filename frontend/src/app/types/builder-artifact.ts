@@ -15,6 +15,7 @@ export interface BuilderArtifactV1 {
   artifactTitle: string;
   /** Rendered PDF preview sibling for PPTX deliverables (e.g. "deck.preview.pdf"). */
   artifactPreviewFilename?: string;
+  artifactFiles?: BuilderArtifactFileV1[];
   supportingFiles?: string[];
   stepsCompleted?: number;
   decisionsMade: string[];
@@ -29,6 +30,7 @@ export interface BuilderArtifactFileV1 {
   path: string;
   name: string;
   label: string;
+  role?: 'primary' | 'source' | 'preview' | 'illustration_asset' | 'internal';
   isPrimary: boolean;
 }
 

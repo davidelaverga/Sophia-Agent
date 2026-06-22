@@ -36,6 +36,7 @@ def test_slide_title_strategy_repair_requires_qc_for_baked_titles() -> None:
                 {
                     "type": "cover",
                     "title": "Launch",
+                    "image_path": "/mnt/user-data/outputs/slide-1.png",
                     "title_strategy": "baked",
                     "title_baked_qc_confirmed": True,
                 }
@@ -45,11 +46,11 @@ def test_slide_title_strategy_repair_requires_qc_for_baked_titles() -> None:
     )
 
     assert repaired is not None
-    assert repaired["slides"][0]["title_strategy"] == "native"
+    assert repaired["slides"][0]["title_strategy"] == "baked"
     assert repaired["slides"][0]["title_baked_qc_confirmed"] is False
 
     repaired = _repair_deck_plan_for_validation(
-        {"slides": [{"type": "cover", "title": "Launch"}]},
+        {"slides": [{"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png"}]},
         {"pptx_slide_title_results": [{"slide": 1, "title_present": True}]},
     )
 
@@ -217,6 +218,9 @@ def test_presentation_completion_ready_allows_advisory_qc_parse_failures(tmp_pat
                     "pass": False,
                     "advisory": True,
                     "parser_error": True,
+                    "presence_pass": True,
+                    "title_present": True,
+                    "caption_present": True,
                     "reasons": ["QC reviewer returned invalid JSON"],
                     "image_path": "/mnt/user-data/outputs/slide-2.png",
                 },

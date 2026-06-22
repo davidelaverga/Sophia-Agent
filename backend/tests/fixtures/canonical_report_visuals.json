@@ -1,0 +1,24 @@
+{
+  "visual_figure_records": [
+    {
+      "family": "diagram:architecture",
+      "grammar": "graphviz_node_link",
+      "path": "/mnt/user-data/outputs/visuals/architecture.png"
+    },
+    {
+      "family": "chart:flow",
+      "grammar": "sankey_flow",
+      "path": "/mnt/user-data/outputs/visuals/flow.png"
+    },
+    {
+      "family": "chart:distribution",
+      "grammar": "distribution_chart",
+      "path": "/mnt/user-data/outputs/visuals/distribution.png"
+    },
+    {
+      "family": "table:comparison",
+      "grammar": "comparison_table",
+      "path": "/mnt/user-data/outputs/visuals/comparison.png"
+    }
+  ]
+}

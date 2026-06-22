@@ -1,0 +1,36 @@
+{
+  "title": "Canonical Image-Forward Deck",
+  "slides": [
+    {
+      "type": "cover",
+      "title": "System Map",
+      "image_path": "/mnt/user-data/outputs/slide-1.png",
+      "title_strategy": "baked",
+      "visual_style": "excalidraw_technical"
+    },
+    {
+      "type": "content",
+      "title": "Flow Control",
+      "caption": "The loop stops once a valid artifact exists.",
+      "image_path": "/mnt/user-data/outputs/slide-2.png",
+      "title_strategy": "baked",
+      "visual_style": "excalidraw_technical"
+    },
+    {
+      "type": "section",
+      "title": "Guardrails",
+      "image_path": "/mnt/user-data/outputs/slide-3.png",
+      "title_strategy": "baked",
+      "visual_style": "excalidraw_technical"
+    },
+    {
+      "type": "content",
+      "subtype": "two-column",
+      "title": "Tradeoffs",
+      "caption": "Each guard removes a different failure mode.",
+      "image_path": "/mnt/user-data/outputs/slide-4.png",
+      "title_strategy": "baked",
+      "visual_style": "excalidraw_technical"
+    }
+  ]
+}

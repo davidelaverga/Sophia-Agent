@@ -7,6 +7,7 @@ import {
   classifyBuilderArtifactFileRole,
   formatBuilderArtifactFileRoleLabel,
   getBuilderArtifactFileBaseStem,
+  getBuilderArtifactFiles,
   isHtmlArtifactFile,
   isMarkdownArtifactFile,
   isPptxArtifactFile,
@@ -167,12 +168,20 @@ describe("builder artifact utilities", () => {
       artifact_type: "presentation",
       artifact_title: "Sophia deck",
       artifact_preview_filename: "sophia-deck.preview.pdf",
+      artifact_files: [
+        { path: "/mnt/user-data/outputs/sophia-deck.pptx", role: "primary" },
+        { path: "/mnt/user-data/outputs/sophia-deck.preview.pdf", role: "preview" },
+      ],
       supporting_files: ["/mnt/user-data/outputs/sophia-deck.preview.pdf"],
     })
 
     expect(artifact).toMatchObject({
       artifactPath: "mnt/user-data/outputs/sophia-deck.pptx",
       artifactPreviewFilename: "sophia-deck.preview.pdf",
+      artifactFiles: [
+        expect.objectContaining({ path: "mnt/user-data/outputs/sophia-deck.pptx", role: "primary" }),
+        expect.objectContaining({ path: "mnt/user-data/outputs/sophia-deck.preview.pdf", role: "preview" }),
+      ],
     })
   })
 })
@@ -190,8 +199,8 @@ describe("builder artifact file roles", () => {
     expect(classifyBuilderArtifactFileRole({ name: "sophia-roadmap.pdf.md" })).toBe("source")
     expect(classifyBuilderArtifactFileRole({ name: "deck.pptx.md" })).toBe("source")
     expect(classifyBuilderArtifactFileRole({ name: "deck.preview.pdf" })).toBe("preview")
-    expect(classifyBuilderArtifactFileRole({ name: "sophia-roadmap.pdf" })).toBe("deliverable")
-    expect(classifyBuilderArtifactFileRole({ name: "deck.pptx" })).toBe("deliverable")
+    expect(classifyBuilderArtifactFileRole({ name: "sophia-roadmap.pdf" })).toBe("primary")
+    expect(classifyBuilderArtifactFileRole({ name: "deck.pptx" })).toBe("primary")
   })
 
   it("classifies a same-stem markdown next to a rendered deliverable as source", () => {
@@ -200,14 +209,14 @@ describe("builder artifact file roles", () => {
       { name: "report.pdf", path: "mnt/user-data/outputs/report.pdf" },
     ]
     expect(classifyBuilderArtifactFileRole(siblings[0], siblings)).toBe("source")
-    expect(classifyBuilderArtifactFileRole(siblings[1], siblings)).toBe("deliverable")
-    expect(classifyBuilderArtifactFileRole({ name: "standalone-notes.md" }, siblings)).toBe("deliverable")
+    expect(classifyBuilderArtifactFileRole(siblings[1], siblings)).toBe("primary")
+    expect(classifyBuilderArtifactFileRole({ name: "standalone-notes.md" }, siblings)).toBe("primary")
   })
 
   it("formats badge labels only for non-deliverable roles", () => {
     expect(formatBuilderArtifactFileRoleLabel("source")).toBe("Source")
     expect(formatBuilderArtifactFileRoleLabel("preview")).toBe("Preview")
-    expect(formatBuilderArtifactFileRoleLabel("deliverable")).toBeNull()
+    expect(formatBuilderArtifactFileRoleLabel("primary")).toBeNull()
   })
 
   it("ranks the primary deliverable above newer source and preview siblings", () => {
@@ -245,6 +254,30 @@ describe("builder artifact file roles", () => {
       "launch.html",
       "unrelated-notes.txt",
       "launch.md",
+    ])
+  })
+})
+
+describe("getBuilderArtifactFiles role filtering", () => {
+  it("returns primary and preview files but hides source and internal records", () => {
+    const artifact = normalizeBuilderArtifactPayload({
+      artifact_path: "/mnt/user-data/outputs/report.pdf",
+      artifact_type: "document",
+      artifact_title: "Report",
+      artifact_files: [
+        { path: "/mnt/user-data/outputs/report.pdf", role: "primary" },
+        { path: "/mnt/user-data/outputs/report.pdf.md", role: "source" },
+        { path: "/mnt/user-data/outputs/report.preview.pdf", role: "preview" },
+        { path: "/mnt/user-data/outputs/_generate_report.py", role: "internal" },
+      ],
+    })
+
+    expect(artifact).not.toBeNull()
+    const visible = getBuilderArtifactFiles(artifact)
+
+    expect(visible.map((file) => [file.name, file.role])).toEqual([
+      ["report.pdf", "primary"],
+      ["report.preview.pdf", "preview"],
     ])
   })
 })

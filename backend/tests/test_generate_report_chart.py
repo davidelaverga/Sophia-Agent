@@ -44,7 +44,7 @@ def test_generate_report_chart_writes_spec_and_downloads_png(tmp_path, monkeypat
     payload = _payload(
         generate_report_chart.func(
             chart_tool="generate_sankey_chart",
-            args={"title": "Flow", "data": [{"source": "A", "target": "B", "value": 4}]},
+            chart_args={"title": "Flow", "data": [{"source": "A", "target": "B", "value": 4}]},
             rationale="A sankey chart shows flow volume across stages.",
             output_name="flow",
             runtime=_runtime(tmp_path),
@@ -66,7 +66,7 @@ def test_generate_report_chart_rejects_empty_args(tmp_path, monkeypatch) -> None
     payload = _payload(
         generate_report_chart.func(
             chart_tool="generate_line_chart",
-            args={},
+            chart_args={},
             rationale="Trend chart.",
             runtime=_runtime(tmp_path),
         )
@@ -82,7 +82,7 @@ def test_generate_report_chart_schema_excludes_runtime() -> None:
 
     properties = schema.get("properties", {})
     assert "runtime" not in properties
-    assert {"chart_tool", "args", "rationale"}.issubset(properties)
+    assert {"chart_tool", "chart_args", "rationale"}.issubset(properties)
 
 
 def test_generate_report_chart_runtime_is_langgraph_injected() -> None:

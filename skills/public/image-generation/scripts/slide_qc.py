@@ -9,19 +9,31 @@ from __future__ import annotations
 
 import argparse
 import base64
+import difflib
 import json
 import mimetypes
 import os
+import re
 import shutil
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
+
+try:  # Pillow is present in the builder image-gen runtime; tests monkeypatch when absent.
+    from PIL import Image
+except Exception:  # pragma: no cover - dependency availability varies.
+    Image = None  # type: ignore[assignment]
 
 _DEFAULT_QC_MODEL = "claude-sonnet-4-6"
 
 _REVIEWER_PROMPT = """You are a strict slide QC reviewer. You are shown one rendered presentation slide and the
 spec it must satisfy. Reply with JSON only: {"pass": true|false, "reasons": ["..."]}.
+
+The slide has a hard layout contract: top 14% is the title band, bottom 11% is the
+caption/takeaway band, and the middle 75% is the visual safe area. Title/caption
+text must be baked into those bands; visual elements must not collide with them.
 
 Fail (pass=false) if ANY is true:
 
@@ -48,6 +60,23 @@ Slide spec:
 
 def _json_result(passed: bool, reasons: list[str]) -> dict[str, Any]:
     return {"pass": bool(passed), "reasons": [str(reason)[:240] for reason in reasons[:5]]}
+
+
+def _merge_presence(payload: dict[str, Any], presence: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(payload)
+    reasons = [str(reason) for reason in (merged.get("reasons") or []) if isinstance(reason, str)]
+    presence_reasons = [
+        str(reason)
+        for reason in (presence.get("presence_reasons") or [])
+        if isinstance(reason, str)
+    ]
+    if presence_reasons:
+        reasons.extend(presence_reasons)
+    merged["reasons"] = reasons[:5]
+    for key in ("title_present", "caption_present", "presence_pass", "presence_reasons"):
+        if key in presence:
+            merged[key] = presence[key]
+    return merged
 
 
 def _qc_parse_advisory_result(reason: str) -> dict[str, Any]:
@@ -137,6 +166,120 @@ def _ocr_text(image_file: Path) -> str:
     return completed.stdout or ""
 
 
+def _ocr_crop_text(image_file: Path, *, y0: float, y1: float) -> str:
+    if Image is None:
+        return ""
+    try:
+        with Image.open(image_file) as image:
+            width, height = image.size
+            crop = image.crop((0, int(height * y0), width, int(height * y1)))
+            with tempfile.NamedTemporaryFile(suffix=".png") as handle:
+                crop.save(handle.name)
+                return _ocr_text(Path(handle.name))
+    except Exception:
+        return ""
+
+
+_TEXT_READS_RE = re.compile(r"\bTHE\s+TEXT\s+READS\s*:\s*", re.IGNORECASE)
+_JSON_FIELD_TITLE_KEYS = ("title", "heading", "title at top")
+_JSON_FIELD_CAPTION_KEYS = ("caption", "takeaway", "bottom caption band", "bottom caption", "caption band")
+
+
+def _clean_expected_text(value: str) -> str:
+    value = _TEXT_READS_RE.sub("", value)
+    return value.strip().strip("\"'`[]{} ")
+
+
+def _first_json_string(payload: Any, keys: tuple[str, ...]) -> str | None:
+    if isinstance(payload, dict):
+        for key, value in payload.items():
+            if str(key).strip().lower() in keys and isinstance(value, str) and value.strip():
+                return _clean_expected_text(value)
+        for value in payload.values():
+            found = _first_json_string(value, keys)
+            if found:
+                return found
+    if isinstance(payload, list):
+        for item in payload:
+            found = _first_json_string(item, keys)
+            if found:
+                return found
+    return None
+
+
+def _line_field_value(spec_text: str, keys: tuple[str, ...]) -> str | None:
+    key_pattern = "|".join(re.escape(key).replace("\\ ", "\\s+") for key in keys)
+    pattern = re.compile(
+        rf"^\s*(?:{key_pattern})\s*(?:band)?\s*[:=-]\s*(.+?)\s*$",
+        re.IGNORECASE,
+    )
+    for line in spec_text.splitlines():
+        match = pattern.match(line)
+        if match:
+            return _clean_expected_text(match.group(1))
+    return None
+
+
+def _expected_text(spec_text: str, keys: tuple[str, ...]) -> str | None:
+    try:
+        loaded = json.loads(spec_text)
+    except Exception:
+        loaded = None
+    if loaded is not None:
+        found = _first_json_string(loaded, keys)
+        if found:
+            return found
+    return _line_field_value(spec_text, keys)
+
+
+def _normalize_presence_text(value: str) -> str:
+    value = _TEXT_READS_RE.sub("", value).lower()
+    return re.sub(r"[^a-z0-9]+", " ", value).strip()
+
+
+def _expected_text_present(expected: str | None, observed: str) -> bool:
+    expected_norm = _normalize_presence_text(expected or "")
+    if not expected_norm:
+        return True
+    observed_norm = _normalize_presence_text(observed)
+    if not observed_norm:
+        return False
+    if expected_norm in observed_norm:
+        return True
+    ratio = difflib.SequenceMatcher(None, expected_norm, observed_norm).ratio()
+    if ratio >= 0.58:
+        return True
+    expected_tokens = {token for token in expected_norm.split() if len(token) > 2}
+    if not expected_tokens:
+        return False
+    observed_tokens = set(observed_norm.split())
+    return len(expected_tokens & observed_tokens) / len(expected_tokens) >= 0.55
+
+
+def _presence_result(image_file: Path, spec_file: Path) -> dict[str, Any]:
+    try:
+        spec_text = spec_file.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        spec_text = ""
+    expected_title = _expected_text(spec_text, _JSON_FIELD_TITLE_KEYS)
+    expected_caption = _expected_text(spec_text, _JSON_FIELD_CAPTION_KEYS)
+    title_text = _ocr_crop_text(image_file, y0=0.0, y1=0.14)
+    caption_text = _ocr_crop_text(image_file, y0=0.89, y1=1.0)
+    title_present = _expected_text_present(expected_title, title_text)
+    caption_present = _expected_text_present(expected_caption, caption_text)
+    reasons: list[str] = []
+    if expected_title and not title_present:
+        reasons.append("Required title text was not detected in the top title band")
+    if expected_caption and not caption_present:
+        reasons.append("Required caption/takeaway text was not detected in the bottom band")
+    return {
+        "title_present": bool(title_present),
+        "caption_present": bool(caption_present),
+        "presence_pass": not reasons,
+        "presence_reasons": reasons,
+    }
+
+
 def _raster_layout_reasons(image_file: Path) -> list[str]:
     text = _ocr_text(image_file).upper()
     if not text:
@@ -163,8 +306,6 @@ def _input_error(image_file: Path, spec_file: Path, reference_image: Path | None
         return _json_result(False, [f"slide spec missing: {spec_file}"])
     if reference_image is not None and not reference_image.is_file():
         return _json_result(False, [f"reference image missing: {reference_image}"])
-    if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
-        return _qc_unavailable_result("slide QC skipped: ANTHROPIC_API_KEY is not set")
     return None
 
 
@@ -199,9 +340,17 @@ def review_slide(
 ) -> dict[str, Any]:
     if error := _input_error(image_file, spec_file, reference_image):
         return error
+    presence = _presence_result(image_file, spec_file)
+    if presence.get("presence_pass") is not True:
+        return _merge_presence(_json_result(False, []), presence)
+    if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
+        return _merge_presence(
+            _qc_unavailable_result("slide QC skipped: ANTHROPIC_API_KEY is not set"),
+            presence,
+        )
     client, error = _anthropic_client()
     if error:
-        return error
+        return _merge_presence(error, presence)
     content = _review_content(image_file, spec_file, reference_image)
 
     try:
@@ -212,8 +361,11 @@ def review_slide(
             messages=[{"role": "user", "content": content}],
         )
     except Exception as exc:  # noqa: BLE001 - QC fails closed, never loops.
-        return _json_result(False, [f"slide QC call failed: {exc.__class__.__name__}"])
-    return _combine_with_raster_checks(parse_review(_extract_text(response)), image_file)
+        return _merge_presence(
+            _json_result(False, [f"slide QC call failed: {exc.__class__.__name__}"]),
+            presence,
+        )
+    return _merge_presence(_combine_with_raster_checks(parse_review(_extract_text(response)), image_file), presence)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

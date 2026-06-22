@@ -83,6 +83,15 @@ _SOPHIA_SLIDE_AVOID = (
     + "No generic stock-deck styling."
 )
 
+_SOPHIA_SLIDE_ZONE_CONTRACT = (
+    "Slide zone contract: render the complete final 16:9 slide bitmap with all title and "
+    "caption text baked into the image. Reserve the top 14% as a clean title band, the "
+    "bottom 11% as a one-line caption/takeaway band, and the center 75% as the visual "
+    "safe area. Put the title only in the top band, the caption only in the bottom band, "
+    "and keep diagrams, charts, arrows, labels, callouts, and decorative marks out of both "
+    "bands. Do not leave title/caption bands blank when the prompt supplies that text."
+)
+
 _SOPHIA_IMAGE_STYLE = (
     "Visual style: warm, luminous, human-centred, with a quiet cosmic undertone. Clean "
     "editorial composition, generous negative space, soft natural light, calm presence. "
@@ -404,7 +413,7 @@ def _subject_from_prompt_file(prompt_file: str, *, slide_visual: bool) -> str:
 def _build_prompt(prompt_file: str, *, slide_visual: bool) -> str:
     subject = _subject_from_prompt_file(prompt_file, slide_visual=slide_visual)
     if slide_visual:
-        return f"{subject}\n\n{_SOPHIA_SLIDE_STYLE}\n\n{_SOPHIA_SLIDE_AVOID}"
+        return f"{subject}\n\n{_SOPHIA_SLIDE_ZONE_CONTRACT}\n\n{_SOPHIA_SLIDE_STYLE}\n\n{_SOPHIA_SLIDE_AVOID}"
     return f"{subject}\n\n{_SOPHIA_IMAGE_STYLE}\n\n{_SOPHIA_IMAGE_AVOID}"
 
 
