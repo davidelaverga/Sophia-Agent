@@ -6,10 +6,13 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
     _apply_report_figure_quality_metadata,
     _enrich_pdf_render_result_with_requested_pages,
+    _presentation_completion_ready,
     _repair_deck_plan_for_validation,
     _report_figure_family_problems,
+    _report_visual_grammar_problems,
     _validate_deck_plan,
 )
+from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
     BuilderTaskMiddleware,
     _pdf_page_target_updates,
@@ -160,6 +163,67 @@ def test_report_figure_family_gate_counts_only_embedded_figures(tmp_path) -> Non
     }
 
     assert _report_figure_family_problems(state) == []
+
+
+def test_report_visual_grammar_gate_blocks_all_node_link_diagrams() -> None:
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+        "builder_visual_diagnostics": {
+            "visual_figure_records": [
+                {"family": "diagram:flow", "grammar": "graphviz_node_link", "path": "/mnt/user-data/outputs/visuals/a.png"},
+                {"family": "diagram:architecture", "grammar": "graphviz_node_link", "path": "/mnt/user-data/outputs/visuals/b.png"},
+                {"family": "diagram:cycle", "grammar": "graphviz_node_link", "path": "/mnt/user-data/outputs/visuals/c.png"},
+            ]
+        },
+    }
+
+    problems = _report_visual_grammar_problems(state)
+
+    assert problems
+    assert "node-link" in problems[-1]
+    assert BuilderArtifactMiddleware._visual_gate_blocks_emit({"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state)
+
+
+def test_presentation_completion_ready_allows_advisory_qc_parse_failures(tmp_path, monkeypatch) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    pptx = outputs / "deck.pptx"
+    pptx.write_bytes(b"fake-pptx")
+    (outputs / "deck.preview.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    monkeypatch.setattr(builder_artifact_module, "_pptx_integrity_error_for_file", lambda _path: None)
+    state = {
+        "thread_data": {"outputs_path": str(outputs)},
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "builder_pptx_diagnostics": {
+            "pptx_generator_success_count": 1,
+            "pptx_generator_slide_count": 2,
+            "pptx_plan_slide_count": 2,
+            "pptx_output_paths": ["/mnt/user-data/outputs/deck.pptx"],
+            "pptx_plan_json": {
+                "slides": [
+                    {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png"},
+                    {
+                        "type": "content",
+                        "title": "Flow",
+                        "caption": "The flow keeps every handoff explicit.",
+                        "image_path": "/mnt/user-data/outputs/slide-2.png",
+                    },
+                ]
+            },
+            "qc_results": [
+                {"pass": True, "reasons": [], "image_path": "/mnt/user-data/outputs/slide-1.png"},
+                {
+                    "pass": False,
+                    "advisory": True,
+                    "parser_error": True,
+                    "reasons": ["QC reviewer returned invalid JSON"],
+                    "image_path": "/mnt/user-data/outputs/slide-2.png",
+                },
+            ],
+        },
+    }
+
+    assert _presentation_completion_ready(state) is True
 
 
 def test_pdf_requested_page_target_enriches_render_result() -> None:

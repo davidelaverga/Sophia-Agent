@@ -43,6 +43,10 @@ and anti-patterns, so write only the content):
 - Include the chosen `visual_style` and diagram family in every prompt.
 - Add concise `speaker_notes` for every content slide: 1-2 sentences that narrate the
   slide. These notes are not visible on the slide canvas.
+- Every image-forward content/diagram slide also carries a visible `caption` or `takeaway`:
+  one short sentence stating the point the slide makes, not a label restatement. The compiler
+  renders it in a reserved bottom band. Cover, section, statement, summary, agenda, and closing
+  slides are exempt.
 - Run `python /mnt/skills/public/image-generation/scripts/generate.py --slide-visual`
   (sets quality=high, 16:9). Generate slide 1 first, then pass it as
   `--reference-images` to every later slide for one consistent look; the script keeps
@@ -73,7 +77,8 @@ gpt-image-2 visuals use `image_path`; deterministic hard-data charts use `visual
 carry the same `visual_style`. Set `title_strategy: "baked"` only when the title is intentionally
 rendered into the image and QC confirms the title is present; otherwise use
 `title_strategy: "native"` so the compiler owns the title overlay. Keep `speaker_notes` for
-concise narration.
+concise narration, but do not rely on notes as the only narrative: image-forward content slides
+need a visible `caption`/`takeaway` too.
 
 ## Per-slide prompt template
 

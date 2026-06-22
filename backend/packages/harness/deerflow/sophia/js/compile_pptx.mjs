@@ -293,6 +293,45 @@ function addImageForwardTitleOverlay(slide, slideInfo, plan, theme, index) {
   return true;
 }
 
+function imageForwardCaptionText(slideInfo) {
+  return firstPresentText([slideInfo.caption, slideInfo.takeaway], "");
+}
+
+function imageForwardCaptionRequired(slideInfo) {
+  return !["cover", "section", "statement", "summary", "stat", "agenda"].includes(slideType(slideInfo));
+}
+
+function addCaptionBand(slide, slideInfo, theme) {
+  const caption = imageForwardCaptionText(slideInfo);
+  if (!caption || !imageForwardCaptionRequired(slideInfo)) {
+    return false;
+  }
+  slide.addShape(SHAPE.roundRect, {
+    x: 0.86,
+    y: 6.48,
+    w: 11.62,
+    h: 0.58,
+    rectRadius: 0.08,
+    fill: { color: theme.bg, transparency: 6 },
+    line: { color: theme.line, transparency: 15, width: 0.7 },
+  });
+  slide.addText(caption, {
+    x: 1.05,
+    y: 6.59,
+    w: 11.24,
+    h: 0.32,
+    fontFace: FONT_BODY,
+    fontSize: 12,
+    color: theme.body,
+    align: "center",
+    valign: "middle",
+    fit: "shrink",
+    breakLine: false,
+    margin: 0,
+  });
+  return true;
+}
+
 function addBullets(slide, bullets, theme, box) {
   if (!bullets.length) return;
   const visibleBullets = bullets.slice(0, box.max || 6);
@@ -850,6 +889,8 @@ function renderCompiledSlide(pptx, args, plan, theme, slidesInfo, slideInfo, ind
   const imageForward = ctx.imageForward;
   if (!imageForward) {
     addFooter(ctx.slide, theme, index, ctx.totalSlides);
+  } else if (addCaptionBand(ctx.slide, slideInfo, theme)) {
+    ctx.captionPresent = true;
   }
   addNotes(ctx.slide, slideInfo);
   console.error(
@@ -863,7 +904,9 @@ function incrementPictureCount(count, visualPath) {
 }
 
 function incrementTextRunCount(count, slideInfo, rendered) {
-  if (rendered.imageForward) return count + (rendered.titlePresent ? 1 : 0);
+  if (rendered.imageForward) {
+    return count + (rendered.titlePresent ? 1 : 0) + (rendered.captionPresent ? 1 : 0);
+  }
   return count + 1 + slideBullets(slideInfo).length;
 }
 

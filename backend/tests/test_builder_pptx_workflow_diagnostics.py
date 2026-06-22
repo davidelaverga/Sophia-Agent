@@ -537,7 +537,14 @@ def test_validate_deck_plan_requires_qc_for_each_image_slide() -> None:
     plan = {
         "slides": [
             {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png", "visual_style": "clean_flat_vector"},
-            {"type": "content", "subtype": "architecture", "title": "Flow", "image_path": "/mnt/user-data/outputs/slide-2.png", "visual_style": "clean_flat_vector"},
+            {
+                "type": "content",
+                "subtype": "architecture",
+                "title": "Flow",
+                "caption": "The flow keeps every handoff explicit.",
+                "image_path": "/mnt/user-data/outputs/slide-2.png",
+                "visual_style": "clean_flat_vector",
+            },
         ]
     }
 
@@ -558,7 +565,14 @@ def test_validate_deck_plan_accepts_image_forward_with_title_and_qc() -> None:
     plan = {
         "slides": [
             {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png", "visual_style": "clean_flat_vector"},
-            {"type": "content", "subtype": "architecture", "title": "Flow", "image_path": "/mnt/user-data/outputs/slide-2.png", "visual_style": "clean_flat_vector"},
+            {
+                "type": "content",
+                "subtype": "architecture",
+                "title": "Flow",
+                "caption": "The flow keeps every handoff explicit.",
+                "image_path": "/mnt/user-data/outputs/slide-2.png",
+                "visual_style": "clean_flat_vector",
+            },
             {"type": "content", "subtype": "chart", "title": "Data", "data_chart": True, "visual_path": "/mnt/user-data/outputs/visuals/chart.png"},
         ]
     }
@@ -816,7 +830,7 @@ def test_slide_qc_bash_result_preserves_skipped_json_payload(tmp_path: Path) -> 
     assert delta == {
         "qc_invocation_count": 1,
         "qc_pass_count": 0,
-        "qc_failure_count": 1,
+        "qc_failure_count": 0,
         "qc_results": [
             {
                 "pass": False,
@@ -861,7 +875,7 @@ def test_slide_qc_bash_result_pads_chained_skipped_qc_as_unavailable(tmp_path: P
     assert delta == {
         "qc_invocation_count": 2,
         "qc_pass_count": 0,
-        "qc_failure_count": 2,
+        "qc_failure_count": 0,
         "qc_results": [
             {
                 "pass": False,
@@ -877,6 +891,42 @@ def test_slide_qc_bash_result_pads_chained_skipped_qc_as_unavailable(tmp_path: P
             },
         ],
         "qc_reasons": [reason],
+    }
+
+
+def test_slide_qc_bash_result_marks_missing_verdict_as_advisory(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    request = SimpleNamespace(
+        state={"thread_data": {"outputs_path": str(outputs)}},
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/image-generation/scripts/slide_qc.py "
+                    "--image-file /mnt/user-data/outputs/slide-01.png "
+                    "--spec-file /mnt/user-data/workspace/slide-01.txt"
+                )
+            },
+        },
+    )
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(request, _tool_message("totally invalid output"))
+
+    assert delta == {
+        "qc_invocation_count": 1,
+        "qc_pass_count": 0,
+        "qc_failure_count": 0,
+        "qc_results": [
+            {
+                "pass": False,
+                "reasons": ["QC subprocess did not emit a parseable verdict"],
+                "advisory": True,
+                "parser_error": True,
+                "image_path": "/mnt/user-data/outputs/slide-01.png",
+            }
+        ],
+        "qc_reasons": ["QC subprocess did not emit a parseable verdict"],
     }
 
 

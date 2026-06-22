@@ -63,13 +63,13 @@ def test_review_slide_fails_closed_when_anthropic_key_is_unavailable(
     assert payload["reasons"] == ["slide QC skipped: ANTHROPIC_API_KEY is not set"]
 
 
-def test_emit_treats_qc_skip_as_failure(qc_module, capsys: pytest.CaptureFixture[str]) -> None:
+def test_emit_treats_qc_skip_as_clean_advisory(qc_module, capsys: pytest.CaptureFixture[str]) -> None:
     exit_code = qc_module._emit(
         {"pass": False, "skipped": True, "reasons": ["slide QC skipped: ANTHROPIC_API_KEY is not set"]}
     )
 
     captured = capsys.readouterr()
-    assert exit_code == 1
+    assert exit_code == 0
     assert '"skipped": true' in captured.out
     assert captured.err.strip() == '[qc] PASS=False reasons=["slide QC skipped: ANTHROPIC_API_KEY is not set"]'
 

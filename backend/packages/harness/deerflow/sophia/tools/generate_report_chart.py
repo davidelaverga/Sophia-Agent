@@ -8,10 +8,10 @@ import re
 import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
 import httpx
-from langchain.tools import ToolRuntime, tool
+from langchain.tools import InjectedToolArg, ToolRuntime, tool
 from pydantic import BaseModel, Field
 
 from deerflow.sandbox.tools import get_thread_data
@@ -349,7 +349,7 @@ def _download_result_payload(
 
 @tool("generate_report_chart", args_schema=GenerateReportChartInput, parse_docstring=False)
 def generate_report_chart(
-    runtime: ToolRuntime,
+    runtime: Annotated[ToolRuntime, InjectedToolArg],
     chart_tool: ChartTool,
     args: dict[str, Any],
     rationale: str,
@@ -364,7 +364,6 @@ def generate_report_chart(
     and downloads the rendered chart under /mnt/user-data/outputs/visuals/.
 
     Args:
-        runtime: Tool runtime supplied by LangGraph.
         chart_tool: Chart-visualization tool name, e.g. generate_line_chart,
             generate_sankey_chart, generate_treemap_chart, or generate_radar_chart.
         args: Exact chart-visualization arguments, including data, labels, title,

@@ -8,6 +8,7 @@ from types import SimpleNamespace
 from deerflow.sophia.tools import generate_report_chart as chart_module
 from deerflow.sophia.tools.generate_report_chart import generate_report_chart
 from deerflow.agents.sophia_agent.builder_tools import build_builder_tools_for_task_type
+from langgraph.prebuilt.tool_node import _get_all_injected_args
 
 
 def _payload(raw: str) -> dict:
@@ -82,6 +83,13 @@ def test_generate_report_chart_schema_excludes_runtime() -> None:
     properties = schema.get("properties", {})
     assert "runtime" not in properties
     assert {"chart_tool", "args", "rationale"}.issubset(properties)
+
+
+def test_generate_report_chart_runtime_is_langgraph_injected() -> None:
+    injected = _get_all_injected_args(generate_report_chart)
+
+    assert injected.runtime == "runtime"
+    assert "runtime" in injected.all_injected_keys
 
 
 def test_report_builder_tool_schemas_generate_for_all_tools() -> None:

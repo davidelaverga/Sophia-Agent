@@ -37,6 +37,7 @@ interface ArtifactToolbarProps {
   openHref?: string | null
   downloadHref?: string | null
   downloadName?: string
+  previewDownloadHint?: string
   annotationCount?: number
   annotationExportAvailable?: boolean
   onDownloadOriginal?: () => void
@@ -74,6 +75,7 @@ export function ArtifactToolbar({
   openHref,
   downloadHref,
   downloadName,
+  previewDownloadHint,
   annotationCount = 0,
   annotationExportAvailable = false,
   onDownloadOriginal,
@@ -108,6 +110,11 @@ export function ArtifactToolbar({
         </p>
         <div className="mt-1 flex flex-wrap items-center gap-2 text-[11px]" style={{ color: "var(--cosmic-text-muted)" }}>
           <span>{effectivePageLabel}</span>
+          {previewDownloadHint ? (
+            <span className="rounded-full border border-[color:var(--cosmic-border-soft)] px-2 py-0.5 text-[10px] text-[color:var(--cosmic-text-faint)]">
+              {previewDownloadHint}
+            </span>
+          ) : null}
           {supportsZoom ? (
             <span className="rounded-full border border-[color:var(--cosmic-border-soft)] px-2 py-0.5 text-[10px] text-[color:var(--cosmic-text-faint)]">
               {zoomLabel}

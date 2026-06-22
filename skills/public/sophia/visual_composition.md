@@ -69,6 +69,10 @@ Route by complexity x text-density x structural-precision:
 
 Enforce diagram-TYPE variety across a report the way slides enforce treatment variety: do not
 render the same diagram style for every architecture.
+Vary the visual grammar, not just the diagram label: a report should not be five node-link
+diagrams with different names. Combine families — at least one of {chart, data table,
+conceptual gpt-image illustration, timeline} alongside node-link diagrams when the content
+supports it. Quantitative data is always a deterministic chart.
 
 Slide visual style anchor: read `/mnt/skills/public/image-generation/references/manifest.json`,
 choose one `visual_style` for the deck, and use that style's `prompt_anchor`. Pass a reference

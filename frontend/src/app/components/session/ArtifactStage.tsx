@@ -893,6 +893,9 @@ export function ArtifactStage({
       payload: {
         artifactId: artifactId ?? null,
         artifactPath: primaryFile?.path ?? null,
+        artifactRenderPath: renderFile?.path ?? null,
+        artifactDownloadPath: primaryFile?.path ?? null,
+        artifactCanvasPreviewKind: canvasPreviewKind ?? null,
         artifactRendererKind: rendererKind,
         artifactPageIndex: pageIndex,
         artifactPageCount: pageCount,
@@ -1628,7 +1631,18 @@ export function ArtifactStage({
       exportKind: "original",
       annotationCount: annotationCounts.annotationCount,
     })
-  }, [annotationCounts, annotationStorageKeyHash, artifactCapabilities.supportsAnnotatedExport, artifactCapabilityTelemetry, artifactId, onWorkspaceExportRequested, primaryFile?.path, rendererKind])
+  }, [
+    annotationCounts,
+    annotationStorageKeyHash,
+    artifactCapabilities.supportsAnnotatedExport,
+    artifactCapabilityTelemetry,
+    artifactId,
+    canvasPreviewKind,
+    onWorkspaceExportRequested,
+    primaryFile?.path,
+    renderFile?.path,
+    rendererKind,
+  ])
 
   const handleExportAnnotated = useCallback(() => {
     onWorkspaceExportRequested?.({
@@ -1708,6 +1722,7 @@ export function ArtifactStage({
         openHref={openHref}
         downloadHref={downloadHref}
         downloadName={primaryFile?.name}
+        previewDownloadHint={canvasPreviewKind === "pptx_pdf_preview" ? "Preview - download is PowerPoint" : undefined}
         annotationCount={annotationCounts.annotationCount}
         annotationExportAvailable={artifactCapabilities.supportsAnnotatedExport}
         onDownloadOriginal={handleDownloadOriginal}

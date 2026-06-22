@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+from collections import Counter
 from contextlib import nullcontext
 from typing import Any
 from urllib.parse import urlparse
@@ -583,6 +584,57 @@ def _add_quality_metadata(
             metadata[key] = str(value)
 
 
+def _tool_counts_by_name(state: dict[str, Any]) -> dict[str, int]:
+    counts: Counter[str] = Counter()
+    summaries = state.get("builder_tool_turn_summaries") or []
+    if not isinstance(summaries, list):
+        return {}
+    for summary in summaries:
+        if not isinstance(summary, dict):
+            continue
+        for name in summary.get("tool_names") or []:
+            if isinstance(name, str) and name.strip():
+                counts[name.strip()] += 1
+    return dict(sorted(counts.items()))
+
+
+def _emit_rejection_count(state: dict[str, Any]) -> int:
+    summaries = state.get("builder_tool_turn_summaries") or []
+    if not isinstance(summaries, list):
+        return 0
+    return sum(
+        1
+        for summary in summaries
+        if isinstance(summary, dict)
+        and (
+            summary.get("failure_stage") == "emit_rejected"
+            or summary.get("emit_rejected") is True
+        )
+    )
+
+
+def _slide_image_hashes(diagnostics: dict[str, Any]) -> list[str]:
+    hashes: list[str] = []
+    for key in ("qc_image_records", "image_output_records"):
+        records = diagnostics.get(key)
+        if not isinstance(records, list):
+            continue
+        for record in records:
+            if not isinstance(record, dict):
+                continue
+            image_hash = record.get("image_hash")
+            if isinstance(image_hash, str) and image_hash.strip() and image_hash not in hashes:
+                hashes.append(image_hash.strip())
+    return hashes[:24]
+
+
+def _artifact_filename(artifact: dict[str, Any]) -> str | None:
+    value = artifact.get("artifact_filename") or artifact.get("artifact_path")
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip().replace("\\", "/").split("/")[-1] or None
+
+
 def builder_observability_payload(
     state: dict[str, Any],
     artifact: dict[str, Any],
@@ -609,6 +661,10 @@ def builder_observability_payload(
         "qc_pass_count": _as_int(diagnostics.get("qc_pass_count")),
         "qc_failure_count": _as_int(diagnostics.get("qc_failure_count")),
     }
+    tool_counts = _tool_counts_by_name(state)
+    if tool_counts:
+        metadata["tool_counts_by_name"] = tool_counts
+    metadata["emit_rejection_count"] = _emit_rejection_count(state)
     _add_identity_metadata(
         metadata,
         artifact=artifact,
@@ -616,8 +672,13 @@ def builder_observability_payload(
         delegation_context=delegation_context,
     )
     _add_artifact_metadata(metadata, artifact, diagnostics)
+    _merge_safe_metadata(metadata, "artifact_filename", _artifact_filename(artifact))
+    _merge_safe_metadata(metadata, "artifact_preview_filename", artifact.get("artifact_preview_filename"))
     if diagnostics.get("pptx_plan_json") is not None:
         metadata["deck_plan"] = diagnostics["pptx_plan_json"]
+    slide_hashes = _slide_image_hashes(diagnostics)
+    if slide_hashes:
+        metadata["accepted_slide_image_hashes"] = slide_hashes
     _add_quality_metadata(metadata, artifact, diagnostics)
 
     artifact_ext = _final_artifact_ext(artifact)

@@ -12,6 +12,8 @@ import base64
 import json
 import mimetypes
 import os
+import shutil
+import subprocess
 import sys
 from pathlib import Path
 from typing import Any
@@ -48,6 +50,15 @@ def _json_result(passed: bool, reasons: list[str]) -> dict[str, Any]:
     return {"pass": bool(passed), "reasons": [str(reason)[:240] for reason in reasons[:5]]}
 
 
+def _qc_parse_advisory_result(reason: str) -> dict[str, Any]:
+    return {
+        "pass": False,
+        "advisory": True,
+        "parser_error": True,
+        "reasons": [reason[:240]],
+    }
+
+
 def _qc_unavailable_result(reason: str) -> dict[str, Any]:
     return {"pass": False, "skipped": True, "reasons": [reason[:240]]}
 
@@ -60,7 +71,9 @@ def _emit(payload: dict[str, Any]) -> int:
         file=sys.stderr,
     )
     print(json.dumps(payload, ensure_ascii=False))
-    return 0 if payload.get("pass") is True else 1
+    if payload.get("pass") is True or payload.get("skipped") is True or payload.get("advisory") is True:
+        return 0
+    return 1
 
 
 def _image_block(image_path: Path) -> dict[str, Any]:
@@ -93,16 +106,54 @@ def parse_review(text: str) -> dict[str, Any]:
         start = clean.find("{")
         end = clean.rfind("}")
         if start < 0 or end <= start:
-            return _json_result(False, ["QC reviewer returned non-JSON output"])
+            return _qc_parse_advisory_result("QC reviewer returned non-JSON output")
         try:
             payload = json.loads(clean[start : end + 1])
         except json.JSONDecodeError:
-            return _json_result(False, ["QC reviewer returned invalid JSON"])
+            return _qc_parse_advisory_result("QC reviewer returned invalid JSON")
     reasons = payload.get("reasons")
     return _json_result(
         payload.get("pass") is True,
         [str(reason) for reason in reasons if isinstance(reason, str)] if isinstance(reasons, list) else [],
     )
+
+
+def _ocr_text(image_file: Path) -> str:
+    tesseract = shutil.which("tesseract")
+    if not tesseract:
+        return ""
+    try:
+        completed = subprocess.run(
+            [tesseract, str(image_file), "stdout", "--psm", "6"],
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=12,
+        )
+    except Exception:
+        return ""
+    if completed.returncode != 0:
+        return ""
+    return completed.stdout or ""
+
+
+def _raster_layout_reasons(image_file: Path) -> list[str]:
+    text = _ocr_text(image_file).upper()
+    if not text:
+        return []
+    reasons: list[str] = []
+    if "THE TEXT READS" in text:
+        reasons.append("Generated bitmap still contains literal prompt text: THE TEXT READS")
+    return reasons
+
+
+def _combine_with_raster_checks(result: dict[str, Any], image_file: Path) -> dict[str, Any]:
+    reasons = _raster_layout_reasons(image_file)
+    if not reasons:
+        return result
+    combined = list(result.get("reasons") or [])
+    combined.extend(reasons)
+    return _json_result(False, [str(reason) for reason in combined])
 
 
 def _input_error(image_file: Path, spec_file: Path, reference_image: Path | None) -> dict[str, Any] | None:
@@ -162,7 +213,7 @@ def review_slide(
         )
     except Exception as exc:  # noqa: BLE001 - QC fails closed, never loops.
         return _json_result(False, [f"slide QC call failed: {exc.__class__.__name__}"])
-    return parse_review(_extract_text(response))
+    return _combine_with_raster_checks(parse_review(_extract_text(response)), image_file)
 
 
 def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:

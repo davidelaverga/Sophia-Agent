@@ -67,7 +67,7 @@ from deerflow.sophia.builder_provider_fallback import (
 )
 from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.observability import annotate_builder_completion
-from deerflow.sophia.pptx_preview import maybe_render_pptx_preview
+from deerflow.sophia.pptx_preview import maybe_render_pptx_preview, preview_path_for
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
 
@@ -259,6 +259,13 @@ _IMAGE_GENERATION_MAX_CALLS_PDF = 2
 _IMAGE_GENERATION_TERMINAL_ERRORS = frozenset(
     {"missing_api_key", "auth_invalid", "org_not_verified", "egress_blocked"}
 )
+_QC_PARSE_FAILURE_MARKERS = (
+    "invalid json",
+    "parseable verdict",
+    "unparseable",
+    "could not parse",
+    "malformed json",
+)
 
 
 def _image_generation_max_calls(state: dict[str, Any]) -> int:
@@ -267,6 +274,9 @@ def _image_generation_max_calls(state: dict[str, Any]) -> int:
 
 def _repair_iteration_grantable(state: dict[str, Any]) -> bool:
     """VQ-10: a repair iteration needs both loop headroom and budget headroom."""
+    if _presentation_completion_ready(state):
+        logger.warning("[BuilderPptxReady] repair_denied reason=presentation_completion_ready")
+        return False
     if not iteration_available(state):
         return False
     if not budget_allows_iteration(state):
@@ -277,6 +287,69 @@ def _repair_iteration_grantable(state: dict[str, Any]) -> bool:
         )
         return False
     return True
+
+
+def _presentation_completion_ready(state: dict[str, Any]) -> bool:
+    """Positive stop rule for decks that already have a shippable PPTX."""
+    if not _requested_pptx_artifact(state):
+        return False
+    diagnostics = _pptx_diagnostics(state)
+    if int(diagnostics.get("pptx_generator_success_count", 0) or 0) < 1:
+        return False
+    pptx_file = _latest_valid_pptx_output_file(state)
+    if pptx_file is None:
+        return False
+    if not preview_path_for(pptx_file).is_file():
+        return False
+    if not _pptx_slide_count_matches_plan(diagnostics):
+        return False
+    return _presentation_qc_clean_or_advisory_only(diagnostics, state)
+
+
+def _latest_valid_pptx_output_file(state: dict[str, Any]) -> Path | None:
+    outputs_root = _outputs_root_from_state(state)
+    if outputs_root is None:
+        return None
+    min_mtime = _builder_started_min_mtime(state)
+    diagnostics = _pptx_diagnostics(state)
+    raw_paths = diagnostics.get("pptx_output_paths") or []
+    candidates: list[Path] = []
+    if isinstance(raw_paths, list):
+        for raw_path in reversed(raw_paths):
+            relative = _extract_output_relative_path(_canonical_outputs_artifact_path(raw_path))
+            if relative:
+                candidates.append(outputs_root / relative)
+    try:
+        candidates.extend(sorted(outputs_root.rglob("*.pptx"), key=lambda path: path.stat().st_mtime, reverse=True))
+    except OSError:
+        logger.debug(
+            "BuilderArtifact._latest_valid_pptx_output_file: scan failed for outputs_path=%s",
+            _outputs_host_path_from_state(state),
+            exc_info=True,
+        )
+    seen: set[Path] = set()
+    for candidate in candidates:
+        if candidate in seen:
+            continue
+        seen.add(candidate)
+        try:
+            if not candidate.is_file() or not _is_public_output_file(candidate):
+                continue
+            if min_mtime is not None and candidate.stat().st_mtime < min_mtime:
+                continue
+        except OSError:
+            continue
+        if _pptx_integrity_error_for_file(candidate) is None:
+            return candidate
+    return None
+
+
+def _pptx_slide_count_matches_plan(diagnostics: dict[str, Any]) -> bool:
+    generated_count = int(diagnostics.get("pptx_generator_slide_count", 0) or 0)
+    plan_count = int(diagnostics.get("pptx_plan_slide_count", 0) or 0)
+    if generated_count <= 0:
+        return False
+    return plan_count <= 0 or generated_count == plan_count
 
 
 def _builder_image_enrichment_enabled(state: dict[str, Any]) -> bool:
@@ -2813,6 +2886,24 @@ def _visual_figure_family_counts(state: dict[str, Any]) -> Counter[str]:
     return Counter(families)
 
 
+def _visual_grammar_counts(state: dict[str, Any]) -> Counter[str]:
+    diagnostics = state.get("builder_visual_diagnostics")
+    if not isinstance(diagnostics, dict):
+        return Counter()
+    records = diagnostics.get("visual_figure_records")
+    if not isinstance(records, list):
+        return Counter()
+    embedded_paths = _embedded_report_figure_paths(state) if _requested_pdf_artifact(state) else set()
+    grammars = [
+        str(record.get("grammar")).strip()
+        for record in records
+        if isinstance(record, dict)
+        and str(record.get("grammar") or "").strip()
+        and (not embedded_paths or _visual_record_embedded(record, embedded_paths))
+    ]
+    return Counter(grammars)
+
+
 def _report_figure_family_problems(state: dict[str, Any]) -> list[str]:
     if not _requested_pdf_artifact(state):
         return []
@@ -2822,6 +2913,27 @@ def _report_figure_family_problems(state: dict[str, Any]) -> list[str]:
         for family, count in sorted(counts.items())
         if count > 2
     ]
+
+
+def _report_visual_grammar_problems(state: dict[str, Any]) -> list[str]:
+    if not _requested_pdf_artifact(state):
+        return []
+    counts = _visual_grammar_counts(state)
+    total = sum(counts.values())
+    if total < 3:
+        return []
+    problems: list[str] = []
+    if len(counts) < 2:
+        grammar = next(iter(counts), "unknown")
+        problems.append(
+            f"PDF report uses one visual grammar ({grammar}) across {total} figures; combine charts, tables, generated illustrations, or timelines with diagrams."
+        )
+    graphviz_count = counts.get("graphviz_node_link", 0)
+    if graphviz_count >= 3 and graphviz_count == total:
+        problems.append(
+            "PDF report relies entirely on node-link diagram grammar; include at least one chart, table, timeline, photo, or generated illustration when the content supports it."
+        )
+    return problems
 
 
 def _local_output_file_for_artifact(state: dict[str, Any], artifact_path: object) -> Path | None:
@@ -3063,21 +3175,26 @@ def _apply_report_figure_quality_metadata(
     artifact: dict[str, Any],
     state: dict[str, Any],
 ) -> dict[str, Any]:
-    problems = _report_figure_family_problems(state)
+    problems = [*_report_figure_family_problems(state), *_report_visual_grammar_problems(state)]
     if not problems:
         return artifact
     updated = dict(artifact)
-    updated["figure_family_warning"] = True
-    updated["figure_family_problems"] = problems[:6]
+    if _report_figure_family_problems(state):
+        updated["figure_family_warning"] = True
+        updated["figure_family_problems"] = _report_figure_family_problems(state)[:6]
+    grammar_problems = _report_visual_grammar_problems(state)
+    if grammar_problems:
+        updated["visual_grammar_warning"] = True
+        updated["visual_grammar_problems"] = grammar_problems[:6]
     updated.setdefault("quality_warning", "monotone_figures")
     confidence = updated.get("confidence")
     if isinstance(confidence, (int, float)):
         updated["confidence"] = min(float(confidence), 0.72)
     tone_hint = str(updated.get("companion_tone_hint") or "").strip()
-    warning = "Note that the report's figures repeat one family more than intended."
+    warning = "Note that the report's figures are less visually varied than intended."
     updated["companion_tone_hint"] = f"{tone_hint} {warning}".strip()
     logger.warning(
-        "[BuilderVisualDiagnostics] phase=figure_family_quality_warning problems=%s",
+        "[BuilderVisualDiagnostics] phase=report_figure_quality_warning problems=%s",
         problems,
     )
     return updated
@@ -3174,6 +3291,27 @@ def _figure_family_for_payload(payload: dict[str, Any]) -> str | None:
     return None
 
 
+def _figure_grammar_for_payload(payload: dict[str, Any]) -> str | None:
+    if payload.get("chart_family") or payload.get("chart_tool"):
+        return "chart"
+    if payload.get("diagram_type"):
+        return "graphviz_node_link"
+    kind = str(payload.get("visual_type") or "").strip().lower()
+    if not kind:
+        return None
+    if kind in {"table", "data_table", "comparison_table", "matrix"}:
+        return "data_table"
+    if "timeline" in kind:
+        return "timeline"
+    if "chart" in kind or kind in {"bar", "line", "area", "scatter", "treemap", "sankey"}:
+        return "chart"
+    if kind in _DIAGRAM_FIGURE_KINDS:
+        return "graphviz_node_link"
+    if kind in {"photo", "hero_photo"}:
+        return "photo"
+    return "generated_illustration" if payload.get("image_path") else "deterministic_svg"
+
+
 _DIAGRAM_FIGURE_KINDS = frozenset({
     "architecture",
     "comparison",
@@ -3196,6 +3334,7 @@ def _figure_record_for_payload(
 ) -> dict[str, Any]:
     return {
         "family": figure_family,
+        "grammar": _figure_grammar_for_payload(payload),
         "kind": _visual_payload_kind(payload),
         "path": paths[0] if paths else None,
     }
@@ -3525,6 +3664,16 @@ def _qc_result_for_image(
     return None
 
 
+def _qc_result_is_advisory_parse_failure(result: dict[str, Any]) -> bool:
+    if result.get("parser_error") is True or result.get("advisory") is True:
+        return True
+    reasons = result.get("reasons") or []
+    return any(
+        any(marker in str(reason).lower() for marker in _QC_PARSE_FAILURE_MARKERS)
+        for reason in reasons
+    )
+
+
 def _deck_image_slides(slides: list[Any]) -> list[tuple[int, str]]:
     return [
         (index, image_ref)
@@ -3553,6 +3702,7 @@ def _validate_deck_plan(
         *_deck_cover_title_problems(slides, diagnostics),
         *_deck_duplicate_image_problems(slides),
         *_deck_style_consistency_problems(slides),
+        *_deck_visible_caption_problems(slides),
         *_deck_qc_problems(slides, diagnostics, state),
     ]
 
@@ -3567,6 +3717,23 @@ def _deck_content_problems(slides: list[Any]) -> list[str]:
             and not _slide_is_stat_layout(slide)
         )
     ]
+
+
+def _deck_visible_caption_problems(slides: list[Any]) -> list[str]:
+    problems: list[str] = []
+    for index, slide in enumerate(slides, 1):
+        if not isinstance(slide, dict):
+            continue
+        if slide not in _content_slides(slides):
+            continue
+        if not _slide_image_ref(slide):
+            continue
+        if _slide_is_data_chart(slide) or _slide_is_stat_layout(slide):
+            continue
+        caption = str(slide.get("caption") or slide.get("takeaway") or "").strip()
+        if not caption:
+            problems.append(f"Image-forward content slide {index} is missing a visible caption/takeaway.")
+    return problems
 
 
 def _deck_treatment_problems(slides: list[Any]) -> list[str]:
@@ -3676,6 +3843,7 @@ def _deck_qc_ordered_problems(image_slides: list[tuple[int, str]], qc_results: l
         if isinstance(result, dict)
         and result.get("pass") is not True
         and result.get("skipped") is not True
+        and not _qc_result_is_advisory_parse_failure(result)
     ]
 
 
@@ -3692,9 +3860,34 @@ def _deck_qc_reference_problems(
             problems.append(f"Slide {index} image was not QC-checked.")
         elif result.get("skipped") is True:
             continue
+        elif _qc_result_is_advisory_parse_failure(result):
+            continue
         elif result.get("pass") is not True:
             problems.append(f"Slide {index} failed QC: {result.get('reasons')}")
     return problems
+
+
+def _presentation_qc_clean_or_advisory_only(
+    diagnostics: dict[str, Any],
+    state: dict[str, Any],
+) -> bool:
+    plan = diagnostics.get("pptx_plan_json")
+    if not isinstance(plan, dict):
+        return False
+    slides_raw = plan.get("slides")
+    slides = slides_raw if isinstance(slides_raw, list) else []
+    image_slides = _deck_image_slides(slides)
+    if not image_slides:
+        return True
+    qc_results = _qc_result_list(diagnostics)
+    qc_by_ref = _qc_results_by_image_ref(diagnostics)
+    qc_by_hash = _qc_results_by_image_hash(diagnostics)
+    if qc_by_ref or qc_by_hash:
+        return not _deck_qc_reference_problems(image_slides, qc_by_ref, qc_by_hash, state)
+    if len(qc_results) < len(image_slides):
+        return False
+    latest_ordered = qc_results[-len(image_slides) :]
+    return not _deck_qc_ordered_problems(image_slides, latest_ordered)
 
 
 def _clone_deck_plan(plan: dict[str, Any]) -> dict[str, Any] | None:
@@ -3865,8 +4058,9 @@ def _slide_qc_results_from_text(text: str) -> list[dict[str, Any]]:
                     "pass": payload.get("pass") is True,
                     "reasons": [str(reason) for reason in reasons] if isinstance(reasons, list) else [],
                 }
-                if payload.get("skipped") is True:
-                    result["skipped"] = True
+                for key in ("skipped", "advisory", "parser_error"):
+                    if payload.get(key) is True:
+                        result[key] = True
                 json_results.append(result)
             continue
         if not line.startswith("[qc]"):
@@ -3923,12 +4117,16 @@ def _append_missing_qc_results(
         return
     skipped_reason = _first_skipped_qc_reason(results)
     for index in range(len(results), invocations):
+        reason = skipped_reason or "QC subprocess did not emit a parseable verdict"
         result = {
             "pass": False,
-            "reasons": [skipped_reason or "QC subprocess did not emit a parseable verdict"],
+            "reasons": [reason],
         }
         if skipped_reason:
             result["skipped"] = True
+        else:
+            result["advisory"] = True
+            result["parser_error"] = True
         if index < len(image_files):
             result["image_path"] = image_files[index]
         results.append(result)
@@ -3963,7 +4161,13 @@ def _slide_qc_bash_delta(command: str, text: str, state: dict[str, Any] | None =
     invocations = max(len(results), _slide_qc_invocations_in_command(command))
     _append_missing_qc_results(results, image_files, invocations)
     passed = sum(1 for result in results if result.get("pass") is True)
-    failures = max(0, invocations - passed)
+    failures = sum(
+        1
+        for result in results
+        if result.get("pass") is not True
+        and result.get("skipped") is not True
+        and not _qc_result_is_advisory_parse_failure(result)
+    )
     reasons = _qc_reasons(results)
     delta: dict[str, Any] = {
         "qc_invocation_count": invocations,
@@ -4926,6 +5130,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state: BuilderArtifactState,
         runtime: Runtime | None = None,
     ) -> dict[str, Any] | None:
+        if _presentation_completion_ready(state):
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
+                "(reason=presentation_completion_ready)"
+            )
+            return self._output_file_completion_tool_choice(
+                state,
+                state.get("builder_non_artifact_turns"),
+                "presentation_completion_ready",
+            )
         turn_force = self._should_force_emit(state)
         clock_force = self._should_force_emit_by_clock(state, runtime)
         if not (turn_force or clock_force):
@@ -6006,6 +6220,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 figure_family_problems,
             )
             return False
+        visual_grammar_problems = _report_visual_grammar_problems(state)
+        if visual_grammar_problems:
+            if int(state.get("builder_visual_embed_rejections", 0) or 0) < 1 and _repair_iteration_grantable(state):
+                logger.warning(
+                    "[BuilderReportGrammarGate] phase=emit_blocked problems=%s",
+                    visual_grammar_problems,
+                )
+                return True
+            logger.warning(
+                "[BuilderReportGrammarGate] phase=emit_soft_pass_after_repair problems=%s",
+                visual_grammar_problems,
+            )
+            return False
         if not _visuals_requested(state):
             return False
         if not _visual_design_skill_read_seen(state):
@@ -6273,18 +6500,18 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
     @staticmethod
     def _figure_family_rejection_message(state: BuilderArtifactState) -> str:
-        figure_family_problems = _report_figure_family_problems(state)
+        figure_family_problems = [*_report_figure_family_problems(state), *_report_visual_grammar_problems(state)]
         if not figure_family_problems:
             return ""
         listing = "\n".join(f"- {problem}" for problem in figure_family_problems[:8])
         return (
-            "Error: emit_builder_artifact rejected — the PDF report repeats the same "
-            "figure family too often:\n"
+            "Error: emit_builder_artifact rejected — the PDF report lacks visual "
+            "figure variety:\n"
             f"{listing}\n\n"
-            "Repair the report once: keep at most two figures from any one family, "
-            "replace repeats with a different supported family such as timeline, "
-            "comparison, architecture, hierarchy, sankey, treemap, radar, funnel, "
-            "distribution, or annotated evidence table when the data warrants it. "
+            "Repair the report once: vary both the declared figure family and the "
+            "visual grammar. Do not ship an all node-link-diagram report; combine "
+            "diagrams with a chart, data table, timeline, generated illustration, "
+            "or annotated evidence table when the content warrants it. "
             "Then update the Markdown, re-run render_markdown_to_pdf, and emit."
         )
 
