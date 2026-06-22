@@ -154,6 +154,7 @@ def test_presence_result_checks_title_and_caption_bands(qc_module, tmp_path: Pat
     def fake_ocr(_image_file: Path, *, y0: float, y1: float) -> str:
         return "Flow Control" if y1 <= 0.14 else "The loop stops cleanly."
 
+    monkeypatch.setattr(qc_module.shutil, "which", lambda _name: "/usr/bin/tesseract")
     monkeypatch.setattr(qc_module, "_ocr_crop_text", fake_ocr)
 
     assert qc_module._presence_result(image_file, spec_file) == {
@@ -176,6 +177,7 @@ def test_presence_result_blocks_missing_caption_band(qc_module, tmp_path: Path, 
     def fake_ocr(_image_file: Path, *, y0: float, y1: float) -> str:
         return "Flow Control" if y1 <= 0.14 else ""
 
+    monkeypatch.setattr(qc_module.shutil, "which", lambda _name: "/usr/bin/tesseract")
     monkeypatch.setattr(qc_module, "_ocr_crop_text", fake_ocr)
 
     payload = qc_module.review_slide(image_file=image_file, spec_file=spec_file)
@@ -183,3 +185,29 @@ def test_presence_result_blocks_missing_caption_band(qc_module, tmp_path: Path, 
     assert payload["pass"] is False
     assert payload["presence_pass"] is False
     assert "bottom band" in payload["reasons"][0]
+
+
+def test_review_slide_treats_missing_tesseract_as_presence_unavailable(
+    qc_module,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ANTHROPIC_API_KEY", raising=False)
+    monkeypatch.setattr(qc_module.shutil, "which", lambda _name: None)
+
+    image_file = tmp_path / "slide.png"
+    image_file.write_bytes(b"fake-png")
+    spec_file = tmp_path / "slide.txt"
+    spec_file.write_text("Title: Flow Control\nCaption: The loop stops cleanly.", encoding="utf-8")
+
+    payload = qc_module.review_slide(image_file=image_file, spec_file=spec_file)
+
+    assert payload["pass"] is False
+    assert payload["skipped"] is True
+    assert payload["presence_skipped"] is True
+    assert payload["presence_unavailable"] is True
+    assert "presence_pass" not in payload
+    assert payload["reasons"] == [
+        "slide QC skipped: ANTHROPIC_API_KEY is not set",
+        "deterministic presence OCR skipped: tesseract is not installed",
+    ]

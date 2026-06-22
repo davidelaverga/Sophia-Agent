@@ -73,7 +73,14 @@ def _merge_presence(payload: dict[str, Any], presence: dict[str, Any]) -> dict[s
     if presence_reasons:
         reasons.extend(presence_reasons)
     merged["reasons"] = reasons[:5]
-    for key in ("title_present", "caption_present", "presence_pass", "presence_reasons"):
+    for key in (
+        "title_present",
+        "caption_present",
+        "presence_pass",
+        "presence_reasons",
+        "presence_skipped",
+        "presence_unavailable",
+    ):
         if key in presence:
             merged[key] = presence[key]
     return merged
@@ -164,6 +171,14 @@ def _ocr_text(image_file: Path) -> str:
     if completed.returncode != 0:
         return ""
     return completed.stdout or ""
+
+
+def _ocr_unavailable_reason() -> str | None:
+    if Image is None:
+        return "deterministic presence OCR skipped: Pillow is not installed"
+    if not shutil.which("tesseract"):
+        return "deterministic presence OCR skipped: tesseract is not installed"
+    return None
 
 
 def _ocr_crop_text(image_file: Path, *, y0: float, y1: float) -> str:
@@ -263,6 +278,13 @@ def _presence_result(image_file: Path, spec_file: Path) -> dict[str, Any]:
         spec_text = ""
     expected_title = _expected_text(spec_text, _JSON_FIELD_TITLE_KEYS)
     expected_caption = _expected_text(spec_text, _JSON_FIELD_CAPTION_KEYS)
+    if expected_title or expected_caption:
+        if reason := _ocr_unavailable_reason():
+            return {
+                "presence_skipped": True,
+                "presence_unavailable": True,
+                "presence_reasons": [reason],
+            }
     title_text = _ocr_crop_text(image_file, y0=0.0, y1=0.14)
     caption_text = _ocr_crop_text(image_file, y0=0.89, y1=1.0)
     title_present = _expected_text_present(expected_title, title_text)
@@ -341,7 +363,7 @@ def review_slide(
     if error := _input_error(image_file, spec_file, reference_image):
         return error
     presence = _presence_result(image_file, spec_file)
-    if presence.get("presence_pass") is not True:
+    if presence.get("presence_pass") is not True and presence.get("presence_skipped") is not True:
         return _merge_presence(_json_result(False, []), presence)
     if not os.environ.get("ANTHROPIC_API_KEY", "").strip():
         return _merge_presence(

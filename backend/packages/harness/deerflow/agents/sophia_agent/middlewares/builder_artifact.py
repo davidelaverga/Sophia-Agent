@@ -1204,6 +1204,49 @@ def _artifact_file_entry(path: object, role: object, name: object = None) -> dic
     return entry
 
 
+def _artifact_file_entries_from_payload(raw_entries: object) -> list[dict[str, str]]:
+    if not isinstance(raw_entries, list):
+        return []
+    entries: list[dict[str, str]] = []
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            continue
+        entry = _artifact_file_entry(
+            raw_entry.get("path"),
+            raw_entry.get("role"),
+            raw_entry.get("name"),
+        )
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _supporting_artifact_file_entries(
+    supporting: object,
+    preview_basename: str,
+) -> list[dict[str, str]]:
+    if not isinstance(supporting, list):
+        return []
+    entries: list[dict[str, str]] = []
+    for raw_path in supporting:
+        role = "preview" if preview_basename and PurePosixPath(str(raw_path)).name == preview_basename else "internal"
+        entry = _artifact_file_entry(raw_path, role)
+        if entry is not None:
+            entries.append(entry)
+    return entries
+
+
+def _dedupe_artifact_file_entries(entries: list[dict[str, str]]) -> list[dict[str, str]]:
+    deduped: dict[str, dict[str, str]] = {}
+    role_priority = {"primary": 0, "preview": 1, "source": 2, "illustration_asset": 3, "internal": 4}
+    for entry in entries:
+        path = entry["path"]
+        previous = deduped.get(path)
+        if previous is None or role_priority[entry["role"]] < role_priority[previous["role"]]:
+            deduped[path] = entry
+    return list(deduped.values())
+
+
 def _artifact_file_entries(artifact_args: dict[str, Any]) -> list[dict[str, str]]:
     primary = artifact_args.get("artifact_path")
     preview_name = str(artifact_args.get("artifact_preview_filename") or "").strip()
@@ -1214,34 +1257,9 @@ def _artifact_file_entries(artifact_args: dict[str, Any]) -> list[dict[str, str]
     if primary_entry is not None:
         entries.append(primary_entry)
 
-    raw_entries = artifact_args.get("artifact_files")
-    if isinstance(raw_entries, list):
-        for raw_entry in raw_entries:
-            if not isinstance(raw_entry, dict):
-                continue
-            path = raw_entry.get("path")
-            role = raw_entry.get("role")
-            name = raw_entry.get("name")
-            entry = _artifact_file_entry(path, role, name)
-            if entry is not None:
-                entries.append(entry)
-
-    supporting = artifact_args.get("supporting_files")
-    if isinstance(supporting, list):
-        for raw_path in supporting:
-            role = "preview" if preview_basename and PurePosixPath(str(raw_path)).name == preview_basename else "internal"
-            entry = _artifact_file_entry(raw_path, role)
-            if entry is not None:
-                entries.append(entry)
-
-    deduped: dict[str, dict[str, str]] = {}
-    role_priority = {"primary": 0, "preview": 1, "source": 2, "illustration_asset": 3, "internal": 4}
-    for entry in entries:
-        path = entry["path"]
-        previous = deduped.get(path)
-        if previous is None or role_priority[entry["role"]] < role_priority[previous["role"]]:
-            deduped[path] = entry
-    return list(deduped.values())
+    entries.extend(_artifact_file_entries_from_payload(artifact_args.get("artifact_files")))
+    entries.extend(_supporting_artifact_file_entries(artifact_args.get("supporting_files"), preview_basename))
+    return _dedupe_artifact_file_entries(entries)
 
 
 def _artifact_file_paths_for_roles(artifact_args: dict[str, Any], roles: set[str] | frozenset[str]) -> list[str]:
@@ -1849,6 +1867,43 @@ def _artifact_ext_from_path(path: Any) -> str | None:
     return suffix or None
 
 
+def _apply_artifact_format_metadata(
+    artifact: dict[str, Any],
+    requested_ext: str | None,
+    artifact_ext: str | None,
+    fallback_reason: str | None,
+) -> None:
+    if requested_ext:
+        artifact["requested_artifact_ext"] = requested_ext
+    if artifact_ext:
+        artifact["artifact_ext"] = artifact_ext
+        if requested_ext == "pptx" and artifact_ext in {"html", "htm"}:
+            artifact["artifact_type"] = "webpage"
+    if _artifact_is_extension_fallback(requested_ext, artifact_ext):
+        artifact["artifact_is_fallback"] = True
+        artifact["fallback_reason"] = _artifact_fallback_reason(artifact, requested_ext, fallback_reason)
+    elif requested_ext and artifact_ext == requested_ext:
+        artifact["artifact_is_fallback"] = False
+        artifact.pop("fallback_reason", None)
+    elif fallback_reason:
+        artifact["fallback_reason"] = fallback_reason
+    elif requested_ext:
+        artifact.setdefault("artifact_is_fallback", False)
+
+
+def _apply_image_generation_metadata(artifact: dict[str, Any], state: dict[str, Any]) -> None:
+    image_status, image_reason = _image_generation_metadata_from_state(state)
+    if image_status:
+        artifact["image_generation_status"] = image_status
+        if image_reason:
+            artifact["image_generation_reason"] = image_reason
+        else:
+            artifact.pop("image_generation_reason", None)
+    outcome = _image_generation_outcome_from_state(state)
+    if outcome is not None:
+        artifact["image_generation_outcome"] = outcome
+
+
 def _apply_edit_context_metadata(artifact: dict[str, Any], state: dict[str, Any]) -> None:
     delegation = state.get("delegation_context")
     edit_context = delegation.get("edit_context") if isinstance(delegation, dict) else None
@@ -1870,39 +1925,11 @@ def _apply_artifact_request_metadata(
     requested_ext = _requested_artifact_ext(state)
     artifact_ext = _artifact_ext_from_path(artifact.get("artifact_path"))
     _apply_edit_context_metadata(artifact, state)
-    if requested_ext:
-        artifact["requested_artifact_ext"] = requested_ext
-    if artifact_ext:
-        artifact["artifact_ext"] = artifact_ext
-        if requested_ext == "pptx" and artifact_ext in {"html", "htm"}:
-            artifact["artifact_type"] = "webpage"
+    _apply_artifact_format_metadata(artifact, requested_ext, artifact_ext, fallback_reason)
     artifact_entries = _artifact_file_entries(artifact)
     if artifact_entries:
         artifact["artifact_files"] = artifact_entries
-    if _artifact_is_extension_fallback(requested_ext, artifact_ext):
-        artifact["artifact_is_fallback"] = True
-        artifact["fallback_reason"] = _artifact_fallback_reason(artifact, requested_ext, fallback_reason)
-    elif requested_ext and artifact_ext == requested_ext:
-        # A delivered artifact in the requested format is never a fallback,
-        # no matter which recovery path promoted it. Prod 2026-06-10: valid
-        # .pptx completions carried fallback_reason=pptx_generation_not_completed
-        # because every call site threads a precautionary reason through here.
-        artifact["artifact_is_fallback"] = False
-        artifact.pop("fallback_reason", None)
-    elif fallback_reason:
-        artifact["fallback_reason"] = fallback_reason
-    elif requested_ext:
-        artifact.setdefault("artifact_is_fallback", False)
-    image_status, image_reason = _image_generation_metadata_from_state(state)
-    if image_status:
-        artifact["image_generation_status"] = image_status
-        if image_reason:
-            artifact["image_generation_reason"] = image_reason
-        else:
-            artifact.pop("image_generation_reason", None)
-    outcome = _image_generation_outcome_from_state(state)
-    if outcome is not None:
-        artifact["image_generation_outcome"] = outcome
+    _apply_image_generation_metadata(artifact, state)
     used = iterations_used(state)
     if used:
         artifact["iterations_used"] = used
@@ -2860,47 +2887,29 @@ def _virtual_output_path_from_host(path: Path, state: dict[str, Any]) -> str | N
     return f"{_OUTPUTS_VIRTUAL_PREFIX}{relative.as_posix()}"
 
 
-def _report_source_candidate_files(state: dict[str, Any]) -> list[Path]:
-    candidates: list[Path] = []
+def _append_virtual_candidate(candidates: list[Path], state: dict[str, Any], path: object) -> None:
+    if not isinstance(path, str) or not path.strip():
+        return
+    local = _local_output_file_for_artifact(state, path)
+    if local is not None:
+        candidates.append(local)
 
-    def add_virtual(path: object) -> None:
-        if not isinstance(path, str) or not path.strip():
-            return
-        local = _local_output_file_for_artifact(state, path)
-        if local is not None:
-            candidates.append(local)
 
-    render_result = state.get("builder_pdf_render_result")
-    if isinstance(render_result, dict):
-        add_virtual(render_result.get("markdown_path") or render_result.get("source_path"))
-        pdf_path = render_result.get("pdf_path")
-        pdf_file = _local_output_file_for_artifact(state, pdf_path)
-        if pdf_file is not None:
-            candidates.extend(
-                sibling for sibling in (
-                    pdf_file.with_suffix(".md"),
-                    pdf_file.with_suffix(".markdown"),
-                    pdf_file.with_suffix(".html"),
-                )
-                if sibling.is_file()
-            )
-
-    target = state.get("builder_artifact_target_path")
-    add_virtual(target)
-    target_file = _local_output_file_for_artifact(state, target)
-    if target_file is not None and target_file.suffix.lower() == ".pdf":
-        candidates.extend(
-            sibling for sibling in (
-                target_file.with_suffix(".md"),
-                target_file.with_suffix(".markdown"),
-                target_file.with_suffix(".html"),
-            )
-            if sibling.is_file()
+def _pdf_source_siblings(pdf_file: Path | None) -> list[Path]:
+    if pdf_file is None:
+        return []
+    return [
+        sibling
+        for sibling in (
+            pdf_file.with_suffix(".md"),
+            pdf_file.with_suffix(".markdown"),
+            pdf_file.with_suffix(".html"),
         )
+        if sibling.is_file()
+    ]
 
-    preferred = _preferred_pdf_render_source_path(state)
-    add_virtual(preferred)
 
+def _unique_existing_candidates(candidates: list[Path]) -> list[Path]:
     seen: set[Path] = set()
     unique: list[Path] = []
     for candidate in candidates:
@@ -2913,6 +2922,26 @@ def _report_source_candidate_files(state: dict[str, Any]) -> list[Path]:
         seen.add(resolved)
         unique.append(candidate)
     return unique
+
+
+def _report_source_candidate_files(state: dict[str, Any]) -> list[Path]:
+    candidates: list[Path] = []
+
+    render_result = state.get("builder_pdf_render_result")
+    if isinstance(render_result, dict):
+        _append_virtual_candidate(candidates, state, render_result.get("markdown_path") or render_result.get("source_path"))
+        pdf_path = render_result.get("pdf_path")
+        candidates.extend(_pdf_source_siblings(_local_output_file_for_artifact(state, pdf_path)))
+
+    target = state.get("builder_artifact_target_path")
+    _append_virtual_candidate(candidates, state, target)
+    target_file = _local_output_file_for_artifact(state, target)
+    if target_file is not None and target_file.suffix.lower() == ".pdf":
+        candidates.extend(_pdf_source_siblings(target_file))
+
+    preferred = _preferred_pdf_render_source_path(state)
+    _append_virtual_candidate(candidates, state, preferred)
+    return _unique_existing_candidates(candidates)
 
 
 def _markdown_image_refs(text: str) -> list[str]:
@@ -2966,30 +2995,47 @@ def _visual_record_embedded(record: dict[str, Any], embedded_paths: set[str]) ->
     return canonical in embedded_paths if canonical else raw_path.strip() in embedded_paths
 
 
+def _visual_record_family(record: object, embedded_paths: set[str]) -> str | None:
+    if not isinstance(record, dict):
+        return None
+    family = str(record.get("family") or "").strip()
+    if not family:
+        return None
+    if embedded_paths and not _visual_record_embedded(record, embedded_paths):
+        return None
+    return family
+
+
+def _visual_record_families(records: object, embedded_paths: set[str]) -> list[str]:
+    if not isinstance(records, list):
+        return []
+    return [
+        family
+        for record in records
+        if (family := _visual_record_family(record, embedded_paths))
+    ]
+
+
+def _raw_visual_figure_families(raw_families: object) -> list[str]:
+    if not isinstance(raw_families, list):
+        return []
+    return [
+        str(family).strip()
+        for family in raw_families
+        if isinstance(family, str) and family.strip()
+    ]
+
+
 def _visual_figure_family_counts(state: dict[str, Any]) -> Counter[str]:
     diagnostics = state.get("builder_visual_diagnostics")
     if not isinstance(diagnostics, dict):
         return Counter()
-    families: list[str] = []
-    records = diagnostics.get("visual_figure_records")
-    if isinstance(records, list):
-        embedded_paths = _embedded_report_figure_paths(state) if _requested_pdf_artifact(state) else set()
-        families.extend(
-            str(record.get("family")).strip()
-            for record in records
-            if isinstance(record, dict)
-            and str(record.get("family") or "").strip()
-            and (not embedded_paths or _visual_record_embedded(record, embedded_paths))
-        )
-        if embedded_paths:
-            return Counter(families)
+    embedded_paths = _embedded_report_figure_paths(state) if _requested_pdf_artifact(state) else set()
+    families = _visual_record_families(diagnostics.get("visual_figure_records"), embedded_paths)
+    if embedded_paths:
+        return Counter(families)
     if not families:
-        raw_families = diagnostics.get("visual_figure_families") or []
-        families.extend(
-            str(family).strip()
-            for family in raw_families
-            if isinstance(family, str) and family.strip()
-        )
+        families = _raw_visual_figure_families(diagnostics.get("visual_figure_families"))
     return Counter(families)
 
 
@@ -3785,6 +3831,8 @@ def _qc_result_presence_problem(index: int, result: dict[str, Any]) -> str | Non
     bands are present.
     """
 
+    if result.get("presence_skipped") is True or result.get("presence_unavailable") is True:
+        return None
     if result.get("skipped") is True and "presence_pass" not in result:
         return f"Slide {index} image was not checked for deterministic title/caption presence."
     if result.get("presence_pass") is True:
@@ -4210,50 +4258,74 @@ def _slide_qc_image_files_in_command(command: str) -> list[str]:
     return image_files
 
 
+def _slide_qc_boolean_flags(payload: dict[str, Any]) -> dict[str, bool]:
+    result: dict[str, bool] = {}
+    for key in (
+        "skipped",
+        "advisory",
+        "parser_error",
+        "presence_skipped",
+        "presence_unavailable",
+    ):
+        if payload.get(key) is True:
+            result[key] = True
+    for key in ("title_present", "caption_present", "presence_pass"):
+        if isinstance(payload.get(key), bool):
+            result[key] = payload[key]
+    return result
+
+
+def _slide_qc_json_result_from_line(line: str) -> dict[str, Any] | None:
+    if not line.startswith("{"):
+        return None
+    try:
+        payload = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict) or "pass" not in payload:
+        return None
+    reasons = payload.get("reasons")
+    result: dict[str, Any] = {
+        "pass": payload.get("pass") is True,
+        "reasons": [str(reason) for reason in reasons] if isinstance(reasons, list) else [],
+    }
+    result.update(_slide_qc_boolean_flags(payload))
+    presence_reasons = payload.get("presence_reasons")
+    if isinstance(presence_reasons, list):
+        result["presence_reasons"] = [
+            str(reason) for reason in presence_reasons if isinstance(reason, str)
+        ]
+    return result
+
+
+def _slide_qc_summary_result_from_line(line: str) -> dict[str, Any] | None:
+    if not line.startswith("[qc]"):
+        return None
+    match = re.match(r"^\[qc\]\s+PASS=(true|false|True|False)\s+reasons=(.*)$", line)
+    if match is None:
+        return None
+    try:
+        reasons = json.loads(match.group(2))
+    except json.JSONDecodeError:
+        reasons = [match.group(2)] if match.group(2) else []
+    return {
+        "pass": match.group(1).lower() == "true",
+        "reasons": [str(reason) for reason in reasons] if isinstance(reasons, list) else [],
+    }
+
+
 def _slide_qc_results_from_text(text: str) -> list[dict[str, Any]]:
     json_results: list[dict[str, Any]] = []
     summary_results: list[dict[str, Any]] = []
     for line in (text or "").splitlines():
         line = line.strip()
-        if line.startswith("{"):
-            try:
-                payload = json.loads(line)
-            except json.JSONDecodeError:
-                payload = None
-            if isinstance(payload, dict) and "pass" in payload:
-                reasons = payload.get("reasons")
-                result = {
-                    "pass": payload.get("pass") is True,
-                    "reasons": [str(reason) for reason in reasons] if isinstance(reasons, list) else [],
-                }
-                for key in ("skipped", "advisory", "parser_error"):
-                    if payload.get(key) is True:
-                        result[key] = True
-                for key in ("title_present", "caption_present", "presence_pass"):
-                    if isinstance(payload.get(key), bool):
-                        result[key] = payload[key]
-                presence_reasons = payload.get("presence_reasons")
-                if isinstance(presence_reasons, list):
-                    result["presence_reasons"] = [
-                        str(reason) for reason in presence_reasons if isinstance(reason, str)
-                    ]
-                json_results.append(result)
+        json_result = _slide_qc_json_result_from_line(line)
+        if json_result is not None:
+            json_results.append(json_result)
             continue
-        if not line.startswith("[qc]"):
-            continue
-        match = re.match(r"^\[qc\]\s+PASS=(true|false|True|False)\s+reasons=(.*)$", line)
-        if match is None:
-            continue
-        try:
-            reasons = json.loads(match.group(2))
-        except json.JSONDecodeError:
-            reasons = [match.group(2)] if match.group(2) else []
-        summary_results.append(
-            {
-                "pass": match.group(1).lower() == "true",
-                "reasons": [str(reason) for reason in reasons] if isinstance(reasons, list) else [],
-            }
-        )
+        summary_result = _slide_qc_summary_result_from_line(line)
+        if summary_result is not None:
+            summary_results.append(summary_result)
     return json_results or summary_results
 
 
@@ -5955,6 +6027,67 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
 
     @staticmethod
+    def _promoted_path_ceiling_fallback(
+        state: BuilderArtifactState,
+        *,
+        promoted_path: str,
+        promoted_type: str,
+        requested_pdf: bool,
+        requested_pptx: bool,
+        steps_completed: int,
+        reason: str,
+    ) -> dict[str, Any]:
+        promoted_suffix = PurePosixPath(promoted_path).suffix.lower()
+        # Format-swapped promotion is disabled for pdf/pptx requests:
+        # never deliver a different format as the completion artifact.
+        if requested_pdf and promoted_suffix != ".pdf":
+            logger.warning(
+                "BuilderArtifact: ceiling refused format-swap promotion "
+                "requested_ext=pdf promoted_ext=%s reason=%s",
+                promoted_suffix.lstrip(".") or None,
+                reason,
+            )
+            failure = BuilderArtifactMiddleware._pdf_no_deliverable_fallback(
+                steps_completed=steps_completed,
+            )
+            return BuilderArtifactMiddleware._budget_stop_fallback(
+                _apply_artifact_request_metadata(
+                    failure,
+                    state,
+                    fallback_reason="pdf_generation_failed",
+                ),
+                reason,
+            )
+        if requested_pptx and promoted_suffix != ".pptx":
+            logger.warning(
+                "BuilderArtifact: ceiling refused format-swap promotion "
+                "requested_ext=pptx promoted_ext=%s reason=%s",
+                promoted_suffix.lstrip(".") or None,
+                reason,
+            )
+            failure = BuilderArtifactMiddleware._pptx_no_deliverable_fallback(
+                steps_completed=steps_completed,
+            )
+            return BuilderArtifactMiddleware._budget_stop_fallback(
+                _apply_artifact_request_metadata(
+                    failure,
+                    state,
+                    fallback_reason="pptx_generation_not_completed",
+                ),
+                reason,
+            )
+        fallback = BuilderArtifactMiddleware._recovered_deliverable_fallback(
+            promoted_path,
+            promoted_type,
+            steps_completed=steps_completed,
+        )
+        return _apply_artifact_request_metadata(
+            fallback,
+            state,
+            fallback_reason="pptx_generation_not_completed" if requested_pptx else reason,
+        )
+
+    @staticmethod
     def _build_ceiling_fallback(
         state: BuilderArtifactState,
         *,
@@ -5962,30 +6095,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         reason: str,
     ) -> dict[str, Any]:
         """Synthesize a ``builder_result`` dict by scanning ``outputs/`` for
-        a deliverable to promote.
-
-        Used by both the hard-ceiling termination path
-        (``non_artifact_turns >= _CEILING_FOR_FORCE``) and the
-        consecutive-rejection short-circuit path (PR #94, when the model
-        emits ``artifact_path=None`` repeatedly under forced emit).
-
-        Promotion priority:
-
-        1. Preferred binary deliverable extension (``.pdf/.pptx/.docx/.xlsx/
-           .png/.jpg/.jpeg/.svg/.html/.zip``) — confidence=0.5, "recovered".
-        2. Generator script (``_generate_*.py``) — confidence=0.4, partial
-           deliverable with a "run it yourself" companion summary.
-        3. Apology fallback (``artifact_path=None``, confidence=0.2) — when
-           neither category matches.
-
-        ``reason`` is included in log lines so traces can distinguish ceiling
-        terminations from rejection short-circuits.
-
-        PDF requests are stricter than generic binary fallbacks: a
-        ``_generate_*.py`` file is never a successful PDF artifact. If
-        ``render_markdown_to_pdf`` cannot produce a PDF, the only acceptable
-        degraded deliverable is the Markdown source; otherwise fail truthfully.
-        """
+        a deliverable to promote."""
         requested_pdf = _requested_pdf_artifact(state)
         requested_pptx = _requested_pptx_artifact(state)
         requested_html = _requested_html_artifact(state)
@@ -6011,56 +6121,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if fallback is not None:
             return BuilderArtifactMiddleware._budget_stop_fallback(fallback, reason)
         if promoted_path:
-            promoted_suffix = PurePosixPath(promoted_path).suffix.lower()
-            # Format-swapped promotion is disabled for pdf/pptx requests:
-            # never deliver a different format as the completion artifact —
-            # report an honest failure instead (intermediate files remain in
-            # the session artifacts list).
-            if requested_pdf and promoted_suffix != ".pdf":
-                logger.warning(
-                    "BuilderArtifact: ceiling refused format-swap promotion "
-                    "requested_ext=pdf promoted_ext=%s reason=%s",
-                    promoted_suffix.lstrip(".") or None,
-                    reason,
-                )
-                failure = BuilderArtifactMiddleware._pdf_no_deliverable_fallback(
-                    steps_completed=steps_completed,
-                )
-                return BuilderArtifactMiddleware._budget_stop_fallback(
-                    _apply_artifact_request_metadata(
-                        failure,
-                        state,
-                        fallback_reason="pdf_generation_failed",
-                    ),
-                    reason,
-                )
-            if requested_pptx and promoted_suffix != ".pptx":
-                logger.warning(
-                    "BuilderArtifact: ceiling refused format-swap promotion "
-                    "requested_ext=pptx promoted_ext=%s reason=%s",
-                    promoted_suffix.lstrip(".") or None,
-                    reason,
-                )
-                failure = BuilderArtifactMiddleware._pptx_no_deliverable_fallback(
-                    steps_completed=steps_completed,
-                )
-                return BuilderArtifactMiddleware._budget_stop_fallback(
-                    _apply_artifact_request_metadata(
-                        failure,
-                        state,
-                        fallback_reason="pptx_generation_not_completed",
-                    ),
-                    reason,
-                )
-            fallback = BuilderArtifactMiddleware._recovered_deliverable_fallback(
-                promoted_path,
-                promoted_type,
-                steps_completed=steps_completed,
-            )
-            return _apply_artifact_request_metadata(
-                fallback,
+            return BuilderArtifactMiddleware._promoted_path_ceiling_fallback(
                 state,
-                fallback_reason="pptx_generation_not_completed" if requested_pptx else reason,
+                promoted_path=promoted_path,
+                promoted_type=promoted_type,
+                requested_pdf=requested_pdf,
+                requested_pptx=requested_pptx,
+                steps_completed=steps_completed,
+                reason=reason,
             )
         fallback = BuilderArtifactMiddleware._requested_pdf_without_render_fallback(
             state,
@@ -6348,6 +6416,62 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return True
 
     @classmethod
+    def _visual_repair_available(cls, state: BuilderArtifactState) -> bool:
+        return int(state.get("builder_visual_embed_rejections", 0) or 0) < 1 and _repair_iteration_grantable(state)
+
+    @classmethod
+    def _deck_plan_gate_blocks(cls, state: BuilderArtifactState) -> bool | None:
+        deck_problems = _deck_plan_validation_problems(state)
+        if not deck_problems:
+            return None
+        hard_problem = any(
+            token in problem.lower()
+            for problem in deck_problems
+            for token in ("cover slide", "same generated image", "qc", "not qc-checked")
+        )
+        if cls._visual_repair_available(state):
+            logger.warning(
+                "[BuilderDeckPlanGate] phase=emit_blocked problems=%s",
+                deck_problems,
+            )
+            return True
+        if hard_problem:
+            logger.warning(
+                "[BuilderDeckPlanGate] phase=emit_blocked_hard problems=%s",
+                deck_problems,
+            )
+            return True
+        logger.warning(
+            "[BuilderDeckPlanGate] phase=emit_soft_pass_after_repair problems=%s",
+            deck_problems,
+        )
+        return False
+
+    @classmethod
+    def _report_problem_gate_blocks(
+        cls,
+        state: BuilderArtifactState,
+        *,
+        problems: list[str],
+        log_tag: str,
+    ) -> bool | None:
+        if not problems:
+            return None
+        if cls._visual_repair_available(state):
+            logger.warning(
+                "[%s] phase=emit_blocked problems=%s",
+                log_tag,
+                problems,
+            )
+            return True
+        logger.warning(
+            "[%s] phase=emit_soft_pass_after_repair problems=%s",
+            log_tag,
+            problems,
+        )
+        return False
+
+    @classmethod
     def _visual_gate_blocks_emit(
         cls,
         artifact_args: dict[str, Any],
@@ -6359,56 +6483,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         must first read the design discipline and get one chance to embed
         generated chart/diagram evidence before terminal success.
         """
-        deck_problems = _deck_plan_validation_problems(state)
-        if deck_problems:
-            hard_problem = any(
-                token in problem.lower()
-                for problem in deck_problems
-                for token in ("cover slide", "same generated image", "qc", "not qc-checked")
+        deck_gate = cls._deck_plan_gate_blocks(state)
+        if deck_gate is not None:
+            return deck_gate
+        for problems, log_tag in (
+            (_report_figure_family_problems(state), "BuilderReportFigureGate"),
+            (_report_visual_grammar_problems(state), "BuilderReportGrammarGate"),
+        ):
+            report_gate = cls._report_problem_gate_blocks(
+                state,
+                problems=problems,
+                log_tag=log_tag,
             )
-            if int(state.get("builder_visual_embed_rejections", 0) or 0) < 1 and _repair_iteration_grantable(state):
-                logger.warning(
-                    "[BuilderDeckPlanGate] phase=emit_blocked problems=%s",
-                    deck_problems,
-                )
-                return True
-            if hard_problem:
-                logger.warning(
-                    "[BuilderDeckPlanGate] phase=emit_blocked_hard problems=%s",
-                    deck_problems,
-                )
-                return True
-            logger.warning(
-                "[BuilderDeckPlanGate] phase=emit_soft_pass_after_repair problems=%s",
-                deck_problems,
-            )
-            return False
-        figure_family_problems = _report_figure_family_problems(state)
-        if figure_family_problems:
-            if int(state.get("builder_visual_embed_rejections", 0) or 0) < 1 and _repair_iteration_grantable(state):
-                logger.warning(
-                    "[BuilderReportFigureGate] phase=emit_blocked problems=%s",
-                    figure_family_problems,
-                )
-                return True
-            logger.warning(
-                "[BuilderReportFigureGate] phase=emit_soft_pass_after_repair problems=%s",
-                figure_family_problems,
-            )
-            return False
-        visual_grammar_problems = _report_visual_grammar_problems(state)
-        if visual_grammar_problems:
-            if int(state.get("builder_visual_embed_rejections", 0) or 0) < 1 and _repair_iteration_grantable(state):
-                logger.warning(
-                    "[BuilderReportGrammarGate] phase=emit_blocked problems=%s",
-                    visual_grammar_problems,
-                )
-                return True
-            logger.warning(
-                "[BuilderReportGrammarGate] phase=emit_soft_pass_after_repair problems=%s",
-                visual_grammar_problems,
-            )
-            return False
+            if report_gate is not None:
+                return report_gate
         if not _visuals_requested(state):
             return False
         if not _visual_design_skill_read_seen(state):
@@ -6421,7 +6509,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return True
         if _visual_presence_validated(artifact_args, state):
             return False
-        if int(state.get("builder_visual_embed_rejections", 0) or 0) < 1 and _repair_iteration_grantable(state):
+        if cls._visual_repair_available(state):
             logger.warning(
                 "[BuilderVisualDiagnostics] phase=emit_blocked_visual_missing "
                 "requested_ext=%s final_ext=%s",
@@ -8888,6 +8976,71 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             goto="model",
         )
 
+    @staticmethod
+    def _image_generation_terminal_rejection(
+        *,
+        attempts: int,
+        successes: int,
+        error_class: object,
+    ) -> str | None:
+        if attempts < 1 or successes != 0 or error_class not in _IMAGE_GENERATION_TERMINAL_ERRORS:
+            return None
+        return (
+            f"Error: image generation is unavailable in this environment ({error_class}). "
+            "Do not call it again. Proceed with hard-data charts and deterministic "
+            "text layouts for presentations, or chart/report-diagram/text layouts for PDFs — "
+            "a chart/diagram/text deliverable is valid."
+        )
+
+    @staticmethod
+    def _image_generation_budget_rejection(
+        state: dict[str, Any],
+        diagnostics: dict[str, Any],
+        *,
+        attempts: int,
+        billable_in_command: int,
+    ) -> str | None:
+        max_calls = _image_generation_max_calls(state)
+        if attempts + billable_in_command <= max_calls:
+            return None
+        generated = [
+            path
+            for path in (diagnostics.get("image_output_paths") or [])
+            if isinstance(path, str)
+        ]
+        generated_note = (
+            f" Use the images already generated: {', '.join(generated[:4])}."
+            if generated
+            else ""
+        )
+        return (
+            f"Error: image generation budget reached ({attempts}/{max_calls} "
+            f"calls used; this command adds {billable_in_command}).{generated_note} Continue composing "
+            "with the existing assets, charts, and text. Do not retry image generation."
+        )
+
+    @staticmethod
+    def _image_generation_rejection_text(
+        state: dict[str, Any],
+        *,
+        billable_in_command: int,
+    ) -> tuple[str | None, int, int, object]:
+        attempts = _pptx_diagnostic_count(state, "image_generation_attempt_count")
+        successes = _pptx_diagnostic_count(state, "image_generation_success_count")
+        diagnostics = _pptx_diagnostics(state)
+        error_class = diagnostics.get("image_generation_error_class")
+        rejection = BuilderArtifactMiddleware._image_generation_terminal_rejection(
+            attempts=attempts,
+            successes=successes,
+            error_class=error_class,
+        ) or BuilderArtifactMiddleware._image_generation_budget_rejection(
+            state,
+            diagnostics,
+            attempts=attempts,
+            billable_in_command=billable_in_command,
+        )
+        return rejection, attempts, successes, error_class
+
     def _image_generation_block_command(self, request: ToolCallRequest) -> Command | None:
         """Enforce the per-build image-generation discipline at bash time.
 
@@ -8912,34 +9065,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             # VQ-3: preflight-only checks are free — never counted, never blocked.
             return None
         state = request.state or {}
-        attempts = _pptx_diagnostic_count(state, "image_generation_attempt_count")
-        successes = _pptx_diagnostic_count(state, "image_generation_success_count")
-        diagnostics = _pptx_diagnostics(state)
-        error_class = diagnostics.get("image_generation_error_class")
-        rejection: str | None = None
-        if attempts >= 1 and successes == 0 and error_class in _IMAGE_GENERATION_TERMINAL_ERRORS:
-            rejection = (
-                f"Error: image generation is unavailable in this environment ({error_class}). "
-                "Do not call it again. Proceed with hard-data charts and deterministic "
-                "text layouts for presentations, or chart/report-diagram/text layouts for PDFs — "
-                "a chart/diagram/text deliverable is valid."
-            )
-        elif attempts + billable_in_command > _image_generation_max_calls(state):
-            generated = [
-                path
-                for path in (diagnostics.get("image_output_paths") or [])
-                if isinstance(path, str)
-            ]
-            generated_note = (
-                f" Use the images already generated: {', '.join(generated[:4])}."
-                if generated
-                else ""
-            )
-            rejection = (
-                f"Error: image generation budget reached ({attempts}/{_image_generation_max_calls(state)} "
-                f"calls used; this command adds {billable_in_command}).{generated_note} Continue composing "
-                "with the existing assets, charts, and text. Do not retry image generation."
-            )
+        rejection, attempts, successes, error_class = self._image_generation_rejection_text(
+            state,
+            billable_in_command=billable_in_command,
+        )
         if rejection is None:
             return None
         logger.warning(

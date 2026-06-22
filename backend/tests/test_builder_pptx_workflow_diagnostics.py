@@ -19,6 +19,8 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     _maybe_attach_image_trace_env,
     _merge_builder_pptx_diagnostics,
     _pptx_skill_read_seen,
+    _qc_result_presence_problem,
+    _slide_qc_results_from_text,
     _validate_deck_plan,
     _visual_asset_result_delta,
     _visual_design_skill_read_seen,
@@ -70,6 +72,43 @@ def test_report_chart_tool_result_records_visual_asset_path() -> None:
     assert delta["visual_asset_bytes_total"] == 128
     assert delta["visual_asset_paths"] == ["/mnt/user-data/outputs/visuals/flow.png"]
     assert delta["visual_png_paths"] == ["/mnt/user-data/outputs/visuals/flow.png"]
+
+
+def test_slide_qc_presence_unavailable_is_advisory() -> None:
+    results = _slide_qc_results_from_text(
+        json.dumps(
+            {
+                "pass": False,
+                "skipped": True,
+                "reasons": [
+                    "slide QC skipped: ANTHROPIC_API_KEY is not set",
+                    "deterministic presence OCR skipped: tesseract is not installed",
+                ],
+                "presence_skipped": True,
+                "presence_unavailable": True,
+                "presence_reasons": [
+                    "deterministic presence OCR skipped: tesseract is not installed"
+                ],
+            }
+        )
+    )
+
+    assert results == [
+        {
+            "pass": False,
+            "reasons": [
+                "slide QC skipped: ANTHROPIC_API_KEY is not set",
+                "deterministic presence OCR skipped: tesseract is not installed",
+            ],
+            "skipped": True,
+            "presence_skipped": True,
+            "presence_unavailable": True,
+            "presence_reasons": [
+                "deterministic presence OCR skipped: tesseract is not installed"
+            ],
+        }
+    ]
+    assert _qc_result_presence_problem(1, results[0]) is None
 
 
 def test_image_generation_bash_result_records_output_bytes(tmp_path: Path) -> None:
