@@ -150,11 +150,14 @@ _PDF_OUTPUT_RE = re.compile(
     r"|(?:document|file|report|summary|brief|article|explainer|presentation|slides?|deck|deliverable|artifact|output|final|export)"
     r"\s+(?:as|in|to)\s+(?:an?\s+)?pdf"
     r"|(?:build|create|make|generate|produce|write|render|export)\s+(?:an?\s+)?pdf\b"
-    r"|(?:build|create|make|generate|produce|write|render|export|draft|prepare)\s+"
-    r"(?:an?\s+|the\s+)?(?:report|write[- ]?up)\b"
     r"|(?:build|create|make|generate|produce|write|render|export)\s+[^.?!\n]{0,80}?\s+as\s+(?:an?\s+)?pdf\b"
     r"|\.pdf\b"
     r")",
+    re.IGNORECASE,
+)
+_GENERIC_REPORT_OUTPUT_RE = re.compile(
+    r"\b(?:build|create|make|generate|produce|write|render|export|draft|prepare)\s+"
+    r"(?:an?\s+|the\s+)?(?:report|write[- ]?up)\b",
     re.IGNORECASE,
 )
 _PPTX_OUTPUT_RE = re.compile(
@@ -190,6 +193,7 @@ _REQUESTED_OUTPUT_EXTENSION_PATTERNS: tuple[tuple[str, str, re.Pattern[str]], ..
     ("md", "explicit_markdown_deliverable", re.compile(r"\b(?:markdown|md)\b", re.IGNORECASE)),
     ("csv", "explicit_csv_deliverable", re.compile(r"\bcsv\b", re.IGNORECASE)),
     ("json", "explicit_json_deliverable", re.compile(r"\bjson\b", re.IGNORECASE)),
+    ("pdf", "explicit_pdf_deliverable", _GENERIC_REPORT_OUTPUT_RE),
 )
 _SIMPLE_PRODUCT_REVIEW_RE = re.compile(
     r"\bproduct\s+review\b",
@@ -333,9 +337,39 @@ _STATUS_CONTEXT_AFTER_MATCH_RE = re.compile(
     r"(?:failing|broken|bad|wrong|off|poor|ugly|rough|stale|not\s+working|missing|miscomposed)\b",
     re.IGNORECASE,
 )
+_PRESENTATION_FORMAT_WORD_RE = re.compile(
+    r"\b(?:pptx|power\s*point|slide\s+deck|\d+\s*[- ]?\s*slides?|slides?|deck|presentation)\b",
+    re.IGNORECASE,
+)
 _SOURCE_VETO_RULES = frozenset({"explicit_presentation_deck"})
 _NEGATION_LOOKBACK_CHARS = 32
 _STATUS_LOOKAHEAD_CHARS = 48
+
+
+def _presentation_format_word_negated_inside(match: re.Match[str]) -> bool:
+    """Catch broad verb matches whose target noun is negated inside the span.
+
+    Example: ``Create an actual PDF report (not a presentation)`` makes the
+    PPTX regex start at ``Create``, so the ordinary prefix veto cannot see
+    ``not``. The format noun itself is still locally negated and should not
+    claim the target.
+    """
+    text = match.group(0)
+    found_format_word = False
+    for word_match in _PRESENTATION_FORMAT_WORD_RE.finditer(text):
+        found_format_word = True
+        prefix = text[max(0, word_match.start() - _NEGATION_LOOKBACK_CHARS) : word_match.start()]
+        if not _NEGATION_BEFORE_MATCH_RE.search(prefix):
+            return False
+    return found_format_word
+
+
+def _has_negated_presentation_format_mention(text: str) -> bool:
+    for match in _PRESENTATION_FORMAT_WORD_RE.finditer(text):
+        prefix = text[max(0, match.start() - _NEGATION_LOOKBACK_CHARS) : match.start()]
+        if _NEGATION_BEFORE_MATCH_RE.search(prefix):
+            return True
+    return False
 
 
 def _pattern_affirmative_match(
@@ -346,6 +380,8 @@ def _pattern_affirmative_match(
     for match in pattern.finditer(text):
         prefix = text[max(0, match.start() - _NEGATION_LOOKBACK_CHARS) : match.start()]
         if _NEGATION_BEFORE_MATCH_RE.search(prefix):
+            continue
+        if source_veto and _presentation_format_word_negated_inside(match):
             continue
         if source_veto and _SOURCE_CONTEXT_BEFORE_MATCH_RE.search(prefix):
             continue
@@ -368,6 +404,12 @@ def _requested_output_extension_match_with_vetoes(
         return "pdf", "explicit_pdf_deck_deliverable", vetoed
     for ext, reason, pattern in _REQUESTED_OUTPUT_EXTENSION_PATTERNS:
         if not pattern.search(text):
+            if (
+                reason == "explicit_presentation_deck"
+                and "explicit_presentation_deck" not in vetoed
+                and _has_negated_presentation_format_mention(text)
+            ):
+                vetoed.append(reason)
             continue
         if _pattern_affirmative_match(
             pattern, text, source_veto=reason in _SOURCE_VETO_RULES

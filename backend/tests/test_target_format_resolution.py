@@ -138,6 +138,27 @@ def test_negated_slides_mention_does_not_claim_target():
     assert reason == "explicit_pdf_deliverable"
 
 
+def test_negated_presentation_after_build_verb_does_not_claim_target():
+    resolution = _resolve_target_format(
+        current_user_text="Create an actual PDF report (not a presentation)",
+        description="Create an actual PDF report (not a presentation)",
+        task_type="visual_report",
+    )
+    assert resolution.final_ext == "pdf"
+    assert resolution.source == "current_user_turn"
+    assert "explicit_presentation_deck" in resolution.vetoed_rules
+
+
+def test_no_slides_after_build_verb_does_not_claim_target():
+    resolution = _resolve_target_format(
+        current_user_text="write a pdf summary on Hermes, no slides",
+        description="write a pdf summary on Hermes, no slides",
+        task_type="visual_report",
+    )
+    assert resolution.final_ext == "pdf"
+    assert resolution.source == "current_user_turn"
+
+
 def test_negated_deck_recorded_as_vetoed_rule():
     ext, _reason, vetoed = _requested_output_extension_match_with_vetoes(
         "I don't want a slide deck, give me a pdf report"
@@ -255,6 +276,26 @@ def test_turn_the_deck_into_an_html_page_resolves_to_html():
         current_user_text="turn the deck into an html page",
         description="turn the deck into an html page",
         task_type="presentation",
+    )
+    assert resolution.final_ext == "html"
+    assert resolution.source == "current_user_turn"
+
+
+def test_html_report_page_beats_generic_pdf_report_inference():
+    resolution = _resolve_target_format(
+        current_user_text="write a report as an HTML page",
+        description="write a report as an HTML page",
+        task_type="frontend",
+    )
+    assert resolution.final_ext == "html"
+    assert resolution.source == "current_user_turn"
+
+
+def test_report_in_html_beats_generic_pdf_report_inference():
+    resolution = _resolve_target_format(
+        current_user_text="draft a report in html",
+        description="draft a report in html",
+        task_type="frontend",
     )
     assert resolution.final_ext == "html"
     assert resolution.source == "current_user_turn"
