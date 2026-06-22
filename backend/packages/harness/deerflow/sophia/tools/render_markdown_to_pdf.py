@@ -118,7 +118,17 @@ _DEFAULT_PDF_THEME = "minimal"
 _TOC_WORD_THRESHOLD = 3500
 
 # Frontmatter keys the cheap parser extracts (theme + cover-page fields).
-_FRONTMATTER_KEYS = {"title", "subtitle", "author", "date", "sophia-theme"}
+_FRONTMATTER_KEYS = {
+    "title",
+    "subtitle",
+    "author",
+    "date",
+    "sophia-theme",
+    "sophia-cover",
+    "coverimage",
+    "cover-image",
+    "cover_image",
+}
 
 
 def _ensure_relative_to_outputs(label: str, path: str) -> str | None:
@@ -473,13 +483,53 @@ def _resolve_theme_name(theme_param: str | None, meta: dict[str, str]) -> str:
     return candidate
 
 
-def _cover_image_path(thread_data: dict[str, Any] | None) -> Path | None:
-    """Newest generated cover graphic under outputs/visuals (``cover-*.png``).
+def _cover_slug(value: str) -> str:
+    return re.sub(r"[^a-z0-9]+", "-", value.lower()).strip("-")
+
+
+def _source_ref_host_paths(
+    refs: list[str],
+    *,
+    md_file: Path,
+    thread_data: dict[str, Any] | None,
+) -> set[Path]:
+    outputs_path = (thread_data or {}).get("outputs_path")
+    outputs_root = Path(outputs_path).resolve() if isinstance(outputs_path, str) and outputs_path else None
+    paths: set[Path] = set()
+    for raw_ref in refs:
+        ref = raw_ref.strip().strip("\"'")
+        if not ref or ref.startswith(("http://", "https://", "data:")):
+            continue
+        if ref.startswith(_OUTPUTS_VIRTUAL_PREFIX):
+            paths.add(_host_path_for_virtual_output(ref, thread_data).resolve())
+            continue
+        candidate = Path(ref)
+        if candidate.is_absolute():
+            paths.add(candidate.resolve())
+            continue
+        paths.add((md_file.parent / candidate).resolve())
+        if outputs_root is not None:
+            paths.add((outputs_root / candidate).resolve())
+    return paths
+
+
+def _cover_frontmatter_refs(meta: dict[str, str]) -> list[str]:
+    refs: list[str] = []
+    for key in ("sophia-cover", "coverimage", "cover-image", "cover_image"):
+        value = meta.get(key)
+        if value:
+            refs.append(value)
+    return refs
+
+
+def _cover_image_path(md_file: Path, thread_data: dict[str, Any] | None, meta: dict[str, str]) -> Path | None:
+    """Current-source generated cover graphic under outputs/visuals.
 
     VQ-5: the image-generation skill writes PDF covers as
     ``visuals/cover-<desc>.png``; when one exists it rides the title page via
-    the template's ``$coverimage$`` hook. Best-effort — any error means no
-    cover, never a failed render.
+    the template's ``$coverimage$`` hook. The cover must be tied to this
+    source, either by Markdown/frontmatter reference or by source-stem slug.
+    Best-effort — any error means no cover, never a failed render.
     """
     outputs_path = (thread_data or {}).get("outputs_path")
     if not isinstance(outputs_path, str) or not outputs_path:
@@ -493,7 +543,23 @@ def _cover_image_path(thread_data: dict[str, Any] | None) -> Path | None:
         )
     except OSError:
         return None
-    return candidates[0] if candidates else None
+    if not candidates:
+        return None
+
+    referenced_paths = _source_ref_host_paths(
+        [*_source_image_refs(md_file), *_cover_frontmatter_refs(meta)],
+        md_file=md_file,
+        thread_data=thread_data,
+    )
+    for candidate in candidates:
+        if candidate.resolve() in referenced_paths:
+            return candidate
+
+    source_slug = _cover_slug(md_file.stem)
+    for candidate in candidates:
+        if _cover_slug(candidate.stem.removeprefix("cover-")) == source_slug:
+            return candidate
+    return None
 
 
 def _theme_variables(theme_name: str, meta: dict[str, str]) -> list[str]:
@@ -823,7 +889,7 @@ def _impl(
         theme_name = _resolve_theme_name(theme, meta)
         extra_vars = _theme_variables(theme_name, meta)
         toc = _source_word_count(md_file) > _TOC_WORD_THRESHOLD
-        cover = _cover_image_path(thread_data)
+        cover = _cover_image_path(md_file, thread_data, meta)
         if cover is not None:
             # VQ-5: generated cover graphic on the title page. Forces the
             # titlepage on — a cover image without a cover page is invisible.

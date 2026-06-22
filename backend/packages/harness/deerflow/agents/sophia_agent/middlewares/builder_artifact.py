@@ -6794,8 +6794,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             requested_ext = _requested_artifact_ext(state)
             if requested_ext == "pdf":
                 wiring = (
-                    "name it /mnt/user-data/outputs/visuals/cover-<desc>.png — the "
-                    "renderer places it on the title page automatically"
+                    "name it /mnt/user-data/outputs/visuals/cover-<desc>.png and add "
+                    "`sophia-cover: /mnt/user-data/outputs/visuals/cover-<desc>.png` "
+                    "to the Markdown frontmatter — the renderer places that current "
+                    "source cover on the title page"
                 )
                 subject = "cover"
             else:

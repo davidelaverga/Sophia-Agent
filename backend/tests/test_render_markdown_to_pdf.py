@@ -1258,7 +1258,13 @@ def test_cover_image_variable_passed_when_cover_exists(tmp_path, monkeypatch):
     outputs = tmp_path / "thread" / "outputs"
     visuals = outputs / "visuals"
     visuals.mkdir(parents=True)
-    (outputs / "report.md").write_text("# Report\n")
+    (outputs / "report.md").write_text(
+        "---\n"
+        "title: Report\n"
+        "sophia-cover: /mnt/user-data/outputs/visuals/cover-launch.png\n"
+        "---\n\n"
+        "# Report\n"
+    )
     (visuals / "cover-launch.png").write_bytes(b"\x89PNG fake")
     thread_data = {
         "workspace_path": str(tmp_path / "thread" / "workspace"),
@@ -1295,6 +1301,47 @@ def test_cover_image_variable_passed_when_cover_exists(tmp_path, monkeypatch):
     joined = " ".join(captured["cmd"])
     assert "coverimage=" in joined and "cover-launch.png" in joined
     assert "titlepage=true" in joined
+
+
+def test_stale_cover_image_is_not_reused_without_source_tie(tmp_path, monkeypatch):
+    outputs = tmp_path / "thread" / "outputs"
+    visuals = outputs / "visuals"
+    visuals.mkdir(parents=True)
+    (outputs / "report.md").write_text("---\ntitle: Report\n---\n\n# Report\n")
+    (visuals / "cover-previous-report.png").write_bytes(b"\x89PNG stale")
+    thread_data = {
+        "workspace_path": str(tmp_path / "thread" / "workspace"),
+        "uploads_path": str(tmp_path / "thread" / "uploads"),
+        "outputs_path": str(outputs),
+    }
+    monkeypatch.setattr(
+        "deerflow.sophia.tools.render_markdown_to_pdf.shutil.which",
+        lambda binary: f"/fake/{binary}",
+    )
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured["cmd"] = cmd
+        Path(cmd[cmd.index("-o") + 1]).write_bytes(b"%PDF-1.4 fake")
+
+        class _Completed:
+            returncode = 0
+            stderr = ""
+            stdout = ""
+
+        return _Completed()
+
+    monkeypatch.setattr("subprocess.run", fake_run)
+
+    result = _parse(_impl(
+        markdown_path=f"{_OUTPUTS_PREFIX}report.md",
+        pdf_path=f"{_OUTPUTS_PREFIX}report.pdf",
+        pdf_engine=None,
+        thread_data=thread_data,
+    ))
+
+    assert result["success"] is True
+    assert "coverimage=" not in " ".join(captured["cmd"])
 
 
 def test_no_cover_variable_without_cover_file(tmp_path, monkeypatch):
