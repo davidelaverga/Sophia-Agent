@@ -19,6 +19,29 @@ def _runtime(outputs_path: Path) -> SimpleNamespace:
     return SimpleNamespace(state={"thread_data": {"outputs_path": str(outputs_path)}})
 
 
+class _FakeResponse:
+    def __init__(self, *, content: bytes, content_type: str | None = None) -> None:
+        self.content = content
+        self.headers = {"content-type": content_type} if content_type is not None else {}
+
+    def raise_for_status(self) -> None:
+        return None
+
+
+class _FakeClient:
+    def __init__(self, response: _FakeResponse) -> None:
+        self._response = response
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *_args):
+        return None
+
+    def get(self, _url: str) -> _FakeResponse:
+        return self._response
+
+
 def test_generate_report_chart_writes_spec_and_downloads_png(tmp_path, monkeypatch) -> None:
     script = tmp_path / "generate.js"
     script.write_text("// fake", encoding="utf-8")
@@ -58,6 +81,54 @@ def test_generate_report_chart_writes_spec_and_downloads_png(tmp_path, monkeypat
     assert payload["spec_path"] == "/mnt/user-data/outputs/visuals/flow.chart.json"
     assert (tmp_path / "visuals" / "flow.png").read_bytes() == b"png-bytes"
     assert (tmp_path / "visuals" / "flow.chart.json").is_file()
+
+
+def test_download_chart_image_rejects_non_image_response(tmp_path, monkeypatch) -> None:
+    target = tmp_path / "chart.png"
+    monkeypatch.setattr(
+        chart_module.httpx,
+        "Client",
+        lambda **_kwargs: _FakeClient(
+            _FakeResponse(content=b"<html>blocked</html>", content_type="text/html")
+        ),
+    )
+
+    try:
+        chart_module._download_chart_image("https://charts.example/bad.png", target)
+    except chart_module.ChartDownloadInvalidImage as exc:
+        assert exc.content_type == "text/html"
+        assert exc.byte_count == len(b"<html>blocked</html>")
+    else:  # pragma: no cover - assertion branch
+        raise AssertionError("expected ChartDownloadInvalidImage")
+
+    assert not target.exists()
+
+
+def test_download_result_payload_reports_invalid_image(tmp_path, monkeypatch) -> None:
+    def invalid_download(_url: str, _image_host_path: Path):
+        raise chart_module.ChartDownloadInvalidImage(
+            content_type="application/json",
+            byte_count=42,
+        )
+
+    monkeypatch.setattr(chart_module, "_download_chart_image", invalid_download)
+
+    payload = _payload(
+        chart_module._download_result_payload(
+            chart_tool="generate_bar_chart",
+            family="comparison",
+            rationale="Compare scenarios.",
+            chart_url="https://charts.example/error.png",
+            image_path="/mnt/user-data/outputs/visuals/error.png",
+            spec_path="/mnt/user-data/outputs/visuals/error.chart.json",
+            image_host_path=tmp_path / "error.png",
+        )
+    )
+
+    assert payload["success"] is False
+    assert payload["error_type"] == "chart_download_invalid_image"
+    assert payload["content_type"] == "application/json"
+    assert payload["image_bytes"] == 42
 
 
 def test_generate_report_chart_rejects_empty_args(tmp_path, monkeypatch) -> None:

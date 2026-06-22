@@ -78,6 +78,23 @@ _CHART_TOOL_FAMILIES: dict[str, str] = {
     "generate_flow_diagram": "flow",
 }
 
+_IMAGE_MAGIC_PREFIXES = (
+    b"\x89PNG\r\n\x1a\n",
+    b"\xff\xd8\xff",
+    b"GIF87a",
+    b"GIF89a",
+    b"RIFF",  # WEBP starts RIFF....WEBP; checked with a secondary marker below.
+)
+
+
+class ChartDownloadInvalidImage(ValueError):
+    """Raised when a chart endpoint returns non-image bytes."""
+
+    def __init__(self, *, content_type: str | None, byte_count: int) -> None:
+        super().__init__("chart_download_invalid_image")
+        self.content_type = content_type
+        self.byte_count = byte_count
+
 
 def _result(*, success: bool, **fields: Any) -> str:
     return json.dumps({"success": success, **fields}, ensure_ascii=False)
@@ -147,13 +164,34 @@ def _extract_first_url(text: str) -> str | None:
     return match.group(0).rstrip(").,")
 
 
+def _bytes_look_like_image(content: bytes) -> bool:
+    if not content:
+        return False
+    if content.startswith(b"RIFF") and content[8:12] == b"WEBP":
+        return True
+    return any(content.startswith(prefix) for prefix in _IMAGE_MAGIC_PREFIXES if prefix != b"RIFF")
+
+
+def _valid_image_response(content: bytes, content_type: str | None) -> bool:
+    normalized_type = str(content_type or "").split(";", 1)[0].strip().lower()
+    if normalized_type.startswith("image/"):
+        return True
+    return _bytes_look_like_image(content)
+
+
 def _download_chart_image(url: str, image_host_path: Path) -> tuple[int, str | None]:
     with httpx.Client(follow_redirects=True, timeout=30.0) as client:
         response = client.get(url)
         response.raise_for_status()
         content_type = response.headers.get("content-type")
-        image_host_path.write_bytes(response.content)
-        return len(response.content), content_type
+        content = response.content
+        if not _valid_image_response(content, content_type):
+            raise ChartDownloadInvalidImage(
+                content_type=content_type,
+                byte_count=len(content),
+            )
+        image_host_path.write_bytes(content)
+        return len(content), content_type
 
 
 def _input_error(chart_tool: str, args: dict[str, Any], family: str | None) -> str | None:
@@ -301,6 +339,24 @@ def _download_result_payload(
 ) -> str:
     try:
         image_bytes, content_type = _download_chart_image(chart_url, image_host_path)
+    except ChartDownloadInvalidImage as exc:
+        logger.warning(
+            "[SophiaReportChart] chart_download_invalid_image url=%s content_type=%s bytes=%d",
+            chart_url,
+            exc.content_type,
+            exc.byte_count,
+        )
+        return _result(
+            success=False,
+            error_type="chart_download_invalid_image",
+            chart_tool=chart_tool,
+            chart_family=family,
+            chart_url=chart_url,
+            spec_path=spec_path,
+            content_type=exc.content_type,
+            image_bytes=exc.byte_count,
+            hint="The chart service returned a non-image response; retry with simpler chart args or a deterministic chart.",
+        )
     except Exception as exc:
         logger.warning("[SophiaReportChart] chart_download_failed url=%s", chart_url, exc_info=True)
         return _result(
