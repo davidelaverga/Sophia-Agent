@@ -2248,10 +2248,13 @@ def _enrich_pdf_render_result_with_requested_pages(
         return payload
     enriched = dict(payload)
     if low == high:
-        enriched.setdefault("requested_page_count", low)
+        enriched["requested_page_count"] = low
+        enriched.pop("requested_min_pages", None)
+        enriched.pop("requested_max_pages", None)
     else:
-        enriched.setdefault("requested_min_pages", low)
-        enriched.setdefault("requested_max_pages", high)
+        enriched.pop("requested_page_count", None)
+        enriched["requested_min_pages"] = low
+        enriched["requested_max_pages"] = high
     if (
         enriched.get("success") is True
         and _pdf_page_count_off_target(enriched)

@@ -247,6 +247,49 @@ def test_pdf_requested_page_target_enriches_render_result() -> None:
     assert enriched["layout_warning"] == "page_count_off_target"
 
 
+def test_pdf_requested_page_target_prefers_state_over_tool_payload() -> None:
+    enriched = _enrich_pdf_render_result_with_requested_pages(
+        {
+            "success": True,
+            "page_count": 8,
+            "requested_page_count": 8,
+            "requested_min_pages": 8,
+            "requested_max_pages": 8,
+            "layout_quality": "ok",
+            "layout_warning": None,
+        },
+        {"builder_pdf_requested_page_count": 2},
+    )
+
+    assert enriched["requested_page_count"] == 2
+    assert "requested_min_pages" not in enriched
+    assert "requested_max_pages" not in enriched
+    assert enriched["layout_quality"] == "warning"
+    assert enriched["layout_warning"] == "page_count_off_target"
+
+
+def test_pdf_requested_page_range_prefers_state_over_tool_exact_payload() -> None:
+    enriched = _enrich_pdf_render_result_with_requested_pages(
+        {
+            "success": True,
+            "page_count": 8,
+            "requested_page_count": 8,
+            "layout_quality": "ok",
+            "layout_warning": None,
+        },
+        {
+            "builder_pdf_requested_min_pages": 2,
+            "builder_pdf_requested_max_pages": 3,
+        },
+    )
+
+    assert "requested_page_count" not in enriched
+    assert enriched["requested_min_pages"] == 2
+    assert enriched["requested_max_pages"] == 3
+    assert enriched["layout_quality"] == "warning"
+    assert enriched["layout_warning"] == "page_count_off_target"
+
+
 def test_pdf_page_count_repair_expands_under_target_report() -> None:
     message = _pdf_layout_repair_message(
         {
