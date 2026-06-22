@@ -2665,6 +2665,127 @@ def _visual_asset_paths(state: dict[str, Any]) -> list[str]:
     return [path for path in paths if isinstance(path, str)]
 
 
+_MARKDOWN_IMAGE_REF_RE = re.compile(r"!\[[^\]]*]\(([^)\s]+)(?:\s+['\"][^'\"]*['\"])?\)")
+_HTML_IMAGE_SRC_RE = re.compile(r"<img\b[^>]*\bsrc=['\"]([^'\"]+)['\"]", re.IGNORECASE)
+
+
+def _virtual_output_path_from_host(path: Path, state: dict[str, Any]) -> str | None:
+    outputs_root = _outputs_root_from_state(state)
+    if outputs_root is None:
+        return None
+    try:
+        relative = path.resolve().relative_to(outputs_root.resolve())
+    except (OSError, ValueError):
+        return None
+    return f"{_OUTPUTS_VIRTUAL_PREFIX}{relative.as_posix()}"
+
+
+def _report_source_candidate_files(state: dict[str, Any]) -> list[Path]:
+    candidates: list[Path] = []
+
+    def add_virtual(path: object) -> None:
+        if not isinstance(path, str) or not path.strip():
+            return
+        local = _local_output_file_for_artifact(state, path)
+        if local is not None:
+            candidates.append(local)
+
+    render_result = state.get("builder_pdf_render_result")
+    if isinstance(render_result, dict):
+        add_virtual(render_result.get("markdown_path") or render_result.get("source_path"))
+        pdf_path = render_result.get("pdf_path")
+        pdf_file = _local_output_file_for_artifact(state, pdf_path)
+        if pdf_file is not None:
+            candidates.extend(
+                sibling for sibling in (
+                    pdf_file.with_suffix(".md"),
+                    pdf_file.with_suffix(".markdown"),
+                    pdf_file.with_suffix(".html"),
+                )
+                if sibling.is_file()
+            )
+
+    target = state.get("builder_artifact_target_path")
+    add_virtual(target)
+    target_file = _local_output_file_for_artifact(state, target)
+    if target_file is not None and target_file.suffix.lower() == ".pdf":
+        candidates.extend(
+            sibling for sibling in (
+                target_file.with_suffix(".md"),
+                target_file.with_suffix(".markdown"),
+                target_file.with_suffix(".html"),
+            )
+            if sibling.is_file()
+        )
+
+    preferred = _preferred_pdf_render_source_path(state)
+    add_virtual(preferred)
+
+    seen: set[Path] = set()
+    unique: list[Path] = []
+    for candidate in candidates:
+        try:
+            resolved = candidate.resolve()
+        except OSError:
+            continue
+        if resolved in seen:
+            continue
+        seen.add(resolved)
+        unique.append(candidate)
+    return unique
+
+
+def _markdown_image_refs(text: str) -> list[str]:
+    return [
+        ref.strip().strip("<>")
+        for ref in [*_MARKDOWN_IMAGE_REF_RE.findall(text), *_HTML_IMAGE_SRC_RE.findall(text)]
+        if ref.strip()
+    ]
+
+
+def _resolve_markdown_image_ref(ref: str, source_file: Path, state: dict[str, Any]) -> str | None:
+    if re.match(r"^(?:https?:|data:)", ref, re.IGNORECASE):
+        return None
+    canonical = _canonical_outputs_artifact_path(ref)
+    if canonical:
+        return canonical
+    pure = PurePosixPath(ref)
+    if pure.is_absolute() or ".." in pure.parts:
+        return None
+    outputs_root = _outputs_root_from_state(state)
+    candidates = [source_file.parent / pure.as_posix()]
+    if outputs_root is not None:
+        candidates.append(outputs_root / pure.as_posix())
+    for candidate in candidates:
+        if candidate.is_file():
+            return _virtual_output_path_from_host(candidate, state)
+    if outputs_root is not None:
+        return f"{_OUTPUTS_VIRTUAL_PREFIX}{pure.as_posix()}"
+    return None
+
+
+def _embedded_report_figure_paths(state: dict[str, Any]) -> set[str]:
+    embedded: set[str] = set()
+    for source_file in _report_source_candidate_files(state):
+        try:
+            text = source_file.read_text(encoding="utf-8", errors="ignore")
+        except OSError:
+            continue
+        for ref in _markdown_image_refs(text):
+            resolved = _resolve_markdown_image_ref(ref, source_file, state)
+            if resolved:
+                embedded.add(resolved)
+    return embedded
+
+
+def _visual_record_embedded(record: dict[str, Any], embedded_paths: set[str]) -> bool:
+    raw_path = record.get("path")
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return False
+    canonical = _canonical_outputs_artifact_path(raw_path)
+    return canonical in embedded_paths if canonical else raw_path.strip() in embedded_paths
+
+
 def _visual_figure_family_counts(state: dict[str, Any]) -> Counter[str]:
     diagnostics = state.get("builder_visual_diagnostics")
     if not isinstance(diagnostics, dict):
@@ -2672,11 +2793,16 @@ def _visual_figure_family_counts(state: dict[str, Any]) -> Counter[str]:
     families: list[str] = []
     records = diagnostics.get("visual_figure_records")
     if isinstance(records, list):
+        embedded_paths = _embedded_report_figure_paths(state) if _requested_pdf_artifact(state) else set()
         families.extend(
             str(record.get("family")).strip()
             for record in records
-            if isinstance(record, dict) and str(record.get("family") or "").strip()
+            if isinstance(record, dict)
+            and str(record.get("family") or "").strip()
+            and (not embedded_paths or _visual_record_embedded(record, embedded_paths))
         )
+        if embedded_paths:
+            return Counter(families)
     if not families:
         raw_families = diagnostics.get("visual_figure_families") or []
         families.extend(

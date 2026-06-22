@@ -365,6 +365,15 @@ _PAGE_TARGET_OUTPUT_BEFORE_RE = re.compile(
     re.IGNORECASE | re.DOTALL,
 )
 _PAGE_TARGET_OUTPUT_AFTER_RE = re.compile(r"\bpdf\b", re.IGNORECASE)
+_PAGE_TARGET_OUTPUT_VERB_BEFORE_RE = re.compile(
+    r"\b(?:build|create|make|generate|produce|write|render|draft|prepare|deliver)\b(?:\s+\w+){0,6}\s*$",
+    re.IGNORECASE,
+)
+_PAGE_TARGET_OUTPUT_NOUN_AFTER_RE = re.compile(
+    r"^\s*(?:(?:technical|concise|detailed|short|long|final|pdf)\s+){0,6}"
+    r"(?:pdf\s+)?(?:report|document|deliverable|output|write[- ]?up)\b",
+    re.IGNORECASE,
+)
 _PAGE_TARGET_SOURCE_NOUN_RE = re.compile(r"\b(?:report|document|source|memo|paper|file|article)\b", re.IGNORECASE)
 
 
@@ -385,8 +394,13 @@ def _page_target_is_output_context(text: str, match: re.Match[str]) -> bool:
         and len(re.findall(r"\w+", after[: after_pdf.start()])) <= 4
         and not _PAGE_TARGET_SOURCE_NOUN_RE.search(after[: after_pdf.start()])
     )
+    after_targets_output_noun = bool(
+        _PAGE_TARGET_OUTPUT_VERB_BEFORE_RE.search(before)
+        and _PAGE_TARGET_OUTPUT_NOUN_AFTER_RE.search(after)
+    )
     return bool(
         after_targets_pdf
+        or after_targets_output_noun
         or _PAGE_TARGET_OUTPUT_BEFORE_RE.search(before)
     )
 

@@ -282,7 +282,9 @@ def test_autowire_assigns_generated_pngs_to_content_slides(tmp_path) -> None:
     rewritten = _json.loads(plan_file.read_text(encoding="utf-8"))
     slides = rewritten["slides"]
     assert "image" not in slides[0]  # title slide untouched
-    assert slides[1]["image"] == "/mnt/user-data/outputs/visuals/timeline.png"
+    assert slides[1]["visual_path"] == "/mnt/user-data/outputs/visuals/timeline.png"
+    assert slides[1]["data_chart"] is True
+    assert "image" not in slides[1]
 
 
 def test_autowire_drops_refs_to_missing_files(tmp_path) -> None:
@@ -443,7 +445,9 @@ def test_autowire_prefers_generated_hero_for_title_slide(tmp_path) -> None:
     assert slides[0]["image"] == "/mnt/user-data/outputs/visuals/hero-launch.png"
     assert slides[0]["layout"] == "full_bleed_image"
     # The chart still round-robins onto the content slide.
-    assert slides[1]["image"] == "/mnt/user-data/outputs/visuals/timeline.png"
+    assert slides[1]["visual_path"] == "/mnt/user-data/outputs/visuals/timeline.png"
+    assert slides[1]["data_chart"] is True
+    assert "image" not in slides[1]
 
 
 def test_autowire_accepts_jpg_generated_images(tmp_path) -> None:

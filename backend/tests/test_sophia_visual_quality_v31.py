@@ -130,6 +130,38 @@ def test_report_figure_family_gate_blocks_once_and_marks_quality_warning() -> No
     assert warned["confidence"] == 0.72
 
 
+def test_report_figure_family_gate_counts_only_embedded_figures(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    visuals = outputs / "visuals"
+    visuals.mkdir(parents=True)
+    (outputs / "report.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    (outputs / "report.md").write_text(
+        "# Report\n\n![Final chart](visuals/final.png)\n",
+        encoding="utf-8",
+    )
+    for name in ("unused-a.png", "unused-b.png", "unused-c.png", "final.png"):
+        (visuals / name).write_bytes(b"png")
+
+    state = {
+        "thread_data": {"outputs_path": str(outputs)},
+        "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+        "builder_pdf_render_result": {
+            "success": True,
+            "pdf_path": "/mnt/user-data/outputs/report.pdf",
+        },
+        "builder_visual_diagnostics": {
+            "visual_figure_records": [
+                {"family": "chart:bar", "path": "/mnt/user-data/outputs/visuals/unused-a.png"},
+                {"family": "chart:bar", "path": "/mnt/user-data/outputs/visuals/unused-b.png"},
+                {"family": "chart:bar", "path": "/mnt/user-data/outputs/visuals/unused-c.png"},
+                {"family": "chart:bar", "path": "/mnt/user-data/outputs/visuals/final.png"},
+            ]
+        },
+    }
+
+    assert _report_figure_family_problems(state) == []
+
+
 def test_pdf_requested_page_target_enriches_render_result() -> None:
     enriched = _enrich_pdf_render_result_with_requested_pages(
         {
@@ -175,3 +207,29 @@ def test_pdf_page_target_ignores_source_document_page_mentions() -> None:
     )
 
     assert updates == {}
+
+
+def test_pdf_page_target_accepts_count_before_output_report_noun() -> None:
+    updates = _pdf_page_target_updates(
+        {
+            "task_type": "pdf",
+            "task": "Write a 2-page report on the failed build attempts.",
+        },
+        companion_artifact={},
+        artifact_target_path="/mnt/user-data/outputs/build-report.pdf",
+    )
+
+    assert updates["builder_pdf_requested_page_count"] == 2
+
+
+def test_pdf_page_target_accepts_count_before_document_as_pdf() -> None:
+    updates = _pdf_page_target_updates(
+        {
+            "task_type": "pdf",
+            "task": "Prepare a 4-page document as PDF about retrieval quality.",
+        },
+        companion_artifact={},
+        artifact_target_path="/mnt/user-data/outputs/retrieval-quality.pdf",
+    )
+
+    assert updates["builder_pdf_requested_page_count"] == 4
