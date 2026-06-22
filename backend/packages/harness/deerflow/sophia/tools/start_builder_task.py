@@ -163,6 +163,7 @@ _GENERIC_REPORT_OUTPUT_RE = re.compile(
     r"(?:[\w-]+\s+){0,8}(?:report|write[- ]?up)\b",
     re.IGNORECASE,
 )
+_REPORT_OUTPUT_NOUN_RE = re.compile(r"\b(?:report|write[- ]?up)\b", re.IGNORECASE)
 _PPTX_OUTPUT_RE = re.compile(
     r"\b(?:"
     r"pptx|\.pptx|power\s*point"
@@ -402,6 +403,74 @@ def _pattern_affirmative_match(
     return _first_affirmative_match(pattern, text, source_veto=source_veto) is not None
 
 
+def _generic_report_precedes_topical_presentation_word(
+    text: str,
+    *,
+    report_match: re.Match[str] | None,
+    pptx_match: re.Match[str] | None,
+) -> bool:
+    """True when the report is the requested object and PPTX words are topical.
+
+    The broad PPTX branch intentionally catches "write a presentation deck",
+    but it can also span from the verb through a later topic noun:
+    "write a report about presentation design".  In that shape, the report
+    noun appears before the first presentation/deck/slide word and the bridge
+    is topical rather than a target conversion ("as/to/into presentation").
+    """
+    if report_match is None or pptx_match is None:
+        return False
+    report_noun = _REPORT_OUTPUT_NOUN_RE.search(report_match.group(0))
+    if report_noun is None:
+        return False
+    report_end = report_match.start() + report_noun.end()
+    search_start = max(report_end, pptx_match.start())
+    search_end = max(search_start, pptx_match.end())
+    presentation_word = _PRESENTATION_FORMAT_WORD_RE.search(
+        text, search_start, search_end
+    )
+    if presentation_word is None:
+        return False
+    bridge = text[report_end : presentation_word.start()]
+    if re.search(r"\b(?:as|in|to|into)\b", bridge, re.IGNORECASE):
+        return False
+    return True
+
+
+def _missing_presentation_rule_was_negated(
+    reason: str, text: str, vetoed: list[str]
+) -> bool:
+    return (
+        reason == "explicit_presentation_deck"
+        and "explicit_presentation_deck" not in vetoed
+        and _has_negated_presentation_format_mention(text)
+    )
+
+
+def _extension_from_affirmative_pattern(
+    text: str,
+    *,
+    ext: str,
+    reason: str,
+    pattern: re.Pattern[str],
+    generic_report_match: re.Match[str] | None,
+) -> tuple[str, str] | None:
+    match = _first_affirmative_match(
+        pattern, text, source_veto=reason in _SOURCE_VETO_RULES
+    )
+    if match is None:
+        return None
+    if (
+        reason == "explicit_presentation_deck"
+        and _generic_report_precedes_topical_presentation_word(
+            text,
+            report_match=generic_report_match,
+            pptx_match=match,
+        )
+    ):
+        return "pdf", "explicit_pdf_deliverable"
+    return ext, reason
+
+
 def _requested_output_extension_match_with_vetoes(
     text: str | None,
 ) -> tuple[str | None, str | None, list[str]]:
@@ -417,19 +486,21 @@ def _requested_output_extension_match_with_vetoes(
         if _has_negated_presentation_format_mention(text):
             vetoed.append("explicit_presentation_deck")
         return "pdf", "explicit_pdf_deliverable", vetoed
+    generic_report_match = _first_affirmative_match(_GENERIC_REPORT_OUTPUT_RE, text)
     for ext, reason, pattern in _REQUESTED_OUTPUT_EXTENSION_PATTERNS:
         if not pattern.search(text):
-            if (
-                reason == "explicit_presentation_deck"
-                and "explicit_presentation_deck" not in vetoed
-                and _has_negated_presentation_format_mention(text)
-            ):
+            if _missing_presentation_rule_was_negated(reason, text, vetoed):
                 vetoed.append(reason)
             continue
-        if _pattern_affirmative_match(
-            pattern, text, source_veto=reason in _SOURCE_VETO_RULES
-        ):
-            return ext, reason, vetoed
+        matched = _extension_from_affirmative_pattern(
+            text,
+            ext=ext,
+            reason=reason,
+            pattern=pattern,
+            generic_report_match=generic_report_match,
+        )
+        if matched is not None:
+            return *matched, vetoed
         vetoed.append(reason)
     return None, None, vetoed
 

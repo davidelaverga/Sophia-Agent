@@ -114,6 +114,45 @@ def test_pptx_about_pdf_report_topic_stays_pptx():
     assert resolution.rule == "explicit_presentation_deck"
 
 
+def test_generic_report_about_presentation_topic_resolves_to_pdf():
+    resolution = _resolve_target_format(
+        current_user_text="Write a report about modern presentation design",
+        description="Write a report about modern presentation design",
+        task_type="document",
+    )
+    assert resolution.final_ext == "pdf"
+    assert resolution.source == "current_user_turn"
+    assert resolution.rule == "explicit_pdf_deliverable"
+
+
+def test_generic_report_about_slide_decks_resolves_to_pdf():
+    ext, reason = _requested_output_extension_match(
+        "Write a report about slide decks"
+    )
+    assert ext == "pdf"
+    assert reason == "explicit_pdf_deliverable"
+
+
+def test_explicit_presentation_deck_about_report_topic_stays_pptx():
+    resolution = _resolve_target_format(
+        current_user_text="write a presentation deck about report design",
+        description="write a presentation deck about report design",
+        task_type="presentation",
+    )
+    assert resolution.final_ext == "pptx"
+    assert resolution.rule == "explicit_presentation_deck"
+
+
+def test_report_as_presentation_slides_stays_pptx():
+    resolution = _resolve_target_format(
+        current_user_text="write the report as presentation slides",
+        description="write the report as presentation slides",
+        task_type="presentation",
+    )
+    assert resolution.final_ext == "pptx"
+    assert resolution.rule == "explicit_presentation_deck"
+
+
 def test_powerpoint_deck_from_pdf_source_resolves_to_pptx():
     resolution = _resolve_target_format(
         current_user_text="build a PowerPoint deck based on a PDF source document",
