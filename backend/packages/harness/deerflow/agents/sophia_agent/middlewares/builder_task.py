@@ -374,6 +374,13 @@ _PAGE_TARGET_OUTPUT_NOUN_AFTER_RE = re.compile(
     r"(?:pdf\s+)?(?:report|document|deliverable|output|write[- ]?up)\b",
     re.IGNORECASE,
 )
+_PAGE_TARGET_OUTPUT_NOUN_BEFORE_COUNT_RE = re.compile(
+    r"\b(?:pdf\s+)?(?:report|document|deliverable|output|write[- ]?up)\b\s+"
+    r"(?:(?:in|within|under|at|of|to|as|up\s+to|no\s+more\s+than)\s+(?:exactly\s+)?"
+    r"|(?:should|must|needs?)\s+be\s+(?:exactly\s+)?"
+    r"|(?:that|which)\s+is\s+(?:exactly\s+)?)$",
+    re.IGNORECASE,
+)
 _PAGE_TARGET_SOURCE_NOUN_RE = re.compile(r"\b(?:report|document|source|memo|paper|file|article)\b", re.IGNORECASE)
 
 
@@ -401,6 +408,7 @@ def _page_target_is_output_context(text: str, match: re.Match[str]) -> bool:
     return bool(
         after_targets_pdf
         or after_targets_output_noun
+        or _PAGE_TARGET_OUTPUT_NOUN_BEFORE_COUNT_RE.search(before)
         or _PAGE_TARGET_OUTPUT_BEFORE_RE.search(before)
     )
 

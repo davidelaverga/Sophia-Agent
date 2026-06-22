@@ -297,3 +297,29 @@ def test_pdf_page_target_accepts_count_before_document_as_pdf() -> None:
     )
 
     assert updates["builder_pdf_requested_page_count"] == 4
+
+
+def test_pdf_page_target_accepts_count_after_report_noun() -> None:
+    updates = _pdf_page_target_updates(
+        {
+            "task_type": "pdf",
+            "task": "Create a PDF report in 2 pages about retrieval quality.",
+        },
+        companion_artifact={},
+        artifact_target_path="/mnt/user-data/outputs/retrieval-quality.pdf",
+    )
+
+    assert updates["builder_pdf_requested_page_count"] == 2
+
+
+def test_pdf_page_target_accepts_count_after_plain_report_noun() -> None:
+    updates = _pdf_page_target_updates(
+        {
+            "task_type": "pdf",
+            "task": "Write the report in 2 pages.",
+        },
+        companion_artifact={},
+        artifact_target_path="/mnt/user-data/outputs/report.pdf",
+    )
+
+    assert updates["builder_pdf_requested_page_count"] == 2
