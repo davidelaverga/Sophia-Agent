@@ -157,7 +157,10 @@ _PDF_OUTPUT_RE = re.compile(
 )
 _GENERIC_REPORT_OUTPUT_RE = re.compile(
     r"\b(?:build|create|make|generate|produce|write|render|export|draft|prepare)\s+"
-    r"(?:an?\s+|the\s+)?(?:report|write[- ]?up)\b",
+    r"(?:me\s+)?(?:an?\s+|the\s+)?"
+    # Keep this bounded: generic report asks default to PDF, but explicit
+    # HTML/Markdown/PPTX/PDF phrases above still take precedence.
+    r"(?:[\w-]+\s+){0,8}(?:report|write[- ]?up)\b",
     re.IGNORECASE,
 )
 _PPTX_OUTPUT_RE = re.compile(

@@ -105,6 +105,39 @@ def test_silent_current_turn_falls_back_to_description():
     assert resolution.user_requested_ext is None
 
 
+def test_page_count_report_request_resolves_document_to_pdf():
+    resolution = _resolve_target_format(
+        current_user_text="Write a 2-page report on the failed build attempts.",
+        description=None,
+        task_type="document",
+    )
+    assert resolution.final_ext == "pdf"
+    assert resolution.rule == "explicit_pdf_deliverable"
+    assert resolution.source == "current_user_turn"
+
+
+def test_short_report_modifier_resolves_research_to_pdf():
+    resolution = _resolve_target_format(
+        current_user_text="Write a technical report on Hermes context engineering.",
+        description=None,
+        task_type="research",
+    )
+    assert resolution.final_ext == "pdf"
+    assert resolution.rule == "explicit_pdf_deliverable"
+    assert resolution.source == "current_user_turn"
+
+
+def test_report_modifiers_in_description_resolve_to_pdf_when_turn_is_silent():
+    resolution = _resolve_target_format(
+        current_user_text="yes, please build that",
+        description="[document] Prepare an 8-page technical report on retrieval systems.",
+        task_type="document",
+    )
+    assert resolution.final_ext == "pdf"
+    assert resolution.rule == "explicit_pdf_deliverable"
+    assert resolution.source == "description"
+
+
 def test_both_silent_falls_back_to_task_type_default():
     resolution = _resolve_target_format(
         current_user_text="do the thing we talked about",
