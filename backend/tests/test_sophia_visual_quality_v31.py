@@ -10,7 +10,10 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     _report_figure_family_problems,
     _validate_deck_plan,
 )
-from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_task import (
+    BuilderTaskMiddleware,
+    _pdf_page_target_updates,
+)
 
 
 def _runtime() -> SimpleNamespace:
@@ -159,3 +162,16 @@ def test_builder_task_briefing_extracts_pdf_requested_pages() -> None:
     assert result is not None
     assert result["builder_pdf_requested_page_count"] == 8
     assert "requested_pages=8" in _briefing(result)
+
+
+def test_pdf_page_target_ignores_source_document_page_mentions() -> None:
+    updates = _pdf_page_target_updates(
+        {
+            "task_type": "pdf",
+            "task": "Summarize this 12-page report as a concise PDF.",
+        },
+        companion_artifact={"artifact_title": "10-page source memo"},
+        artifact_target_path="/mnt/user-data/outputs/summary-12-page-report.pdf",
+    )
+
+    assert updates == {}

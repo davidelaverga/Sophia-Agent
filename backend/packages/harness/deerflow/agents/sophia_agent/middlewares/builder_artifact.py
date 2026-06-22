@@ -499,18 +499,27 @@ def _chart_wire_targets(slides: list) -> list[dict]:
         slide
         for slide in slides
         if isinstance(slide, dict)
-        and str(slide.get("type") or "").lower() != "title"
+        and str(slide.get("type") or "").strip().lower() not in {"title", "cover"}
+        and str(slide.get("layout") or "").strip().lower() not in {"title", "cover", "section_divider", "full_bleed_image"}
         and not slide.get("image")
+        and not slide.get("visual_path")
     ]
     if not targets and len(slides) > 1:
-        targets = [slide for slide in slides[1:] if isinstance(slide, dict) and not slide.get("image")]
+        targets = [
+            slide
+            for slide in slides[1:]
+            if isinstance(slide, dict)
+            and not slide.get("image")
+            and not slide.get("visual_path")
+        ]
     return targets
 
 
 def _wire_chart_assets(slides: list, chart_assets: list[str]) -> int:
     wired = 0
     for slide, asset in zip(_chart_wire_targets(slides), chart_assets, strict=False):
-        slide["image"] = asset
+        slide["visual_path"] = asset
+        slide["data_chart"] = True
         wired += 1
     return wired
 

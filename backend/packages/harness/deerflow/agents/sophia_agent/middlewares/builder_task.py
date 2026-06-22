@@ -359,6 +359,13 @@ def _artifact_target_extension(artifact_target_path: object) -> str:
 
 _PAGE_RANGE_RE = re.compile(r"(?<!\d)(\d{1,2})\s*(?:-|to)\s*(\d{1,2})\s*pages?\b", re.IGNORECASE)
 _PAGE_COUNT_RE = re.compile(r"(?<!\d)(\d{1,2})\s*(?:-| )?\s*pages?\b", re.IGNORECASE)
+_PAGE_TARGET_OUTPUT_BEFORE_RE = re.compile(
+    r"\b(?:pdf|report|document|deliverable|output)\b.{0,80}"
+    r"\b(?:exactly|length|target|make|create|generate|produce|render|write|deliver|should|must|needs?)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_PAGE_TARGET_OUTPUT_AFTER_RE = re.compile(r"\bpdf\b", re.IGNORECASE)
+_PAGE_TARGET_SOURCE_NOUN_RE = re.compile(r"\b(?:report|document|source|memo|paper|file|article)\b", re.IGNORECASE)
 
 
 def _valid_page_count(value: str) -> int | None:
@@ -369,6 +376,42 @@ def _valid_page_count(value: str) -> int | None:
     return count if 1 <= count <= 60 else None
 
 
+def _page_target_is_output_context(text: str, match: re.Match[str]) -> bool:
+    before = text[max(0, match.start() - 100): match.start()]
+    after = text[match.end(): match.end() + 100]
+    after_pdf = _PAGE_TARGET_OUTPUT_AFTER_RE.search(after)
+    after_targets_pdf = bool(
+        after_pdf
+        and len(re.findall(r"\w+", after[: after_pdf.start()])) <= 4
+        and not _PAGE_TARGET_SOURCE_NOUN_RE.search(after[: after_pdf.start()])
+    )
+    return bool(
+        after_targets_pdf
+        or _PAGE_TARGET_OUTPUT_BEFORE_RE.search(before)
+    )
+
+
+def _page_range_target(combined: str) -> tuple[int, int] | None:
+    for match in _PAGE_RANGE_RE.finditer(combined):
+        if not _page_target_is_output_context(combined, match):
+            continue
+        low = _valid_page_count(match.group(1))
+        high = _valid_page_count(match.group(2))
+        if low is not None and high is not None:
+            return tuple(sorted((low, high)))
+    return None
+
+
+def _page_count_target(combined: str) -> int | None:
+    for match in _PAGE_COUNT_RE.finditer(combined):
+        if not _page_target_is_output_context(combined, match):
+            continue
+        count = _valid_page_count(match.group(1))
+        if count is not None:
+            return count
+    return None
+
+
 def _pdf_page_target_updates(
     delegation_context: dict[str, Any],
     *,
@@ -377,28 +420,21 @@ def _pdf_page_target_updates(
 ) -> dict[str, Any]:
     text_parts: list[str] = []
     for source in (delegation_context, companion_artifact):
-        for key in ("task", "description", "artifact_brief", "original_task", "title", "artifact_title"):
+        for key in ("task", "description", "artifact_brief", "original_task"):
             value = source.get(key) if isinstance(source, dict) else None
             if isinstance(value, str) and value.strip():
                 text_parts.append(value)
-    if isinstance(artifact_target_path, str):
-        text_parts.append(artifact_target_path)
     combined = "\n".join(text_parts)
     if not combined:
         return {}
-    if match := _PAGE_RANGE_RE.search(combined):
-        low = _valid_page_count(match.group(1))
-        high = _valid_page_count(match.group(2))
-        if low is not None and high is not None:
-            lo, hi = sorted((low, high))
-            return {
-                "builder_pdf_requested_min_pages": lo,
-                "builder_pdf_requested_max_pages": hi,
-            }
-    if match := _PAGE_COUNT_RE.search(combined):
-        count = _valid_page_count(match.group(1))
-        if count is not None:
-            return {"builder_pdf_requested_page_count": count}
+    if page_range := _page_range_target(combined):
+        lo, hi = page_range
+        return {
+            "builder_pdf_requested_min_pages": lo,
+            "builder_pdf_requested_max_pages": hi,
+        }
+    if count := _page_count_target(combined):
+        return {"builder_pdf_requested_page_count": count}
     return {}
 
 

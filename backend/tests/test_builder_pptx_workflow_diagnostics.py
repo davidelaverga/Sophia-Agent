@@ -22,6 +22,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     _validate_deck_plan,
     _visual_asset_result_delta,
     _visual_design_skill_read_seen,
+    _wire_plan_visual_assets,
 )
 
 _REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -638,6 +639,38 @@ def test_deck_plan_validation_repairs_known_chart_visual_metadata() -> None:
     repaired = diagnostics["pptx_plan_json"]
     assert repaired["slides"][1]["data_chart"] is True
     assert state["builder_pptx_plan_deterministic_repair_attempted"] is True
+
+
+def test_deck_plan_validation_autowires_chart_assets_without_slide_qc(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    visuals = outputs / "visuals"
+    visuals.mkdir(parents=True)
+    chart = visuals / "benchmark-chart.png"
+    _write_png(chart)
+    plan = {
+        "slides": [
+            {"type": "cover", "title": "Launch"},
+            {"type": "content", "title": "Benchmark chart", "subtype": "chart"},
+        ]
+    }
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation", "task": "Create a visual deck"},
+        "builder_visual_diagnostics": {
+            "visual_asset_paths": ["/mnt/user-data/outputs/visuals/benchmark-chart.png"],
+        },
+        "thread_data": {"outputs_path": str(outputs)},
+    }
+
+    assert _wire_plan_visual_assets(plan["slides"], state) is True
+    assert plan["slides"][1]["visual_path"] == "/mnt/user-data/outputs/visuals/benchmark-chart.png"
+    assert plan["slides"][1]["data_chart"] is True
+    assert "image" not in plan["slides"][1]
+    assert _validate_deck_plan(
+        plan,
+        {"pptx_slide_title_results": [{"slide": 1, "title_present": True}]},
+        state,
+    ) == []
 
 
 def test_deck_plan_validation_does_not_repair_missing_image_refs_from_unused_outputs() -> None:
