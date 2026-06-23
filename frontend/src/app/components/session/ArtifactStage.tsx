@@ -912,7 +912,7 @@ export function ArtifactStage({
         ...details,
       },
     })
-  }, [annotationCounts, artifactCapabilities.supportsAnnotations, artifactCapabilityTelemetry, artifactId, fitMode, pageCount, pageIndex, primaryFile?.path, rendererKind, reviewStale, toolMode, zoom])
+  }, [annotationCounts, artifactCapabilities.supportsAnnotations, artifactCapabilityTelemetry, artifactId, canvasPreviewKind, fitMode, pageCount, pageIndex, primaryFile?.path, renderFile?.path, rendererKind, reviewStale, toolMode, zoom])
   const applyVoiceCommand = useCallback((command: ArtifactReviewVoiceCommand): ArtifactReviewVoiceCommandApplyResult => {
     const normalizedPageCount = Math.max(1, Math.floor(pageCount))
     const currentPageIndex = Math.min(Math.max(0, pageIndex), normalizedPageCount - 1)
@@ -1637,10 +1637,8 @@ export function ArtifactStage({
     artifactCapabilities.supportsAnnotatedExport,
     artifactCapabilityTelemetry,
     artifactId,
-    canvasPreviewKind,
     onWorkspaceExportRequested,
     primaryFile?.path,
-    renderFile?.path,
     rendererKind,
   ])
 
