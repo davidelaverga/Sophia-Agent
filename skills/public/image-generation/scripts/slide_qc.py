@@ -196,8 +196,17 @@ def _ocr_crop_text(image_file: Path, *, y0: float, y1: float) -> str:
 
 
 _TEXT_READS_RE = re.compile(r"\bTHE\s+TEXT\s+READS\s*:\s*", re.IGNORECASE)
-_JSON_FIELD_TITLE_KEYS = ("title", "heading", "title at top")
-_JSON_FIELD_CAPTION_KEYS = ("caption", "takeaway", "bottom caption band", "bottom caption", "caption band")
+_JSON_FIELD_TITLE_KEYS = ("title", "heading", "title at top", "title band text")
+_JSON_FIELD_CAPTION_KEYS = (
+    "caption",
+    "takeaway",
+    "bottom caption band",
+    "bottom caption",
+    "caption band",
+    "caption band text",
+    "bottom caption band text",
+    "bottom caption text",
+)
 
 
 def _clean_expected_text(value: str) -> str:
@@ -222,6 +231,22 @@ def _first_json_string(payload: Any, keys: tuple[str, ...]) -> str | None:
     return None
 
 
+def _json_string_values(payload: Any) -> list[str]:
+    if isinstance(payload, str):
+        return [payload]
+    if isinstance(payload, dict):
+        values: list[str] = []
+        for value in payload.values():
+            values.extend(_json_string_values(value))
+        return values
+    if isinstance(payload, list):
+        values: list[str] = []
+        for item in payload:
+            values.extend(_json_string_values(item))
+        return values
+    return []
+
+
 def _line_field_value(spec_text: str, keys: tuple[str, ...]) -> str | None:
     key_pattern = "|".join(re.escape(key).replace("\\ ", "\\s+") for key in keys)
     pattern = re.compile(
@@ -244,6 +269,10 @@ def _expected_text(spec_text: str, keys: tuple[str, ...]) -> str | None:
         found = _first_json_string(loaded, keys)
         if found:
             return found
+        for value in _json_string_values(loaded):
+            found = _line_field_value(value, keys)
+            if found:
+                return found
     return _line_field_value(spec_text, keys)
 
 

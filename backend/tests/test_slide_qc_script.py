@@ -165,6 +165,62 @@ def test_presence_result_checks_title_and_caption_bands(qc_module, tmp_path: Pat
     }
 
 
+def test_presence_result_extracts_documented_band_text_labels(
+    qc_module,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_file = tmp_path / "slide.png"
+    image_file.write_bytes(b"fake-png")
+    spec_file = tmp_path / "slide.txt"
+    spec_file.write_text(
+        "Title band text: Flow Control\n"
+        "Bottom caption band text: The loop stops cleanly.",
+        encoding="utf-8",
+    )
+
+    def fake_ocr(_image_file: Path, *, y0: float, y1: float) -> str:
+        return "Flow Control" if y1 <= 0.14 else "The loop stops cleanly."
+
+    monkeypatch.setattr(qc_module.shutil, "which", lambda _name: "/usr/bin/tesseract")
+    monkeypatch.setattr(qc_module, "_ocr_crop_text", fake_ocr)
+
+    assert qc_module._presence_result(image_file, spec_file) == {
+        "title_present": True,
+        "caption_present": True,
+        "presence_pass": True,
+        "presence_reasons": [],
+    }
+
+
+def test_presence_result_extracts_band_text_from_json_prompt_field(
+    qc_module,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    image_file = tmp_path / "slide.png"
+    image_file.write_bytes(b"fake-png")
+    spec_file = tmp_path / "slide.json"
+    spec_file.write_text(
+        '{"prompt":"Title band text: Flow Control\\n'
+        'Bottom caption band text: The loop stops cleanly."}',
+        encoding="utf-8",
+    )
+
+    def fake_ocr(_image_file: Path, *, y0: float, y1: float) -> str:
+        return "Flow Control" if y1 <= 0.14 else ""
+
+    monkeypatch.setattr(qc_module.shutil, "which", lambda _name: "/usr/bin/tesseract")
+    monkeypatch.setattr(qc_module, "_ocr_crop_text", fake_ocr)
+
+    payload = qc_module._presence_result(image_file, spec_file)
+
+    assert payload["title_present"] is True
+    assert payload["caption_present"] is False
+    assert payload["presence_pass"] is False
+    assert "bottom band" in payload["presence_reasons"][0]
+
+
 def test_presence_result_blocks_missing_caption_band(qc_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     image_file = tmp_path / "slide.png"
     image_file.write_bytes(b"fake-png")
