@@ -194,6 +194,26 @@ class TestFallbackEnabledButNotConfigured:
 
 
 class TestFallbackEnabledAndConfigured:
+    @staticmethod
+    def _composed_builder_call(request, model_call):
+        """Production shape: LLMErrorHandling wraps the builder fallback.
+
+        The fallback is the inner model-call wrapper so provider availability
+        exceptions get a first chance at OpenAI before the generic LLM handler
+        converts them into a user-facing fallback message.
+        """
+        from deerflow.agents.middlewares.llm_error_handling_middleware import (
+            LLMErrorHandlingMiddleware,
+        )
+
+        error_mw = LLMErrorHandlingMiddleware(retry_max_attempts=1)
+        fallback_mw = BuilderProviderFallbackMiddleware()
+
+        def inner_handler(req):
+            return fallback_mw.wrap_model_call(req, model_call)
+
+        return error_mw.wrap_model_call(request, inner_handler)
+
     def test_auth_failure_retries_once_via_openai_with_same_tools(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable_fallback(monkeypatch)
         handler = _Handler(_ProviderStatusError(401), response="fallback-ok")
@@ -215,6 +235,44 @@ class TestFallbackEnabledAndConfigured:
         assert update["provider_error_class"] == "auth_error"
         assert update["fallback_primary_bypassed"] is False
         assert update["final_provider"] == "openai"
+
+    def test_anthropic_overload_reaches_fallback_before_generic_reply(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _enable_fallback(monkeypatch)
+        handler = _Handler(_ProviderStatusError(529, "Overloaded"), response="fallback-ok")
+        request = _FakeRequest()
+
+        result = self._composed_builder_call(request, handler)
+
+        assert len(handler.calls) == 2
+        assert handler.calls[1].model is _FALLBACK_MODEL_SENTINEL
+        assert result.model_response == "fallback-ok"
+        update = result.command.update["builder_provider_fallback"]
+        assert update["fallback_attempted"] is True
+        assert update["fallback_result"] == "success"
+        assert update["provider_error_class"] == "provider_unavailable"
+        assert update["final_provider"] == "openai"
+
+    def test_overload_without_fallback_keeps_generic_busy_message(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        from langchain_core.messages import AIMessage
+
+        _disable_fallback(monkeypatch)
+        handler = _Handler(_ProviderStatusError(529, "Overloaded"))
+
+        with caplog.at_level(logging.WARNING):
+            result = self._composed_builder_call(_FakeRequest(), handler)
+
+        assert len(handler.calls) == 1
+        assert isinstance(result, AIMessage)
+        assert result.additional_kwargs.get("deerflow_error_fallback") is True
+        assert result.additional_kwargs.get("error_reason") == "busy"
+        assert "temporarily unavailable" in result.content
+        assert "fallback_result=fallback_disabled" in caplog.text
 
     def test_primary_cooldown_bypasses_anthropic_on_next_turn(self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture) -> None:
         _enable_fallback(monkeypatch)

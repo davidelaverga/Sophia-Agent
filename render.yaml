@@ -59,6 +59,19 @@ services:
         value: Sophia
       - key: LANGSMITH_API_KEY
         sync: false
+      # Builder provider resilience: when Anthropic is overloaded or otherwise
+      # unavailable, retry the model turn once through OpenAI. OPENAI_API_KEY is
+      # already required above for builder visual skills.
+      - key: SOPHIA_BUILDER_OPENAI_FALLBACK_ENABLED
+        value: "true"
+      - key: SOPHIA_BUILDER_OPENAI_FALLBACK_MODEL
+        value: gpt-4.1
+      - key: SOPHIA_BUILDER_OPENAI_FALLBACK_TIMEOUT_SECONDS
+        value: "120"
+      - key: SOPHIA_BUILDER_OPENAI_FALLBACK_MAX_RETRIES
+        value: "1"
+      - key: SOPHIA_BUILDER_PRIMARY_COOLDOWN_SECONDS
+        value: "300"
       # Uncomment only if the write key spans multiple LangSmith workspaces.
       # - key: LANGSMITH_WORKSPACE_ID
       #   sync: false

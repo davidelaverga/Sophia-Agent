@@ -4741,6 +4741,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         failure_stage: str,
         failure_code: str,
         failure_reason: str,
+        provider_error_reason: str | None = None,
+        retryable: bool | None = None,
         emit_attempted: bool,
         emit_tool_call_seen: bool | None,
     ) -> dict[str, Any]:
@@ -4751,6 +4753,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 failure_stage=failure_stage,
                 failure_code=failure_code,
                 failure_reason=failure_reason,
+                provider_error_reason=provider_error_reason,
+                retryable=retryable,
                 emit_attempted=emit_attempted,
                 emit_tool_call_seen=emit_tool_call_seen,
                 completion_webhook_attempted=True,
@@ -4763,6 +4767,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             failure_stage=failure_stage,  # type: ignore[arg-type]
             failure_reason=failure_reason,
             failure_code=failure_code,
+            provider_error_reason=provider_error_reason,
+            retryable=retryable,
             emit_attempted=emit_attempted,
             emit_tool_call_seen=emit_tool_call_seen,
             completion_webhook_attempted=True,
@@ -4778,6 +4784,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         failure_stage: str,
         failure_code: str,
         failure_reason: str,
+        provider_error_reason: str | None = None,
+        retryable: bool | None = None,
         emit_attempted: bool,
         emit_tool_call_seen: bool | None,
     ) -> dict[str, Any]:
@@ -4788,10 +4796,39 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             failure_stage=failure_stage,
             failure_code=failure_code,
             failure_reason=failure_reason,
+            provider_error_reason=provider_error_reason,
+            retryable=retryable,
             emit_attempted=emit_attempted,
             emit_tool_call_seen=emit_tool_call_seen,
         )
         return fallback
+
+    @staticmethod
+    def _model_provider_failure_from_message(msg: Any) -> dict[str, Any] | None:
+        additional_kwargs = getattr(msg, "additional_kwargs", None)
+        if not isinstance(additional_kwargs, dict):
+            return None
+        if additional_kwargs.get("deerflow_error_fallback") is not True:
+            return None
+        reason = str(additional_kwargs.get("error_reason") or "generic").strip().lower()
+        if reason not in {"auth", "busy", "generic", "quota", "transient"}:
+            reason = "generic"
+        retryable = reason in {"busy", "transient"}
+        return {
+            "failure_stage": "model_provider",
+            "failure_code": (
+                "primary_provider_unavailable"
+                if retryable
+                else f"primary_provider_{reason}"
+            ),
+            "failure_reason": (
+                "Primary model provider was temporarily unavailable before the builder produced an artifact."
+                if retryable
+                else "Primary model provider failed before the builder produced an artifact."
+            ),
+            "provider_error_reason": reason,
+            "retryable": retryable,
+        }
 
     @staticmethod
     def _annotate_supabase_mirror_diagnostics(
@@ -9604,13 +9641,28 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "user_next_action": None,
                 "confidence": 0.3,
             }
+            provider_failure = self._model_provider_failure_from_message(msg)
             self._attach_terminal_failure_diagnostics(
                 state,
                 runtime,
                 fallback,
-                failure_stage="generation",
-                failure_code="builder_completed_without_deliverable",
-                failure_reason="Builder finished without producing a deliverable artifact.",
+                failure_stage=(
+                    provider_failure["failure_stage"] if provider_failure else "generation"
+                ),
+                failure_code=(
+                    provider_failure["failure_code"]
+                    if provider_failure
+                    else "builder_completed_without_deliverable"
+                ),
+                failure_reason=(
+                    provider_failure["failure_reason"]
+                    if provider_failure
+                    else "Builder finished without producing a deliverable artifact."
+                ),
+                provider_error_reason=(
+                    provider_failure["provider_error_reason"] if provider_failure else None
+                ),
+                retryable=provider_failure["retryable"] if provider_failure else None,
                 emit_attempted=False,
                 emit_tool_call_seen=False,
             )

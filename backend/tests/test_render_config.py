@@ -58,3 +58,17 @@ def test_langgraph_declares_openai_api_key_secret() -> None:
     assert "name: sophia-langgraph" in joined
     assert "key: OPENAI_API_KEY" in joined
     assert "sync: false" in joined
+
+
+def test_langgraph_enables_builder_openai_fallback_and_gateway_does_not() -> None:
+    langgraph = _service_env("sophia-langgraph")
+    gateway = _service_env("sophia-gateway")
+
+    assert langgraph["SOPHIA_BUILDER_OPENAI_FALLBACK_ENABLED"]["value"] == "true"
+    assert langgraph["SOPHIA_BUILDER_OPENAI_FALLBACK_MODEL"]["value"] == "gpt-4.1"
+    assert langgraph["SOPHIA_BUILDER_OPENAI_FALLBACK_TIMEOUT_SECONDS"]["value"] == "120"
+    assert langgraph["SOPHIA_BUILDER_OPENAI_FALLBACK_MAX_RETRIES"]["value"] == "1"
+    assert langgraph["SOPHIA_BUILDER_PRIMARY_COOLDOWN_SECONDS"]["value"] == "300"
+
+    assert "SOPHIA_BUILDER_OPENAI_FALLBACK_ENABLED" not in gateway
+    assert "SOPHIA_BUILDER_OPENAI_FALLBACK_MODEL" not in gateway

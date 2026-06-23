@@ -29,6 +29,7 @@ _PPTX_REQUIRED_ZIP_ENTRIES = frozenset({
 
 FailureStage = Literal[
     "generation",
+    "model_provider",
     "emit_attempted",
     "emit_rejected",
     "artifact_missing",
@@ -93,7 +94,9 @@ _ALLOWED_DIAGNOSTIC_KEYS = frozenset({
     "fallback_bypass_reason",
     "final_provider",
     "provider_error_class",
+    "provider_error_reason",
     "provider_error_safe_message",
+    "retryable",
     "raw_provider_payload_excluded",
     "provider_secrets_excluded",
 })
@@ -152,6 +155,8 @@ class BuilderFailureDiagnostics:
     failure_stage: FailureStage = "unknown"
     failure_reason: str = "Builder failure could not be classified."
     failure_code: str | None = None
+    provider_error_reason: str | None = None
+    retryable: bool | None = None
     emit_attempted: bool = False
     emit_tool_call_seen: bool | None = None
     sanitized_emit_args: dict[str, Any] | None = None
@@ -188,6 +193,8 @@ class BuilderFailureDiagnostics:
             "target_path": self.target_path,
             "target_extension": self.target_extension,
             "failure_code": self.failure_code,
+            "provider_error_reason": self.provider_error_reason,
+            "retryable": self.retryable,
             "emit_tool_call_seen": self.emit_tool_call_seen,
             "sanitized_emit_args": self.sanitized_emit_args,
             "outputs_summary": self.outputs_summary,
@@ -213,6 +220,8 @@ def build_builder_failure_diagnostics(
     failure_stage: FailureStage = "unknown",
     failure_reason: str = "Builder failure could not be classified.",
     failure_code: str | None = None,
+    provider_error_reason: str | None = None,
+    retryable: bool | None = None,
     emit_attempted: bool = False,
     emit_tool_call_seen: bool | None = None,
     outputs_host_path: str | None = None,
@@ -246,6 +255,8 @@ def build_builder_failure_diagnostics(
             failure_stage=failure_stage,
             failure_reason=failure_reason,
             failure_code=failure_code,
+            provider_error_reason=provider_error_reason,
+            retryable=retryable,
             emit_attempted=emit_attempted,
             emit_tool_call_seen=emit_tool_call_seen,
             sanitized_emit_args=sanitize_emit_args(artifact_args, outputs_root=outputs_root)
@@ -533,6 +544,7 @@ def _sanitize_allowed_value(key: str, value: Any) -> Any:
         "fallback_attempted",
         "fallback_model_configured",
         "fallback_primary_bypassed",
+        "retryable",
         "raw_provider_payload_excluded",
         "provider_secrets_excluded",
     }:

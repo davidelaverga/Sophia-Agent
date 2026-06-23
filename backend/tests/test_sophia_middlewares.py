@@ -2549,6 +2549,51 @@ class TestBuilderArtifactMiddleware:
         assert result["builder_result"]["confidence"] == 0.9
         assert result["jump_to"] == "end"
 
+    def test_model_provider_fallback_message_gets_retryable_diagnostics(self, monkeypatch):
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+            BuilderArtifactMiddleware,
+        )
+
+        monkeypatch.setattr(
+            builder_artifact,
+            "annotate_builder_completion",
+            lambda *_args, **_kwargs: None,
+        )
+        monkeypatch.setattr(
+            builder_artifact,
+            "fire_completion_webhook_from_artifact",
+            lambda **_kwargs: None,
+        )
+
+        mw = BuilderArtifactMiddleware()
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = []
+        msg.additional_kwargs = {
+            "deerflow_error_fallback": True,
+            "error_reason": "busy",
+            "error_detail": "Overloaded",
+        }
+
+        result = mw.after_model(
+            {
+                "messages": [msg],
+                "delegation_context": {"task": "Build a deck", "task_type": "presentation"},
+            },
+            _make_runtime(thread_id="builder-thread"),
+        )
+
+        assert result is not None
+        diagnostic = result["builder_failure_diagnostics"]
+        assert diagnostic["failure_stage"] == "model_provider"
+        assert diagnostic["failure_code"] == "primary_provider_unavailable"
+        assert diagnostic["provider_error_reason"] == "busy"
+        assert diagnostic["retryable"] is True
+        assert diagnostic["emit_attempted"] is False
+        assert "error_detail" not in diagnostic
+        assert "Overloaded" not in repr(diagnostic)
+
     def test_uploads_to_parent_thread_id_when_delegation_context_has_it(self, monkeypatch):
         """Phase-1-async-migration regression (2026-05-06).
 
