@@ -410,7 +410,7 @@ export function getBuilderArtifactFiles(builderArtifact: BuilderArtifactV1 | nul
   for (const supportingFile of builderArtifact.supportingFiles || []) {
     const normalized = normalizeBuilderArtifactPath(supportingFile);
     const basename = normalized?.split('/').filter(Boolean).pop()?.toLowerCase() ?? '';
-    if (previewName && basename === previewName) {
+    if ((previewName && basename === previewName) || basename.endsWith(PPTX_PREVIEW_PDF_SUFFIX)) {
       addFile(normalized || supportingFile, false, 'preview');
     }
   }

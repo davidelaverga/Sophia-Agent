@@ -104,10 +104,14 @@ def _native_update_context(native_callable: Any) -> tuple[dict[str, Any], Any] |
     return None
 
 
-def _updated_task_entry(tracked: dict[str, Any], run_id: str) -> dict[str, Any]:
+def _updated_task_entry(
+    tracked: dict[str, Any],
+    run_id: str,
+    delegation_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     task_id = str(tracked.get("task_id") or tracked.get("thread_id") or "")
-    return {
+    task = {
         "task_id": task_id,
         "agent_name": tracked["agent_name"],
         "thread_id": tracked["thread_id"],
@@ -117,14 +121,18 @@ def _updated_task_entry(tracked: dict[str, Any], run_id: str) -> dict[str, Any]:
         "last_checked_at": str(tracked.get("last_checked_at") or now),
         "last_updated_at": now,
     }
+    if task_type := _resolve_effective_task_type(tracked, delegation_context):
+        task["task_type"] = task_type
+    return task
 
 
 def _update_task_command(
     tracked: dict[str, Any],
     run_id: str,
     tool_call_id: str | None,
+    delegation_context: dict[str, Any] | None = None,
 ) -> Command:
-    task = _updated_task_entry(tracked, run_id)
+    task = _updated_task_entry(tracked, run_id, delegation_context)
     msg = f"Updated async subagent. task_id: {tracked['task_id']}"
     return Command(
         update={
@@ -134,11 +142,17 @@ def _update_task_command(
     )
 
 
-def _update_run_config(runtime: ToolRuntime | None, tracked: dict[str, Any]) -> dict[str, Any]:
+def _update_run_config(
+    runtime: ToolRuntime | None,
+    tracked: dict[str, Any],
+    delegation_context: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     configurable: dict[str, Any] = {
         "thread_id": tracked["thread_id"],
         "graph_id": tracked["agent_name"],
     }
+    if task_type := _resolve_effective_task_type(tracked, delegation_context):
+        configurable["task_type"] = task_type
     runtime_config = getattr(runtime, "config", None)
     if isinstance(runtime_config, dict):
         source = runtime_config.get("configurable")
@@ -164,6 +178,7 @@ def _dispatch_update_with_url_state_sync(
     if context is None or tracked is None:
         return None
     agent_map, clients = context
+    delegation_context = _state_delegation_context(state)
     try:
         spec = agent_map[tracked["agent_name"]]
         client = clients.get_sync(tracked["agent_name"])
@@ -171,13 +186,13 @@ def _dispatch_update_with_url_state_sync(
             thread_id=tracked["thread_id"],
             assistant_id=spec["graph_id"],
             input=_update_run_input(message, explicit_update_urls),
-            config=_update_run_config(runtime, tracked),
+            config=_update_run_config(runtime, tracked, delegation_context),
             multitask_strategy="interrupt",
         )
     except Exception as exc:  # noqa: BLE001 - match native tool failure semantics.
         logger.warning("Failed to update async subagent '%s': %s", tracked.get("agent_name"), exc)
         return f"Failed to update async subagent: {exc}"
-    return _update_task_command(tracked, run["run_id"], runtime.tool_call_id)
+    return _update_task_command(tracked, run["run_id"], runtime.tool_call_id, delegation_context)
 
 
 async def _dispatch_update_with_url_state_async(
@@ -194,6 +209,7 @@ async def _dispatch_update_with_url_state_async(
     if context is None or tracked is None:
         return None
     agent_map, clients = context
+    delegation_context = _state_delegation_context(state)
     try:
         spec = agent_map[tracked["agent_name"]]
         client = clients.get_async(tracked["agent_name"])
@@ -201,13 +217,13 @@ async def _dispatch_update_with_url_state_async(
             thread_id=tracked["thread_id"],
             assistant_id=spec["graph_id"],
             input=_update_run_input(message, explicit_update_urls),
-            config=_update_run_config(runtime, tracked),
+            config=_update_run_config(runtime, tracked, delegation_context),
             multitask_strategy="interrupt",
         )
     except Exception as exc:  # noqa: BLE001 - match native tool failure semantics.
         logger.warning("Failed to update async subagent '%s': %s", tracked.get("agent_name"), exc)
         return f"Failed to update async subagent: {exc}"
-    return _update_task_command(tracked, run["run_id"], runtime.tool_call_id)
+    return _update_task_command(tracked, run["run_id"], runtime.tool_call_id, delegation_context)
 
 
 async def _fetch_live_status(tracked: dict[str, Any]) -> str | None:
@@ -964,17 +980,16 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
             state=state if isinstance(state, dict) else None,
         )
         explicit_update_urls = extract_explicit_user_urls(message)
-        if explicit_update_urls:
-            url_state_result = _dispatch_update_with_url_state_sync(
-                native_func=native_func,
-                task_id=task_id,
-                message=augmented,
-                explicit_update_urls=explicit_update_urls,
-                runtime=runtime,
-                state=state,
-            )
-            if url_state_result is not None:
-                return url_state_result
+        state_result = _dispatch_update_with_url_state_sync(
+            native_func=native_func,
+            task_id=task_id,
+            message=augmented,
+            explicit_update_urls=explicit_update_urls,
+            runtime=runtime,
+            state=state,
+        )
+        if state_result is not None:
+            return state_result
         return native_func(task_id=task_id, message=augmented, runtime=runtime)
 
     async def aupdate_async_task(
@@ -1041,17 +1056,16 @@ def make_update_async_task_wrapper(native_tool: StructuredTool) -> StructuredToo
             state=state if isinstance(state, dict) else None,
         )
         explicit_update_urls = extract_explicit_user_urls(message)
-        if explicit_update_urls:
-            url_state_result = await _dispatch_update_with_url_state_async(
-                native_coroutine=native_coroutine,
-                task_id=task_id,
-                message=augmented,
-                explicit_update_urls=explicit_update_urls,
-                runtime=runtime,
-                state=state,
-            )
-            if url_state_result is not None:
-                return url_state_result
+        state_result = await _dispatch_update_with_url_state_async(
+            native_coroutine=native_coroutine,
+            task_id=task_id,
+            message=augmented,
+            explicit_update_urls=explicit_update_urls,
+            runtime=runtime,
+            state=state,
+        )
+        if state_result is not None:
+            return state_result
         return await native_coroutine(
             task_id=task_id, message=augmented, runtime=runtime
         )

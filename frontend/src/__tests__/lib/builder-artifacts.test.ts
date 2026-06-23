@@ -280,6 +280,26 @@ describe("getBuilderArtifactFiles role filtering", () => {
       ["report.preview.pdf", "preview"],
     ])
   })
+
+  it("keeps legacy PPTX preview siblings from supporting files without explicit preview metadata", () => {
+    const artifact = normalizeBuilderArtifactPayload({
+      artifact_path: "/mnt/user-data/outputs/deck.pptx",
+      artifact_type: "presentation",
+      artifact_title: "Deck",
+      supporting_files: [
+        "/mnt/user-data/outputs/deck.preview.pdf",
+        "/mnt/user-data/outputs/deck.source.md",
+      ],
+    })
+
+    expect(artifact).not.toBeNull()
+    const visible = getBuilderArtifactFiles(artifact)
+
+    expect(visible.map((file) => [file.name, file.role, file.isPrimary])).toEqual([
+      ["deck.pptx", "primary", true],
+      ["deck.preview.pdf", "preview", false],
+    ])
+  })
 })
 
 describe("resolveCanvasRenderFile", () => {

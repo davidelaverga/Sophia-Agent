@@ -461,7 +461,8 @@ def test_directive_pptx_target_requires_presentation_skill_workflow():
     assert "/mnt/skills/public/ppt-generation/SKILL.md" in augmented
     assert "/mnt/skills/public/image-generation/scripts/generate.py" in augmented
     assert "/mnt/skills/public/ppt-generation/scripts/generate.py" in augmented
-    assert "write_file(description=..." in augmented
+    assert "Do NOT call `write_file` to author the PPTX binary" in augmented
+    assert "python-pptx/write_file loops" in augmented
 
 
 @pytest.mark.parametrize("text_task_type", ["document", "research", "frontend"])
@@ -948,6 +949,78 @@ def test_wrapper_persists_update_urls_in_replacement_run_input():
     assert "approved fetch targets" in run_input["messages"][0]["content"]
     assert update_calls[0]["config"]["configurable"]["thread_id"] == "builder-thread-1"
     assert response.update["async_tasks"]["task-1"]["run_id"] == "run-new"
+
+
+def test_wrapper_preserves_delegation_task_type_in_replacement_run_config():
+    """State-aware builder updates must keep presentation/tool filtering config.
+
+    ``async_tasks`` entries can be rewritten without ``task_type`` while the
+    canonical value still lives in ``delegation_context``. The replacement run
+    config is what ``make_sophia_builder`` reads when choosing the builder
+    toolset, so losing this value re-adds non-presentation tools mid-build.
+    """
+    update_calls: list[dict] = []
+
+    class FakeRuns:
+        async def create(self, **kwargs):
+            update_calls.append(kwargs)
+            return {"run_id": "run-new"}
+
+    class FakeClient:
+        runs = FakeRuns()
+
+    class FakeClients:
+        def get_async(self, agent_name):
+            assert agent_name == "sophia_builder"
+            return FakeClient()
+
+    agent_map = {"sophia_builder": {"graph_id": "sophia_builder"}}
+    clients = FakeClients()
+
+    async def native_coroutine(*, task_id, message, runtime):
+        assert agent_map and clients
+        raise AssertionError("State-aware dispatch should bypass native fallback")
+
+    native = SimpleNamespace(
+        name="update_async_task",
+        description="native desc",
+        func=None,
+        coroutine=native_coroutine,
+        args_schema=None,
+    )
+    wrapped = make_update_async_task_wrapper(native)
+    runtime = SimpleNamespace(
+        state={
+            "async_tasks": {
+                "task-1": {
+                    "task_id": "task-1",
+                    "agent_name": "sophia_builder",
+                    "thread_id": "builder-thread-1",
+                    "run_id": "run-old",
+                    "status": "running",
+                }
+            },
+            "delegation_context": {"task_type": "presentation"},
+        },
+        tool_call_id="tc-update",
+        config={"configurable": {"user_id": "user-1", "parent_thread_id": "parent-1"}},
+    )
+
+    response = asyncio.run(
+        wrapped.coroutine(
+            task_id="task-1",
+            message="tighten slide 3 narrative",
+            runtime=runtime,
+        )
+    )
+
+    assert isinstance(response, Command)
+    assert len(update_calls) == 1
+    assert "explicit_user_urls" not in update_calls[0]["input"]
+    configurable = update_calls[0]["config"]["configurable"]
+    assert configurable["thread_id"] == "builder-thread-1"
+    assert configurable["task_type"] == "presentation"
+    assert response.update["async_tasks"]["task-1"]["task_type"] == "presentation"
 
 
 def test_wrapper_augmentation_is_idempotent():
