@@ -76,6 +76,22 @@ Later turns:
 After the emit_artifact call, stop. Do not call more tools or repeat the same spoken sentence.
 </artifact_contract>"""
 
+_LIFECYCLE_ACK_INSTRUCTIONS = """
+<lifecycle_tool_acknowledgement>
+When this turn included a successful lifecycle-tool call, the `next_step` or
+`takeaway` in `emit_artifact` must acknowledge the user's intent and the action
+you took in one short sentence.
+
+- `start_builder_task` -> "Starting the build now -- I'll have it back to you shortly."
+- `update_async_task` -> "Got it, updating the build to include X."
+- `edit_builder_artifact` -> "Got it, revising the delivered artifact now."
+- `check_async_task` -> "Let me check on it -- still running."
+- `cancel_async_task` -> "Got it, cancelling the build now."
+- `list_async_tasks` -> "Pulling up your in-flight builds -- here's what's running."
+</lifecycle_tool_acknowledgement>"""
+
+_DEFAULT_ARTIFACT_INSTRUCTIONS = _VOICE_ARTIFACT_INSTRUCTIONS + _LIFECYCLE_ACK_INSTRUCTIONS
+
 
 class ArtifactState(AgentState):
     skip_expensive: NotRequired[bool]
@@ -95,9 +111,11 @@ class ArtifactMiddleware(AgentMiddleware[ArtifactState]):
 
     def __init__(self, artifact_instructions_path: Path):
         super().__init__()
-        if not artifact_instructions_path.exists():
-            raise FileNotFoundError(f"Artifact instructions not found: {artifact_instructions_path}")
-        self._instructions = artifact_instructions_path.read_text(encoding="utf-8")
+        self._instructions = (
+            artifact_instructions_path.read_text(encoding="utf-8")
+            if artifact_instructions_path.exists()
+            else _DEFAULT_ARTIFACT_INSTRUCTIONS
+        )
 
     @override
     def before_agent(self, state: ArtifactState, runtime: Runtime) -> dict | None:

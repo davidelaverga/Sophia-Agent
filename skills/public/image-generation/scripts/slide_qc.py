@@ -2,7 +2,7 @@
 
 This helper performs one multimodal review of a rendered slide image against
 the slide spec. It intentionally does not loop or repair; callers decide
-whether to regenerate once or fall back to deterministic slide composition.
+whether to regenerate once or fail the build cleanly.
 """
 
 from __future__ import annotations
@@ -302,13 +302,23 @@ def _presence_result(image_file: Path, spec_file: Path) -> dict[str, Any]:
     }
 
 
+_FORBIDDEN_RASTER_TEXT: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\bTHE\s+TEXT\s+READS\b", re.IGNORECASE), "THE TEXT READS"),
+    (re.compile(r"\bCAPTION\s*:", re.IGNORECASE), "caption:"),
+    (re.compile(r"\bPROMPT\s*:", re.IGNORECASE), "prompt:"),
+    (re.compile(r"\[\s*VISUAL\s*\]", re.IGNORECASE), "[visual]"),
+    (re.compile(r"\bINSTRUCTIONS?\s*:", re.IGNORECASE), "instruction label"),
+)
+
+
 def _raster_layout_reasons(image_file: Path) -> list[str]:
-    text = _ocr_text(image_file).upper()
+    text = _ocr_text(image_file)
     if not text:
         return []
     reasons: list[str] = []
-    if "THE TEXT READS" in text:
-        reasons.append("Generated bitmap still contains literal prompt text: THE TEXT READS")
+    for pattern, label in _FORBIDDEN_RASTER_TEXT:
+        if pattern.search(text):
+            reasons.append(f"Generated bitmap still contains literal prompt scaffolding: {label}")
     return reasons
 
 

@@ -4639,7 +4639,6 @@ class TestBuilderArtifactMiddleware:
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
-        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
 
         mw = BuilderArtifactMiddleware()
         msg = MagicMock()
@@ -4683,9 +4682,9 @@ class TestBuilderArtifactMiddleware:
         assert "builder_result" in result2
         # Counter resets after fallback fires.
         assert result2["builder_consecutive_empty_emit_rejections"] == 0
-        # Real PDF on disk → fallback promotes it (confidence=0.5).
-        assert result2["builder_result"]["artifact_path"] == "/mnt/user-data/outputs/report.pdf"
-        assert result2["builder_result"]["confidence"] == 0.5
+        # No real file on disk → fallback emits the deterministic apology.
+        assert result2["builder_result"]["artifact_path"] is None
+        assert result2["builder_result"]["confidence"] == 0.2
 
     def test_consecutive_rejection_short_circuit_promotes_generator_when_no_binary(self, tmp_path):
         """Short-circuit reuses the same fallback priority as hard-ceiling:

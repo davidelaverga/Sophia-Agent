@@ -82,8 +82,8 @@ def build_builder_middleware_chain(
     1. ``build_subagent_runtime_middlewares`` — sandbox + tool-error
        handling provided by deerflow harness; sits at the front.
     2. ``FileInjectionMiddleware`` — soul.md + coordination_core.md +
-       builder_obligations.md + anti_slop.md. Builder doesn't speak, so
-       voice.md is intentionally absent.
+       builder_obligations.md. Builder doesn't speak, so voice.md is
+       intentionally absent.
     3. ``UserIdentityMiddleware`` — identity file shapes what builder
        creates.
     4. ``BuilderMem0RetrievalMiddleware`` (Phase-3 Stage 1) — pre-fetches
@@ -131,7 +131,6 @@ def build_builder_middleware_chain(
             (SKILLS_PATH / "soul.md", False),
             (SKILLS_PATH / "coordination_core.md", False),
             (SKILLS_PATH / "builder_obligations.md", False),
-            (SKILLS_PATH / "anti_slop.md", False),
         ),
         UserIdentityMiddleware(user_id),
         BuilderMem0RetrievalMiddleware(),

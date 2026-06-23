@@ -46,6 +46,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import NotRequired, override
 
@@ -70,6 +71,33 @@ _DEFAULT_TIMEOUT_SECONDS = 2.0
 # the system prompt budget bounded — Mem0 occasionally returns long
 # multi-paragraph memories that would dominate the prompt.
 _MAX_SNIPPET_CHARS = 600
+_STYLE_INTENT_RE = re.compile(
+    r"\b(?:prefer(?:s|red)?|like(?:s|d)?|want(?:s|ed)?|love(?:s|d)?|"
+    r"dislike(?:s|d)?|hate(?:s|d)?|favorite|favourite|style|aesthetic)\b",
+    re.IGNORECASE,
+)
+_ARTIFACT_STYLE_RE = re.compile(
+    r"\b(?:aesthetic|brand|caption|chart|color|colour|dark|deck|diagram|"
+    r"excalidraw|heavy|hero|image|illustration|layout|light|minimal|palette|"
+    r"presentation|report|slide|slides|theme|title|visual|visuals)\b",
+    re.IGNORECASE,
+)
+_TASK_TOKEN_STOPWORDS = frozenset({
+    "about",
+    "artifact",
+    "build",
+    "create",
+    "deck",
+    "deliver",
+    "generate",
+    "make",
+    "presentation",
+    "report",
+    "slide",
+    "slides",
+    "technical",
+    "with",
+})
 
 
 class BuilderMem0RetrievalState(AgentState):
@@ -135,7 +163,7 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
             log_middleware("BuilderMem0Retrieval", "no results", _t0)
             return None
 
-        memory_ids, memory_contents = self._collect_snippets(results)
+        memory_ids, memory_contents = self._collect_snippets(results, query)
         if not memory_contents:
             log_middleware("BuilderMem0Retrieval", "no usable contents", _t0)
             return None
@@ -190,27 +218,32 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
             return None
 
     @staticmethod
-    def _collect_snippets(results: list) -> tuple[list[str], list[str]]:
+    def _collect_snippets(results: list, query: str = "") -> tuple[list[str], list[str]]:
         """Extract (memory_ids, memory_contents) from raw Mem0 search results.
 
         Drops non-dict entries silently. Truncates each content snippet
         to ``_MAX_SNIPPET_CHARS`` so a single multi-paragraph memory can't
-        dominate the prompt budget.
+        dominate the prompt budget. Generic artifact-style preferences are
+        filtered unless they name the current task topic, so stale aesthetic
+        memories cannot collapse every builder artifact into one house style.
         """
+        task_terms = _task_terms(query)
         memory_ids: list[str] = []
         memory_contents: list[str] = []
         for entry in results:
             if not isinstance(entry, dict):
                 continue
             entry_id = entry.get("id")
-            if isinstance(entry_id, str) and entry_id:
-                memory_ids.append(entry_id)
             entry_content = entry.get("content")
             if isinstance(entry_content, str) and entry_content.strip():
                 snippet = entry_content.strip()
+                if _generic_artifact_style_memory(snippet, task_terms):
+                    continue
                 if len(snippet) > _MAX_SNIPPET_CHARS:
                     snippet = snippet[: _MAX_SNIPPET_CHARS - 1] + "…"
                 memory_contents.append(snippet)
+                if isinstance(entry_id, str) and entry_id:
+                    memory_ids.append(entry_id)
         return memory_ids, memory_contents
 
     def _build_state_update(
@@ -330,3 +363,21 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
             f"{lines}\n"
             "</memory>"
         )
+
+
+def _task_terms(query: str) -> set[str]:
+    """Extract topic-bearing task terms used to keep task-specific memories."""
+    terms: set[str] = set()
+    for raw in re.findall(r"[A-Za-z][A-Za-z0-9_-]{3,}", query):
+        token = raw.lower().strip("_-")
+        if token and token not in _TASK_TOKEN_STOPWORDS:
+            terms.add(token)
+    return terms
+
+
+def _generic_artifact_style_memory(snippet: str, task_terms: set[str]) -> bool:
+    """Return True for stale aesthetic memories unrelated to the current task."""
+    lowered = snippet.lower()
+    if task_terms and any(term in lowered for term in task_terms):
+        return False
+    return bool(_STYLE_INTENT_RE.search(snippet) and _ARTIFACT_STYLE_RE.search(snippet))

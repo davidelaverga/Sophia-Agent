@@ -127,12 +127,14 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
    Pass the first slide as `--reference-images` to later slides for consistency; the script
    automatically sends those referenced slides through the `gpt-image-2` edit path.
 
-2. **Illustrations (default)** — heroes, section art, concept illustrations, and ALL imagery for
-   PDF reports. Describe only the subject; NO text, labels, charts, or diagrams in the image
-   (the report/deck engine composes those). The script appends the brand style and anti-patterns.
+2. **Illustrations (default)** — standalone images, heroes, section art, and concept
+   illustrations when the requested deliverable is an image or web artifact. Describe only
+   the subject; NO text, labels, charts, or diagrams in the image. Do not use this mode for
+   PDF reports.
 
-For PDF reports, technical diagrams use `generate_excalidraw_diagram` (graphviz) and charts use
-`generate_visual_asset` — NOT this skill. That deterministic path is unchanged.
+For PDF reports, technical diagrams use graphviz through `generate_excalidraw_diagram`, and
+charts are chosen with the chart-visualization skill and rendered with local deterministic code.
+This image skill is not part of the PDF report workflow.
 
 Reference library: for Excalidraw-style technical slide visuals, first inspect
 `/mnt/skills/public/image-generation/references/manifest.json`. It is a v2 style manifest:
@@ -149,11 +151,9 @@ no ref for that type, do not invent a path; rely on the text prompt anchor.
 The reference sets the look; the prompt still supplies the exact structure, labels, brand
 palette, and "THE TEXT READS: ..." strings. Keep one visual style per deck.
 
-Before accepting a presentation slide visual, apply the shared Sophia anti-slop rubric
-(`/mnt/skills/public/sophia/anti_slop.md`): Philosophy, Hierarchy, Execution,
-Specificity, Restraint, and Variety. Reject purple/pink AI-gradient hero slides,
-single-font template looks, and generic stock-deck styling even if the image was generated
-successfully.
+Before accepting a presentation slide visual, check hierarchy, specificity, restraint, and
+variety. Reject purple/pink generic hero slides, single-font template looks, and stock-deck
+styling even if the image was generated successfully.
 
 ## Common Scenarios
 

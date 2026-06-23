@@ -165,8 +165,8 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "emit_builder_artifact" in builder_tool_names
     # render_markdown_to_pdf (Phase B) is the skill-driven PDF path.
     assert "render_markdown_to_pdf" in builder_tool_names
-    assert "generate_visual_asset" in builder_tool_names
     assert "generate_excalidraw_diagram" in builder_tool_names
+    assert "generate_visual_asset" not in builder_tool_names
     assert "generate_report_chart" not in builder_tool_names
     # ``present_files`` must NOT be in the builder's tool list. Its presence
     # invited the model (trained on upstream's pattern) to call
@@ -232,12 +232,12 @@ def test_presentation_builder_toolset_removes_excalidraw_diagram(monkeypatch) ->
     builder_module._create_builder_agent(user_id="user_123", task_type="presentation")
 
     tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
-    assert "generate_visual_asset" in tool_names
+    assert "generate_visual_asset" not in tool_names
     assert "generate_excalidraw_diagram" not in tool_names
     assert "generate_report_chart" not in tool_names
 
 
-def test_report_builder_toolset_includes_report_chart_wrapper(monkeypatch) -> None:
+def test_report_builder_toolset_includes_excalidraw_but_not_retired_chart_wrapper(monkeypatch) -> None:
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     _reset_tracing_cache()
@@ -261,8 +261,9 @@ def test_report_builder_toolset_includes_report_chart_wrapper(monkeypatch) -> No
     builder_module._create_builder_agent(user_id="user_123", task_type="document")
 
     tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
-    assert "generate_report_chart" in tool_names
     assert "generate_excalidraw_diagram" in tool_names
+    assert "generate_report_chart" not in tool_names
+    assert "generate_visual_asset" not in tool_names
 
 
 def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:
@@ -525,16 +526,17 @@ def test_async_builder_system_prompt_has_update_failure_handling():
     assert "start_builder_task" in prompt
 
 
-def test_artifact_instructions_lists_ack_example_per_lifecycle_tool():
-    """Read the markdown skill file from disk and confirm every lifecycle
-    tool has its ack example so the model emits the right next_step /
-    takeaway."""
-    from deerflow.agents.sophia_agent.paths import SKILLS_PATH
+def test_embedded_artifact_instructions_list_ack_example_per_lifecycle_tool():
+    """The artifact markdown file is retired; the embedded companion
+    contract still needs the lifecycle ack examples."""
+    from deerflow.agents.sophia_agent.middlewares.artifact import (
+        _DEFAULT_ARTIFACT_INSTRUCTIONS,
+    )
 
-    text = (SKILLS_PATH / "artifact_instructions.md").read_text(encoding="utf-8")
+    text = _DEFAULT_ARTIFACT_INSTRUCTIONS
     for tool_name, ack_marker in _LIFECYCLE_TOOLS_WITH_ACK:
-        assert tool_name in text, f"{tool_name} missing from artifact_instructions.md"
-        assert ack_marker in text, f"ack '{ack_marker}' missing from artifact_instructions.md"
+        assert tool_name in text, f"{tool_name} missing from embedded artifact instructions"
+        assert ack_marker in text, f"ack '{ack_marker}' missing from embedded artifact instructions"
 
 
 def test_update_async_task_wrapped_with_terminal_guard(monkeypatch):

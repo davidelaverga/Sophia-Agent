@@ -13,8 +13,6 @@ from deerflow.sophia.tools.builder_web_search import builder_web_search
 from deerflow.sophia.tools.create_pdf_artifact import create_pdf_artifact
 from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
 from deerflow.sophia.tools.generate_excalidraw_diagram import generate_excalidraw_diagram
-from deerflow.sophia.tools.generate_report_chart import generate_report_chart
-from deerflow.sophia.tools.generate_visual_asset import generate_visual_asset
 from deerflow.sophia.tools.read_session_context import read_session_context, read_tool_enabled
 from deerflow.sophia.tools.render_markdown_to_pdf import render_markdown_to_pdf
 from deerflow.tools.builtins.view_image_tool import view_image_tool
@@ -39,15 +37,12 @@ def build_builder_tools_for_task_type(task_type: str | None, *, vision_enabled: 
         builder_web_search,
         builder_web_fetch,
         create_pdf_artifact,
-        generate_visual_asset,
         render_markdown_to_pdf,
         emit_builder_artifact,
     ]
     if normalized_task_type not in _PRESENTATION_TASK_TYPES:
-        tools.insert(8, generate_excalidraw_diagram)
-    if normalized_task_type in _REPORT_TASK_TYPES:
         insert_at = tools.index(render_markdown_to_pdf)
-        tools.insert(insert_at, generate_report_chart)
+        tools.insert(insert_at, generate_excalidraw_diagram)
 
     # Vision is gated by the same ``supports_vision`` decision that governs
     # ViewImageMiddleware inclusion, keeping the tool list and middleware

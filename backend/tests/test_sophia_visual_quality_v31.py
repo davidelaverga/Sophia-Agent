@@ -9,8 +9,6 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     _pdf_layout_repair_message,
     _presentation_completion_ready,
     _repair_deck_plan_for_validation,
-    _report_figure_family_problems,
-    _report_visual_grammar_problems,
     _validate_deck_plan,
 )
 from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
@@ -29,7 +27,7 @@ def _briefing(result: dict) -> str:
     return "\n".join(blocks)
 
 
-def test_slide_title_strategy_repair_requires_qc_for_baked_titles() -> None:
+def test_slide_title_presence_repair_requires_qc_for_baked_titles() -> None:
     repaired = _repair_deck_plan_for_validation(
         {
             "slides": [
@@ -37,7 +35,6 @@ def test_slide_title_strategy_repair_requires_qc_for_baked_titles() -> None:
                     "type": "cover",
                     "title": "Launch",
                     "image_path": "/mnt/user-data/outputs/slide-1.png",
-                    "title_strategy": "baked",
                     "title_baked_qc_confirmed": True,
                 }
             ]
@@ -46,8 +43,8 @@ def test_slide_title_strategy_repair_requires_qc_for_baked_titles() -> None:
     )
 
     assert repaired is not None
-    assert repaired["slides"][0]["title_strategy"] == "baked"
     assert repaired["slides"][0]["title_baked_qc_confirmed"] is False
+    assert "title_strategy" not in repaired["slides"][0]
 
     repaired = _repair_deck_plan_for_validation(
         {"slides": [{"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png"}]},
@@ -55,9 +52,9 @@ def test_slide_title_strategy_repair_requires_qc_for_baked_titles() -> None:
     )
 
     assert repaired is not None
-    assert repaired["slides"][0]["title_strategy"] == "baked"
     assert repaired["slides"][0]["title_baked_qc_confirmed"] is True
     assert repaired["slides"][0]["title_present"] is True
+    assert "title_strategy" not in repaired["slides"][0]
 
 
 def test_deck_plan_accepts_baked_title_qc_when_compiler_diagnostics_missing() -> None:
@@ -69,7 +66,6 @@ def test_deck_plan_accepts_baked_title_qc_when_compiler_diagnostics_missing() ->
                     "title": "Launch",
                     "image_path": "/mnt/user-data/outputs/slide-1.png",
                     "visual_style": "clean_flat_vector",
-                    "title_strategy": "baked",
                     "title_baked_qc_confirmed": True,
                 }
             ]
@@ -114,7 +110,15 @@ def test_deck_plan_rejects_mixed_generated_slide_styles() -> None:
     assert any("Deck mixes generated image styles" in problem for problem in problems)
 
 
-def test_report_figure_family_gate_blocks_once_and_marks_quality_warning() -> None:
+def test_report_variety_gate_functions_are_removed() -> None:
+    assert not hasattr(builder_artifact_module, "_report_figure_family_problems")
+    assert not hasattr(builder_artifact_module, "_report_visual_grammar_problems")
+    assert not hasattr(builder_artifact_module, "_visual_figure_family_counts")
+    assert not hasattr(builder_artifact_module, "_visual_grammar_counts")
+    assert not hasattr(BuilderArtifactMiddleware, "_figure_family_rejection_message")
+
+
+def test_report_variety_is_skill_owned_not_runtime_blocking() -> None:
     state = {
         "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
         "builder_visual_diagnostics": {
@@ -126,64 +130,10 @@ def test_report_figure_family_gate_blocks_once_and_marks_quality_warning() -> No
         },
     }
 
-    assert _report_figure_family_problems(state)
-    assert BuilderArtifactMiddleware._visual_gate_blocks_emit({"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state)
+    assert not BuilderArtifactMiddleware._visual_gate_blocks_emit({"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state)
 
     warned = _apply_report_figure_quality_metadata({"confidence": 0.95}, state)
-    assert warned["quality_warning"] == "monotone_figures"
-    assert warned["figure_family_warning"] is True
-    assert warned["confidence"] == 0.72
-
-
-def test_report_figure_family_gate_counts_only_embedded_figures(tmp_path) -> None:
-    outputs = tmp_path / "outputs"
-    visuals = outputs / "visuals"
-    visuals.mkdir(parents=True)
-    (outputs / "report.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
-    (outputs / "report.md").write_text(
-        "# Report\n\n![Final chart](visuals/final.png)\n",
-        encoding="utf-8",
-    )
-    for name in ("unused-a.png", "unused-b.png", "unused-c.png", "final.png"):
-        (visuals / name).write_bytes(b"png")
-
-    state = {
-        "thread_data": {"outputs_path": str(outputs)},
-        "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
-        "builder_pdf_render_result": {
-            "success": True,
-            "pdf_path": "/mnt/user-data/outputs/report.pdf",
-        },
-        "builder_visual_diagnostics": {
-            "visual_figure_records": [
-                {"family": "chart:bar", "path": "/mnt/user-data/outputs/visuals/unused-a.png"},
-                {"family": "chart:bar", "path": "/mnt/user-data/outputs/visuals/unused-b.png"},
-                {"family": "chart:bar", "path": "/mnt/user-data/outputs/visuals/unused-c.png"},
-                {"family": "chart:bar", "path": "/mnt/user-data/outputs/visuals/final.png"},
-            ]
-        },
-    }
-
-    assert _report_figure_family_problems(state) == []
-
-
-def test_report_visual_grammar_gate_blocks_all_node_link_diagrams() -> None:
-    state = {
-        "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
-        "builder_visual_diagnostics": {
-            "visual_figure_records": [
-                {"family": "diagram:flow", "grammar": "graphviz_node_link", "path": "/mnt/user-data/outputs/visuals/a.png"},
-                {"family": "diagram:architecture", "grammar": "graphviz_node_link", "path": "/mnt/user-data/outputs/visuals/b.png"},
-                {"family": "diagram:cycle", "grammar": "graphviz_node_link", "path": "/mnt/user-data/outputs/visuals/c.png"},
-            ]
-        },
-    }
-
-    problems = _report_visual_grammar_problems(state)
-
-    assert problems
-    assert "node-link" in problems[-1]
-    assert BuilderArtifactMiddleware._visual_gate_blocks_emit({"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state)
+    assert warned == {"confidence": 0.95}
 
 
 def test_presentation_completion_ready_allows_advisory_qc_parse_failures(tmp_path, monkeypatch) -> None:

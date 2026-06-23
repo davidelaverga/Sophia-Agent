@@ -74,18 +74,18 @@ def test_plain_pdf_stays_off():
     ) is False
 
 
-def test_plain_no_image_deck_does_not_request_visual_gate():
+def test_plain_no_image_deck_still_requests_visual_gate():
     state = _deck_state()
     state["delegation_context"]["task"] = "Build a plain text-only deck with no images"
 
-    assert _visuals_requested(state) is False
+    assert _visuals_requested(state) is True
     assert BuilderArtifactMiddleware._visual_gate_blocks_emit(
         {"artifact_path": "/mnt/user-data/outputs/deck.pptx"},
         state,
-    ) is False
+    ) is True
 
 
-def test_no_image_phrasing_does_not_request_visual_gate():
+def test_no_image_phrasing_still_requests_visual_gate():
     for task in (
         "Build a no-image deck about our roadmap",
         "Build a no image deck about our roadmap",
@@ -94,7 +94,7 @@ def test_no_image_phrasing_does_not_request_visual_gate():
         state = _deck_state()
         state["delegation_context"]["task"] = task
 
-        assert _visuals_requested(state) is False
+        assert _visuals_requested(state) is True
 
 
 def test_no_image_deck_with_deterministic_diagram_still_requests_visual_gate():
@@ -112,12 +112,12 @@ def test_enrichment_enabled_mirror_reads_state():
     assert _builder_image_enrichment_enabled(_pdf_state(task="plain text summary")) is False
 
 
-def test_pdf_cap_is_two():
+def test_pdf_cap_is_zero():
     from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
         _image_generation_max_calls,
     )
 
-    assert _image_generation_max_calls(_pdf_state()) == 2
+    assert _image_generation_max_calls(_pdf_state()) == 0
     assert _image_generation_max_calls(_deck_state()) == 8
 
 
@@ -274,7 +274,7 @@ def test_hero_gate_is_one_shot():
     ) is False
 
 
-def test_hero_gate_off_for_plain_decks():
+def test_hero_gate_does_not_block_plain_decks_after_gate_was_softened():
     state = _deck_state()
     state["delegation_context"]["task"] = "a plain text-only deck"
     assert BuilderArtifactMiddleware._hero_gate_blocks_emit(

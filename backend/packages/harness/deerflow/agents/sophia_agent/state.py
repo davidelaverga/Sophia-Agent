@@ -216,10 +216,6 @@ def _merge_builder_visual_diagnostic_value(merged: dict, key: str, value: object
     if key in _VISUAL_DIAGNOSTIC_LIST_KEYS and isinstance(value, list):
         merged[key] = _merge_string_list(merged.get(key), value)
         return
-    if key == "visual_figure_records" and isinstance(value, list):
-        existing = merged.get(key) if isinstance(merged.get(key), list) else []
-        merged[key] = [*existing, *value]
-        return
     merged[key] = value
 
 
@@ -227,7 +223,6 @@ _VISUAL_DIAGNOSTIC_LIST_KEYS = frozenset({
     "visual_asset_paths",
     "visual_svg_paths",
     "visual_png_paths",
-    "visual_figure_families",
 })
 
 

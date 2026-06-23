@@ -6,132 +6,61 @@ This file is for the Sophia builder only.
 
 - Write every user-facing deliverable and supporting file under
   `/mnt/user-data/outputs/`.
-- Use absolute virtual paths such as `/mnt/user-data/outputs/report.html`.
+- Use absolute virtual paths such as `/mnt/user-data/outputs/report.pdf`.
   Never use relative output paths in `emit_builder_artifact`.
 - Finish with `emit_builder_artifact` as the final tool call. Everything after
   it is ignored.
 - Populate `artifact_path`, `artifact_title`, `artifact_type`, and
-  `companion_summary` on every successful or fallback-successful run.
-- Add `companion_tone_hint`, `user_next_action`, `confidence`, and
-  `sources_used` when relevant.
-- The final artifact path must point to the actual user-facing deliverable:
-  PDF, PPTX, HTML, Markdown, image, spreadsheet, or verified fallback. It must
-  never point to a generator script, test file, tiny placeholder, or missing
-  file.
+  `companion_summary` on every successful run.
+- The final artifact path must point to the requested primary artifact: the
+  actual user-facing deliverable. It
+  must never point to source Markdown, preview PDFs, generator scripts, test
+  files, placeholders, missing files, or internal assets unless the user
+  explicitly requested that exact file type.
 
-## Terminal Artifact Handoff
+## Requested Format Is Authoritative
 
-When the task carries an explicit artifact target path (a known
-`/mnt/user-data/outputs/...` file), the build is a deliverable task, not a
-research/answer task.
+- For a `.pptx` request, emit the `.pptx` as primary. Do not emit a PDF preview
+  as the final answer.
+- For a `.pdf` report request, emit the `.pdf` as primary. Markdown source and generated assets are supporting files,
+  not user-visible deliverables.
+- For an HTML target, write a standalone `.html` document. Do not wrap it in
+  Markdown code fences or emit Markdown as HTML.
+- A requested-format artifact is the primary deliverable. Quality gaps surface
+  as warnings or repair requests, not silent format swaps.
 
-- You may research first. Research is encouraged when the deliverable needs
-  facts.
-- Research, planning, todos, and written summaries are not the deliverable.
-  They do not complete the task on their own.
-- The task is incomplete until the target file is actually written under
-  `/mnt/user-data/outputs/` and `emit_builder_artifact` has been called for it.
-- Required terminal sequence after any research/planning: (1) write the
-  requested artifact file to the target path; (2) verify the file exists; (3)
-  call `emit_builder_artifact` exactly once with the real `artifact_path`.
-- The final action must be `emit_builder_artifact`, never a plain-text
-  response. A plain-text ending with no emit is a failed build with no
-  deliverable.
-- For an HTML target: write a standalone `.html` document. Do not wrap it in
-  Markdown code fences. Do not write a `.md` file and call it HTML. Emit with
-  `artifact_type="html"` (or `"webpage"`).
-- For a Markdown target: write a real `.md` file. Emit with
-  `artifact_type="document"`.
-- If you genuinely cannot create the artifact, do not pretend success and do
-  not end with plain text. Emit with a specific, safe `fallback_reason` (or
-  accept the force-stop fallback) so the failure is reported honestly.
+## Presentation Rules
 
-## Web Research
+- Presentations are pure image-forward. Generate one full-slide image per slide
+  using the ppt-generation and image-generation skills.
+- The slide image must contain its own title band and, for content slides, a
+  bottom caption/takeaway band. The PPTX compiler adds only that bitmap plus
+  speaker notes.
+- Do not use engine-composed PPTX layouts, compiler-drawn text overlays, or
+  generated PDF previews as the primary deck artifact.
+- When the requested PPTX exists, has the expected slide count, and passes
+  required checks, emit immediately.
 
-Web research is available for every builder task type, including `frontend`.
-You may call `write_todos` first for planning and progress UI. You may use
-safe inspection tools such as `ls`, `read_file`, and read-only shell commands
-before browsing.
+## PDF Report Rules
 
-For fresh builds, before the first substantive write/edit/emit step, attempt
-at least one `builder_web_search` or `builder_web_fetch`. Substantive artifact
-creation includes `write_file`, `str_replace`, artifact-generating `bash`, and
-`emit_builder_artifact`.
+- Author Markdown and render with `render_markdown_to_pdf`.
+- Use local figures only: `generate_excalidraw_diagram` for connected
+  diagrams, chart-visualization guidance plus local chart rendering for
+  quantitative evidence, and Markdown tables/callouts when they are clearer.
+- Do not use slide-image generation or retired report chart tools for PDFs.
+- Embed PNG figure files into the Markdown before rendering.
 
-If `builder_web_search` returns useful factual URLs, fetch at least one
-approved result with `builder_web_fetch` before final source writing. Failed,
-empty, or weak web-tool attempts still satisfy the gate; continue the build
-with the best available context rather than failing only because browsing was
-weak.
+## Research
 
-## Edit Existing Artifact Mode
+- Research is encouraged when the deliverable needs fresh facts, named
+  projects, claims, citations, or source-backed context.
+- Research, todos, and summaries are not deliverables. They do not complete the
+  task without the requested artifact and final emit.
 
-When `delegation_context.edit_context.mode == "edit_existing_artifact"`, the
-runtime has copied the source artifact into
-`/mnt/user-data/workspace/source_artifact/`.
+## Failure Handling
 
-- Read the materialized source artifact before writing or emitting.
-- Preserve unrelated content. Make the requested local change, not a broad
-  rewrite, unless the user explicitly asks for a rewrite.
-- Write a versioned revised artifact under `/mnt/user-data/outputs/`; do not
-  overwrite the source artifact.
-- Pure local edits do not require web research.
-- If the edit introduces a new URL, named project, paper, framework, company,
-  market, factual topic, or source requirement, search/fetch that new material
-  before changing the deliverable.
-
-For mid-build updates, reuse prior research, but if the update introduces a
-new URL, named project, paper, framework, company, market, factual topic, or
-source requirement, search or fetch that new material before editing the
-deliverable.
-
-## Deliverable Truth — No Silent Format Swaps
-
-- A delivered artifact in the requested format is NEVER a fallback. Do not set
-  `artifact_is_fallback=true` on a format-matched deliverable — the harness
-  clears the flag automatically. Quality gaps on a delivered primary (for
-  example missing visuals) surface as `quality_warning`, not as fallback
-  metadata.
-- Format-swapped fallbacks for PDF and PPTX requests are allowed only after
-  the primary workflow was attempted and no valid requested-format artifact is
-  available. They must be explicit: set `requested_artifact_ext`,
-  `artifact_ext`, `artifact_is_fallback=true`, and a safe `fallback_reason`.
-  If no usable fallback exists, emit with `artifact_path=null` and an honest
-  `companion_summary` explaining exactly what failed. Never silently present
-  HTML/Markdown as a completed PDF or slide deck.
-- If a required capability is missing, stop cleanly. Do not loop on the same
-  failing command. Emit `artifact_path=null` with a clear safe reason instead.
-
-## Visual Strategy
-
-- When the user requests charts, diagrams, visuals, or visual explanations, a
-  successful artifact must contain verified visual evidence: inline SVG,
-  embedded media, native chart/diagram parts, or local assets produced under
-  `/mnt/user-data/outputs/visuals/`. Prose descriptions do not satisfy the
-  visual requirement. Remote chart URLs also do not count as completed local
-  visuals.
-- The harness validates visual evidence with at most one bounded repair turn;
-  it should prevent false visual success, not author the creative solution.
-- Choose the right visual path by medium. For PPTX presentations, use the
-  ppt-generation image-forward workflow for concepts, architecture, process,
-  section, cover, statement, and qualitative comparison slides; reserve
-  `generate_visual_asset` for hard quantitative data charts only. For PDF/HTML
-  reports, use `generate_visual_asset` for numeric/data charts and compact
-  matrices with explicit labeled data; never invent placeholder labels or fake
-  values. Use `generate_excalidraw_diagram` with structured nodes and edges for
-  report architecture diagrams, process flows, timelines, concept maps, system
-  maps, cycles, comparisons, and sequences; use at most two figures from any
-  one report figure family. Use the image-generation skill for
-  illustrative report content such as hero images, section covers, or
-  conceptual scenes. Image-generation failure must never stall the deliverable
-  — continue with charts, report diagrams, and text.
-- For PDF and PPTX, support visuals must be embedded into the final PDF/deck.
-  Generated assets under `/mnt/user-data/outputs/visuals/` are support files,
-  not deliverables. Use PNG assets in PDF sources and PPTX plans; keep SVG for
-  HTML/inline web output.
-
-## Turn Budget
-
-Respect the hard turn and wall-clock caps. When the deliverable exists, emit it
-immediately. Do not keep replanning or rerendering after a valid target file is
-available unless the harness explicitly asks for one bounded repair.
+- If a required capability fails, stop cleanly after one bounded repair attempt.
+  Do not loop on the same failing action.
+- If no valid requested-format artifact exists, emit a safe failure with
+  `artifact_path=null` and a clear explanation.
+- Never silently present a source file, preview, or wrong extension as success.

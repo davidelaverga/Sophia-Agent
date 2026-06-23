@@ -131,13 +131,11 @@ def test_generate_visual_asset_restricts_structural_visuals_for_presentations(tm
     assert "--slide-visual" in payload["hint"]
 
 
-def test_generate_visual_asset_allows_structural_visuals_for_no_image_presentations(tmp_path) -> None:
-    outputs = tmp_path / "outputs"
-
+def test_generate_visual_asset_rejects_no_image_presentation_opt_out(tmp_path) -> None:
     payload = _payload(
         generate_visual_asset.func(
             runtime=_presentation_runtime(
-                outputs,
+                tmp_path / "outputs",
                 task="Build a no images architecture deck with an editable system flow diagram",
             ),
             visual_type="architecture_diagram",
@@ -148,9 +146,9 @@ def test_generate_visual_asset_allows_structural_visuals_for_no_image_presentati
         )
     )
 
-    assert payload["success"] is True
-    assert payload["svg_path"] == "/mnt/user-data/outputs/visuals/system-flow.svg"
-    assert (outputs / "visuals" / "system-flow.svg").is_file()
+    assert payload["success"] is False
+    assert payload["error_type"] == "presentation_visual_asset_restricted"
+    assert "--slide-visual" in payload["hint"]
 
 
 def test_generate_visual_asset_allows_structural_visuals_after_failed_slide_qc(tmp_path) -> None:

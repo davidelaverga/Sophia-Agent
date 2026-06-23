@@ -109,8 +109,9 @@ def test_skills_reorganized():
     skills_path = project_root / "skills" / "public" / "sophia"
 
     # Core files
-    for name in ["soul.md", "voice.md", "techniques.md", "tone_guidance.md", "artifact_instructions.md"]:
+    for name in ["soul.md", "voice.md", "techniques.md", "tone_guidance.md"]:
         assert (skills_path / name).exists(), f"Missing: {name}"
+    assert not (skills_path / "artifact_instructions.md").exists()
 
     # Context files
     for name in ["gaming.md", "life.md", "work.md"]:

@@ -612,7 +612,6 @@ def test_validate_deck_plan_accepts_image_forward_with_title_and_qc() -> None:
                 "image_path": "/mnt/user-data/outputs/slide-2.png",
                 "visual_style": "clean_flat_vector",
             },
-            {"type": "content", "subtype": "chart", "title": "Data", "data_chart": True, "visual_path": "/mnt/user-data/outputs/visuals/chart.png"},
         ]
     }
 
@@ -667,7 +666,7 @@ def test_validate_deck_plan_accepts_qc_coverage_by_image_hash(tmp_path: Path) ->
     assert problems == []
 
 
-def test_deck_plan_validation_repairs_known_chart_visual_metadata() -> None:
+def test_deck_plan_validation_rejects_chart_visual_metadata_without_slide_image() -> None:
     plan = {
         "slides": [
             {"type": "cover", "title": "Launch"},
@@ -688,62 +687,86 @@ def test_deck_plan_validation_repairs_known_chart_visual_metadata() -> None:
         "builder_pptx_diagnostics": diagnostics,
     }
 
-    assert _deck_plan_validation_problems(state) == []
-    repaired = diagnostics["pptx_plan_json"]
-    assert repaired["slides"][1]["data_chart"] is True
-    assert state["builder_pptx_plan_deterministic_repair_attempted"] is True
+    assert _deck_plan_validation_problems(state) == [
+        "Slide 1 is missing its generated slide image.",
+        "Slide 2 is missing its generated slide image.",
+    ]
+    assert "data_chart" not in diagnostics["pptx_plan_json"]["slides"][1]
+    assert "builder_pptx_plan_deterministic_repair_attempted" not in state
 
 
-def test_deck_plan_validation_autowires_chart_assets_without_slide_qc(tmp_path: Path) -> None:
+def test_deck_plan_validation_autowires_generated_slide_images_then_requires_qc(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     visuals = outputs / "visuals"
     visuals.mkdir(parents=True)
-    chart = visuals / "benchmark-chart.png"
-    _write_png(chart)
+    slide = visuals / "slide-02.png"
+    _write_png(slide)
     plan = {
         "slides": [
-            {"type": "cover", "title": "Launch"},
-            {"type": "content", "title": "Benchmark chart", "subtype": "chart"},
+            {
+                "type": "cover",
+                "title": "Launch",
+                "image_path": "/mnt/user-data/outputs/visuals/slide-01.png",
+                "visual_style": "clean_flat_vector",
+            },
+            {
+                "type": "content",
+                "title": "Benchmark chart",
+                "subtype": "chart",
+                "caption": "The benchmark trend is visible inside the baked slide image.",
+            },
         ]
     }
     state = {
         "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
         "delegation_context": {"task_type": "presentation", "task": "Create a visual deck"},
-        "builder_visual_diagnostics": {
-            "visual_asset_paths": ["/mnt/user-data/outputs/visuals/benchmark-chart.png"],
+        "builder_pptx_diagnostics": {
+            "image_output_paths": ["/mnt/user-data/outputs/visuals/slide-02.png"],
         },
         "thread_data": {"outputs_path": str(outputs)},
     }
 
     assert _wire_plan_visual_assets(plan["slides"], state) is True
-    assert plan["slides"][1]["visual_path"] == "/mnt/user-data/outputs/visuals/benchmark-chart.png"
-    assert plan["slides"][1]["data_chart"] is True
-    assert "image" not in plan["slides"][1]
+    assert plan["slides"][1]["image"] == "/mnt/user-data/outputs/visuals/slide-02.png"
+    assert "data_chart" not in plan["slides"][1]
+    assert plan["slides"][1]["visual_style"] == "clean_flat_vector"
     assert _validate_deck_plan(
         plan,
-        {"pptx_slide_title_results": [{"slide": 1, "title_present": True}]},
+        {
+            "pptx_slide_title_results": [{"slide": 1, "title_present": True}],
+            "qc_results": [{"pass": True, "presence_pass": True, "title_present": True}],
+        },
         state,
-    ) == []
+    ) == ["Slide 2 image was not QC-checked."]
 
 
-def test_validate_deck_plan_excludes_data_chart_images_from_slide_qc() -> None:
+def test_validate_deck_plan_requires_qc_for_chart_like_slide_images() -> None:
     plan = {
         "slides": [
-            {"type": "cover", "title": "Launch"},
+            {
+                "type": "cover",
+                "title": "Launch",
+                "image_path": "/mnt/user-data/outputs/slide-1.png",
+                "visual_style": "clean_flat_vector",
+            },
             {
                 "type": "content",
                 "title": "Benchmark chart",
                 "subtype": "chart",
-                "data_chart": True,
-                "image": "/mnt/user-data/outputs/visuals/benchmark-chart.png",
+                "caption": "The benchmark trend is visible inside the baked slide image.",
+                "image_path": "/mnt/user-data/outputs/slide-2.png",
+                "visual_style": "clean_flat_vector",
             },
         ]
     }
 
     assert _validate_deck_plan(
         plan,
-        {"pptx_slide_title_results": [{"slide": 1, "title_present": True}]},
-    ) == []
+        {
+            "pptx_slide_title_results": [{"slide": 1, "title_present": True}],
+            "qc_results": [{"pass": True, "presence_pass": True, "title_present": True}],
+        },
+    ) == ["Slide 2 image was not QC-checked."]
 
 
 def test_deck_plan_validation_does_not_repair_missing_image_refs_from_unused_outputs() -> None:
@@ -766,7 +789,8 @@ def test_deck_plan_validation_does_not_repair_missing_image_refs_from_unused_out
     problems = _deck_plan_validation_problems(state)
 
     assert problems == [
-        "Content slide 1 is neither image-forward nor a flagged data/stat slide.",
+        "Slide 1 is missing its generated slide image.",
+        "Slide 2 is missing its generated slide image.",
     ]
     assert diagnostics["pptx_plan_json"]["slides"][1].get("image_path") is None
     assert "builder_pptx_plan_deterministic_repair_attempted" not in state
@@ -800,7 +824,7 @@ def test_validate_deck_plan_treats_skipped_qc_as_unavailable() -> None:
     assert problems == []
 
 
-def test_validate_deck_plan_accepts_native_stat_slides_without_images() -> None:
+def test_validate_deck_plan_rejects_stat_slides_without_images() -> None:
     diagnostics = {"pptx_slide_title_results": [{"slide": 1, "title_present": True}]}
 
     for stat_slide in (
@@ -815,10 +839,13 @@ def test_validate_deck_plan_accepts_native_stat_slides_without_images() -> None:
     ):
         plan = {"slides": [{"type": "cover", "title": "Launch"}, stat_slide]}
 
-        assert _validate_deck_plan(plan, diagnostics) == []
+        assert _validate_deck_plan(plan, diagnostics) == [
+            "Slide 1 is missing its generated slide image.",
+            "Slide 2 is missing its generated slide image.",
+        ]
 
 
-def test_validate_deck_plan_accepts_compiler_alias_slides_without_images() -> None:
+def test_validate_deck_plan_rejects_compiler_alias_slides_without_images() -> None:
     diagnostics = {"pptx_slide_title_results": [{"slide": 1, "title_present": True}]}
 
     plan = {
@@ -830,7 +857,12 @@ def test_validate_deck_plan_accepts_compiler_alias_slides_without_images() -> No
         ]
     }
 
-    assert _validate_deck_plan(plan, diagnostics) == []
+    assert _validate_deck_plan(plan, diagnostics) == [
+        "Slide 1 is missing its generated slide image.",
+        "Slide 2 is missing its generated slide image.",
+        "Slide 3 is missing its generated slide image.",
+        "Slide 4 is missing its generated slide image.",
+    ]
 
 
 def test_slide_qc_bash_result_records_verdict_feedback_payload(tmp_path: Path) -> None:
@@ -1295,12 +1327,12 @@ def test_visual_skill_force_count_uses_persisted_state_to_stop_after_cap() -> No
     assert result is expected
 
 
-def test_ppt_generation_script_can_create_no_image_deck(tmp_path: Path) -> None:
+def test_ppt_generation_script_rejects_no_image_deck(tmp_path: Path) -> None:
     plan = tmp_path / "plan.json"
     plan.write_text(
         json.dumps(
             {
-                "title": "No Image Deck",
+                "title": "Image Deck",
                 "aspect_ratio": "16:9",
                 "slides": [
                     {"title": "One", "subtitle": "Opening"},
@@ -1326,13 +1358,12 @@ def test_ppt_generation_script_can_create_no_image_deck(tmp_path: Path) -> None:
         timeout=15,
     )
 
-    assert result.returncode == 0
-    assert output.exists()
-    assert output.stat().st_size > 1024
-    assert "Successfully generated presentation with 2 slides" in result.stdout
+    assert result.returncode == 1
+    assert "Slide 1 is missing its generated slide image" in result.stderr
+    assert not output.exists()
 
 
-def test_ppt_generation_script_embeds_plan_chart_image(tmp_path: Path) -> None:
+def test_ppt_generation_script_rejects_chart_path_as_slide_image(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     chart = outputs / "visuals" / "chart.png"
     _write_png(chart)
@@ -1369,13 +1400,12 @@ def test_ppt_generation_script_embeds_plan_chart_image(tmp_path: Path) -> None:
         timeout=15,
     )
 
-    assert result.returncode == 0, result.stderr
-    assert "picture_count=1" in result.stdout
-    with zipfile.ZipFile(output) as archive:
-        assert any(name.startswith("ppt/media/") for name in archive.namelist())
+    assert result.returncode == 1
+    assert "Slide 1 is missing its generated slide image" in result.stderr
+    assert not output.exists()
 
 
-def test_ppt_generation_script_degrades_when_slide_image_missing(tmp_path: Path) -> None:
+def test_ppt_generation_script_rejects_missing_slide_image(tmp_path: Path) -> None:
     plan = tmp_path / "plan.json"
     plan.write_text(json.dumps({"aspect_ratio": "16:9", "slides": [{"title": "One"}]}), encoding="utf-8")
     output = tmp_path / "deck.pptx"
@@ -1396,6 +1426,6 @@ def test_ppt_generation_script_degrades_when_slide_image_missing(tmp_path: Path)
         timeout=15,
     )
 
-    assert result.returncode == 0
-    assert "Slide image missing, using text layout:" in result.stderr
-    assert output.exists()
+    assert result.returncode == 1
+    assert "Slide 1 image not found:" in result.stderr
+    assert not output.exists()

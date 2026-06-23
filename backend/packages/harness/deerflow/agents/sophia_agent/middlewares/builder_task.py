@@ -534,33 +534,6 @@ _POLISHED_DECK_IMAGE_MARKERS = (
     "full bleed",
 )
 
-_PLAIN_DECK_IMAGE_OPT_OUT_MARKERS = (
-    "text-only",
-    "text only",
-    "text-only deck",
-    "text only deck",
-    "no-image",
-    "no image",
-    "no-image deck",
-    "no image deck",
-    "no images",
-    "no imagery",
-    "no illustrations",
-    "no visuals",
-    "without images",
-    "without imagery",
-    "without illustrations",
-    "without visuals",
-)
-
-
-def _plain_deck_image_opt_out_requested(text: str) -> bool:
-    return any(
-        re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", text)
-        for marker in _PLAIN_DECK_IMAGE_OPT_OUT_MARKERS
-    )
-
-
 def _text_marker_present(text: str, marker: str) -> bool:
     return re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", text) is not None
 
@@ -584,7 +557,7 @@ def _image_generation_enabled(
     description = str(delegation_context.get("description") or "").lower()
     combined = f"{task}\n{description}"
     if _is_pptx_image_generation_target(artifact_target_ext, task_type):
-        return not _plain_deck_image_opt_out_requested(combined)
+        return True
     if any(marker in combined for marker in _EXPLICIT_IMAGE_GENERATION_MARKERS):
         return True
     return False
@@ -601,13 +574,6 @@ def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
         str(delegation_context.get(key) or "").lower()
         for key in ("task", "description", "artifact_brief", "original_task")
     )
-    if _plain_deck_image_opt_out_requested(combined):
-        for marker in _PLAIN_DECK_IMAGE_OPT_OUT_MARKERS:
-            combined = re.sub(
-                rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])",
-                " ",
-                combined,
-            )
     return any(_text_marker_present(combined, marker) for marker in _VISUAL_REQUEST_MARKERS)
 
 
@@ -1106,13 +1072,12 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 "costs 90+ seconds of LLM output, so re-writing the same file twice burns the budget.\n"
             )
         pptx_visual_guidance = (
-            "Slides use gpt-image-2 full-slide visuals when image-generation is listed for this run; "
-            "hard quantitative charts are the only deterministic exception. If a generated slide fails QC, regenerate "
-            "or replace that image-forward slide instead of downgrading the deck to deterministic diagrams/text."
+            "Slides use gpt-image-2 full-slide visuals when image-generation is listed for this run. "
+            "Every PPTX slide must be a generated full-slide image with baked title/caption bands. "
+            "If a generated slide fails QC, regenerate or replace that image-forward slide once; "
+            "do not downgrade the deck to engine-composed diagrams/text."
             if image_generation_enabled
-            else "Image generation is disabled for this run. For PPTX/presentation output, preserve any plain/text-only/no-image constraint: "
-            "build an editable deterministic deck with slide text, shapes, simple diagrams, tables, and charts; do not run the image-generation script "
-            "or add generated hero/full-slide visuals."
+            else "Image generation is not listed for this non-PPTX run. Use the medium-specific local figure workflow."
         )
 
         sections.append(

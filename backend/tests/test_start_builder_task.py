@@ -1202,7 +1202,7 @@ def test_start_builder_task_treats_failed_status_as_terminal(monkeypatch):
     assert "new-1" in response.update["async_tasks"]
 
 
-# ---- visual expectations brief line (editable visual decks, 2026-06-13) -----
+# ---- visual expectations brief line (image-forward visual decks) -----
 
 
 def test_presentation_brief_gains_visual_expectations_line():
@@ -1211,19 +1211,20 @@ def test_presentation_brief_gains_visual_expectations_line():
     line = _visual_expectations_line("Build an investor deck about our roadmap", "presentation")
     assert line is not None
     assert "Visual expectations" in line
-    assert "deck editable rather than image-only" in line
-    assert "Excalidraw-style diagrams" in line
+    assert "generated image-forward deck" in line
+    assert "full-slide visual" in line
 
 
-def test_plain_deck_brief_gets_opt_out_line():
+def test_plain_deck_brief_keeps_image_forward_line():
     from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
 
     line = _visual_expectations_line("A plain text-only deck please", "presentation")
     assert line is not None
-    assert "do NOT use generated imagery" in line
+    assert "restrained design" in line
+    assert "non-visual workflow" in line
 
 
-def test_no_image_deck_brief_gets_opt_out_line():
+def test_no_image_deck_brief_keeps_image_forward_line():
     from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
 
     for brief in (
@@ -1233,7 +1234,7 @@ def test_no_image_deck_brief_gets_opt_out_line():
     ):
         line = _visual_expectations_line(brief, "presentation")
         assert line is not None
-        assert "do NOT use generated imagery" in line
+        assert "generated image-forward deck" in line
 
 
 def test_bare_plain_style_with_images_keeps_visual_expectations_line():
@@ -1242,16 +1243,16 @@ def test_bare_plain_style_with_images_keeps_visual_expectations_line():
     line = _visual_expectations_line("A plain-English deck with illustrations", "presentation")
     assert line is not None
     assert "do NOT use generated imagery" not in line
-    assert "deck editable rather than image-only" in line
+    assert "generated image-forward deck" in line
 
 
-def test_explaining_deck_does_not_trigger_plain_opt_out_line():
+def test_explaining_deck_uses_image_forward_line():
     from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
 
     line = _visual_expectations_line("Build a deck explaining OpenClaw", "presentation")
     assert line is not None
     assert "do NOT use generated imagery" not in line
-    assert "deck editable rather than image-only" in line
+    assert "generated image-forward deck" in line
 
 
 def test_style_keywords_surface_in_brief():

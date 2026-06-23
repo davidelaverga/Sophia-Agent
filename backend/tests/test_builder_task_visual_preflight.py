@@ -1,9 +1,9 @@
 """Visual capability prompt tests.
 
-Image generation is default-on for PPTX decks and opt-in for other builder
+Image generation is mandatory for PPTX decks and opt-in for other builder
 tasks. Presentation and visual report tasks should not hard-stop when
-``OPENAI_API_KEY`` is missing; the builder should create valid chart/text
-PPTX/PDF/HTML deliverables when generated raster images are unavailable.
+``OPENAI_API_KEY`` is missing, but PPTX prompts must still describe the
+image-forward contract instead of switching to native text layouts.
 """
 
 from __future__ import annotations
@@ -113,7 +113,7 @@ class TestVisualCapabilityPrompt:
         briefing = _briefing(result)
         assert "<missing_capability>" not in briefing
 
-    def test_plain_presentation_prompt_preserves_no_image_opt_out(self) -> None:
+    def test_plain_presentation_prompt_keeps_image_forward_contract(self) -> None:
         state = _make_state("presentation")
         state["delegation_context"]["task"] = "Build a plain text-only deck about the roadmap with no images"
 
@@ -121,11 +121,10 @@ class TestVisualCapabilityPrompt:
 
         briefing = _briefing(result)
         skill_names = _available_skills_section(briefing)
-        assert "image-generation" not in skill_names
-        assert "visual-design" not in skill_names
-        assert "Image generation is disabled for this run" in briefing
-        assert "do not run the image-generation script" in briefing
-        assert "Slides use gpt-image-2 full-slide visuals" not in briefing
+        assert "image-generation" in skill_names
+        assert "Image generation is disabled for this run" not in briefing
+        assert "do not run the image-generation script" not in briefing
+        assert "Slides use gpt-image-2 full-slide visuals" in briefing
 
 
 def _available_skills_section(briefing: str) -> str:

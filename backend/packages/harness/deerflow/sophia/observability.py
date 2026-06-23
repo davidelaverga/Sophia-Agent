@@ -85,7 +85,7 @@ def _safe_metadata_value(value: Any) -> str | int | float | bool | None:
     if isinstance(value, (int, float)):
         return value
     if isinstance(value, str):
-        stripped = value.strip()
+        stripped = value.strip().strip('"').strip("'").strip()
         return stripped[:512] if stripped else None
     return None
 
@@ -115,7 +115,7 @@ def _endpoint_host(endpoint: str) -> str:
 def _langsmith_log_context() -> dict[str, Any]:
     config = get_tracing_config()
     return {
-        "project": config.project,
+        "project": _safe_metadata_value(config.project),
         "endpoint_host": _endpoint_host(config.endpoint),
         "api_key_present": bool(config.api_key),
         "workspace_id_present": bool(config.workspace_id),
@@ -170,6 +170,11 @@ def builder_trace_metadata(
     """Build safe metadata for the root Sophia builder trace."""
 
     metadata: dict[str, Any] = {"sophia_component": "builder"}
+    tracing_config = get_tracing_config()
+    _merge_safe_metadata(metadata, "LANGSMITH_PROJECT", tracing_config.project)
+    _merge_safe_metadata(metadata, "langsmith_project", tracing_config.project)
+    _merge_safe_metadata(metadata, "langsmith_endpoint_host", _endpoint_host(tracing_config.endpoint))
+    _merge_safe_metadata(metadata, "langsmith_project_uuid", tracing_config.project_uuid)
     _merge_safe_metadata(metadata, "builder_model_name", model_name)
     _merge_safe_metadata(metadata, "builder_model_source", model_source)
 
@@ -189,6 +194,8 @@ def builder_trace_metadata(
                 _merge_safe_metadata(metadata, key, source.get(key))
     if "parent_trace_id" not in metadata:
         _merge_safe_metadata(metadata, "parent_trace_id", config_metadata.get("trace_id"))
+    if "task_id" not in metadata and metadata.get("thread_id") is not None:
+        metadata["task_id"] = metadata["thread_id"]
     return metadata
 
 
@@ -667,6 +674,15 @@ def builder_observability_payload(
     if tool_counts:
         metadata["tool_counts_by_name"] = tool_counts
     metadata["emit_rejection_count"] = _emit_rejection_count(state)
+    lifecycle_markers = state.get("builder_lifecycle_markers")
+    if isinstance(lifecycle_markers, dict) and lifecycle_markers:
+        metadata["builder_lifecycle_markers"] = {
+            str(key): value
+            for key, value in lifecycle_markers.items()
+            if _safe_metadata_value(key) is not None and _safe_metadata_value(value) is not None
+        }
+    _merge_safe_metadata(metadata, "builder_terminal_halt_reason", state.get("builder_terminal_halt_reason"))
+    metadata["builder_graph_halted"] = state.get("builder_graph_halted") is True
     _add_identity_metadata(
         metadata,
         artifact=artifact,
@@ -753,6 +769,6 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
     logger.info(
         "Sophia builder LangSmith completion annotation attached: run_id=%s project=%s",
         getattr(run_tree, "id", None),
-        get_tracing_config().project,
+        _safe_metadata_value(get_tracing_config().project),
     )
     return True

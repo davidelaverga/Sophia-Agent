@@ -84,7 +84,7 @@ def generate_ppt(
     output_file: str,
 ) -> str:
     """
-    Generate a PowerPoint presentation from a plan, optionally with slide images.
+    Generate a PowerPoint presentation from baked full-slide images.
 
     Args:
         plan_file: Path to JSON file containing presentation plan
@@ -107,38 +107,33 @@ def generate_ppt(
     blank_layout = prs.slide_layouts[6]  # Blank layout
     slides_info = plan.get("slides", [])
     if not slides_info:
-        slides_info = [{"slide_number": 1, "type": "title", "title": plan.get("title", "Presentation")}]
+        raise ValueError("Presentation plan must include generated slide-image entries.")
 
     if slide_images and len(slide_images) != len(slides_info):
-        print(
-            "Slide image count does not match plan slide count; extra slides "
-            "will use plan-referenced visuals or text layouts",
-            file=sys.stderr,
+        raise ValueError(
+            "Slide image count does not match plan slide count; pure image-forward decks "
+            "require one generated image per slide."
         )
 
     for index, slide_info in enumerate(slides_info):
+        image_path = (
+            slide_images[index]
+            if index < len(slide_images)
+            else slide_visual_image_path(slide_info, plan_file, output_file)
+        )
+        if not image_path:
+            raise ValueError(f"Slide {index + 1} is missing its generated slide image.")
+        if not os.path.exists(image_path):
+            raise FileNotFoundError(f"Slide {index + 1} image not found: {image_path}")
         slide = prs.slides.add_slide(blank_layout)
-        image_from_cli = index < len(slide_images)
-        image_path = slide_images[index] if image_from_cli else slide_visual_image_path(slide_info, plan_file, output_file)
-        if image_path and not os.path.exists(image_path):
-            # Degrade to the text layout instead of aborting the whole deck
-            # (or leaving an empty visual card) on a missing file.
-            print(
-                f"Slide image missing, using text layout: {image_path}",
-                file=sys.stderr,
-            )
-            image_path = None
-        layout_name = resolve_layout(slide_info, image_path, cli_image=image_from_cli)
-        if image_path is None and layout_name in _IMAGE_DEPENDENT_LAYOUTS:
-            # Explicit image layout without a usable image: re-resolve as if
-            # no layout was requested. Title-typed slides keep the title
-            # treatment; everything else falls back to content_text.
-            print(f"Layout '{layout_name}' requires an image, using text layout", file=sys.stderr)
-            layout_name = "title" if str(slide_info.get("type") or "").lower() == "title" else "content_text"
-        LAYOUT_DISPATCH[layout_name](slide, slide_info, plan, image_path, slide_width, slide_height)
+        add_image_forward_slide(slide, slide_info, plan, image_path, slide_width, slide_height)
         add_speaker_notes(slide, slide_info)
 
     picture_count = save_and_validate_pptx(prs, output_file)
+    if picture_count != len(slides_info):
+        raise RuntimeError(
+            f"PPTX image-only compile expected {len(slides_info)} pictures, got {picture_count}."
+        )
     return f"Successfully generated presentation with {len(prs.slides)} slides (picture_count={picture_count})"
 
 
@@ -730,7 +725,7 @@ _VISUAL_ANCHOR_LAYOUTS = {"image_forward", "full_bleed_image", "content_image", 
 
 
 def _has_image_ref(slide_info: dict) -> bool:
-    return any(_text_ref(slide_info.get(key)) for key in ("image", "chart_path", "visual_path"))
+    return any(_text_ref(slide_info.get(key)) for key in ("image_path", "image"))
 
 
 def _lint_resolved_layout(slide_info: dict) -> str:
@@ -765,7 +760,7 @@ def _lint_consecutive_layouts(facts: list[dict]) -> list[str]:
 
 
 def _dry_stretch_warning(run: list[dict]) -> str:
-    return f"slides {run[0]['number']}-{run[-1]['number']} are a text-only stretch with no visual anchor (full_bleed_image, content_image, section_divider, quote, or stat_band) — aim for at least one anchor every 3 slides"
+        return f"slides {run[0]['number']}-{run[-1]['number']} are missing generated image anchors — provide one full-slide image for every slide"
 
 
 def _lint_visual_cadence(facts: list[dict]) -> list[str]:
@@ -857,7 +852,7 @@ def slide_points(slide_info: dict) -> list[str]:
 
 
 def slide_visual_image_path(slide_info: dict, plan_file: str, output_file: str) -> str | None:
-    raw = slide_info.get("image_path") or slide_info.get("image") or slide_info.get("chart_path") or slide_info.get("visual_path")
+    raw = slide_info.get("image_path") or slide_info.get("image")
     if not isinstance(raw, str) or not raw.strip():
         return None
     return resolve_image_path(raw.strip(), plan_file, output_file)

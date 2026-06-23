@@ -1,15 +1,17 @@
 from __future__ import annotations
 
+import importlib.util
 import json
 from pathlib import Path
+from types import SimpleNamespace
 
 from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+    BuilderArtifactMiddleware,
     _USER_SURFACE_ARTIFACT_FILE_ROLES,
     _artifact_file_entries,
     _artifact_file_paths_for_roles,
     _presentation_completion_ready,
-    _report_visual_grammar_problems,
     _unmet_conditions_from_state,
     _validate_deck_plan,
 )
@@ -61,7 +63,10 @@ def test_image_forward_compiler_does_not_add_native_title_or_caption_overlays() 
 
     assert "addImageForwardTitleOverlay" not in source
     assert "addCaptionBand" not in source
-    assert "return count;\n  }\n  return count + 1 + slideBullets" in source
+    assert "rendererForSlideType" not in source
+    assert "function slideType" not in source
+    assert "addText(" not in source
+    assert "renderImageForward" in source
 
 
 def test_canonical_deck_plan_passes_presence_and_treatment_variety() -> None:
@@ -92,6 +97,24 @@ def test_pptx_terminal_latch_rejects_missing_baked_title_presence(tmp_path: Path
     assert state.get("builder_presentation_terminal_ready") is not True
 
 
+def test_terminal_halt_suppresses_followup_model_call() -> None:
+    middleware = BuilderArtifactMiddleware()
+    request = SimpleNamespace(
+        state={"builder_graph_halted": True, "builder_terminal_halt_reason": "artifact_emitted"},
+        runtime=None,
+        model=object(),
+        override=lambda **_kwargs: None,
+    )
+
+    def _handler(_request):  # pragma: no cover - should not be reached
+        raise AssertionError("model handler should not be called after terminal halt")
+
+    result = middleware.wrap_model_call(request, _handler)
+
+    assert result.content.startswith("[Sophia builder stopped")
+    assert not getattr(result, "tool_calls", None)
+
+
 def test_pptx_picture_count_is_visual_evidence_for_image_forward_decks() -> None:
     state = {
         "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
@@ -106,11 +129,9 @@ def test_pptx_picture_count_is_visual_evidence_for_image_forward_decks() -> None
     )
 
 
-def test_report_visual_grammar_gate_allows_varied_report_and_blocks_dominant_grammar() -> None:
-    varied_state = {
-        "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
-        "builder_visual_diagnostics": _fixture("canonical_report_visuals.json"),
-    }
+def test_report_visual_grammar_gate_is_absent() -> None:
+    assert not hasattr(builder_artifact_module, "_report_visual_grammar_problems")
+    assert not hasattr(builder_artifact_module, "_report_figure_family_problems")
     repetitive_state = {
         "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
         "builder_visual_diagnostics": {
@@ -123,8 +144,28 @@ def test_report_visual_grammar_gate_allows_varied_report_and_blocks_dominant_gra
         },
     }
 
-    assert _report_visual_grammar_problems(varied_state) == []
-    assert any("50% or less" in problem for problem in _report_visual_grammar_problems(repetitive_state))
+    assert not BuilderArtifactMiddleware._visual_gate_blocks_emit(
+        {"artifact_path": "/mnt/user-data/outputs/report.pdf"},
+        repetitive_state,
+    )
+
+
+def test_slide_qc_fails_visible_prompt_scaffolding(tmp_path: Path, monkeypatch) -> None:
+    script = Path(__file__).parents[2] / "skills/public/image-generation/scripts/slide_qc.py"
+    spec = importlib.util.spec_from_file_location("slide_qc_under_test", script)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    image_file = tmp_path / "slide.png"
+    image_file.write_bytes(b"not-really-an-image")
+    monkeypatch.setattr(module, "_ocr_text", lambda _path: "Prompt: THE TEXT READS: [visual] caption: demo")
+
+    reasons = module._raster_layout_reasons(image_file)
+
+    assert any("THE TEXT READS" in reason for reason in reasons)
+    assert any("caption:" in reason for reason in reasons)
+    assert any("prompt:" in reason for reason in reasons)
+    assert any("[visual]" in reason for reason in reasons)
 
 
 def test_artifact_file_roles_surface_only_primary_and_preview() -> None:

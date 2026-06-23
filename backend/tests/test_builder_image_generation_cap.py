@@ -40,7 +40,11 @@ def _bash_request(command: str, state: dict):
 
 
 def _state_with_image_diagnostics(**diagnostics) -> dict:
-    return {"builder_pptx_diagnostics": diagnostics}
+    return {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation"},
+        "builder_pptx_diagnostics": diagnostics,
+    }
 
 
 # ---- command counting -------------------------------------------------------
@@ -151,8 +155,9 @@ def test_terminal_error_short_circuits_after_single_failure():
     content = result.update["messages"][0].content
     assert "unavailable" in content
     assert "missing_api_key" in content
-    assert "hard-data charts" in content
-    assert "chart/report-diagram/text layouts" in content
+    assert "artifact_path=null" in content
+    assert "PDF" in content
+    assert "local chart, table, diagram, and prose" in content
 
 
 def test_preflight_chained_with_generation_honors_terminal_error_short_circuit():
@@ -271,15 +276,15 @@ def test_explicit_image_request_enables_generation():
     ) is True
 
 
-def test_plain_deck_marker_opts_out():
+def test_plain_deck_marker_does_not_opt_out():
     assert _image_generation_enabled(
         {"task": "Build a plain text-only deck about our roadmap"},
         artifact_target_ext=".pptx",
         task_type="presentation",
-    ) is False
+    ) is True
 
 
-def test_no_image_phrasing_opts_out_of_deck_images():
+def test_no_image_phrasing_does_not_opt_out_of_deck_images():
     for task in (
         "Build a no-image deck about our roadmap",
         "Build a no image deck about our roadmap",
@@ -289,7 +294,7 @@ def test_no_image_phrasing_opts_out_of_deck_images():
             {"task": task},
             artifact_target_ext=".pptx",
             task_type="presentation",
-        ) is False
+        ) is True
 
 
 def test_bare_plain_style_does_not_disable_requested_deck_images():

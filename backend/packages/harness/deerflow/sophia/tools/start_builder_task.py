@@ -1219,24 +1219,6 @@ def _build_enriched_description(
     return "\n\n".join(sections)
 
 
-_PLAIN_VISUAL_OPT_OUT_MARKERS = (
-    "text-only",
-    "text only",
-    "text-only deck",
-    "text only deck",
-    "no-image",
-    "no image",
-    "no-image deck",
-    "no image deck",
-    "no images",
-    "no imagery",
-    "no illustrations",
-    "no visuals",
-    "without images",
-    "without imagery",
-    "without illustrations",
-    "without visuals",
-)
 _VISUAL_STYLE_KEYWORDS = (
     "professional",
     "corporate",
@@ -1254,13 +1236,6 @@ _VISUAL_STYLE_KEYWORDS = (
 )
 
 
-def _plain_visual_opt_out_requested(text: str) -> bool:
-    return any(
-        re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", text)
-        for marker in _PLAIN_VISUAL_OPT_OUT_MARKERS
-    )
-
-
 def _visual_expectations_line(description: str, task_type: str) -> str | None:
     """One explicit visual-expectations line for visual deliverable briefs.
 
@@ -1270,18 +1245,18 @@ def _visual_expectations_line(description: str, task_type: str) -> str | None:
     if task_type not in {"presentation", "visual_report"}:
         return None
     lowered = description.lower()
-    if _plain_visual_opt_out_requested(lowered):
-        return (
-            "Visual expectations: the user explicitly asked for a plain/text-only/no-visual "
-            "deliverable — do NOT use generated imagery; charts only if explicitly requested."
-        )
     styles = [kw for kw in _VISUAL_STYLE_KEYWORDS if kw in lowered]
     style_note = f" Preferred style cues from the user: {', '.join(styles[:3])}." if styles else ""
+    if task_type == "presentation":
+        return (
+            "Visual expectations: create a generated image-forward deck. Every slide "
+            "should be a full-slide visual with baked title and caption/takeaway bands; "
+            f"minimal/plain wording means restrained design, not a non-visual workflow.{style_note}"
+        )
     return (
         "Visual expectations: create a polished, visual artifact. Use generated "
         "imagery for hero/section/illustrative assets when useful; use charts "
-        "and Excalidraw-style diagrams for factual visuals. For PPTX, keep the "
-        f"deck editable rather than image-only.{style_note}"
+        f"and Excalidraw-style diagrams for factual visuals.{style_note}"
     )
 
 

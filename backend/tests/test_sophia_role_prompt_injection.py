@@ -28,7 +28,6 @@ class TestSophiaRolePromptFiles:
             "coordination_core.md",
             "companion_delegation.md",
             "builder_obligations.md",
-            "anti_slop.md",
             # Artifact Visual System Phase 5: the per-type composition cards
             # (pptx/pdf/html/visuals) were retired; composition guidance moved
             # into the always-injected directives. Research card is orthogonal.
@@ -87,7 +86,7 @@ class TestSophiaRolePromptInjection:
 
         assert "coordination_core.md" in src
         assert "builder_obligations.md" in src
-        assert "anti_slop.md" in src
+        assert "anti_slop.md" not in src
         assert "companion_delegation.md" not in src
         assert 'SKILLS_PATH / "AGENTS.md", False' not in src
 

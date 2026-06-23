@@ -35,7 +35,7 @@ def test_visual_design_missing_injects_blocking_prompt(tmp_path) -> None:
     assert "/mnt/skills/public/visual-design/SKILL.md" in update["messages"][0].content
 
 
-def test_generate_visual_asset_is_blocked_until_design_skill_is_read(tmp_path) -> None:
+def test_retired_generate_visual_asset_tool_is_not_intercepted(tmp_path) -> None:
     state = _visual_state(tmp_path / "outputs")
     state["builder_tool_turn_summaries"] = [
         {"tool_names": ["builder_web_search"]},
@@ -53,9 +53,7 @@ def test_generate_visual_asset_is_blocked_until_design_skill_is_read(tmp_path) -
 
     result = BuilderArtifactMiddleware().wrap_tool_call(request, handler)
 
-    assert result.goto == "model"
-    assert result.update["messages"][0].status == "error"
-    assert "visual asset creation is blocked" in result.update["messages"][0].content
+    assert result == "handled"
 
 
 def test_visual_pdf_emit_without_embedded_visuals_gets_quality_warning(tmp_path) -> None:
@@ -251,7 +249,9 @@ def test_autowire_assigns_generated_pngs_to_content_slides(tmp_path) -> None:
     visuals = outputs / "visuals"
     visuals.mkdir(parents=True)
     workspace.mkdir()
+    (visuals / "cover.png").write_bytes(b"\x89PNG fake")
     (visuals / "timeline.png").write_bytes(b"\x89PNG fake")
+    (visuals / "architecture.png").write_bytes(b"\x89PNG fake")
     plan = {
         "title": "Deck",
         "slides": [
@@ -265,9 +265,13 @@ def test_autowire_assigns_generated_pngs_to_content_slides(tmp_path) -> None:
 
     state = _visual_state(outputs, target="/mnt/user-data/outputs/deck.pptx")
     state["thread_data"]["workspace_path"] = str(workspace)
-    state["builder_visual_diagnostics"] = {
-        "visual_asset_success_count": 1,
-        "visual_asset_paths": ["/mnt/user-data/outputs/visuals/timeline.png"],
+    state["builder_pptx_diagnostics"] = {
+        "image_generation_success_count": 3,
+        "image_output_paths": [
+            "/mnt/user-data/outputs/visuals/cover.png",
+            "/mnt/user-data/outputs/visuals/timeline.png",
+            "/mnt/user-data/outputs/visuals/architecture.png",
+        ],
     }
     command = (
         "python /mnt/skills/public/ppt-generation/scripts/generate.py "
@@ -281,10 +285,12 @@ def test_autowire_assigns_generated_pngs_to_content_slides(tmp_path) -> None:
 
     rewritten = _json.loads(plan_file.read_text(encoding="utf-8"))
     slides = rewritten["slides"]
-    assert "image" not in slides[0]  # title slide untouched
-    assert slides[1]["visual_path"] == "/mnt/user-data/outputs/visuals/timeline.png"
-    assert slides[1]["data_chart"] is True
-    assert "image" not in slides[1]
+    assert slides[0]["image"] == "/mnt/user-data/outputs/visuals/cover.png"
+    assert slides[1]["image"] == "/mnt/user-data/outputs/visuals/timeline.png"
+    assert slides[2]["image"] == "/mnt/user-data/outputs/visuals/architecture.png"
+    assert "visual_path" not in slides[1]
+    assert "data_chart" not in slides[1]
+    assert "layout" not in slides[1]
 
 
 def test_autowire_drops_refs_to_missing_files(tmp_path) -> None:
@@ -441,12 +447,12 @@ def test_autowire_prefers_generated_hero_for_title_slide(tmp_path) -> None:
 
     rewritten = _json.loads(plan_file.read_text(encoding="utf-8"))
     slides = rewritten["slides"]
-    # Hero image lands on the title slide as a full-bleed layout.
+    # Generated slide image lands on the title slide; deterministic visual assets
+    # are no longer wired into PPTX plans.
     assert slides[0]["image"] == "/mnt/user-data/outputs/visuals/hero-launch.png"
-    assert slides[0]["layout"] == "full_bleed_image"
-    # The chart still round-robins onto the content slide.
-    assert slides[1]["visual_path"] == "/mnt/user-data/outputs/visuals/timeline.png"
-    assert slides[1]["data_chart"] is True
+    assert "layout" not in slides[0]
+    assert "visual_path" not in slides[1]
+    assert "data_chart" not in slides[1]
     assert "image" not in slides[1]
 
 

@@ -250,6 +250,64 @@ class TestRetrievalAsync:
         assert result["injected_memories"] == ["existing-id", "m2", "m1"]
 
     @pytest.mark.anyio
+    async def test_generic_artifact_style_memory_filtered(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_search(
+            monkeypatch,
+            [
+                {
+                    "id": "style",
+                    "content": "User prefers dark, heavy visual presentation style.",
+                },
+                {
+                    "id": "subject",
+                    "content": "User is evaluating LangGraph orchestration tradeoffs.",
+                },
+            ],
+        )
+        mw = BuilderMem0RetrievalMiddleware()
+        state = {
+            "user_id": "u",
+            "delegation_context": {"normalized_brief": "Create a PDF report on LangGraph."},
+            "messages": [{"type": "human", "content": "Create a PDF report on LangGraph."}],
+        }
+
+        result = await mw.abefore_agent(state, runtime=None)
+
+        assert result["injected_memory_contents"] == [
+            "User is evaluating LangGraph orchestration tradeoffs."
+        ]
+        assert result["injected_memories"] == ["subject"]
+
+    @pytest.mark.anyio
+    async def test_task_specific_artifact_style_memory_kept(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_search(
+            monkeypatch,
+            [
+                {
+                    "id": "style",
+                    "content": "For LangGraph reports, user prefers a light diagram palette.",
+                },
+            ],
+        )
+        mw = BuilderMem0RetrievalMiddleware()
+        state = {
+            "user_id": "u",
+            "delegation_context": {"normalized_brief": "Create a PDF report on LangGraph."},
+            "messages": [{"type": "human", "content": "Create a PDF report on LangGraph."}],
+        }
+
+        result = await mw.abefore_agent(state, runtime=None)
+
+        assert result["injected_memory_contents"] == [
+            "For LangGraph reports, user prefers a light diagram palette."
+        ]
+        assert result["injected_memories"] == ["style"]
+
+    @pytest.mark.anyio
     async def test_long_snippet_truncated(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

@@ -1,6 +1,6 @@
 ---
 name: visual-design
-description: Use this skill before creating charts, diagrams, visual reports, visual slide decks, or visual PDF/HTML artifacts. It gives compact design, chart-selection, accessibility, and visual-density guidance for deterministic local visual assets.
+description: Use this skill before creating charts, diagrams, visual reports, visual slide decks, or visual PDF/HTML artifacts. It gives compact design, chart-selection, accessibility, and visual-density guidance for local visual assets.
 ---
 
 # Visual Design Skill
@@ -19,9 +19,8 @@ be generated locally under `/mnt/user-data/outputs/`.
 2. Choose the minimum useful visual set: one clear chart/diagram is better
    than several decorative weak ones.
 3. Create local visual assets with `generate_excalidraw_diagram` for
-   technical diagrams and `generate_report_chart` or `generate_visual_asset`
-   for numeric/data visuals; do not treat remote chart URLs as deliverable
-   assets.
+   technical diagrams and the chart-visualization skill for numeric/data
+   visuals; do not treat remote chart URLs as deliverable assets.
 4. Embed or reference the local visual assets in the final HTML, PDF source, or
    PPTX plan before emitting the artifact.
 
@@ -47,7 +46,7 @@ be generated locally under `/mnt/user-data/outputs/`.
 - Chronology or staged development: timeline.
 - Workflow or process: Excalidraw process flow.
 - System layers, components, or architecture: Excalidraw architecture diagram.
-- Tradeoffs or alternatives: comparison matrix or quadrant.
+- Tradeoffs or options: comparison matrix or quadrant.
 - Concept relationships: Excalidraw concept map.
 
 ## Target-Specific Guidance
@@ -55,11 +54,11 @@ be generated locally under `/mnt/user-data/outputs/`.
 - HTML: inline SVG or local SVG/PNG assets are both acceptable.
 - PDF: reference local SVG/PNG assets from the Markdown/HTML source before
   rendering. Do not rely on browser-only scripts.
-- PPTX: include local visual assets in the presentation plan or generator
-  inputs. A text-only deck does not satisfy a chart/diagram request.
+- PPTX: generated slide images must contain the requested visual evidence
+  directly in the bitmap.
 
 ## Done Criteria
 
 A visual artifact is complete only when the final deliverable contains the
-requested visual evidence: inline SVG, embedded media, native chart/diagram
+requested visual evidence: inline SVG, embedded media, chart/diagram
 parts, or local generated assets referenced by the delivered file.
