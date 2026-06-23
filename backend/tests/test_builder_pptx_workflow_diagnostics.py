@@ -457,6 +457,48 @@ def test_pptx_generation_bash_result_records_plan_and_slide_count(tmp_path: Path
     assert delta["pptx_plan_json"] == plan
 
 
+def test_pptx_generation_bash_result_parses_pptxgenjs_slide_count(tmp_path: Path) -> None:
+    workspace = tmp_path / "workspace"
+    outputs = tmp_path / "outputs"
+    workspace.mkdir()
+    outputs.mkdir()
+    deck = outputs / "deck.pptx"
+    _write_minimal_pptx(deck)
+    plan_file = workspace / "plan.json"
+    plan = {"slides": [{"title": "One"}, {"title": "Two"}, {"title": "Three"}]}
+    plan_file.write_text(json.dumps(plan), encoding="utf-8")
+    request = SimpleNamespace(
+        state={
+            "thread_data": {
+                "workspace_path": str(workspace),
+                "outputs_path": str(outputs),
+            }
+        },
+        tool_call={
+            "name": "bash",
+            "args": {
+                "command": (
+                    "python /mnt/skills/public/ppt-generation/scripts/generate.py "
+                    "--plan-file /mnt/user-data/workspace/plan.json "
+                    "--output-file /mnt/user-data/outputs/deck.pptx"
+                )
+            },
+        },
+    )
+
+    delta = BuilderArtifactMiddleware._pptx_bash_result_delta(
+        request,
+        _tool_message(
+            "[compile_pptx] wrote /mnt/user-data/outputs/deck.pptx slides=3 pictures=3\n"
+            "Successfully generated presentation with PptxGenJS"
+        ),
+    )
+
+    assert delta["pptx_generator_success_count"] == 1
+    assert delta["pptx_generator_slide_count"] == 3
+    assert delta["pptx_plan_slide_count"] == 3
+
+
 def test_chained_pptx_generation_uses_ppt_generator_output_flag(tmp_path: Path) -> None:
     workspace = tmp_path / "workspace"
     outputs = tmp_path / "outputs"

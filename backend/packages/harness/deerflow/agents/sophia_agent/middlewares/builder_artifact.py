@@ -3411,6 +3411,8 @@ def _pptx_picture_count_from_text(text: str) -> int:
 def _pptx_slide_count_from_text(text: str) -> int:
     match = re.search(r"\bslide_count=(\d+)\b", text)
     if match is None:
+        match = re.search(r"\bslides=(\d+)\b", text)
+    if match is None:
         match = re.search(r"\bwith\s+(\d+)\s+slides\b", text, flags=re.IGNORECASE)
     if match is None:
         return 0
