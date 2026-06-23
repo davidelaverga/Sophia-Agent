@@ -7682,17 +7682,24 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _maybe_reset_turn_budget(
         self, state: BuilderArtifactState
     ) -> dict[str, Any] | None:
-        """Collect post-interrupt hints without extending the active turn budget."""
+        """Reset post-interrupt turn budget while preserving resume hints."""
         messages = state.get("messages") or []
         if not self._is_post_interrupt_update(messages):
             return None
         current = int(state.get("builder_non_artifact_turns", 0) or 0)
         update = self._post_interrupt_state_hints(state, messages)
-        logger.info(
-            "[BuilderArtifact] post-interrupt update detected; preserving "
-            "builder_non_artifact_turns=%d",
-            current,
-        )
+        if current > 0:
+            update["builder_non_artifact_turns"] = 0
+            logger.info(
+                "[BuilderArtifact] post-interrupt update detected; resetting "
+                "builder_non_artifact_turns=%d",
+                current,
+            )
+        else:
+            logger.info(
+                "[BuilderArtifact] post-interrupt update detected; "
+                "builder_non_artifact_turns already reset"
+            )
         return update or None
 
     def _maybe_inject_pdf_layout_repair(self, state: BuilderArtifactState) -> dict[str, Any] | None:
