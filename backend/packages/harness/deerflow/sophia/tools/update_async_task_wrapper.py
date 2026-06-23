@@ -111,7 +111,8 @@ def _updated_task_entry(
 ) -> dict[str, Any]:
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     task_id = str(tracked.get("task_id") or tracked.get("thread_id") or "")
-    task = {
+    task = dict(tracked)
+    task.update({
         "task_id": task_id,
         "agent_name": tracked["agent_name"],
         "thread_id": tracked["thread_id"],
@@ -120,7 +121,7 @@ def _updated_task_entry(
         "created_at": str(tracked.get("created_at") or now),
         "last_checked_at": str(tracked.get("last_checked_at") or now),
         "last_updated_at": now,
-    }
+    })
     if task_type := _resolve_effective_task_type(tracked, delegation_context):
         task["task_type"] = task_type
     return task
