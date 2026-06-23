@@ -769,6 +769,34 @@ def test_validate_deck_plan_requires_qc_for_chart_like_slide_images() -> None:
     ) == ["Slide 2 image was not QC-checked."]
 
 
+def test_validate_deck_plan_excludes_deterministic_chart_refs_from_slide_qc() -> None:
+    plan = {
+        "slides": [
+            {
+                "type": "cover",
+                "title": "Launch",
+                "image_path": "/mnt/user-data/outputs/slide-1.png",
+                "visual_style": "clean_flat_vector",
+            },
+            {
+                "type": "content",
+                "title": "Benchmark chart",
+                "subtype": "chart",
+                "caption": "Revenue is up and churn is down.",
+                "image": "/mnt/user-data/outputs/visuals/benchmark-chart.png",
+            },
+        ]
+    }
+
+    assert _validate_deck_plan(
+        plan,
+        {
+            "pptx_slide_title_results": [{"slide": 1, "title_present": True}],
+            "qc_results": [{"pass": True, "presence_pass": True, "title_present": True}],
+        },
+    ) == []
+
+
 def test_deck_plan_validation_does_not_repair_missing_image_refs_from_unused_outputs() -> None:
     diagnostics = {
         "pptx_plan_json": {
@@ -845,7 +873,7 @@ def test_validate_deck_plan_rejects_stat_slides_without_images() -> None:
         ]
 
 
-def test_validate_deck_plan_rejects_compiler_alias_slides_without_images() -> None:
+def test_validate_deck_plan_accepts_compiler_alias_slides_without_images() -> None:
     diagnostics = {"pptx_slide_title_results": [{"slide": 1, "title_present": True}]}
 
     plan = {
@@ -859,9 +887,6 @@ def test_validate_deck_plan_rejects_compiler_alias_slides_without_images() -> No
 
     assert _validate_deck_plan(plan, diagnostics) == [
         "Slide 1 is missing its generated slide image.",
-        "Slide 2 is missing its generated slide image.",
-        "Slide 3 is missing its generated slide image.",
-        "Slide 4 is missing its generated slide image.",
     ]
 
 

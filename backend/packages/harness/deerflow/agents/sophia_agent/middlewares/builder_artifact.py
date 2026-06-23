@@ -3474,6 +3474,13 @@ def _slide_image_ref(slide: dict[str, Any]) -> str | None:
     return None
 
 
+_NON_IMAGE_REQUIRED_SLIDE_TYPES = frozenset({"section", "statement", "summary"})
+
+
+def _slide_requires_generated_image(slide: dict[str, Any]) -> bool:
+    return _slide_type(slide) not in _NON_IMAGE_REQUIRED_SLIDE_TYPES
+
+
 def _content_slides(slides: list[Any]) -> list[dict[str, Any]]:
     content: list[dict[str, Any]] = []
     for slide in slides:
@@ -3660,12 +3667,49 @@ def _qc_result_is_advisory_parse_failure(result: dict[str, Any]) -> bool:
 
 
 def _deck_image_slides(slides: list[Any]) -> list[tuple[int, str]]:
+    return _deck_generated_image_slides(slides)
+
+
+def _generated_ref_set(diagnostics: dict[str, Any] | None) -> set[str]:
+    refs: set[str] = set()
+    if not isinstance(diagnostics, dict):
+        return refs
+    for raw in diagnostics.get("image_output_paths") or []:
+        if not isinstance(raw, str) or not raw.strip():
+            continue
+        value = raw.strip()
+        refs.add(value)
+        refs.add(PurePosixPath(value).name)
+    return refs
+
+
+def _slide_uses_generated_image_ref(
+    slide: dict[str, Any],
+    image_ref: str,
+    generated_refs: set[str] | None = None,
+) -> bool:
+    if slide.get("image_path"):
+        return True
+    if _slide_type(slide) == "image_forward":
+        return True
+    if _slide_layout_key(slide.get("layout") or slide.get("treatment")) == "image_forward":
+        return True
+    if generated_refs and (image_ref in generated_refs or PurePosixPath(image_ref).name in generated_refs):
+        return True
+    return False
+
+
+def _deck_generated_image_slides(
+    slides: list[Any],
+    diagnostics: dict[str, Any] | None = None,
+) -> list[tuple[int, str]]:
+    generated_refs = _generated_ref_set(diagnostics)
     return [
         (index, image_ref)
         for index, slide in enumerate(slides, 1)
         if isinstance(slide, dict)
         for image_ref in [_slide_image_ref(slide)]
-        if image_ref
+        if image_ref and _slide_uses_generated_image_ref(slide, image_ref, generated_refs)
     ]
 
 
@@ -3696,7 +3740,7 @@ def _deck_content_problems(slides: list[Any]) -> list[str]:
     return [
         f"Slide {index} is missing its generated slide image."
         for index, slide in enumerate(slides, 1)
-        if isinstance(slide, dict) and not _slide_image_ref(slide)
+        if isinstance(slide, dict) and _slide_requires_generated_image(slide) and not _slide_image_ref(slide)
     ]
 
 
@@ -3782,7 +3826,8 @@ def _deck_style_consistency_problems(slides: list[Any]) -> list[str]:
         (index, _slide_visual_style(slide))
         for index, slide in enumerate(slides, 1)
         if isinstance(slide, dict)
-        and _slide_image_ref(slide)
+        and (image_ref := _slide_image_ref(slide))
+        and _slide_uses_generated_image_ref(slide, image_ref)
     ]
     if not image_styles:
         return []
@@ -3806,10 +3851,11 @@ def _deck_qc_problems(
     diagnostics: dict[str, Any],
     state: dict[str, Any] | None = None,
 ) -> list[str]:
-    image_slides = _deck_image_slides(slides)
-    qc_results = _qc_result_list(diagnostics)
-    qc_by_ref = _qc_results_by_image_ref(diagnostics)
-    qc_by_hash = _qc_results_by_image_hash(diagnostics)
+    effective_diagnostics = {**_pptx_diagnostics(state or {}), **diagnostics}
+    image_slides = _deck_generated_image_slides(slides, effective_diagnostics)
+    qc_results = _qc_result_list(effective_diagnostics)
+    qc_by_ref = _qc_results_by_image_ref(effective_diagnostics)
+    qc_by_hash = _qc_results_by_image_hash(effective_diagnostics)
     if image_slides and not qc_by_ref and not qc_by_hash and len(qc_results) >= len(image_slides):
         return _deck_qc_ordered_problems(image_slides, qc_results)
     if image_slides and not qc_by_ref and not qc_by_hash and len(qc_results) < len(image_slides):
@@ -3852,17 +3898,18 @@ def _presentation_qc_clean_or_advisory_only(
     diagnostics: dict[str, Any],
     state: dict[str, Any],
 ) -> bool:
-    plan = diagnostics.get("pptx_plan_json")
+    effective_diagnostics = {**_pptx_diagnostics(state), **diagnostics}
+    plan = effective_diagnostics.get("pptx_plan_json")
     if not isinstance(plan, dict):
         return False
     slides_raw = plan.get("slides")
     slides = slides_raw if isinstance(slides_raw, list) else []
-    image_slides = _deck_image_slides(slides)
+    image_slides = _deck_generated_image_slides(slides, effective_diagnostics)
     if not image_slides:
         return True
-    qc_results = _qc_result_list(diagnostics)
-    qc_by_ref = _qc_results_by_image_ref(diagnostics)
-    qc_by_hash = _qc_results_by_image_hash(diagnostics)
+    qc_results = _qc_result_list(effective_diagnostics)
+    qc_by_ref = _qc_results_by_image_ref(effective_diagnostics)
+    qc_by_hash = _qc_results_by_image_hash(effective_diagnostics)
     if qc_by_ref or qc_by_hash:
         return not _deck_qc_reference_problems(image_slides, qc_by_ref, qc_by_hash, state)
     if len(qc_results) < len(image_slides):
