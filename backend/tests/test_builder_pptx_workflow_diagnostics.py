@@ -21,6 +21,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     _pptx_skill_read_seen,
     _qc_result_presence_problem,
     _slide_qc_results_from_text,
+    _slide_type,
     _validate_deck_plan,
     _visual_asset_result_delta,
     _visual_design_skill_read_seen,
@@ -915,7 +916,7 @@ def test_validate_deck_plan_rejects_stat_slides_without_images() -> None:
         ]
 
 
-def test_validate_deck_plan_accepts_compiler_alias_slides_without_images() -> None:
+def test_validate_deck_plan_requires_images_for_compiler_alias_slides() -> None:
     diagnostics = {"pptx_slide_title_results": [{"slide": 1, "title_present": True}]}
 
     plan = {
@@ -929,6 +930,16 @@ def test_validate_deck_plan_accepts_compiler_alias_slides_without_images() -> No
 
     assert _validate_deck_plan(plan, diagnostics) == [
         "Slide 1 is missing its generated slide image.",
+        "Slide 2 is missing its generated slide image.",
+        "Slide 3 is missing its generated slide image.",
+        "Slide 4 is missing its generated slide image.",
+    ]
+
+    assert [_slide_type(slide) for slide in plan["slides"]] == [
+        "cover",
+        "statement",
+        "section",
+        "summary",
     ]
 
 

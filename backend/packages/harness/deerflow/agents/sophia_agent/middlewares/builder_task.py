@@ -360,7 +360,7 @@ def _artifact_target_extension(artifact_target_path: object) -> str:
 _PAGE_RANGE_RE = re.compile(r"(?<!\d)(\d{1,2})\s*(?:-|to)\s*(\d{1,2})\s*pages?\b", re.IGNORECASE)
 _PAGE_COUNT_RE = re.compile(r"(?<!\d)(\d{1,2})\s*(?:-| )?\s*pages?\b", re.IGNORECASE)
 _PAGE_TARGET_OUTPUT_BEFORE_RE = re.compile(
-    r"\b(?:pdf|report|document|deliverable|output)\b.{0,80}"
+    r"\b(?:pdf|report|document|summary|brief|article|explainer|deliverable|output)\b.{0,80}"
     r"\b(?:exactly|length|target|make|create|generate|produce|render|write|deliver|should|must|needs?)\b",
     re.IGNORECASE | re.DOTALL,
 )
@@ -371,11 +371,11 @@ _PAGE_TARGET_OUTPUT_VERB_BEFORE_RE = re.compile(
 )
 _PAGE_TARGET_OUTPUT_NOUN_AFTER_RE = re.compile(
     r"^\s*(?:(?:technical|concise|detailed|short|long|final|pdf)\s+){0,6}"
-    r"(?:pdf\s+)?(?:report|document|deliverable|output|write[- ]?up)\b",
+    r"(?:pdf\s+)?(?:report|document|summary|brief|article|explainer|deliverable|output|write[- ]?up)\b",
     re.IGNORECASE,
 )
 _PAGE_TARGET_OUTPUT_NOUN_BEFORE_COUNT_RE = re.compile(
-    r"\b(?:pdf\s+)?(?:report|document|deliverable|output|write[- ]?up)\b\s+"
+    r"\b(?:pdf\s+)?(?:report|document|summary|brief|article|explainer|deliverable|output|write[- ]?up)\b\s+"
     r"(?:(?:in|within|under|at|of|to|as|up\s+to|no\s+more\s+than)\s+(?:exactly\s+)?"
     r"|(?:should|must|needs?)\s+be\s+(?:exactly\s+)?"
     r"|(?:that|which)\s+is\s+(?:exactly\s+)?)$",

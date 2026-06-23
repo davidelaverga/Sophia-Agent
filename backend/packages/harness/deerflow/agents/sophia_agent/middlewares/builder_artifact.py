@@ -3476,11 +3476,8 @@ def _slide_image_ref(slide: dict[str, Any]) -> str | None:
     return None
 
 
-_NON_IMAGE_REQUIRED_SLIDE_TYPES = frozenset({"section", "statement", "summary"})
-
-
 def _slide_requires_generated_image(slide: dict[str, Any]) -> bool:
-    return _slide_type(slide) not in _NON_IMAGE_REQUIRED_SLIDE_TYPES
+    return True
 
 
 def _content_slides(slides: list[Any]) -> list[dict[str, Any]]:

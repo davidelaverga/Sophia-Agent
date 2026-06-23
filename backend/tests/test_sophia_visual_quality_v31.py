@@ -358,3 +358,20 @@ def test_pdf_page_target_accepts_count_after_plain_report_noun() -> None:
     )
 
     assert updates["builder_pdf_requested_page_count"] == 2
+
+
+def test_pdf_page_target_accepts_count_after_summary_brief_and_article_nouns() -> None:
+    cases = [
+        ("Write a PDF summary in 2 pages about retrieval quality.", 2),
+        ("Write a PDF brief in 3 pages about retrieval quality.", 3),
+        ("Create a PDF article in 4 pages about retrieval quality.", 4),
+    ]
+
+    for task, expected in cases:
+        updates = _pdf_page_target_updates(
+            {"task_type": "pdf", "task": task},
+            companion_artifact={},
+            artifact_target_path="/mnt/user-data/outputs/retrieval-quality.pdf",
+        )
+
+        assert updates["builder_pdf_requested_page_count"] == expected
