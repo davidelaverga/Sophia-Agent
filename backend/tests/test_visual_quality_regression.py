@@ -11,10 +11,14 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     _USER_SURFACE_ARTIFACT_FILE_ROLES,
     _artifact_file_entries,
     _artifact_file_paths_for_roles,
+    _deck_plan_validation_problems,
     _presentation_completion_ready,
     _unmet_conditions_from_state,
     _validate_deck_plan,
 )
+from deerflow.agents.sophia_agent.middlewares.builder_task import _slide_count_target
+from deerflow.agents.sophia_agent.builder_tools import build_builder_tools_for_task_type
+from deerflow.sophia.builder_memory_filter import filter_builder_memory_snippets
 
 
 _FIXTURES = Path(__file__).parent / "fixtures"
@@ -69,12 +73,14 @@ def test_image_forward_compiler_does_not_add_native_title_or_caption_overlays() 
     assert "renderImageForward" in source
 
 
-def test_canonical_deck_plan_passes_presence_and_treatment_variety() -> None:
+def test_canonical_deck_plan_passes_structural_validation_without_treatment_gate() -> None:
     plan = _fixture("canonical_image_forward_deck.json")
     diagnostics = {
         "qc_results": [_presence_qc(index) for index in range(1, 5)],
     }
 
+    assert not hasattr(builder_artifact_module, "_deck_treatment_problems")
+    assert not hasattr(builder_artifact_module, "_presentation_qc_clean_or_advisory_only")
     assert _validate_deck_plan(plan, diagnostics) == []
 
 
@@ -86,15 +92,60 @@ def test_pptx_terminal_latch_accepts_valid_deck_without_preview(tmp_path: Path, 
     assert state["builder_presentation_terminal_ready"] is True
 
 
-def test_pptx_terminal_latch_rejects_missing_baked_title_presence(tmp_path: Path, monkeypatch) -> None:
+def test_pptx_terminal_latch_ignores_stale_baked_title_qc(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(builder_artifact_module, "_pptx_integrity_error_for_file", lambda _path: None)
     state = _pptx_state(
         tmp_path,
         qc_results=[_presence_qc(1), _presence_qc(2, ok=False), _presence_qc(3), _presence_qc(4)],
     )
 
+    assert _presentation_completion_ready(state) is True
+    assert state["builder_presentation_terminal_ready"] is True
+
+
+def test_pptx_terminal_latch_requests_one_slide_count_repair_then_accepts(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(builder_artifact_module, "_pptx_integrity_error_for_file", lambda _path: None)
+    state = _pptx_state(tmp_path, qc_results=[])
+    state["delegation_context"] = {"task": "Create a 6-slide technical presentation."}
+    state["builder_pptx_requested_slide_count"] = 6
+
     assert _presentation_completion_ready(state) is False
-    assert state.get("builder_presentation_terminal_ready") is not True
+    assert state["builder_pptx_slide_count_repair_attempted"] is True
+    assert state["builder_pptx_slide_count_repair_requested"] == {
+        "requested_slide_count": 6,
+        "generated_slide_count": 4,
+    }
+
+    assert _presentation_completion_ready(state) is True
+    assert state["builder_presentation_terminal_ready"] is True
+
+
+def test_deck_plan_gate_only_blocks_zero_embedded_pictures() -> None:
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation", "task": "Create a visual presentation"},
+        "builder_pptx_diagnostics": {
+            "pptx_generator_success_count": 1,
+            "pptx_generator_slide_count": 4,
+            "pptx_generator_picture_count": 4,
+            "pptx_plan_json": {
+                "slides": [
+                    {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png"},
+                    {"type": "content", "title": "Flow", "image_path": "/mnt/user-data/outputs/slide-2.png"},
+                    {"type": "content", "title": "Evidence", "image_path": "/mnt/user-data/outputs/slide-3.png"},
+                    {"type": "summary", "title": "Close", "image_path": "/mnt/user-data/outputs/slide-4.png"},
+                ]
+            },
+            "qc_results": [{"pass": False, "presence_pass": False, "reasons": ["stale QC"]}],
+        },
+    }
+
+    assert _deck_plan_validation_problems(state) == []
+
+    state["builder_pptx_diagnostics"]["pptx_generator_picture_count"] = 0
+    assert _deck_plan_validation_problems(state) == [
+        "PPTX package contains zero embedded slide pictures."
+    ]
 
 
 def test_terminal_halt_suppresses_followup_model_call() -> None:
@@ -148,6 +199,46 @@ def test_report_visual_grammar_gate_is_absent() -> None:
         {"artifact_path": "/mnt/user-data/outputs/report.pdf"},
         repetitive_state,
     )
+
+
+def test_report_builder_uses_generate_chart_not_retired_wrapper() -> None:
+    tool_names = [
+        getattr(tool, "name", "")
+        for tool in build_builder_tools_for_task_type("document", vision_enabled=False)
+    ]
+
+    assert "generate_chart" in tool_names
+    assert "generate_report_chart" not in tool_names
+
+
+def test_builder_memory_filter_caps_and_removes_cross_modality_style_memories() -> None:
+    snippets = [
+        "User prefers dark slide decks with huge visual-only diagrams.",
+        "Use precise citations for agentic RL reports.",
+        "Keep executive summaries short.",
+        "User likes presentation title bands in electric purple.",
+        "Mention policy gradient baselines when relevant.",
+        "Prefer appendix tables for ablations.",
+        "This extra report memory should be clipped by the cap.",
+    ]
+
+    assert filter_builder_memory_snippets(
+        snippets,
+        query="Create a 10-page PDF report on agentic RL.",
+        task_type="pdf",
+        limit=5,
+    ) == [
+        "Use precise citations for agentic RL reports.",
+        "Keep executive summaries short.",
+        "Mention policy gradient baselines when relevant.",
+        "Prefer appendix tables for ablations.",
+        "This extra report memory should be clipped by the cap.",
+    ]
+
+
+def test_slide_count_target_is_parsed_from_output_context_only() -> None:
+    assert _slide_count_target("Create a 6-slide technical presentation on LangGraph.") == 6
+    assert _slide_count_target("Summarize the attached 28-slide deck as a concise presentation.") is None
 
 
 def test_slide_qc_fails_visible_prompt_scaffolding(tmp_path: Path, monkeypatch) -> None:

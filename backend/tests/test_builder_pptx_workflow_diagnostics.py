@@ -615,7 +615,7 @@ def test_pptx_generation_bash_result_records_title_presence_diagnostics(tmp_path
     ]
 
 
-def test_validate_deck_plan_requires_qc_for_each_image_slide() -> None:
+def test_validate_deck_plan_does_not_require_qc_for_each_image_slide() -> None:
     plan = {
         "slides": [
             {"type": "cover", "title": "Launch", "image_path": "/mnt/user-data/outputs/slide-1.png", "visual_style": "clean_flat_vector"},
@@ -640,7 +640,7 @@ def test_validate_deck_plan_requires_qc_for_each_image_slide() -> None:
         },
     )
 
-    assert "Slide 2 image was not QC-checked." in problems
+    assert problems == []
 
 
 def test_validate_deck_plan_accepts_image_forward_with_title_and_qc() -> None:
@@ -709,7 +709,7 @@ def test_validate_deck_plan_accepts_qc_coverage_by_image_hash(tmp_path: Path) ->
     assert problems == []
 
 
-def test_deck_plan_validation_rejects_chart_visual_metadata_without_slide_image() -> None:
+def test_deck_plan_validation_ignores_metadata_when_no_package_evidence_exists() -> None:
     plan = {
         "slides": [
             {"type": "cover", "title": "Launch"},
@@ -730,15 +730,12 @@ def test_deck_plan_validation_rejects_chart_visual_metadata_without_slide_image(
         "builder_pptx_diagnostics": diagnostics,
     }
 
-    assert _deck_plan_validation_problems(state) == [
-        "Slide 1 is missing its generated slide image.",
-        "Slide 2 is missing its generated slide image.",
-    ]
+    assert _deck_plan_validation_problems(state) == []
     assert "data_chart" not in diagnostics["pptx_plan_json"]["slides"][1]
     assert "builder_pptx_plan_deterministic_repair_attempted" not in state
 
 
-def test_deck_plan_validation_autowires_generated_slide_images_then_requires_qc(tmp_path: Path) -> None:
+def test_deck_plan_validation_autowires_generated_slide_images_without_qc_gate(tmp_path: Path) -> None:
     outputs = tmp_path / "outputs"
     visuals = outputs / "visuals"
     visuals.mkdir(parents=True)
@@ -780,10 +777,10 @@ def test_deck_plan_validation_autowires_generated_slide_images_then_requires_qc(
             "qc_results": [{"pass": True, "presence_pass": True, "title_present": True}],
         },
         state,
-    ) == ["Slide 2 image was not QC-checked."]
+    ) == []
 
 
-def test_validate_deck_plan_requires_qc_for_chart_like_slide_images() -> None:
+def test_validate_deck_plan_does_not_require_qc_for_chart_like_slide_images() -> None:
     plan = {
         "slides": [
             {
@@ -809,7 +806,7 @@ def test_validate_deck_plan_requires_qc_for_chart_like_slide_images() -> None:
             "pptx_slide_title_results": [{"slide": 1, "title_present": True}],
             "qc_results": [{"pass": True, "presence_pass": True, "title_present": True}],
         },
-    ) == ["Slide 2 image was not QC-checked."]
+    ) == []
 
 
 def test_validate_deck_plan_excludes_deterministic_chart_refs_from_slide_qc() -> None:
@@ -859,10 +856,7 @@ def test_deck_plan_validation_does_not_repair_missing_image_refs_from_unused_out
 
     problems = _deck_plan_validation_problems(state)
 
-    assert problems == [
-        "Slide 1 is missing its generated slide image.",
-        "Slide 2 is missing its generated slide image.",
-    ]
+    assert problems == []
     assert diagnostics["pptx_plan_json"]["slides"][1].get("image_path") is None
     assert "builder_pptx_plan_deterministic_repair_attempted" not in state
 

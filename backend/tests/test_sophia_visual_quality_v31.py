@@ -80,7 +80,7 @@ def test_deck_plan_accepts_baked_title_qc_when_compiler_diagnostics_missing() ->
     assert problems == []
 
 
-def test_deck_plan_rejects_mixed_generated_slide_styles() -> None:
+def test_deck_plan_accepts_mixed_generated_slide_styles() -> None:
     problems = _validate_deck_plan(
         {
             "slides": [
@@ -107,7 +107,7 @@ def test_deck_plan_rejects_mixed_generated_slide_styles() -> None:
         },
     )
 
-    assert any("Deck mixes generated image styles" in problem for problem in problems)
+    assert problems == []
 
 
 def test_report_variety_gate_functions_are_removed() -> None:
@@ -150,6 +150,7 @@ def test_presentation_completion_ready_allows_advisory_qc_parse_failures(tmp_pat
             "pptx_generator_success_count": 1,
             "pptx_generator_slide_count": 2,
             "pptx_plan_slide_count": 2,
+            "pptx_generator_picture_count": 2,
             "pptx_output_paths": ["/mnt/user-data/outputs/deck.pptx"],
             "pptx_plan_json": {
                 "slides": [

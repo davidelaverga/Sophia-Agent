@@ -39,7 +39,7 @@ import logging
 import os
 import time
 from datetime import UTC, datetime
-from typing import Any, NotRequired, TypedDict, override
+from typing import Annotated, Any, NotRequired, TypedDict, override
 
 import httpx
 from langchain.agents import AgentState
@@ -485,9 +485,15 @@ def _sequence_update(sequence: int | None) -> dict[str, Any] | None:
     return {"builder_progress_sequence": sequence} if sequence is not None else None
 
 
+def _keep_max_sequence(left: int | None, right: int | None) -> int:
+    """Merge concurrent progress writes by keeping the monotonic max sequence."""
+
+    return max(int(left or 0), int(right or 0))
+
+
 class BuilderProgressState(AgentState):
     builder_progress_last_phase: NotRequired[str]
-    builder_progress_sequence: NotRequired[int]
+    builder_progress_sequence: NotRequired[Annotated[int, _keep_max_sequence]]
 
 
 class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
@@ -618,4 +624,4 @@ class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):
         return update
 
 
-__all__ = ["BuilderProgressMiddleware"]
+__all__ = ["BuilderProgressMiddleware", "_keep_max_sequence"]

@@ -13,10 +13,13 @@ import asyncio
 from types import SimpleNamespace
 
 import pytest
+from langgraph.graph import END, START, StateGraph
 
 from deerflow.agents.sophia_agent.middlewares.builder_progress import (
     BuilderProgressMiddleware,
+    BuilderProgressState,
     _classify_tool,
+    _keep_max_sequence,
     _pick_strongest_phase,
 )
 
@@ -97,6 +100,32 @@ class TestClassifier:
             {"name": "write_file"},
         ])
         assert result == "drafting"
+
+
+def test_builder_progress_sequence_reducer_keeps_max_value() -> None:
+    assert _keep_max_sequence(None, 3) == 3
+    assert _keep_max_sequence(7, None) == 7
+    assert _keep_max_sequence(2, 5) == 5
+
+
+def test_builder_progress_sequence_accepts_parallel_langgraph_writes() -> None:
+    def _write_two(_state):
+        return {"builder_progress_sequence": 2}
+
+    def _write_five(_state):
+        return {"builder_progress_sequence": 5}
+
+    graph = StateGraph(BuilderProgressState)
+    graph.add_node("write_two", _write_two)
+    graph.add_node("write_five", _write_five)
+    graph.add_edge(START, "write_two")
+    graph.add_edge(START, "write_five")
+    graph.add_edge("write_two", END)
+    graph.add_edge("write_five", END)
+
+    result = graph.compile().invoke({"messages": [], "builder_progress_sequence": 1})
+
+    assert result["builder_progress_sequence"] == 5
 
 
 # ---- middleware hooks ------------------------------------------------------

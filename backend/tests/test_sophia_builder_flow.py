@@ -166,6 +166,7 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     # render_markdown_to_pdf (Phase B) is the skill-driven PDF path.
     assert "render_markdown_to_pdf" in builder_tool_names
     assert "generate_excalidraw_diagram" in builder_tool_names
+    assert "generate_chart" in builder_tool_names
     assert "generate_visual_asset" not in builder_tool_names
     assert "generate_report_chart" not in builder_tool_names
     # ``present_files`` must NOT be in the builder's tool list. Its presence
@@ -234,6 +235,7 @@ def test_presentation_builder_toolset_removes_excalidraw_diagram(monkeypatch) ->
     tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
     assert "generate_visual_asset" not in tool_names
     assert "generate_excalidraw_diagram" not in tool_names
+    assert "generate_chart" not in tool_names
     assert "generate_report_chart" not in tool_names
 
 
@@ -262,6 +264,7 @@ def test_report_builder_toolset_includes_excalidraw_but_not_retired_chart_wrappe
 
     tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
     assert "generate_excalidraw_diagram" in tool_names
+    assert "generate_chart" in tool_names
     assert "generate_report_chart" not in tool_names
     assert "generate_visual_asset" not in tool_names
 

@@ -85,11 +85,12 @@ _SOPHIA_SLIDE_AVOID = (
 
 _SOPHIA_SLIDE_ZONE_CONTRACT = (
     "Slide zone contract: render the complete final 16:9 slide bitmap with all title and "
-    "caption text baked into the image. Reserve the top 14% as a clean title band, the "
-    "bottom 11% as a one-line caption/takeaway band, and the center 75% as the visual "
-    "safe area. Put the title only in the top band, the caption only in the bottom band, "
+    "bottom narrative text baked into the image. Reserve the top 14% as a clean title band, the "
+    "bottom 16% as a concise 1-2 sentence narrative band, and the center 70% as the visual "
+    "safe area. Put the title only in the top band, the narrative only in the bottom band, "
     "and keep diagrams, charts, arrows, labels, callouts, and decorative marks out of both "
-    "bands. Do not leave title/caption bands blank when the prompt supplies that text."
+    "bands. Do not leave title/narrative bands blank when the prompt supplies that text. "
+    "If the prompt says caption or takeaway, render it as a complete explanatory bottom narrative."
 )
 
 _SOPHIA_IMAGE_STYLE = (

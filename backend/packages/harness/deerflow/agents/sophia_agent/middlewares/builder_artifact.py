@@ -296,9 +296,9 @@ def _presentation_completion_ready(state: dict[str, Any]) -> bool:
     pptx_file = _latest_valid_pptx_output_file(state)
     if pptx_file is None:
         return False
-    if not _pptx_slide_count_matches_plan(diagnostics):
+    if not _pptx_picture_count_satisfies_slide_count(diagnostics):
         return False
-    if not _presentation_qc_clean_or_advisory_only(diagnostics, state):
+    if _pptx_target_slide_count_needs_one_repair(diagnostics, state):
         return False
     state["builder_presentation_terminal_ready"] = True
     state["builder_terminal_artifact_path"] = _canonical_outputs_artifact_path(
@@ -361,6 +361,55 @@ def _pptx_slide_count_matches_plan(diagnostics: dict[str, Any]) -> bool:
     if generated_count <= 0:
         return False
     return plan_count <= 0 or generated_count == plan_count
+
+
+def _pptx_picture_count_satisfies_slide_count(diagnostics: dict[str, Any]) -> bool:
+    generated_count = int(diagnostics.get("pptx_generator_slide_count", 0) or 0)
+    picture_count = int(diagnostics.get("pptx_generator_picture_count", 0) or 0)
+    return generated_count > 0 and picture_count >= generated_count
+
+
+def _pptx_requested_target_slide_count(state: dict[str, Any]) -> int:
+    for source in (
+        state,
+        state.get("delegation_context") if isinstance(state.get("delegation_context"), dict) else {},
+    ):
+        if not isinstance(source, dict):
+            continue
+        value = source.get("builder_pptx_requested_slide_count") or source.get("target_slide_count")
+        if isinstance(value, int) and value > 0:
+            return value
+    return 0
+
+
+def _pptx_target_slide_count_needs_one_repair(
+    diagnostics: dict[str, Any],
+    state: dict[str, Any],
+) -> bool:
+    """Allow one non-blocking repair turn for explicit slide-count drift."""
+
+    requested = _pptx_requested_target_slide_count(state)
+    generated = int(diagnostics.get("pptx_generator_slide_count", 0) or 0)
+    if requested <= 0 or generated <= 0 or requested == generated:
+        return False
+    if state.get("builder_pptx_slide_count_repair_attempted") is True:
+        logger.warning(
+            "[BuilderPptxReady] slide_count_mismatch_advisory requested=%d generated=%d",
+            requested,
+            generated,
+        )
+        return False
+    state["builder_pptx_slide_count_repair_attempted"] = True
+    state["builder_pptx_slide_count_repair_requested"] = {
+        "requested_slide_count": requested,
+        "generated_slide_count": generated,
+    }
+    logger.warning(
+        "[BuilderPptxReady] slide_count_mismatch_repair_once requested=%d generated=%d",
+        requested,
+        generated,
+    )
+    return True
 
 
 def _builder_image_enrichment_enabled(state: dict[str, Any]) -> bool:
@@ -695,7 +744,7 @@ _PDF_REPORT_SKILL_PATH_MARKERS = (
     "/skills/pdf-report/SKILL.md",
     "/mnt/skills/pdf-report/SKILL.md",
 )
-_VISUAL_ASSET_TOOL_NAMES = frozenset({"generate_excalidraw_diagram"})
+_VISUAL_ASSET_TOOL_NAMES = frozenset({"generate_chart", "generate_excalidraw_diagram"})
 _VISUAL_ASSET_EXTENSIONS = frozenset({".svg", ".png", ".jpg", ".jpeg", ".webp"})
 _WRITE_ERROR_CLASS_MARKERS = (
     ("missing_thread_id", ("thread id not available", "nonetype' object has no attribute 'get")),
@@ -3724,15 +3773,7 @@ def _validate_deck_plan(
 ) -> list[str]:
     slides_raw = plan.get("slides")
     slides = slides_raw if isinstance(slides_raw, list) else []
-    return [
-        *_deck_content_problems(slides),
-        *_deck_treatment_problems(slides),
-        *_deck_cover_title_problems(slides, diagnostics, state),
-        *_deck_duplicate_image_problems(slides),
-        *_deck_style_consistency_problems(slides),
-        *_deck_visible_caption_problems(slides),
-        *_deck_qc_problems(slides, diagnostics, state),
-    ]
+    return _deck_content_problems(slides)
 
 
 def _deck_content_problems(slides: list[Any]) -> list[str]:
@@ -3741,180 +3782,6 @@ def _deck_content_problems(slides: list[Any]) -> list[str]:
         for index, slide in enumerate(slides, 1)
         if isinstance(slide, dict) and _slide_requires_generated_image(slide) and not _slide_image_ref(slide)
     ]
-
-
-def _deck_visible_caption_problems(slides: list[Any]) -> list[str]:
-    problems: list[str] = []
-    for index, slide in enumerate(slides, 1):
-        if not isinstance(slide, dict):
-            continue
-        if slide not in _content_slides(slides):
-            continue
-        if not _slide_image_ref(slide):
-            continue
-        caption = str(slide.get("caption") or slide.get("takeaway") or "").strip()
-        if not caption:
-            problems.append(f"Image-forward content slide {index} is missing a visible caption/takeaway.")
-    return problems
-
-
-def _deck_treatment_problems(slides: list[Any]) -> list[str]:
-    treatments = [_slide_treatment(slide) for slide in slides if isinstance(slide, dict)]
-    problems: list[str] = []
-    run = 1
-    for index in range(1, len(treatments)):
-        run = run + 1 if treatments[index] == treatments[index - 1] else 1
-        if run >= 3:
-            problems.append("Three or more consecutive slides share a treatment — vary it.")
-            break
-    if len(slides) > 3 and len(set(treatments)) < 3:
-        problems.append("Deck uses fewer than three distinct slide types.")
-    return problems
-
-
-def _deck_cover_title_problems(
-    slides: list[Any],
-    diagnostics: dict[str, Any],
-    state: dict[str, Any] | None = None,
-) -> list[str]:
-    cover = slides[0] if slides and isinstance(slides[0], dict) else {}
-    title_by_slide = _title_present_by_slide(diagnostics)
-    title_by_slide.update(_qc_title_present_by_slide(slides, diagnostics, state))
-    cover_title_present = _slide_has_confirmed_title(cover, 1, title_by_slide)
-    if slides and not cover_title_present:
-        return ["Cover slide has no confirmed title detected in the image."]
-    return []
-
-
-def _slide_has_confirmed_title(
-    slide: dict[str, Any],
-    index: int,
-    title_by_slide: dict[int, bool],
-) -> bool:
-    return (
-        bool(slide.get("title_present"))
-        or title_by_slide.get(index) is True
-        or _slide_has_baked_title_qc_confirmation(slide)
-    )
-
-
-def _slide_has_baked_title_qc_confirmation(slide: dict[str, Any]) -> bool:
-    return any(slide.get(key) is True for key in ("title_baked_qc_confirmed", "baked_title_qc_confirmed"))
-
-
-def _deck_duplicate_image_problems(slides: list[Any]) -> list[str]:
-    used = [
-        image_ref
-        for slide in slides
-        if isinstance(slide, dict)
-        for image_ref in [_slide_image_ref(slide)]
-        if image_ref
-    ]
-    if len(used) != len(set(used)):
-        return ["The same generated image is used on more than one slide."]
-    return []
-
-
-def _slide_visual_style(slide: dict[str, Any]) -> str:
-    style = slide.get("visual_style") or slide.get("visualStyle")
-    return str(style or "").strip()
-
-
-def _deck_style_consistency_problems(slides: list[Any]) -> list[str]:
-    image_styles: list[tuple[int, str]] = [
-        (index, _slide_visual_style(slide))
-        for index, slide in enumerate(slides, 1)
-        if isinstance(slide, dict)
-        and (image_ref := _slide_image_ref(slide))
-        and _slide_uses_generated_image_ref(slide, image_ref)
-    ]
-    if not image_styles:
-        return []
-    missing = [index for index, style in image_styles if not style]
-    if missing:
-        return [
-            "Generated slide images are missing visual_style on slides "
-            f"{', '.join(str(index) for index in missing[:6])}; pick one deck style and stamp it on every image-forward slide."
-        ]
-    styles = {style for _index, style in image_styles}
-    if len(styles) > 1:
-        return [
-            "Deck mixes generated image styles "
-            f"({', '.join(sorted(styles)[:6])}); use one visual_style across the deck and vary the diagram type instead."
-        ]
-    return []
-
-
-def _deck_qc_problems(
-    slides: list[Any],
-    diagnostics: dict[str, Any],
-    state: dict[str, Any] | None = None,
-) -> list[str]:
-    effective_diagnostics = {**_pptx_diagnostics(state or {}), **diagnostics}
-    image_slides = _deck_generated_image_slides(slides, effective_diagnostics)
-    qc_results = _qc_result_list(effective_diagnostics)
-    qc_by_ref = _qc_results_by_image_ref(effective_diagnostics)
-    qc_by_hash = _qc_results_by_image_hash(effective_diagnostics)
-    if image_slides and not qc_by_ref and not qc_by_hash and len(qc_results) >= len(image_slides):
-        return _deck_qc_ordered_problems(image_slides, qc_results)
-    if image_slides and not qc_by_ref and not qc_by_hash and len(qc_results) < len(image_slides):
-        missing_slide_index = image_slides[len(qc_results)][0]
-        return [f"Slide {missing_slide_index} image was not QC-checked."]
-    return _deck_qc_reference_problems(image_slides, qc_by_ref, qc_by_hash, state)
-
-
-def _deck_qc_ordered_problems(image_slides: list[tuple[int, str]], qc_results: list[Any]) -> list[str]:
-    problems: list[str] = []
-    for (index, _image_ref), result in zip(image_slides, qc_results, strict=False):
-        if not isinstance(result, dict):
-            problems.append(f"Slide {index} image QC did not emit a structured verdict.")
-            continue
-        problem = _qc_result_presence_problem(index, result)
-        if problem:
-            problems.append(problem)
-    return problems
-
-
-def _deck_qc_reference_problems(
-    image_slides: list[tuple[int, str]],
-    qc_by_ref: dict[str, dict[str, Any]],
-    qc_by_hash: dict[str, dict[str, Any]],
-    state: dict[str, Any] | None = None,
-) -> list[str]:
-    problems: list[str] = []
-    for index, image_ref in image_slides:
-        result = _qc_result_for_image(qc_by_ref, qc_by_hash, image_ref, state)
-        if result is None:
-            problems.append(f"Slide {index} image was not QC-checked.")
-            continue
-        problem = _qc_result_presence_problem(index, result)
-        if problem:
-            problems.append(problem)
-    return problems
-
-
-def _presentation_qc_clean_or_advisory_only(
-    diagnostics: dict[str, Any],
-    state: dict[str, Any],
-) -> bool:
-    effective_diagnostics = {**_pptx_diagnostics(state), **diagnostics}
-    plan = effective_diagnostics.get("pptx_plan_json")
-    if not isinstance(plan, dict):
-        return False
-    slides_raw = plan.get("slides")
-    slides = slides_raw if isinstance(slides_raw, list) else []
-    image_slides = _deck_generated_image_slides(slides, effective_diagnostics)
-    if not image_slides:
-        return True
-    qc_results = _qc_result_list(effective_diagnostics)
-    qc_by_ref = _qc_results_by_image_ref(effective_diagnostics)
-    qc_by_hash = _qc_results_by_image_hash(effective_diagnostics)
-    if qc_by_ref or qc_by_hash:
-        return not _deck_qc_reference_problems(image_slides, qc_by_ref, qc_by_hash, state)
-    if len(qc_results) < len(image_slides):
-        return False
-    latest_ordered = qc_results[-len(image_slides) :]
-    return not _deck_qc_ordered_problems(image_slides, latest_ordered)
 
 
 def _clone_deck_plan(plan: dict[str, Any]) -> dict[str, Any] | None:
@@ -3965,29 +3832,11 @@ def _deck_plan_validation_problems(state: dict[str, Any]) -> list[str]:
     if not _requested_pptx_artifact(state) or not _builder_image_enrichment_enabled(state):
         return []
     diagnostics = _pptx_diagnostics(state)
-    plan = diagnostics.get("pptx_plan_json")
-    if not isinstance(plan, dict):
-        return ["PPTX plan metadata was not captured; re-run the ppt-generation script before emitting."]
-    problems = _validate_deck_plan(plan, diagnostics, state)
-    if not problems:
-        return []
-    if state.get("builder_pptx_plan_deterministic_repair_attempted"):
-        return problems
-    repaired = _repair_deck_plan_for_validation(plan, diagnostics)
-    if repaired is None:
-        return problems
-    repaired_problems = _validate_deck_plan(repaired, diagnostics, state)
-    if len(repaired_problems) >= len(problems):
-        return problems
-    diagnostics["pptx_plan_json"] = repaired
-    state["builder_pptx_plan_deterministic_repair_attempted"] = True
-    logger.warning(
-        "[BuilderPptxPlanRepair] repaired=%s remaining=%d previous=%d",
-        not repaired_problems,
-        len(repaired_problems),
-        len(problems),
-    )
-    return repaired_problems
+    generated_count = int(diagnostics.get("pptx_generator_slide_count", 0) or 0)
+    picture_count = int(diagnostics.get("pptx_generator_picture_count", 0) or 0)
+    if generated_count > 0 and picture_count <= 0:
+        return ["PPTX package contains zero embedded slide pictures."]
+    return []
 
 
 def _pptx_plan_diagnostics_from_command(command: str, state: dict[str, Any]) -> dict[str, Any]:
@@ -4358,7 +4207,7 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
         "`read_file(path='/mnt/skills/public/ppt-generation/SKILL.md')`.\n"
         "2. Generate one full-slide PNG per slide with the image-generation "
         "slide-visual workflow. Each image must include its own top title band, "
-        "center visual area, and bottom caption/takeaway band when needed.\n"
+        "center visual area, and bottom 1-2 sentence narrative band when needed.\n"
         "3. Create a valid slide plan JSON under `/mnt/user-data/workspace/`; each "
         "slide must point to its PNG with `image_path` and include speaker notes.\n"
         "4. Run the PPTX compiler through the ppt-generation workflow with "
@@ -6230,7 +6079,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         hard_problem = any(
             token in problem.lower()
             for problem in deck_problems
-            for token in ("cover slide", "same generated image", "qc", "not qc-checked")
+            for token in ("zero embedded", "contains zero", "package", "wrong extension")
         )
         if cls._visual_repair_available(state):
             logger.warning(
@@ -6544,12 +6393,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         listing = "\n".join(f"- {problem}" for problem in deck_problems[:8])
         return (
             "Error: emit_builder_artifact rejected — the PPTX deck plan failed Sophia "
-            "slide quality validation:\n"
+            "structural validation:\n"
             f"{listing}\n\n"
-            "Repair the deck now: regenerate or replace failed image-forward slides, run "
-            "`slide_qc.py` for every generated slide image, ensure every slide has "
-            "a generated `image_path`, avoid duplicate slide images, then re-run the "
-            "ppt-generation script and emit the regenerated .pptx."
+            "Repair the deck now: re-run the PPTX compiler so the requested .pptx "
+            "opens and contains at least one embedded full-slide picture."
         )
 
     @classmethod

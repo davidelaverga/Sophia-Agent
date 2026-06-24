@@ -37,6 +37,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_budget import (
 )
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.sophia.builder_memory_filter import filter_builder_memory_snippets
 
 logger = logging.getLogger(__name__)
 
@@ -382,6 +383,21 @@ _PAGE_TARGET_OUTPUT_NOUN_BEFORE_COUNT_RE = re.compile(
     re.IGNORECASE,
 )
 _PAGE_TARGET_SOURCE_NOUN_RE = re.compile(r"\b(?:report|document|source|memo|paper|file|article)\b", re.IGNORECASE)
+_SLIDE_COUNT_RE = re.compile(r"(?<!\d)(\d{1,2})\s*(?:-| )?\s*slides?\b", re.IGNORECASE)
+_SLIDE_TARGET_OUTPUT_BEFORE_RE = re.compile(
+    r"\b(?:presentation|deck|slides?|pptx|slideshow|deliverable|output)\b.{0,80}"
+    r"\b(?:exactly|length|target|make|create|generate|produce|render|write|deliver|should|must|needs?)\b",
+    re.IGNORECASE | re.DOTALL,
+)
+_SLIDE_TARGET_OUTPUT_VERB_BEFORE_RE = re.compile(
+    r"\b(?:build|create|make|generate|produce|write|render|draft|prepare|deliver)\b(?:\s+\w+){0,6}\s*$",
+    re.IGNORECASE,
+)
+_SLIDE_TARGET_OUTPUT_NOUN_AFTER_RE = re.compile(
+    r"^\s*(?:(?:technical|concise|detailed|short|long|final|pptx)\s+){0,6}"
+    r"(?:presentation|deck|slideshow|slides?|pptx)\b",
+    re.IGNORECASE,
+)
 
 
 def _valid_page_count(value: str) -> int | None:
@@ -432,6 +448,68 @@ def _page_count_target(combined: str) -> int | None:
         if count is not None:
             return count
     return None
+
+
+def _valid_slide_count(value: str) -> int | None:
+    try:
+        count = int(value)
+    except (TypeError, ValueError):
+        return None
+    return count if 1 <= count <= 80 else None
+
+
+def _slide_target_is_output_context(text: str, match: re.Match[str]) -> bool:
+    before = text[max(0, match.start() - 100): match.start()]
+    after = text[match.end(): match.end() + 100]
+    return bool(
+        _SLIDE_TARGET_OUTPUT_BEFORE_RE.search(before)
+        or (
+            _SLIDE_TARGET_OUTPUT_VERB_BEFORE_RE.search(before)
+            and _SLIDE_TARGET_OUTPUT_NOUN_AFTER_RE.search(after)
+        )
+    )
+
+
+def _slide_count_target(combined: str) -> int | None:
+    for match in _SLIDE_COUNT_RE.finditer(combined):
+        if not _slide_target_is_output_context(combined, match):
+            continue
+        count = _valid_slide_count(match.group(1))
+        if count is not None:
+            return count
+    return None
+
+
+def _pptx_slide_target_updates(
+    delegation_context: dict[str, Any],
+    *,
+    companion_artifact: dict[str, Any],
+) -> dict[str, Any]:
+    text_parts: list[str] = []
+    for source in (delegation_context, companion_artifact):
+        for key in ("task", "description", "artifact_brief", "original_task"):
+            value = source.get(key) if isinstance(source, dict) else None
+            if isinstance(value, str) and value.strip():
+                text_parts.append(value)
+    combined = "\n".join(text_parts)
+    if not combined:
+        return {}
+    if count := _slide_count_target(combined):
+        return {"builder_pptx_requested_slide_count": count}
+    return {}
+
+
+def _pptx_slide_target_section(slide_updates: dict[str, Any]) -> str | None:
+    count = slide_updates.get("builder_pptx_requested_slide_count")
+    if not isinstance(count, int):
+        return None
+    return (
+        "<pptx_slide_count_target>\n"
+        f"- Requested PPTX length: exactly {count} total slides, including cover and summary.\n"
+        "- Do not add a cover slide on top of this count; the number is the whole deck.\n"
+        "- If your first plan has a different slide count, revise the plan once to this count before compiling.\n"
+        "</pptx_slide_count_target>"
+    )
 
 
 def _pdf_page_target_updates(
@@ -757,6 +835,7 @@ class BuilderTaskState(AgentState):
     builder_pdf_requested_page_count: NotRequired[int]
     builder_pdf_requested_min_pages: NotRequired[int]
     builder_pdf_requested_max_pages: NotRequired[int]
+    builder_pptx_requested_slide_count: NotRequired[int]
     # Spec D D-4: read_session_context's self-enforced call counter — the
     # tool's Command update persists only because the key is declared here.
     builder_session_context_reads: NotRequired[int]
@@ -812,7 +891,13 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # from). Spec Appendix B shows the canonical synthesised shape.
         companion_artifact: dict[str, Any] = delegation_context.get("companion_artifact") or {}
         task_type: str = delegation_context.get("task_type", "unknown")
-        relevant_memories: list[str] = delegation_context.get("relevant_memories") or []
+        task_brief = str(delegation_context.get("task") or delegation_context.get("task_brief") or "")
+        relevant_memories: list[str] = filter_builder_memory_snippets(
+            delegation_context.get("relevant_memories") or [],
+            query=task_brief,
+            task_type=task_type,
+            limit=5,
+        )
         active_ritual: str | None = delegation_context.get("active_ritual")
         ritual_phase: str | None = delegation_context.get("ritual_phase")
         allow_web_research = True
@@ -822,6 +907,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         )
         artifact_target_ext = _artifact_target_extension(artifact_target_path)
         page_target_updates: dict[str, Any] = {}
+        slide_target_updates: dict[str, Any] = {}
         if artifact_target_ext == ".pdf":
             for key in (
                 "builder_pdf_requested_page_count",
@@ -836,6 +922,15 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                     delegation_context,
                     companion_artifact=companion_artifact,
                     artifact_target_path=artifact_target_path,
+                )
+        if artifact_target_ext == ".pptx" or task_type in {"presentation", "slides", "slide_deck", "deck"}:
+            value = state.get("builder_pptx_requested_slide_count")
+            if isinstance(value, int):
+                slide_target_updates["builder_pptx_requested_slide_count"] = value
+            if not slide_target_updates:
+                slide_target_updates = _pptx_slide_target_updates(
+                    delegation_context,
+                    companion_artifact=companion_artifact,
                 )
         tracked_sources = [
             source for source in (state.get("builder_search_sources") or []) if isinstance(source, dict)
@@ -953,6 +1048,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         if page_target_section := _pdf_page_target_section(page_target_updates):
             sections.append(page_target_section)
+        if slide_target_section := _pptx_slide_target_section(slide_target_updates):
+            sections.append(slide_target_section)
 
         edit_context = delegation_context.get("edit_context")
         if isinstance(edit_context, dict) and edit_context.get("mode") == "edit_existing_artifact":
@@ -1073,7 +1170,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             )
         pptx_visual_guidance = (
             "Slides use gpt-image-2 full-slide visuals when image-generation is listed for this run. "
-            "Every PPTX slide must be a generated full-slide image with baked title/caption bands. "
+            "Every PPTX slide must be a generated full-slide image with baked title and concise narrative bands. "
             "If a generated slide fails QC, regenerate or replace that image-forward slide once; "
             "do not downgrade the deck to engine-composed diagrams/text."
             if image_generation_enabled
@@ -1125,13 +1222,14 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "reportlab / python-pptx code.** Follow the matching <builder_workflow_card> above when one is "
             "present. If no workflow card covers the requested format, use the closest listed skill first.\n"
             "    * **PDF**: follow the PDF workflow card. A valid render is terminal-ready; emit immediately "
-            "unless Sophia asks for one layout repair.\n"
+            "unless Sophia asks for one layout repair. For quantitative/comparative figures, call "
+            "`generate_chart`; reserve `generate_excalidraw_diagram` for connected-node structure.\n"
             "    * **PPTX / presentation**: follow the PPTX workflow card. Reading SKILL.md alone is not "
             f"completion; normal success requires deck composition and a valid .pptx. {pptx_visual_guidance} "
             "PDF/HTML diagrams use local visual tools.\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"
-            "    * **Standalone chart / image**: use the chart-visualization or image-generation skill. The "
+            "    * **Standalone chart / image**: use `generate_chart`, the chart-visualization skill, or image-generation. The "
             "generated PNG/SVG is the deliverable.\n"
             "    * **Data analysis / spreadsheet**: use the data-analysis skill (DuckDB-based) for SQL over "
             "tabular data. Output CSV/JSON/Markdown directly.\n"
@@ -1270,7 +1368,12 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             f"non_artifact_turns={non_artifact_turns}",
             _t0,
         )
-        return {"system_prompt_blocks": blocks, **boundary_state_updates, **page_target_updates}
+        return {
+            "system_prompt_blocks": blocks,
+            **boundary_state_updates,
+            **page_target_updates,
+            **slide_target_updates,
+        }
 
     # ------------------------------------------------------------------
     # Private helpers

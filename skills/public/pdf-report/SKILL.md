@@ -20,8 +20,9 @@ or preview files as the final artifact unless explicitly requested.
    figure references.
 4. Generate deterministic figures:
    - Connected structure: `generate_excalidraw_diagram`.
-   - Quantitative evidence: use the chart-visualization skill to choose the
-     chart/table/callout grammar, then render deterministically.
+   - Quantitative, comparative, distributional, trend, ranking, composition,
+     or flow-volume evidence: call `generate_chart`, the tool-backed
+     chart-visualization renderer, and embed its returned `png_path`.
    - Tables/stat boxes: Markdown tables or LaTeX-friendly callouts when they
      are clearer than a chart.
 5. Render with `render_markdown_to_pdf`, passing requested page-count
@@ -42,8 +43,10 @@ Pick the figure form that matches the content:
 - One/few numbers: stat callout, not a chart.
 
 Avoid repetitive diagrams. A report with several figures should show more than
-one grammar when the source material supports it. Repetition is acceptable only
-when repeated measurement is the actual analytic point.
+one grammar when the source material supports it. For four or more figures,
+mix at least one `generate_chart` chart and at least one table with any
+connected-node diagrams. Repetition is acceptable only when repeated
+measurement is the actual analytic point.
 
 ## Figure Requirements
 

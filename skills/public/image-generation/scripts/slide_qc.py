@@ -31,8 +31,8 @@ _DEFAULT_QC_MODEL = "claude-sonnet-4-6"
 _REVIEWER_PROMPT = """You are a strict slide QC reviewer. You are shown one rendered presentation slide and the
 spec it must satisfy. Reply with JSON only: {"pass": true|false, "reasons": ["..."]}.
 
-The slide has a hard layout contract: top 14% is the title band, bottom 11% is the
-caption/takeaway band, and the middle 75% is the visual safe area. Title/caption
+The slide has a hard layout contract: top 14% is the title band, bottom 16% is the
+visible narrative band, and the middle 70% is the visual safe area. Title/narrative
 text must be baked into those bands; visual elements must not collide with them.
 
 Fail (pass=false) if ANY is true:
@@ -315,14 +315,14 @@ def _presence_result(image_file: Path, spec_file: Path) -> dict[str, Any]:
                 "presence_reasons": [reason],
             }
     title_text = _ocr_crop_text(image_file, y0=0.0, y1=0.14)
-    caption_text = _ocr_crop_text(image_file, y0=0.89, y1=1.0)
+    caption_text = _ocr_crop_text(image_file, y0=0.84, y1=1.0)
     title_present = _expected_text_present(expected_title, title_text)
     caption_present = _expected_text_present(expected_caption, caption_text)
     reasons: list[str] = []
     if expected_title and not title_present:
         reasons.append("Required title text was not detected in the top title band")
     if expected_caption and not caption_present:
-        reasons.append("Required caption/takeaway text was not detected in the bottom band")
+        reasons.append("Required narrative text was not detected in the bottom band")
     return {
         "title_present": bool(title_present),
         "caption_present": bool(caption_present),

@@ -264,12 +264,13 @@ def _write_chart_spec(
     family: str,
     rationale: str,
     spec_path: str,
+    source: str = "generate_report_chart",
 ) -> None:
     spec = {
         "tool": chart_tool,
         "args": args,
         "sophia": {
-            "source": "generate_report_chart",
+            "source": source,
             "chart_family": family,
             "rationale": rationale,
         },
@@ -382,31 +383,15 @@ def _download_result_payload(
     )
 
 
-@tool("generate_report_chart", parse_docstring=True)
-def generate_report_chart(
+def _generate_chart_impl(
     runtime: ToolRuntime,
     chart_tool: ChartTool,
     chart_args: dict[str, Any],
     rationale: str,
     output_name: str | None = None,
+    *,
+    source: str = "generate_report_chart",
 ) -> str:
-    """Generate a local chart image for PDF/report artifacts.
-
-    Use this report-only wrapper when a PDF or Markdown report needs a richer
-    chart than the compact deterministic chart tool provides. Choose the chart
-    tool from the chart-visualization taxonomy, pass the exact labeled data in
-    chart_args, and explain the choice in rationale. The tool saves the chart spec
-    and downloads the rendered chart under /mnt/user-data/outputs/visuals/.
-
-    Args:
-        chart_tool: Chart-visualization tool name, e.g. generate_line_chart,
-            generate_sankey_chart, generate_treemap_chart, or generate_radar_chart.
-        chart_args: Exact chart-visualization arguments, including data, labels, title,
-            and style/theme fields needed by the selected chart tool.
-        rationale: Brief reason this chart family fits the report evidence.
-        output_name: Optional output filename or /mnt/user-data/outputs/... path.
-    """
-
     family = _CHART_TOOL_FAMILIES.get(chart_tool)
     error = _input_error(chart_tool, chart_args, family)
     if error is not None:
@@ -433,6 +418,7 @@ def generate_report_chart(
         family=family,
         rationale=rationale,
         spec_path=spec_path,
+        source=source,
     )
     chart_url, error = _generation_error_payload(
         completed=_run_chart_script(node, script_path, spec_host_path),
@@ -451,4 +437,74 @@ def generate_report_chart(
         image_path=image_path,
         spec_path=spec_path,
         image_host_path=image_host_path,
+    )
+
+
+@tool("generate_chart", parse_docstring=True)
+def generate_chart(
+    runtime: ToolRuntime,
+    chart_type: ChartTool,
+    data: dict[str, Any],
+    output_name: str | None = None,
+    rationale: str = "",
+) -> str:
+    """Generate a local chart PNG for PDF/report artifacts.
+
+    Use this report-only chart tool for quantitative, comparative,
+    distributional, trend, ranking, composition, or flow-volume evidence.
+    Choose a chart_type from the chart-visualization taxonomy, pass exact
+    labeled chart arguments in data, and embed the returned png_path in the
+    Markdown before calling render_markdown_to_pdf.
+
+    Args:
+        chart_type: Chart-visualization tool name, e.g. generate_bar_chart,
+            generate_line_chart, generate_sankey_chart, generate_radar_chart.
+        data: Exact chart-visualization arguments, including data, labels, title,
+            and style/theme fields needed by the selected chart type.
+        output_name: Optional output filename or /mnt/user-data/outputs/... path.
+        rationale: Brief reason this chart family fits the report evidence.
+    """
+
+    return _generate_chart_impl(
+        runtime=runtime,
+        chart_tool=chart_type,
+        chart_args=data,
+        rationale=rationale or f"{chart_type} fits the available report evidence.",
+        output_name=output_name,
+        source="generate_chart",
+    )
+
+
+@tool("generate_report_chart", parse_docstring=True)
+def generate_report_chart(
+    runtime: ToolRuntime,
+    chart_tool: ChartTool,
+    chart_args: dict[str, Any],
+    rationale: str,
+    output_name: str | None = None,
+) -> str:
+    """Generate a local chart image for PDF/report artifacts.
+
+    Deprecated compatibility wrapper. Prefer generate_chart in the builder
+    report toolset. Choose the chart tool from the chart-visualization taxonomy,
+    pass the exact labeled data in chart_args, and explain the choice in
+    rationale. The tool saves the chart spec and downloads the rendered chart
+    under /mnt/user-data/outputs/visuals/.
+
+    Args:
+        chart_tool: Chart-visualization tool name, e.g. generate_line_chart,
+            generate_sankey_chart, generate_treemap_chart, or generate_radar_chart.
+        chart_args: Exact chart-visualization arguments, including data, labels, title,
+            and style/theme fields needed by the selected chart tool.
+        rationale: Brief reason this chart family fits the report evidence.
+        output_name: Optional output filename or /mnt/user-data/outputs/... path.
+    """
+
+    return _generate_chart_impl(
+        runtime=runtime,
+        chart_tool=chart_tool,
+        chart_args=chart_args,
+        rationale=rationale,
+        output_name=output_name,
+        source="generate_report_chart",
     )

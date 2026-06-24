@@ -41,7 +41,7 @@ def test_visual_composition_routes_pptx_and_pdf_to_separate_pipelines() -> None:
     assert "PDF reports are deterministic reports" in directives
     assert "There is no alternate plain deck mode" in directives
     assert "generate_excalidraw_diagram" in directives
-    assert "chart-visualization skill" in directives
+    assert "generate_chart" in directives
     assert "generate_visual_asset" not in directives
     assert "generate_report_chart" not in directives
 
@@ -51,7 +51,7 @@ def test_ppt_generation_skill_is_pure_image_forward() -> None:
 
     assert "Every slide is a single 16:9 image" in text
     assert "top 14% title band" in text
-    assert "bottom 11% caption/takeaway band" in text
+    assert "bottom 16% narrative band" in text
     assert "image_path" in text
     assert "Zero compiler-side text boxes" in text
     assert "generate_visual_asset" not in text
@@ -65,7 +65,8 @@ def test_pdf_report_skill_uses_local_deterministic_figures_only() -> None:
 
     assert "render_markdown_to_pdf" in text
     assert "generate_excalidraw_diagram" in text
-    assert "chart-visualization skill" in text
+    assert "generate_chart" in text
+    assert "chart-visualization renderer" in text
     assert "Do not use generated slide images in PDF reports" in text
     assert "generate_report_chart" not in text
     assert "generate_visual_asset" not in text

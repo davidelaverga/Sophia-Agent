@@ -124,6 +124,8 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 1. **Slide visuals (`--slide-visual`)** — for `.pptx` slides, this skill DOES render full slides
    and technical drawings WITH text. Wrap rendered copy as "THE TEXT READS: ...", keep labels
    8 words or fewer, put exact data in the prompt, and use `--slide-visual` (quality=high, 16:9).
+   Reserve top 14% for the title, bottom 16% for a concise 1-2 sentence visible narrative,
+   and the center 70% for the visual safe area.
    Pass the first slide as `--reference-images` to later slides for consistency; the script
    automatically sends those referenced slides through the `gpt-image-2` edit path.
 
@@ -133,7 +135,7 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
    PDF reports.
 
 For PDF reports, technical diagrams use graphviz through `generate_excalidraw_diagram`, and
-charts are chosen with the chart-visualization skill and rendered with local deterministic code.
+charts are rendered through the report `generate_chart` tool backed by the chart-visualization skill.
 This image skill is not part of the PDF report workflow.
 
 Reference library: for Excalidraw-style technical slide visuals, first inspect

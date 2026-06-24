@@ -56,6 +56,7 @@ from deerflow.sophia.builder_web_policy import (
     make_builder_web_budget,
     should_allow_builder_web_research,
 )
+from deerflow.sophia.builder_memory_filter import filter_builder_memory_snippets
 
 # Importing ``deerflow.agents.sophia_agent.state`` (or any module under
 # ``deerflow.agents``) at module-load time triggers loading of
@@ -1250,7 +1251,7 @@ def _visual_expectations_line(description: str, task_type: str) -> str | None:
     if task_type == "presentation":
         return (
             "Visual expectations: create a generated image-forward deck. Every slide "
-            "should be a full-slide visual with baked title and caption/takeaway bands; "
+            "should be a full-slide visual with baked title and concise narrative bands; "
             f"minimal/plain wording means restrained design, not a non-visual workflow.{style_note}"
         )
     return (
@@ -2028,6 +2029,12 @@ async def _start_builder_task_impl(
         task_type=task_type,
         edit_context=edit_context,
         companion_artifact=companion_artifact,
+    )
+    memory_snippets = filter_builder_memory_snippets(
+        memory_snippets,
+        query=description,
+        task_type=task_type,
+        limit=5,
     )
 
     allow_web_research = should_allow_builder_web_research(task_type, description)

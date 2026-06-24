@@ -11,16 +11,15 @@ medium. Do not mix workflows just because another tool is available.
 ## Medium Routing
 
 - Presentations (`.pptx`) are pure image-forward decks. Every slide is one
-  generated 16:9 bitmap with the title, visual, and any visible caption baked
+  generated 16:9 bitmap with the title, visual, and any visible narrative baked
   into the image. The PPTX compiler only places the full-slide bitmap and
   speaker notes. It never draws compiler-side titles, captions, text boxes,
   charts, or engine-composed layouts.
 - PDF reports are deterministic reports. Author Markdown, embed local PNG
   figures, and render with `render_markdown_to_pdf`. Use
-  `generate_excalidraw_diagram` for connected diagrams. Use the
-  chart-visualization skill to design chart/table/callout choices, then render
-  charts with deterministic code or the report source. Do not use generated
-  slide images inside PDF reports.
+  `generate_excalidraw_diagram` for connected diagrams and `generate_chart` for
+  quantitative, comparative, ranking, composition, trend, distribution, or
+  flow-volume evidence. Do not use generated slide images inside PDF reports.
 - HTML artifacts may use code-built visuals (SVG, CSS, Canvas) when that is
   the simplest faithful implementation.
 
@@ -29,8 +28,8 @@ medium. Do not mix workflows just because another tool is available.
 - There is no alternate plain deck mode. A requested `.pptx` deck still follows
   the image-forward pipeline.
 - Each generated slide image reserves the top 14% for a title band, the center
-  75% for the visual, and the bottom 11% for a concise caption or takeaway
-  when the slide type needs visible narrative.
+  70% for the visual, and the bottom 16% for a concise visible narrative when
+  the slide type needs explanation.
 - Keep visible slide text sparse and explicit. All rendered labels must be
   specified in the prompt as exact text.
 - Add concise speaker notes for narrative context, but never rely on notes as

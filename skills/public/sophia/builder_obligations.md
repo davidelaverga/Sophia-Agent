@@ -34,19 +34,19 @@ This file is for the Sophia builder only.
 - Presentations are pure image-forward. Generate one full-slide image per slide
   using the ppt-generation and image-generation skills.
 - The slide image must contain its own title band and, for content slides, a
-  bottom caption/takeaway band. The PPTX compiler adds only that bitmap plus
+  bottom 1-2 sentence narrative band. The PPTX compiler adds only that bitmap plus
   speaker notes.
 - Do not use engine-composed PPTX layouts, compiler-drawn text overlays, or
   generated PDF previews as the primary deck artifact.
-- When the requested PPTX exists, has the expected slide count, and passes
-  required checks, emit immediately.
+- When the requested PPTX exists, opens, and has embedded full-slide pictures,
+  emit immediately after at most one slide-count repair nudge.
 
 ## PDF Report Rules
 
 - Author Markdown and render with `render_markdown_to_pdf`.
 - Use local figures only: `generate_excalidraw_diagram` for connected
-  diagrams, chart-visualization guidance plus local chart rendering for
-  quantitative evidence, and Markdown tables/callouts when they are clearer.
+  diagrams, `generate_chart` for quantitative/comparative evidence, and
+  Markdown tables/callouts when they are clearer.
 - Do not use slide-image generation or retired report chart tools for PDFs.
 - Embed PNG figure files into the Markdown before rendering.
 
