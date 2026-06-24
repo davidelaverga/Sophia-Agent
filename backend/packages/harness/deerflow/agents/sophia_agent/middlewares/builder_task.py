@@ -1170,7 +1170,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             )
         pptx_visual_guidance = (
             "Slides use gpt-image-2 full-slide visuals when image-generation is listed for this run. "
-            "Every PPTX slide must be a generated full-slide image with baked title and concise narrative bands. "
+            "Every PPTX slide must be a generated full-slide image with baked title, center visual safe area, "
+            "and concise narrative/takeaway bands (about 14% / 75% / 11% vertically). "
             "If a generated slide fails QC, regenerate or replace that image-forward slide once; "
             "do not downgrade the deck to engine-composed diagrams/text."
             if image_generation_enabled

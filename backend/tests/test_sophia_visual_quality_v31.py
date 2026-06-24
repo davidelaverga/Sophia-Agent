@@ -8,8 +8,10 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     _enrich_pdf_render_result_with_requested_pages,
     _pdf_layout_repair_message,
     _presentation_completion_ready,
+    _report_visual_grammar_problems,
     _repair_deck_plan_for_validation,
     _validate_deck_plan,
+    _visual_grammar_counts,
 )
 from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
@@ -110,15 +112,13 @@ def test_deck_plan_accepts_mixed_generated_slide_styles() -> None:
     assert problems == []
 
 
-def test_report_variety_gate_functions_are_removed() -> None:
-    assert not hasattr(builder_artifact_module, "_report_figure_family_problems")
-    assert not hasattr(builder_artifact_module, "_report_visual_grammar_problems")
-    assert not hasattr(builder_artifact_module, "_visual_figure_family_counts")
-    assert not hasattr(builder_artifact_module, "_visual_grammar_counts")
-    assert not hasattr(BuilderArtifactMiddleware, "_figure_family_rejection_message")
+def test_report_variety_gate_functions_are_runtime_owned() -> None:
+    assert callable(_report_visual_grammar_problems)
+    assert callable(_visual_grammar_counts)
+    assert hasattr(BuilderArtifactMiddleware, "_report_visual_grammar_rejection_message")
 
 
-def test_report_variety_is_skill_owned_not_runtime_blocking() -> None:
+def test_report_variety_rejects_repetitive_runtime_grammar() -> None:
     state = {
         "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
         "builder_visual_diagnostics": {
@@ -126,14 +126,35 @@ def test_report_variety_is_skill_owned_not_runtime_blocking() -> None:
                 {"family": "diagram:architecture", "path": "/mnt/user-data/outputs/visuals/a.png"},
                 {"family": "diagram:architecture", "path": "/mnt/user-data/outputs/visuals/b.png"},
                 {"family": "diagram:architecture", "path": "/mnt/user-data/outputs/visuals/c.png"},
+                {"family": "diagram:architecture", "path": "/mnt/user-data/outputs/visuals/d.png"},
             ]
         },
     }
 
-    assert not BuilderArtifactMiddleware._visual_gate_blocks_emit({"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state)
+    assert _visual_grammar_counts(state) == {"diagram:architecture": 4}
+    assert _report_visual_grammar_problems(state)
+    assert BuilderArtifactMiddleware._visual_gate_blocks_emit({"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state)
 
     warned = _apply_report_figure_quality_metadata({"confidence": 0.95}, state)
-    assert warned == {"confidence": 0.95}
+    assert warned["quality_warning"] == "report_visual_grammar"
+    assert warned["confidence"] == 0.65
+
+
+def test_report_variety_allows_mixed_grammars() -> None:
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+        "builder_visual_diagnostics": {
+            "visual_figure_records": [
+                {"family": "diagram:architecture", "path": "/mnt/user-data/outputs/visuals/a.png"},
+                {"family": "chart:flow", "path": "/mnt/user-data/outputs/visuals/b.png"},
+                {"family": "chart:comparison", "path": "/mnt/user-data/outputs/visuals/c.png"},
+                {"family": "diagram:timeline", "path": "/mnt/user-data/outputs/visuals/d.png"},
+            ]
+        },
+    }
+
+    assert _report_visual_grammar_problems(state) == []
+    assert not BuilderArtifactMiddleware._visual_gate_blocks_emit({"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state)
 
 
 def test_presentation_completion_ready_allows_advisory_qc_parse_failures(tmp_path, monkeypatch) -> None:

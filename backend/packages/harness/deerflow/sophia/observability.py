@@ -593,17 +593,33 @@ def _add_quality_metadata(
             metadata[key] = str(value)
 
 
+def _summary_tool_names(summary: object) -> list[str]:
+    if not isinstance(summary, dict):
+        return []
+    names = summary.get("tool_names") or []
+    if not isinstance(names, list):
+        return []
+    cleaned: list[str] = []
+    for item in names:
+        name = _clean_tool_name(item)
+        if name:
+            cleaned.append(name)
+    return cleaned
+
+
+def _clean_tool_name(value: Any) -> str | None:
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value.strip()
+
+
 def _tool_counts_by_name(state: dict[str, Any]) -> dict[str, int]:
-    counts: Counter[str] = Counter()
     summaries = state.get("builder_tool_turn_summaries") or []
     if not isinstance(summaries, list):
         return {}
+    counts: Counter[str] = Counter()
     for summary in summaries:
-        if not isinstance(summary, dict):
-            continue
-        for name in summary.get("tool_names") or []:
-            if isinstance(name, str) and name.strip():
-                counts[name.strip()] += 1
+        counts.update(_summary_tool_names(summary))
     return dict(sorted(counts.items()))
 
 
@@ -622,19 +638,121 @@ def _emit_rejection_count(state: dict[str, Any]) -> int:
     )
 
 
+def _image_hashes_from_records(records: object) -> list[str]:
+    hashes: list[str] = []
+    if not isinstance(records, list):
+        return hashes
+    for record in records:
+        if not isinstance(record, dict):
+            continue
+        image_hash = record.get("image_hash")
+        if isinstance(image_hash, str) and image_hash.strip():
+            hashes.append(image_hash.strip())
+    return hashes
+
+
 def _slide_image_hashes(diagnostics: dict[str, Any]) -> list[str]:
     hashes: list[str] = []
     for key in ("qc_image_records", "image_output_records"):
-        records = diagnostics.get(key)
-        if not isinstance(records, list):
-            continue
-        for record in records:
-            if not isinstance(record, dict):
-                continue
-            image_hash = record.get("image_hash")
-            if isinstance(image_hash, str) and image_hash.strip() and image_hash not in hashes:
-                hashes.append(image_hash.strip())
+        for image_hash in _image_hashes_from_records(diagnostics.get(key)):
+            if image_hash not in hashes:
+                hashes.append(image_hash)
     return hashes[:24]
+
+
+def _visual_grammar_counts_from_state(state: dict[str, Any]) -> dict[str, int]:
+    visual = _as_dict(state.get("builder_visual_diagnostics"))
+    records = visual.get("visual_figure_records")
+    if not isinstance(records, list):
+        return {}
+    counts: Counter[str] = Counter()
+    for record in records:
+        grammar = _visual_record_grammar(record)
+        if grammar:
+            counts[grammar] += 1
+    return dict(sorted(counts.items()))
+
+
+def _visual_record_grammar(record: Any) -> str | None:
+    if not isinstance(record, dict):
+        return None
+    for key in ("grammar", "family", "visual_type", "chart_family", "chart_tool"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _deck_gate_tag(state: dict[str, Any], artifact_ext: str | None, image_forward: bool) -> str | None:
+    diagnostics = _as_dict(state.get("builder_pptx_diagnostics"))
+    if artifact_ext == "pptx" and (
+        image_forward
+        or state.get("builder_presentation_terminal_ready") is True
+        or _as_int(diagnostics.get("pptx_generator_success_count")) > 0
+    ):
+        return "deck_latch_passed"
+    return None
+
+
+def _artifact_is_pdf(artifact: dict[str, Any], artifact_ext: str | None) -> bool:
+    return artifact_ext == "pdf" or str(artifact.get("artifact_type") or "").lower() == "pdf"
+
+
+def _artifact_pdf_layout_failed(artifact: dict[str, Any]) -> bool:
+    failure_code = str(
+        artifact.get("failure_code")
+        or artifact.get("acceptance_failure_code")
+        or artifact.get("error_reason")
+        or ""
+    )
+    return failure_code == "pdf_page_count_off_target" or artifact.get("artifact_acceptance_status") == "failed"
+
+
+def _pdf_layout_gate_tag(
+    state: dict[str, Any],
+    artifact: dict[str, Any],
+    artifact_ext: str | None,
+) -> str | None:
+    if not _artifact_is_pdf(artifact, artifact_ext):
+        return None
+    if _artifact_pdf_layout_failed(artifact):
+        return "pdf_layout_failed"
+    if _as_dict(state.get("builder_pdf_render_result")).get("success") is True:
+        return "pdf_layout_passed"
+    return None
+
+
+def _report_variety_gate_tag(
+    state: dict[str, Any],
+    artifact: dict[str, Any],
+    artifact_ext: str | None,
+) -> str | None:
+    grammar_counts = artifact.get("report_visual_grammar_counts") or _visual_grammar_counts_from_state(state)
+    grammar_problems = artifact.get("report_visual_grammar_problems")
+    if artifact_ext == "pdf" and (grammar_counts or grammar_problems):
+        return "report_variety_failed" if grammar_problems else "report_variety_passed"
+    return None
+
+
+def _builder_gate_tags(
+    *,
+    state: dict[str, Any],
+    artifact: dict[str, Any],
+    artifact_ext: str | None,
+    image_forward: bool,
+) -> list[str]:
+    tags = [
+        tag
+        for tag in (
+            _deck_gate_tag(state, artifact_ext, image_forward),
+            _pdf_layout_gate_tag(state, artifact, artifact_ext),
+            _report_variety_gate_tag(state, artifact, artifact_ext),
+        )
+        if tag
+    ]
+    if not tags:
+        tags.append("qc_not_applicable")
+    return tags
 
 
 def _artifact_filename(artifact: dict[str, Any]) -> str | None:
@@ -642,6 +760,189 @@ def _artifact_filename(artifact: dict[str, Any]) -> str | None:
     if not isinstance(value, str) or not value.strip():
         return None
     return value.strip().replace("\\", "/").split("/")[-1] or None
+
+
+def _add_terminal_gate_metadata(
+    metadata: dict[str, Any],
+    *,
+    state: dict[str, Any],
+    artifact: dict[str, Any],
+    diagnostics: dict[str, Any],
+) -> None:
+    _add_pptx_terminal_metadata(metadata, diagnostics)
+    _add_pdf_layout_metadata(metadata, state=state, artifact=artifact)
+    _add_artifact_acceptance_metadata(metadata, artifact)
+    _add_report_grammar_metadata(metadata, state=state, artifact=artifact)
+
+
+def _add_pptx_terminal_metadata(metadata: dict[str, Any], diagnostics: dict[str, Any]) -> None:
+    for key in (
+        "slide_assets_ready_at_turn",
+        "compile_forced_at_turn",
+        "pptx_terminal_ready_at_turn",
+        "time_to_first_valid_artifact_ms",
+    ):
+        _merge_safe_metadata(metadata, key, diagnostics.get(key))
+
+
+def _add_pdf_layout_metadata(
+    metadata: dict[str, Any],
+    *,
+    state: dict[str, Any],
+    artifact: dict[str, Any],
+) -> None:
+    pdf_result = _as_dict(state.get("builder_pdf_render_result"))
+    for key in ("requested_page_count", "page_count", "layout_quality", "layout_warning"):
+        _merge_safe_metadata(metadata, f"pdf_{key}", pdf_result.get(key))
+    requested = pdf_result.get("requested_page_count") or artifact.get("requested_pages")
+    actual = pdf_result.get("page_count") or artifact.get("actual_pages")
+    if isinstance(requested, int) and isinstance(actual, int):
+        metadata["pdf_page_delta"] = actual - requested
+
+
+def _add_artifact_acceptance_metadata(metadata: dict[str, Any], artifact: dict[str, Any]) -> None:
+    for key in (
+        "artifact_acceptance_status",
+        "failure_code",
+        "requested_pages",
+        "actual_pages",
+        "page_delta",
+        "report_visual_grammar_count",
+    ):
+        _merge_safe_metadata(metadata, key, artifact.get(key))
+
+
+def _add_report_grammar_metadata(
+    metadata: dict[str, Any],
+    *,
+    state: dict[str, Any],
+    artifact: dict[str, Any],
+) -> None:
+    _add_report_grammar_count_metadata(metadata, artifact)
+    _add_report_grammar_problem_metadata(metadata, artifact)
+    grammar_counts = _visual_grammar_counts_from_state(state)
+    if grammar_counts and "report_visual_grammar_counts" not in metadata:
+        metadata["report_visual_grammar_counts"] = grammar_counts
+        metadata["report_visual_grammar_count"] = len(grammar_counts)
+
+
+def _add_report_grammar_count_metadata(metadata: dict[str, Any], artifact: dict[str, Any]) -> None:
+    artifact_grammar_counts = artifact.get("report_visual_grammar_counts")
+    if isinstance(artifact_grammar_counts, dict):
+        metadata["report_visual_grammar_counts"] = {
+            str(key): int(value)
+            for key, value in artifact_grammar_counts.items()
+            if isinstance(value, int)
+        }
+
+
+def _add_report_grammar_problem_metadata(metadata: dict[str, Any], artifact: dict[str, Any]) -> None:
+    artifact_grammar_problems = artifact.get("report_visual_grammar_problems")
+    if isinstance(artifact_grammar_problems, list):
+        metadata["report_visual_grammar_problems"] = [
+            str(problem)[:240]
+            for problem in artifact_grammar_problems[:8]
+            if isinstance(problem, str) and problem.strip()
+        ]
+
+
+def _image_forward_stats(diagnostics: dict[str, Any]) -> tuple[int, int, int, bool]:
+    slide_count = _first_positive_int(
+        diagnostics.get("pptx_plan_slide_count"),
+        diagnostics.get("pptx_generator_slide_count"),
+    )
+    image_count = _as_int(diagnostics.get("image_generation_success_count"))
+    qc_invocations = _as_int(diagnostics.get("qc_invocation_count"))
+    return slide_count, image_count, qc_invocations, bool(slide_count > 0 and image_count >= slide_count)
+
+
+def _base_builder_metadata(
+    artifact: dict[str, Any],
+    diagnostics: dict[str, Any],
+    *,
+    slide_count: int,
+    image_count: int,
+    qc_invocations: int,
+    image_forward: bool,
+) -> dict[str, Any]:
+    return {
+        "slide_count": slide_count,
+        "image_count": image_count,
+        "image_forward": image_forward,
+        "degraded": _degraded(artifact, diagnostics),
+        "dropped_image_refs": _as_int(diagnostics.get("dropped_image_refs")),
+        "qc_invocation_count": qc_invocations,
+        "qc_pass_count": _as_int(diagnostics.get("qc_pass_count")),
+        "qc_failure_count": _as_int(diagnostics.get("qc_failure_count")),
+    }
+
+
+def _safe_lifecycle_markers(markers: Any) -> dict[str, Any]:
+    if not isinstance(markers, dict):
+        return {}
+    return {
+        str(key): value
+        for key, value in markers.items()
+        if _safe_metadata_value(key) is not None and _safe_metadata_value(value) is not None
+    }
+
+
+def _add_state_summary_metadata(metadata: dict[str, Any], state: dict[str, Any]) -> None:
+    tool_counts = _tool_counts_by_name(state)
+    if tool_counts:
+        metadata["tool_counts_by_name"] = tool_counts
+    metadata["emit_rejection_count"] = _emit_rejection_count(state)
+    lifecycle_markers = _safe_lifecycle_markers(state.get("builder_lifecycle_markers"))
+    if lifecycle_markers:
+        metadata["builder_lifecycle_markers"] = lifecycle_markers
+    _merge_safe_metadata(metadata, "builder_terminal_halt_reason", state.get("builder_terminal_halt_reason"))
+    metadata["builder_graph_halted"] = state.get("builder_graph_halted") is True
+
+
+def _add_artifact_detail_metadata(
+    metadata: dict[str, Any],
+    *,
+    state: dict[str, Any],
+    artifact: dict[str, Any],
+    diagnostics: dict[str, Any],
+) -> None:
+    _add_artifact_metadata(metadata, artifact, diagnostics)
+    _merge_safe_metadata(metadata, "artifact_filename", _artifact_filename(artifact))
+    _merge_safe_metadata(metadata, "artifact_preview_filename", artifact.get("artifact_preview_filename"))
+    if diagnostics.get("pptx_plan_json") is not None:
+        metadata["deck_plan"] = diagnostics["pptx_plan_json"]
+    slide_hashes = _slide_image_hashes(diagnostics)
+    if slide_hashes:
+        metadata["accepted_slide_image_hashes"] = slide_hashes
+    _add_quality_metadata(metadata, artifact, diagnostics)
+    _add_terminal_gate_metadata(
+        metadata,
+        state=state,
+        artifact=artifact,
+        diagnostics=diagnostics,
+    )
+
+
+def _builder_observability_tags(
+    *,
+    state: dict[str, Any],
+    artifact: dict[str, Any],
+    artifact_ext: str | None,
+    image_forward: bool,
+    qc_invocations: int,
+) -> list[str]:
+    tags = [
+        f"artifact:{artifact_ext}" if artifact_ext else "artifact:unknown",
+        "image_forward" if image_forward else "mixed_or_fallback",
+        "qc_ran" if qc_invocations > 0 else None,
+        *_builder_gate_tags(
+            state=state,
+            artifact=artifact,
+            artifact_ext=artifact_ext,
+            image_forward=image_forward,
+        ),
+    ]
+    return [tag for tag in tags if tag]
 
 
 def builder_observability_payload(
@@ -653,58 +954,37 @@ def builder_observability_payload(
     diagnostics = _as_dict(state.get("builder_pptx_diagnostics"))
     delegation_context = _as_dict(state.get("delegation_context"))
     builder_task = _as_dict(state.get("builder_task"))
-    slide_count = _first_positive_int(
-        diagnostics.get("pptx_plan_slide_count"),
-        diagnostics.get("pptx_generator_slide_count"),
+    slide_count, image_count, qc_invocations, image_forward = _image_forward_stats(diagnostics)
+    metadata = _base_builder_metadata(
+        artifact,
+        diagnostics,
+        slide_count=slide_count,
+        image_count=image_count,
+        qc_invocations=qc_invocations,
+        image_forward=image_forward,
     )
-    image_count = _as_int(diagnostics.get("image_generation_success_count"))
-    qc_invocations = _as_int(diagnostics.get("qc_invocation_count"))
-    image_forward = bool(slide_count > 0 and image_count >= slide_count)
-    metadata: dict[str, Any] = {
-        "slide_count": slide_count,
-        "image_count": image_count,
-        "image_forward": image_forward,
-        "degraded": _degraded(artifact, diagnostics),
-        "dropped_image_refs": _as_int(diagnostics.get("dropped_image_refs")),
-        "qc_invocation_count": qc_invocations,
-        "qc_pass_count": _as_int(diagnostics.get("qc_pass_count")),
-        "qc_failure_count": _as_int(diagnostics.get("qc_failure_count")),
-    }
-    tool_counts = _tool_counts_by_name(state)
-    if tool_counts:
-        metadata["tool_counts_by_name"] = tool_counts
-    metadata["emit_rejection_count"] = _emit_rejection_count(state)
-    lifecycle_markers = state.get("builder_lifecycle_markers")
-    if isinstance(lifecycle_markers, dict) and lifecycle_markers:
-        metadata["builder_lifecycle_markers"] = {
-            str(key): value
-            for key, value in lifecycle_markers.items()
-            if _safe_metadata_value(key) is not None and _safe_metadata_value(value) is not None
-        }
-    _merge_safe_metadata(metadata, "builder_terminal_halt_reason", state.get("builder_terminal_halt_reason"))
-    metadata["builder_graph_halted"] = state.get("builder_graph_halted") is True
+    _add_state_summary_metadata(metadata, state)
     _add_identity_metadata(
         metadata,
         artifact=artifact,
         builder_task=builder_task,
         delegation_context=delegation_context,
     )
-    _add_artifact_metadata(metadata, artifact, diagnostics)
-    _merge_safe_metadata(metadata, "artifact_filename", _artifact_filename(artifact))
-    _merge_safe_metadata(metadata, "artifact_preview_filename", artifact.get("artifact_preview_filename"))
-    if diagnostics.get("pptx_plan_json") is not None:
-        metadata["deck_plan"] = diagnostics["pptx_plan_json"]
-    slide_hashes = _slide_image_hashes(diagnostics)
-    if slide_hashes:
-        metadata["accepted_slide_image_hashes"] = slide_hashes
-    _add_quality_metadata(metadata, artifact, diagnostics)
+    _add_artifact_detail_metadata(
+        metadata,
+        state=state,
+        artifact=artifact,
+        diagnostics=diagnostics,
+    )
 
     artifact_ext = _final_artifact_ext(artifact)
-    tags = [
-        f"artifact:{artifact_ext}" if artifact_ext else "artifact:unknown",
-        "image_forward" if image_forward else "mixed_or_fallback",
-        "qc_ran" if qc_invocations > 0 else "qc_skipped",
-    ]
+    tags = _builder_observability_tags(
+        state=state,
+        artifact=artifact,
+        artifact_ext=artifact_ext,
+        image_forward=image_forward,
+        qc_invocations=qc_invocations,
+    )
     return metadata, tags, _qc_results(diagnostics)
 
 

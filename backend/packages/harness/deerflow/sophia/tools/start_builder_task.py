@@ -1251,7 +1251,8 @@ def _visual_expectations_line(description: str, task_type: str) -> str | None:
     if task_type == "presentation":
         return (
             "Visual expectations: create a generated image-forward deck. Every slide "
-            "should be a full-slide visual with baked title and concise narrative bands; "
+            "should be a full-slide visual with baked title, center visual safe area, "
+            "and concise narrative/takeaway bands (about 14% / 75% / 11% vertically); "
             f"minimal/plain wording means restrained design, not a non-visual workflow.{style_note}"
         )
     return (

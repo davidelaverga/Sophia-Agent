@@ -3189,6 +3189,60 @@ class TestBuilderArtifactMiddleware:
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state, _make_runtime(thread_id="thread-x"))
         assert choice == {"type": "tool", "name": "emit_builder_artifact"}
 
+    def test_pptx_slide_assets_ready_forces_compile_bash(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "builder_pptx_requested_slide_count": 3,
+            "builder_pptx_diagnostics": {
+                "image_generation_success_count": 3,
+            },
+        }
+        mw = BuilderArtifactMiddleware()
+
+        update = mw._combined_before_model_updates(state, _make_runtime(thread_id="thread-x"))
+        assert update is not None
+        assert update["builder_pptx_compile_latch_pending"] is True
+        assert update["builder_pptx_diagnostics"]["slide_assets_ready_at_turn"] == 1
+        assert "PPTX compile latch" in update["messages"][0].content
+
+        latched_state = {**state, **update}
+        choice = mw._force_choice_for_state(latched_state, _make_runtime(thread_id="thread-x"))
+        assert choice == {"type": "tool", "name": "bash"}
+
+    def test_pptx_terminal_ready_forces_immediate_emit(self, tmp_path, monkeypatch):
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as module
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        pptx = outputs_dir / "deck.pptx"
+        pptx.write_bytes(b"fake-pptx")
+        monkeypatch.setattr(module, "_pptx_integrity_error_for_file", lambda _path: None)
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "builder_pptx_requested_slide_count": 3,
+            "builder_pptx_diagnostics": {
+                "pptx_generator_success_count": 1,
+                "pptx_generator_slide_count": 3,
+                "pptx_generator_picture_count": 3,
+                "pptx_output_paths": ["/mnt/user-data/outputs/deck.pptx"],
+            },
+        }
+
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(
+            state,
+            _make_runtime(thread_id="thread-x"),
+        )
+
+        assert choice == {"type": "tool", "name": "emit_builder_artifact"}
+        assert state["builder_presentation_terminal_ready"] is True
+
     def test_pdf_layout_warning_injects_one_repair_before_emit(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
@@ -3246,6 +3300,68 @@ class TestBuilderArtifactMiddleware:
         }
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state, _make_runtime(thread_id="thread-x"))
         assert choice == {"type": "tool", "name": "emit_builder_artifact"}
+
+    def test_pdf_page_count_off_target_allows_second_bounded_repair(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "builder_pdf_layout_repair_attempts": 1,
+            "builder_pdf_layout_repair_requested": True,
+            "builder_pdf_render_result": {
+                "success": True,
+                "pdf_path": "/mnt/user-data/outputs/report.pdf",
+                "layout_quality": "warning",
+                "layout_warning": "page_count_off_target",
+                "requested_page_count": 10,
+                "page_count": 6,
+            },
+        }
+        mw = BuilderArtifactMiddleware()
+        update = mw._combined_before_model_updates(state, _make_runtime(thread_id="thread-x"))
+
+        assert update is not None
+        assert update["builder_pdf_render_result"] is None
+        assert update["builder_pdf_layout_repair_attempts"] == 2
+        assert update["builder_pdf_layout_repair_pending"] is True
+
+    def test_pdf_page_count_off_target_after_two_repairs_is_not_normal_success(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "builder_pdf_layout_repair_attempts": 2,
+            "builder_pdf_layout_repair_requested": True,
+            "builder_pdf_render_result": {
+                "success": True,
+                "pdf_path": "/mnt/user-data/outputs/report.pdf",
+                "layout_quality": "warning",
+                "layout_warning": "page_count_off_target",
+                "requested_page_count": 10,
+                "page_count": 17,
+            },
+        }
+        mw = BuilderArtifactMiddleware()
+
+        assert mw._force_choice_for_state(state, _make_runtime(thread_id="thread-x")) is None
+        assert (
+            BuilderArtifactMiddleware._format_specific_rejection(
+                "/mnt/user-data/outputs/report.pdf",
+                state,
+                _make_runtime(thread_id="thread-x"),
+            )
+            == "pdf_page_count_off_target"
+        )
 
     def test_recover_emit_args_prefers_successful_pdf_render(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware

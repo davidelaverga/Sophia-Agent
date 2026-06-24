@@ -13,8 +13,10 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     _artifact_file_paths_for_roles,
     _deck_plan_validation_problems,
     _presentation_completion_ready,
+    _report_visual_grammar_problems,
     _unmet_conditions_from_state,
     _validate_deck_plan,
+    _visual_grammar_counts,
 )
 from deerflow.agents.sophia_agent.middlewares.builder_task import _slide_count_target
 from deerflow.agents.sophia_agent.builder_tools import build_builder_tools_for_task_type
@@ -193,9 +195,7 @@ def test_pptx_picture_count_is_visual_evidence_for_image_forward_decks() -> None
     )
 
 
-def test_report_visual_grammar_gate_is_absent() -> None:
-    assert not hasattr(builder_artifact_module, "_report_visual_grammar_problems")
-    assert not hasattr(builder_artifact_module, "_report_figure_family_problems")
+def test_report_visual_grammar_gate_rejects_repetitive_diagrams() -> None:
     repetitive_state = {
         "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
         "builder_visual_diagnostics": {
@@ -208,7 +208,12 @@ def test_report_visual_grammar_gate_is_absent() -> None:
         },
     }
 
-    assert not BuilderArtifactMiddleware._visual_gate_blocks_emit(
+    assert _visual_grammar_counts(repetitive_state) == {
+        "graphviz_node_link": 3,
+        "sankey_flow": 1,
+    }
+    assert _report_visual_grammar_problems(repetitive_state)
+    assert BuilderArtifactMiddleware._visual_gate_blocks_emit(
         {"artifact_path": "/mnt/user-data/outputs/report.pdf"},
         repetitive_state,
     )

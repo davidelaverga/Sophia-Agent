@@ -251,6 +251,7 @@ _SHELL_SEPARATORS = {"&&", "||", ";", "|", "&"}
 _IMAGE_GENERATION_MAX_CALLS = 8
 # v4.1: PDF reports are deterministic only; generated images are blocked.
 _IMAGE_GENERATION_MAX_CALLS_PDF = 0
+_PDF_PAGE_COUNT_REPAIR_MAX = 2
 _IMAGE_GENERATION_TERMINAL_ERRORS = frozenset(
     {"missing_api_key", "auth_invalid", "org_not_verified", "egress_blocked"}
 )
@@ -300,11 +301,24 @@ def _presentation_completion_ready(state: dict[str, Any]) -> bool:
         return False
     if _pptx_target_slide_count_needs_one_repair(diagnostics, state):
         return False
+    _mark_presentation_terminal_ready(state, diagnostics, pptx_file)
+    return True
+
+
+def _mark_presentation_terminal_ready(
+    state: dict[str, Any],
+    diagnostics: dict[str, Any],
+    pptx_file: Path,
+) -> None:
     state["builder_presentation_terminal_ready"] = True
     state["builder_terminal_artifact_path"] = _canonical_outputs_artifact_path(
         f"/mnt/user-data/outputs/{pptx_file.name}"
     )
-    return True
+    diagnostics.setdefault("pptx_terminal_ready_at_turn", _builder_current_turn_index(state))
+    elapsed = _elapsed_since_builder_start_ms(state)
+    if elapsed is not None:
+        diagnostics.setdefault("time_to_first_valid_artifact_ms", elapsed)
+    state["builder_pptx_diagnostics"] = diagnostics
 
 
 def _terminal_halt_fields(state: dict[str, Any], reason: str) -> dict[str, Any]:
@@ -380,6 +394,74 @@ def _pptx_requested_target_slide_count(state: dict[str, Any]) -> int:
         if isinstance(value, int) and value > 0:
             return value
     return 0
+
+
+def _builder_current_turn_index(state: dict[str, Any]) -> int:
+    return int(state.get("builder_non_artifact_turns", 0) or 0) + 1
+
+
+def _elapsed_since_builder_start_ms(state: dict[str, Any]) -> int | None:
+    started = state.get("builder_task_started_at_ms")
+    if not isinstance(started, (int, float)) or started <= 0:
+        return None
+    return max(0, int(time.time() * 1000) - int(started))
+
+
+def _pptx_latch_target_slide_count(state: dict[str, Any]) -> int:
+    requested = _pptx_requested_target_slide_count(state)
+    if requested > 0:
+        return requested
+    diagnostics = _pptx_diagnostics(state)
+    plan_count = diagnostics.get("pptx_plan_slide_count")
+    return int(plan_count or 0) if isinstance(plan_count, int) and plan_count > 0 else 0
+
+
+def _pptx_assets_success_count(state: dict[str, Any]) -> int:
+    diagnostics = _pptx_diagnostics(state)
+    return int(diagnostics.get("image_generation_success_count", 0) or 0)
+
+
+def _pptx_valid_output_already_terminal(state: dict[str, Any]) -> bool:
+    latest_pptx = _latest_valid_pptx_output_file(state)
+    return latest_pptx is not None and _pptx_picture_count_satisfies_slide_count(_pptx_diagnostics(state))
+
+
+def _pptx_slide_assets_ready(state: dict[str, Any]) -> bool:
+    if not _requested_pptx_artifact(state):
+        return False
+    target_count = _pptx_latch_target_slide_count(state)
+    if target_count <= 0:
+        return False
+    if _pptx_assets_success_count(state) < target_count:
+        return False
+    return not _pptx_valid_output_already_terminal(state)
+
+
+def _pptx_latch_diagnostics_update(
+    state: dict[str, Any],
+    *,
+    compile_forced: bool,
+) -> dict[str, Any]:
+    diagnostics = _pptx_diagnostics(state)
+    current_turn = _builder_current_turn_index(state)
+    update: dict[str, Any] = {}
+    if diagnostics.get("slide_assets_ready_at_turn") is None:
+        update["slide_assets_ready_at_turn"] = current_turn
+    if compile_forced and diagnostics.get("compile_forced_at_turn") is None:
+        update["compile_forced_at_turn"] = current_turn
+    return update
+
+
+def _pptx_terminal_ready_diagnostics_update(state: dict[str, Any]) -> dict[str, Any]:
+    diagnostics = _pptx_diagnostics(state)
+    update: dict[str, Any] = {}
+    if diagnostics.get("pptx_terminal_ready_at_turn") is None:
+        update["pptx_terminal_ready_at_turn"] = _builder_current_turn_index(state)
+    if diagnostics.get("time_to_first_valid_artifact_ms") is None:
+        elapsed = _elapsed_since_builder_start_ms(state)
+        if elapsed is not None:
+            update["time_to_first_valid_artifact_ms"] = elapsed
+    return update
 
 
 def _pptx_target_slide_count_needs_one_repair(
@@ -843,17 +925,23 @@ def _merge_string_list(current: object, update: list) -> list[str]:
     return list(seen)
 
 
+def _record_merge_key(item: dict[str, Any], fallback: int) -> str:
+    for key in ("image_hash", "image_ref", "path", "png_path", "spec_path"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    return str(fallback)
+
+
 def _merge_record_list(current: object, update: list) -> list[dict[str, Any]]:
     merged: dict[str, dict[str, Any]] = {}
     if isinstance(current, list):
         for item in current:
             if isinstance(item, dict):
-                key = str(item.get("image_hash") or item.get("image_ref") or len(merged))
-                merged[key] = dict(item)
+                merged[_record_merge_key(item, len(merged))] = dict(item)
     for item in update:
         if isinstance(item, dict):
-            key = str(item.get("image_hash") or item.get("image_ref") or len(merged))
-            merged[key] = dict(item)
+            merged[_record_merge_key(item, len(merged))] = dict(item)
     return list(merged.values())
 
 
@@ -1015,6 +1103,9 @@ def _merge_builder_visual_diagnostic_value(merged: dict, key: str, value: object
     if key in _VISUAL_DIAGNOSTIC_LIST_KEYS and isinstance(value, list):
         merged[key] = _merge_string_list(merged.get(key), value)
         return
+    if key in _VISUAL_DIAGNOSTIC_RECORD_KEYS and isinstance(value, list):
+        merged[key] = _merge_record_list(merged.get(key), value)
+        return
     merged[key] = value
 
 
@@ -1022,6 +1113,10 @@ _VISUAL_DIAGNOSTIC_LIST_KEYS = frozenset({
     "visual_asset_paths",
     "visual_svg_paths",
     "visual_png_paths",
+})
+_VISUAL_DIAGNOSTIC_RECORD_KEYS = frozenset({
+    "visual_figure_records",
+    "visual_failed_family_records",
 })
 
 
@@ -2039,22 +2134,48 @@ def _unmet_conditions_from_state(artifact: dict[str, Any], state: dict[str, Any]
     Whatever the loop could not fix ships NAMED in the payload — never
     silent. Mirrors the gate predicates exactly.
     """
-    unmet: list[str] = []
-    if _visuals_requested(state) and not _visual_presence_validated(artifact, state):
-        unmet.append("visuals_not_embedded")
-    if _requested_artifact_ext(state) in {"pptx", "pdf"} and _builder_image_enrichment_enabled(state):
-        diagnostics = _pptx_diagnostics(state)
-        succeeded = int(diagnostics.get("image_generation_success_count", 0) or 0)
-        skip = diagnostics.get("image_generation_skip_reason")
-        error_class = str(diagnostics.get("image_generation_error_class") or "")
-        honest_skip = bool(skip) or error_class in _IMAGE_GENERATION_TERMINAL_ERRORS or error_class == "content_blocked"
-        if succeeded == 0 and not honest_skip:
-            unmet.append("hero_missing" if _requested_artifact_ext(state) == "pptx" else "cover_missing")
+    unmet = _visual_unmet_conditions(artifact, state)
+    hero_condition = _hero_or_cover_unmet_condition(state)
+    if hero_condition:
+        unmet.append(hero_condition)
     # Spec D D-5 honesty stamp: gate-flagged brief gaps the model neither
     # recovered (read_session_context) nor disclosed (brief_assumptions)
     # ship NAMED — observability only, never a rejection.
     unmet.extend(brief_gate_unmet_conditions(state, artifact))
     return unmet
+
+
+def _visual_unmet_conditions(artifact: dict[str, Any], state: dict[str, Any]) -> list[str]:
+    unmet: list[str] = []
+    if _visuals_requested(state) and not _visual_presence_validated(artifact, state):
+        unmet.append("visuals_not_embedded")
+    if _report_visual_grammar_problems(state):
+        unmet.append("report_visual_grammar_failed")
+    return unmet
+
+
+def _hero_or_cover_unmet_condition(state: dict[str, Any]) -> str | None:
+    requested_ext = _requested_artifact_ext(state)
+    if not _hero_cover_gate_applies(state, requested_ext):
+        return None
+    diagnostics = _pptx_diagnostics(state)
+    succeeded = int(diagnostics.get("image_generation_success_count", 0) or 0)
+    if succeeded > 0 or _hero_cover_honest_skip(diagnostics):
+        return None
+    return "hero_missing" if requested_ext == "pptx" else "cover_missing"
+
+
+def _hero_cover_gate_applies(state: dict[str, Any], requested_ext: str | None) -> bool:
+    return requested_ext in {"pptx", "pdf"} and _builder_image_enrichment_enabled(state)
+
+
+def _hero_cover_honest_skip(diagnostics: dict[str, Any]) -> bool:
+    error_class = str(diagnostics.get("image_generation_error_class") or "")
+    return (
+        bool(diagnostics.get("image_generation_skip_reason"))
+        or error_class in _IMAGE_GENERATION_TERMINAL_ERRORS
+        or error_class == "content_blocked"
+    )
 
 
 def _log_loop_rescues(artifact: dict[str, Any], state: dict[str, Any]) -> None:
@@ -2255,12 +2376,39 @@ def _pdf_layout_repair_attempts(state: dict[str, Any]) -> int:
 
 
 def _pdf_layout_repair_needed(state: dict[str, Any]) -> bool:
+    result = _successful_pdf_render_result(state)
+    if result is None:
+        return False
+    if _pdf_page_count_off_target({**state, **result}):
+        return _pdf_layout_repair_attempts(state) < _PDF_PAGE_COUNT_REPAIR_MAX
     quality = _pdf_render_layout_quality(state)
     return quality in {"warning", "unusable"} and _pdf_layout_repair_attempts(state) < 1
 
 
 def _pdf_render_unusable_after_repair(state: dict[str, Any]) -> bool:
     return _pdf_render_layout_quality(state) == "unusable" and _pdf_layout_repair_attempts(state) >= 1
+
+
+def _pdf_render_page_count_failed_after_repairs(state: dict[str, Any]) -> bool:
+    result = _successful_pdf_render_result(state)
+    if result is None:
+        return False
+    return (
+        _pdf_page_count_off_target({**state, **result})
+        and _pdf_layout_repair_attempts(state) >= _PDF_PAGE_COUNT_REPAIR_MAX
+    )
+
+
+def _pdf_page_count_failure_payload(state: dict[str, Any], result: dict[str, Any]) -> dict[str, int]:
+    requested, _high = _pdf_requested_page_bounds({**state, **result})
+    actual = result.get("page_count")
+    requested_pages = int(requested or 0)
+    actual_pages = int(actual or 0) if isinstance(actual, int) else 0
+    return {
+        "requested_pages": requested_pages,
+        "actual_pages": actual_pages,
+        "page_delta": actual_pages - requested_pages if requested_pages > 0 else 0,
+    }
 
 
 def _successful_pdf_ready_to_emit(state: dict[str, Any]) -> bool:
@@ -2270,6 +2418,8 @@ def _successful_pdf_ready_to_emit(state: dict[str, Any]) -> bool:
     if _pdf_layout_repair_needed(state):
         return False
     if _pdf_render_unusable_after_repair(state):
+        return False
+    if _pdf_render_page_count_failed_after_repairs(state):
         return False
     return _canonical_outputs_artifact_path(result.get("pdf_path")) is not None
 
@@ -2420,6 +2570,8 @@ def _pdf_artifact_suffix_rejection_reason(canonical: str, state: dict[str, Any])
     suffix = PurePosixPath(canonical).suffix.lower()
     if suffix not in _allowed_pdf_artifact_suffixes(state):
         return f"pdf_invalid_artifact_extension:{suffix or 'none'}"
+    if suffix == ".pdf" and _pdf_render_page_count_failed_after_repairs(state):
+        return "pdf_page_count_off_target"
     return _pdf_fallback_rejection_reason(suffix, state)
 
 
@@ -3084,6 +3236,106 @@ def _visual_record_embedded(record: dict[str, Any], embedded_paths: set[str]) ->
     return canonical in embedded_paths if canonical else raw_path.strip() in embedded_paths
 
 
+def _visual_record_grammar(record: dict[str, Any]) -> str | None:
+    for key in ("grammar", "family", "visual_type", "chart_family", "chart_tool"):
+        value = record.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _visual_figure_records(state: dict[str, Any]) -> list[dict[str, Any]]:
+    diagnostics = state.get("builder_visual_diagnostics")
+    records = diagnostics.get("visual_figure_records") if isinstance(diagnostics, dict) else None
+    if not isinstance(records, list):
+        return []
+    normalized = _copy_visual_records(records)
+    embedded_paths = _embedded_report_figure_paths(state)
+    if not embedded_paths:
+        return normalized
+    return _embedded_visual_records(normalized, embedded_paths)
+
+
+def _copy_visual_records(records: list[Any]) -> list[dict[str, Any]]:
+    copied: list[dict[str, Any]] = []
+    for record in records:
+        if isinstance(record, dict):
+            copied.append(dict(record))
+    return copied
+
+
+def _embedded_visual_records(
+    records: list[dict[str, Any]],
+    embedded_paths: set[str],
+) -> list[dict[str, Any]]:
+    embedded: list[dict[str, Any]] = []
+    for record in records:
+        if _visual_record_embedded(record, embedded_paths):
+            embedded.append(record)
+    return embedded
+
+
+def _visual_failed_family_records(state: dict[str, Any]) -> list[dict[str, Any]]:
+    diagnostics = state.get("builder_visual_diagnostics")
+    records = diagnostics.get("visual_failed_family_records") if isinstance(diagnostics, dict) else None
+    return [dict(record) for record in records if isinstance(record, dict)] if isinstance(records, list) else []
+
+
+def _visual_grammar_counts(state: dict[str, Any]) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for record in _visual_figure_records(state):
+        grammar = _visual_record_grammar(record)
+        if not grammar:
+            continue
+        counts[grammar] = counts.get(grammar, 0) + 1
+    return dict(sorted(counts.items()))
+
+
+def _report_grammar_diversity_problems(figure_count: int, counts: dict[str, int]) -> list[str]:
+    problems: list[str] = []
+    if len(counts) < 2:
+        problems.append(
+            f"report has {figure_count} embedded figures but fewer than two visual grammars"
+        )
+    if figure_count >= 4:
+        problems.extend(
+            f"visual grammar `{grammar}` appears in {count}/{figure_count} figures (>50%)"
+            for grammar, count in counts.items()
+            if count / figure_count > 0.5
+        )
+    return problems
+
+
+def _failed_report_variety_problem(state: dict[str, Any], counts: dict[str, int]) -> str | None:
+    if len(counts) >= 2:
+        return None
+    failed_names = sorted(
+        {
+            grammar
+            for record in _visual_failed_family_records(state)
+            if (grammar := _visual_record_grammar(record))
+        }
+    )
+    if not failed_names:
+        return None
+    return "chart/diagram variety attempts failed for: " + ", ".join(failed_names[:6])
+
+
+def _report_visual_grammar_problems(state: dict[str, Any]) -> list[str]:
+    if _requested_artifact_ext(state) != "pdf":
+        return []
+    records = _visual_figure_records(state)
+    figure_count = len(records)
+    if figure_count < 2:
+        return []
+    counts = _visual_grammar_counts(state)
+    problems = _report_grammar_diversity_problems(figure_count, counts)
+    failed_problem = _failed_report_variety_problem(state, counts)
+    if failed_problem:
+        problems.append(failed_problem)
+    return problems
+
+
 def _local_output_file_for_artifact(state: dict[str, Any], artifact_path: object) -> Path | None:
     canonical = _canonical_outputs_artifact_path(artifact_path)
     relative = _extract_output_relative_path(canonical)
@@ -3323,7 +3575,64 @@ def _apply_report_figure_quality_metadata(
     artifact: dict[str, Any],
     state: dict[str, Any],
 ) -> dict[str, Any]:
-    return artifact
+    counts = _visual_grammar_counts(state)
+    problems = _report_visual_grammar_problems(state)
+    if not counts and not problems:
+        return artifact
+    updated = dict(artifact)
+    if counts:
+        updated["report_visual_grammar_counts"] = counts
+        updated["report_visual_grammar_count"] = len(counts)
+    if problems:
+        updated["quality_warning"] = "report_visual_grammar"
+        updated["report_visual_grammar_problems"] = problems
+        confidence = updated.get("confidence")
+        if isinstance(confidence, (int, float)):
+            updated["confidence"] = min(float(confidence), 0.65)
+    return updated
+
+
+def _visual_payload_grammar(payload: dict[str, Any]) -> str | None:
+    chart_grammar = _visual_payload_prefixed_value(payload, "chart_family", "chart")
+    if chart_grammar:
+        return chart_grammar
+    chart_tool = _visual_payload_prefixed_value(payload, "chart_tool", "chart")
+    if chart_tool:
+        return chart_tool
+    visual_type = _visual_payload_prefixed_value(payload, "visual_type", "diagram")
+    if visual_type:
+        return visual_type
+    return None
+
+
+def _visual_payload_prefixed_value(payload: dict[str, Any], key: str, prefix: str) -> str | None:
+    value = payload.get(key)
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return f"{prefix}:{value.strip()}"
+
+
+def _copy_visual_payload_record_fields(record: dict[str, Any], payload: dict[str, Any]) -> None:
+    for key in ("visual_type", "chart_tool", "chart_family", "error_type", "spec_path"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            record[key] = value.strip()
+
+
+def _visual_payload_record(payload: dict[str, Any], *, success: bool) -> dict[str, Any] | None:
+    grammar = _visual_payload_grammar(payload)
+    svg_path, png_path = _visual_payload_paths(payload)
+    path = png_path or svg_path
+    if grammar is None and not isinstance(path, str):
+        return None
+    record: dict[str, Any] = {"success": success}
+    if grammar is not None:
+        record["grammar"] = grammar
+        record["family"] = grammar
+    if isinstance(path, str) and path.strip():
+        record["path"] = path.strip()
+    _copy_visual_payload_record_fields(record, payload)
+    return record
 
 
 def _visual_asset_result_delta(result: ToolMessage) -> dict[str, Any] | None:
@@ -3357,7 +3666,8 @@ def _visual_tool_payload_delta(payload: dict[str, Any]) -> dict[str, Any]:
     success = payload.get("success") is True
     svg_path, png_path = _visual_payload_paths(payload)
     paths, svg_paths, png_paths = _successful_visual_paths(success, svg_path, png_path)
-    return {
+    record = _visual_payload_record(payload, success=success)
+    delta: dict[str, Any] = {
         "visual_asset_attempt_count": 1,
         "visual_asset_success_count": 1 if success else 0,
         "visual_asset_bytes_total": _visual_payload_bytes(payload),
@@ -3366,6 +3676,12 @@ def _visual_tool_payload_delta(payload: dict[str, Any]) -> dict[str, Any]:
         "visual_svg_paths": svg_paths,
         "visual_png_paths": png_paths,
     }
+    if record is not None:
+        if success:
+            delta["visual_figure_records"] = [record]
+        else:
+            delta["visual_failed_family_records"] = [record]
+    return delta
 
 
 def _successful_visual_paths(
@@ -4256,7 +4572,8 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
         "`read_file(path='/mnt/skills/public/ppt-generation/SKILL.md')`.\n"
         "2. Generate one full-slide PNG per slide with the image-generation "
         "slide-visual workflow. Each image must include its own top title band, "
-        "center visual area, and bottom 1-2 sentence narrative band when needed.\n"
+        "center visual area, and bottom concise narrative/takeaway band "
+        "(roughly 14% / 75% / 11% vertical bands).\n"
         "3. Create a valid slide plan JSON under `/mnt/user-data/workspace/`; each "
         "slide must point to its PNG with `image_path` and include speaker notes.\n"
         "4. Run the PPTX compiler through the ppt-generation workflow with "
@@ -4267,6 +4584,25 @@ def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
         "Do not emit placeholder/tiny/corrupt `.pptx` files, Python scripts, source "
         "Markdown, or preview PDFs. If you cannot produce the deck after the bounded "
         "repair, emit artifact_path=null with an honest companion_summary."
+    )
+
+
+def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
+    diagnostics = _pptx_diagnostics(state)
+    target_count = _pptx_latch_target_slide_count(state)
+    success_count = int(diagnostics.get("image_generation_success_count", 0) or 0)
+    target = state.get("builder_artifact_target_path") or f"{_OUTPUTS_VIRTUAL_PREFIX}deck.pptx"
+    return (
+        "[Sophia/PPTX compile latch]\n"
+        f"You have generated {success_count}/{target_count} requested full-slide images. "
+        "Stop generating or redesigning slides. Your next action must be a single bash "
+        "call that runs the existing PPTX compiler path with the existing plan JSON "
+        f"and writes the requested deck to `{target}`.\n\n"
+        "Every generated slide bitmap must already contain the visible top title band "
+        "(about 14% of slide height), center visual safe area (about 75%), and bottom "
+        "one-line narrative/takeaway band (about 11%). The PPTX compiler must embed "
+        "those bitmaps full-bleed with speaker notes only; do not add native title, "
+        "caption, footer, text box, PDF, Markdown, or HTML fallbacks."
     )
 
 
@@ -4427,6 +4763,7 @@ class BuilderArtifactState(AgentState):
     builder_pdf_requested_max_pages: NotRequired[int]
     builder_pdf_layout_repair_attempts: NotRequired[int]
     builder_pdf_layout_repair_requested: NotRequired[bool]
+    builder_pdf_layout_repair_pending: NotRequired[bool]
     builder_pdf_render_correction_emitted: NotRequired[bool]
     builder_pdf_source_write_directive_emitted: NotRequired[bool]
     builder_pptx_skill_correction_emitted: NotRequired[bool]
@@ -4436,6 +4773,7 @@ class BuilderArtifactState(AgentState):
     builder_pptx_slide_count_repair_directive_emitted: NotRequired[bool]
     builder_pptx_slide_count_repair_pending: NotRequired[bool]
     builder_pptx_slide_count_repair_requested: NotRequired[dict[str, int]]
+    builder_pptx_compile_latch_pending: NotRequired[bool]
     builder_visual_design_correction_emitted: NotRequired[bool]
     builder_visual_asset_correction_emitted: NotRequired[bool]
     builder_graph_halted: NotRequired[bool]
@@ -5356,7 +5694,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 candidates,
                 primary_suffix=".pdf",
                 fallback_suffix=_pdf_fallback_suffix(state),
-                primary_disabled=_pdf_render_unusable_after_repair(state),
+                primary_disabled=(
+                    _pdf_render_unusable_after_repair(state)
+                    or _pdf_render_page_count_failed_after_repairs(state)
+                ),
             )
         if requested_pptx:
             return BuilderArtifactMiddleware._preferred_suffix_candidates(
@@ -6191,6 +6532,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         deck_gate = cls._deck_plan_gate_blocks(state)
         if deck_gate is not None:
             return deck_gate
+        report_grammar_gate = cls._report_problem_gate_blocks(
+            state,
+            problems=_report_visual_grammar_problems(state),
+            log_tag="BuilderReportGrammarGate",
+        )
+        if report_grammar_gate is not None:
+            return report_grammar_gate
         if not _visuals_requested(state):
             return False
         if not _visual_design_skill_read_seen(state):
@@ -6429,6 +6777,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         for message in (
             cls._deck_plan_rejection_message(state),
             cls._hero_rejection_message(artifact_args, state),
+            cls._report_visual_grammar_rejection_message(state),
             cls._visual_presence_rejection_message(artifact_args, state),
             cls._pdf_request_rejection_message(artifact_args, state),
             cls._pptx_request_rejection_message(state),
@@ -6488,6 +6837,24 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 f"section, generate it, {wiring}; (3) emit the regenerated deliverable."
             )
         return ""
+
+    @staticmethod
+    def _report_visual_grammar_rejection_message(state: BuilderArtifactState) -> str:
+        problems = _report_visual_grammar_problems(state)
+        if not problems:
+            return ""
+        listing = "\n".join(f"- {problem}" for problem in problems[:8])
+        counts = _visual_grammar_counts(state)
+        counts_text = ", ".join(f"{name}={count}" for name, count in counts.items()) or "none"
+        return (
+            "Error: emit_builder_artifact rejected — the PDF report visual grammar is too repetitive:\n"
+            f"{listing}\n\n"
+            f"Current grammar counts: {counts_text}. Regenerate or replace figures so the final "
+            "report uses at least two distinct successful visual grammars. For reports with four "
+            "or more figures, no single grammar may account for more than 50% of embedded figures. "
+            "Use chart families from generate_chart and Excalidraw diagram grammars deliberately, "
+            "then re-render the PDF and emit only the primary PDF."
+        )
 
     @staticmethod
     def _visual_presence_rejection_message(
@@ -6552,6 +6919,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "Error: emit_builder_artifact rejected — this is a PDF request "
                         "and a valid rendered .pdf already exists. Emit the rendered .pdf "
                         "instead of a .md/.html fallback."
+                    )
+                if reason == "pdf_page_count_off_target":
+                    result = _successful_pdf_render_result(state) or {}
+                    counts = _pdf_page_count_failure_payload(state, result)
+                    return (
+                        "Error: emit_builder_artifact rejected — the rendered PDF does not "
+                        "match the requested page count after bounded repairs. "
+                        f"requested_pages={counts['requested_pages']} actual_pages={counts['actual_pages']} "
+                        f"page_delta={counts['page_delta']}. Emit artifact_path=null with "
+                        "failure_code='pdf_page_count_off_target' instead of shipping this as normal success."
                     )
                 return (
                     "Error: emit_builder_artifact rejected — this is a PDF request. "
@@ -6954,18 +7331,33 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if choice is not None:
             return choice, None
 
+        pptx_compile_choice = self._pptx_compile_tool_choice_for_state(state)
+        if pptx_compile_choice is not None:
+            return pptx_compile_choice, {
+                "builder_pptx_compile_latch_pending": True,
+                "builder_pptx_diagnostics": _pptx_latch_diagnostics_update(
+                    state,
+                    compile_forced=True,
+                ),
+            }
+
         visual_choice = self._visual_tool_choice_for_state(state)
         if visual_choice is not None:
             return visual_choice, {
                 "builder_visual_force_count": _builder_visual_force_count(state) + 1,
             }
 
-        choice = (
-            self._pdf_render_source_tool_choice_for_state(state)
-            or self._completion_tool_choice_for_state(state, runtime)
-        )
+        choice = self._pdf_render_source_tool_choice_for_state(state)
         if choice is not None:
             return choice, None
+        choice = self._completion_tool_choice_for_state(state, runtime)
+        if choice is not None:
+            update = None
+            if state.get("builder_presentation_terminal_ready") is True:
+                update = {
+                    "builder_pptx_diagnostics": _pptx_terminal_ready_diagnostics_update(state),
+                }
+            return choice, update
         return None, None
 
     @staticmethod
@@ -7016,6 +7408,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             _SIMPLE_PDF_TOOL_NAME,
         )
         return self._forced_simple_pdf_tool_choice()
+
+    def _pptx_compile_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not (state.get("builder_pptx_compile_latch_pending") or _pptx_slide_assets_ready(state)):
+            return None
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=bash after PPTX slide assets are ready "
+            "success_count=%d target_slide_count=%d",
+            _pptx_diagnostic_count(state, "image_generation_success_count"),
+            _pptx_latch_target_slide_count(state),
+        )
+        return self._forced_bash_tool_choice()
 
     def _pdf_terminal_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_pdf_artifact(state) or not _successful_pdf_ready_to_emit(state):
@@ -7603,24 +8006,29 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return update or None
 
     def _maybe_inject_pdf_layout_repair(self, state: BuilderArtifactState) -> dict[str, Any] | None:
-        if not _requested_pdf_artifact(state) or state.get("builder_pdf_layout_repair_requested"):
+        if not _requested_pdf_artifact(state) or state.get("builder_pdf_layout_repair_pending"):
             return None
         result = _successful_pdf_render_result(state)
         if result is None or not _pdf_layout_repair_needed(state):
             return None
+        attempts = _pdf_layout_repair_attempts(state) + 1
         logger.warning(
-            "BuilderArtifact: requesting one PDF layout repair page_count=%s "
-            "blank_page_count=%s short_page_count=%s layout_quality=%s",
+            "BuilderArtifact: requesting PDF layout repair attempt=%d/%d page_count=%s "
+            "blank_page_count=%s short_page_count=%s layout_quality=%s layout_warning=%s",
+            attempts,
+            _PDF_PAGE_COUNT_REPAIR_MAX,
             result.get("page_count"),
             result.get("blank_page_count"),
             result.get("short_page_count"),
             result.get("layout_quality"),
+            result.get("layout_warning"),
         )
         return {
             "messages": [HumanMessage(content=_pdf_layout_repair_message(result, state))],
             "builder_pdf_render_result": None,
             "builder_pdf_layout_repair_requested": True,
-            "builder_pdf_layout_repair_attempts": _pdf_layout_repair_attempts(state) + 1,
+            "builder_pdf_layout_repair_pending": True,
+            "builder_pdf_layout_repair_attempts": attempts,
         }
 
     def _maybe_inject_pdf_render_source_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
@@ -7662,6 +8070,26 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return {
             "messages": [HumanMessage(content=_pdf_source_write_message(target))],
             "builder_pdf_source_write_directive_emitted": True,
+        }
+
+    def _maybe_inject_pptx_compile_latch(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not _pptx_slide_assets_ready(state):
+            return None
+        if state.get("builder_pptx_compile_latch_pending"):
+            return None
+        logger.warning(
+            "BuilderArtifact: PPTX slide assets ready; injecting compile latch "
+            "success_count=%d target_slide_count=%d",
+            _pptx_diagnostic_count(state, "image_generation_success_count"),
+            _pptx_latch_target_slide_count(state),
+        )
+        return {
+            "messages": [HumanMessage(content=_pptx_compile_latch_message(state))],
+            "builder_pptx_compile_latch_pending": True,
+            "builder_pptx_diagnostics": _pptx_latch_diagnostics_update(
+                state,
+                compile_forced=False,
+            ),
         }
 
     def _maybe_inject_pptx_plan_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
@@ -7799,6 +8227,43 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_visual_asset_correction_emitted": True,
         }
 
+    @staticmethod
+    def _merge_if_update(update: dict[str, Any], result: Any) -> bool:
+        if not isinstance(result, dict):
+            return False
+        update.update(result)
+        return True
+
+    def _merge_nonblocking_before_model_updates(
+        self,
+        state: BuilderArtifactState,
+        update: dict[str, Any],
+    ) -> None:
+        for result in (
+            self._maybe_inject_visual_design_correction(state),
+            self._maybe_inject_visual_asset_correction(state),
+        ):
+            self._merge_if_update(update, result)
+
+    def _first_blocking_before_model_update(
+        self,
+        state: BuilderArtifactState,
+        update: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        for probe in (
+            self._maybe_inject_pdf_render_source_correction,
+            self._maybe_inject_pdf_layout_repair,
+            self._maybe_inject_pdf_source_write_directive,
+            self._maybe_inject_pptx_compile_latch,
+            self._maybe_inject_pptx_structural_correction,
+            self._maybe_inject_pptx_fallback_after_image_failure,
+            self._maybe_inject_image_generation_stop,
+            self._maybe_inject_pptx_skill_correction,
+        ):
+            if self._merge_if_update(update, probe(state)):
+                return update
+        return None
+
     def _combined_before_model_updates(
         self,
         state: BuilderArtifactState,
@@ -7816,48 +8281,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             runtime,
             reason="successful_write_after_correction",
         )
-        if isinstance(promotion, dict):
-            update.update(promotion)
+        if self._merge_if_update(update, promotion):
             return update
-        visual_design = self._maybe_inject_visual_design_correction(state)
-        if isinstance(visual_design, dict):
-            update.update(visual_design)
-        visual_asset = self._maybe_inject_visual_asset_correction(state)
-        if isinstance(visual_asset, dict):
-            update.update(visual_asset)
-        pdf_render = self._maybe_inject_pdf_render_source_correction(state)
-        if isinstance(pdf_render, dict):
-            update.update(pdf_render)
-            return update
-        pdf_repair = self._maybe_inject_pdf_layout_repair(state)
-        if isinstance(pdf_repair, dict):
-            update.update(pdf_repair)
-            return update
-        pdf_source_write = self._maybe_inject_pdf_source_write_directive(state)
-        if isinstance(pdf_source_write, dict):
-            update.update(pdf_source_write)
-            return update
-        pptx_structural = self._maybe_inject_pptx_structural_correction(state)
-        if isinstance(pptx_structural, dict):
-            update.update(pptx_structural)
-            return update
-        pptx_fallback = self._maybe_inject_pptx_fallback_after_image_failure(state)
-        if isinstance(pptx_fallback, dict):
-            update.update(pptx_fallback)
-            return update
-        image_stop = self._maybe_inject_image_generation_stop(state)
-        if isinstance(image_stop, dict):
-            update.update(image_stop)
-            return update
-        pptx_correction = self._maybe_inject_pptx_skill_correction(state)
-        if isinstance(pptx_correction, dict):
-            update.update(pptx_correction)
-            return update
-        correction = self._maybe_inject_path_correction(state, runtime)
-        if isinstance(correction, dict):
-            # Merge: ``messages`` reducer concatenates, scalar flags overwrite.
-            for key, value in correction.items():
-                update[key] = value
+        self._merge_nonblocking_before_model_updates(state, update)
+        blocking = self._first_blocking_before_model_update(state, update)
+        if blocking is not None:
+            return blocking
+        # Merge: ``messages`` reducer concatenates, scalar flags overwrite.
+        self._merge_if_update(update, self._maybe_inject_path_correction(state, runtime))
         return update or None
 
     @hook_config(can_jump_to=["end"])
@@ -8225,6 +8656,83 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             goto="end",
         )
 
+    @staticmethod
+    def _pdf_page_count_failure_fallback(
+        *,
+        steps_completed: int,
+        state: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        page_counts = _pdf_page_count_failure_payload(state, payload)
+        requested = page_counts["requested_pages"]
+        actual = page_counts["actual_pages"]
+        return {
+            "artifact_path": None,
+            "artifact_type": "pdf",
+            "artifact_title": "PDF layout did not meet the requested page count",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "The builder rendered the PDF and attempted bounded layout repairs, "
+                f"but it ended at {actual} pages instead of the requested {requested}."
+            ),
+            "companion_tone_hint": (
+                "Direct and apologetic — PDF rendering completed, but exact page-count "
+                "acceptance failed after bounded repairs."
+            ),
+            "user_next_action": "Ask me to retry the PDF build with a revised length target.",
+            "confidence": 0.0,
+            "error_reason": "pdf_page_count_off_target",
+            "artifact_acceptance_status": "failed",
+            "failure_code": "pdf_page_count_off_target",
+            "requested_pages": requested,
+            "actual_pages": actual,
+            "page_delta": page_counts["page_delta"],
+            "layout_quality": payload.get("layout_quality"),
+            "layout_warning": payload.get("layout_warning"),
+        }
+
+    def _pdf_page_count_failure_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage,
+        payload: dict[str, Any],
+    ) -> Command:
+        fallback = self._pdf_page_count_failure_fallback(
+            steps_completed=int(request.state.get("builder_non_artifact_turns", 0) or 0) + 1,
+            state=request.state,
+            payload=payload,
+        )
+        logger.warning(
+            "BuilderArtifact: terminal PDF page-count failure requested_pages=%s "
+            "actual_pages=%s page_delta=%s repair_attempts=%d",
+            fallback["requested_pages"],
+            fallback["actual_pages"],
+            fallback["page_delta"],
+            _pdf_layout_repair_attempts(request.state),
+        )
+        self._upload_fallback_and_fire(
+            state=request.state,
+            runtime=request.runtime,
+            fallback=fallback,
+            status="failed",
+        )
+        return Command(
+            update={
+                "messages": [result],
+                "builder_pdf_render_result": payload,
+                "builder_pdf_layout_repair_pending": False,
+                "builder_result": fallback,
+                "builder_non_artifact_turns": 0,
+                "builder_task_started_at_ms": 0,
+                "builder_consecutive_empty_emit_rejections": 0,
+                "builder_last_missing_emit_path": None,
+                "builder_consecutive_missing_emit_path_rejections": 0,
+                **_terminal_halt_fields(request.state, "pdf_page_count_off_target"),
+            },
+            goto="end",
+        )
+
     def _pdf_result_command(
         self,
         request: ToolCallRequest,
@@ -8238,12 +8746,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             request.state,
         )
         delta["builder_pdf_render_result"] = payload
+        delta["builder_pdf_layout_repair_pending"] = False
         if (
             request.tool_call.get("name") == _SIMPLE_PDF_TOOL_NAME
             and payload.get("success") is False
             and payload.get("error_type") == "pdf_generation_failed"
         ):
             return self._pdf_generation_failure_command(request, result, payload)
+        if payload.get("success") is True and _pdf_render_page_count_failed_after_repairs(
+            {**request.state, "builder_pdf_render_result": payload}
+        ):
+            return self._pdf_page_count_failure_command(request, result, payload)
         return Command(update={"messages": [result], **delta})
 
     @staticmethod
@@ -8447,6 +8960,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         }
         if output_path and valid_pptx:
             delta["pptx_output_paths"] = [output_path]
+            if _pptx_diagnostics(state).get("time_to_first_valid_artifact_ms") is None:
+                elapsed = _elapsed_since_builder_start_ms(state)
+                if elapsed is not None:
+                    delta["time_to_first_valid_artifact_ms"] = elapsed
         return delta
 
     @staticmethod
@@ -8493,11 +9010,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         delta = self._pptx_bash_result_delta(request, result)
         if delta is None:
             return result
+        update: dict[str, Any] = {
+            "messages": [result],
+            "builder_pptx_diagnostics": delta,
+        }
+        if "pptx_generator_attempt_count" in delta:
+            update["builder_pptx_compile_latch_pending"] = False
         return Command(
-            update={
-                "messages": [result],
-                "builder_pptx_diagnostics": delta,
-            }
+            update=update
         )
 
     def _visual_asset_result_command(

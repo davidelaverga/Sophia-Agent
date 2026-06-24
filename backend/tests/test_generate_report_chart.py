@@ -148,6 +148,28 @@ def test_generate_report_chart_rejects_empty_args(tmp_path, monkeypatch) -> None
     assert payload["chart_family"] == "time_series"
 
 
+def test_chart_paths_avoid_cross_family_spec_collision(tmp_path) -> None:
+    visuals = tmp_path / "visuals"
+    visuals.mkdir()
+    (visuals / "flow.chart.json").write_text(
+        json.dumps({"tool": "generate_sankey_chart"}),
+        encoding="utf-8",
+    )
+
+    image_path, spec_path, image_host_path, spec_host_path, error = chart_module._resolved_output_paths(
+        "flow",
+        "generate_bar_chart",
+        "comparison",
+        _runtime(tmp_path),
+    )
+
+    assert error is None
+    assert image_path == "/mnt/user-data/outputs/visuals/flow-bar.png"
+    assert spec_path == "/mnt/user-data/outputs/visuals/flow-bar.chart.json"
+    assert image_host_path == visuals / "flow-bar.png"
+    assert spec_host_path == visuals / "flow-bar.chart.json"
+
+
 def test_generate_report_chart_schema_excludes_runtime() -> None:
     schema = generate_report_chart.tool_call_schema.model_json_schema()
 

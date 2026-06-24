@@ -157,6 +157,58 @@ def _canonical_chart_paths(output_name: str | None, chart_tool: str) -> tuple[st
     return image_path, spec_path
 
 
+def _existing_chart_tool(spec_host_path: Path) -> str | None:
+    if not spec_host_path.is_file():
+        return None
+    try:
+        payload = json.loads(spec_host_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return None
+    tool_name = payload.get("tool") if isinstance(payload, dict) else None
+    return tool_name.strip() if isinstance(tool_name, str) and tool_name.strip() else None
+
+
+def _chart_collision_suffix(chart_tool: str) -> str:
+    value = chart_tool.removeprefix("generate_")
+    return _slug(value.removesuffix("_chart") or value, "chart")
+
+
+def _collision_safe_chart_paths(
+    *,
+    output_name: str | None,
+    chart_tool: str,
+    image_path: str,
+    spec_path: str,
+    spec_host_path: Path,
+    runtime: ToolRuntime | None,
+) -> tuple[str, str, Path, Path]:
+    existing_tool = _existing_chart_tool(spec_host_path)
+    if existing_tool in {None, chart_tool}:
+        return image_path, spec_path, _host_path_for_visual(image_path, runtime), spec_host_path
+
+    base = PurePosixPath(_extract_output_name_for_collision(output_name, image_path))
+    collision_name = f"{base.stem}-{_chart_collision_suffix(chart_tool)}"
+    image_path, spec_path = _canonical_chart_paths(collision_name, chart_tool)
+    image_host_path = _host_path_for_visual(image_path, runtime)
+    spec_host_path = _host_path_for_visual(spec_path, runtime)
+    logger.info(
+        "[SophiaReportChart] chart_path_collision avoided existing_tool=%s "
+        "new_tool=%s spec_path=%s",
+        existing_tool,
+        chart_tool,
+        spec_path,
+    )
+    return image_path, spec_path, image_host_path, spec_host_path
+
+
+def _extract_output_name_for_collision(output_name: str | None, image_path: str) -> str:
+    raw = str(output_name or "").replace("\\", "/").strip()
+    if raw:
+        return PurePosixPath(raw).stem
+    relative = image_path[len(_OUTPUTS_VIRTUAL_PREFIX) :].strip("/")
+    return PurePosixPath(relative).stem or "report-chart"
+
+
 def _extract_first_url(text: str) -> str | None:
     match = _URL_RE.search(text)
     if not match:
@@ -245,6 +297,14 @@ def _resolved_output_paths(
         image_path, spec_path = _canonical_chart_paths(output_name, chart_tool)
         image_host_path = _host_path_for_visual(image_path, runtime)
         spec_host_path = _host_path_for_visual(spec_path, runtime)
+        image_path, spec_path, image_host_path, spec_host_path = _collision_safe_chart_paths(
+            output_name=output_name,
+            chart_tool=chart_tool,
+            image_path=image_path,
+            spec_path=spec_path,
+            spec_host_path=spec_host_path,
+            runtime=runtime,
+        )
         return image_path, spec_path, image_host_path, spec_host_path, None
     except ValueError as exc:
         return None, None, None, None, _result(
