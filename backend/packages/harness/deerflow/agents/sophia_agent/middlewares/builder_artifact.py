@@ -388,28 +388,77 @@ def _pptx_target_slide_count_needs_one_repair(
 ) -> bool:
     """Allow one non-blocking repair turn for explicit slide-count drift."""
 
+    return _pptx_slide_count_repair_request(diagnostics, state) is not None
+
+
+def _pptx_slide_count_repair_request(
+    diagnostics: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, int] | None:
     requested = _pptx_requested_target_slide_count(state)
     generated = int(diagnostics.get("pptx_generator_slide_count", 0) or 0)
     if requested <= 0 or generated <= 0 or requested == generated:
-        return False
+        return None
     if state.get("builder_pptx_slide_count_repair_attempted") is True:
         logger.warning(
             "[BuilderPptxReady] slide_count_mismatch_advisory requested=%d generated=%d",
             requested,
             generated,
         )
-        return False
-    state["builder_pptx_slide_count_repair_attempted"] = True
-    state["builder_pptx_slide_count_repair_requested"] = {
-        "requested_slide_count": requested,
-        "generated_slide_count": generated,
+        return None
+    return {"requested_slide_count": requested, "generated_slide_count": generated}
+
+
+def _pptx_slide_count_repair_message(repair: dict[str, int]) -> str:
+    requested = repair["requested_slide_count"]
+    generated = repair["generated_slide_count"]
+    direction = "remove" if generated > requested else "add"
+    return (
+        "[Sophia/PPTX slide-count repair]\n"
+        f"The current PPTX is valid, but it has {generated} slides while the "
+        f"user explicitly requested exactly {requested} total slides. Use this "
+        "one bounded repair turn to revise the deck plan and regenerate the PPTX "
+        f"so it has exactly {requested} total slides, including cover and summary. "
+        f"Do not polish unrelated content; only {direction} slide(s) as needed, "
+        "re-run the PPTX compiler, verify the package, then emit the .pptx."
+    )
+
+
+def _pptx_slide_count_repair_attempt_update(state: dict[str, Any]) -> dict[str, Any]:
+    if state.get("builder_pptx_slide_count_repair_pending") is not True:
+        return {}
+    return {
+        "builder_pptx_slide_count_repair_pending": False,
+        "builder_pptx_slide_count_repair_attempted": True,
     }
+
+
+def _pptx_slide_count_repair_injection_update(state: dict[str, Any]) -> dict[str, Any] | None:
+    if not _requested_pptx_artifact(state):
+        return None
+    if state.get("builder_pptx_slide_count_repair_directive_emitted") is True:
+        return None
+    diagnostics = _pptx_diagnostics(state)
+    if int(diagnostics.get("pptx_generator_success_count", 0) or 0) < 1:
+        return None
+    if _latest_valid_pptx_output_file(state) is None:
+        return None
+    if not _pptx_picture_count_satisfies_slide_count(diagnostics):
+        return None
+    repair = _pptx_slide_count_repair_request(diagnostics, state)
+    if repair is None:
+        return None
     logger.warning(
         "[BuilderPptxReady] slide_count_mismatch_repair_once requested=%d generated=%d",
-        requested,
-        generated,
+        repair["requested_slide_count"],
+        repair["generated_slide_count"],
     )
-    return True
+    return {
+        "messages": [HumanMessage(content=_pptx_slide_count_repair_message(repair))],
+        "builder_pptx_slide_count_repair_requested": repair,
+        "builder_pptx_slide_count_repair_pending": True,
+        "builder_pptx_slide_count_repair_directive_emitted": True,
+    }
 
 
 def _builder_image_enrichment_enabled(state: dict[str, Any]) -> bool:
@@ -4383,6 +4432,10 @@ class BuilderArtifactState(AgentState):
     builder_pptx_skill_correction_emitted: NotRequired[bool]
     builder_pptx_plan_correction_emitted: NotRequired[bool]
     builder_pptx_fallback_directive_emitted: NotRequired[bool]
+    builder_pptx_slide_count_repair_attempted: NotRequired[bool]
+    builder_pptx_slide_count_repair_directive_emitted: NotRequired[bool]
+    builder_pptx_slide_count_repair_pending: NotRequired[bool]
+    builder_pptx_slide_count_repair_requested: NotRequired[dict[str, int]]
     builder_visual_design_correction_emitted: NotRequired[bool]
     builder_visual_asset_correction_emitted: NotRequired[bool]
     builder_graph_halted: NotRequired[bool]
@@ -7627,6 +7680,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_pptx_plan_correction_emitted": True,
         }
 
+    def _maybe_inject_pptx_slide_count_repair(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        update = _pptx_slide_count_repair_injection_update(state)
+        if update is None:
+            return None
+        logger.warning("BuilderArtifact: injecting PPTX slide-count repair directive")
+        return update
+
+    def _maybe_inject_pptx_structural_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        return (
+            self._maybe_inject_pptx_plan_correction(state)
+            or self._maybe_inject_pptx_slide_count_repair(state)
+        )
+
     def _maybe_inject_pptx_skill_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_pptx_artifact(state):
             return None
@@ -7771,9 +7837,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if isinstance(pdf_source_write, dict):
             update.update(pdf_source_write)
             return update
-        pptx_plan = self._maybe_inject_pptx_plan_correction(state)
-        if isinstance(pptx_plan, dict):
-            update.update(pptx_plan)
+        pptx_structural = self._maybe_inject_pptx_structural_correction(state)
+        if isinstance(pptx_structural, dict):
+            update.update(pptx_structural)
             return update
         pptx_fallback = self._maybe_inject_pptx_fallback_after_image_failure(state)
         if isinstance(pptx_fallback, dict):
@@ -9215,6 +9281,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "builder_consecutive_empty_emit_rejections": consecutive_rejections,
                             "builder_last_missing_emit_path": missing_path,
                             "builder_consecutive_missing_emit_path_rejections": consecutive_missing_path_rejections,
+                            **_pptx_slide_count_repair_attempt_update(state),
                         }
                         # NOTE: gate counters (builder_visual_embed_rejections,
                         # builder_hero_gate_rejections) and the shared
@@ -9481,6 +9548,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "builder_consecutive_empty_emit_rejections": 0,
                     "builder_last_missing_emit_path": None,
                     "builder_consecutive_missing_emit_path_rejections": 0,
+                    **_pptx_slide_count_repair_attempt_update(state),
                 }
 
             # AI message with NO tool calls -- agent ending with plain text, create fallback
