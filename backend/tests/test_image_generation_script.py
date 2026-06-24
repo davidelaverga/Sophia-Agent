@@ -9,6 +9,7 @@ machinery (the bash tool will call the bare script in production).
 from __future__ import annotations
 
 import base64
+import hashlib
 import importlib.util
 import os
 import subprocess
@@ -480,7 +481,9 @@ class TestSlideVisualMode:
         assert script_module._SOPHIA_SLIDE_AVOID in kwargs["prompt"]
         captured = capsys.readouterr()
         assert "[gen] slide_visual=True quality=high size=1536x1024" in captured.out
-        assert '[gen] PROMPT_SENT: A professional slide. Title: "THE TEXT READS: Roadmap".' in captured.out
+        prompt_hash = hashlib.sha256(kwargs["prompt"].encode("utf-8")).hexdigest()[:16]
+        assert f"[gen] PROMPT_SENT: sha256={prompt_hash} chars={len(kwargs['prompt'])}" in captured.out
+        assert "THE TEXT READS: Roadmap" not in captured.out
         assert "[gen] result: ext=.png bytes=" in captured.out
         assert "ref_images=0" in captured.out
         with script_module.Image.open(output_file) as img:

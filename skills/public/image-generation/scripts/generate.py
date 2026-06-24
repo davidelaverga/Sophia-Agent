@@ -26,6 +26,7 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import hashlib
 import json as _json
 import os
 import sys
@@ -590,7 +591,10 @@ def _emit_generation_request(
     prompt: str,
 ) -> None:
     print(f"[gen] slide_visual={slide_visual} quality={quality} size={size}")
-    print(f"[gen] PROMPT_SENT: {prompt}")
+    prompt_hash = hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+    print(f"[gen] PROMPT_SENT: sha256={prompt_hash} chars={len(prompt)}")
+    if _env_flag_preferred("SOPHIA_IMAGE_GENERATION_DEBUG_PROMPT"):
+        print(f"[gen] PROMPT_SENT_FULL: {prompt}")
 
 
 def _emit_generation_result(output_file: str, valid_refs: list[str]) -> None:
