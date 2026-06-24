@@ -175,7 +175,7 @@ def test_presence_result_extracts_documented_band_text_labels(
     spec_file = tmp_path / "slide.txt"
     spec_file.write_text(
         "Title band text: Flow Control\n"
-        "Bottom caption band text: The loop stops cleanly.",
+        "Bottom narrative band text: The loop stops cleanly.",
         encoding="utf-8",
     )
 
@@ -203,7 +203,7 @@ def test_presence_result_extracts_band_text_from_json_prompt_field(
     spec_file = tmp_path / "slide.json"
     spec_file.write_text(
         '{"prompt":"Title band text: Flow Control\\n'
-        'Bottom caption band text: The loop stops cleanly."}',
+        'Bottom narrative band text: The loop stops cleanly."}',
         encoding="utf-8",
     )
 

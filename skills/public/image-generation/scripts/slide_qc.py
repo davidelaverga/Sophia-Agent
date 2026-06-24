@@ -206,6 +206,13 @@ _JSON_FIELD_CAPTION_KEYS = (
     "caption band text",
     "bottom caption band text",
     "bottom caption text",
+    "narrative",
+    "narrative band",
+    "narrative band text",
+    "bottom narrative",
+    "bottom narrative band",
+    "bottom narrative band text",
+    "bottom narrative text",
 )
 
 
