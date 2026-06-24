@@ -205,7 +205,12 @@ def test_visual_gate_error_tool_message_is_text_only(tmp_path, monkeypatch):
     state = _deck_state(
         thread_data={"outputs_path": str(outputs)},
         build_iterations=0,
-        builder_pptx_diagnostics={},
+        delegation_context={
+            "task": "Build a professional technical presentation with a flowchart",
+            "task_type": "presentation",
+        },
+        builder_skill_reads={"visual_design_skill_read": True},
+        builder_pptx_diagnostics={"pptx_generator_picture_count": 0},
     )
     monkeypatch.setattr(
         BuilderArtifactMiddleware,
