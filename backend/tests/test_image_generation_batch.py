@@ -8,10 +8,13 @@ the per-item isolation we want to assert).
 
 from __future__ import annotations
 
+import importlib.util
 import json
 import subprocess
 import sys
 from pathlib import Path
+
+import pytest
 
 _SCRIPT = (
     Path(__file__).resolve().parents[2]
@@ -21,6 +24,13 @@ _SCRIPT = (
     / "scripts"
     / "generate.py"
 )
+
+
+def _load_script_module():
+    spec = importlib.util.spec_from_file_location("imggen_under_test", _SCRIPT)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
 
 
 def _run_manifest(manifest: dict, tmp_path: Path) -> tuple[int, dict | None]:
@@ -81,3 +91,48 @@ def test_item_missing_required_fields_is_reported(tmp_path) -> None:
     assert summary is not None
     assert summary["items"][0]["success"] is False
     assert summary["items"][0]["error"] == "missing_prompt_or_output"
+
+
+# ---- per-call timeout (kills the ~10-min hang) ------------------------------
+
+
+def test_timeout_default_is_600s(monkeypatch) -> None:
+    module = _load_script_module()
+    monkeypatch.delenv("SOPHIA_IMAGE_GEN_TIMEOUT", raising=False)
+    assert module._image_gen_timeout_seconds() == 600.0
+
+
+def test_timeout_honors_env_override(monkeypatch) -> None:
+    module = _load_script_module()
+    monkeypatch.setenv("SOPHIA_IMAGE_GEN_TIMEOUT", "45")
+    assert module._image_gen_timeout_seconds() == 45.0
+
+
+def test_timeout_falls_back_to_default_on_garbage(monkeypatch) -> None:
+    module = _load_script_module()
+    for bad in ("bogus", "", "-1", "0"):
+        monkeypatch.setenv("SOPHIA_IMAGE_GEN_TIMEOUT", bad)
+        assert module._image_gen_timeout_seconds() == 600.0
+
+
+def test_openai_client_passes_timeout_and_disables_retries(monkeypatch) -> None:
+    module = _load_script_module()
+    pytest.importorskip("openai")
+    import openai
+
+    captured = {}
+
+    class _FakeClient:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr(openai, "OpenAI", _FakeClient)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("SOPHIA_IMAGE_GEN_TIMEOUT", "75")
+
+    module._openai_client_from_env()
+
+    assert captured["timeout"] == 75.0
+    # max_retries=0 so a stuck request fails fast instead of compounding backoff.
+    assert captured["max_retries"] == 0
+    assert captured["api_key"] == "sk-test"

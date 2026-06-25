@@ -28,8 +28,11 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
     assert "Finish with `emit_builder_artifact`" in contract
     assert "requested primary artifact" in contract
     assert "Generate one full-slide image per slide" in contract
-    assert "render_markdown_to_pdf" in contract
-    assert "Markdown source and generated assets are supporting files" in contract
+    # PDF reports are authored as HTML and rendered via render_html_to_pdf; the
+    # markdown→pandoc path and remote generate_chart are retired for reports.
+    assert "render_html_to_pdf" in contract
+    assert "render_markdown_to_pdf" not in contract
+    assert "The HTML source and generated assets are supporting files" in contract
     assert "generate_visual_asset" not in contract
     assert "generate_report_chart" not in contract
 
@@ -38,12 +41,14 @@ def test_visual_composition_routes_pptx_and_pdf_to_separate_pipelines() -> None:
     directives = _sophia_prompt("visual_composition.md")
 
     assert "Presentations (`.pptx`) are pure image-forward decks" in directives
-    assert "PDF reports are deterministic reports" in directives
+    # PDF reports are authored as one self-contained HTML file with inline <svg>
+    # figures and rendered via render_html_to_pdf (no remote chart service).
+    assert "render_html_to_pdf" in directives
+    assert "inline static" in directives
     assert "There is no alternate plain deck mode" in directives
-    # Custom excalidraw tool removed; PDFs route all charts AND structural
-    # diagrams through the upstream generate_chart engine.
+    # Custom excalidraw tool removed AND remote generate_chart retired for reports.
     assert "generate_excalidraw_diagram" not in directives
-    assert "generate_chart" in directives
+    assert "no remote `generate_chart`" in directives
     assert "generate_visual_asset" not in directives
     assert "generate_report_chart" not in directives
 
@@ -62,15 +67,17 @@ def test_ppt_generation_skill_is_pure_image_forward() -> None:
     assert "title_strategy" not in text
 
 
-def test_pdf_report_skill_uses_generate_chart_and_bounded_conceptual_images() -> None:
+def test_pdf_report_skill_uses_html_and_inline_svg() -> None:
     text = _skill("pdf-report")
 
-    assert "render_markdown_to_pdf" in text
-    # Charts AND structural diagrams go through the upstream chart engine; the
-    # custom excalidraw tool is gone.
+    # PDF reports are authored as HTML with inline <svg> figures and rendered via
+    # render_html_to_pdf; markdown→pandoc and remote generate_chart are retired.
+    assert "render_html_to_pdf" in text
+    assert "render_markdown_to_pdf" not in text
+    assert "inline" in text.lower() and "<svg>" in text
     assert "generate_excalidraw_diagram" not in text
-    assert "generate_chart" in text
-    assert "chart-visualization renderer" in text
+    # generate_chart appears only in the "why not" rationale, never as guidance.
+    assert "no remote `generate_chart`" in text.lower() or "not `generate_chart`" in text.lower()
     # No full-slide deck images in a report, but bounded conceptual images are allowed.
     assert "Do not use full-slide deck images" in text
     assert "conceptual" in text.lower()

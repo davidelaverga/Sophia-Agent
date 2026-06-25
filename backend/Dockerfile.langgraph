@@ -47,6 +47,7 @@ RUN --mount=type=cache,target=/root/.npm \
     cd /app/backend/packages/harness/deerflow/sophia/js \
     && npm ci --omit=dev --no-audit --no-fund \
     && test -f compile_pptx.mjs \
+    && test -f render_html_to_pdf.mjs \
     && node -e "const r=require('module').createRequire(process.cwd() + '/'); r.resolve('pptxgenjs'); r.resolve('playwright-core')"
 
 ENV SOPHIA_ARTIFACT_JS_RUNTIME=/app/backend/packages/harness/deerflow/sophia/js

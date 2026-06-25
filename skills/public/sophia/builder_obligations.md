@@ -22,7 +22,7 @@ This file is for the Sophia builder only.
 
 - For a `.pptx` request, emit the `.pptx` as primary. Do not emit a PDF preview
   as the final answer.
-- For a `.pdf` report request, emit the `.pdf` as primary. Markdown source and generated assets are supporting files,
+- For a `.pdf` report request, emit the `.pdf` as primary. The HTML source and generated assets are supporting files,
   not user-visible deliverables.
 - For an HTML target, write a standalone `.html` document. Do not wrap it in
   Markdown code fences or emit Markdown as HTML.
@@ -43,17 +43,17 @@ This file is for the Sophia builder only.
 
 ## PDF Report Rules
 
-- Author Markdown and render with `render_markdown_to_pdf`.
-- Use `generate_chart` for figures: data charts (quantitative/comparative)
-  AND structural diagrams (flow, network, mind-map, fishbone, organization-
-  chart, sankey). Vary the diagram family per figure; use Markdown
-  tables/callouts when they are clearer.
+- Author ONE self-contained HTML file (base print CSS inlined) and render with
+  `render_html_to_pdf`. Follow the pdf-report SKILL.md pattern library.
+- Draw every figure as inline static `<svg>`: data charts (bar/line/column for
+  quantitative/comparative) AND structural diagrams (box-and-arrow flow,
+  comparison, mind-map). NO remote `generate_chart`, NO client-side JS. Vary the
+  figure family per figure; use HTML tables/callouts when they are clearer.
 - You may generate up to 3 conceptual/editorial images (a cover/hero plus key
   concepts) via the image-generation skill — no text baked into the image,
-  theme-matched palette. Reserve generated images for conceptual figures; all
-  data and structure goes through `generate_chart`. Do not use retired report
-  chart tools for PDFs.
-- Embed PNG figure files into the Markdown before rendering.
+  theme-matched palette, referenced as `<img src="visuals/<name>.png">`. Reserve
+  generated images for conceptual figures; all data and structure is inline
+  `<svg>`.
 
 ## Research
 

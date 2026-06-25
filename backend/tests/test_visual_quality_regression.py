@@ -218,14 +218,18 @@ def test_report_visual_grammar_gate_rejects_repetitive_diagrams() -> None:
     )
 
 
-def test_report_builder_uses_generate_chart_not_retired_wrapper() -> None:
+def test_report_builder_uses_render_html_to_pdf_not_retired_renderers() -> None:
     tool_names = [
         getattr(tool, "name", "")
         for tool in build_builder_tools_for_task_type("document", vision_enabled=False)
     ]
 
-    assert "generate_chart" in tool_names
+    # Reports render via HTML→PDF (inline <svg>); the remote chart service and the
+    # markdown→pandoc renderer are retired for reports.
+    assert "render_html_to_pdf" in tool_names
+    assert "generate_chart" not in tool_names
     assert "generate_report_chart" not in tool_names
+    assert "render_markdown_to_pdf" not in tool_names
 
 
 def test_builder_memory_filter_caps_and_removes_cross_modality_style_memories() -> None:

@@ -182,6 +182,83 @@ def test_preflight_chained_with_generation_honors_terminal_error_short_circuit()
     assert "missing_api_key" in content
 
 
+# ---- deck hero-anchor batch backstop ----------------------------------------
+
+
+def _deck_single_slide_command() -> str:
+    return f"python {_SCRIPT} --slide-visual --prompt-file s2.prompt.json --output-file s2.png"
+
+
+def test_deck_batch_backstop_nudges_second_serial_slide_call():
+    # Hero already generated (success_count=1); a second SINGLE --slide-visual
+    # call is the serial loop — nudge it onto the --manifest batch once.
+    state = _state_with_image_diagnostics(image_generation_success_count=1)
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+    assert isinstance(result, Command)
+    assert result.goto == "model"
+    content = result.update["messages"][0].content
+    assert "[Sophia/deck-batch]" in content
+    assert "--manifest" in content
+    # Idempotency stamp lands in the diagnostics channel.
+    assert result.update["builder_pptx_diagnostics"]["deck_batch_directive_emitted"] is True
+
+
+def test_deck_batch_backstop_allows_hero_first_call():
+    # No slide generated yet (success_count=0): the hero call must pass.
+    state = _state_with_image_diagnostics(image_generation_success_count=0)
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+    assert result is None
+
+
+def test_deck_batch_backstop_allows_manifest_call():
+    state = _state_with_image_diagnostics(image_generation_success_count=1)
+    command = f"python {_SCRIPT} --manifest /mnt/user-data/outputs/visuals/manifest.json"
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(command, state)
+    )
+    assert result is None
+
+
+def test_deck_batch_backstop_is_idempotent_after_directive():
+    state = _state_with_image_diagnostics(
+        image_generation_success_count=1,
+        deck_batch_directive_emitted=True,
+    )
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+    assert result is None
+
+
+def test_deck_batch_backstop_allows_single_repair_after_batch_ran():
+    # Once a batch ran, single calls are the legitimate stray-failure repair path.
+    state = _state_with_image_diagnostics(
+        image_generation_success_count=5,
+        image_generation_manifest_seen=True,
+    )
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+    assert result is None
+
+
+def test_deck_batch_backstop_only_fires_for_pptx():
+    # A PDF report's bounded conceptual image must not be redirected to a deck batch.
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+        "delegation_context": {"task_type": "document"},
+        "builder_pptx_diagnostics": {"image_generation_success_count": 1},
+    }
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+    assert result is None
+
+
 def test_transient_error_does_not_short_circuit():
     state = _state_with_image_diagnostics(
         image_generation_attempt_count=1,

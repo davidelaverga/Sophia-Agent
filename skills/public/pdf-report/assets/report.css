@@ -1,0 +1,109 @@
+/* Sophia PDF report — base print CSS.
+ *
+ * Inline the FULL contents of this file into a <style> block in your report
+ * HTML so the document is self-contained (render_html_to_pdf opens the file
+ * via file://; a self-contained document never has a missing-stylesheet risk).
+ * render_html_to_pdf supplies the page margins and the page-number footer, so
+ * do NOT add your own @page margin or footer here.
+ *
+ * Palette is deck-grade and theme-able: override the :root custom properties in
+ * a second <style> block after this one to retheme without editing the rules.
+ */
+
+:root {
+  --ink: #14181f;          /* body text */
+  --ink-soft: #424a57;     /* secondary text, captions */
+  --rule: #d7dce4;         /* hairlines, table borders */
+  --accent: #2f6df6;       /* primary accent — headings underline, chart series */
+  --accent-2: #16a36a;     /* secondary series */
+  --accent-3: #e0683a;     /* tertiary series */
+  --surface: #f5f7fb;      /* callout / stat-band background */
+  --cover-bg: #0e1626;     /* cover page background */
+  --cover-ink: #f3f6fc;    /* cover page text */
+  --font-sans: "Helvetica Neue", Arial, "Liberation Sans", sans-serif;
+  --font-serif: Georgia, "Times New Roman", serif;
+}
+
+* { box-sizing: border-box; }
+
+html { -webkit-print-color-adjust: exact; print-color-adjust: exact; }
+
+body {
+  font-family: var(--font-serif);
+  color: var(--ink);
+  font-size: 10.5pt;
+  line-height: 1.5;
+  margin: 0;
+}
+
+/* ---- Cover page ---------------------------------------------------------- */
+.cover {
+  background: var(--cover-bg);
+  color: var(--cover-ink);
+  /* fill the printable area; render_html_to_pdf adds the page margin around it */
+  min-height: 247mm;
+  padding: 40mm 22mm 22mm;
+  page-break-after: always;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-start;
+}
+.cover h1 {
+  font-family: var(--font-sans);
+  font-size: 30pt;
+  line-height: 1.12;
+  margin: 0 0 10mm;
+  border: 0;
+  color: var(--cover-ink);
+}
+.cover .subtitle { font-family: var(--font-sans); font-size: 14pt; color: #aebbd2; margin: 0 0 24mm; }
+.cover .meta { margin-top: auto; font-family: var(--font-sans); font-size: 10pt; color: #8ea0bd; }
+.cover .cover-figure { margin: 8mm 0; }
+
+/* ---- Headings ------------------------------------------------------------ */
+h1, h2, h3, h4 { font-family: var(--font-sans); color: var(--ink); line-height: 1.25; }
+h1 { font-size: 20pt; margin: 0 0 4mm; }
+h2 {
+  font-size: 15pt;
+  margin: 9mm 0 3mm;
+  padding-bottom: 1.5mm;
+  border-bottom: 2px solid var(--accent);
+  page-break-after: avoid;
+}
+h3 { font-size: 12pt; margin: 6mm 0 2mm; color: var(--ink-soft); page-break-after: avoid; }
+p { margin: 0 0 3mm; }
+a { color: var(--accent); text-decoration: none; }
+strong { color: var(--ink); }
+
+/* ---- Table of contents -------------------------------------------------- */
+.toc { page-break-after: always; }
+.toc h2 { border: 0; }
+.toc ol { list-style: none; padding: 0; margin: 0; }
+.toc li { display: flex; justify-content: space-between; padding: 1.2mm 0; border-bottom: 1px dotted var(--rule); font-family: var(--font-sans); font-size: 10pt; }
+
+/* ---- Tables ------------------------------------------------------------- */
+table { width: 100%; border-collapse: collapse; margin: 4mm 0; font-family: var(--font-sans); font-size: 9pt; page-break-inside: avoid; }
+thead th { background: var(--surface); color: var(--ink); text-align: left; padding: 2mm 3mm; border-bottom: 2px solid var(--accent); }
+td { padding: 2mm 3mm; border-bottom: 1px solid var(--rule); vertical-align: top; }
+tbody tr:nth-child(even) td { background: #fafbfe; }
+
+/* ---- Figures ------------------------------------------------------------ */
+figure { margin: 5mm 0; page-break-inside: avoid; text-align: center; }
+figure svg, figure img { max-width: 100%; height: auto; }
+figcaption { font-family: var(--font-sans); font-size: 8.5pt; color: var(--ink-soft); margin-top: 1.5mm; }
+.figure-title { font-family: var(--font-sans); font-size: 10pt; font-weight: 600; color: var(--ink); margin: 0 0 2mm; text-align: left; }
+
+/* ---- Callouts / stat band ----------------------------------------------- */
+.callout { background: var(--surface); border-left: 3px solid var(--accent); padding: 3mm 4mm; margin: 4mm 0; page-break-inside: avoid; }
+.stat-band { display: flex; gap: 4mm; margin: 5mm 0; page-break-inside: avoid; }
+.stat { flex: 1; background: var(--surface); border-radius: 2mm; padding: 4mm; text-align: center; }
+.stat .num { font-family: var(--font-sans); font-size: 20pt; font-weight: 700; color: var(--accent); display: block; }
+.stat .label { font-family: var(--font-sans); font-size: 8.5pt; color: var(--ink-soft); }
+
+/* ---- Lists / misc ------------------------------------------------------- */
+ul, ol { margin: 0 0 3mm; padding-left: 6mm; }
+li { margin: 0 0 1.5mm; }
+blockquote { margin: 4mm 0; padding-left: 4mm; border-left: 3px solid var(--rule); color: var(--ink-soft); font-style: italic; }
+code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 9pt; background: var(--surface); padding: 0.3mm 1mm; border-radius: 1mm; }
+section { page-break-inside: auto; }
+.page-break { page-break-before: always; }

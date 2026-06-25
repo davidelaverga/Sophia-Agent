@@ -130,7 +130,8 @@ class TestGeneratePathWithoutReferenceImages:
                 aspect_ratio="16:9",
             )
 
-        openai_ctor.assert_called_once_with(api_key="sk-test")
+        # Per-call timeout + no SDK retries bound a hung image-gen request.
+        openai_ctor.assert_called_once_with(api_key="sk-test", timeout=600.0, max_retries=0)
         fake_client.images.generate.assert_called_once_with(
             model="gpt-image-2",
             prompt=f"a clear blue sky\n\n{script_module._SOPHIA_IMAGE_STYLE}\n\n{script_module._SOPHIA_IMAGE_AVOID}",

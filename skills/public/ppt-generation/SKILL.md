@@ -11,19 +11,56 @@ labels, diagrams, and layout baked into the bitmap. The PPTX compiler places tha
 full bleed and attaches speaker notes. It does not draw compiler-side titles,
 captions, charts, shapes, or engine-composed slides.
 
-## Workflow
+## Workflow (hero-anchor batch — generate slides in ONE parallel batch)
+
+Generating slide images one-per-turn is the slow path that made decks loop for
+~15-20 minutes. Instead, anchor on a hero image, then generate every remaining
+slide in a SINGLE concurrent batch.
 
 1. Plan the deck: one line per slide with `title`, core idea, treatment,
    diagram family, and visible bottom narrative.
-2. Choose one `visual_style` for the whole deck from the image-generation
-   manifest. Keep the style consistent while varying composition and diagram
-   grammar.
-3. Generate one PNG per slide with the image-generation script in slide-visual
-   mode.
-4. QC each slide image. Repair/regenerate once when required.
-5. Create a plan JSON whose slides point to the generated images with
+2. Choose one `visual_style` for the whole deck. Keep it consistent across all
+   slides while varying composition and diagram grammar.
+3. **Generate the hero/cover slide FIRST** (one call). It sets the style every
+   other slide references:
+   ```bash
+   python /mnt/skills/public/image-generation/scripts/generate.py \
+     --slide-visual \
+     --prompt-file /mnt/user-data/outputs/visuals/slide-01.prompt.json \
+     --output-file /mnt/user-data/outputs/visuals/slide-01.png
+   ```
+   Each `*.prompt.json` is `{"prompt": "<the slide prompt from the skeleton below>"}`.
+4. **Write ONE batch manifest** for the remaining slides. Every item is
+   `slide_visual: true` and lists the hero in `reference_images` for visual
+   consistency:
+   ```json
+   {
+     "concurrency": 4,
+     "items": [
+       {"prompt_file": "/mnt/user-data/outputs/visuals/slide-02.prompt.json",
+        "output_file": "/mnt/user-data/outputs/visuals/slide-02.png",
+        "slide_visual": true,
+        "reference_images": ["/mnt/user-data/outputs/visuals/slide-01.png"]},
+       {"prompt_file": "/mnt/user-data/outputs/visuals/slide-03.prompt.json",
+        "output_file": "/mnt/user-data/outputs/visuals/slide-03.png",
+        "slide_visual": true,
+        "reference_images": ["/mnt/user-data/outputs/visuals/slide-01.png"]}
+     ]
+   }
+   ```
+5. **Run the batch ONCE** (all remaining slides generate concurrently):
+   ```bash
+   python /mnt/skills/public/image-generation/scripts/generate.py \
+     --manifest /mnt/user-data/outputs/visuals/manifest.json
+   ```
+   It prints one `IMAGEGEN_BATCH {...}` summary line. Do NOT fall back to
+   one-call-per-slide — that is the loop this batch exists to prevent.
+6. QC the batch summary. Repair ONLY the failed items: write a small manifest
+   containing just those items and re-run `--manifest` once (or a single
+   `--slide-visual` call for one stray failure).
+7. Create a plan JSON whose slides point to the generated images with
    `image_path` and include concise `speaker_notes`.
-6. Compile the PPTX. Emit the `.pptx` as the primary artifact.
+8. Compile the PPTX. Emit the `.pptx` as the primary artifact.
 
 ## Slide Image Contract
 
@@ -91,6 +128,7 @@ That failure is intentional: regenerate the missing image or stop cleanly.
 
 ## QA Checklist
 
+- Slides generated via the hero + ONE `--manifest` batch, not one call per turn.
 - One picture per slide.
 - Zero compiler-side text boxes over image-forward slides.
 - Baked title visible on every slide.

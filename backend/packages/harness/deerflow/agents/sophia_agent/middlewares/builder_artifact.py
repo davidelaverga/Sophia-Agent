@@ -191,7 +191,15 @@ def _emit_skill_usage_logs(tool_calls: list[dict[str, Any]]) -> None:
 
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 _SIMPLE_PDF_TOOL_NAME = "create_pdf_artifact"
-_PDF_CREATION_TOOL_NAMES = frozenset({"render_markdown_to_pdf", _SIMPLE_PDF_TOOL_NAME})
+# render_html_to_pdf (2026-06-25) is the report render path (HTML + inline SVG →
+# headless chromium). It returns the same result JSON shape as
+# render_markdown_to_pdf, so listing it here wires BOTH attempt-detection
+# (_pdf_render_attempted) and result-capture (the _PDF_CREATION_TOOL_NAMES
+# dispatch → _pdf_result_command → builder_pdf_render_result) with no other change.
+_REPORT_PDF_RENDER_TOOL_NAME = "render_html_to_pdf"
+_PDF_CREATION_TOOL_NAMES = frozenset(
+    {"render_markdown_to_pdf", _REPORT_PDF_RENDER_TOOL_NAME, _SIMPLE_PDF_TOOL_NAME}
+)
 _BUILDER_WRITE_TOOL_NAMES = {"write_file", "write_file_tool"}
 _BUILDER_RESEARCH_TOOL_NAMES = {"builder_web_search", "builder_web_fetch"}
 _BUILDER_SUBSTANTIVE_TOOL_NAMES = {
@@ -252,8 +260,9 @@ _SHELL_SEPARATORS = {"&&", "||", ";", "|", "&"}
 # burning turns.
 _IMAGE_GENERATION_MAX_CALLS = 20
 # PDF reports get up to a few conceptual/editorial illustrations (cover/hero +
-# key concepts) on by default; all charts and structural diagrams still go
-# through generate_chart (chart-visualization). Counts generated images.
+# key concepts) on by default; all charts and structural diagrams are drawn as
+# inline <svg> in the report HTML (rendered via render_html_to_pdf), not images.
+# Counts generated conceptual images only.
 _IMAGE_GENERATION_MAX_CALLS_PDF = 3
 # One bounded repair attempt: a second pass rarely converges and doubles cost.
 _PDF_PAGE_COUNT_REPAIR_MAX = 1
@@ -2405,7 +2414,7 @@ def _pptx_path_integrity_rejection_reason(
     return None
 
 
-def _render_markdown_to_pdf_attempted(state: dict[str, Any]) -> bool:
+def _pdf_render_attempted(state: dict[str, Any]) -> bool:
     summaries = state.get("builder_tool_turn_summaries") or []
     return any(
         any(name in _PDF_CREATION_TOOL_NAMES for name in (summary.get("tool_names") or []))
@@ -2545,10 +2554,11 @@ def _pdf_page_count_repair_instruction(
 ) -> str:
     if result.get("layout_warning") in {"images_missing", "missing_image_resources"}:
         return (
-            "One or more referenced figures are missing from the rendered PDF. Ensure every "
-            "![](...) reference points to a real file under /mnt/user-data/outputs/visuals/ — "
-            "regenerate the missing figure via generate_chart, or remove the dead reference — "
-            "then call render_markdown_to_pdf again. "
+            "One or more referenced figures are missing from the rendered PDF. Every figure must "
+            "be inline `<svg>` in the HTML; for the few conceptual images, ensure each "
+            "`<img src=\"visuals/...\">` points to a real file under "
+            "/mnt/user-data/outputs/visuals/ — fix the inline SVG or the dead `<img>` reference, "
+            "then call render_html_to_pdf again. "
         )
     page_count = result.get("page_count")
     low, high = _pdf_requested_page_bounds({**state, **result})
@@ -2560,20 +2570,20 @@ def _pdf_page_count_repair_instruction(
     ):
         if page_count < low:
             return (
-                "Make ONE targeted edit (do not rewrite the whole document): add or expand a "
-                "single section — one focused paragraph or a single figure with caption — to "
-                "reach the requested length, then call render_markdown_to_pdf again. Do not pad "
+                "Make ONE targeted edit to the HTML (do not rewrite the whole document): add or "
+                "expand a single section — one focused paragraph or a single figure with caption — "
+                "to reach the requested length, then call render_html_to_pdf again. Do not pad "
                 "every page; that creates sparse pages. "
             )
         if page_count > high:
             return (
-                "Make ONE targeted edit (do not rewrite the whole document): trim or merge a "
-                "single thin section and remove unnecessary page breaks to reach the requested "
-                "length, then call render_markdown_to_pdf again. "
+                "Make ONE targeted edit to the HTML (do not rewrite the whole document): trim or "
+                "merge a single thin section and remove unnecessary page breaks to reach the "
+                "requested length, then call render_html_to_pdf again. "
             )
     return (
-        "Revise the Markdown source once: compact sparse tables or continuation pages, remove "
-        "unnecessary page breaks, combine thin sections, then call render_markdown_to_pdf again. "
+        "Revise the HTML source once: compact sparse tables or continuation pages, remove "
+        "unnecessary page breaks, combine thin sections, then call render_html_to_pdf again. "
     )
 
 
@@ -2673,7 +2683,7 @@ def _pdf_artifact_suffix_rejection_reason(canonical: str, state: dict[str, Any])
 def _pdf_fallback_rejection_reason(suffix: str, state: dict[str, Any]) -> str | None:
     if suffix not in _PDF_FALLBACK_EXTENSIONS:
         return None
-    if not _render_markdown_to_pdf_attempted(state):
+    if not _pdf_render_attempted(state):
         return "pdf_fallback_before_render_attempt"
     if _successful_pdf_ready_to_emit(state):
         return "pdf_fallback_when_valid_pdf_exists"
@@ -2733,7 +2743,7 @@ def _pdf_render_target_path(state: dict[str, Any], source_path: str | None) -> s
 def _pdf_render_attempt_missing(state: dict[str, Any]) -> bool:
     if not _requested_pdf_artifact(state):
         return False
-    return not _render_markdown_to_pdf_attempted(state)
+    return not _pdf_render_attempted(state)
 
 
 def _artifact_path_suffix_label(path: object) -> str | None:
@@ -4775,24 +4785,25 @@ def _pptx_plan_error_reason(diagnostics: dict[str, Any]) -> str:
 def _pdf_render_correction_message(source_path: str, pdf_path: str) -> str:
     return (
         "[Sophia/PDF render correction]\n"
-        "A requested PDF has a source document on disk, but the PDF renderer "
+        "A requested PDF has an HTML source document on disk, but the PDF renderer "
         "has not been attempted. Your next action must be:\n"
-        f"`render_markdown_to_pdf(markdown_path='{source_path}', pdf_path='{pdf_path}')`.\n"
+        f"`render_html_to_pdf(html_path='{source_path}', pdf_path='{pdf_path}')`.\n"
         "If rendering succeeds, immediately emit that `.pdf`. If rendering "
         "genuinely cannot complete, emit artifact_path=null with an honest summary."
     )
 
 
 def _pdf_source_write_message(target_path: str) -> str:
-    source_path = f"{_OUTPUTS_VIRTUAL_PREFIX}{PurePosixPath(target_path).with_suffix('.md').name}"
+    source_path = f"{_OUTPUTS_VIRTUAL_PREFIX}{PurePosixPath(target_path).with_suffix('.html').name}"
     return (
         "[Sophia/PDF source correction]\n"
-        "This is a requested PDF build, but no Markdown/HTML source is available "
+        "This is a requested PDF build, but no HTML source is available "
         "for the renderer yet. Stop writing helper scripts. Use one complete "
-        "`write_file` call to create the Markdown source now:\n"
+        "`write_file` call to create the self-contained HTML source now (with the "
+        "base print CSS and inline `<svg>` figures):\n"
         "`write_file(description='write PDF source', "
         f"path='{source_path}', content='...', append=False)`.\n"
-        "After that, call `render_markdown_to_pdf` to create the PDF."
+        "After that, call `render_html_to_pdf` to create the PDF."
     )
 
 
@@ -4806,10 +4817,10 @@ def _visual_design_skill_message() -> str:
         "`read_file(description='read visual design skill', "
         "path='/mnt/skills/public/visual-design/SKILL.md')`.\n"
         "For PPTX decks, every slide must be a generated full-slide image embedded "
-        "by the PPTX compiler. For PDF reports, both charts AND structural diagrams "
-        "follow the chart-visualization skill via `generate_chart` (use the flow / "
-        "network / mind-map / fishbone / organization-chart / sankey families for "
-        "diagrams). Embed the resulting local assets in the final artifact before emitting."
+        "by the PPTX compiler. For PDF reports, draw both charts AND structural diagrams "
+        "as inline static `<svg>` directly in the report HTML (bar / line / column for "
+        "data; box-and-arrow flow / comparison / mind-map for structure) — NO remote "
+        "`generate_chart`, NO client-side JS — then render via render_html_to_pdf."
     )
 
 
@@ -5487,8 +5498,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
     @staticmethod
     def _forced_pdf_render_tool_choice() -> dict[str, Any]:
-        """Anthropic tool_choice payload that forces the PDF renderer."""
-        return {"type": "tool", "name": "render_markdown_to_pdf"}
+        """Anthropic tool_choice payload that forces the PDF renderer.
+
+        Reports render via HTML→PDF (render_html_to_pdf) — that is the tool in
+        the report toolset, so the force must name it (forcing the retired
+        render_markdown_to_pdf would reference a tool not offered to the build).
+        """
+        return {"type": "tool", "name": _REPORT_PDF_RENDER_TOOL_NAME}
 
     @staticmethod
     def _forced_simple_pdf_tool_choice() -> dict[str, Any]:
@@ -5607,7 +5623,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     ) -> dict[str, Any]:
         if self._should_force_pdf_render_before_emit(state):
             logger.warning(
-                "BuilderArtifact: forcing tool_choice=render_markdown_to_pdf "
+                "BuilderArtifact: forcing tool_choice=render_html_to_pdf "
                 "before PDF fallback emit (non_artifact_turns=%s, "
                 "ceiling=%s, reason=%s)",
                 non_artifact_turns,
@@ -5630,7 +5646,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return False
         if cls._has_requested_pdf_binary(state):
             return False
-        return not _render_markdown_to_pdf_attempted(state)
+        return not _pdf_render_attempted(state)
 
     def _generator_recovery_tool_choice(
         self,
@@ -6146,7 +6162,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         promoted_path: str | None,
         steps_completed: int,
     ) -> dict[str, Any] | None:
-        if not _requested_pdf_artifact(state) or _render_markdown_to_pdf_attempted(state):
+        if not _requested_pdf_artifact(state) or _pdf_render_attempted(state):
             return None
         if promoted_path:
             promoted_suffix = PurePosixPath(promoted_path).suffix.lower()
@@ -6844,11 +6860,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "requested_ext=pdf render_tool_attempted=%s fallback_ext=%s "
             "rejected_ext=%s",
             rejection_reason,
-            _render_markdown_to_pdf_attempted(state),
+            _pdf_render_attempted(state),
             _pdf_fallback_suffix(state).lstrip("."),
             rejected_ext,
         )
-        if not _render_markdown_to_pdf_attempted(state):
+        if not _pdf_render_attempted(state):
             BuilderArtifactMiddleware._log_missing_pdf_render_attempt_if_needed(
                 state,
                 {"artifact_path": primary},
@@ -6984,8 +7000,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             f"Current grammar counts: {counts_text}. Regenerate or replace figures so the final "
             "report uses at least two distinct successful visual grammars. For reports with four "
             "or more figures, no single grammar may account for more than 50% of embedded figures. "
-            "Use chart families from generate_chart and Excalidraw diagram grammars deliberately, "
-            "then re-render the PDF and emit only the primary PDF."
+            "Draw distinct inline-`<svg>` figure families (bar/line/column charts, box-and-arrow "
+            "flow, comparison, mind-map) deliberately, then re-render via render_html_to_pdf and "
+            "emit only the primary PDF."
         )
 
     @staticmethod
@@ -7008,9 +7025,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     )
                 elif requested_ext == "pdf":
                     embed_hint = (
-                        "Reference them from the Markdown source with "
-                        "`![Title](/mnt/user-data/outputs/visuals/<name>.png)`, re-run "
-                        "render_markdown_to_pdf, and emit the regenerated .pdf."
+                        "Reference them from the HTML source with "
+                        "`<img src=\"visuals/<name>.png\">` (or an absolute "
+                        "/mnt/user-data/outputs/visuals/<name>.png path), re-run "
+                        "render_html_to_pdf, and emit the regenerated .pdf."
                     )
                 else:
                     embed_hint = "Embed or reference them before emitting."
@@ -7043,8 +7061,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 if reason == "pdf_fallback_before_render_attempt":
                     return (
                         "Error: emit_builder_artifact rejected — this is a PDF request, "
-                        "so you must attempt render_markdown_to_pdf before emitting. "
-                        "Fix the Markdown source if needed and render the real .pdf."
+                        "so you must attempt render_html_to_pdf before emitting. "
+                        "Fix the HTML source if needed and render the real .pdf."
                     )
                 if reason == "pdf_fallback_when_valid_pdf_exists":
                     return (
@@ -7055,7 +7073,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 return (
                     "Error: emit_builder_artifact rejected — this is a PDF request. "
                     "The final artifact must be a real .pdf rendered via "
-                    "render_markdown_to_pdf. Do not emit Python files, generator "
+                    "render_html_to_pdf. Do not emit Python files, generator "
                     "scripts, bare paths, or files outside /mnt/user-data/outputs/ "
                     "as the user-ready artifact."
                 )
@@ -7556,13 +7574,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _pdf_render_source_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_pdf_artifact(state):
             return None
-        if self._has_requested_pdf_binary(state) or _render_markdown_to_pdf_attempted(state):
+        if self._has_requested_pdf_binary(state) or _pdf_render_attempted(state):
             return None
         source_path = _preferred_pdf_render_source_path(state)
         if not source_path:
             return None
         logger.warning(
-            "BuilderArtifact: forcing tool_choice=render_markdown_to_pdf "
+            "BuilderArtifact: forcing tool_choice=render_html_to_pdf "
             "because PDF source exists before render source_ext=%s",
             PurePosixPath(source_path).suffix.lower().lstrip(".") or None,
         )
@@ -8158,7 +8176,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         if state.get("builder_pdf_render_correction_emitted"):
             return None
-        if self._has_requested_pdf_binary(state) or _render_markdown_to_pdf_attempted(state):
+        if self._has_requested_pdf_binary(state) or _pdf_render_attempted(state):
             return None
         source_path = _preferred_pdf_render_source_path(state)
         if not source_path:
@@ -8178,7 +8196,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         if state.get("builder_pdf_source_write_directive_emitted"):
             return None
-        if self._has_requested_pdf_binary(state) or _render_markdown_to_pdf_attempted(state):
+        if self._has_requested_pdf_binary(state) or _pdf_render_attempted(state):
             return None
         if _preferred_pdf_render_source_path(state):
             return None
@@ -8942,6 +8960,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "image_generation_bytes_total": bytes_total,
             "image_generation_error_class": error_class,
         }
+        if manifest_segments:
+            # Records that the deck used the parallel batch path — the deck-batch
+            # backstop allows single-image repair calls only AFTER a batch ran.
+            delta["image_generation_manifest_seen"] = True
         delta.update(_image_generation_success_path_delta(state, successful_paths))
         return delta
 
@@ -9344,6 +9366,54 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         return rejection, attempts, successes, error_class
 
+    @staticmethod
+    def _deck_batch_directive_rejection(command: str, state: dict[str, Any]) -> str | None:
+        """Backstop the deck hero-anchor batch workflow at bash time.
+
+        Decks must generate the hero first, then ALL remaining slides in one
+        ``--manifest`` batch (skills/public/ppt-generation). When the model
+        instead drifts back to serial single ``--slide-visual`` calls after the
+        hero, this nudges it onto the batch path ONCE. After the directive fires
+        (or once a batch has run), single calls are allowed — they are the
+        legitimate one-off repair path for a stray failed slide.
+
+        Returns the directive text to reject with, or ``None`` to allow.
+        """
+        if _requested_artifact_ext(state) != "pptx":
+            return None
+        diagnostics = _pptx_diagnostics(state)
+        if diagnostics.get("image_generation_manifest_seen"):
+            return None  # a batch already ran — single calls are repairs now
+        if diagnostics.get("deck_batch_directive_emitted"):
+            return None  # one-shot nudge already spent
+        # Hero must already be done (>=1 success) before we expect a batch.
+        if _pptx_diagnostic_count(state, "image_generation_success_count") < 1:
+            return None
+        billable = [
+            segment
+            for segment in _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS)
+            if "--preflight" not in _command_parts(segment)
+        ]
+        if any(_command_flag_value(segment, "--manifest") for segment in billable):
+            return None  # this IS a batch call — allow
+        has_single_slide_visual = any(
+            _command_flag_value(segment, "--manifest") is None
+            and "--slide-visual" in _command_parts(segment)
+            for segment in billable
+        )
+        if not has_single_slide_visual:
+            return None
+        return (
+            "[Sophia/deck-batch] The hero slide is generated. Do NOT generate the remaining "
+            "slides one at a time — that is the serial loop the batch path exists to prevent. "
+            "Write ONE manifest JSON listing every remaining slide (each item `slide_visual: "
+            "true` with the hero PNG in `reference_images`), then call the image-generation "
+            "script ONCE with `--manifest /mnt/user-data/outputs/visuals/manifest.json`. All "
+            "remaining slides will generate concurrently. See the ppt-generation SKILL.md "
+            "workflow. (Single --slide-visual calls are allowed only to repair a stray failed "
+            "slide AFTER the batch runs.)"
+        )
+
     def _image_generation_block_command(self, request: ToolCallRequest) -> Command | None:
         """Enforce the per-build image-generation discipline at bash time.
 
@@ -9368,6 +9438,25 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             # VQ-3: preflight-only checks are free — never counted, never blocked.
             return None
         state = request.state or {}
+        # Deck hero-anchor batch backstop: nudge serial slide calls onto the
+        # parallel --manifest path ONCE (before the cap/error checks so the
+        # nudge isn't masked by an unrelated rejection).
+        deck_batch_directive = self._deck_batch_directive_rejection(command, state)
+        if deck_batch_directive is not None:
+            logger.warning("[BuilderImageGeneration] phase=deck_batch_nudge")
+            return Command(
+                update={
+                    "messages": [
+                        _error_tool_message(
+                            content=deck_batch_directive,
+                            tool_call_id=request.tool_call.get("id", ""),
+                            name=tool_name,
+                        ),
+                    ],
+                    "builder_pptx_diagnostics": {"deck_batch_directive_emitted": True},
+                },
+                goto="model",
+            )
         # The cap counts IMAGES: a single ``--manifest`` call produces N images,
         # so the budget math uses the manifest item count, not the invocation count.
         images_in_command = max(1, _image_generation_images_in_command(command, state))

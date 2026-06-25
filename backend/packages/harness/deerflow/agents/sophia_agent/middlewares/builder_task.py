@@ -555,7 +555,7 @@ def _pdf_page_target_section(page_updates: dict[str, Any]) -> str | None:
         return (
             "<pdf_length_target>\n"
             f"- Requested PDF length: exactly {count} pages.\n"
-            f"- When calling render_markdown_to_pdf, pass requested_pages={count}.\n"
+            f"- When calling render_html_to_pdf, pass requested_pages={count}.\n"
             "- If layout_quality warns about page_count_off_target, revise once and re-render.\n"
             "</pdf_length_target>"
         )
@@ -565,7 +565,7 @@ def _pdf_page_target_section(page_updates: dict[str, Any]) -> str | None:
         return (
             "<pdf_length_target>\n"
             f"- Requested PDF length: {low}-{high} pages.\n"
-            "- When calling render_markdown_to_pdf, pass "
+            "- When calling render_html_to_pdf, pass "
             f"requested_min_pages={low} and requested_max_pages={high}.\n"
             "- If layout_quality warns about page_count_off_target, revise once and re-render.\n"
             "</pdf_length_target>"
@@ -638,9 +638,10 @@ def _image_generation_enabled(
     Image targets and explicit requests keep legacy behavior. PPTX builds use
     gpt-image-2 full-slide visuals as the primary slide path. PDF reports get a
     few conceptual/editorial illustrations on by default (cover/hero + key
-    concepts) alongside chart-visualization figures; the per-build cap
-    (``_IMAGE_GENERATION_MAX_CALLS_PDF``) bounds them. HTML chart/diagram work
-    still uses local visual tools unless the user explicitly asks for imagery.
+    concepts) alongside the inline-``<svg>`` charts/diagrams the model draws in
+    the report HTML; the per-build cap (``_IMAGE_GENERATION_MAX_CALLS_PDF``)
+    bounds them. HTML chart/diagram work uses inline static ``<svg>`` (rendered
+    to PDF via render_html_to_pdf) unless the user explicitly asks for imagery.
     """
     if artifact_target_ext in _IMAGE_OUTPUT_EXTENSIONS:
         return True
@@ -785,8 +786,9 @@ def _terminal_artifact_format_line(artifact_target_ext: str) -> str:
         )
     if artifact_target_ext == ".pdf":
         return (
-            "- This is a PDF target: the deliverable is a real .pdf rendered via "
-            "render_markdown_to_pdf. Call emit_builder_artifact with "
+            "- This is a PDF target: author ONE self-contained HTML file with inline "
+            "<svg> charts/diagrams, then render the real .pdf via "
+            "render_html_to_pdf. Call emit_builder_artifact with "
             "artifact_type=\"pdf\". If rendering genuinely fails after the "
             "bounded repair, a .md/.html fallback must be explicitly marked "
             "with requested_artifact_ext, artifact_is_fallback=true, and "
@@ -1120,8 +1122,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         # PR Phase B (2026-04-29): inject the skills inventory so the
         # builder knows the pre-tested generation workflows
-        # (chart-visualization, ppt-generation, image-generation,
-        # data-analysis) are available. Without this block the model
+        # (ppt-generation, image-generation, data-analysis) are available.
+        # Without this block the model
         # falls back to writing its own matplotlib/reportlab code, which
         # is the failure pattern PR #93/#94 spent recovery machinery on.
         image_generation_enabled = _image_generation_enabled(
@@ -1172,8 +1174,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "- Other: markdown, requests, httpx\n"
             "If you ever see ModuleNotFoundError for one of these, the import path is wrong — check the module name above. "
             "Never call `pip install` via bash_tool; it wastes your turn budget.\n"
-            "Important: these libraries do NOT replace target workflow cards. For PDF, use "
-            "render_markdown_to_pdf instead of reportlab/fpdf scripts. For PPTX, use the "
+            "Important: these libraries do NOT replace target workflow cards. For PDF, author "
+            "HTML with inline <svg> and render via render_html_to_pdf instead of reportlab/fpdf "
+            "scripts. For PPTX, use the "
             "ppt-generation skill instead of python-pptx scripts. Skills wrap pre-tested "
             "generators that handle font, encoding, embedding, and validation correctly.\n"
             "</preinstalled_libraries>"
@@ -1226,7 +1229,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "BEFORE planning, check <skill_system> above. If a listed skill matches "
             "the deliverable type (e.g. pdf-report for PDF reports, "
             "deep-research / academic-paper-review / systematic-literature-review for research-backed reports, "
-            "chart-visualization for chart/data design, ppt-generation for slide decks, "
+            "ppt-generation for slide decks, "
             "image-generation when listed for image deliverables, explicit generated imagery, or PPTX full-slide visuals, "
             "data-analysis for tabular data), USE IT — read its SKILL.md "
             "via read_file_tool and follow its workflow. Workflow cards are authoritative "
@@ -1262,18 +1265,19 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "**Use skills and tools that wrap pre-tested generators — do NOT write your own matplotlib / "
             "reportlab / python-pptx code.** Follow the matching <builder_workflow_card> above when one is "
             "present. If no workflow card covers the requested format, use the closest listed skill first.\n"
-            "    * **PDF**: follow the PDF workflow card. A valid render is terminal-ready; emit immediately "
-            "unless Sophia asks for one layout repair. For ALL figures — data charts AND structural diagrams — "
-            "call `generate_chart` (bar/line/column/radar for quantitative data; flow / network / mind-map / "
-            "fishbone / organization-chart / sankey for structure). Vary the diagram family to fit each figure's "
-            "content; never route every figure to the same kind.\n"
+            "    * **PDF**: follow the PDF workflow card. Author ONE self-contained HTML file with inline "
+            "`<svg>` figures, then call `render_html_to_pdf`. A valid render is terminal-ready; emit immediately "
+            "unless Sophia asks for one layout repair. Draw ALL figures — data charts AND structural diagrams — "
+            "as inline static `<svg>` (bar/line/column for quantitative data; box-and-arrow flow / comparison / "
+            "mind-map for structure); NO remote `generate_chart`, NO client-side JS. Vary the figure family to "
+            "fit each figure's content; never route every figure to the same kind.\n"
             "    * **PPTX / presentation**: follow the PPTX workflow card. Reading SKILL.md alone is not "
             f"completion; normal success requires deck composition and a valid .pptx. {pptx_visual_guidance} "
             "PDF/HTML diagrams use local visual tools.\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"
-            "    * **Standalone chart / image**: use `generate_chart`, the chart-visualization skill, or image-generation. The "
-            "generated PNG/SVG is the deliverable.\n"
+            "    * **Standalone chart / image**: use the image-generation skill, or author the chart as a "
+            "standalone inline-`<svg>` HTML file. The generated PNG/SVG is the deliverable.\n"
             "    * **Data analysis / spreadsheet**: use the data-analysis skill (DuckDB-based) for SQL over "
             "tabular data. Output CSV/JSON/Markdown directly.\n"
             "    * **xlsx / docx / other formats not covered by a skill**: as a LAST RESORT, write a short "
@@ -1283,7 +1287,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "2 fix-and-retry cycles. Never ship the generator script as the artifact unless the user "
             "explicitly asked for code; emit with artifact_path=null and an honest companion_summary instead.\n"
             "    Libraries listed in <preinstalled_libraries> are already available — do NOT pip install.\n"
-            "- After each meaningful step (write_file, successful skill invocation, render_markdown_to_pdf), "
+            "- After each meaningful step (write_file, successful skill invocation, render_html_to_pdf), "
             "call write_todos again to mark the corresponding item 'completed' or 'in-progress'. This is how "
             "the user sees the progress bar advance — skipping these updates leaves the UI stuck.\n"
             "- Make targeted edits only if critical fixes are needed.\n"
@@ -1428,8 +1432,12 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
     # reportlab / python-pptx code itself. Limited to the binary-
     # generation skills relevant to builder workflows; other skills
     # (sophia, bootstrap, surprise-me, …) are noise here.
+    # chart-visualization is intentionally EXCLUDED: its documented workflow
+    # shells out to the remote Alipay GPT-Vis service, which rendered empty
+    # charts + failed structural diagram families in production (2026-06-25
+    # visual-render-regression forensics). Report figures are now authored as
+    # inline <svg> in HTML and rendered via render_html_to_pdf.
     _BUILDER_RELEVANT_SKILLS: tuple[str, ...] = (
-        "chart-visualization",
         "visual-design",
         "hallmark",
         "pdf-report",

@@ -26,6 +26,33 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-06-25 · [builder-report-html-to-pdf] · PR #145
+**Author:** Claude · **Track:** backend · **Spec:** `docs/audits/sophia-builder-visual-render-regression-2026-06-25.md`
+
+### What Changed
+- **Reports now render via HTML→PDF.** New `render_html_to_pdf` tool ([sophia/tools/render_html_to_pdf.py](backend/packages/harness/deerflow/sophia/tools/render_html_to_pdf.py) + [sophia/js/render_html_to_pdf.mjs](backend/packages/harness/deerflow/sophia/js/render_html_to_pdf.mjs), headless Chromium via bundled `playwright-core`). The model authors ONE self-contained HTML file with inline static `<svg>` figures + inlined base print CSS. Result JSON mirrors `render_markdown_to_pdf`, so every PDF gate (page-count tolerance, `image_count` visual-presence, never-terminal downgrade) works unchanged via the shared `_inspect_pdf_layout_with_targets`.
+- **Retired for reports:** `generate_chart` (remote Alipay GPT-Vis — rendered empty charts + failed structural-diagram families in prod) and `render_markdown_to_pdf` (markdown→pandoc). Both tool files kept on disk (shared page-count-gate helpers + their tests) but unwired from the report toolset. `chart-visualization` removed from `_BUILDER_RELEVANT_SKILLS` (it steered the model back to the broken remote path via bash).
+- **Wiring:** `_PDF_CREATION_TOOL_NAMES` += `render_html_to_pdf`; `_forced_pdf_render_tool_choice()` → `render_html_to_pdf`; `_render_markdown_to_pdf_attempted` → `_pdf_render_attempted`; all model-facing repair/recovery/rejection strings re-steered to HTML+inline-SVG.
+- **New skill contract:** rewrote [pdf-report/SKILL.md](skills/public/pdf-report/SKILL.md) (HTML + copy-paste inline-SVG pattern library) + added [pdf-report/assets/report.css](skills/public/pdf-report/assets/report.css) (base print CSS). Updated `visual_composition.md` + `builder_obligations.md`.
+- **Deck hero-anchor batch harness-enforced:** rewrote [ppt-generation/SKILL.md](skills/public/ppt-generation/SKILL.md) to hero → ONE `--manifest` batch; backstop `_deck_batch_directive_rejection` rejects a 2nd serial `--slide-visual` call once (idempotent via `deck_batch_directive_emitted`; `image_generation_manifest_seen` allows post-batch repairs).
+- **Image-gen per-call timeout:** `_openai_client_from_env` passes `timeout=SOPHIA_IMAGE_GEN_TIMEOUT` (default 600s) + `max_retries=0` (single + batch).
+
+### What We Learned
+- A prompt-only nudge loses to an authoritative SKILL.md every time: the 2026-06-24 deck `--manifest` "batch" was ignored because `ppt-generation/SKILL.md` still prescribed serial generation. Behavior changes have to land in the authoritative skill file AND a harness backstop, not a guidance string.
+- Removing a *tool* isn't enough — its *skill* must leave the inventory too, or the model bash-invokes the documented (broken) workflow.
+- Inline static SVG is the deterministic substitute for a remote chart service: it always renders exactly as authored, and chromium rasterizes it into PDF image XObjects so the existing `image_count` visual gate just works.
+
+### CLAUDE.md Updates
+- Root `CLAUDE.md`: added the "Report HTML→PDF + deck batch enforcement (2026-06-25, PR #145)" paragraph to the builder section.
+- `backend/CLAUDE.md`: added the "Builder report HTML→PDF + deck batch enforcement (2026-06-25, PR #145)" section.
+
+### Skills Created / Modified
+- Modified: `skills/public/pdf-report/SKILL.md` (HTML+inline-SVG rewrite), `skills/public/ppt-generation/SKILL.md` (hero-anchor batch), `skills/public/sophia/visual_composition.md`, `skills/public/sophia/builder_obligations.md`.
+- Created: `skills/public/pdf-report/assets/report.css`.
+
+### GEPA Log Entry
+- Prompt files changed (pdf-report/SKILL.md, ppt-generation/SKILL.md, visual_composition.md, builder_obligations.md). Before: report figures routed to remote `generate_chart` → empty/failed visuals; decks generated serially → ~15-20 min loops. After: figures are inline `<svg>` rendered locally via `render_html_to_pdf`; decks generate in one parallel `--manifest` batch (~2-3 min). tone_delta: N/A (builder prompts, not companion voice). Trace pair available: yes (2026-06-24 + 2026-06-25 forensics audits).
+
 ## 2026-06-02 · [coreview-artifact-still-review] · PR #TBD
 **Author:** Codex · **Track:** frontend | voice · **Spec:** `docs/coreview-artifact-still-review.md`
 

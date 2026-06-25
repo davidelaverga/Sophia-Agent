@@ -15,16 +15,18 @@ medium. Do not mix workflows just because another tool is available.
   into the image. The PPTX compiler only places the full-slide bitmap and
   speaker notes. It never draws compiler-side titles, captions, text boxes,
   charts, or engine-composed layouts.
-- PDF reports are deterministic reports. Author Markdown, embed local PNG
-  figures, and render with `render_markdown_to_pdf`. Use `generate_chart` for
-  BOTH data evidence (quantitative, comparative, ranking, composition, trend,
-  distribution, flow-volume) AND structural diagrams (flow, network, mind-map,
-  fishbone, organization-chart, sankey) — vary the diagram family to fit each
-  figure; never route every figure to the same kind. You may additionally
-  generate up to 3 conceptual/editorial illustrations (a cover/hero plus key
-  concepts) via the image-generation skill: no text baked into the image,
-  theme-matched palette. Reserve generated images for conceptual/aesthetic
-  figures — every data chart and structural diagram goes through `generate_chart`.
+- PDF reports are authored as ONE self-contained HTML file and rendered with
+  `render_html_to_pdf`. Draw BOTH data evidence (bar / line / column for
+  quantitative, comparative, ranking, composition, trend) AND structural
+  diagrams (box-and-arrow flow, comparison, mind-map) as **inline static
+  `<svg>`** — no remote `generate_chart`, no client-side JS. Vary the figure
+  family to fit each figure; never route every figure to the same kind. You may
+  additionally generate up to 3 conceptual/editorial illustrations (a cover/hero
+  plus key concepts) via the image-generation skill: no text baked into the
+  image, theme-matched palette, referenced as `<img src="visuals/<name>.png">`.
+  Reserve generated images for conceptual/aesthetic figures — every data chart
+  and structural diagram is inline `<svg>`. Follow the pdf-report SKILL.md
+  pattern library.
 - HTML artifacts may use code-built visuals (SVG, CSS, Canvas) when that is
   the simplest faithful implementation.
 
@@ -44,8 +46,11 @@ medium. Do not mix workflows just because another tool is available.
 
 ## PDF Report Invariants
 
-- The final primary artifact is the `.pdf`. Markdown source, preview files, and
+- The final primary artifact is the `.pdf`. The HTML source, preview files, and
   assets are supporting/internal files unless explicitly requested.
+- Every chart and diagram is inline `<svg>` authored in the report HTML —
+  charts must render with real series and labels (never an empty frame), which
+  inline SVG guarantees. Do not call a remote chart service.
 - Diagrams must match the idea: architecture, flow, sequence, timeline, cycle,
   comparison, tree, or concept map. Do not route every figure to the same
   node-link architecture diagram.

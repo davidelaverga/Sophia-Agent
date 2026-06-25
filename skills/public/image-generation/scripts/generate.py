@@ -537,6 +537,21 @@ def _call_image_api_with_trace(
         return response
 
 
+def _image_gen_timeout_seconds() -> float:
+    """Per-call generation timeout. Bounds a single hung image-gen request.
+
+    Default 600s. A serial deck used to be able to hang ~10 min on one slide;
+    with max_retries=0 a stuck request fails fast instead of compounding via the
+    SDK's internal retry backoff.
+    """
+    raw = (os.getenv("SOPHIA_IMAGE_GEN_TIMEOUT") or "").strip()
+    try:
+        value = float(raw)
+    except ValueError:
+        return 600.0
+    return value if value > 0 else 600.0
+
+
 def _openai_client_from_env() -> object:
     api_key = os.getenv("OPENAI_API_KEY")
     if not api_key:
@@ -545,7 +560,7 @@ def _openai_client_from_env() -> object:
         from openai import OpenAI  # transitive dep via langchain-openai
     except ImportError as e:  # pragma: no cover - sandbox should always have this
         _fail("api_error", f"openai SDK is not available in the sandbox: {type(e).__name__}", exit_code=2)
-    return OpenAI(api_key=api_key)
+    return OpenAI(api_key=api_key, timeout=_image_gen_timeout_seconds(), max_retries=0)
 
 
 def _extract_payload_or_fail(response: object) -> str:

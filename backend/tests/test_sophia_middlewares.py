@@ -2338,7 +2338,7 @@ class TestBuilderTaskMiddleware:
                 return f"{base}/{self.name}/SKILL.md"
 
         fake_skills = [
-            _FakeSkill("chart-visualization"),
+            _FakeSkill("chart-visualization"),  # EXCLUDED — remote GPT-Vis path retired
             _FakeSkill("pdf-report"),
             _FakeSkill("ppt-generation"),
             _FakeSkill("image-generation"),
@@ -2369,7 +2369,6 @@ class TestBuilderTaskMiddleware:
         assert block is not None
         # All whitelisted skills are present, regardless of enabled state.
         assert "<skill_system>" in block
-        assert "chart-visualization" in block
         assert "pdf-report" in block
         assert "ppt-generation" in block
         assert "image-generation" in block
@@ -2377,11 +2376,16 @@ class TestBuilderTaskMiddleware:
         assert "academic-paper-review" in block
         assert "systematic-literature-review" in block
         assert "data-analysis" in block
+        # chart-visualization is intentionally EXCLUDED from the whitelist: its
+        # documented workflow shells out to the broken remote GPT-Vis service.
+        # Reports now author inline <svg> + render_html_to_pdf.
+        assert "chart-visualization" not in block
         # The unrelated skill is filtered out by the whitelist.
         assert "unrelated-skill" not in block
-        # Observability: the INFO breadcrumb fires either way.
+        # Observability: the INFO breadcrumb fires either way. 7 of the 9 fake
+        # skills are whitelisted (chart-visualization + unrelated-skill dropped).
         assert any(
-            "skills_inventory: 8 skills injected" in rec.message for rec in caplog.records
+            "skills_inventory: 7 skills injected" in rec.message for rec in caplog.records
         )
 
     def test_skills_inventory_block_can_omit_image_generation(
@@ -2773,7 +2777,7 @@ class TestBuilderArtifactMiddleware:
         msg.tool_calls = [
             {
                 "name": "read_file",
-                "args": {"path": "/mnt/skills/chart-visualization/SKILL.md"},
+                "args": {"path": "/mnt/skills/public/pdf-report/SKILL.md"},
             }
         ]
         state = {"messages": [msg]}
@@ -2782,7 +2786,7 @@ class TestBuilderArtifactMiddleware:
             mw.after_model(state, _make_runtime())
 
         assert any(
-            "[BuilderSkill] manifest_read: skill=chart-visualization" in rec.message
+            "[BuilderSkill] manifest_read: skill=pdf-report" in rec.message
             for rec in caplog.records
         )
 
@@ -3080,13 +3084,16 @@ class TestBuilderArtifactMiddleware:
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
         assert choice == {"type": "tool", "name": "write_file"}
 
-    def test_force_choice_pdf_target_renders_markdown_before_fallback_emit(self, tmp_path):
-        """A Markdown fallback must be preceded by a render_markdown_to_pdf attempt."""
+    def test_force_choice_pdf_target_renders_html_before_fallback_emit(self, tmp_path):
+        """A fallback must be preceded by a render_html_to_pdf attempt."""
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
-        (outputs_dir / "report.md").write_text("# Report")
+        (outputs_dir / "report.html").write_text(
+            "<!doctype html><html><head><title>Report</title></head><body>"
+            "<h1>Report</h1><p>" + ("section content " * 12) + "</p></body></html>"
+        )
 
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
@@ -3094,17 +3101,20 @@ class TestBuilderArtifactMiddleware:
             "builder_non_artifact_turns": 27,
         }
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
-        assert choice == {"type": "tool", "name": "render_markdown_to_pdf"}
+        assert choice == {"type": "tool", "name": "render_html_to_pdf"}
 
-    def test_force_choice_visual_pdf_target_renders_markdown_source_before_html_fallback(self, tmp_path):
-        """Visual PDF requests may prefer HTML fallback, but Markdown source still renders first."""
+    def test_force_choice_visual_pdf_target_renders_html_source_before_fallback(self, tmp_path):
+        """A visual PDF with an HTML source (inline <svg>) renders before any fallback."""
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
-        (outputs_dir / "visuals").mkdir()
-        (outputs_dir / "visuals" / "chart.svg").write_text("<svg></svg>")
-        (outputs_dir / "report.md").write_text("# Visual report\n\n![Chart](visuals/chart.svg)")
+        (outputs_dir / "report.html").write_text(
+            "<!doctype html><html><head><title>Visual report</title></head><body>"
+            "<h1>Visual report</h1><figure><svg viewBox='0 0 100 80'>"
+            "<rect x='5' y='5' width='40' height='70' fill='#2f6df6'/></svg></figure>"
+            "<p>" + ("analysis " * 16) + "</p></body></html>"
+        )
 
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
@@ -3120,12 +3130,10 @@ class TestBuilderArtifactMiddleware:
             "builder_web_budget": {"search_calls": 1, "fetch_calls": 1},
             "builder_visual_diagnostics": {
                 "visual_design_skill_read": True,
-                "visual_asset_success_count": 1,
-                "visual_asset_paths": ["/mnt/user-data/outputs/visuals/chart.svg"],
             },
         }
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
-        assert choice == {"type": "tool", "name": "render_markdown_to_pdf"}
+        assert choice == {"type": "tool", "name": "render_html_to_pdf"}
 
     def test_force_choice_pdf_target_allows_fallback_after_render_attempt(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
