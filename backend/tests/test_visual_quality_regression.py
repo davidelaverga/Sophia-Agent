@@ -258,6 +258,16 @@ def test_slide_count_target_is_parsed_from_output_context_only() -> None:
     assert _slide_count_target("Summarize the attached 28-slide deck as a concise presentation.") is None
 
 
+def test_slide_count_target_captures_bare_slide_requests() -> None:
+    # Codex P2: a build verb directly before the count is enough — the match
+    # already ends in "slides", so no trailing presentation noun is required.
+    assert _slide_count_target("create 5 slides about X") == 5
+    assert _slide_count_target("make 6 slides") == 6
+    assert _slide_count_target("write a 5-slide deck") == 5
+    # ...but an incidental slide mention inside a report request must NOT capture.
+    assert _slide_count_target("create a report about the 5 slides I saw") is None
+
+
 def test_slide_qc_fails_visible_prompt_scaffolding(tmp_path: Path, monkeypatch) -> None:
     script = Path(__file__).parents[2] / "skills/public/image-generation/scripts/slide_qc.py"
     spec = importlib.util.spec_from_file_location("slide_qc_under_test", script)

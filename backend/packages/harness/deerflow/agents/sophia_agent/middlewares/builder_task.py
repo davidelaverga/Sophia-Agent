@@ -398,6 +398,16 @@ _SLIDE_TARGET_OUTPUT_NOUN_AFTER_RE = re.compile(
     r"(?:presentation|deck|slideshow|slides?|pptx)\b",
     re.IGNORECASE,
 )
+# A build verb (with an optional article) DIRECTLY before the count is enough
+# context on its own — _SLIDE_COUNT_RE already requires the matched span to end
+# in "slides", so a trailing presentation noun is redundant. Catches bare
+# requests like "create 5 slides about X" / "make 6 slides" while still
+# rejecting "create a report about the 5 slides" (words intervene before $).
+_SLIDE_TARGET_BUILD_VERB_ADJACENT_RE = re.compile(
+    r"\b(?:build|create|make|generate|produce|write|render|draft|prepare|deliver)\b"
+    r"(?:\s+(?:a|an|the|me|us|some))?\s*$",
+    re.IGNORECASE,
+)
 
 
 def _valid_page_count(value: str) -> int | None:
@@ -463,6 +473,7 @@ def _slide_target_is_output_context(text: str, match: re.Match[str]) -> bool:
     after = text[match.end(): match.end() + 100]
     return bool(
         _SLIDE_TARGET_OUTPUT_BEFORE_RE.search(before)
+        or _SLIDE_TARGET_BUILD_VERB_ADJACENT_RE.search(before)
         or (
             _SLIDE_TARGET_OUTPUT_VERB_BEFORE_RE.search(before)
             and _SLIDE_TARGET_OUTPUT_NOUN_AFTER_RE.search(after)
