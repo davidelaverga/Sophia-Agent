@@ -10,14 +10,18 @@ plus the gating policy in builder_task and the budget cost telemetry.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 
 from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     _IMAGE_GENERATION_MAX_CALLS,
+    _IMAGE_GENERATION_MAX_CALLS_PDF,
     BuilderArtifactMiddleware,
+    _image_generation_images_in_command,
     _image_generation_invocations_in_command,
+    _parse_image_batch_summary,
 )
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
     _image_generation_enabled,
@@ -237,11 +241,13 @@ def test_presentation_task_fallback_only_applies_without_resolved_extension():
     assert _is_pptx_image_generation_target("", "presentation") is True
     assert _is_pptx_image_generation_target(".pptx", "document") is True
     assert _is_pptx_image_generation_target(".pdf", "presentation") is False
+    # A .pdf target now enables conceptual image-gen (bounded to 3) regardless
+    # of the originating task_type.
     assert _image_generation_enabled(
         {"task": "Build a presentation and export it as a PDF"},
         artifact_target_ext=".pdf",
         task_type="presentation",
-    ) is False
+    ) is True
 
 
 def test_polished_presentation_task_enables_image_generation():
@@ -348,3 +354,94 @@ def test_explicit_marker_still_wins_for_documents():
         artifact_target_ext=".md",
         task_type="document",
     ) is True
+
+
+# ---- image-count accounting (2026-06-24: cap counts IMAGES, not invocations) --
+
+
+def test_image_caps_are_image_counts() -> None:
+    # Deck cap is 20 images (a --manifest batch makes many in one call); PDF 3.
+    assert _IMAGE_GENERATION_MAX_CALLS == 20
+    assert _IMAGE_GENERATION_MAX_CALLS_PDF == 3
+
+
+def test_images_in_command_single_call_counts_one() -> None:
+    assert _image_generation_images_in_command(f"python {_SCRIPT} --prompt-file p.json --output-file o.png") == 1
+
+
+def test_images_in_command_preflight_is_free() -> None:
+    assert _image_generation_images_in_command(f"python {_SCRIPT} --preflight") == 0
+
+
+def test_images_in_command_manifest_counts_items(tmp_path) -> None:
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        '{"items": [{"prompt_file": "a"}, {"prompt_file": "b"}, {"prompt_file": "c"}]}',
+        encoding="utf-8",
+    )
+    state = {"thread_data": {"outputs_path": str(tmp_path)}}
+    count = _image_generation_images_in_command(
+        f"python {_SCRIPT} --manifest /mnt/user-data/outputs/m.json",
+        state,
+    )
+    assert count == 3
+
+
+def test_images_in_command_mixed_hero_then_batch(tmp_path) -> None:
+    manifest = tmp_path / "m.json"
+    manifest.write_text('{"items": [{"prompt_file": "a"}, {"prompt_file": "b"}]}', encoding="utf-8")
+    state = {"thread_data": {"outputs_path": str(tmp_path)}}
+    command = (
+        f"python {_SCRIPT} --slide-visual --prompt-file hero.json --output-file hero.png"
+        f" && python {_SCRIPT} --manifest /mnt/user-data/outputs/m.json"
+    )
+    assert _image_generation_images_in_command(command, state) == 3  # 1 hero + 2 batch
+
+
+def test_manifest_unreadable_falls_back_to_one(tmp_path) -> None:
+    # An unreadable manifest must count as >=1 so it never silently bypasses the cap.
+    state = {"thread_data": {"outputs_path": str(tmp_path)}}
+    assert (
+        _image_generation_images_in_command(
+            f"python {_SCRIPT} --manifest /mnt/user-data/outputs/missing.json",
+            state,
+        )
+        == 1
+    )
+
+
+def test_parse_image_batch_summary_returns_successful_paths() -> None:
+    line = (
+        'noise\nIMAGEGEN_BATCH {"images_generated": 2, "requested": 3, "items": ['
+        '{"output_file": "a.png", "success": true},'
+        '{"output_file": "b.png", "success": false},'
+        '{"output_file": "c.png", "success": true}]}'
+    )
+    requested, paths = _parse_image_batch_summary(line)
+    assert requested == 3
+    assert paths == ["a.png", "c.png"]
+
+
+def test_manifest_batch_under_cap_passes_through(tmp_path) -> None:
+    # A single manifest of 12 images (under the 20 deck cap) is allowed.
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"items": [{"prompt_file": f"p{i}"} for i in range(12)]}), encoding="utf-8")
+    state = _state_with_image_diagnostics(image_generation_attempt_count=0)
+    state["thread_data"] = {"outputs_path": str(tmp_path)}
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(f"python {_SCRIPT} --manifest /mnt/user-data/outputs/m.json", state)
+    )
+    assert result is None
+
+
+def test_manifest_batch_over_cap_is_rejected(tmp_path) -> None:
+    # A manifest whose item count would exceed the remaining image budget is blocked.
+    manifest = tmp_path / "m.json"
+    manifest.write_text(json.dumps({"items": [{"prompt_file": f"p{i}"} for i in range(15)]}), encoding="utf-8")
+    state = _state_with_image_diagnostics(image_generation_attempt_count=10)  # 10 + 15 > 20
+    state["thread_data"] = {"outputs_path": str(tmp_path)}
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(f"python {_SCRIPT} --manifest /mnt/user-data/outputs/m.json", state)
+    )
+    assert isinstance(result, Command)
+    assert "budget reached" in result.update["messages"][0].content

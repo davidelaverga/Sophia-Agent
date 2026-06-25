@@ -756,16 +756,102 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         action="store_true",
         help="Generate a full-slide PPTX visual: use prompt.prompt, Sophia slide style, quality=high, and 16:9 size.",
     )
+    parser.add_argument(
+        "--manifest",
+        default=None,
+        help=(
+            "Absolute path to a JSON batch manifest: "
+            '{"items": [{"prompt_file", "output_file", "reference_images"?, '
+            '"aspect_ratio"?, "slide_visual"?, "size"?}, ...], "concurrency"?: int}. '
+            "Generates all items concurrently (bounded by SOPHIA_IMAGE_GEN_CONCURRENCY, "
+            "default 4). Mutually exclusive with --prompt-file/--output-file."
+        ),
+    )
     args = parser.parse_args(argv)
-    if not args.preflight and (not args.prompt_file or not args.output_file):
-        parser.error("--prompt-file and --output-file are required unless --preflight is used")
+    if not args.preflight and not args.manifest and (not args.prompt_file or not args.output_file):
+        parser.error("--prompt-file and --output-file are required unless --preflight or --manifest is used")
     return args
+
+
+def _run_batch(manifest_path: str) -> int:
+    """Generate multiple images concurrently from a JSON manifest.
+
+    Deck builds (and PDF reports' few conceptual images) generate visuals in a
+    single parallel batch instead of one serial call per turn. Manifest shape::
+
+        {"items": [{"prompt_file", "output_file", "reference_images"?,
+                     "aspect_ratio"?, "slide_visual"?, "size"?}, ...],
+         "concurrency"?: int}
+
+    Each item runs the same per-image pipeline as single mode. One item's
+    failure is ISOLATED — ``generate_image()`` hard-exits via ``sys.exit`` on
+    failure, which we catch per worker so a single bad image never aborts the
+    batch. Prints exactly one ``IMAGEGEN_BATCH`` JSON summary line on stdout;
+    exits 0 when at least one image succeeded, else 1. Hero-anchor consistency
+    is the caller's job: generate the hero first, then list it in each item's
+    ``reference_images``.
+    """
+    import json as _json
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _summary(payload: dict) -> int:
+        print(f"IMAGEGEN_BATCH {_json.dumps(payload)}")
+        return 0 if payload.get("images_generated", 0) else 1
+
+    try:
+        manifest = _json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+    except (OSError, ValueError) as exc:
+        return _summary({"images_generated": 0, "requested": 0, "error": f"manifest_unreadable: {exc}"})
+    items = manifest.get("items") if isinstance(manifest, dict) else None
+    if not isinstance(items, list) or not items:
+        return _summary({"images_generated": 0, "requested": 0, "error": "manifest_empty"})
+
+    env_conc = os.environ.get("SOPHIA_IMAGE_GEN_CONCURRENCY", "").strip()
+    concurrency = int(env_conc) if env_conc.isdigit() and int(env_conc) > 0 else 4
+    requested_conc = manifest.get("concurrency")
+    if isinstance(requested_conc, int) and requested_conc > 0:
+        concurrency = requested_conc
+    concurrency = max(1, min(concurrency, len(items)))
+
+    def _one(item: dict) -> dict:
+        out = str(item.get("output_file") or "")
+        if not item.get("prompt_file") or not out:
+            return {"output_file": out, "success": False, "error": "missing_prompt_or_output"}
+        try:
+            status = generate_image(
+                str(item.get("prompt_file")),
+                list(item.get("reference_images") or []),
+                out,
+                str(item.get("aspect_ratio") or "16:9"),
+                slide_visual=bool(item.get("slide_visual")),
+                size=item.get("size"),
+            )
+            return {"output_file": out, "success": True, "status": status}
+        except SystemExit as exc:  # generate_image -> _fail() -> sys.exit; isolate per item
+            return {"output_file": out, "success": False, "error": f"exit_{exc.code}"}
+        except Exception as exc:  # noqa: BLE001 — one bad image must never abort the batch
+            return {"output_file": out, "success": False, "error": f"{type(exc).__name__}: {exc}"}
+
+    with ThreadPoolExecutor(max_workers=concurrency) as pool:
+        results = list(pool.map(_one, items))
+
+    succeeded = sum(1 for r in results if r.get("success"))
+    return _summary(
+        {
+            "images_generated": succeeded,
+            "requested": len(items),
+            "concurrency": concurrency,
+            "items": results,
+        }
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
     args = _parse_args(argv)
     if args.preflight:
         return preflight()
+    if args.manifest:
+        return _run_batch(args.manifest)
     print(
         generate_image(
             args.prompt_file,

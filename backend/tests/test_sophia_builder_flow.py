@@ -165,7 +165,10 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "emit_builder_artifact" in builder_tool_names
     # render_markdown_to_pdf (Phase B) is the skill-driven PDF path.
     assert "render_markdown_to_pdf" in builder_tool_names
-    assert "generate_excalidraw_diagram" in builder_tool_names
+    # The custom single-grammar excalidraw tool was removed; reports use the
+    # upstream chart-visualization engine (generate_chart) for charts AND
+    # structural diagrams.
+    assert "generate_excalidraw_diagram" not in builder_tool_names
     assert "generate_chart" in builder_tool_names
     assert "generate_visual_asset" not in builder_tool_names
     assert "generate_report_chart" not in builder_tool_names
@@ -239,7 +242,7 @@ def test_presentation_builder_toolset_removes_excalidraw_diagram(monkeypatch) ->
     assert "generate_report_chart" not in tool_names
 
 
-def test_report_builder_toolset_includes_excalidraw_but_not_retired_chart_wrapper(monkeypatch) -> None:
+def test_report_builder_toolset_uses_generate_chart_not_excalidraw(monkeypatch) -> None:
     builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
     monkeypatch.setenv("LANGSMITH_TRACING", "false")
     _reset_tracing_cache()
@@ -263,7 +266,7 @@ def test_report_builder_toolset_includes_excalidraw_but_not_retired_chart_wrappe
     builder_module._create_builder_agent(user_id="user_123", task_type="document")
 
     tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
-    assert "generate_excalidraw_diagram" in tool_names
+    assert "generate_excalidraw_diagram" not in tool_names
     assert "generate_chart" in tool_names
     assert "generate_report_chart" not in tool_names
     assert "generate_visual_asset" not in tool_names

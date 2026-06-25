@@ -2196,3 +2196,33 @@ Late in this wave, several commits landed over a red suite or with edits that si
 
 ### GEPA Log Entry
 - N/A — no prompt files changed.
+
+## 2026-06-24 · [builder-visual-overhaul] · PR #144
+**Author:** Claude · **Track:** backend · **Spec:** `docs/audits/sophia-builder-observability-forensics-2026-06-24.md`
+
+### What Changed
+- **Decks:** parallel batch image generation — `image-generation/scripts/generate.py` gained a `--manifest` mode (`_run_batch`: `ThreadPoolExecutor` + `SOPHIA_IMAGE_GEN_CONCURRENCY`, per-item isolation, one `IMAGEGEN_BATCH` summary). Deck guidance is hero-anchor (hero first, then one batch referencing it). ~16 min serial → ~2–3 min.
+- **Image cap counts IMAGES, not invocations:** `_IMAGE_GENERATION_MAX_CALLS=20` (deck), `_IMAGE_GENERATION_MAX_CALLS_PDF=3`. New `_image_generation_images_in_command` reads `--manifest` item counts; `_image_generation_bash_delta` parses the batch summary; block-command budget-checks by image count.
+- **PDF visual path:** removed the custom `generate_excalidraw_diagram` (single-grammar Graphviz → repetitive node-link figures); PDF charts AND structural diagrams (flow/network/mind-map/fishbone/org-chart/sankey) now route through the upstream `generate_chart` (chart-visualization). PDFs get ≤3 conceptual/editorial generated images on by default (`_is_pdf_image_generation_target`).
+- **PDF page-count gate:** ±10% tolerance band + never-terminal — an off-band rendered PDF ships with `quality_warning="page_count_off_target"` (`_apply_pdf_page_count_quality_metadata`), never `artifact_path=null`. Repair max 2→1, targeted one-section repair.
+- **Empty/dead figures:** `generate_report_chart` rejects 0-byte responses; `render_markdown_to_pdf` flags `images_missing`/dead `missing_resources` as a `layout_warning` → one bounded repair turn.
+- **Deck `.preview.pdf`** excluded from the deliverable artifact list (`routers/artifacts.py`) so it no longer surfaces as a second card.
+
+### What We Learned
+- The deck "looping" was not a repair loop — it was 8 serial `gpt-image-2` calls (~2 min each); the image skill had no batch path and the cap counted invocations, so batching had to come with image-count accounting or it would silently bypass the cap.
+- The diagram repetition was a tool-selection/prompt problem, not an upstream bypass: the upstream `generate_chart` (26 AntV types incl. node-link families) was already wired; the prompt steered structural figures to the custom excalidraw tool.
+- The page-count gate failed an 11-vs-10-page report as terminal (`page_delta=1`) — violating "a delivered artifact in the requested format is never a fallback."
+- Cross-provider forensics (Render logs + LangSmith traces + rendered PDF) was essential; LangSmith confirmed varied model input (so the repetition was renderer-side).
+
+### CLAUDE.md Updates
+- Root `CLAUDE.md`: added "Visual overhaul (2026-06-24)" note (image-count caps, batch, excalidraw removal, page-gate tolerance, preview card).
+- `backend/CLAUDE.md`: added "Builder visual overhaul (2026-06-24, PR #144)" section; superseded the stale "hard cap 3 / pdf=2,else 3" claims.
+
+### Skills Created / Modified
+- Modified: `skills/public/sophia/visual_composition.md`, `skills/public/sophia/builder_obligations.md`, `skills/public/pdf-report/SKILL.md`, `skills/public/visual-design/SKILL.md`, `skills/public/image-generation/SKILL.md` (excalidraw → generate_chart diagram families; PDF conceptual-image policy; deck `--manifest` batch docs).
+
+### GEPA Log Entry
+- Prompt files changed (builder_task.py guidance strings + 5 skill files). Before: structural PDF diagrams steered to `generate_excalidraw_diagram` (single repetitive node-link grammar); PDFs image-gen off. After: structural diagrams routed to `generate_chart` diagram families with explicit "vary the family / never one kind"; PDFs get ≤3 conceptual images; decks generate via hero-anchor `--manifest` batch. tone_delta: N/A (builder prompts, not companion tone). Trace pair available: yes — JEPA forensics run (`019efc72`/`019efc79`) is the before; re-run after deploy for the after.
+
+### Known Follow-up
+- Inline artifact card on a failed→restart run (issue #4): root cause is frontend run-tracking in `useBuilderCanvas`/`PresenceArtifactPanel`; gateway is correct within the 15-min TTL. Deferred — needs browser E2E verification.

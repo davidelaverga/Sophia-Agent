@@ -5,10 +5,11 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+from langgraph.prebuilt.tool_node import _get_all_injected_args
+
+from deerflow.agents.sophia_agent.builder_tools import build_builder_tools_for_task_type
 from deerflow.sophia.tools import generate_report_chart as chart_module
 from deerflow.sophia.tools.generate_report_chart import generate_chart, generate_report_chart
-from deerflow.agents.sophia_agent.builder_tools import build_builder_tools_for_task_type
-from langgraph.prebuilt.tool_node import _get_all_injected_args
 
 
 def _payload(raw: str) -> dict:

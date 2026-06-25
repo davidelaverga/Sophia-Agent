@@ -130,13 +130,44 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
    automatically sends those referenced slides through the `gpt-image-2` edit path.
 
 2. **Illustrations (default)** — standalone images, heroes, section art, and concept
-   illustrations when the requested deliverable is an image or web artifact. Describe only
-   the subject; NO text, labels, charts, or diagrams in the image. Do not use this mode for
-   PDF reports.
+   illustrations. Describe only the subject; NO text, labels, charts, or diagrams in the image.
 
-For PDF reports, technical diagrams use graphviz through `generate_excalidraw_diagram`, and
-charts are rendered through the report `generate_chart` tool backed by the chart-visualization skill.
-This image skill is not part of the PDF report workflow.
+### Batch generation (decks) — generate in parallel, not one per turn
+
+For multi-image decks, do NOT call the script once per slide across turns (that serializes
+~2 min/image). Instead:
+
+1. Generate the hero/cover image first with a single `--slide-visual` call.
+2. Write ONE JSON manifest of all remaining slide images and call the script once with
+   `--manifest`. Give every item the hero PNG in `reference_images` so the deck stays consistent:
+
+```json
+{"items": [
+  {"prompt_file": "/mnt/user-data/workspace/slide-02.json",
+   "output_file": "/mnt/user-data/outputs/visuals/slide-02.png",
+   "slide_visual": true,
+   "reference_images": ["/mnt/user-data/outputs/visuals/hero.png"]},
+  {"prompt_file": "/mnt/user-data/workspace/slide-03.json",
+   "output_file": "/mnt/user-data/outputs/visuals/slide-03.png",
+   "slide_visual": true,
+   "reference_images": ["/mnt/user-data/outputs/visuals/hero.png"]}
+]}
+```
+```bash
+python /mnt/skills/public/image-generation/scripts/generate.py \
+  --manifest /mnt/user-data/outputs/visuals/slide-manifest.json
+```
+
+The items run concurrently (bounded for API rate limits); the script prints one
+`IMAGEGEN_BATCH {...}` summary line with per-image success. A failed item is isolated and never
+aborts the batch.
+
+For PDF reports, all data charts AND structural diagrams (flow, network, mind-map, fishbone,
+organization-chart, sankey) are rendered through the `generate_chart` tool backed by the
+chart-visualization skill. You may ALSO use this image skill for up to **3 conceptual/editorial
+illustrations per report** (a cover/hero plus key concepts): subject-only prompts, no text baked
+into the image, theme-matched palette. Reserve generated images for conceptual/aesthetic figures —
+never for data or structure (those always go through `generate_chart`).
 
 Reference library: for Excalidraw-style technical slide visuals, first inspect
 `/mnt/skills/public/image-generation/references/manifest.json`. It is a v2 style manifest:

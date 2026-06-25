@@ -3301,8 +3301,50 @@ class TestBuilderArtifactMiddleware:
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state, _make_runtime(thread_id="thread-x"))
         assert choice == {"type": "tool", "name": "emit_builder_artifact"}
 
-    def test_pdf_page_count_off_target_allows_second_bounded_repair(self, tmp_path):
+    def test_pdf_page_count_off_target_allows_one_bounded_repair(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
+
+        # 6 pages for a 10-page request is outside the tolerance band (9-11),
+        # so the first render gets exactly one bounded repair.
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "builder_pdf_layout_repair_attempts": 0,
+            "builder_pdf_layout_repair_requested": True,
+            "builder_pdf_render_result": {
+                "success": True,
+                "pdf_path": "/mnt/user-data/outputs/report.pdf",
+                "layout_quality": "warning",
+                "layout_warning": "page_count_off_target",
+                "requested_page_count": 10,
+                "page_count": 6,
+            },
+        }
+        mw = BuilderArtifactMiddleware()
+        update = mw._combined_before_model_updates(state, _make_runtime(thread_id="thread-x"))
+
+        assert update is not None
+        assert update["builder_pdf_render_result"] is None
+        assert update["builder_pdf_layout_repair_attempts"] == 1
+        assert update["builder_pdf_layout_repair_pending"] is True
+
+    def test_pdf_within_tolerance_band_needs_no_repair(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import _pdf_page_count_off_target
+
+        # 11 pages for a 10-page request is within the ±10% band — not off-target.
+        assert _pdf_page_count_off_target({"requested_page_count": 10, "page_count": 11}) is False
+        assert _pdf_page_count_off_target({"requested_page_count": 10, "page_count": 9}) is False
+        assert _pdf_page_count_off_target({"requested_page_count": 10, "page_count": 13}) is True
+
+    def test_pdf_page_count_off_target_after_repair_ships_with_quality_warning(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+            BuilderArtifactMiddleware,
+            _apply_pdf_page_count_quality_metadata,
+        )
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
@@ -3319,49 +3361,27 @@ class TestBuilderArtifactMiddleware:
                 "layout_quality": "warning",
                 "layout_warning": "page_count_off_target",
                 "requested_page_count": 10,
-                "page_count": 6,
-            },
-        }
-        mw = BuilderArtifactMiddleware()
-        update = mw._combined_before_model_updates(state, _make_runtime(thread_id="thread-x"))
-
-        assert update is not None
-        assert update["builder_pdf_render_result"] is None
-        assert update["builder_pdf_layout_repair_attempts"] == 2
-        assert update["builder_pdf_layout_repair_pending"] is True
-
-    def test_pdf_page_count_off_target_after_two_repairs_is_not_normal_success(self, tmp_path):
-        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
-
-        outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
-        (outputs_dir / "report.pdf").write_bytes(b"%PDF-1.4 fake")
-
-        state = {
-            "thread_data": {"outputs_path": str(outputs_dir)},
-            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
-            "builder_pdf_layout_repair_attempts": 2,
-            "builder_pdf_layout_repair_requested": True,
-            "builder_pdf_render_result": {
-                "success": True,
-                "pdf_path": "/mnt/user-data/outputs/report.pdf",
-                "layout_quality": "warning",
-                "layout_warning": "page_count_off_target",
-                "requested_page_count": 10,
                 "page_count": 17,
             },
         }
-        mw = BuilderArtifactMiddleware()
 
-        assert mw._force_choice_for_state(state, _make_runtime(thread_id="thread-x")) is None
+        # Never terminal: the off-target PDF is not rejected at emit ...
         assert (
             BuilderArtifactMiddleware._format_specific_rejection(
                 "/mnt/user-data/outputs/report.pdf",
                 state,
                 _make_runtime(thread_id="thread-x"),
             )
-            == "pdf_page_count_off_target"
+            is None
         )
+        # ... it ships with a quality_warning instead of artifact_path=null.
+        emitted = _apply_pdf_page_count_quality_metadata(
+            {"artifact_path": "/mnt/user-data/outputs/report.pdf", "confidence": 0.9},
+            state,
+        )
+        assert emitted["quality_warning"] == "page_count_off_target"
+        assert emitted["confidence"] <= 0.65
+        assert emitted["page_count_delta"] == 7
 
     def test_recover_emit_args_prefers_successful_pdf_render(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware

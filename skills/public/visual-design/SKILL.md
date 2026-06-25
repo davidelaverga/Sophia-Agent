@@ -18,9 +18,10 @@ be generated locally under `/mnt/user-data/outputs/`.
    artifact when the user requested visuals.
 2. Choose the minimum useful visual set: one clear chart/diagram is better
    than several decorative weak ones.
-3. Create local visual assets with `generate_excalidraw_diagram` for
-   technical diagrams and the chart-visualization skill for numeric/data
-   visuals; do not treat remote chart URLs as deliverable assets.
+3. Create local visual assets with `generate_chart` (the chart-visualization
+   skill) for both structural diagrams (flow, network, mind-map, fishbone,
+   organization-chart, sankey) and numeric/data charts; do not treat remote
+   chart URLs as deliverable assets.
 4. Embed or reference the local visual assets in the final HTML, PDF source, or
    PPTX plan before emitting the artifact.
 

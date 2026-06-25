@@ -225,6 +225,11 @@ def _bytes_look_like_image(content: bytes) -> bool:
 
 
 def _valid_image_response(content: bytes, content_type: str | None) -> bool:
+    # An empty body is never a usable chart even if the service labels it
+    # image/* — guard before trusting the content-type so a 0-byte render is
+    # rejected (success=False) instead of writing an empty figure.
+    if not content:
+        return False
     normalized_type = str(content_type or "").split(";", 1)[0].strip().lower()
     if normalized_type.startswith("image/"):
         return True

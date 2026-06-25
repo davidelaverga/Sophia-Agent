@@ -635,14 +635,14 @@ def test_list_artifacts_includes_associated_builder_task_outputs(tmp_path, monke
     )
 
     assert response.thread_id == "parent-thread"
+    # `.preview.pdf` is the deck's canvas render aid (a support artifact), so it
+    # is excluded from the deliverable list; the associated builder `.md` output
+    # is still included.
     assert [item.path for item in response.artifacts] == [
-        "mnt/user-data/outputs/builder-demo.preview.pdf",
         "mnt/user-data/outputs/builder-demo.md",
     ]
-    assert response.artifacts[0].name == "builder-demo.preview.pdf"
-    assert response.artifacts[0].mime_type == "application/pdf"
-    assert response.artifacts[1].name == "builder-demo.md"
-    assert response.artifacts[1].size_bytes == len("builder artifact")
+    assert response.artifacts[0].name == "builder-demo.md"
+    assert response.artifacts[0].size_bytes == len("builder artifact")
 
 
 def test_list_artifacts_prefers_newest_duplicate_associated_builder_output(tmp_path, monkeypatch) -> None:

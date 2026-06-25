@@ -9,8 +9,10 @@ Sophia PDF reports are source-first documents. Author Markdown, embed local PNG
 figures, and render with `render_markdown_to_pdf`. The PDF renderer owns table
 of contents, citations, page layout, and typography.
 
-Do not use generated slide images in PDF reports. Do not emit Markdown source
-or preview files as the final artifact unless explicitly requested.
+Do not use full-slide deck images (the gpt-image-2 `--slide-visual` output) in
+PDF reports. Generated imagery in a PDF is limited to the bounded
+conceptual/editorial illustrations described in the workflow below. Do not emit
+Markdown source or preview files as the final artifact unless explicitly requested.
 
 ## Workflow
 
@@ -18,13 +20,20 @@ or preview files as the final artifact unless explicitly requested.
 2. Research as needed and preserve citations.
 3. Author clean Markdown with headings, prose, tables, citations, and local PNG
    figure references.
-4. Generate deterministic figures:
-   - Connected structure: `generate_excalidraw_diagram`.
+4. Generate figures via the `generate_chart` chart-visualization renderer and
+   embed each returned `png_path`:
+   - Structural / relationship / process diagrams: use the flow, network,
+     mind-map, fishbone, organization-chart, or sankey families. Vary the
+     family to fit each figure — never route every diagram to the same kind.
    - Quantitative, comparative, distributional, trend, ranking, composition,
-     or flow-volume evidence: call `generate_chart`, the tool-backed
-     chart-visualization renderer, and embed its returned `png_path`.
+     or flow-volume evidence: use the bar / line / column / radar / etc.
+     families.
    - Tables/stat boxes: Markdown tables or LaTeX-friendly callouts when they
      are clearer than a chart.
+   - Optional: up to 3 conceptual/editorial illustrations (a cover/hero plus
+     key concepts) via the image-generation skill — no text baked into the
+     image, theme-matched palette. Reserve generated images for conceptual
+     figures; all data and structure goes through `generate_chart`.
 5. Render with `render_markdown_to_pdf`, passing requested page-count
    parameters when the user asked for a length.
 6. Inspect the render result. Repair missing resources or page-count drift once.

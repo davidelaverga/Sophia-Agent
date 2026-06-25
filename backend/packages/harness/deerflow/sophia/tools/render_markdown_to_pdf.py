@@ -819,6 +819,12 @@ def _pdf_success_result(
             "Verify the image paths exist under /mnt/user-data/outputs/ and "
             "re-render before emitting."
         )
+    # Missing / dead image references become a layout warning so the builder
+    # spends one bounded repair turn fixing them (regenerate or drop the dead
+    # ref) before emit — never ship a report with a broken/empty figure.
+    if (images_missing or masked_missing) and layout.get("layout_quality") in {"ok", None, "unknown"}:
+        layout["layout_quality"] = "warning"
+        layout["layout_warning"] = "images_missing" if images_missing else "missing_image_resources"
     return _result(
         success=True,
         pdf_path=pdf_path,

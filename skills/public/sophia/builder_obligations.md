@@ -44,10 +44,15 @@ This file is for the Sophia builder only.
 ## PDF Report Rules
 
 - Author Markdown and render with `render_markdown_to_pdf`.
-- Use local figures only: `generate_excalidraw_diagram` for connected
-  diagrams, `generate_chart` for quantitative/comparative evidence, and
-  Markdown tables/callouts when they are clearer.
-- Do not use slide-image generation or retired report chart tools for PDFs.
+- Use `generate_chart` for figures: data charts (quantitative/comparative)
+  AND structural diagrams (flow, network, mind-map, fishbone, organization-
+  chart, sankey). Vary the diagram family per figure; use Markdown
+  tables/callouts when they are clearer.
+- You may generate up to 3 conceptual/editorial images (a cover/hero plus key
+  concepts) via the image-generation skill — no text baked into the image,
+  theme-matched palette. Reserve generated images for conceptual figures; all
+  data and structure goes through `generate_chart`. Do not use retired report
+  chart tools for PDFs.
 - Embed PNG figure files into the Markdown before rendering.
 
 ## Research

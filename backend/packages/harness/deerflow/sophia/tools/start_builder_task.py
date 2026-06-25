@@ -51,12 +51,12 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 from langgraph.typing import ContextT
 
+from deerflow.sophia.builder_memory_filter import filter_builder_memory_snippets
 from deerflow.sophia.builder_web_policy import (
     extract_explicit_user_urls,
     make_builder_web_budget,
     should_allow_builder_web_research,
 )
-from deerflow.sophia.builder_memory_filter import filter_builder_memory_snippets
 
 # Importing ``deerflow.agents.sophia_agent.state`` (or any module under
 # ``deerflow.agents``) at module-load time triggers loading of

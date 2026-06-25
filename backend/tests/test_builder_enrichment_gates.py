@@ -3,8 +3,9 @@
 Prod 2026-06-11 (F5): Sonnet silently skipped gpt-image enrichment on the
 primary provider — prompt-only policy produced zero generated images with no
 signal. The middleware now records the outcome and lets rendered artifact QA
-own the bounded repair pass; PDFs use deterministic/report visuals unless the
-user explicitly asks for generated imagery.
+own the bounded repair pass. PDFs now get conceptual/editorial images on by
+default (cap 3); data charts and structural diagrams still route through
+generate_chart (chart-visualization).
 """
 
 from __future__ import annotations
@@ -50,12 +51,14 @@ def _pdf_state(task: str = "Create a technical PDF with diagrams and visuals", *
 # ---- VQ-5: PDF enrichment scope ----------------------------------------------
 
 
-def test_visuals_requested_pdf_uses_deterministic_visuals_by_default():
+def test_pdf_enables_generated_images_by_default():
+    # New policy: PDF reports get up to 3 conceptual/editorial images on by
+    # default; charts/diagrams still route through generate_chart.
     assert _image_generation_enabled(
         {"task": "Create a technical PDF with diagrams and visuals"},
         artifact_target_ext=".pdf",
         task_type="document",
-    ) is False
+    ) is True
 
 
 def test_explicit_image_pdf_enables_enrichment():
@@ -66,12 +69,15 @@ def test_explicit_image_pdf_enables_enrichment():
     ) is True
 
 
-def test_plain_pdf_stays_off():
+def test_pdf_image_generation_on_by_default_even_for_plain_brief():
+    # PDFs enable image-gen unconditionally (the cap bounds it to 3); the prompt
+    # steers the model to reserve generated images for conceptual figures, so a
+    # plain brief simply yields few or none.
     assert _image_generation_enabled(
         {"task": "Write a markdown-style PDF summary"},
         artifact_target_ext=".pdf",
         task_type="document",
-    ) is False
+    ) is True
 
 
 def test_plain_no_image_deck_still_requests_visual_gate():
@@ -108,17 +114,18 @@ def test_no_image_deck_with_deterministic_diagram_still_requests_visual_gate():
 
 def test_enrichment_enabled_mirror_reads_state():
     assert _builder_image_enrichment_enabled(_deck_state()) is True
-    assert _builder_image_enrichment_enabled(_pdf_state()) is False
-    assert _builder_image_enrichment_enabled(_pdf_state(task="plain text summary")) is False
+    assert _builder_image_enrichment_enabled(_pdf_state()) is True
+    assert _builder_image_enrichment_enabled(_pdf_state(task="plain text summary")) is True
 
 
-def test_pdf_cap_is_zero():
+def test_pdf_cap_is_three_and_deck_cap_is_twenty():
     from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
         _image_generation_max_calls,
     )
 
-    assert _image_generation_max_calls(_pdf_state()) == 0
-    assert _image_generation_max_calls(_deck_state()) == 8
+    # Caps count IMAGES (a --manifest batch produces N images in one call).
+    assert _image_generation_max_calls(_pdf_state()) == 3
+    assert _image_generation_max_calls(_deck_state()) == 20
 
 
 # ---- VQ-3: preflight delta + outcome accounting -------------------------------
@@ -156,7 +163,12 @@ def test_preflight_command_not_counted_or_blocked():
 
 
 def test_outcome_none_when_enrichment_disabled():
-    state = _pdf_state(task="plain text summary")
+    # Enrichment is disabled for non-image, non-pptx, non-pdf targets (e.g. HTML)
+    # with no explicit imagery request — so the outcome is None.
+    state = {
+        "delegation_context": {"task": "Build a plain HTML page", "task_type": "frontend"},
+        "builder_artifact_target_path": "/mnt/user-data/outputs/page.html",
+    }
     assert _image_generation_outcome_from_state(state) is None
 
 

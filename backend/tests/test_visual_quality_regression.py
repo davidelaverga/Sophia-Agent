@@ -5,10 +5,11 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+from deerflow.agents.sophia_agent.builder_tools import build_builder_tools_for_task_type
 from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
-    BuilderArtifactMiddleware,
     _USER_SURFACE_ARTIFACT_FILE_ROLES,
+    BuilderArtifactMiddleware,
     _artifact_file_entries,
     _artifact_file_paths_for_roles,
     _deck_plan_validation_problems,
@@ -19,9 +20,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     _visual_grammar_counts,
 )
 from deerflow.agents.sophia_agent.middlewares.builder_task import _slide_count_target
-from deerflow.agents.sophia_agent.builder_tools import build_builder_tools_for_task_type
 from deerflow.sophia.builder_memory_filter import filter_builder_memory_snippets
-
 
 _FIXTURES = Path(__file__).parent / "fixtures"
 

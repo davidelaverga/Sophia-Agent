@@ -2,18 +2,18 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 
+from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
     _apply_report_figure_quality_metadata,
     _enrich_pdf_render_result_with_requested_pages,
     _pdf_layout_repair_message,
     _presentation_completion_ready,
-    _report_visual_grammar_problems,
     _repair_deck_plan_for_validation,
+    _report_visual_grammar_problems,
     _validate_deck_plan,
     _visual_grammar_counts,
 )
-from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
     BuilderTaskMiddleware,
     _pdf_page_target_updates,
@@ -276,9 +276,9 @@ def test_pdf_page_count_repair_expands_under_target_report() -> None:
     )
 
     assert "Target length is exactly 8 pages" in message
-    assert "expand the report" in message
-    assert "add substantive narrative paragraphs" in message
-    assert "remove unnecessary page breaks" not in message
+    assert "ONE targeted edit" in message
+    assert "add or expand a single section" in message
+    assert "Do not pad every page" in message
 
 
 def test_pdf_page_count_repair_compacts_over_target_report() -> None:
@@ -295,7 +295,8 @@ def test_pdf_page_count_repair_compacts_over_target_report() -> None:
     )
 
     assert "Target length is exactly 8 pages" in message
-    assert "compact the report" in message
+    assert "ONE targeted edit" in message
+    assert "trim or merge a single thin section" in message
     assert "remove unnecessary page breaks" in message
 
 

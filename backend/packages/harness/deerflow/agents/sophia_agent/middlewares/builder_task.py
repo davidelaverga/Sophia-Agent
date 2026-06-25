@@ -625,9 +625,11 @@ def _image_generation_enabled(
     """Whether the image-generation skill is offered to the builder.
 
     Image targets and explicit requests keep legacy behavior. PPTX builds use
-    gpt-image-2 full-slide visuals as the primary slide path. PDF/HTML chart
-    and diagram work uses local visual tools unless the user explicitly asks
-    for generated imagery.
+    gpt-image-2 full-slide visuals as the primary slide path. PDF reports get a
+    few conceptual/editorial illustrations on by default (cover/hero + key
+    concepts) alongside chart-visualization figures; the per-build cap
+    (``_IMAGE_GENERATION_MAX_CALLS_PDF``) bounds them. HTML chart/diagram work
+    still uses local visual tools unless the user explicitly asks for imagery.
     """
     if artifact_target_ext in _IMAGE_OUTPUT_EXTENSIONS:
         return True
@@ -635,6 +637,8 @@ def _image_generation_enabled(
     description = str(delegation_context.get("description") or "").lower()
     combined = f"{task}\n{description}"
     if _is_pptx_image_generation_target(artifact_target_ext, task_type):
+        return True
+    if _is_pdf_image_generation_target(artifact_target_ext, task_type):
         return True
     if any(marker in combined for marker in _EXPLICIT_IMAGE_GENERATION_MARKERS):
         return True
@@ -645,6 +649,24 @@ def _is_pptx_image_generation_target(artifact_target_ext: str, task_type: str) -
     if artifact_target_ext:
         return artifact_target_ext == ".pptx"
     return task_type in {"presentation", "slides", "slide_deck", "deck"}
+
+
+_REPORT_IMAGE_GENERATION_TASK_TYPES = {
+    "document",
+    "report",
+    "research",
+    "research_report",
+    "visual_report",
+    "data_analysis",
+    "pdf",
+}
+
+
+def _is_pdf_image_generation_target(artifact_target_ext: str, task_type: str) -> bool:
+    """PDF reports get conceptual imagery on by default (bounded by the PDF cap)."""
+    if artifact_target_ext:
+        return artifact_target_ext == ".pdf"
+    return task_type in _REPORT_IMAGE_GENERATION_TASK_TYPES
 
 
 def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
@@ -1025,7 +1047,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "<output_contract>\n"
             "- Write every user-facing deliverable and supporting file under /mnt/user-data/outputs/ using absolute paths.\n"
             "- Do NOT use relative paths like outputs/report.md or ./outputs/report.md.\n"
-            "- When you call emit_builder_artifact, artifact_path and any artifact_files/supporting_files must use the same /mnt/user-data/outputs/... absolute paths. Mark only the requested deliverable as artifact_files role=primary; use source/internal for markdown or scripts and preview for render-only previews.\n"
+            "- When you call emit_builder_artifact, artifact_path and any artifact_files/supporting_files must use the "
+            "same /mnt/user-data/outputs/... absolute paths. Mark only the requested deliverable as artifact_files "
+            "role=primary; use source/internal for markdown or scripts and preview for render-only previews.\n"
             "</output_contract>"
         )
         if isinstance(artifact_target_path, str) and artifact_target_path.startswith("/mnt/user-data/outputs/"):
@@ -1172,6 +1196,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "Slides use gpt-image-2 full-slide visuals when image-generation is listed for this run. "
             "Every PPTX slide must be a generated full-slide image with baked title, center visual safe area, "
             "and concise narrative/takeaway bands (about 14% / 75% / 11% vertically). "
+            "GENERATE IN ONE PARALLEL BATCH, not one image per turn: first draft the full slide plan, then "
+            "generate the hero/cover image first (a single call), then write ONE JSON manifest listing every "
+            "remaining slide image and call `image-generation/scripts/generate.py --manifest <path>` ONCE — give "
+            "each manifest item the hero PNG in its `reference_images` so the deck stays visually consistent. The "
+            "batch runs concurrently, so an N-slide deck costs roughly one image's wall-clock, not N. "
             "If a generated slide fails QC, regenerate or replace that image-forward slide once; "
             "do not downgrade the deck to engine-composed diagrams/text."
             if image_generation_enabled
@@ -1223,8 +1252,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "reportlab / python-pptx code.** Follow the matching <builder_workflow_card> above when one is "
             "present. If no workflow card covers the requested format, use the closest listed skill first.\n"
             "    * **PDF**: follow the PDF workflow card. A valid render is terminal-ready; emit immediately "
-            "unless Sophia asks for one layout repair. For quantitative/comparative figures, call "
-            "`generate_chart`; reserve `generate_excalidraw_diagram` for connected-node structure.\n"
+            "unless Sophia asks for one layout repair. For ALL figures — data charts AND structural diagrams — "
+            "call `generate_chart` (bar/line/column/radar for quantitative data; flow / network / mind-map / "
+            "fishbone / organization-chart / sankey for structure). Vary the diagram family to fit each figure's "
+            "content; never route every figure to the same kind.\n"
             "    * **PPTX / presentation**: follow the PPTX workflow card. Reading SKILL.md alone is not "
             f"completion; normal success requires deck composition and a valid .pptx. {pptx_visual_guidance} "
             "PDF/HTML diagrams use local visual tools.\n"

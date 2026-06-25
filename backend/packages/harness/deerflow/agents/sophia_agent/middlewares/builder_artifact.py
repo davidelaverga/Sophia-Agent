@@ -64,7 +64,7 @@ from deerflow.sophia.builder_provider_fallback import (
 )
 from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.observability import annotate_builder_completion
-from deerflow.sophia.pptx_preview import maybe_render_pptx_preview, preview_path_for
+from deerflow.sophia.pptx_preview import maybe_render_pptx_preview
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.supabase_mirror import maybe_mirror_file
 
@@ -243,15 +243,25 @@ _SLIDE_QC_PATH_MARKERS = (
     "/mnt/skills/image-generation/scripts/slide_qc.py",
 )
 _SHELL_SEPARATORS = {"&&", "||", ";", "|", "&"}
-# Enrichment discipline (product decision 2026-06-11): generated imagery is
-# on by default for decks, bounded by a hard per-build call cap enforced at
-# bash interception time. Terminal error classes short-circuit retries —
-# when the environment cannot generate images at all, the build must
-# continue with charts/text instead of burning turns.
-_IMAGE_GENERATION_MAX_CALLS = 8
-# v4.1: PDF reports are deterministic only; generated images are blocked.
-_IMAGE_GENERATION_MAX_CALLS_PDF = 0
-_PDF_PAGE_COUNT_REPAIR_MAX = 2
+# Enrichment discipline: generated imagery is on by default for decks, bounded
+# by a hard per-build IMAGE cap enforced at bash interception time. Decks
+# generate slide images in a single parallel batch (one ``--manifest`` call
+# produces N images), so the cap counts IMAGES, not script invocations.
+# Terminal error classes short-circuit retries — when the environment cannot
+# generate images at all, the build must continue with charts/text instead of
+# burning turns.
+_IMAGE_GENERATION_MAX_CALLS = 20
+# PDF reports get up to a few conceptual/editorial illustrations (cover/hero +
+# key concepts) on by default; all charts and structural diagrams still go
+# through generate_chart (chart-visualization). Counts generated images.
+_IMAGE_GENERATION_MAX_CALLS_PDF = 3
+# One bounded repair attempt: a second pass rarely converges and doubles cost.
+_PDF_PAGE_COUNT_REPAIR_MAX = 1
+# Accept a small band around the requested length — an 11-page PDF for a
+# "10-page" request is a delivered artifact, not a failure. An off-band render
+# (after the one repair) ships with a quality_warning, never a terminal failure
+# or artifact_path=null.
+_PDF_PAGE_COUNT_TOLERANCE_FRACTION = 0.1
 _IMAGE_GENERATION_TERMINAL_ERRORS = frozenset(
     {"missing_api_key", "auth_invalid", "org_not_verified", "egress_blocked"}
 )
@@ -637,6 +647,74 @@ def _image_generation_billable_invocations_in_command(command: str) -> int:
     )
 
 
+def _manifest_item_count(state: dict[str, Any] | None, manifest_path: str) -> int:
+    """Best-effort count of items in an image-gen batch manifest (>=1).
+
+    The model writes the manifest (via write_file -> /mnt/user-data/outputs/...)
+    before invoking ``generate.py --manifest``, so the file exists on disk at
+    bash-intercept time. Falls back to 1 when it cannot be read so a single
+    unreadable manifest never silently bypasses the per-build image cap by
+    counting as zero.
+    """
+    if state is not None and manifest_path:
+        host = BuilderArtifactMiddleware._host_path_for_plan_file(state, manifest_path)
+        if host is not None and host.is_file():
+            try:
+                data = json.loads(host.read_text(encoding="utf-8"))
+            except (OSError, ValueError):
+                return 1
+            items = data.get("items") if isinstance(data, dict) else None
+            if isinstance(items, list) and items:
+                return len(items)
+    return 1
+
+
+def _image_generation_images_in_command(command: str, state: dict[str, Any] | None = None) -> int:
+    """Number of IMAGES a billable image-generation command will produce.
+
+    A ``--manifest`` call generates N images in one invocation (the parallel
+    batch path); count the manifest's items so the per-build cap and cost
+    accounting track images, not script invocations. Non-manifest calls are one
+    image each. Preflight-only segments are free.
+    """
+    total = 0
+    for segment in _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS):
+        if "--preflight" in _command_parts(segment):
+            continue
+        manifest_path = _command_flag_value(segment, "--manifest")
+        total += _manifest_item_count(state, manifest_path) if manifest_path else 1
+    return total
+
+
+def _parse_image_batch_summary(text: str) -> tuple[int, list[str]]:
+    """Parse the ``IMAGEGEN_BATCH`` JSON summary line from a batch run.
+
+    Returns ``(requested_count, successful_output_paths)``. The batch script
+    asserts non-empty bytes before marking an item successful, so a reported
+    success implies a written file.
+    """
+    for line in reversed((text or "").splitlines()):
+        stripped = line.strip()
+        if not stripped.startswith("IMAGEGEN_BATCH"):
+            continue
+        payload_str = stripped[len("IMAGEGEN_BATCH"):].strip()
+        try:
+            payload = json.loads(payload_str)
+        except json.JSONDecodeError:
+            return 0, []
+        if not isinstance(payload, dict):
+            return 0, []
+        items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        requested = int(payload.get("requested") or 0) or len(items)
+        paths = [
+            str(item.get("output_file"))
+            for item in items
+            if isinstance(item, dict) and item.get("success") and item.get("output_file")
+        ]
+        return requested, paths
+    return 0, []
+
+
 def _autowire_plan_path(request: "ToolCallRequest") -> str | None:
     """Plan-file path when the bash call is an autowire-eligible pptx run."""
     tool_name = str(request.tool_call.get("name") or "")
@@ -875,7 +953,7 @@ _PDF_REPORT_SKILL_PATH_MARKERS = (
     "/skills/pdf-report/SKILL.md",
     "/mnt/skills/pdf-report/SKILL.md",
 )
-_VISUAL_ASSET_TOOL_NAMES = frozenset({"generate_chart", "generate_excalidraw_diagram"})
+_VISUAL_ASSET_TOOL_NAMES = frozenset({"generate_chart"})
 _VISUAL_ASSET_EXTENSIONS = frozenset({".svg", ".png", ".jpg", ".jpeg", ".webp"})
 _WRITE_ERROR_CLASS_MARKERS = (
     ("missing_thread_id", ("thread id not available", "nonetype' object has no attribute 'get")),
@@ -2419,8 +2497,9 @@ def _successful_pdf_ready_to_emit(state: dict[str, Any]) -> bool:
         return False
     if _pdf_render_unusable_after_repair(state):
         return False
-    if _pdf_render_page_count_failed_after_repairs(state):
-        return False
+    # Page count never blocks emit: an off-target-after-repair PDF ships with a
+    # quality_warning (see _apply_pdf_page_count_quality_metadata), never a
+    # terminal failure.
     return _canonical_outputs_artifact_path(result.get("pdf_path")) is not None
 
 
@@ -2444,17 +2523,33 @@ def _pdf_page_target_text(state_or_result: dict[str, Any]) -> str:
     return f"{low}-{high} pages"
 
 
+def _pdf_page_count_tolerance(low: int, high: int) -> int:
+    """Pages of slack allowed on either side of the requested band."""
+    midpoint = (low + high) / 2
+    return max(1, round(midpoint * _PDF_PAGE_COUNT_TOLERANCE_FRACTION))
+
+
 def _pdf_page_count_off_target(payload: dict[str, Any]) -> bool:
     low, high = _pdf_requested_page_bounds(payload)
     if low is None or high is None:
         return False
     page_count = payload.get("page_count")
-    return isinstance(page_count, int) and not (low <= page_count <= high)
+    if not isinstance(page_count, int):
+        return False
+    tolerance = _pdf_page_count_tolerance(low, high)
+    return not (low - tolerance <= page_count <= high + tolerance)
 
 
 def _pdf_page_count_repair_instruction(
     result: dict[str, Any], state: dict[str, Any]
 ) -> str:
+    if result.get("layout_warning") in {"images_missing", "missing_image_resources"}:
+        return (
+            "One or more referenced figures are missing from the rendered PDF. Ensure every "
+            "![](...) reference points to a real file under /mnt/user-data/outputs/visuals/ — "
+            "regenerate the missing figure via generate_chart, or remove the dead reference — "
+            "then call render_markdown_to_pdf again. "
+        )
     page_count = result.get("page_count")
     low, high = _pdf_requested_page_bounds({**state, **result})
     if (
@@ -2465,16 +2560,16 @@ def _pdf_page_count_repair_instruction(
     ):
         if page_count < low:
             return (
-                "Revise the Markdown source once: expand the report to meet the requested "
-                "length, add substantive narrative paragraphs, examples, evidence, and "
-                "section detail, and preserve useful page breaks before calling "
-                "render_markdown_to_pdf again. "
+                "Make ONE targeted edit (do not rewrite the whole document): add or expand a "
+                "single section — one focused paragraph or a single figure with caption — to "
+                "reach the requested length, then call render_markdown_to_pdf again. Do not pad "
+                "every page; that creates sparse pages. "
             )
         if page_count > high:
             return (
-                "Revise the Markdown source once: compact the report to meet the requested "
-                "length, trim redundant prose, combine thin sections, and remove unnecessary "
-                "page breaks before calling render_markdown_to_pdf again. "
+                "Make ONE targeted edit (do not rewrite the whole document): trim or merge a "
+                "single thin section and remove unnecessary page breaks to reach the requested "
+                "length, then call render_markdown_to_pdf again. "
             )
     return (
         "Revise the Markdown source once: compact sparse tables or continuation pages, remove "
@@ -2570,8 +2665,8 @@ def _pdf_artifact_suffix_rejection_reason(canonical: str, state: dict[str, Any])
     suffix = PurePosixPath(canonical).suffix.lower()
     if suffix not in _allowed_pdf_artifact_suffixes(state):
         return f"pdf_invalid_artifact_extension:{suffix or 'none'}"
-    if suffix == ".pdf" and _pdf_render_page_count_failed_after_repairs(state):
-        return "pdf_page_count_off_target"
+    # Page count is never a path/emit rejection — a rendered .pdf off the
+    # requested length still ships (with a quality_warning), never null.
     return _pdf_fallback_rejection_reason(suffix, state)
 
 
@@ -3535,6 +3630,44 @@ def _apply_visual_missing_quality_metadata(
         "[BuilderVisualDiagnostics] phase=visual_missing_quality_warning requested_ext=%s final_ext=%s",
         requested_ext,
         artifact_ext,
+    )
+    return updated
+
+
+def _apply_pdf_page_count_quality_metadata(
+    artifact: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """Annotate a rendered PDF whose page count is outside the requested band.
+
+    Page count is NEVER a terminal failure for a delivered .pdf (restores the
+    "a delivered artifact in the requested format is never a fallback"
+    invariant — prod 2026-06-24: an 11-page PDF for a "10-page" request was
+    discarded as artifact_path=null). An off-band render ships with a
+    quality_warning + capped confidence instead.
+    """
+    if _artifact_ext_from_path(artifact.get("artifact_path")) != "pdf":
+        return artifact
+    result = _successful_pdf_render_result(state)
+    if result is None or not _pdf_page_count_off_target({**state, **result}):
+        return artifact
+    if artifact.get("quality_warning"):
+        return artifact
+    counts = _pdf_page_count_failure_payload(state, result)
+    updated = dict(artifact)
+    updated["quality_warning"] = "page_count_off_target"
+    updated["page_count_delta"] = counts.get("page_delta")
+    confidence = updated.get("confidence")
+    if isinstance(confidence, (int, float)):
+        updated["confidence"] = min(float(confidence), 0.65)
+    tone_hint = str(updated.get("companion_tone_hint") or "").strip()
+    degraded_hint = "Note the report is a little off the requested page length but complete and usable."
+    updated["companion_tone_hint"] = f"{tone_hint} {degraded_hint}".strip()
+    logger.warning(
+        "[BuilderArtifact] phase=page_count_off_target_quality_warning requested=%s actual=%s delta=%s",
+        counts.get("requested_pages"),
+        counts.get("actual_pages"),
+        counts.get("page_delta"),
     )
     return updated
 
@@ -4673,9 +4806,10 @@ def _visual_design_skill_message() -> str:
         "`read_file(description='read visual design skill', "
         "path='/mnt/skills/public/visual-design/SKILL.md')`.\n"
         "For PPTX decks, every slide must be a generated full-slide image embedded "
-        "by the PPTX compiler. For PDF reports, charts must follow the "
-        "chart-visualization skill and technical diagrams use `generate_excalidraw_diagram`. "
-        "Embed the resulting local assets in the final artifact before emitting."
+        "by the PPTX compiler. For PDF reports, both charts AND structural diagrams "
+        "follow the chart-visualization skill via `generate_chart` (use the flow / "
+        "network / mind-map / fishbone / organization-chart / sankey families for "
+        "diagrams). Embed the resulting local assets in the final artifact before emitting."
     )
 
 
@@ -5694,10 +5828,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 candidates,
                 primary_suffix=".pdf",
                 fallback_suffix=_pdf_fallback_suffix(state),
-                primary_disabled=(
-                    _pdf_render_unusable_after_repair(state)
-                    or _pdf_render_page_count_failed_after_repairs(state)
-                ),
+                primary_disabled=_pdf_render_unusable_after_repair(state),
             )
         if requested_pptx:
             return BuilderArtifactMiddleware._preferred_suffix_candidates(
@@ -6264,6 +6395,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         upload_thread_id = parent_thread_id or builder_thread_id
         fallback = _apply_visual_missing_quality_metadata(fallback, state)
+        fallback = _apply_pdf_page_count_quality_metadata(fallback, state)
         _attach_durable_upload_identity(fallback, state, runtime)
         mirror_result = _upload_builder_outputs_to_supabase(
             thread_id=upload_thread_id,
@@ -6919,16 +7051,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "Error: emit_builder_artifact rejected — this is a PDF request "
                         "and a valid rendered .pdf already exists. Emit the rendered .pdf "
                         "instead of a .md/.html fallback."
-                    )
-                if reason == "pdf_page_count_off_target":
-                    result = _successful_pdf_render_result(state) or {}
-                    counts = _pdf_page_count_failure_payload(state, result)
-                    return (
-                        "Error: emit_builder_artifact rejected — the rendered PDF does not "
-                        "match the requested page count after bounded repairs. "
-                        f"requested_pages={counts['requested_pages']} actual_pages={counts['actual_pages']} "
-                        f"page_delta={counts['page_delta']}. Emit artifact_path=null with "
-                        "failure_code='pdf_page_count_off_target' instead of shipping this as normal success."
                     )
                 return (
                     "Error: emit_builder_artifact rejected — this is a PDF request. "
@@ -8753,10 +8875,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             and payload.get("error_type") == "pdf_generation_failed"
         ):
             return self._pdf_generation_failure_command(request, result, payload)
-        if payload.get("success") is True and _pdf_render_page_count_failed_after_repairs(
-            {**request.state, "builder_pdf_render_result": payload}
-        ):
-            return self._pdf_page_count_failure_command(request, result, payload)
+        # Page count never fires a terminal failure: a rendered PDF off the
+        # requested length ships with a quality_warning at emit time
+        # (_apply_pdf_page_count_quality_metadata), never artifact_path=null.
         return Command(update={"messages": [result], **delta})
 
     @staticmethod
@@ -8776,17 +8897,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         billable_segments = BuilderArtifactMiddleware._billable_image_generation_segments(image_segments)
         if not billable_segments:
             return preflight_delta
+
+        manifest_segments = [s for s in billable_segments if _command_flag_value(s, "--manifest")]
+        single_segments = [s for s in billable_segments if not _command_flag_value(s, "--manifest")]
+
+        # Single-image segments keep the existing per-segment output validation.
         statuses = [
             _image_generation_segment_status(segment=segment, text=text, state=state)
-            for segment in billable_segments
+            for segment in single_segments
         ]
-        in_command = max(1, len(billable_segments))
         successful_paths = [
             output_path
             for output_path, valid_image, _bytes_count, _error_class, _status_reason in statuses
             if output_path and valid_image
         ]
-        success_count = len(successful_paths)
         bytes_total = sum(
             bytes_count
             for _output_path, valid_image, bytes_count, _error_class, _status_reason in statuses
@@ -8800,10 +8924,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             ),
             None,
         )
+
+        # Manifest (batch) segments: one invocation produces N images. The
+        # generated paths come from the IMAGEGEN_BATCH summary line (the batch
+        # script asserts non-empty bytes before reporting success).
+        if manifest_segments:
+            _batch_requested, batch_paths = _parse_image_batch_summary(text)
+            successful_paths.extend(batch_paths)
+
+        # attempt_count tracks IMAGES (manifest item counts + one per single
+        # call) so the per-build cap and the cost breaker bound generated images.
+        attempt_count = max(1, _image_generation_images_in_command(command, state))
         delta: dict[str, Any] = {
             **preflight_delta,
-            "image_generation_attempt_count": in_command,
-            "image_generation_success_count": success_count,
+            "image_generation_attempt_count": attempt_count,
+            "image_generation_success_count": len(successful_paths),
             "image_generation_bytes_total": bytes_total,
             "image_generation_error_class": error_class,
         }
@@ -9233,9 +9368,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             # VQ-3: preflight-only checks are free — never counted, never blocked.
             return None
         state = request.state or {}
+        # The cap counts IMAGES: a single ``--manifest`` call produces N images,
+        # so the budget math uses the manifest item count, not the invocation count.
+        images_in_command = max(1, _image_generation_images_in_command(command, state))
         rejection, attempts, successes, error_class = self._image_generation_rejection_text(
             state,
-            billable_in_command=billable_in_command,
+            billable_in_command=images_in_command,
         )
         if rejection is None:
             return None
@@ -9829,6 +9967,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         fallback_reason="pptx_generation_not_completed" if _requested_pptx_artifact(state) else None,
                     )
                     args = _apply_visual_missing_quality_metadata(args, state)
+                    args = _apply_pdf_page_count_quality_metadata(args, state)
                     args = _apply_hero_missing_quality_metadata(args, state)
                     args = _apply_report_figure_quality_metadata(args, state)
                     args = self._attach_pptx_canvas_preview(args, state)

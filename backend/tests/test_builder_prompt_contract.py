@@ -40,7 +40,9 @@ def test_visual_composition_routes_pptx_and_pdf_to_separate_pipelines() -> None:
     assert "Presentations (`.pptx`) are pure image-forward decks" in directives
     assert "PDF reports are deterministic reports" in directives
     assert "There is no alternate plain deck mode" in directives
-    assert "generate_excalidraw_diagram" in directives
+    # Custom excalidraw tool removed; PDFs route all charts AND structural
+    # diagrams through the upstream generate_chart engine.
+    assert "generate_excalidraw_diagram" not in directives
     assert "generate_chart" in directives
     assert "generate_visual_asset" not in directives
     assert "generate_report_chart" not in directives
@@ -60,23 +62,30 @@ def test_ppt_generation_skill_is_pure_image_forward() -> None:
     assert "title_strategy" not in text
 
 
-def test_pdf_report_skill_uses_local_deterministic_figures_only() -> None:
+def test_pdf_report_skill_uses_generate_chart_and_bounded_conceptual_images() -> None:
     text = _skill("pdf-report")
 
     assert "render_markdown_to_pdf" in text
-    assert "generate_excalidraw_diagram" in text
+    # Charts AND structural diagrams go through the upstream chart engine; the
+    # custom excalidraw tool is gone.
+    assert "generate_excalidraw_diagram" not in text
     assert "generate_chart" in text
     assert "chart-visualization renderer" in text
-    assert "Do not use generated slide images in PDF reports" in text
+    # No full-slide deck images in a report, but bounded conceptual images are allowed.
+    assert "Do not use full-slide deck images" in text
+    assert "conceptual" in text.lower()
     assert "generate_report_chart" not in text
     assert "generate_visual_asset" not in text
 
 
-def test_image_generation_skill_is_not_pdf_report_path() -> None:
+def test_image_generation_skill_allows_bounded_pdf_conceptual_images() -> None:
     text = _skill("image-generation")
 
     assert "--slide-visual" in text
-    assert "This image skill is not part of the PDF report workflow" in text
+    # Image-gen is now a bounded PDF path for conceptual/editorial figures only;
+    # data + structure still go through generate_chart.
+    assert "3 conceptual/editorial" in text
+    assert "generate_chart" in text
     assert "generate_visual_asset" not in text
     assert "anti_slop.md" not in text
 
