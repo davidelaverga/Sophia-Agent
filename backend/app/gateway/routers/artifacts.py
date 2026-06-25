@@ -381,7 +381,13 @@ def _is_supabase_thread_list_support_artifact_path(relative_path: str) -> bool:
     """
     normalized = relative_path.strip().lstrip("/").replace("\\", "/")
     name = PurePosixPath(normalized).name.lower()
-    if name.endswith(".preview.pdf"):
+    parts = [part for part in normalized.split("/") if part]
+    in_support_dir = len(parts) > 1 and parts[0] in {"visuals", "sources", "source_artifact", ".builder"}
+    # A top-level deck preview (`<deck>.preview.pdf` beside the .pptx) is kept in
+    # the list so the canvas resolver can find it after a deploy. A `.preview.pdf`
+    # NESTED under an internal/support directory stays hidden — the preview
+    # exemption must not re-expose support files (Codex P2, 2026-06-25).
+    if name.endswith(".preview.pdf") and not in_support_dir:
         return False
     return _is_builder_support_artifact_path(normalized)
 

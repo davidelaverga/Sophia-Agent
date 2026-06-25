@@ -500,6 +500,18 @@ def test_list_artifacts_filters_supabase_visual_support_assets(tmp_path, monkeyp
     assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/deck.pptx"]
 
 
+def test_supabase_support_filter_keeps_toplevel_preview_but_hides_nested() -> None:
+    # A top-level deck preview stays in the list (canvas resolver needs it) ...
+    assert artifacts_router._is_supabase_thread_list_support_artifact_path("deck.preview.pdf") is False
+    assert artifacts_router._is_supabase_thread_list_support_artifact_path("outputs/deck.preview.pdf") is False
+    # ... but a .preview.pdf nested under an internal/support dir stays hidden
+    # (the preview exemption must not re-expose support files).
+    assert artifacts_router._is_supabase_thread_list_support_artifact_path("visuals/x.preview.pdf") is True
+    assert artifacts_router._is_supabase_thread_list_support_artifact_path("sources/x.preview.pdf") is True
+    assert artifacts_router._is_supabase_thread_list_support_artifact_path(".builder/x.preview.pdf") is True
+    assert artifacts_router._is_supabase_thread_list_support_artifact_path("source_artifact/x.preview.pdf") is True
+
+
 def test_list_artifacts_keeps_supabase_deck_preview_pdf_for_canvas_resolution(tmp_path, monkeypatch) -> None:
     missing_outputs = tmp_path / "missing" / "outputs"
     supabase_items = [
