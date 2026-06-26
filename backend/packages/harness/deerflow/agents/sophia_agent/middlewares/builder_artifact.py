@@ -9302,6 +9302,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if visual_design_block is not None:
             return visual_design_block
         if request.tool_call.get("name") != "emit_builder_artifact":
+            deck_block = self._deck_improvisation_rejection(request)
+            if deck_block is not None:
+                return deck_block
             image_block = self._image_generation_block_command(request)
             if image_block is not None:
                 return image_block
@@ -9489,6 +9492,74 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "remaining slides will generate concurrently. See the ppt-generation SKILL.md "
             "workflow. (Single --slide-visual calls are allowed only to repair a stray failed "
             "slide AFTER the batch runs.)"
+        )
+
+    @staticmethod
+    def _deck_improvisation_rejection(request: ToolCallRequest) -> Command | None:
+        """Block model-run deck compilation for `.pptx` targets (Spec D §2.5).
+
+        Decks are authored as slide HTML and converted by
+        ``build_deck_from_slides``; the model must NEVER write
+        ``python-pptx``/``pptxgenjs`` code or invoke a deck compiler — that
+        improvisation produced no `.pptx` and hard-ceiling-timed-out in prod
+        (2026-06-26, runs 019f0473 / 019f047a). Reject with a redirect; slide
+        HTML authoring (``.html``) is always allowed.
+        """
+        state = request.state or {}
+        if not _requested_pptx_artifact(state):
+            return None
+        name = str(request.tool_call.get("name") or "")
+        args = request.tool_call.get("args")
+        if not isinstance(args, dict):
+            return None
+        if name in {"bash", "bash_tool"}:
+            haystack = str(args.get("command") or "").lower()
+        elif name in {"write_file", "write_file_tool", "str_replace", "str_replace_tool"}:
+            path = str(args.get("path") or args.get("file_path") or "").lower()
+            if path.endswith((".html", ".htm")):
+                return None  # slide HTML authoring is the sanctioned path
+            if not path.endswith((".py", ".js", ".mjs", ".ts")):
+                return None  # only code files can carry deck-compilation improvisation
+            content = str(
+                args.get("content")
+                or args.get("new_str")
+                or args.get("new_string")
+                or ""
+            )
+            haystack = f"{path}\n{content}".lower()
+        else:
+            return None
+        signals = (
+            "import pptx",
+            "from pptx",
+            "pptxgenjs",
+            "python-pptx",
+            "compile_pptx",
+            "ppt-generation/scripts/generate.py",
+            "presentation(",  # python-pptx API constructor
+        )
+        if not any(sig in haystack for sig in signals):
+            return None
+        logger.warning("[BuilderDeck] phase=improvisation_blocked tool=%s", name)
+        return Command(
+            update={
+                "messages": [
+                    _error_tool_message(
+                        content=(
+                            "[Sophia/deck-build] Decks are authored as slide HTML and the build "
+                            "system converts them to PPTX — do NOT write python-pptx/pptxgenjs "
+                            "code or invoke a deck compiler. Author one self-contained 1920x1080 "
+                            "HTML file per slide under /mnt/user-data/outputs/slides/ (images "
+                            "referenced by relative ../assets/<file> paths), then call "
+                            "build_deck_from_slides(output_path='/mnt/user-data/outputs/<deck>.pptx') "
+                            "to produce the deck."
+                        ),
+                        tool_call_id=request.tool_call.get("id", ""),
+                        name=name,
+                    ),
+                ],
+            },
+            goto="model",
         )
 
     def _image_generation_block_command(self, request: ToolCallRequest) -> Command | None:
@@ -9733,6 +9804,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if visual_design_block is not None:
             return visual_design_block
         if request.tool_call.get("name") != "emit_builder_artifact":
+            deck_block = self._deck_improvisation_rejection(request)
+            if deck_block is not None:
+                return deck_block
             image_block = self._image_generation_block_command(request)
             if image_block is not None:
                 return image_block

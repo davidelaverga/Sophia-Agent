@@ -4,8 +4,71 @@
 **Audience:** Sophia engineering (Davide)
 **Branch / HEAD:** `codex/sophia-observability-v1` @ `8865413c` ("fix(builder): render reports via HTML→PDF (inline SVG); enforce deck batch")
 **Author:** Builder forensics pass (adversarially verified against top-of-branch source)
+**Updated:** 2026-06-26 (Round 2 — post-deploy retest on `5da2841f`, live 14:53 UTC)
 
 ---
+
+## Round 2 — Post-Deploy Retest (deploy `5da2841f`, live 2026-06-26 14:53:48 UTC)
+
+The Round-1 fixes shipped in `5da2841f` and prod is running it. The user retested: **the PDF report succeeded with excellent diagram/chart quality** (user-confirmed: good variety, well-rendered, no figure imperfections), but **two presentation builds both failed**, and the PDF carries two **new** imperfections — near-blank pages and a page-count overrun (11 pages for an 8-page request).
+
+> **⚠️ Correction to an earlier draft of this section.** An earlier Round-2 draft claimed "no deck build ran post-deploy / the deck fix is untested." **That was wrong.** Two `task_type=presentation` builds *did* run on `5da2841f` and both failed (details below). The error was a log-tooling mistake on my part: `render logs --limit 1000` returns the **most-recent** N lines in a window, so the verbose PDF run (15:42–15:48) pushed the earlier deck runs (15:01–15:21) out of the returned slice. Re-scanned with tight 10-minute windows, the deck runs are unmistakable. Evidence below is from `sophia-langgraph` Render logs (deck runs `019f0473` and `019f047a`, PDF run `019f0498`) + the delivered artifact.
+
+### Status at a glance
+
+| Item | Round 1 (`8865413c`, ~01:16 UTC) | Round 2 (`5da2841f`, 15:01–15:48 retest) |
+|---|---|---|
+| PDF delivery | works | ✅ works (`render_html_to_pdf` → upload → webhook `status=success` delivered) |
+| PDF figure quality | clipping/collision (F1–F2) | ✅ **excellent** — inline-SVG charts + diagrams, varied, well-rendered (user-confirmed) |
+| PDF code/column fidelity (F1/F2) | broken | ✅ fixed (report.css `pre` wrap + `.cols-2`) — not retriggered |
+| PDF page count | n/a | ⚠️ **11 pages vs 8 requested** (`page_count_off_target`, ships with warning) |
+| PDF blank pages | n/a | ⚠️ **near-blank pages 3, 9, 11** |
+| PDF visual-presence gate | n/a | ⚠️ **false-rejected** (`image_count=0` for inline SVG) — wasted a repair turn |
+| Deck (`.pptx`) build | failed (t.pptx mismatch + timeout) | ❌ **STILL FAILS** — 2 builds, both hard-ceiling timeouts, **never compiled a `.pptx`** |
+
+### ✅ What worked
+- **The visual-quality program is done.** The report's inline-SVG charts and structural diagrams render correctly, with real series/labels and good variety — exactly the goal of the 2026-06-25 (HTML→PDF inline-SVG) + 2026-06-26 (report.css `pre`/`.cols-2`) work. No figure-level imperfections. The F1/F2 code-clip/column-collide defects did not recur.
+- **PDF delivery is solid.** Run `019f0498`: `render_html_to_pdf: render_success`, uploaded to Supabase, `fire_completion_webhook status=success` **delivered** (the webhook-retry path is in play; no "delivery failed").
+- **Deck image generation works.** Both deck runs reached `image_calls=20` (hero-anchor `--manifest` batch) — image gen is *not* the failure site.
+
+### ❌ / ⚠️ What didn't (Round-2 findings)
+
+#### R2-1 — Deck builds STILL FAIL on `5da2841f`: the model never compiles a `.pptx` → hard-ceiling timeout (the fix targeted the wrong failure mode)
+- **Evidence — two deck builds, both failed:**
+  - Deck #1: dispatch `15:01:21` (`start_builder_task dispatching: task_type=presentation target_ext=pptx`), builder thread `019f0473` → `hard ceiling reached at turn=45, tools=write_file — forcing end with fallback` → `fire_completion_webhook status=timeout artifact_path=None` at `15:08:24` (~7 min).
+  - Deck #2 (user retry): dispatch `15:09:35`, builder thread `019f047a-a81b` → `image_calls=20` (images generated), `write_file_count=14` (many `ext=py` writes), repeated `tool calls present but no builder artifact … tools=bash/write_file` + `forcing tool_choice=write_file … no output file yet`, dangling/duplicate `bash`/`write_file` tool-result churn → `hard ceiling reached at turn=45` → `status=timeout artifact_path=None` at `15:21:34` (~12 min).
+- **Root cause (verified across both runs):** the model generates the slide images but **never compiles them into a `.pptx`**. A targeted grep across both runs for `ppt-generation/scripts/generate.py`, `--plan-file/--output-file`, `compile_pptx`, any `.pptx` write, or `_maybe_autowire_pptx` returns **nothing** — the model instead writes custom Python (`write_file … ext=py`) and runs `bash`, which dangles/errors (duplicate tool-results dropped), so **no output `.pptx` ever exists**. With no file at the recognized path, the build loops `write_file` under tool_choice pressure until the **45-turn hard ceiling** fires → timeout, `artifact_path=None`.
+- **Why my Round-1 deck fix did not help:** `_authoritative_pptx_emit_args` only repoints the emit when a valid `.pptx` already exists on disk — here **none is ever produced**, so it has nothing to promote (`pptx_emit_repointed_to_compiled_deck` never appears in either run). And A4 (documenting the exact `generate.py` command in `ppt-generation/SKILL.md`) **did not change the model's behavior** — it still improvised custom python-pptx. This is the **same failure mode as Round-1's `019f0168` timeout**, which was the dominant deck failure all along; A1 fixed only the rarer "compiled-but-mis-named (`t.pptx`)" mode (`019f0178`).
+- **Conclusion:** the deck needs **harness ENFORCEMENT of the compile step**, not prompt guidance. When slide images are ready and no valid `.pptx` exists, the harness must force the exact `generate.py --plan-file … --output-file /mnt/user-data/outputs/<slug>.pptx` invocation (extend `_pptx_compile_tool_choice_for_state` to force that specific command, not just any `bash`), and/or detect-and-reject custom `python-pptx` / `_generate_*.py` authoring for a `.pptx` target and redirect to the compiler. Documentation (A4) and post-hoc promotion (A1) are insufficient — the model must be *made* to run the compiler.
+
+#### R2-2 — PDF visual-presence gate FALSE-rejects inline-SVG reports (NEW; regression from HTML→PDF)
+- **Supposed vs Actual:** the visual gate should confirm the requested charts/diagrams are present. *Actual:* `render_html_to_pdf` reported **`image_count=0`** for a report packed with inline SVG, so the gate fired `emit rejected in after_model — artifact_path … exists but requested visuals are not embedded`, **consumed the one visual-embed repair turn**, then shipped with a misleading `visual_missing_quality_warning`.
+- **Root cause (verified):** `_visual_presence_validated` routes `.pdf` to `_pdf_contains_visual_evidence` (`builder_artifact.py`), which reads **`image_count`** = the count of PDF `/Image` XObjects. **Chromium renders inline `<svg>` as vector drawing operators, not image XObjects**, so `image_count=0` even for a richly-illustrated report. The gate was designed for the old PNG-embedding path; it is wrong for the HTML→PDF inline-SVG path. (Confirmed: prod `image_count=0` + the rejection log + the code.)
+- **Impact:** non-fatal (the PDF still ships via soft-pass) but it (a) wastes the repair budget that should fix page count, and (b) stamps a false "visuals missing" quality warning.
+
+#### R2-3 — PDF page-count overshoot (2 → 11 vs 8) + near-blank pages (NEW)
+- **Evidence (run `019f0498`):** first render `page_count=2` (far under 8) → `requesting PDF layout repair attempt=1/1` → second render `page_count=11` (over 8 by +37%) → `page_count_off_target`, repair budget spent → `forcing tool_choice=emit_builder_artifact` → ships with warning. `short_page_count=4`. The artifact shows **near-blank pages 3, 9, 11** (a figure caption / a single callout / one source line at the top, the rest empty).
+- **Root cause:** two compounding factors — (a) **the model under-drafts then over-expands**: its first HTML was ~56 KB / 2 pages, and the one-shot page-count repair (`_PDF_PAGE_COUNT_REPAIR_MAX=1`) can't converge an under→over swing, so the over-expanded 11-page draft ships; (b) **layout leaves whitespace**: over-tall figure containers (a small diagram in a page-tall box) plus `figure { page-break-inside: avoid }` push blocks to the next page and split an over-tall figure (page 3 = Figure 1's caption + the empty tail of its box), and the expansion padded with spacing rather than content (pages 9, 11). `report.css` has no `figure`/`svg` `max-height` cap and no guard against page-tall figure blocks.
+
+### Root-cause summary (Round 2)
+
+| # | Symptom | Root cause | Type | Fix |
+|---|---|---|---|---|
+| R2-1 | Deck builds (×2) timed out, no artifact | Model generates images but **never compiles a `.pptx`** (writes custom python-pptx instead of `generate.py`, bash dangles) → no output → 45-turn hard ceiling. A1 can't repoint (no file); A4 docs didn't change behavior | code (needs enforcement) | **Harness-force the `generate.py` compile** when images ready + no `.pptx`; reject custom python-pptx for pptx targets |
+| R2-2 | "visuals not embedded" on an illustrated PDF | `_pdf_contains_visual_evidence` keys on `image_count` (PDF /Image XObjects); inline SVG is vector → 0 | code (HTML→PDF regression) | Treat inline-`<svg>` reports as visual-present (count `<svg>` in source, or have `render_html_to_pdf` return an svg/vector-visual count) |
+| R2-3 | 11 vs 8 pages; near-blank pages 3/9/11 | model under-drafts→over-expands; 1-shot repair can't converge; over-tall figures + `page-break-inside` leave whitespace | code (CSS) + prompt | CSS: cap `figure`/`svg` max-height, trim default vertical spacing; SKILL.md: author to length on first pass, compact figures, no spacer padding; consider a 2nd page-count repair |
+
+### Recommended fixes (prioritized)
+
+- **P0 — Harness-enforce the deck compile (R2-1, the real deck fix).** The deck fails because the model never runs the compiler. Documentation (A4) and post-hoc promotion (A1) are not enough — *force* it: when slide images are ready and no valid `.pptx` exists under outputs/, force the exact `python …/ppt-generation/scripts/generate.py --plan-file … --output-file /mnt/user-data/outputs/<slug>.pptx` (extend `_pptx_compile_tool_choice_for_state` to force that command, not just `bash`), and detect-and-reject custom `python-pptx` / `_generate_*.py` authoring on a `.pptx` target (redirect to the compiler). Also investigate the dangling/duplicate `bash` tool-result churn that burns turns toward the ceiling. _Then_ A1's authoritative-emit becomes the safety net for naming, as designed.
+- **P1 — Fix the inline-SVG visual gate (R2-2).** In `_pdf_contains_visual_evidence` / the render-result, recognize vector visuals: either count `<svg>` occurrences in the report HTML source (the model authors them there), or have `render_html_to_pdf.mjs`/`.py` return an `svg_count` (or `vector_visual_count`) alongside `image_count` and treat `>0` as visual-present. Stops the false rejection, the wasted repair, and the misleading warning.
+- **P1 — Tighten PDF length/whitespace (R2-3).** `report.css`: add `figure svg, figure img { max-height: ~150mm }` and reduce default `figure`/section vertical spacing so a small diagram can't reserve a page; keep `page-break-inside: avoid` only for short figures. `pdf-report/SKILL.md`: author the report to the requested page count on the FIRST pass (don't rely on the repair to grow it), size figures compactly, and never pad with empty space/spacers. Optionally raise `_PDF_PAGE_COUNT_REPAIR_MAX` to 2 so an under→over swing can converge.
+
+---
+
+## Round 1 — Pre-fix analysis (deploy `8865413c`) · fixes shipped in `5da2841f`
+
+> The sections below are the original 2026-06-26 analysis of the `8865413c` deploy. The deck (D1–D2) and PDF code/column (F1–F3) fixes described here **shipped in `5da2841f`**; Round-2 above is the post-deploy retest.
 
 ## 1. Executive Summary
 

@@ -53,25 +53,24 @@ def test_visual_composition_routes_pptx_and_pdf_to_separate_pipelines() -> None:
     assert "generate_report_chart" not in directives
 
 
-def test_ppt_generation_skill_is_pure_image_forward() -> None:
+def test_ppt_generation_skill_authors_html_slides() -> None:
+    """Spec D Phase 0: decks are authored as slide HTML; harness converts to PPTX."""
     text = _skill("ppt-generation")
 
-    assert "Every slide is a single 16:9 image" in text
-    assert "top 14% title band" in text
-    assert "bottom 16% narrative band" in text
-    assert "image_path" in text
-    assert "Zero compiler-side text boxes" in text
+    # New HTML-slide contract.
+    assert "slide HTML" in text or "HTML file per slide" in text
+    assert "build_deck_from_slides" in text
+    assert "slides/" in text and "assets/" in text
+    assert "../assets/" in text  # relative image path convention
+    # The model never compiles the deck.
+    assert "python-pptx" in text  # appears only as a prohibition
+    assert "pptxgenjs" in text
+    assert "never" in text.lower() or "do not" in text.lower() or "do NOT" in text
+    # Old contract retired.
+    assert "Every slide is a single 16:9 image" not in text
+    assert "--plan-file" not in text  # model no longer runs the compiler
     assert "generate_visual_asset" not in text
     assert "generate_report_chart" not in text
-    assert "text-only" not in text
-    assert "title_strategy" not in text
-    # 2026-06-26: the compile step must document the exact compiler command +
-    # a load-bearing output path so the model stops improvising (→ t.pptx).
-    assert "ppt-generation/scripts/generate.py" in text
-    assert "--plan-file" in text
-    assert "--output-file" in text
-    assert "load-bearing" in text.lower()
-    assert "python-pptx" in text  # explicitly forbidden as a custom-compile path
 
 
 def test_pdf_report_skill_uses_html_and_inline_svg() -> None:

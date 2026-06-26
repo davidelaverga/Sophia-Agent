@@ -1,154 +1,99 @@
 ---
 name: ppt-generation
-description: Use this skill whenever the builder must create a PowerPoint deck or presentation (.pptx). Sophia decks are pure image-forward: one generated full-slide bitmap per slide, compiled into PPTX with speaker notes only.
+description: Use this skill whenever the builder must create a PowerPoint deck or presentation (.pptx). Sophia decks are authored as one self-contained HTML file per slide; the build system renders each slide and converts the deck to PPTX. You never compile the deck.
 ---
 
-# Sophia Deck Skill - PPTX
+# Sophia Deck Skill — PPTX (HTML slides)
 
-Sophia presentations are generated visual decks, not editable template decks.
-Every slide is a single 16:9 image with all visible title, concise narrative,
-labels, diagrams, and layout baked into the bitmap. The PPTX compiler places that image
-full bleed and attaches speaker notes. It does not draw compiler-side titles,
-captions, charts, shapes, or engine-composed slides.
+A deck is a set of **slide HTML files**. You author the HTML; the build system
+renders each slide to a full-bleed image, checks its layout, and converts the
+deck to PPTX. **You do not compile the deck yourself.** Each slide is a
+self-contained `1920×1080` HTML document — real DOM text (crisp titles and body)
+plus a generated image referenced by a **relative** path. This is the same
+Chromium substrate the PDF report path uses.
 
-## Workflow (hero-anchor batch — generate slides in ONE parallel batch)
+## Building a deck
 
-Generating slide images one-per-turn is the slow path that made decks loop for
-~15-20 minutes. Instead, anchor on a hero image, then generate every remaining
-slide in a SINGLE concurrent batch.
-
-1. Plan the deck: one line per slide with `title`, core idea, treatment,
-   diagram family, and visible bottom narrative.
-2. Choose one `visual_style` for the whole deck. Keep it consistent across all
-   slides while varying composition and diagram grammar.
-3. **Generate the hero/cover slide FIRST** (one call). It sets the style every
-   other slide references:
+1. **Plan the slides** — slide count and, per slide: the title, the body/narrative,
+   and the image to generate.
+2. **Generate each slide's image into the deck `assets/` folder.** Use the
+   image-generation skill, writing the PNG under `/mnt/user-data/outputs/assets/`.
+   Generate the hero/cover first, then the rest in ONE `--manifest` batch (each
+   item referencing the hero for visual consistency):
    ```bash
+   # hero first (anchors the visual style)
    python /mnt/skills/public/image-generation/scripts/generate.py \
-     --slide-visual \
-     --prompt-file /mnt/user-data/outputs/visuals/slide-01.prompt.json \
-     --output-file /mnt/user-data/outputs/visuals/slide-01.png
-   ```
-   Each `*.prompt.json` is `{"prompt": "<the slide prompt from the skeleton below>"}`.
-4. **Write ONE batch manifest** for the remaining slides. Every item is
-   `slide_visual: true` and lists the hero in `reference_images` for visual
-   consistency:
-   ```json
-   {
-     "concurrency": 4,
-     "items": [
-       {"prompt_file": "/mnt/user-data/outputs/visuals/slide-02.prompt.json",
-        "output_file": "/mnt/user-data/outputs/visuals/slide-02.png",
-        "slide_visual": true,
-        "reference_images": ["/mnt/user-data/outputs/visuals/slide-01.png"]},
-       {"prompt_file": "/mnt/user-data/outputs/visuals/slide-03.prompt.json",
-        "output_file": "/mnt/user-data/outputs/visuals/slide-03.png",
-        "slide_visual": true,
-        "reference_images": ["/mnt/user-data/outputs/visuals/slide-01.png"]}
-     ]
-   }
-   ```
-5. **Run the batch ONCE** (all remaining slides generate concurrently):
-   ```bash
+     --prompt-file /mnt/user-data/outputs/assets/01-cover.prompt.json \
+     --output-file /mnt/user-data/outputs/assets/01-cover.png
+   # then ONE batch for the rest (each item: "reference_images": [".../assets/01-cover.png"])
    python /mnt/skills/public/image-generation/scripts/generate.py \
-     --manifest /mnt/user-data/outputs/visuals/manifest.json
+     --manifest /mnt/user-data/outputs/assets/manifest.json
    ```
-   It prints one `IMAGEGEN_BATCH {...}` summary line. Do NOT fall back to
-   one-call-per-slide — that is the loop this batch exists to prevent.
-6. QC the batch summary. Repair ONLY the failed items: write a small manifest
-   containing just those items and re-run `--manifest` once (or a single
-   `--slide-visual` call for one stray failure).
-7. Create a plan JSON whose slides point to the generated images with
-   `image_path` and include concise `speaker_notes`.
-8. Compile the PPTX. Emit the `.pptx` as the primary artifact.
+   Generated images are written as **local files** — reference them by relative
+   path from your slide HTML, never a remote URL.
+3. **Author one self-contained HTML file per slide** under
+   `/mnt/user-data/outputs/slides/`, named so they sort in order (e.g.
+   `slides/01-cover.html`, `slides/02-overview.html`). Each is a `1920×1080`
+   document. Use the skeleton below. Reference the slide's image by **relative**
+   path only (`../assets/01-cover.png`).
+4. **Convert to PPTX.** Call the build tool once:
+   ```
+   build_deck_from_slides(output_path="/mnt/user-data/outputs/<deck>.pptx", title="<Deck title>")
+   ```
+   The build system renders every `slides/*.html` to a full-bleed PNG and wraps
+   them into the `.pptx`. It returns the `.pptx` path and slide count.
+5. **Emit** the returned `.pptx` with `emit_builder_artifact(artifact_type="presentation")`.
 
-## Slide Image Contract
+## Slide HTML skeleton
 
-Every prompt must ask for:
-
-- A professional presentation slide, 16:9.
-- top 14% title band.
-- Center 70% visual safe area.
-- bottom 16% narrative band for content, architecture, process,
-  comparison, and concept slides.
-- No visual element entering the top or bottom bands.
-- Exact rendered strings for every visible label.
-
-Use this prompt skeleton:
-
-```text
-A professional presentation slide, 16:9.
-Reserve the top 14% for title, bottom 16% for a concise 1-2 sentence narrative, and center 70% for the visual.
-Title band text: "{title}".
-Bottom narrative band text: "{narrative}".
-Center safe area: {precise layout and visual description}.
-Labels to render exactly: "{label 1}", "{label 2}", ...
-Use the selected Sophia visual style: {visual_style}. High contrast, crisp, presentation-grade.
+```html
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+  /* A slide is exactly the deck canvas. No scroll, no margins. */
+  html, body { margin: 0; padding: 0; }
+  .slide {
+    width: 1920px; height: 1080px; box-sizing: border-box;
+    background: #0e1626; color: #f3f6fc; overflow: hidden; position: relative;
+    font-family: "Helvetica Neue", Arial, sans-serif;
+  }
+  .slide .title { position: absolute; top: 64px; left: 80px; right: 80px;
+    font-size: 64px; font-weight: 700; line-height: 1.1; }
+  .slide .visual { position: absolute; top: 200px; left: 80px; right: 80px; bottom: 200px; }
+  .slide .visual img { width: 100%; height: 100%; object-fit: contain; }
+  .slide .narrative { position: absolute; left: 80px; right: 80px; bottom: 72px;
+    font-size: 30px; line-height: 1.35; color: #aebbd2; }
+</style>
+</head>
+<body>
+  <div class="slide">
+    <div class="title">Slide title</div>
+    <div class="visual"><img src="../assets/01-cover.png" alt="..."></div>
+    <div class="narrative">One or two sentences of supporting narrative.</div>
+  </div>
+</body>
+</html>
 ```
 
-Keep visible text concise:
+## Hard rules
 
-- Title: 4-9 words.
-- Bottom narrative: 1-2 short sentences that explain the slide's point, ideally 18-34 words total.
-- Diagram labels: 1-5 words each.
-- Avoid dense paragraphs on the slide image.
-
-## Narrative
-
-Speaker notes are required for content slides. Notes should be 1-3 concise
-sentences that narrate the slide. Notes are not visible on the slide and do not
-replace the bottom narrative band.
-
-## Hard Data
-
-When exact numeric reading is essential, include the exact data in the image
-prompt and keep the chart simple. Do not fabricate values. If the data cannot
-be rendered reliably after one repair, emit an honest warning rather than
-switching to an engine-composed PPTX slide.
-
-## Compile Contract
-
-The plan JSON must include one image path per slide:
-
-```json
-{
-  "title": "Deck title",
-  "slides": [
-    {
-      "title": "Slide title",
-      "image_path": "/mnt/user-data/outputs/visuals/slide-01.png",
-      "speaker_notes": "Concise narration."
-    }
-  ]
-}
-```
-
-Write the plan to `/mnt/user-data/outputs/deck_plan.json`, then compile with the
-**ppt-generation compiler** — this exact command, nothing else:
-
-```bash
-python /mnt/skills/public/ppt-generation/scripts/generate.py \
-  --plan-file /mnt/user-data/outputs/deck_plan.json \
-  --output-file /mnt/user-data/outputs/<the requested deck filename>.pptx
-```
-
-**The output path is load-bearing.** Write the `.pptx` to the deliverable
-filename you were asked for under `/mnt/user-data/outputs/`, then pass that SAME
-path to `emit_builder_artifact(artifact_path=…)`. Do NOT:
-- write your own `python-pptx` / custom generator script — use the compiler above;
-- improvise a short or placeholder name (e.g. `t.pptx`) — emit the file you compiled.
-
-The compiler fails if a slide image is missing. That failure is intentional:
-regenerate the missing image or stop cleanly.
+- **You author HTML only.** You never author or run deck-compilation code. Do NOT
+  write `python-pptx` or `pptxgenjs` code, do NOT call any deck compiler, do NOT
+  run `bash` to assemble a deck. The build system converts your slide HTML to PPTX.
+- **Every slide visual is a relative `../assets/<file>` path.** A remote URL in a
+  slide is an error — generate images into `assets/` first.
+- Generate images into `/mnt/user-data/outputs/assets/`; author slides into
+  `/mnt/user-data/outputs/slides/`; the deck is built to
+  `/mnt/user-data/outputs/<deck>.pptx`.
+- Keep visible slide text concise (title 4–9 words; narrative 1–2 sentences). The
+  text is real HTML now — it renders crisply, but a wall of text still looks bad.
 
 ## QA Checklist
 
-- Slides generated via the hero + ONE `--manifest` batch, not one call per turn.
-- One picture per slide.
-- Zero compiler-side text boxes over image-forward slides.
-- Baked title visible on every slide.
-- Baked 1-2 sentence narrative visible on content slides.
-- No overlap between title, center visual, and bottom narrative.
-- Expected slide count.
-- Correct primary extension: `.pptx`.
-- Emit promptly once valid.
+- Slides authored as `slides/*.html`; images in `assets/`, referenced relatively.
+- The deck was produced by `build_deck_from_slides`, not hand-written PPTX code.
+- One image per slide; titles/narrative are real HTML text, legible and not clipped.
+- Expected slide count; correct primary extension `.pptx`.
+- Emit promptly once the build returns a valid `.pptx`.

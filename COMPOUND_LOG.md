@@ -26,6 +26,27 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-06-26 · [spec-D-phase-0 · decks on HTML render substrate] · PR #147
+**Author:** Claude · **Track:** backend · **Spec:** `sophia_spec_D_builder_build_pipeline_v1.md` (validated/amended) · forensics `docs/audits/sophia-builder-deck-failure-and-pdf-render-forensics-2026-06-26.md`
+
+### What changed
+- Decks no longer compiled by the model. New deterministic builder tool `build_deck_from_slides` (`sophia/tools/build_deck_from_slides.py`): renders each authored `slides/*.html` to a full-bleed PNG via new `render_html_to_png.mjs` (1920×1080, same Chromium engine as render_html_to_pdf), wraps via existing `compile_pptx.mjs`. Offered to presentation task types instead of render_html_to_pdf.
+- Improvisation backstop `_deck_improvisation_rejection` (wrap_tool_call, both sync/async): blocks python-pptx/pptxgenjs/compiler tool calls for `.pptx` targets; allows slide-HTML authoring.
+- `ppt-generation/SKILL.md` rewritten to the HTML-slide contract; `builder_task.py` deck guidance updated; Dockerfile verifies the new .mjs.
+
+### What we learned
+- The prior deck "fix" (authoritative-emit) targeted the rarer mis-named-`.pptx` mode; the dominant, recurring failure was the model **never compiling at all** (improvises python-pptx → no file → hard-ceiling timeout). Verified across 4 prod runs. The robust fix is to take compilation out of the model's hands entirely — author HTML, harness converts — reusing the proven report substrate.
+- Spec premise check matters: the spec's Genspark-borrowed credentialed image downloader was unnecessary — Sophia's image-gen already writes local files. Validating the spec against code before building saved that work.
+
+### CLAUDE.md Updates
+- `backend/CLAUDE.md`: "Spec D Phase 0 — decks on the HTML render substrate (2026-06-26)".
+
+### Skills Created / Modified
+- Rewrote `skills/public/ppt-generation/SKILL.md` (HTML-slide authoring contract).
+
+### GEPA Log Entry
+- Prompt file changed (ppt-generation/SKILL.md): before = "generate one full-slide image per slide, compile with the PPTX workflow" (model improvised python-pptx → never compiled); after = "author one HTML file per slide, call build_deck_from_slides; never write pptx code." tone_delta: N/A (builder). Trace pair: yes (runs 019f0473/019f047a hard-ceiling vs the new pipeline).
+
 ## 2026-06-26 · [builder-deck-delivery + pdf-render-fidelity] · PR #146
 **Author:** Claude · **Track:** backend · **Spec:** `docs/audits/sophia-builder-deck-failure-and-pdf-render-forensics-2026-06-26.md`
 
