@@ -15,6 +15,7 @@
 import fs from "node:fs";
 import path from "node:path";
 import process from "node:process";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { chromium } from "playwright-core";
 
 function parseArgs(argv) {
@@ -41,6 +42,49 @@ function parseArgs(argv) {
   return args;
 }
 
+function outputRootForHtml(htmlFile) {
+  const resolved = path.resolve(htmlFile);
+  const parts = resolved.split(path.sep);
+  const outputIndex = parts.lastIndexOf("outputs");
+  if (outputIndex >= 0) {
+    return parts.slice(0, outputIndex + 1).join(path.sep) || path.sep;
+  }
+  return path.dirname(resolved);
+}
+
+function isInsideDirectory(candidate, root) {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (relative && !relative.startsWith("..") && !path.isAbsolute(relative));
+}
+
+function isAllowedRenderRequest(url, htmlFile, outputRoot) {
+  if (url === pathToFileURL(path.resolve(htmlFile)).href) {
+    return true;
+  }
+  if (url.startsWith("data:") || url.startsWith("blob:") || url === "about:blank") {
+    return true;
+  }
+  if (!url.startsWith("file:")) {
+    return false;
+  }
+  try {
+    return isInsideDirectory(path.resolve(fileURLToPath(url)), outputRoot);
+  } catch {
+    return false;
+  }
+}
+
+async function installRenderRequestPolicy(page, htmlFile) {
+  const outputRoot = outputRootForHtml(htmlFile);
+  await page.route("**/*", (route) => {
+    const requestUrl = route.request().url();
+    if (isAllowedRenderRequest(requestUrl, htmlFile, outputRoot)) {
+      return route.continue();
+    }
+    return route.abort("blockedbyclient");
+  });
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!fs.existsSync(args.htmlFile)) {
@@ -57,10 +101,12 @@ async function main() {
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });
   try {
-    const page = await browser.newPage({
+    const context = await browser.newContext({ javaScriptEnabled: false });
+    const page = await context.newPage({
       viewport: { width, height },
       deviceScaleFactor: scale,
     });
+    await installRenderRequestPolicy(page, args.htmlFile);
     await page.goto(`file://${path.resolve(args.htmlFile)}`, {
       waitUntil: "networkidle",
       timeout: 60000,

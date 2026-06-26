@@ -335,3 +335,15 @@ def test_render_html_to_pdf_reports_vector_visual_count(staged, monkeypatch, tmp
     assert result["success"] is True
     assert result["image_count"] == 0  # chromium keeps SVG vector
     assert result["vector_visual_count"] == 2  # two inline <svg> figures counted
+
+
+def test_chromium_html_renderers_block_external_subresources():
+    pdf_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_pdf.mjs"
+    png_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_png.mjs"
+    for script in (pdf_script, png_script):
+        source = script.read_text(encoding="utf-8")
+        assert "javaScriptEnabled: false" in source
+        assert "await page.route(\"**/*\"" in source
+        assert "blockedbyclient" in source
+        assert "url.startsWith(\"file:\")" in source
+        assert "outputRootForHtml" in source
