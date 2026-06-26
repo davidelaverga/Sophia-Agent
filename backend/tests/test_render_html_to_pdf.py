@@ -69,14 +69,23 @@ def staged(tmp_path, monkeypatch):
 # ---- Input validation ------------------------------------------------------
 
 
-def test_rejects_pdf_path_outside_outputs(staged):
+@pytest.mark.parametrize(
+    ("html_path", "pdf_path", "error_part"),
+    [
+        (f"{_OUTPUTS_PREFIX}report.html", "/tmp/elsewhere.pdf", "pdf_path"),
+        ("/etc/passwd", f"{_OUTPUTS_PREFIX}out.pdf", "html_path"),
+        (f"{_OUTPUTS_PREFIX}../secret.html", f"{_OUTPUTS_PREFIX}out.pdf", "traversal"),
+    ],
+)
+def test_rejects_paths_outside_outputs(staged, html_path, pdf_path, error_part):
     result = _call(
         runtime=_fake_runtime(),
-        html_path=f"{_OUTPUTS_PREFIX}report.html",
-        pdf_path="/tmp/elsewhere.pdf",
+        html_path=html_path,
+        pdf_path=pdf_path,
     )
     assert result["success"] is False
     assert result["error_type"] == "invalid_input"
+    assert error_part in result["error"]
 
 
 def test_missing_html_source(staged, monkeypatch):

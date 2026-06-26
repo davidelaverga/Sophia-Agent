@@ -14,6 +14,7 @@ import json
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from langgraph.types import Command
 
 import deerflow.sophia.tools.build_deck_from_slides as deck
@@ -47,14 +48,26 @@ def test_presentation_toolset_offers_deck_builder_not_pdf_renderer():
 # ---- build_deck_from_slides ------------------------------------------------
 
 
-def test_rejects_output_outside_outputs():
-    r = _call(runtime=_runtime(), output_path="/tmp/deck.pptx")
-    assert r["success"] is False and r["error_type"] == "invalid_input"
+@pytest.mark.parametrize(
+    ("kwargs", "error_part"),
+    [
+        ({"output_path": "/tmp/deck.pptx"}, "output_path"),
+        ({"output_path": f"{_OUTPUTS}../deck.pptx"}, "traversal"),
+        ({"output_path": f"{_OUTPUTS}deck.pptx", "slides_dir": "/etc"}, "slides_dir"),
+        ({"output_path": f"{_OUTPUTS}deck.pptx", "slides_dir": f"{_OUTPUTS}../slides"}, "traversal"),
+    ],
+)
+def test_rejects_paths_outside_outputs(kwargs, error_part):
+    r = _call(runtime=_runtime(), **kwargs)
+    assert r["success"] is False
+    assert r["error_type"] == "invalid_input"
+    assert error_part in r["error"]
 
 
 def test_rejects_non_pptx_output():
     r = _call(runtime=_runtime(), output_path=f"{_OUTPUTS}deck.pdf")
-    assert r["success"] is False and r["error_type"] == "invalid_input"
+    assert r["success"] is False
+    assert r["error_type"] == "invalid_input"
 
 
 def test_no_slides_is_reported(tmp_path, monkeypatch):

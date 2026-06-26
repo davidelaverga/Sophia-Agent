@@ -29,6 +29,7 @@ from langchain.tools import ToolRuntime, tool
 
 from deerflow.sandbox.tools import get_thread_data
 from deerflow.sophia.tools.render_markdown_to_pdf import (
+    _ensure_relative_to_outputs,
     _host_path_for_virtual_output,
     _inspect_pdf_layout_with_targets,
     _result,
@@ -68,6 +69,75 @@ def _render_script_path() -> Path | None:
     return None
 
 
+def _html_pdf_runtime() -> tuple[str | None, Path | None, str | None]:
+    node = shutil.which("node")
+    if not node:
+        return None, None, _result(
+            success=False,
+            error_type="node_unavailable",
+            error="node is not available to render HTML→PDF.",
+        )
+    script = _render_script_path()
+    if script is None:
+        return None, None, _result(
+            success=False,
+            error_type="render_script_missing",
+            error="render_html_to_pdf.mjs not found on this runtime.",
+        )
+    return node, script, None
+
+
+def _run_html_pdf_render(
+    *,
+    node: str,
+    script: Path,
+    host_html: Path,
+    host_pdf: Path,
+    html_path: str,
+    margin: str | None,
+) -> str | None:
+    cmd = [node, str(script), "--html-file", str(host_html), "--pdf-file", str(host_pdf)]
+    if margin:
+        cmd += ["--margin", margin]
+    try:
+        completed = subprocess.run(  # noqa: S603 — fixed node + bundled script, file path args only
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_RENDER_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("render_html_to_pdf: chromium render timed out html=%s", html_path)
+        return _result(
+            success=False,
+            error_type="render_timeout",
+            error=f"Chromium render exceeded {_RENDER_TIMEOUT_SECONDS}s.",
+        )
+    if completed.returncode == 0 and host_pdf.is_file():
+        return None
+    stderr = (completed.stderr or "").strip()
+    logger.warning(
+        "render_html_to_pdf: render_failed rc=%s html=%s stderr=%s",
+        completed.returncode,
+        html_path,
+        stderr[-300:],
+    )
+    return _result(
+        success=False,
+        error_type="html_render_failed",
+        stderr=stderr[-1000:] if stderr else None,
+        error="Chromium failed to render the HTML to PDF.",
+    )
+
+
+def _html_pdf_path_error(html_path: str, pdf_path: str) -> str | None:
+    html_error = _ensure_relative_to_outputs("html_path", html_path)
+    if html_error is not None:
+        return html_error
+    return _ensure_relative_to_outputs("pdf_path", pdf_path)
+
+
 @tool("render_html_to_pdf", parse_docstring=True)
 def render_html_to_pdf(
     runtime: ToolRuntime,
@@ -93,12 +163,9 @@ def render_html_to_pdf(
         requested_max_pages: Maximum requested pages (range mode).
         margin: Optional CSS page margin (e.g. "16mm"); defaults to 16mm.
     """
-    if not pdf_path.strip().startswith(_OUTPUTS_VIRTUAL_PREFIX):
-        return _result(
-            success=False,
-            error_type="invalid_input",
-            error=f"pdf_path must be under {_OUTPUTS_VIRTUAL_PREFIX}",
-        )
+    path_error = _html_pdf_path_error(html_path, pdf_path)
+    if path_error is not None:
+        return _result(success=False, error_type="invalid_input", error=path_error)
     thread_data = get_thread_data(runtime)
     host_html = _host_path_for_virtual_output(html_path, thread_data)
     host_pdf = _host_path_for_virtual_output(pdf_path, thread_data)
@@ -109,54 +176,19 @@ def render_html_to_pdf(
             error=f"HTML source not found: {html_path}",
         )
 
-    node = shutil.which("node")
-    if not node:
-        return _result(
-            success=False,
-            error_type="node_unavailable",
-            error="node is not available to render HTML→PDF.",
-        )
-    script = _render_script_path()
-    if script is None:
-        return _result(
-            success=False,
-            error_type="render_script_missing",
-            error="render_html_to_pdf.mjs not found on this runtime.",
-        )
-
-    cmd = [node, str(script), "--html-file", str(host_html), "--pdf-file", str(host_pdf)]
-    if margin:
-        cmd += ["--margin", margin]
-    try:
-        completed = subprocess.run(  # noqa: S603 — fixed node + bundled script, file path args only
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_RENDER_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        logger.warning("render_html_to_pdf: chromium render timed out html=%s", html_path)
-        return _result(
-            success=False,
-            error_type="render_timeout",
-            error=f"Chromium render exceeded {_RENDER_TIMEOUT_SECONDS}s.",
-        )
-
-    if completed.returncode != 0 or not host_pdf.is_file():
-        stderr = (completed.stderr or "").strip()
-        logger.warning(
-            "render_html_to_pdf: render_failed rc=%s html=%s stderr=%s",
-            completed.returncode,
-            html_path,
-            stderr[-300:],
-        )
-        return _result(
-            success=False,
-            error_type="html_render_failed",
-            stderr=stderr[-1000:] if stderr else None,
-            error="Chromium failed to render the HTML to PDF.",
-        )
+    node, script, runtime_error = _html_pdf_runtime()
+    if runtime_error is not None:
+        return runtime_error
+    render_error = _run_html_pdf_render(
+        node=node or "",
+        script=script or Path(),
+        host_html=host_html,
+        host_pdf=host_pdf,
+        html_path=html_path,
+        margin=margin,
+    )
+    if render_error is not None:
+        return render_error
 
     layout = _inspect_pdf_layout_with_targets(
         host_pdf,

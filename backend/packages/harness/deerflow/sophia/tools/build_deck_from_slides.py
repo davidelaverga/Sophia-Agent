@@ -30,6 +30,7 @@ from langchain.tools import ToolRuntime, tool
 
 from deerflow.sandbox.tools import get_thread_data
 from deerflow.sophia.tools.render_html_to_pdf import _host_path_for_virtual_output, _result
+from deerflow.sophia.tools.render_markdown_to_pdf import _ensure_relative_to_outputs
 
 logger = logging.getLogger(__name__)
 
@@ -64,6 +65,110 @@ def _ordered_slide_html(slides_host_dir: Path) -> list[Path]:
     )
 
 
+def _deck_runtime() -> tuple[str | None, Path | None, Path | None, str | None]:
+    node = shutil.which("node")
+    if not node:
+        return None, None, None, _result(
+            success=False,
+            error_type="node_unavailable",
+            error="node is not available to build the deck.",
+        )
+    png_script = _js_script_path("render_html_to_png.mjs")
+    wrap_script = _js_script_path("compile_pptx.mjs")
+    if png_script is None or wrap_script is None:
+        return None, None, None, _result(
+            success=False,
+            error_type="render_script_missing",
+            error="deck render/wrap scripts not found on this runtime.",
+        )
+    return node, png_script, wrap_script, None
+
+
+def _render_slide_pngs(node: str, png_script: Path, slide_files: list[Path], render_dir: Path) -> tuple[list[Path], str | None]:
+    render_dir.mkdir(parents=True, exist_ok=True)
+    png_paths: list[Path] = []
+    for index, html in enumerate(slide_files):
+        png = render_dir / f"slide-{index + 1:02d}.png"
+        cmd = [
+            node, str(png_script),
+            "--html-file", str(html),
+            "--png-file", str(png),
+            "--width", str(_DECK_WIDTH),
+            "--height", str(_DECK_HEIGHT),
+        ]
+        try:
+            completed = subprocess.run(  # noqa: S603 — fixed node + bundled script, file path args only
+                cmd, check=False, capture_output=True, text=True, timeout=_PER_SLIDE_TIMEOUT_SECONDS,
+            )
+        except subprocess.TimeoutExpired:
+            logger.warning("build_deck_from_slides: slide render timed out slide=%s", html.name)
+            return [], _result(
+                success=False,
+                error_type="slide_render_timeout",
+                error=f"Slide render exceeded {_PER_SLIDE_TIMEOUT_SECONDS}s: {html.name}",
+            )
+        if completed.returncode != 0 or not png.is_file():
+            stderr = (completed.stderr or "").strip()
+            logger.warning("build_deck_from_slides: slide render failed slide=%s stderr=%s", html.name, stderr[-300:])
+            return [], _result(
+                success=False,
+                error_type="slide_render_failed",
+                stderr=stderr[-800:] if stderr else None,
+                error=f"Chromium failed to render slide {html.name}.",
+            )
+        png_paths.append(png)
+    return png_paths, None
+
+
+def _run_wrap_command(wrap_cmd: list[str]) -> tuple[subprocess.CompletedProcess[str] | None, str | None]:
+    try:
+        wrapped = subprocess.run(  # noqa: S603 — fixed node + bundled script, file path args only
+            wrap_cmd, check=False, capture_output=True, text=True, timeout=_WRAP_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        return None, _result(success=False, error_type="wrap_timeout", error=f"PPTX wrap exceeded {_WRAP_TIMEOUT_SECONDS}s.")
+    return wrapped, None
+
+
+def _pptx_wrap_failure(wrapped: subprocess.CompletedProcess[str] | None, host_pptx: Path) -> str | None:
+    if wrapped is not None and wrapped.returncode == 0 and host_pptx.is_file():
+        return None
+    stderr = ((wrapped.stderr if wrapped is not None else "") or "").strip()
+    logger.warning(
+        "build_deck_from_slides: wrap failed rc=%s stderr=%s",
+        getattr(wrapped, "returncode", None),
+        stderr[-300:],
+    )
+    return _result(
+        success=False,
+        error_type="pptx_wrap_failed",
+        stderr=stderr[-800:] if stderr else None,
+        error="Failed to wrap rendered slides into PPTX.",
+    )
+
+
+def _wrap_slide_pngs(
+    *,
+    node: str,
+    wrap_script: Path,
+    host_pptx: Path,
+    render_dir: Path,
+    png_paths: list[Path],
+    title: str | None,
+) -> str | None:
+    plan = {"title": title or "Sophia presentation", "slides": [{"index": i} for i in range(len(png_paths))]}
+    plan_path = render_dir / "_deck_plan.json"
+    plan_path.write_text(json.dumps(plan), encoding="utf-8")
+    wrap_cmd = [
+        node, str(wrap_script),
+        "--plan-file", str(plan_path),
+        "--output-file", str(host_pptx),
+        "--slide-images", *[str(p) for p in png_paths],
+    ]
+    wrapped, run_error = _run_wrap_command(wrap_cmd)
+    return run_error or _pptx_wrap_failure(wrapped, host_pptx)
+
+
 @tool("build_deck_from_slides", parse_docstring=True)
 def build_deck_from_slides(
     runtime: ToolRuntime,
@@ -85,12 +190,15 @@ def build_deck_from_slides(
         slides_dir: Optional absolute /mnt/user-data/outputs/ slides directory;
             defaults to /mnt/user-data/outputs/slides.
     """
-    if not output_path.strip().startswith(_OUTPUTS_VIRTUAL_PREFIX):
-        return _result(success=False, error_type="invalid_input", error=f"output_path must be under {_OUTPUTS_VIRTUAL_PREFIX}")
+    output_error = _ensure_relative_to_outputs("output_path", output_path)
+    if output_error is not None:
+        return _result(success=False, error_type="invalid_input", error=output_error)
     if not output_path.strip().lower().endswith(".pptx"):
         return _result(success=False, error_type="invalid_input", error="output_path must end with .pptx")
-
     slides_virtual = slides_dir or f"{_OUTPUTS_VIRTUAL_PREFIX}slides"
+    slides_error = _ensure_relative_to_outputs("slides_dir", slides_virtual)
+    if slides_error is not None:
+        return _result(success=False, error_type="invalid_input", error=slides_error)
     thread_data = get_thread_data(runtime)
     slides_host = _host_path_for_virtual_output(slides_virtual, thread_data)
     host_pptx = _host_path_for_virtual_output(output_path, thread_data)
@@ -99,60 +207,27 @@ def build_deck_from_slides(
     if not slide_files:
         return _result(success=False, error_type="no_slides", error=f"No slide .html files found in {slides_virtual}")
 
-    node = shutil.which("node")
-    if not node:
-        return _result(success=False, error_type="node_unavailable", error="node is not available to build the deck.")
-    png_script = _js_script_path("render_html_to_png.mjs")
-    wrap_script = _js_script_path("compile_pptx.mjs")
-    if png_script is None or wrap_script is None:
-        return _result(success=False, error_type="render_script_missing", error="deck render/wrap scripts not found on this runtime.")
+    node, png_script, wrap_script, runtime_error = _deck_runtime()
+    if runtime_error is not None:
+        return runtime_error
 
     # 1) Render each slide HTML → full-bleed PNG under render/.
     render_dir = host_pptx.parent / "_deck_render"
-    render_dir.mkdir(parents=True, exist_ok=True)
-    png_paths: list[Path] = []
-    for index, html in enumerate(slide_files):
-        png = render_dir / f"slide-{index + 1:02d}.png"
-        cmd = [
-            node, str(png_script),
-            "--html-file", str(html),
-            "--png-file", str(png),
-            "--width", str(_DECK_WIDTH),
-            "--height", str(_DECK_HEIGHT),
-        ]
-        try:
-            completed = subprocess.run(  # noqa: S603 — fixed node + bundled script, file path args only
-                cmd, check=False, capture_output=True, text=True, timeout=_PER_SLIDE_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired:
-            logger.warning("build_deck_from_slides: slide render timed out slide=%s", html.name)
-            return _result(success=False, error_type="slide_render_timeout", error=f"Slide render exceeded {_PER_SLIDE_TIMEOUT_SECONDS}s: {html.name}")
-        if completed.returncode != 0 or not png.is_file():
-            stderr = (completed.stderr or "").strip()
-            logger.warning("build_deck_from_slides: slide render failed slide=%s stderr=%s", html.name, stderr[-300:])
-            return _result(success=False, error_type="slide_render_failed", stderr=stderr[-800:] if stderr else None, error=f"Chromium failed to render slide {html.name}.")
-        png_paths.append(png)
+    png_paths, render_error = _render_slide_pngs(node or "", png_script or Path(), slide_files, render_dir)
+    if render_error is not None:
+        return render_error
 
     # 2) Wrap the rendered PNGs full-bleed into a .pptx via compile_pptx.mjs.
-    plan = {"title": title or "Sophia presentation", "slides": [{"index": i} for i in range(len(png_paths))]}
-    plan_path = render_dir / "_deck_plan.json"
-    plan_path.write_text(json.dumps(plan), encoding="utf-8")
-    wrap_cmd = [
-        node, str(wrap_script),
-        "--plan-file", str(plan_path),
-        "--output-file", str(host_pptx),
-        "--slide-images", *[str(p) for p in png_paths],
-    ]
-    try:
-        wrapped = subprocess.run(  # noqa: S603 — fixed node + bundled script, file path args only
-            wrap_cmd, check=False, capture_output=True, text=True, timeout=_WRAP_TIMEOUT_SECONDS,
-        )
-    except subprocess.TimeoutExpired:
-        return _result(success=False, error_type="wrap_timeout", error=f"PPTX wrap exceeded {_WRAP_TIMEOUT_SECONDS}s.")
-    if wrapped.returncode != 0 or not host_pptx.is_file():
-        stderr = (wrapped.stderr or "").strip()
-        logger.warning("build_deck_from_slides: wrap failed rc=%s stderr=%s", wrapped.returncode, stderr[-300:])
-        return _result(success=False, error_type="pptx_wrap_failed", stderr=stderr[-800:] if stderr else None, error="Failed to wrap rendered slides into PPTX.")
+    wrap_error = _wrap_slide_pngs(
+        node=node or "",
+        wrap_script=wrap_script or Path(),
+        host_pptx=host_pptx,
+        render_dir=render_dir,
+        png_paths=png_paths,
+        title=title,
+    )
+    if wrap_error is not None:
+        return wrap_error
 
     size_bytes = host_pptx.stat().st_size
     logger.info(
