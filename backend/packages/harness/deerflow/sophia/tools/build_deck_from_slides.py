@@ -65,6 +65,21 @@ def _ordered_slide_html(slides_host_dir: Path) -> list[Path]:
     )
 
 
+def _deck_request_error(output_path: str, slides_virtual: str) -> str | None:
+    output_error = _ensure_relative_to_outputs("output_path", output_path)
+    if output_error is not None:
+        return output_error
+    if not output_path.strip().lower().endswith(".pptx"):
+        return "output_path must end with .pptx"
+    return _ensure_relative_to_outputs("slides_dir", slides_virtual)
+
+
+def _no_slides_error(slide_files: list[Path], slides_virtual: str) -> str | None:
+    if slide_files:
+        return None
+    return _result(success=False, error_type="no_slides", error=f"No slide .html files found in {slides_virtual}")
+
+
 def _deck_runtime() -> tuple[str | None, Path | None, Path | None, str | None]:
     node = shutil.which("node")
     if not node:
@@ -84,38 +99,57 @@ def _deck_runtime() -> tuple[str | None, Path | None, Path | None, str | None]:
     return node, png_script, wrap_script, None
 
 
+def _slide_render_command(node: str, png_script: Path, html: Path, png: Path) -> list[str]:
+    return [
+        node, str(png_script),
+        "--html-file", str(html),
+        "--png-file", str(png),
+        "--width", str(_DECK_WIDTH),
+        "--height", str(_DECK_HEIGHT),
+    ]
+
+
+def _run_slide_render(cmd: list[str], html: Path) -> tuple[subprocess.CompletedProcess[str] | None, str | None]:
+    try:
+        completed = subprocess.run(  # noqa: S603 — fixed node + bundled script, file path args only
+            cmd, check=False, capture_output=True, text=True, timeout=_PER_SLIDE_TIMEOUT_SECONDS,
+        )
+    except subprocess.TimeoutExpired:
+        logger.warning("build_deck_from_slides: slide render timed out slide=%s", html.name)
+        return None, _result(
+            success=False,
+            error_type="slide_render_timeout",
+            error=f"Slide render exceeded {_PER_SLIDE_TIMEOUT_SECONDS}s: {html.name}",
+        )
+    return completed, None
+
+
+def _slide_render_succeeded(completed: subprocess.CompletedProcess[str] | None, png: Path) -> bool:
+    return completed is not None and completed.returncode == 0 and png.is_file()
+
+
+def _slide_render_failure(completed: subprocess.CompletedProcess[str] | None, html: Path, png: Path) -> str | None:
+    if _slide_render_succeeded(completed, png):
+        return None
+    stderr = ((completed.stderr if completed is not None else "") or "").strip()
+    logger.warning("build_deck_from_slides: slide render failed slide=%s stderr=%s", html.name, stderr[-300:])
+    return _result(
+        success=False,
+        error_type="slide_render_failed",
+        stderr=stderr[-800:] if stderr else None,
+        error=f"Chromium failed to render slide {html.name}.",
+    )
+
+
 def _render_slide_pngs(node: str, png_script: Path, slide_files: list[Path], render_dir: Path) -> tuple[list[Path], str | None]:
     render_dir.mkdir(parents=True, exist_ok=True)
     png_paths: list[Path] = []
     for index, html in enumerate(slide_files):
         png = render_dir / f"slide-{index + 1:02d}.png"
-        cmd = [
-            node, str(png_script),
-            "--html-file", str(html),
-            "--png-file", str(png),
-            "--width", str(_DECK_WIDTH),
-            "--height", str(_DECK_HEIGHT),
-        ]
-        try:
-            completed = subprocess.run(  # noqa: S603 — fixed node + bundled script, file path args only
-                cmd, check=False, capture_output=True, text=True, timeout=_PER_SLIDE_TIMEOUT_SECONDS,
-            )
-        except subprocess.TimeoutExpired:
-            logger.warning("build_deck_from_slides: slide render timed out slide=%s", html.name)
-            return [], _result(
-                success=False,
-                error_type="slide_render_timeout",
-                error=f"Slide render exceeded {_PER_SLIDE_TIMEOUT_SECONDS}s: {html.name}",
-            )
-        if completed.returncode != 0 or not png.is_file():
-            stderr = (completed.stderr or "").strip()
-            logger.warning("build_deck_from_slides: slide render failed slide=%s stderr=%s", html.name, stderr[-300:])
-            return [], _result(
-                success=False,
-                error_type="slide_render_failed",
-                stderr=stderr[-800:] if stderr else None,
-                error=f"Chromium failed to render slide {html.name}.",
-            )
+        completed, run_error = _run_slide_render(_slide_render_command(node, png_script, html, png), html)
+        render_error = run_error or _slide_render_failure(completed, html, png)
+        if render_error is not None:
+            return [], render_error
         png_paths.append(png)
     return png_paths, None
 
@@ -130,8 +164,12 @@ def _run_wrap_command(wrap_cmd: list[str]) -> tuple[subprocess.CompletedProcess[
     return wrapped, None
 
 
+def _pptx_wrap_succeeded(wrapped: subprocess.CompletedProcess[str] | None, host_pptx: Path) -> bool:
+    return wrapped is not None and wrapped.returncode == 0 and host_pptx.is_file()
+
+
 def _pptx_wrap_failure(wrapped: subprocess.CompletedProcess[str] | None, host_pptx: Path) -> str | None:
-    if wrapped is not None and wrapped.returncode == 0 and host_pptx.is_file():
+    if _pptx_wrap_succeeded(wrapped, host_pptx):
         return None
     stderr = ((wrapped.stderr if wrapped is not None else "") or "").strip()
     logger.warning(
@@ -169,6 +207,25 @@ def _wrap_slide_pngs(
     return run_error or _pptx_wrap_failure(wrapped, host_pptx)
 
 
+def _build_deck_artifact(host_pptx: Path, slide_files: list[Path], title: str | None) -> tuple[list[Path], str | None]:
+    node, png_script, wrap_script, runtime_error = _deck_runtime()
+    if runtime_error is not None:
+        return [], runtime_error
+    render_dir = host_pptx.parent / "_deck_render"
+    png_paths, render_error = _render_slide_pngs(node or "", png_script or Path(), slide_files, render_dir)
+    if render_error is not None:
+        return [], render_error
+    wrap_error = _wrap_slide_pngs(
+        node=node or "",
+        wrap_script=wrap_script or Path(),
+        host_pptx=host_pptx,
+        render_dir=render_dir,
+        png_paths=png_paths,
+        title=title,
+    )
+    return png_paths, wrap_error
+
+
 @tool("build_deck_from_slides", parse_docstring=True)
 def build_deck_from_slides(
     runtime: ToolRuntime,
@@ -190,44 +247,22 @@ def build_deck_from_slides(
         slides_dir: Optional absolute /mnt/user-data/outputs/ slides directory;
             defaults to /mnt/user-data/outputs/slides.
     """
-    output_error = _ensure_relative_to_outputs("output_path", output_path)
-    if output_error is not None:
-        return _result(success=False, error_type="invalid_input", error=output_error)
-    if not output_path.strip().lower().endswith(".pptx"):
-        return _result(success=False, error_type="invalid_input", error="output_path must end with .pptx")
     slides_virtual = slides_dir or f"{_OUTPUTS_VIRTUAL_PREFIX}slides"
-    slides_error = _ensure_relative_to_outputs("slides_dir", slides_virtual)
-    if slides_error is not None:
-        return _result(success=False, error_type="invalid_input", error=slides_error)
+    path_error = _deck_request_error(output_path, slides_virtual)
+    if path_error is not None:
+        return _result(success=False, error_type="invalid_input", error=path_error)
     thread_data = get_thread_data(runtime)
     slides_host = _host_path_for_virtual_output(slides_virtual, thread_data)
     host_pptx = _host_path_for_virtual_output(output_path, thread_data)
 
     slide_files = _ordered_slide_html(slides_host)
-    if not slide_files:
-        return _result(success=False, error_type="no_slides", error=f"No slide .html files found in {slides_virtual}")
+    no_slides_error = _no_slides_error(slide_files, slides_virtual)
+    if no_slides_error is not None:
+        return no_slides_error
 
-    node, png_script, wrap_script, runtime_error = _deck_runtime()
-    if runtime_error is not None:
-        return runtime_error
-
-    # 1) Render each slide HTML → full-bleed PNG under render/.
-    render_dir = host_pptx.parent / "_deck_render"
-    png_paths, render_error = _render_slide_pngs(node or "", png_script or Path(), slide_files, render_dir)
-    if render_error is not None:
-        return render_error
-
-    # 2) Wrap the rendered PNGs full-bleed into a .pptx via compile_pptx.mjs.
-    wrap_error = _wrap_slide_pngs(
-        node=node or "",
-        wrap_script=wrap_script or Path(),
-        host_pptx=host_pptx,
-        render_dir=render_dir,
-        png_paths=png_paths,
-        title=title,
-    )
-    if wrap_error is not None:
-        return wrap_error
+    png_paths, build_error = _build_deck_artifact(host_pptx, slide_files, title)
+    if build_error is not None:
+        return build_error
 
     size_bytes = host_pptx.stat().st_size
     logger.info(

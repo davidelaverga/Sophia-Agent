@@ -9504,6 +9504,25 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
 
     @staticmethod
+    def _deck_improvisation_haystack(name: str, args: dict[str, Any]) -> str | None:
+        if name in {"bash", "bash_tool"}:
+            return str(args.get("command") or "").lower()
+        if name not in {"write_file", "write_file_tool", "str_replace", "str_replace_tool"}:
+            return None
+        path = str(args.get("path") or args.get("file_path") or "").lower()
+        if path.endswith((".html", ".htm")):
+            return None  # slide HTML authoring is the sanctioned path
+        if not path.endswith((".py", ".js", ".mjs", ".ts")):
+            return None  # only code files can carry deck-compilation improvisation
+        content = str(
+            args.get("content")
+            or args.get("new_str")
+            or args.get("new_string")
+            or ""
+        )
+        return f"{path}\n{content}".lower()
+
+    @staticmethod
     def _deck_improvisation_rejection(request: ToolCallRequest) -> Command | None:
         """Block model-run deck compilation for `.pptx` targets (Spec D §2.5).
 
@@ -9521,22 +9540,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         args = request.tool_call.get("args")
         if not isinstance(args, dict):
             return None
-        if name in {"bash", "bash_tool"}:
-            haystack = str(args.get("command") or "").lower()
-        elif name in {"write_file", "write_file_tool", "str_replace", "str_replace_tool"}:
-            path = str(args.get("path") or args.get("file_path") or "").lower()
-            if path.endswith((".html", ".htm")):
-                return None  # slide HTML authoring is the sanctioned path
-            if not path.endswith((".py", ".js", ".mjs", ".ts")):
-                return None  # only code files can carry deck-compilation improvisation
-            content = str(
-                args.get("content")
-                or args.get("new_str")
-                or args.get("new_string")
-                or ""
-            )
-            haystack = f"{path}\n{content}".lower()
-        else:
+        haystack = BuilderArtifactMiddleware._deck_improvisation_haystack(name, args)
+        if haystack is None:
             return None
         signals = (
             "import pptx",

@@ -87,6 +87,35 @@ def _html_pdf_runtime() -> tuple[str | None, Path | None, str | None]:
     return node, script, None
 
 
+def _html_pdf_command(node: str, script: Path, host_html: Path, host_pdf: Path, margin: str | None) -> list[str]:
+    cmd = [node, str(script), "--html-file", str(host_html), "--pdf-file", str(host_pdf)]
+    if margin:
+        cmd += ["--margin", margin]
+    return cmd
+
+
+def _html_pdf_render_succeeded(completed: subprocess.CompletedProcess[str] | None, host_pdf: Path) -> bool:
+    return completed is not None and completed.returncode == 0 and host_pdf.is_file()
+
+
+def _html_pdf_render_failure(completed: subprocess.CompletedProcess[str] | None, host_pdf: Path, html_path: str) -> str | None:
+    if _html_pdf_render_succeeded(completed, host_pdf):
+        return None
+    stderr = ((completed.stderr if completed is not None else "") or "").strip()
+    logger.warning(
+        "render_html_to_pdf: render_failed rc=%s html=%s stderr=%s",
+        getattr(completed, "returncode", None),
+        html_path,
+        stderr[-300:],
+    )
+    return _result(
+        success=False,
+        error_type="html_render_failed",
+        stderr=stderr[-1000:] if stderr else None,
+        error="Chromium failed to render the HTML to PDF.",
+    )
+
+
 def _run_html_pdf_render(
     *,
     node: str,
@@ -96,12 +125,9 @@ def _run_html_pdf_render(
     html_path: str,
     margin: str | None,
 ) -> str | None:
-    cmd = [node, str(script), "--html-file", str(host_html), "--pdf-file", str(host_pdf)]
-    if margin:
-        cmd += ["--margin", margin]
     try:
         completed = subprocess.run(  # noqa: S603 — fixed node + bundled script, file path args only
-            cmd,
+            _html_pdf_command(node, script, host_html, host_pdf, margin),
             check=False,
             capture_output=True,
             text=True,
@@ -114,21 +140,7 @@ def _run_html_pdf_render(
             error_type="render_timeout",
             error=f"Chromium render exceeded {_RENDER_TIMEOUT_SECONDS}s.",
         )
-    if completed.returncode == 0 and host_pdf.is_file():
-        return None
-    stderr = (completed.stderr or "").strip()
-    logger.warning(
-        "render_html_to_pdf: render_failed rc=%s html=%s stderr=%s",
-        completed.returncode,
-        html_path,
-        stderr[-300:],
-    )
-    return _result(
-        success=False,
-        error_type="html_render_failed",
-        stderr=stderr[-1000:] if stderr else None,
-        error="Chromium failed to render the HTML to PDF.",
-    )
+    return _html_pdf_render_failure(completed, host_pdf, html_path)
 
 
 def _html_pdf_path_error(html_path: str, pdf_path: str) -> str | None:
@@ -136,6 +148,16 @@ def _html_pdf_path_error(html_path: str, pdf_path: str) -> str | None:
     if html_error is not None:
         return html_error
     return _ensure_relative_to_outputs("pdf_path", pdf_path)
+
+
+def _missing_html_result(host_html: Path, html_path: str) -> str | None:
+    if host_html.is_file():
+        return None
+    return _result(
+        success=False,
+        error_type="missing_html",
+        error=f"HTML source not found: {html_path}",
+    )
 
 
 @tool("render_html_to_pdf", parse_docstring=True)
@@ -169,12 +191,9 @@ def render_html_to_pdf(
     thread_data = get_thread_data(runtime)
     host_html = _host_path_for_virtual_output(html_path, thread_data)
     host_pdf = _host_path_for_virtual_output(pdf_path, thread_data)
-    if not host_html.is_file():
-        return _result(
-            success=False,
-            error_type="missing_html",
-            error=f"HTML source not found: {html_path}",
-        )
+    missing_html = _missing_html_result(host_html, html_path)
+    if missing_html is not None:
+        return missing_html
 
     node, script, runtime_error = _html_pdf_runtime()
     if runtime_error is not None:
