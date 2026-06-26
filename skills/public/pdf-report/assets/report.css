@@ -105,5 +105,56 @@ ul, ol { margin: 0 0 3mm; padding-left: 6mm; }
 li { margin: 0 0 1.5mm; }
 blockquote { margin: 4mm 0; padding-left: 4mm; border-left: 3px solid var(--rule); color: var(--ink-soft); font-style: italic; }
 code { font-family: "SF Mono", Menlo, Consolas, monospace; font-size: 9pt; background: var(--surface); padding: 0.3mm 1mm; border-radius: 1mm; }
+
+/* ---- Code blocks -------------------------------------------------------- */
+/* A PDF page has no horizontal scroll: long lines in a <pre> MUST wrap or they
+ * are clipped at the right margin. Always wrap + break unbreakable tokens
+ * (e.g. long import paths). */
+pre {
+  font-family: "SF Mono", Menlo, Consolas, monospace;
+  font-size: 8.5pt;
+  line-height: 1.4;
+  background: var(--surface);
+  border: 1px solid var(--rule);
+  border-radius: 1.5mm;
+  padding: 3mm;
+  margin: 4mm 0;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  max-width: 100%;
+  page-break-inside: avoid;
+}
+pre code { background: none; padding: 0; font-size: inherit; border-radius: 0; }
+
+/* ---- Safe two-column layout --------------------------------------------- */
+/* For side-by-side body content. `min-width: 0` is required — grid/flex
+ * children default to `min-width: auto` and refuse to shrink, so a wide child
+ * (a non-wrapping <pre> or a width:100% table) overflows and collides with its
+ * neighbor. Never place a wide table beside a code block; prefer stacking. */
+.cols-2 {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6mm;
+  align-items: start;
+  margin: 4mm 0;
+  page-break-inside: avoid;
+}
+.cols-2 > * { min-width: 0; overflow-wrap: anywhere; }
+.cols-2 pre, .cols-2 table { max-width: 100%; }
+
+/* ---- Eyebrow / section labels ------------------------------------------- */
+/* Trailing letter-spacing adds phantom space after the last glyph; the matching
+ * left padding prevents the first glyph being shaved at a container edge. */
+.section-label {
+  display: inline-block;
+  font-family: var(--font-sans);
+  text-transform: uppercase;
+  letter-spacing: 0.12em;
+  padding-left: 0.12em;
+  font-size: 9pt;
+  color: var(--ink-soft);
+}
+
 section { page-break-inside: auto; }
 .page-break { page-break-before: always; }

@@ -26,6 +26,30 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-06-26 · [builder-deck-delivery + pdf-render-fidelity] · PR #146
+**Author:** Claude · **Track:** backend · **Spec:** `docs/audits/sophia-builder-deck-failure-and-pdf-render-forensics-2026-06-26.md`
+
+### What Changed
+- **Deck delivery (P0):** new `BuilderArtifactMiddleware._authoritative_pptx_emit_args` (+ `_preferred_valid_pptx_output_path`) mirrors the PDF authoritative-emit pattern — repoints a deck emit to a validly-compiled `.pptx` under outputs/ when the model emitted an off-target/missing path (the `t.pptx`-vs-slug mismatch that terminal-halted prod run 019f0178). Wired at all 3 emit sites (after_model recovery + sync/async `wrap_tool_call`).
+- **Webhook retry (P0):** `builder_events._post_webhook` retries transport/5xx with (2,5,15)s backoff, stops on 4xx — a dropped ceiling-fallback `status=success` event was the second half of the deck failure.
+- **Compile command documented:** `ppt-generation/SKILL.md` now gives the exact `generate.py --plan-file/--output-file` command, a load-bearing output path, and forbids custom python-pptx / placeholder names.
+- **PDF render fidelity (P1):** `pdf-report/assets/report.css` gained a `pre` wrap rule (code no longer clips), a `.cols-2` grid with `min-width:0` (table+code no longer collide), and a `.section-label` rule (cover glyph). `pdf-report/SKILL.md` documents all three + 2 QA items.
+- **Supabase probe (P1):** `download_artifact` + HEAD `check_artifact*_exists` treat 400 like 404 (benign missing).
+
+### What We Learned
+- The deck failure was **pre-existing** (compile-command gap predates the HTML→PDF wave); image-gen was never the problem. The robust fix is harness-side authoritative-emit (deliver any valid in-format artifact regardless of the model's path choice), not prompt discipline — exactly what the PDF path already did.
+- A fire-and-forget webhook with no retry silently loses terminal events on a single gateway hiccup; the langgraph→gateway leg needed the same bounded retry the gateway→Telegram leg already had.
+- Grid/flex children default to `min-width: auto` and refuse to shrink — the one-line `min-width: 0` is what actually fixes side-by-side overflow in print.
+
+### CLAUDE.md Updates
+- `backend/CLAUDE.md`: added "Builder deck delivery + PDF render fidelity (2026-06-26, PR #146)".
+
+### Skills Created / Modified
+- Modified: `skills/public/ppt-generation/SKILL.md` (compile command), `skills/public/pdf-report/SKILL.md` (code/column/label guidance + QA), `skills/public/pdf-report/assets/report.css` (pre/cols-2/section-label).
+
+### GEPA Log Entry
+- Prompt files changed (ppt-generation + pdf-report SKILL.md). Before: deck compile step undocumented → model improvised → off-target `.pptx` → emit rejected/terminal-halt; report code blocks clipped + columns collided. After: explicit compile command + load-bearing output path; CSS wraps code + safe columns. tone_delta: N/A (builder prompts). Trace pair available: yes (2026-06-26 forensics + the two failed prod runs 019f0168/019f0178).
+
 ## 2026-06-25 · [builder-report-html-to-pdf] · PR #145
 **Author:** Claude · **Track:** backend · **Spec:** `docs/audits/sophia-builder-visual-render-regression-2026-06-25.md`
 

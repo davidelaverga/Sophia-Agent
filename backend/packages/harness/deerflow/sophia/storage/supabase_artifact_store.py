@@ -670,9 +670,18 @@ def check_artifact_exists(
     http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
     try:
         response = http.head(url, headers=headers)
-        if response.status_code == 404:
+        # Supabase Storage answers 400 (not only 404) for the missing-object
+        # shape on some endpoints (prod 2026-06-12 / 2026-06-26) — treat both as
+        # a benign "no object yet", not a transport error worth a warning.
+        if response.status_code in (400, 404):
+            logger.debug(
+                "Supabase HEAD: no object yet thread_id=%s filename=%s status=%s",
+                thread_id,
+                filename,
+                response.status_code,
+            )
             return False
-        # Any non-2xx is treated as "not exists" to keep the builder flow
+        # Any other non-2xx is treated as "not exists" to keep the builder flow
         # resilient against transient Supabase hiccups.
         if not response.is_success:
             logger.warning(
@@ -859,7 +868,10 @@ def download_artifact(
     http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
     try:
         response = http.get(url, headers=headers)
-        if response.status_code == 404:
+        # Supabase Storage answers 400 (not only 404) for the missing-object
+        # shape on some endpoints (prod 2026-06-12 ledger + 2026-06-26 pptx
+        # emit-check) — treat both as "not there" rather than raising.
+        if response.status_code in (400, 404):
             return None
         response.raise_for_status()
         return (
@@ -933,7 +945,14 @@ def check_artifact_object_exists(
     http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
     try:
         response = http.head(url, headers=headers)
-        if response.status_code == 404:
+        # Supabase Storage answers 400 (not only 404) for the missing-object
+        # shape on some endpoints — treat both as a benign "no object yet".
+        if response.status_code in (400, 404):
+            logger.debug(
+                "Supabase HEAD: no object yet object_path=%s status=%s",
+                normalized_path,
+                response.status_code,
+            )
             return False
         if not response.is_success:
             logger.warning(

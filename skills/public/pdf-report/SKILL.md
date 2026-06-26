@@ -225,6 +225,16 @@ acceptable only when repeated measurement is the actual analytic point.
 - Cite researched claims inline.
 - Prefer prose over unnecessary graphics.
 - Use HTML `<table>` for tabular comparisons.
+- **Code blocks:** always `<pre><code>…</code></pre>`. The base CSS wraps long
+  lines — a PDF page has NO horizontal scroll, so an unwrapped line is clipped
+  at the right margin. Keep lines short where practical; never rely on scroll.
+- **Side-by-side content:** use `<div class="cols-2">…</div>` (a safe grid). Do
+  NOT place a wide table beside a code block — they collide; stack full-width
+  blocks vertically instead. A wide comparison table spans the full page width,
+  never a half-column shared with code.
+- **Eyebrow / section labels:** use `<p class="section-label">…</p>` (handles
+  uppercase + letter-spacing without clipping the first glyph) — do not hand-roll
+  `letter-spacing` on an ad-hoc element.
 
 ## QA checklist
 
@@ -235,4 +245,7 @@ acceptable only when repeated measurement is the actual analytic point.
 - Citations are present where factual claims require them.
 - Figures are inline SVG, render with real series/labels (not empty frames),
   legible, varied when appropriate, and not repeated from one generic template.
+- No code line is clipped at the page edge (use `<pre>`; the CSS wraps it).
+- No column overlaps or clips its neighbor (use `.cols-2`; don't pair a wide
+  table with code).
 - Only the primary PDF is user-visible by default.

@@ -7226,6 +7226,76 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return authoritative_args
 
     @classmethod
+    def _authoritative_pptx_emit_args(
+        cls,
+        artifact_args: dict[str, Any],
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> dict[str, Any] | None:
+        """Deck (.pptx) analog of ``_authoritative_pdf_emit_args``.
+
+        The deck compile step has no documented output-path contract, so the
+        model often writes the .pptx under an off-target name (e.g. ``t.pptx``)
+        while emitting the slug target path — the emit gate then rejects a
+        validly-compiled deck as "missing" (prod 2026-06-26, run 019f0178).
+        When a valid .pptx exists under outputs/ and the emitted path is NOT a
+        usable .pptx, repoint the emit at the real deck rather than reject it —
+        the same "a delivered artifact in the requested format is never a
+        fallback" invariant the PDF path enforces.
+        """
+        if not _requested_pptx_artifact(state):
+            return None
+        # Don't override a validly-emitted deck with a different on-disk .pptx;
+        # only act when the emitted path is missing or a non-pptx fallback.
+        if cls._artifact_files_exist(artifact_args, state, runtime):
+            emitted_ext = _artifact_ext_from_path(artifact_args.get("artifact_path"))
+            if emitted_ext == "pptx":
+                return None
+        pptx_path = cls._preferred_valid_pptx_output_path(state, runtime)
+        if not pptx_path:
+            return None
+        current_path = _canonical_outputs_artifact_path(artifact_args.get("artifact_path"))
+        current_ext = _artifact_ext_from_path(current_path or artifact_args.get("artifact_path"))
+        if current_path == pptx_path and current_ext == "pptx":
+            return None
+        authoritative_args = dict(artifact_args)
+        authoritative_args["artifact_path"] = pptx_path
+        authoritative_args["requested_artifact_ext"] = "pptx"
+        authoritative_args["artifact_ext"] = "pptx"
+        authoritative_args["artifact_is_fallback"] = False
+        authoritative_args["fallback_reason"] = None
+        authoritative_args["artifact_type"] = "presentation"
+        logger.warning(
+            "BuilderArtifact: pptx_emit_repointed_to_compiled_deck "
+            "emitted_ext=%s emitted_path=%s -> pptx_path=%s",
+            current_ext,
+            current_path,
+            pptx_path,
+        )
+        return authoritative_args
+
+    @classmethod
+    def _preferred_valid_pptx_output_path(
+        cls,
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> str | None:
+        if not _requested_pptx_artifact(state):
+            return None
+        promoted, ext = cls._promoted_deliverable_from_outputs(
+            state,
+            requested_pdf=False,
+            requested_pptx=True,
+            requested_html=False,
+            reason="authoritative_pptx_emit",
+        )
+        if not promoted or ext != "pptx":
+            return None
+        if cls._artifact_files_exist({"artifact_path": promoted}, state, runtime):
+            return promoted
+        return None
+
+    @classmethod
     def _preferred_successful_pdf_render_path(
         cls,
         state: BuilderArtifactState,
@@ -7413,6 +7483,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         authoritative_pdf = cls._authoritative_pdf_emit_args(artifact_args, state, runtime)
         if authoritative_pdf is not None:
             return authoritative_pdf
+        authoritative_pptx = cls._authoritative_pptx_emit_args(artifact_args, state, runtime)
+        if authoritative_pptx is not None:
+            return authoritative_pptx
         if cls._artifact_files_exist(artifact_args, state, runtime):
             return artifact_args
         return (
@@ -9259,6 +9332,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if authoritative_pdf_args is not None:
             request.tool_call["args"] = authoritative_pdf_args
             return handler(request)
+        authoritative_pptx_args = self._authoritative_pptx_emit_args(args, request.state, request.runtime)
+        if authoritative_pptx_args is not None:
+            request.tool_call["args"] = authoritative_pptx_args
+            return handler(request)
         if self._artifact_files_exist(args, request.state, request.runtime):
             visual_rejection = self._visual_gate_rejection_command(request, args)
             if visual_rejection is not None:
@@ -9683,6 +9760,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         authoritative_pdf_args = self._authoritative_pdf_emit_args(args, request.state, request.runtime)
         if authoritative_pdf_args is not None:
             request.tool_call["args"] = authoritative_pdf_args
+            return await handler(request)
+        authoritative_pptx_args = self._authoritative_pptx_emit_args(args, request.state, request.runtime)
+        if authoritative_pptx_args is not None:
+            request.tool_call["args"] = authoritative_pptx_args
             return await handler(request)
         if self._artifact_files_exist(args, request.state, request.runtime):
             visual_rejection = self._visual_gate_rejection_command(request, args)

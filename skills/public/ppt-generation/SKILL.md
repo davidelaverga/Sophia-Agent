@@ -123,8 +123,23 @@ The plan JSON must include one image path per slide:
 }
 ```
 
-Compile with the PPTX workflow. The compiler fails if a slide image is missing.
-That failure is intentional: regenerate the missing image or stop cleanly.
+Write the plan to `/mnt/user-data/outputs/deck_plan.json`, then compile with the
+**ppt-generation compiler** — this exact command, nothing else:
+
+```bash
+python /mnt/skills/public/ppt-generation/scripts/generate.py \
+  --plan-file /mnt/user-data/outputs/deck_plan.json \
+  --output-file /mnt/user-data/outputs/<the requested deck filename>.pptx
+```
+
+**The output path is load-bearing.** Write the `.pptx` to the deliverable
+filename you were asked for under `/mnt/user-data/outputs/`, then pass that SAME
+path to `emit_builder_artifact(artifact_path=…)`. Do NOT:
+- write your own `python-pptx` / custom generator script — use the compiler above;
+- improvise a short or placeholder name (e.g. `t.pptx`) — emit the file you compiled.
+
+The compiler fails if a slide image is missing. That failure is intentional:
+regenerate the missing image or stop cleanly.
 
 ## QA Checklist
 

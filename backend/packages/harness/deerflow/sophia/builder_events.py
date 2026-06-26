@@ -30,6 +30,7 @@ from __future__ import annotations
 import logging
 import os
 import threading
+import time
 from collections import OrderedDict
 from datetime import UTC, datetime
 from typing import Any
@@ -47,6 +48,12 @@ logger = logging.getLogger(__name__)
 _DEFAULT_GATEWAY_URL = "http://localhost:8001"
 _WEBHOOK_PATH = "/internal/builder-events"
 _WEBHOOK_TIMEOUT_SECONDS = 2.0
+# Bounded retry on transient failure (transport error / 5xx). A single
+# fire-and-forget POST dropped completion events when the gateway hiccuped —
+# prod 2026-06-26 (a deck's ceiling-fallback success webhook was lost). Mirrors
+# the gateway-side terminal-edit retry backoff. 4xx is a contract bug and is
+# NOT retried. Runs on a daemon thread so the sleeps never block the executor.
+_WEBHOOK_RETRY_BACKOFFS_SECONDS = (2.0, 5.0, 15.0)
 _INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
     {"ledger", "uploads", ".builder", "sources", "source_artifact"}
 )
@@ -352,35 +359,64 @@ def _is_phantom_success(
 
 
 def _post_webhook(payload: dict[str, Any]) -> None:
-    """Fire the POST. Called on a daemon thread so the executor never blocks."""
+    """Fire the POST with bounded retry. On a daemon thread so it never blocks.
+
+    Retries transient failures (transport error / 5xx) with the
+    ``_WEBHOOK_RETRY_BACKOFFS_SECONDS`` backoff; a 2xx stops immediately and a
+    4xx (contract bug) is not retried. Without this, a single gateway hiccup
+    silently dropped a terminal completion event — prod 2026-06-26, where a
+    deck's ceiling-fallback ``status=success`` webhook failed to deliver.
+    """
     if not payload.get("thread_id"):
         # No parent thread → nothing for the gateway to route to.
         return
     _warn_if_misconfigured(payload)
     url = f"{_gateway_url()}{_WEBHOOK_PATH}"
-    try:
-        with httpx.Client(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
-            response = client.post(url, json=payload)
-            if response.status_code >= 500:
-                logger.warning(
-                    "Builder-events webhook returned %s for task_id=%s",
-                    response.status_code,
-                    payload.get("task_id"),
-                )
-            elif response.status_code >= 400:
-                # 4xx is a contract bug we want to know about.
+    task_id = payload.get("task_id")
+    max_attempts = len(_WEBHOOK_RETRY_BACKOFFS_SECONDS) + 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            with httpx.Client(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
+                response = client.post(url, json=payload)
+            if response.status_code < 400:
+                if attempt > 1:
+                    logger.info(
+                        "Builder-events webhook delivered for task_id=%s on attempt=%d",
+                        task_id,
+                        attempt,
+                    )
+                return
+            if response.status_code < 500:
+                # 4xx is a contract bug we want to know about — not retryable.
                 logger.warning(
                     "Builder-events webhook rejected (status=%s) for task_id=%s body=%s",
                     response.status_code,
-                    payload.get("task_id"),
+                    task_id,
                     response.text[:200],
                 )
-    except Exception:
-        logger.warning(
-            "Builder-events webhook delivery failed for task_id=%s",
-            payload.get("task_id"),
-            exc_info=True,
-        )
+                return
+            logger.warning(
+                "Builder-events webhook returned %s for task_id=%s (attempt=%d/%d)",
+                response.status_code,
+                task_id,
+                attempt,
+                max_attempts,
+            )
+        except Exception:
+            logger.warning(
+                "Builder-events webhook delivery failed for task_id=%s (attempt=%d/%d)",
+                task_id,
+                attempt,
+                max_attempts,
+                exc_info=True,
+            )
+        if attempt <= len(_WEBHOOK_RETRY_BACKOFFS_SECONDS):
+            time.sleep(_WEBHOOK_RETRY_BACKOFFS_SECONDS[attempt - 1])
+    logger.error(
+        "Builder-events webhook exhausted %d attempts for task_id=%s; event dropped",
+        max_attempts,
+        task_id,
+    )
 
 
 def reset_for_tests() -> None:

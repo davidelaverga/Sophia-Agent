@@ -65,6 +65,13 @@ def test_ppt_generation_skill_is_pure_image_forward() -> None:
     assert "generate_report_chart" not in text
     assert "text-only" not in text
     assert "title_strategy" not in text
+    # 2026-06-26: the compile step must document the exact compiler command +
+    # a load-bearing output path so the model stops improvising (→ t.pptx).
+    assert "ppt-generation/scripts/generate.py" in text
+    assert "--plan-file" in text
+    assert "--output-file" in text
+    assert "load-bearing" in text.lower()
+    assert "python-pptx" in text  # explicitly forbidden as a custom-compile path
 
 
 def test_pdf_report_skill_uses_html_and_inline_svg() -> None:
@@ -83,6 +90,12 @@ def test_pdf_report_skill_uses_html_and_inline_svg() -> None:
     assert "conceptual" in text.lower()
     assert "generate_report_chart" not in text
     assert "generate_visual_asset" not in text
+    # 2026-06-26: code-block + safe two-column + section-label guidance so the
+    # model authors layouts that don't clip/collide in a fixed-width PDF.
+    assert "<pre><code>" in text
+    assert "cols-2" in text
+    assert "section-label" in text
+    assert "clipped at the page edge" in text  # QA checklist item
 
 
 def test_image_generation_skill_allows_bounded_pdf_conceptual_images() -> None:
