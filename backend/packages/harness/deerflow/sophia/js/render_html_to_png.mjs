@@ -101,11 +101,12 @@ async function main() {
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });
   try {
-    const context = await browser.newContext({ javaScriptEnabled: false });
-    const page = await context.newPage({
+    const context = await browser.newContext({
+      javaScriptEnabled: false,
       viewport: { width, height },
       deviceScaleFactor: scale,
     });
+    const page = await context.newPage();
     await installRenderRequestPolicy(page, args.htmlFile);
     await page.goto(`file://${path.resolve(args.htmlFile)}`, {
       waitUntil: "networkidle",

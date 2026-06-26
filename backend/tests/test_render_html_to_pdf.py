@@ -347,3 +347,11 @@ def test_chromium_html_renderers_block_external_subresources():
         assert "blockedbyclient" in source
         assert "url.startsWith(\"file:\")" in source
         assert "outputRootForHtml" in source
+
+
+def test_slide_png_renderer_sets_viewport_on_browser_context():
+    png_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_png.mjs"
+    source = png_script.read_text(encoding="utf-8")
+    assert "const context = await browser.newContext({\n      javaScriptEnabled: false,\n      viewport: { width, height },\n      deviceScaleFactor: scale," in source
+    assert "const page = await context.newPage();" in source
+    assert "context.newPage({\n      viewport" not in source
