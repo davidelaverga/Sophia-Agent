@@ -88,8 +88,14 @@ td { padding: 2mm 3mm; border-bottom: 1px solid var(--rule); vertical-align: top
 tbody tr:nth-child(even) td { background: #fafbfe; }
 
 /* ---- Figures ------------------------------------------------------------ */
-figure { margin: 5mm 0; page-break-inside: avoid; text-align: center; }
-figure svg, figure img { max-width: 100%; height: auto; }
+figure { margin: 4mm 0; page-break-inside: avoid; text-align: center; }
+/* Cap figure media so a small diagram cannot reserve a whole page and strand
+ * the rest as whitespace (R2-3, prod 2026-06-26: near-blank pages from page-tall
+ * figure boxes). Width-bounded too; aspect ratio preserved. */
+figure svg, figure img { max-width: 100%; max-height: 150mm; width: auto; height: auto; }
+/* A genuinely tall figure (full-page diagram) may break across pages rather than
+ * jump to the next page and leave a gap behind it. */
+figure.tall { page-break-inside: auto; }
 figcaption { font-family: var(--font-sans); font-size: 8.5pt; color: var(--ink-soft); margin-top: 1.5mm; }
 .figure-title { font-family: var(--font-sans); font-size: 10pt; font-weight: 600; color: var(--ink); margin: 0 0 2mm; text-align: left; }
 

@@ -264,8 +264,11 @@ _IMAGE_GENERATION_MAX_CALLS = 20
 # inline <svg> in the report HTML (rendered via render_html_to_pdf), not images.
 # Counts generated conceptual images only.
 _IMAGE_GENERATION_MAX_CALLS_PDF = 3
-# One bounded repair attempt: a second pass rarely converges and doubles cost.
-_PDF_PAGE_COUNT_REPAIR_MAX = 1
+# Two bounded repair attempts: one pass cannot converge an under→over swing
+# (prod 2026-06-26: a 2-page first draft over-corrected to 11 vs an 8-page
+# request and shipped off-band). The CSS figure caps + first-pass length
+# guidance should make repairs rare; 2 is the backstop. (R2-3)
+_PDF_PAGE_COUNT_REPAIR_MAX = 2
 # Accept a small band around the requested length — an 11-page PDF for a
 # "10-page" request is a delivered artifact, not a failure. An off-band render
 # (after the one repair) ships with a quality_warning, never a terminal failure
@@ -3576,8 +3579,14 @@ def _pdf_page_image_count(page: Any) -> int:
 def _pdf_contains_visual_evidence(path: Path, state: dict[str, Any]) -> bool:
     render_result = state.get("builder_pdf_render_result")
     if isinstance(render_result, dict):
+        # Inline <svg> figures are vector in the PDF (not /Image XObjects), so a
+        # fully-illustrated HTML→PDF report reads image_count=0. Honor the
+        # renderer's vector_visual_count so we don't false-reject it (R2-2,
+        # prod 2026-06-26). Either rasterized images OR vector figures count.
         try:
-            return int(render_result.get("image_count", 0) or 0) > 0
+            image_count = int(render_result.get("image_count", 0) or 0)
+            vector_count = int(render_result.get("vector_visual_count", 0) or 0)
+            return image_count > 0 or vector_count > 0
         except (TypeError, ValueError):
             pass
     if PdfReader is None:

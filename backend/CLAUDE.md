@@ -435,6 +435,15 @@ The 2026-06-26 deck fix (above) was the wrong failure mode: re-test showed **two
 
 Regression targets: `tests/test_build_deck_from_slides.py tests/test_builder_prompt_contract.py tests/test_sophia_builder_flow.py tests/test_visual_quality_regression.py`. (Spec D Phases 1–4 — unified render-and-inspect gate, build manifest, BuildService, default-on tracing — follow.)
 
+### Spec D Phase 1 (PDF subset) — inline-SVG visual gate + page-count/whitespace (2026-06-26)
+
+The Round-2 retest PDF defects (the report rendered well but had a false "visuals missing" warning + 11-vs-8 pages with near-blank pages 3/9/11):
+
+- **R2-2 — inline-SVG visual presence.** `render_html_to_pdf` now returns `vector_visual_count` (count of inline `<svg>` in the source via `_count_inline_svg`), flowing through `_render_pdf_result_delta` into `builder_pdf_render_result`. `_pdf_contains_visual_evidence` treats `image_count > 0 OR vector_visual_count > 0` as visual-present — chromium keeps inline SVG **vector** (not /Image XObjects), so a fully-illustrated report read `image_count=0` and was false-rejected (prod 2026-06-26), burning the visual-embed repair turn and stamping a bogus `visual_missing_quality_warning`. Fixed.
+- **R2-3 — page-count overshoot + near-blank pages.** `report.css`: `figure svg, figure img { max-height: 150mm }` + trimmed figure margins + a `figure.tall { page-break-inside: auto }` escape — a small diagram can no longer reserve a page. `pdf-report/SKILL.md`: a "Length and figure sizing" section (author to length on the FIRST draft; never pad with whitespace). `_PDF_PAGE_COUNT_REPAIR_MAX` 1→2 so an under→over swing (a 2-page draft over-correcting to 11) can converge. The `_pdf_layout_repair_attempts` vs `builder_visual_embed_rejections` budgets are already separate — the spec's "shared budget starvation" (§3.3) was a false premise, so it was dropped.
+
+Regression targets: `tests/test_render_html_to_pdf.py tests/test_builder_deck_pdf_fixes_2026_06_26.py`. (The full render-and-inspect DOM gate — §3.1 — is deferred to the rest of Phase 1.)
+
 ### Correction wave — target-format truth (2026-06-12)
 
 From the 2026-06-12 prod analysis ([docs/audits/prod-log-analysis-2026-06-12.md](../docs/audits/prod-log-analysis-2026-06-12.md)): two intended-PDF runs dispatched as `target_ext=pptx` (description contamination + pptx-before-pdf ordering); one failed terminally with a correct PDF on disk.

@@ -40,6 +40,20 @@ _RENDER_TIMEOUT_SECONDS = 120
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 
 
+def _count_inline_svg(host_html: Path) -> int:
+    """Count inline ``<svg>`` elements in the report HTML source (R2-2 signal).
+
+    Chromium renders inline SVG as vector ops, not PDF /Image XObjects, so the
+    visual-presence gate cannot see them via image_count. The authored source is
+    the reliable signal that the report contains charts/diagrams.
+    """
+    try:
+        text = host_html.read_text(encoding="utf-8", errors="ignore")
+    except OSError:
+        return 0
+    return text.lower().count("<svg")
+
+
 def _render_script_path() -> Path | None:
     """Locate render_html_to_pdf.mjs (env override → beside this pkg → container)."""
     configured = os.getenv("SOPHIA_ARTIFACT_JS_RUNTIME")
@@ -150,13 +164,20 @@ def render_html_to_pdf(
         requested_min_pages=requested_min_pages,
         requested_max_pages=requested_max_pages,
     )
+    # Inline <svg> charts/diagrams are VECTOR in the PDF (drawing ops, not
+    # /Image XObjects), so ``image_count`` reads 0 even for a fully-illustrated
+    # report (prod 2026-06-26: false "visuals not embedded" reject). Count the
+    # authored inline SVG from the source so the visual-presence gate has a
+    # vector signal alongside image_count. (R2-2)
+    vector_visual_count = _count_inline_svg(host_html)
     size_bytes = host_pdf.stat().st_size
     logger.info(
         "render_html_to_pdf: render_success final_artifact_ext=pdf size_bytes=%s "
-        "page_count=%s image_count=%s layout_quality=%s",
+        "page_count=%s image_count=%s vector_visual_count=%s layout_quality=%s",
         size_bytes,
         layout.get("page_count"),
         layout.get("image_count"),
+        vector_visual_count,
         layout.get("layout_quality"),
     )
     return _result(
@@ -165,5 +186,6 @@ def render_html_to_pdf(
         size_bytes=size_bytes,
         engine="chromium",
         engine_message="rendered via headless chromium (playwright-core)",
+        vector_visual_count=vector_visual_count,
         **layout,
     )

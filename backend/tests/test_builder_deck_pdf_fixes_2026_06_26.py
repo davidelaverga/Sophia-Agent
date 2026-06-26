@@ -175,6 +175,29 @@ def test_report_css_wraps_code_blocks_and_has_safe_columns():
     assert ".section-label" in css
 
 
+# ---- R2-3: page-count overshoot + near-blank pages --------------------------
+
+
+def test_report_css_caps_figure_media_height():
+    css = (_REPO / "skills/public/pdf-report/assets/report.css").read_text(encoding="utf-8")
+    # A small diagram must not reserve a whole page (the near-blank-page cause).
+    assert "max-height: 150mm" in css
+
+
+def test_pdf_report_skill_has_length_and_figure_sizing_guidance():
+    text = (_REPO / "skills/public/pdf-report/SKILL.md").read_text(encoding="utf-8")
+    assert "Length and figure sizing" in text
+    assert "FIRST draft" in text
+    assert "never pad" in text.lower()
+
+
+def test_pdf_page_count_repair_budget_is_two():
+    # One repair can't converge an under→over swing (2→11 vs 8); 2 can. (R2-3)
+    from deerflow.agents.sophia_agent.middlewares.builder_artifact import _PDF_PAGE_COUNT_REPAIR_MAX
+
+    assert _PDF_PAGE_COUNT_REPAIR_MAX == 2
+
+
 # ---- C1: Supabase 400 tolerance --------------------------------------------
 
 

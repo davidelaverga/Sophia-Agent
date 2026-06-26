@@ -289,11 +289,40 @@ def test_forced_pdf_render_targets_the_html_tool():
     assert choice == {"type": "tool", "name": "render_html_to_pdf"}
 
 
-def test_html_pdf_image_count_passes_visual_gate(tmp_path):
-    # Inline-SVG reports have no separate PNG asset files; visual evidence comes
-    # from the rendered PDF's image_count, stored in builder_pdf_render_result.
+def test_html_pdf_visual_evidence_accepts_image_or_vector(tmp_path):
+    # Visual evidence comes from the render result. Rasterized images count
+    # (image_count) AND inline-SVG vector figures count (vector_visual_count) —
+    # the R2-2 fix: an inline-SVG report reads image_count=0 but is visual-present.
     pdf = tmp_path / "out.pdf"
-    state_with_visuals = {"builder_pdf_render_result": {"image_count": 2, "page_count": 4}}
-    state_without = {"builder_pdf_render_result": {"image_count": 0, "page_count": 4}}
-    assert _pdf_contains_visual_evidence(pdf, state_with_visuals) is True
-    assert _pdf_contains_visual_evidence(pdf, state_without) is False
+    by_image = {"builder_pdf_render_result": {"image_count": 2, "vector_visual_count": 0, "page_count": 4}}
+    by_vector = {"builder_pdf_render_result": {"image_count": 0, "vector_visual_count": 3, "page_count": 4}}
+    neither = {"builder_pdf_render_result": {"image_count": 0, "vector_visual_count": 0, "page_count": 4}}
+    assert _pdf_contains_visual_evidence(pdf, by_image) is True
+    assert _pdf_contains_visual_evidence(pdf, by_vector) is True  # R2-2: no false reject
+    assert _pdf_contains_visual_evidence(pdf, neither) is False
+
+
+def test_render_html_to_pdf_reports_vector_visual_count(staged, monkeypatch, tmp_path):
+    # The renderer counts inline <svg> in the source so the visual gate has a
+    # vector signal even when chromium keeps SVG as vector (image_count=0).
+    (staged / "report.html").write_text(
+        "<html><body><figure><svg></svg></figure><figure><svg></svg></figure></body></html>"
+    )
+    _wire_node(monkeypatch, tmp_path)
+
+    def _fake_run(cmd, **kwargs):
+        (staged / "out.pdf").write_bytes(b"%PDF-1.7 fake")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(render_html.subprocess, "run", _fake_run)
+    monkeypatch.setattr(
+        render_html, "_inspect_pdf_layout_with_targets", lambda host_pdf, **kw: {"page_count": 3, "image_count": 0}
+    )
+    result = _call(
+        runtime=_fake_runtime(),
+        html_path=f"{_OUTPUTS_PREFIX}report.html",
+        pdf_path=f"{_OUTPUTS_PREFIX}out.pdf",
+    )
+    assert result["success"] is True
+    assert result["image_count"] == 0  # chromium keeps SVG vector
+    assert result["vector_visual_count"] == 2  # two inline <svg> figures counted

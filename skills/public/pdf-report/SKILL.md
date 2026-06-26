@@ -216,6 +216,24 @@ acceptable only when repeated measurement is the actual analytic point.
 - Wrap each figure in `<figure>` with a `.figure-title` and a `<figcaption>`.
 - Keep captions specific and source-aware.
 
+## Length and figure sizing
+
+Author the report to the requested page count on your **FIRST draft**. Do not
+under-write and rely on a repair pass to expand it — expansion pads with
+whitespace and overshoots (a 2-page draft "repaired" to 11 pages for an 8-page
+request).
+
+- **Match the requested length on the first pass.** Asked for 8 pages → write 8
+  pages of substantive content.
+- **Size figures compactly.** A chart/diagram occupies the space its content
+  needs, not a reserved block. The base CSS caps figure media at ~150mm tall;
+  keep your `<svg>` `viewBox` proportionate — never a page-tall box around a
+  small diagram.
+- **Never pad with empty space, spacer elements, or blank blocks** to reach a
+  length. Reach length with content.
+- **Keep every page dense.** A page holding only a caption, a single callout, or
+  one line is a defect — fold that content onto the preceding page.
+
 ## HTML requirements
 
 - One self-contained `.html` file; inline the base CSS in a `<style>` block.
