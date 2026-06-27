@@ -70,10 +70,22 @@ function isAllowedRenderRequest(url, htmlFile, outputRoot) {
   if (!url.startsWith("file:")) {
     return false;
   }
+  let candidate;
   try {
-    return isInsideDirectory(path.resolve(fileURLToPath(url)), outputRoot);
+    candidate = path.resolve(fileURLToPath(url));
   } catch {
     return false;
+  }
+  try {
+    // Resolve symlinks: a real existing asset must stay under the REAL outputs
+    // root, so a symlinked asset pointing outside outputs cannot smuggle an
+    // outside file into the rendered deliverable (Codex P1, 2026-06-27).
+    return isInsideDirectory(fs.realpathSync(candidate), fs.realpathSync(outputRoot));
+  } catch {
+    // Missing target (or missing file): fall back to the lexical check so a
+    // genuinely-absent asset is still recognized/tracked downstream — a
+    // nonexistent path discloses nothing.
+    return isInsideDirectory(candidate, outputRoot);
   }
 }
 

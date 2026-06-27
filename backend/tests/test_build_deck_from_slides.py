@@ -78,6 +78,28 @@ def test_no_slides_is_reported(tmp_path, monkeypatch):
     assert r["success"] is False and r["error_type"] == "no_slides"
 
 
+def test_rejects_symlinked_slides_dir_escape(tmp_path, monkeypatch):
+    # Codex P1 (2026-06-27): a slides_dir that is a symlink to a directory OUTSIDE
+    # outputs must be rejected before enumeration, or _ordered_slide_html() would
+    # follow it and render outside-HTML into the .pptx (file disclosure).
+    outputs = tmp_path / "outputs"
+    outputs.mkdir(parents=True)
+    outside = tmp_path / "outside_secrets"
+    outside.mkdir()
+    (outside / "01.html").write_text("<html>secret</html>")
+    try:
+        (outputs / "slides").symlink_to(outside, target_is_directory=True)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+    monkeypatch.setattr(deck, "_host_path_for_virtual_output", lambda p, td: outputs / p.removeprefix(_OUTPUTS))
+
+    r = _call(runtime=_runtime(), output_path=f"{_OUTPUTS}deck.pptx")
+
+    assert r["success"] is False
+    assert r["error_type"] == "invalid_input"
+    assert "escapes the outputs directory" in r["error"]
+
+
 def test_success_renders_each_slide_then_wraps(tmp_path, monkeypatch):
     outputs = tmp_path / "outputs"
     slides = outputs / "slides"

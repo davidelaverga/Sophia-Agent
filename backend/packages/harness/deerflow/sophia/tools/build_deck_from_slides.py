@@ -31,7 +31,11 @@ from typing import Any
 from langchain.tools import ToolRuntime, tool
 
 from deerflow.sandbox.tools import get_thread_data
-from deerflow.sophia.tools.render_html_to_pdf import _host_path_for_virtual_output, _result
+from deerflow.sophia.tools.render_html_to_pdf import (
+    _host_path_for_virtual_output,
+    _resolved_host_path_error,
+    _result,
+)
 from deerflow.sophia.tools.render_markdown_to_pdf import _ensure_relative_to_outputs
 
 logger = logging.getLogger(__name__)
@@ -274,6 +278,16 @@ def build_deck_from_slides(
     thread_data = get_thread_data(runtime)
     slides_host = _host_path_for_virtual_output(slides_virtual, thread_data)
     host_pptx = _host_path_for_virtual_output(output_path, thread_data)
+
+    # Resolve symlinks and require both paths to stay under the real outputs root
+    # BEFORE enumerating slides — a symlinked slides_dir would otherwise let
+    # _ordered_slide_html() follow it and render outside-HTML into the .pptx
+    # (Codex P1, 2026-06-27). Mirrors render_html_to_pdf's host-path guard.
+    resolved_error = _resolved_host_path_error("slides_dir", slides_virtual, slides_host) or _resolved_host_path_error(
+        "output_path", output_path, host_pptx
+    )
+    if resolved_error is not None:
+        return _result(success=False, error_type="invalid_input", error=resolved_error)
 
     slide_files = _ordered_slide_html(slides_host)
     no_slides_error = _no_slides_error(slide_files, slides_virtual)
