@@ -3197,7 +3197,7 @@ class TestBuilderArtifactMiddleware:
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state, _make_runtime(thread_id="thread-x"))
         assert choice == {"type": "tool", "name": "emit_builder_artifact"}
 
-    def test_pptx_slide_assets_ready_forces_compile_bash(self, tmp_path):
+    def test_pptx_slide_assets_ready_instructs_deck_builder(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3216,11 +3216,19 @@ class TestBuilderArtifactMiddleware:
         assert update is not None
         assert update["builder_pptx_compile_latch_pending"] is True
         assert update["builder_pptx_diagnostics"]["slide_assets_ready_at_turn"] == 1
-        assert "PPTX compile latch" in update["messages"][0].content
+        # Phase 0: the latch now instructs the HTML-slide deck builder, not the
+        # retired bash plan-JSON compiler. (Codex P1, 2026-06-27)
+        message = update["messages"][0].content
+        assert "deck compile latch" in message
+        assert "build_deck_from_slides" in message
 
         latched_state = {**state, **update}
         choice = mw._force_choice_for_state(latched_state, _make_runtime(thread_id="thread-x"))
-        assert choice == {"type": "tool", "name": "bash"}
+        # No hard tool-force after slide images are ready: the model must author
+        # slides/*.html (several write_file calls) before build_deck_from_slides,
+        # so forcing bash (rejected by the deck-improvisation backstop) or
+        # build_deck_from_slides (no_slides loop) would derail the build.
+        assert choice != {"type": "tool", "name": "bash"}
 
     def test_pptx_terminal_ready_forces_immediate_emit(self, tmp_path, monkeypatch):
         from deerflow.agents.sophia_agent.middlewares import builder_artifact as module

@@ -4749,16 +4749,17 @@ def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
     success_count = int(diagnostics.get("image_generation_success_count", 0) or 0)
     target = state.get("builder_artifact_target_path") or f"{_OUTPUTS_VIRTUAL_PREFIX}deck.pptx"
     return (
-        "[Sophia/PPTX compile latch]\n"
-        f"You have generated {success_count}/{target_count} requested full-slide images. "
-        "Stop generating or redesigning slides. Your next action must be a single bash "
-        "call that runs the existing PPTX compiler path with the existing plan JSON "
-        f"and writes the requested deck to `{target}`.\n\n"
-        "Every generated slide bitmap must already contain the visible top title band "
-        "(about 14% of slide height), center visual safe area (about 75%), and bottom "
-        "one-line narrative/takeaway band (about 11%). The PPTX compiler must embed "
-        "those bitmaps full-bleed with speaker notes only; do not add native title, "
-        "caption, footer, text box, PDF, Markdown, or HTML fallbacks."
+        "[Sophia/deck compile latch]\n"
+        f"You have generated {success_count}/{target_count} requested slide images. "
+        "Stop generating or redesigning images. Author one self-contained HTML file "
+        "per slide (1920x1080) under `/mnt/user-data/outputs/slides/` — real DOM title "
+        "and narrative plus the generated image referenced by a RELATIVE "
+        "`../assets/<file>` path — then call "
+        f"`build_deck_from_slides(output_path='{target}')` to render each slide and "
+        "wrap them into the deck.\n\n"
+        "Do NOT write or run python-pptx, pptxgenjs, or any deck-compiler script — the "
+        "harness owns the HTML→PNG→PPTX conversion. Do not emit PDF, Markdown, or HTML "
+        "as a substitute for the .pptx."
     )
 
 
@@ -7557,15 +7558,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if choice is not None:
             return choice, None
 
-        pptx_compile_choice = self._pptx_compile_tool_choice_for_state(state)
-        if pptx_compile_choice is not None:
-            return pptx_compile_choice, {
-                "builder_pptx_compile_latch_pending": True,
-                "builder_pptx_diagnostics": _pptx_latch_diagnostics_update(
-                    state,
-                    compile_forced=True,
-                ),
-            }
+        # Phase 0 deck pipeline (Codex P1, 2026-06-27): once slide images are
+        # ready the model authors slides/*.html and calls build_deck_from_slides
+        # — a step that needs several write_file calls first — so we do NOT
+        # hard-force a single tool here. Forcing bash ran the RETIRED plan-JSON
+        # compiler, which the deck-improvisation backstop now rejects → loop;
+        # forcing build_deck_from_slides before any HTML exists loops on
+        # no_slides. The one-time latch MESSAGE (_maybe_inject_pptx_compile_latch)
+        # instructs build_deck_from_slides instead of forcing a tool.
 
         visual_choice = self._visual_tool_choice_for_state(state)
         if visual_choice is not None:
@@ -7634,17 +7634,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             _SIMPLE_PDF_TOOL_NAME,
         )
         return self._forced_simple_pdf_tool_choice()
-
-    def _pptx_compile_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
-        if not (state.get("builder_pptx_compile_latch_pending") or _pptx_slide_assets_ready(state)):
-            return None
-        logger.warning(
-            "BuilderArtifact: forcing tool_choice=bash after PPTX slide assets are ready "
-            "success_count=%d target_slide_count=%d",
-            _pptx_diagnostic_count(state, "image_generation_success_count"),
-            _pptx_latch_target_slide_count(state),
-        )
-        return self._forced_bash_tool_choice()
 
     def _pdf_terminal_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_pdf_artifact(state) or not _successful_pdf_ready_to_emit(state):
@@ -9279,6 +9268,56 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             }
         )
 
+    @staticmethod
+    def _deck_builder_result_delta(result: ToolMessage) -> dict[str, Any] | None:
+        """Record PPTX diagnostics from a ``build_deck_from_slides`` JSON result.
+
+        The Phase 0 deck path compiles via ``build_deck_from_slides`` (one
+        full-bleed picture per slide), not the bash plan-JSON compiler, so
+        ``_pptx_bash_result_delta`` never sees it. Without this,
+        ``pptx_generator_slide_count`` / ``pptx_generator_picture_count`` stay
+        unset and explicit slide-count requests can't be checked or repaired
+        before emit. (Codex P2, 2026-06-27)
+        """
+        text = BuilderArtifactMiddleware._tool_message_text(result)
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict) or payload.get("success") is not True:
+            return None
+        slide_count = int(payload.get("slide_count") or 0)
+        if slide_count <= 0:
+            return None
+        delta: dict[str, Any] = {
+            "pptx_generator_attempt_count": 1,
+            "pptx_generator_success_count": 1,
+            # Every rendered slide is one full-bleed picture, so picture_count == slide_count.
+            "pptx_generator_slide_count": slide_count,
+            "pptx_generator_picture_count": slide_count,
+        }
+        pptx_path = payload.get("pptx_path")
+        if isinstance(pptx_path, str) and pptx_path:
+            delta["pptx_output_paths"] = [pptx_path]
+        return delta
+
+    def _deck_builder_result_command(
+        self,
+        result: ToolMessage | Command,
+    ) -> ToolMessage | Command:
+        if not isinstance(result, ToolMessage):
+            return result
+        delta = self._deck_builder_result_delta(result)
+        if delta is None:
+            return result
+        return Command(
+            update={
+                "messages": [result],
+                "builder_pptx_diagnostics": delta,
+                "builder_pptx_compile_latch_pending": False,
+            }
+        )
+
     def _tool_result_command(
         self,
         request: ToolCallRequest,
@@ -9289,6 +9328,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._write_result_command(request, result)
         if tool_name in _PDF_CREATION_TOOL_NAMES and isinstance(result, ToolMessage):
             return self._pdf_result_command(request, result)
+        if tool_name == "build_deck_from_slides":
+            return self._deck_builder_result_command(result)
         if tool_name in {"bash", "bash_tool"}:
             return self._pptx_bash_result_command(request, result)
         if tool_name in _VISUAL_ASSET_TOOL_NAMES:

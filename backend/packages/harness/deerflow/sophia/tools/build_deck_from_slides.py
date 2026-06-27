@@ -211,7 +211,11 @@ def _build_deck_artifact(host_pptx: Path, slide_files: list[Path], title: str | 
     node, png_script, wrap_script, runtime_error = _deck_runtime()
     if runtime_error is not None:
         return [], runtime_error
-    render_dir = host_pptx.parent / "_deck_render"
+    # Keep render scratch (slide-*.png + _deck_plan.json) under the hidden
+    # `.builder/` support dir so the thread artifact listing — which hides
+    # `.builder/visuals/sources/source_artifact` top-level dirs — doesn't surface
+    # these intermediates as separate user deliverables. (Codex P2, 2026-06-27)
+    render_dir = host_pptx.parent / ".builder" / "_deck_render"
     png_paths, render_error = _render_slide_pngs(node or "", png_script or Path(), slide_files, render_dir)
     if render_error is not None:
         return [], render_error

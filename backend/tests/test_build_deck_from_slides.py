@@ -171,3 +171,36 @@ def test_backstop_noop_for_non_pptx_target():
         _req("bash", {"command": "from pptx import Presentation"}, target=f"{_OUTPUTS}report.pdf")
     )
     assert r is None
+
+
+# ---- _deck_builder_result_command (Codex P2 — record deck diagnostics) -----
+
+
+def _deck_tool_message(payload: dict):
+    from langchain_core.messages import ToolMessage
+
+    return ToolMessage(content=json.dumps(payload), tool_call_id="tc")
+
+
+def test_deck_builder_result_records_pptx_diagnostics():
+    result = _deck_tool_message({"success": True, "pptx_path": f"{_OUTPUTS}deck.pptx", "slide_count": 4})
+    cmd = BuilderArtifactMiddleware()._deck_builder_result_command(result)
+    assert isinstance(cmd, Command)
+    diag = cmd.update["builder_pptx_diagnostics"]
+    # picture_count == slide_count (each rendered slide is one full-bleed picture),
+    # so the slide-count gate can verify/repair an explicit slide-count request.
+    assert diag["pptx_generator_slide_count"] == 4
+    assert diag["pptx_generator_picture_count"] == 4
+    assert diag["pptx_output_paths"] == [f"{_OUTPUTS}deck.pptx"]
+    assert cmd.update["builder_pptx_compile_latch_pending"] is False
+
+
+def test_deck_builder_result_ignores_failure_and_garbage():
+    # A failed build records no diagnostics — the original ToolMessage passes through.
+    failed = _deck_tool_message({"success": False, "error_type": "no_slides"})
+    assert BuilderArtifactMiddleware()._deck_builder_result_command(failed) is failed
+    # Non-JSON content is tolerated (no crash, passthrough).
+    from langchain_core.messages import ToolMessage
+
+    garbage = ToolMessage(content="not json", tool_call_id="tc")
+    assert BuilderArtifactMiddleware()._deck_builder_result_command(garbage) is garbage
