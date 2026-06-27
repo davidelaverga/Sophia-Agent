@@ -546,10 +546,12 @@ def _pptx_slide_count_repair_message(repair: dict[str, int]) -> str:
         "[Sophia/PPTX slide-count repair]\n"
         f"The current PPTX is valid, but it has {generated} slides while the "
         f"user explicitly requested exactly {requested} total slides. Use this "
-        "one bounded repair turn to revise the deck plan and regenerate the PPTX "
-        f"so it has exactly {requested} total slides, including cover and summary. "
-        f"Do not polish unrelated content; only {direction} slide(s) as needed, "
-        "re-run the PPTX compiler, verify the package, then emit the .pptx."
+        f"one bounded repair turn to {direction} slide HTML file(s) under "
+        "`/mnt/user-data/outputs/slides/` so there are exactly "
+        f"{requested} total slides, including cover and summary, then call "
+        "`build_deck_from_slides(output_path=...)` again to rebuild the deck. "
+        "Do not polish unrelated content and do not run a deck compiler; the "
+        "harness rebuilds the .pptx from the slide HTML."
     )
 
 
@@ -4742,82 +4744,44 @@ def _log_pptx_skill_correction(
     )
 
 
-def _pptx_skill_correction_message(state: dict[str, Any]) -> str:
-    return (
-        "[Sophia/presentation-skill correction]\n"
-        "This is a PPTX slide-deck build. Reading SKILL.md is useful, but it is not "
-        "completion. Stop ad hoc deck generation, Python scripts, and generic "
-        "write_file loops.\n\n"
-        "Your next safe workflow is:\n"
-        "1. If you have not already done so, call "
-        "`read_file(path='/mnt/skills/public/ppt-generation/SKILL.md')`.\n"
-        "2. Generate one full-slide PNG per slide with the image-generation "
-        "slide-visual workflow. Each image must include its own top title band, "
-        "center visual area, and bottom concise narrative/takeaway band "
-        "(roughly 14% / 75% / 11% vertical bands).\n"
-        "3. Create a valid slide plan JSON under `/mnt/user-data/workspace/`; each "
-        "slide must point to its PNG with `image_path` and include speaker notes.\n"
-        "4. Run the PPTX compiler through the ppt-generation workflow with "
-        "`/mnt/skills/public/ppt-generation/scripts/generate.py`, `--plan-file`, "
-        "and `--output-file`.\n"
-        "5. Emit only after the `.pptx` exists, opens as a valid PowerPoint package, "
-        "and has the requested slide count.\n\n"
-        "Do not emit placeholder/tiny/corrupt `.pptx` files, Python scripts, source "
-        "Markdown, or preview PDFs. If you cannot produce the deck after the bounded "
-        "repair, emit artifact_path=null with an honest companion_summary."
-    )
-
-
 def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
+    """The single source of truth for deck steering.
+
+    Gate-agnostic on purpose: this one message is injected by every deck
+    correction site (compile latch when slide images are ready, AND the
+    early drift/skill correction before any image exists). It never names a
+    slide-plan JSON, ``--plan-file``, ``image_path``, or the retired
+    ``ppt-generation/scripts/generate.py`` compiler — the harness owns the
+    HTML→PNG→PPTX conversion. (Phase 0 §2.6 single-source consolidation.)
+    """
     diagnostics = _pptx_diagnostics(state)
     target_count = _pptx_latch_target_slide_count(state)
     success_count = int(diagnostics.get("image_generation_success_count", 0) or 0)
     target = state.get("builder_artifact_target_path") or f"{_OUTPUTS_VIRTUAL_PREFIX}deck.pptx"
+    if target_count > 0 and success_count >= target_count:
+        opener = (
+            f"You have generated {success_count}/{target_count} slide images. "
+            "Stop generating or redesigning images. "
+        )
+    else:
+        opener = (
+            "This is a PPTX slide-deck build. Reading SKILL.md is not completion, "
+            "and you never compile the deck yourself. "
+        )
     return (
         "[Sophia/deck compile latch]\n"
-        f"You have generated {success_count}/{target_count} requested slide images. "
-        "Stop generating or redesigning images. Author one self-contained HTML file "
-        "per slide (1920x1080) under `/mnt/user-data/outputs/slides/` — real DOM title "
-        "and narrative plus the generated image referenced by a RELATIVE "
-        "`../assets/<file>` path — then call "
-        f"`build_deck_from_slides(output_path='{target}')` to render each slide and "
-        "wrap them into the deck.\n\n"
-        "Do NOT write or run python-pptx, pptxgenjs, or any deck-compiler script — the "
-        "harness owns the HTML→PNG→PPTX conversion. Do not emit PDF, Markdown, or HTML "
-        "as a substitute for the .pptx."
-    )
-
-
-def _pptx_plan_correction_message(reason: str | None = None) -> str:
-    safe_reason = (reason or "invalid_plan_json").strip()[:240]
-    return (
-        "[Sophia/presentation-plan correction]\n"
-        f"plan JSON invalid: {safe_reason}; re-emit valid JSON matching the deck schema. "
-        "Do not switch to HTML. Rewrite the plan as a valid JSON object under "
-        "`/mnt/user-data/workspace/` and run the PPT generator once more.\n\n"
-        "Minimum schema:\n"
-        "{\n"
-        '  "title": "Deck title",\n'
-        '  "aspect_ratio": "16:9",\n'
-        '  "theme": "sophia_light",\n'
-        '  "slides": [\n'
-        '    {"slide_number": 1, "title": "Title", '
-        '"image_path": "/mnt/user-data/outputs/visuals/slide-01.png", '
-        '"speaker_notes": "Concise narration."},\n'
-        '    {"slide_number": 2, "title": "Part One", '
-        '"image_path": "/mnt/user-data/outputs/visuals/slide-02.png", '
-        '"speaker_notes": "Concise narration."}\n'
-        "  ]\n"
-        "}\n\n"
-        "`theme` is optional (sophia_light | sophia_warm). Every slide needs an "
-        "`image_path`; the compiler will not compose a slide from text fields."
-    )
-
-
-def _pptx_plan_error_reason(diagnostics: dict[str, Any]) -> str:
-    return (
-        str(diagnostics.get("pptx_generator_error_detail") or "").strip()
-        or str(diagnostics.get("pptx_generator_error_class") or "").strip()
+        + opener
+        + "Generate each slide's visual-area image into `/mnt/user-data/outputs/assets/` "
+        "(hero first, then ONE image-generation `--manifest` batch; the image is the "
+        "visual area only — never bake the slide title, narrative, footer, or page chrome "
+        "into it). Author one self-contained 1920x1080 HTML file per slide under "
+        "`/mnt/user-data/outputs/slides/` (real DOM title + 1-2 sentence narrative; the "
+        "image referenced by a RELATIVE `../assets/<file>` path), then call "
+        f"`build_deck_from_slides(output_path='{target}')` ONCE — the harness renders each "
+        "slide to a full-bleed PNG and wraps them into the deck.\n\n"
+        "Do NOT write or run python-pptx, pptxgenjs, a slide-plan JSON, or any deck-compiler "
+        "script — the harness owns the HTML→PNG→PPTX conversion. Do not emit PDF, Markdown, "
+        "or HTML as a substitute for the .pptx."
     )
 
 
@@ -4855,24 +4819,13 @@ def _visual_design_skill_message() -> str:
         "is available:\n"
         "`read_file(description='read visual design skill', "
         "path='/mnt/skills/public/visual-design/SKILL.md')`.\n"
-        "For PPTX decks, every slide must be a generated full-slide image embedded "
-        "by the PPTX compiler. For PDF reports, draw both charts AND structural diagrams "
+        "For PPTX decks, author one HTML file per slide under "
+        "`/mnt/user-data/outputs/slides/` (title + narrative as real DOM text, the visual "
+        "as a relative `../assets/<file>` image) and call build_deck_from_slides — the "
+        "harness converts to PPTX. For PDF reports, draw both charts AND structural diagrams "
         "as inline static `<svg>` directly in the report HTML (bar / line / column for "
         "data; box-and-arrow flow / comparison / mind-map for structure) — NO remote "
         "`generate_chart`, NO client-side JS — then render via render_html_to_pdf."
-    )
-
-
-def _visual_asset_required_message(state: dict[str, Any]) -> str:
-    target_ext = _requested_target_suffix(state).lstrip(".") or "artifact"
-    return (
-        "[Sophia/visual-asset correction]\n"
-        f"This {target_ext} request asked for charts, diagrams, or visuals, but "
-        "no verified local visual asset has been created yet. For PPTX, generate "
-        "full-slide images and reference them with `image_path`. For PDF, create "
-        "local chart/table/diagram assets under `/mnt/user-data/outputs/visuals/` "
-        "and embed them in the Markdown before rendering. Remote chart URLs and "
-        "prose descriptions do not count."
     )
 
 
@@ -6986,11 +6939,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return ""
         listing = "\n".join(f"- {problem}" for problem in deck_problems[:8])
         return (
-            "Error: emit_builder_artifact rejected — the PPTX deck plan failed Sophia "
+            "Error: emit_builder_artifact rejected — the PPTX deck failed Sophia "
             "structural validation:\n"
             f"{listing}\n\n"
-            "Repair the deck now: re-run the PPTX compiler so the requested .pptx "
-            "opens and contains at least one embedded full-slide picture."
+            "Repair the deck now: ensure each `/mnt/user-data/outputs/slides/*.html` slide "
+            "is well-formed (1920x1080, real DOM title + narrative, the visual as a relative "
+            "`../assets/<file>` image), then call "
+            "`build_deck_from_slides(output_path=...)` so the harness produces a `.pptx` with "
+            "one full-bleed slide per slide HTML. Do not write python-pptx or run a deck compiler."
         )
 
     @classmethod
@@ -7013,10 +6969,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 subject = "cover"
             else:
                 wiring = (
-                    "save it as /mnt/user-data/outputs/visuals/hero-<desc>.png and wire "
-                    "it into the plan: slide 1 gets `\"layout\": \"full_bleed_image\"` "
-                    "and `\"image\": <the hero path>` (auto-wiring also picks it up), "
-                    "then re-run the ppt-generation script"
+                    "save it as /mnt/user-data/outputs/assets/hero-<desc>.png and "
+                    "reference it from your title slide's HTML under "
+                    "/mnt/user-data/outputs/slides/ with a relative "
+                    "`<img src=\"../assets/hero-<desc>.png\">`, then call "
+                    "build_deck_from_slides"
                 )
                 subject = "hero"
             return (
@@ -7061,11 +7018,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 requested_ext = _requested_artifact_ext(state)
                 if requested_ext == "pptx":
                     embed_hint = (
-                        "Add a per-slide `image` field referencing one of these PNG "
-                        "paths in your presentation plan JSON (use `\"layout\": "
-                        "\"full_bleed_image\"` for hero images on title/section "
-                        "slides), then re-run the ppt-generation script and emit "
-                        "the regenerated .pptx."
+                        "Reference each generated PNG from its slide's HTML under "
+                        "`/mnt/user-data/outputs/slides/` with a RELATIVE "
+                        "`<img src=\"../assets/<name>.png\">` (the image is the slide's "
+                        "visual area; keep the title and narrative as real DOM text), "
+                        "then call `build_deck_from_slides(output_path=...)` to rebuild "
+                        "the deck. Do not write a plan JSON or run a deck compiler."
                     )
                 elif requested_ext == "pdf":
                     embed_hint = (
@@ -7088,7 +7046,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "visual evidence yet. Read /mnt/skills/public/visual-design/SKILL.md "
                 "if you have not already, create a local visual under "
                 "/mnt/user-data/outputs/visuals/ with the medium-appropriate path "
-                "(presentation image-forward slide visual, hard-data chart, report "
+                "(a visual-area image inside an HTML slide, hard-data chart, report "
                 "diagram, or inline SVG in HTML), then embed or reference it before emitting."
             )
         return ""
@@ -7130,7 +7088,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "Error: emit_builder_artifact rejected — this is a slide-deck "
                 "request. The normal final artifact must be a structurally valid "
                 ".pptx PowerPoint package under /mnt/user-data/outputs/. A .md/.html "
-                "fallback is allowed only after ppt-generation has been attempted, "
+                "fallback is allowed only after build_deck_from_slides has been attempted, "
                 "no valid deck exists, and the fallback is marked with "
                 "requested_artifact_ext='pptx', artifact_is_fallback=true, and a "
                 "safe fallback_reason. Do not emit Python files, placeholder decks, "
@@ -8352,22 +8310,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             ),
         }
 
-    def _maybe_inject_pptx_plan_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
-        if not _requested_pptx_artifact(state):
-            return None
-        if state.get("builder_pptx_plan_correction_emitted"):
-            return None
-        diagnostics = _pptx_diagnostics(state)
-        if diagnostics.get("pptx_generator_error_class") != "invalid_plan_json":
-            return None
-        if self._has_valid_pptx_output(state):
-            return None
-        logger.warning("BuilderArtifact: injecting PPTX plan JSON correction after invalid_plan_json")
-        return {
-            "messages": [HumanMessage(content=_pptx_plan_correction_message(_pptx_plan_error_reason(diagnostics)))],
-            "builder_pptx_plan_correction_emitted": True,
-        }
-
     def _maybe_inject_pptx_slide_count_repair(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         update = _pptx_slide_count_repair_injection_update(state)
         if update is None:
@@ -8376,10 +8318,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return update
 
     def _maybe_inject_pptx_structural_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
-        return (
-            self._maybe_inject_pptx_plan_correction(state)
-            or self._maybe_inject_pptx_slide_count_repair(state)
-        )
+        # Phase 0 §2.6: the retired slide-plan-JSON correction is gone (decks are
+        # HTML; there is no plan JSON). Slide-count repair is the only structural
+        # correction that still applies to the HTML-slide flow.
+        return self._maybe_inject_pptx_slide_count_repair(state)
 
     def _maybe_inject_pptx_skill_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_pptx_artifact(state):
@@ -8404,7 +8346,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         return {
             "messages": [
-                HumanMessage(content=_pptx_skill_correction_message(state))
+                # Phase 0 §2.6: single source of truth — the early drift/skill
+                # correction injects the SAME gate-agnostic deck-steering contract
+                # as the compile latch (build_deck_from_slides HTML flow), never the
+                # retired generate.py/plan-JSON path.
+                HumanMessage(content=_pptx_compile_latch_message(state))
             ],
             "builder_pptx_skill_correction_emitted": True,
         }
@@ -8433,10 +8379,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "Image generation has failed "
                         f"{attempts} times with no usable output "
                         f"(last error: {diagnostics.get('image_generation_error_class') or 'unknown'}). "
-                        "Stop calling the image-generation script in this build. A Sophia PPTX "
-                        "requires one generated full-slide image per slide, so do not switch to "
-                        "engine-composed slides. Emit artifact_path=null with an honest summary, "
-                        "or emit a valid requested-format deck only if usable slide images already exist."
+                        "Stop calling the image-generation script in this build. A Sophia deck is "
+                        "authored as HTML slides (one `slides/*.html` per slide, the image as the "
+                        "visual area), so do not switch to python-pptx or engine-composed slides. "
+                        "If usable slide images already exist, author the slide HTML (text-forward "
+                        "where an image is missing) and call build_deck_from_slides; otherwise emit "
+                        "artifact_path=null with an honest summary."
                     )
                 )
             ],

@@ -1,5 +1,6 @@
 import os
 import shutil
+import signal
 import subprocess
 import time
 from datetime import UTC, datetime
@@ -9,6 +10,69 @@ from deerflow.sandbox.sandbox import Sandbox
 
 _COMMAND_TIMEOUT_SECONDS = 600
 _COMMAND_PREVIEW_CHARS = 400
+_GROUP_DRAIN_SECONDS = 10
+
+
+def _terminate_process_group(proc: "subprocess.Popen[str]") -> None:
+    """Best-effort SIGKILL of the child's entire process group (Unix).
+
+    A forked grandchild (e.g. the image-generation worker subprocess) can
+    inherit and hold the stdout pipe open, so killing only the direct child
+    leaves ``communicate()`` blocked far past the timeout — the exact wedge that
+    hung deck build 019f0679 in prod (2026-06-27). Because the child was started
+    with ``start_new_session=True`` it owns its own process group, so killpg
+    reaps the whole tree without touching the harness.
+    """
+    try:
+        pgid = os.getpgid(proc.pid)
+    except (ProcessLookupError, OSError):
+        # Leader already exited; the group still lives under proc.pid (it was the
+        # new-session leader, so pgid == pid) as long as a grandchild survives.
+        pgid = proc.pid
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            proc.kill()
+        except OSError:
+            pass
+
+
+def _run_command_capture(
+    run_args: "list[str] | str",
+    run_kwargs: dict[str, object],
+    timeout: int,
+) -> "subprocess.CompletedProcess[str]":
+    """Run a command capturing stdout/stderr, with a wall-clock that actually fires.
+
+    On Unix the child is started in a new session and, on timeout, the whole
+    process group is SIGKILLed so a forking grandchild cannot hold the pipe open
+    and defeat the timeout (``subprocess.run``'s own timeout only kills the direct
+    child). Raises ``subprocess.TimeoutExpired`` on timeout so callers keep their
+    existing handling. Windows keeps the plain ``subprocess.run`` path.
+    """
+    if os.name == "nt":
+        return subprocess.run(run_args, capture_output=True, text=True, timeout=timeout, **run_kwargs)
+
+    popen_kwargs = dict(run_kwargs)
+    popen_kwargs["start_new_session"] = True
+    proc = subprocess.Popen(  # noqa: S603 — shell/executable come from the caller's validated shell detection
+        run_args,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        **popen_kwargs,
+    )
+    try:
+        stdout, stderr = proc.communicate(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        _terminate_process_group(proc)
+        try:
+            stdout, stderr = proc.communicate(timeout=_GROUP_DRAIN_SECONDS)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        raise subprocess.TimeoutExpired(proc.args, timeout, output=stdout, stderr=stderr) from None
+    return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
 def _preview_text(value: str | bytes | None, *, limit: int = _COMMAND_PREVIEW_CHARS) -> str | None:
@@ -105,13 +169,7 @@ class LocalSandbox(Sandbox):
                 run_args = command
                 run_kwargs = {"shell": True, "executable": shell_executable}
 
-            result = subprocess.run(
-                run_args,
-                capture_output=True,
-                text=True,
-                timeout=_COMMAND_TIMEOUT_SECONDS,
-                **run_kwargs,
-            )
+            result = _run_command_capture(run_args, run_kwargs, _COMMAND_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired as exc:
             completed_at = datetime.now(UTC)
             stdout_preview = _preview_text(exc.stdout)

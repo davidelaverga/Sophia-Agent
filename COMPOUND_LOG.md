@@ -26,6 +26,28 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-06-27 · [spec-D-phase-0 §2.6/§2.7 · deck steering single-source + image-gen hang] · PR #TBD
+**Author:** Claude · **Track:** backend · **Spec:** `sophia_spec_D_builder_build_pipeline_v1.1` (approved) · forensics `docs/audits/sophia-builder-deck-deploy-gap-forensics-2026-06-27.md`
+
+### What changed
+- **§2.6 deck steering = single source of truth.** All deck-correction injection now routes to one gate-agnostic `_pptx_compile_latch_message` (build_deck_from_slides HTML flow). Deleted the retired-flow functions `_pptx_skill_correction_message` / `_pptx_plan_correction_message` / `_pptx_plan_error_reason` / dead `_visual_asset_required_message` + the `_maybe_inject_pptx_plan_correction` injector. Swept every sibling old-flow string in `builder_artifact.py` (visual-design, image-gen-stop, slide-count-repair, deck-plan-rejection, visual-evidence parenthetical, the pptx-request fallback, and — found in adversarial review — the live `_visual_presence_rejection_message` embed hint + dead-gated `_hero_rejection_message` wiring). Invariant guard renders every deck correction (gate-locked ones via monkeypatch) and rejects retired-flow tokens.
+- **§2.7 image-gen subprocess hang.** `local_sandbox.py` bash now runs via `Popen(start_new_session=True)` + group SIGKILL on timeout (`_run_command_capture`/`_terminate_process_group`) so a forking grandchild holding the stdout pipe can't defeat the 600s wall-clock (the wedge that hung deck 019f0679). Live forking-grandchild regression test.
+
+### What we learned
+- Phase 0 **accreted** the new deck path without **subtracting** the old correction surfaces — the model was steered to `generate.py` then blocked from it (deadlock). The fix is deletion + a single steering message, not more new-flow strings beside the old. An invariant test (no retired token in any rendered deck correction) prevents the eight-surfaces-drift recurrence.
+- A redeploy was necessary (prod 6 commits behind at `eabe6058`) but **not sufficient** — the load-bearing turn-3 correction was old-flow in HEAD too. "Verify against current code, not just the deployed commit" mattered.
+- `subprocess.run(timeout=, capture_output=True)` does NOT bound a command that forks a pipe-holding grandchild; only a process-group kill (via `start_new_session`) does. The naive `sleep 30 & sleep 30` repro does not exercise it — a live grandchild must hold fd 1.
+- Adversarial review of the diff caught a real LIVE leak (`_visual_presence_rejection_message`) the author's grep missed and a vacuous-passing invariant test — worth the pass.
+
+### CLAUDE.md Updates
+- `backend/CLAUDE.md`: "Spec D Phase 0 §2.6/§2.7 — deck steering single-source + image-gen hang fix (2026-06-27)".
+
+### Skills Created / Modified
+- None (steering lives in middleware; the skills were already HTML-flow correct).
+
+### GEPA Log Entry
+- Runtime correction prompts changed (`builder_artifact.py`): before = turn-3 `_pptx_skill_correction_message` commanded "full-slide PNG + slide-plan JSON + run ppt-generation/scripts/generate.py --plan-file" (deadlocked vs the improvisation backstop → 0 build_deck_from_slides calls, hard-ceiling/hang); after = single gate-agnostic message "author slides/*.html → build_deck_from_slides; never compile". tone_delta: N/A (builder). Trace pair: yes (prod runs 019f0668 timeout / 019f0679 hang vs the consolidated flow).
+
 ## 2026-06-26 · [spec-D-phase-0 · decks on HTML render substrate] · PR #147
 **Author:** Claude · **Track:** backend · **Spec:** `sophia_spec_D_builder_build_pipeline_v1.md` (validated/amended) · forensics `docs/audits/sophia-builder-deck-failure-and-pdf-render-forensics-2026-06-26.md`
 

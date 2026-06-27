@@ -4329,7 +4329,10 @@ class TestBuilderArtifactMiddleware:
         assert calls[0] == "parent-thread"
         assert "builder-thread" not in calls
 
-    def test_pptx_skill_read_alone_still_gets_generator_correction(self, tmp_path):
+    def test_pptx_skill_read_alone_still_gets_deck_steering_correction(self, tmp_path):
+        # Phase 0 §2.6: the drift/skill correction still fires, but now injects the
+        # single canonical deck-steering message (HTML slides + build_deck_from_slides),
+        # never the retired generate.py/plan-JSON flow.
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -4350,9 +4353,11 @@ class TestBuilderArtifactMiddleware:
         assert result is not None
         assert result["builder_pptx_skill_correction_emitted"] is True
         content = result["messages"][0].content
-        assert "Reading SKILL.md is useful, but it is not completion" in content
-        assert "/mnt/skills/public/ppt-generation/scripts/generate.py" in content
-        assert "artifact_path=null" in content
+        assert "build_deck_from_slides" in content
+        assert "/mnt/user-data/outputs/slides/" in content
+        assert "/mnt/skills/public/ppt-generation/scripts/generate.py" not in content
+        assert "--plan-file" not in content
+        assert "image_path" not in content
 
     def test_pptx_generator_invocation_suppresses_skill_correction(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware

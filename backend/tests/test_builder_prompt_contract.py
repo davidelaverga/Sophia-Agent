@@ -155,3 +155,132 @@ def test_brand_tokens_resolve_the_georgia_conflict() -> None:
     assert "Never Aptos or Georgia" in tokens
     assert "Cambria" in tokens
     assert "graphviz" in tokens
+
+
+# Phase 0 §2.6 — deck steering is a single source of truth. No deck-facing
+# correction message may steer the RETIRED full-slide-bitmap + slide-plan-JSON +
+# ppt-generation/scripts/generate.py compiler flow. The deck failure (prod
+# 2026-06-27, runs 019f0668 timeout + 019f0679 hang) was the turn-3
+# `_pptx_skill_correction_message` commanding `generate.py --plan-file` while the
+# improvisation backstop blocked that exact script — a deadlock with no path to
+# `build_deck_from_slides`. This guard fails if any retired-flow steering returns.
+
+# Retired-flow INSTRUCTION tokens that must never appear in a rendered deck
+# correction (python-pptx / pptxgenjs are allowed only as prohibitions, so they
+# are intentionally excluded from this list).
+# Unambiguous RETIRED-flow instruction tokens. python-pptx / pptxgenjs / "deck
+# compiler" / "slide-plan JSON" appear only as PROHIBITIONS in the new messages,
+# so they are intentionally excluded (their presence is correct, not a leak).
+_RETIRED_DECK_TOKENS = (
+    "ppt-generation/scripts/generate.py",
+    "--plan-file",
+    "image_path",
+    "full_bleed_image",
+    "full-slide image per slide",
+    "full-slide png",
+    "pptx compiler",
+    "embedded full-slide picture",
+    "image-forward",
+    "ppt-generation has been attempted",
+    "ppt-generation script",
+    "re-run the ppt-generation",
+    "run the ppt generator",
+)
+
+
+def _render_deck_corrections() -> dict[str, str]:
+    """Render every deck-facing correction message the harness can inject."""
+    from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
+
+    out = "/mnt/user-data/outputs/"
+    ready = {
+        "builder_artifact_target_path": f"{out}deck.pptx",
+        "builder_pptx_requested_slide_count": 8,
+        "builder_pptx_diagnostics": {"image_generation_success_count": 8},
+    }
+    drifting = {
+        "builder_artifact_target_path": f"{out}deck.pptx",
+        "builder_pptx_diagnostics": {"image_generation_success_count": 0},
+    }
+    slide_count_mismatch = {
+        "builder_artifact_target_path": f"{out}deck.pptx",
+        "builder_pptx_requested_slide_count": 6,
+        "builder_pptx_diagnostics": {
+            "pptx_generator_slide_count": 8,
+            "pptx_generator_picture_count": 8,
+        },
+    }
+    zero_pictures = {
+        "builder_artifact_target_path": f"{out}deck.pptx",
+        "builder_pptx_diagnostics": {
+            "pptx_generator_slide_count": 8,
+            "pptx_generator_picture_count": 0,
+            "image_generation_enabled": True,
+        },
+    }
+    messages = {
+        "compile_latch_ready": ba._pptx_compile_latch_message(ready),
+        "compile_latch_drifting": ba._pptx_compile_latch_message(drifting),
+        "visual_design": ba._visual_design_skill_message(),
+        "deck_plan_rejection": ba.BuilderArtifactMiddleware._deck_plan_rejection_message(zero_pictures),
+    }
+    repair = ba._pptx_slide_count_repair_injection_update(slide_count_mismatch)
+    if repair and repair.get("messages"):
+        messages["slide_count_repair"] = repair["messages"][0].content
+    return {k: v for k, v in messages.items() if isinstance(v, str) and v}
+
+
+def test_deck_corrections_use_html_slide_flow_not_retired_compiler() -> None:
+    rendered = _render_deck_corrections()
+    # The canonical deck-steering message must name the HTML-slide tool + dir.
+    canonical = rendered["compile_latch_ready"].lower()
+    assert "build_deck_from_slides" in canonical
+    assert "slides/" in canonical
+    # No rendered deck correction may carry a retired-flow instruction token.
+    for name, message in rendered.items():
+        low = message.lower()
+        for token in _RETIRED_DECK_TOKENS:
+            assert token not in low, f"retired deck token {token!r} in {name} correction"
+
+
+def test_retired_deck_correction_functions_are_deleted() -> None:
+    from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
+
+    for gone in (
+        "_pptx_skill_correction_message",
+        "_pptx_plan_correction_message",
+        "_pptx_plan_error_reason",
+        "_visual_asset_required_message",
+    ):
+        assert not hasattr(ba, gone), f"{gone} must be deleted (Phase 0 §2.6 single source of truth)"
+    assert not hasattr(
+        ba.BuilderArtifactMiddleware, "_maybe_inject_pptx_plan_correction"
+    ), "_maybe_inject_pptx_plan_correction must be deleted (no slide-plan JSON in the HTML flow)"
+
+
+def test_pptx_emit_rejection_messages_use_html_slide_flow(monkeypatch) -> None:
+    # The emit-time visual rejection paths (visual-presence + hero gates) are
+    # gate-locked, so force them open and assert their pptx branch steers the
+    # build_deck_from_slides HTML flow — NOT "presentation plan JSON / re-run the
+    # ppt-generation script" (the live leak the 2026-06-27 review caught).
+    from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
+
+    out = "/mnt/user-data/outputs/"
+    state = {"builder_artifact_target_path": f"{out}deck.pptx"}
+
+    monkeypatch.setattr(ba, "_visuals_requested", lambda _s: True)
+    monkeypatch.setattr(ba, "_visual_presence_validated", lambda _a, _s: False)
+    monkeypatch.setattr(ba, "_visual_asset_paths", lambda _s: [f"{out}assets/hero.png"])
+    monkeypatch.setattr(ba, "_requested_artifact_ext", lambda _s: "pptx")
+    visual_presence = ba.BuilderArtifactMiddleware._visual_presence_rejection_message({}, state)
+    assert visual_presence, "visual-presence rejection should render for a pptx with unembedded assets"
+    assert "build_deck_from_slides" in visual_presence
+    for token in _RETIRED_DECK_TOKENS:
+        assert token not in visual_presence.lower(), f"retired token {token!r} in visual-presence rejection"
+
+    monkeypatch.setattr(ba.BuilderArtifactMiddleware, "_hero_gate_blocks_emit", classmethod(lambda _cls, _a, _s: True))
+    monkeypatch.setattr(ba, "_visuals_requested", lambda _s: False)  # opens the hero guard
+    hero = ba.BuilderArtifactMiddleware._hero_rejection_message({}, state)
+    assert hero, "hero rejection should render when the hero gate blocks"
+    for token in _RETIRED_DECK_TOKENS:
+        assert token not in hero.lower(), f"retired token {token!r} in hero rejection"

@@ -1223,7 +1223,11 @@ def test_failed_image_generation_after_correction_does_not_force_fallback(tmp_pa
     assert result is None
 
 
-def test_invalid_plan_json_gets_pptx_plan_correction(tmp_path: Path) -> None:
+def test_invalid_plan_json_no_longer_injects_plan_correction(tmp_path: Path) -> None:
+    # Phase 0 §2.6: the retired slide-plan-JSON correction is deleted — there is
+    # no plan JSON in the HTML-slide deck flow. A stale ``invalid_plan_json``
+    # diagnostic must NOT inject the old "re-emit plan JSON / run the PPT generator"
+    # directive (the steering that deadlocked prod decks on 2026-06-27).
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     state = {
@@ -1238,11 +1242,13 @@ def test_invalid_plan_json_gets_pptx_plan_correction(tmp_path: Path) -> None:
 
     result = BuilderArtifactMiddleware().before_model(state, SimpleNamespace(context={}))
 
-    assert result is not None
-    assert result["builder_pptx_plan_correction_emitted"] is True
-    assert "presentation-plan correction" in result["messages"][0].content
-    assert "plan JSON invalid: invalid_plan_json; re-emit valid JSON matching the deck schema" in result["messages"][0].content
-    assert "slides" in result["messages"][0].content
+    # No plan-correction is injected for this state (no drift, no images ready).
+    if result is not None:
+        content = result["messages"][0].content if result.get("messages") else ""
+        assert "presentation-plan correction" not in content
+        assert "--plan-file" not in content
+        assert "image_path" not in content
+        assert "builder_pptx_plan_correction_emitted" not in result
 
 
 def test_skill_read_flags_latch_after_summary_window_rolls() -> None:
