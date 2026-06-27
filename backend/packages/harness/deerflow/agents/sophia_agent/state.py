@@ -1,4 +1,4 @@
-from typing import Annotated, NotRequired
+from typing import Annotated, Any, NotRequired
 
 from langchain.agents import AgentState
 
@@ -216,6 +216,9 @@ def _merge_builder_visual_diagnostic_value(merged: dict, key: str, value: object
     if key in _VISUAL_DIAGNOSTIC_LIST_KEYS and isinstance(value, list):
         merged[key] = _merge_string_list(merged.get(key), value)
         return
+    if key in _VISUAL_DIAGNOSTIC_RECORD_KEYS and isinstance(value, list):
+        merged[key] = _merge_record_list(merged.get(key), value)
+        return
     merged[key] = value
 
 
@@ -223,6 +226,10 @@ _VISUAL_DIAGNOSTIC_LIST_KEYS = frozenset({
     "visual_asset_paths",
     "visual_svg_paths",
     "visual_png_paths",
+})
+_VISUAL_DIAGNOSTIC_RECORD_KEYS = frozenset({
+    "visual_figure_records",
+    "visual_failed_family_records",
 })
 
 
@@ -232,6 +239,26 @@ def _merge_string_list(current: object, update: list) -> list[str]:
         if isinstance(item, str):
             seen[item] = None
     return list(seen)
+
+
+def _record_merge_key(item: dict[str, Any], fallback: int) -> str:
+    for key in ("image_hash", "image_ref", "path", "png_path", "spec_path"):
+        value = item.get(key)
+        if value:
+            return str(value)
+    return str(fallback)
+
+
+def _merge_record_list(current: object, update: list) -> list[dict[str, Any]]:
+    merged: dict[str, dict[str, Any]] = {}
+    if isinstance(current, list):
+        for item in current:
+            if isinstance(item, dict):
+                merged[_record_merge_key(item, len(merged))] = dict(item)
+    for item in update:
+        if isinstance(item, dict):
+            merged[_record_merge_key(item, len(merged))] = dict(item)
+    return list(merged.values())
 
 
 class SophiaState(AgentState):

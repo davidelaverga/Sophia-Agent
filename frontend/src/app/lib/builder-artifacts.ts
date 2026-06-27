@@ -362,8 +362,8 @@ export function resolveCanvasRenderFile<T extends BuilderArtifactFileLike & { is
       : null
   );
   const previewFile = findByName(explicitPreviewName)
-    ?? list.find((file) => file !== downloadFile && file.role === 'preview')
-    ?? findByName(stemPreviewName);
+    ?? findByName(stemPreviewName)
+    ?? list.find((file) => file !== downloadFile && file.role === 'preview');
   if (!previewFile) {
     return { renderFile: downloadFile, downloadFile, previewKind: null };
   }

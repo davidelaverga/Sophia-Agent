@@ -48,6 +48,7 @@ from langchain.agents import AgentState
 from deerflow.agents.sophia_agent import middlewares as _middlewares_pkg
 from deerflow.agents.sophia_agent.state import (
     SophiaState,
+    _merge_builder_visual_diagnostics,
     _merge_builder_web_budget,
     _merge_search_sources,
     _union_string_list,
@@ -307,6 +308,42 @@ def test_merge_builder_web_budget_sums_call_deltas_and_last_wins_for_limits():
     assert merged["fetch_calls"] == 3  # 2 + 1
     # Static limit preserved (not in delta, so not touched).
     assert merged["search_limit"] == 10
+
+
+def test_merge_builder_visual_diagnostics_accumulates_record_lists():
+    """Figure records arrive as one-record deltas from separate tool calls.
+
+    ``SophiaState`` is the graph's base schema, so its reducer must preserve
+    all records or report visual-variety gates only see the last generated
+    figure.
+    """
+    current = {
+        "visual_figure_records": [
+            {"path": "/mnt/user-data/outputs/figures/one.png", "grammar": "architecture"}
+        ],
+        "visual_failed_family_records": [
+            {"spec_path": "/mnt/user-data/outputs/figures/bad-one.json", "family": "line"}
+        ],
+    }
+    update = {
+        "visual_figure_records": [
+            {"path": "/mnt/user-data/outputs/figures/two.png", "grammar": "timeline"}
+        ],
+        "visual_failed_family_records": [
+            {"spec_path": "/mnt/user-data/outputs/figures/bad-two.json", "family": "bar"}
+        ],
+    }
+
+    merged = _merge_builder_visual_diagnostics(current, update)
+
+    assert [record["grammar"] for record in merged["visual_figure_records"]] == [
+        "architecture",
+        "timeline",
+    ]
+    assert [record["family"] for record in merged["visual_failed_family_records"]] == [
+        "line",
+        "bar",
+    ]
 
 
 def test_merge_builder_web_budget_static_limits_use_last_wins():

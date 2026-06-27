@@ -351,6 +351,26 @@ describe("resolveCanvasRenderFile", () => {
     expect(resolved.previewKind).toBe("pptx_pdf_preview")
   })
 
+  it("prefers the stem-matched preview before unrelated preview-role files", () => {
+    const stalePreview = {
+      path: "mnt/user-data/outputs/previous-deck.preview.pdf",
+      name: "previous-deck.preview.pdf",
+      label: "previous-deck.preview.pdf",
+      role: "preview" as const,
+      isPrimary: false,
+    }
+    const stemPreview = {
+      ...previewSibling,
+      role: "preview" as const,
+    }
+
+    const resolved = resolveCanvasRenderFile([pptxPrimary, stalePreview, stemPreview])
+
+    expect(resolved.renderFile).toBe(stemPreview)
+    expect(resolved.downloadFile).toBe(pptxPrimary)
+    expect(resolved.previewKind).toBe("pptx_pdf_preview")
+  })
+
   it("keeps rendering the primary when no preview sibling exists", () => {
     const resolved = resolveCanvasRenderFile([pptxPrimary])
 
