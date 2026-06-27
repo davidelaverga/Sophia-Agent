@@ -71,6 +71,20 @@ def _ordered_slide_html(slides_host_dir: Path) -> list[Path]:
     )
 
 
+def _validated_slide_html_files(
+    slides_host_dir: Path,
+    slides_virtual: str,
+) -> tuple[list[Path], str | None]:
+    slide_files = _ordered_slide_html(slides_host_dir)
+    slides_prefix = slides_virtual.rstrip("/")
+    for slide in slide_files:
+        virtual_slide = f"{slides_prefix}/{slide.name}"
+        error = _resolved_host_path_error("slide_html", virtual_slide, slide)
+        if error is not None:
+            return [], _result(success=False, error_type="invalid_input", error=error)
+    return slide_files, None
+
+
 def _deck_request_error(output_path: str, slides_virtual: str) -> str | None:
     output_error = _ensure_relative_to_outputs("output_path", output_path)
     if output_error is not None:
@@ -289,7 +303,9 @@ def build_deck_from_slides(
     if resolved_error is not None:
         return _result(success=False, error_type="invalid_input", error=resolved_error)
 
-    slide_files = _ordered_slide_html(slides_host)
+    slide_files, slide_file_error = _validated_slide_html_files(slides_host, slides_virtual)
+    if slide_file_error is not None:
+        return slide_file_error
     no_slides_error = _no_slides_error(slide_files, slides_virtual)
     if no_slides_error is not None:
         return no_slides_error

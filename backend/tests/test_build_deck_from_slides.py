@@ -100,6 +100,25 @@ def test_rejects_symlinked_slides_dir_escape(tmp_path, monkeypatch):
     assert "escapes the outputs directory" in r["error"]
 
 
+def test_rejects_symlinked_slide_html_outside_outputs(tmp_path, monkeypatch):
+    outputs = tmp_path / "outputs"
+    slides = outputs / "slides"
+    slides.mkdir(parents=True)
+    outside = tmp_path / "outside_secret.html"
+    outside.write_text("<html>secret slide</html>")
+    try:
+        (slides / "01.html").symlink_to(outside)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+    monkeypatch.setattr(deck, "_host_path_for_virtual_output", lambda p, td: outputs / p.removeprefix(_OUTPUTS))
+
+    r = _call(runtime=_runtime(), output_path=f"{_OUTPUTS}deck.pptx")
+
+    assert r["success"] is False
+    assert r["error_type"] == "invalid_input"
+    assert "escapes the outputs directory" in r["error"]
+
+
 def test_success_renders_each_slide_then_wraps(tmp_path, monkeypatch):
     outputs = tmp_path / "outputs"
     slides = outputs / "slides"
