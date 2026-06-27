@@ -24,7 +24,9 @@ import logging
 import os
 import shutil
 import subprocess  # noqa: S404 — node by absolute path + fixed bundled scripts
+import tempfile
 from pathlib import Path
+from typing import Any
 
 from langchain.tools import ToolRuntime, tool
 
@@ -207,26 +209,40 @@ def _wrap_slide_pngs(
     return run_error or _pptx_wrap_failure(wrapped, host_pptx)
 
 
-def _build_deck_artifact(host_pptx: Path, slide_files: list[Path], title: str | None) -> tuple[list[Path], str | None]:
+def _deck_render_temp_parent(host_pptx: Path, thread_data: dict[str, Any] | None) -> Path:
+    outputs_path = (thread_data or {}).get("outputs_path") if isinstance(thread_data, dict) else None
+    if isinstance(outputs_path, str) and outputs_path.strip():
+        parent = Path(outputs_path).resolve().parent
+    else:
+        parent = host_pptx.parent.resolve().parent
+    render_parent = parent / ".deck-render"
+    render_parent.mkdir(parents=True, exist_ok=True)
+    return render_parent
+
+
+def _build_deck_artifact(
+    host_pptx: Path,
+    slide_files: list[Path],
+    title: str | None,
+    thread_data: dict[str, Any] | None,
+) -> tuple[list[Path], str | None]:
     node, png_script, wrap_script, runtime_error = _deck_runtime()
     if runtime_error is not None:
         return [], runtime_error
-    # Keep render scratch (slide-*.png + _deck_plan.json) under the hidden
-    # `.builder/` support dir so the thread artifact listing — which hides
-    # `.builder/visuals/sources/source_artifact` top-level dirs — doesn't surface
-    # these intermediates as separate user deliverables. (Codex P2, 2026-06-27)
-    render_dir = host_pptx.parent / ".builder" / "_deck_render"
-    png_paths, render_error = _render_slide_pngs(node or "", png_script or Path(), slide_files, render_dir)
-    if render_error is not None:
-        return [], render_error
-    wrap_error = _wrap_slide_pngs(
-        node=node or "",
-        wrap_script=wrap_script or Path(),
-        host_pptx=host_pptx,
-        render_dir=render_dir,
-        png_paths=png_paths,
-        title=title,
-    )
+    render_parent = _deck_render_temp_parent(host_pptx, thread_data)
+    with tempfile.TemporaryDirectory(prefix=f"{host_pptx.stem}-", dir=render_parent) as render_tmp:
+        render_dir = Path(render_tmp)
+        png_paths, render_error = _render_slide_pngs(node or "", png_script or Path(), slide_files, render_dir)
+        if render_error is not None:
+            return [], render_error
+        wrap_error = _wrap_slide_pngs(
+            node=node or "",
+            wrap_script=wrap_script or Path(),
+            host_pptx=host_pptx,
+            render_dir=render_dir,
+            png_paths=png_paths,
+            title=title,
+        )
     return png_paths, wrap_error
 
 
@@ -264,7 +280,7 @@ def build_deck_from_slides(
     if no_slides_error is not None:
         return no_slides_error
 
-    png_paths, build_error = _build_deck_artifact(host_pptx, slide_files, title)
+    png_paths, build_error = _build_deck_artifact(host_pptx, slide_files, title, thread_data)
     if build_error is not None:
         return build_error
 

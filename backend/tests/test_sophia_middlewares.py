@@ -3224,11 +3224,74 @@ class TestBuilderArtifactMiddleware:
 
         latched_state = {**state, **update}
         choice = mw._force_choice_for_state(latched_state, _make_runtime(thread_id="thread-x"))
-        # No hard tool-force after slide images are ready: the model must author
-        # slides/*.html (several write_file calls) before build_deck_from_slides,
-        # so forcing bash (rejected by the deck-improvisation backstop) or
-        # build_deck_from_slides (no_slides loop) would derail the build.
-        assert choice != {"type": "tool", "name": "bash"}
+        # No hard tool-force until slide HTML exists: forcing the deck builder
+        # too early would loop on no_slides, while forcing bash would invoke the
+        # retired compiler path.
+        assert choice is None
+
+    def test_pptx_slide_html_ready_forces_deck_builder_tool(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        slides_dir = outputs_dir / "slides"
+        slides_dir.mkdir(parents=True)
+        for index in range(1, 4):
+            (slides_dir / f"{index:02d}.html").write_text("<html><body>slide</body></html>")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "builder_pptx_requested_slide_count": 3,
+            "builder_pptx_compile_latch_pending": True,
+            "builder_non_artifact_turns": 2,
+            "builder_pptx_diagnostics": {
+                "image_generation_success_count": 3,
+            },
+        }
+
+        choice, update = BuilderArtifactMiddleware()._force_choice_plan_for_state(
+            state,
+            _make_runtime(thread_id="thread-x"),
+        )
+
+        assert choice == {"type": "tool", "name": "build_deck_from_slides"}
+        assert update is not None
+        assert update["builder_pptx_diagnostics"]["compile_forced_at_turn"] == 3
+
+    def test_deck_builder_result_records_pptx_diagnostics(self, tmp_path):
+        from langchain_core.messages import ToolMessage
+
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "deck.pptx").write_bytes(b"PK\x03\x04 fake-pptx")
+        request = MagicMock()
+        request.tool_call = {
+            "name": "build_deck_from_slides",
+            "args": {"output_path": "/mnt/user-data/outputs/deck.pptx"},
+        }
+        request.state = {"thread_data": {"outputs_path": str(outputs_dir)}}
+        result = ToolMessage(
+            content=json.dumps(
+                {
+                    "success": True,
+                    "pptx_path": "/mnt/user-data/outputs/deck.pptx",
+                    "slide_count": 3,
+                    "size_bytes": 12,
+                }
+            ),
+            tool_call_id="deck-build",
+        )
+
+        command = BuilderArtifactMiddleware()._tool_result_command(request, result)
+
+        assert command.update["builder_pptx_compile_latch_pending"] is False
+        diagnostics = command.update["builder_pptx_diagnostics"]
+        assert diagnostics["pptx_generator_attempt_count"] == 1
+        assert diagnostics["pptx_generator_success_count"] == 1
+        assert diagnostics["pptx_generator_slide_count"] == 3
+        assert diagnostics["pptx_generator_picture_count"] == 3
+        assert diagnostics["pptx_output_paths"] == ["/mnt/user-data/outputs/deck.pptx"]
 
     def test_pptx_terminal_ready_forces_immediate_emit(self, tmp_path, monkeypatch):
         from deerflow.agents.sophia_agent.middlewares import builder_artifact as module

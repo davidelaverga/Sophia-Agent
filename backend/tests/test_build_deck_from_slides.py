@@ -114,6 +114,9 @@ def test_success_renders_each_slide_then_wraps(tmp_path, monkeypatch):
     assert r["slide_count"] == 2
     assert calls["png"] == 2  # one render per slide
     assert calls["wrap"] == 1  # one wrap call
+    assert not (outputs / ".builder" / "_deck_render").exists()
+    assert not (outputs / "_deck_render").exists()
+    assert (tmp_path / ".deck-render").is_dir()
 
 
 def test_slide_render_failure_is_reported(tmp_path, monkeypatch):
@@ -182,11 +185,25 @@ def _deck_tool_message(payload: dict):
     return ToolMessage(content=json.dumps(payload), tool_call_id="tc")
 
 
-def test_deck_builder_result_records_pptx_diagnostics():
+def _deck_build_request(outputs_dir: Path):
+    return SimpleNamespace(
+        tool_call={
+            "name": "build_deck_from_slides",
+            "args": {"output_path": f"{_OUTPUTS}deck.pptx"},
+        },
+        state={"thread_data": {"outputs_path": str(outputs_dir)}},
+    )
+
+
+def test_deck_builder_result_records_pptx_diagnostics(tmp_path):
+    outputs_dir = tmp_path / "outputs"
+    outputs_dir.mkdir()
+    (outputs_dir / "deck.pptx").write_bytes(b"PK\x03\x04 fake")
     result = _deck_tool_message({"success": True, "pptx_path": f"{_OUTPUTS}deck.pptx", "slide_count": 4})
-    cmd = BuilderArtifactMiddleware()._deck_builder_result_command(result)
+    cmd = BuilderArtifactMiddleware()._deck_builder_result_command(_deck_build_request(outputs_dir), result)
     assert isinstance(cmd, Command)
     diag = cmd.update["builder_pptx_diagnostics"]
+    assert diag["pptx_generator_success_count"] == 1
     # picture_count == slide_count (each rendered slide is one full-bleed picture),
     # so the slide-count gate can verify/repair an explicit slide-count request.
     assert diag["pptx_generator_slide_count"] == 4
@@ -195,12 +212,18 @@ def test_deck_builder_result_records_pptx_diagnostics():
     assert cmd.update["builder_pptx_compile_latch_pending"] is False
 
 
-def test_deck_builder_result_ignores_failure_and_garbage():
-    # A failed build records no diagnostics — the original ToolMessage passes through.
+def test_deck_builder_result_records_failure_and_ignores_garbage(tmp_path):
+    outputs_dir = tmp_path / "outputs"
+    outputs_dir.mkdir()
     failed = _deck_tool_message({"success": False, "error_type": "no_slides"})
-    assert BuilderArtifactMiddleware()._deck_builder_result_command(failed) is failed
+    cmd = BuilderArtifactMiddleware()._deck_builder_result_command(_deck_build_request(outputs_dir), failed)
+    assert isinstance(cmd, Command)
+    diag = cmd.update["builder_pptx_diagnostics"]
+    assert diag["pptx_generator_attempt_count"] == 1
+    assert diag["pptx_generator_success_count"] == 0
+    assert diag["pptx_generator_error_class"] == "no_slides"
     # Non-JSON content is tolerated (no crash, passthrough).
     from langchain_core.messages import ToolMessage
 
     garbage = ToolMessage(content="not json", tool_call_id="tc")
-    assert BuilderArtifactMiddleware()._deck_builder_result_command(garbage) is garbage
+    assert BuilderArtifactMiddleware()._deck_builder_result_command(_deck_build_request(outputs_dir), garbage) is garbage

@@ -200,6 +200,7 @@ _REPORT_PDF_RENDER_TOOL_NAME = "render_html_to_pdf"
 _PDF_CREATION_TOOL_NAMES = frozenset(
     {"render_markdown_to_pdf", _REPORT_PDF_RENDER_TOOL_NAME, _SIMPLE_PDF_TOOL_NAME}
 )
+_DECK_BUILD_TOOL_NAME = "build_deck_from_slides"
 _BUILDER_WRITE_TOOL_NAMES = {"write_file", "write_file_tool"}
 _BUILDER_RESEARCH_TOOL_NAMES = {"builder_web_search", "builder_web_fetch"}
 _BUILDER_SUBSTANTIVE_TOOL_NAMES = {
@@ -457,6 +458,30 @@ def _pptx_slide_assets_ready(state: dict[str, Any]) -> bool:
     if _pptx_assets_success_count(state) < target_count:
         return False
     return not _pptx_valid_output_already_terminal(state)
+
+
+def _pptx_slide_html_count(state: dict[str, Any]) -> int:
+    outputs_root = _outputs_root_from_state(state)
+    if outputs_root is None:
+        return 0
+    slides_dir = outputs_root / "slides"
+    if not slides_dir.is_dir():
+        return 0
+    try:
+        return sum(
+            1
+            for path in slides_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in {".html", ".htm"}
+        )
+    except OSError:
+        return 0
+
+
+def _pptx_slide_html_ready(state: dict[str, Any]) -> bool:
+    target_count = _pptx_latch_target_slide_count(state)
+    if target_count <= 0:
+        return False
+    return _pptx_slide_html_count(state) >= target_count
 
 
 def _pptx_latch_diagnostics_update(
@@ -5521,6 +5546,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return {"type": "tool", "name": _REPORT_PDF_RENDER_TOOL_NAME}
 
     @staticmethod
+    def _forced_deck_build_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload that forces the deck compiler tool."""
+        return {"type": "tool", "name": _DECK_BUILD_TOOL_NAME}
+
+    @staticmethod
     def _forced_simple_pdf_tool_choice() -> dict[str, Any]:
         """Anthropic tool_choice payload that forces the deterministic PDF writer."""
         return {"type": "tool", "name": _SIMPLE_PDF_TOOL_NAME}
@@ -7558,14 +7588,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if choice is not None:
             return choice, None
 
-        # Phase 0 deck pipeline (Codex P1, 2026-06-27): once slide images are
-        # ready the model authors slides/*.html and calls build_deck_from_slides
-        # — a step that needs several write_file calls first — so we do NOT
-        # hard-force a single tool here. Forcing bash ran the RETIRED plan-JSON
-        # compiler, which the deck-improvisation backstop now rejects → loop;
-        # forcing build_deck_from_slides before any HTML exists loops on
-        # no_slides. The one-time latch MESSAGE (_maybe_inject_pptx_compile_latch)
-        # instructs build_deck_from_slides instead of forcing a tool.
+        pptx_compile_choice = self._pptx_compile_tool_choice_for_state(state)
+        if pptx_compile_choice is not None:
+            return pptx_compile_choice, {
+                "builder_pptx_compile_latch_pending": True,
+                "builder_pptx_diagnostics": _pptx_latch_diagnostics_update(
+                    state,
+                    compile_forced=True,
+                ),
+            }
 
         visual_choice = self._visual_tool_choice_for_state(state)
         if visual_choice is not None:
@@ -7634,6 +7665,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             _SIMPLE_PDF_TOOL_NAME,
         )
         return self._forced_simple_pdf_tool_choice()
+
+    def _pptx_compile_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if not (state.get("builder_pptx_compile_latch_pending") or _pptx_slide_assets_ready(state)):
+            return None
+        if not _pptx_slide_html_ready(state):
+            return None
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=build_deck_from_slides after PPTX slide assets "
+            "and slide HTML are ready success_count=%d target_slide_count=%d slide_html_count=%d",
+            _pptx_diagnostic_count(state, "image_generation_success_count"),
+            _pptx_latch_target_slide_count(state),
+            _pptx_slide_html_count(state),
+        )
+        return self._forced_deck_build_tool_choice()
 
     def _pdf_terminal_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_pdf_artifact(state) or not _successful_pdf_ready_to_emit(state):
@@ -9269,45 +9314,92 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
 
     @staticmethod
-    def _deck_builder_result_delta(result: ToolMessage) -> dict[str, Any] | None:
-        """Record PPTX diagnostics from a ``build_deck_from_slides`` JSON result.
-
-        The Phase 0 deck path compiles via ``build_deck_from_slides`` (one
-        full-bleed picture per slide), not the bash plan-JSON compiler, so
-        ``_pptx_bash_result_delta`` never sees it. Without this,
-        ``pptx_generator_slide_count`` / ``pptx_generator_picture_count`` stay
-        unset and explicit slide-count requests can't be checked or repaired
-        before emit. (Codex P2, 2026-06-27)
-        """
+    def _deck_builder_result_payload(result: ToolMessage) -> dict[str, Any] | None:
         text = BuilderArtifactMiddleware._tool_message_text(result)
         try:
             payload = json.loads(text)
         except (TypeError, ValueError):
             return None
-        if not isinstance(payload, dict) or payload.get("success") is not True:
-            return None
-        slide_count = int(payload.get("slide_count") or 0)
-        if slide_count <= 0:
-            return None
-        delta: dict[str, Any] = {
+        return payload if isinstance(payload, dict) else None
+
+    @staticmethod
+    def _deck_builder_output_path(request: ToolCallRequest, payload: dict[str, Any]) -> str | None:
+        args = request.tool_call.get("args") or {}
+        pptx_path = payload.get("pptx_path")
+        if not isinstance(pptx_path, str) or not pptx_path.strip():
+            pptx_path = args.get("output_path") if isinstance(args, dict) else None
+        return pptx_path if isinstance(pptx_path, str) and pptx_path.strip() else None
+
+    @staticmethod
+    def _deck_builder_base_delta(
+        *,
+        success: bool,
+        bytes_count: int,
+        error_class: object,
+        slide_count: int,
+    ) -> dict[str, Any]:
+        return {
             "pptx_generator_attempt_count": 1,
-            "pptx_generator_success_count": 1,
+            "pptx_generator_success_count": 1 if success else 0,
+            "pptx_generator_bytes_total": bytes_count if success else 0,
+            "pptx_generator_error_class": error_class,
             # Every rendered slide is one full-bleed picture, so picture_count == slide_count.
             "pptx_generator_slide_count": slide_count,
-            "pptx_generator_picture_count": slide_count,
+            "pptx_generator_picture_count": slide_count if success else 0,
         }
-        pptx_path = payload.get("pptx_path")
-        if isinstance(pptx_path, str) and pptx_path:
-            delta["pptx_output_paths"] = [pptx_path]
+
+    @staticmethod
+    def _attach_deck_builder_success_fields(
+        delta: dict[str, Any],
+        *,
+        pptx_path: str | None,
+        state: dict[str, Any],
+    ) -> None:
+        if not pptx_path:
+            return
+        delta["pptx_output_paths"] = [pptx_path]
+        if _pptx_diagnostics(state).get("time_to_first_valid_artifact_ms") is None:
+            elapsed = _elapsed_since_builder_start_ms(state)
+            if elapsed is not None:
+                delta["time_to_first_valid_artifact_ms"] = elapsed
+
+    @staticmethod
+    def _deck_builder_result_delta(
+        request: ToolCallRequest,
+        result: ToolMessage,
+    ) -> dict[str, Any] | None:
+        """Record PPTX diagnostics from a ``build_deck_from_slides`` JSON result."""
+        payload = BuilderArtifactMiddleware._deck_builder_result_payload(result)
+        if payload is None:
+            return None
+        state = request.state or {}
+        pptx_path = BuilderArtifactMiddleware._deck_builder_output_path(request, payload)
+        exists, bytes_count, status_reason = _virtual_output_status(request.state or {}, pptx_path)
+        success = payload.get("success") is True and exists
+        slide_count = int(payload.get("slide_count") or 0)
+        error_class = None if success else payload.get("error_type") or status_reason or "deck_build_failed"
+        delta = BuilderArtifactMiddleware._deck_builder_base_delta(
+            success=success,
+            bytes_count=bytes_count,
+            error_class=error_class,
+            slide_count=slide_count,
+        )
+        if pptx_path and success:
+            BuilderArtifactMiddleware._attach_deck_builder_success_fields(
+                delta,
+                pptx_path=pptx_path,
+                state=state,
+            )
         return delta
 
     def _deck_builder_result_command(
         self,
+        request: ToolCallRequest,
         result: ToolMessage | Command,
     ) -> ToolMessage | Command:
         if not isinstance(result, ToolMessage):
             return result
-        delta = self._deck_builder_result_delta(result)
+        delta = self._deck_builder_result_delta(request, result)
         if delta is None:
             return result
         return Command(
@@ -9328,8 +9420,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._write_result_command(request, result)
         if tool_name in _PDF_CREATION_TOOL_NAMES and isinstance(result, ToolMessage):
             return self._pdf_result_command(request, result)
-        if tool_name == "build_deck_from_slides":
-            return self._deck_builder_result_command(result)
+        if tool_name == _DECK_BUILD_TOOL_NAME:
+            return self._deck_builder_result_command(request, result)
         if tool_name in {"bash", "bash_tool"}:
             return self._pptx_bash_result_command(request, result)
         if tool_name in _VISUAL_ASSET_TOOL_NAMES:
