@@ -480,6 +480,10 @@ class TestSlideVisualMode:
         assert kwargs["prompt"].startswith('A professional slide. Title: "THE TEXT READS: Roadmap".')
         assert script_module._SOPHIA_SLIDE_STYLE in kwargs["prompt"]
         assert script_module._SOPHIA_SLIDE_AVOID in kwargs["prompt"]
+        assert "Do not bake the slide title" in kwargs["prompt"]
+        assert "real HTML text" in kwargs["prompt"]
+        assert "top 14%" not in kwargs["prompt"]
+        assert "bottom 16%" not in kwargs["prompt"]
         captured = capsys.readouterr()
         assert "[gen] slide_visual=True quality=high size=1536x1024" in captured.out
         prompt_hash = hashlib.sha256(kwargs["prompt"].encode("utf-8")).hexdigest()[:16]

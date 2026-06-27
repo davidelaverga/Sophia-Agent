@@ -85,13 +85,13 @@ _SOPHIA_SLIDE_AVOID = (
 )
 
 _SOPHIA_SLIDE_ZONE_CONTRACT = (
-    "Slide zone contract: render the complete final 16:9 slide bitmap with all title and "
-    "bottom narrative text baked into the image. Reserve the top 14% as a clean title band, the "
-    "bottom 16% as a concise 1-2 sentence narrative band, and the center 70% as the visual "
-    "safe area. Put the title only in the top band, the narrative only in the bottom band, "
-    "and keep diagrams, charts, arrows, labels, callouts, and decorative marks out of both "
-    "bands. Do not leave title/narrative bands blank when the prompt supplies that text. "
-    "If the prompt says caption or takeaway, render it as a complete explanatory bottom narrative."
+    "Slide visual asset contract: render only the image that will sit inside the PPTX HTML "
+    "slide skeleton's `.visual` region. Do not bake the slide title, bottom narrative, footer, "
+    "or page chrome into this image; those are real HTML text in `slides/*.html`. Fill the "
+    "frame with the visual substance (diagram, architecture map, chart, comparison, scene, or "
+    "concept illustration). Essential in-diagram labels are allowed, but keep them short, "
+    "high-contrast, and away from the image edges so the HTML title and narrative cannot "
+    "overlap them."
 )
 
 _SOPHIA_IMAGE_STYLE = (

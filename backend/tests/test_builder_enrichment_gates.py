@@ -53,7 +53,8 @@ def _pdf_state(task: str = "Create a technical PDF with diagrams and visuals", *
 
 def test_pdf_enables_generated_images_by_default():
     # New policy: PDF reports get up to 3 conceptual/editorial images on by
-    # default; charts/diagrams still route through generate_chart.
+    # default; charts/diagrams are authored as inline SVG and rendered via
+    # render_html_to_pdf.
     assert _image_generation_enabled(
         {"task": "Create a technical PDF with diagrams and visuals"},
         artifact_target_ext=".pdf",

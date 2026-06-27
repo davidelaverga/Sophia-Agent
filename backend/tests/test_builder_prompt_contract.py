@@ -102,9 +102,12 @@ def test_image_generation_skill_allows_bounded_pdf_conceptual_images() -> None:
 
     assert "--slide-visual" in text
     # Image-gen is now a bounded PDF path for conceptual/editorial figures only;
-    # data + structure still go through generate_chart.
+    # data + structure stay inline SVG in the render_html_to_pdf path.
     assert "3 conceptual/editorial" in text
-    assert "generate_chart" in text
+    assert "render_html_to_pdf" in text
+    assert "generate_chart" not in text
+    assert "Do NOT bake" in text
+    assert "HTML text" in text
     assert "generate_visual_asset" not in text
     assert "anti_slop.md" not in text
 

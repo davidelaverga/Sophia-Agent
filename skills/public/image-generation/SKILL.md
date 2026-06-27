@@ -121,11 +121,14 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 
 ## Two modes
 
-1. **Slide visuals (`--slide-visual`)** — for `.pptx` slides, this skill DOES render full slides
-   and technical drawings WITH text. Wrap rendered copy as "THE TEXT READS: ...", keep labels
-   8 words or fewer, put exact data in the prompt, and use `--slide-visual` (quality=high, 16:9).
-   Reserve top 14% for the title, bottom 16% for a concise 1-2 sentence visible narrative,
-   and the center 70% for the visual safe area.
+1. **Slide visual assets (`--slide-visual`)** — for `.pptx` slides, this skill renders the
+   image that goes inside the `ppt-generation` HTML skeleton's `.visual` region. Do NOT bake
+   the slide title, bottom narrative, footer, or page chrome into this PNG; those are real
+   HTML text in `slides/*.html`. Use `--slide-visual` (quality=high, 16:9) for the visual
+   substance only: diagrams, architecture maps, comparison panels, scenes, charts, or
+   conceptual illustrations. Diagram labels inside the visual are allowed when essential;
+   wrap required label copy as "THE TEXT READS: ...", keep labels 8 words or fewer, and keep
+   them away from the image edges so the HTML title/narrative never overlap the asset.
    Pass the first slide as `--reference-images` to later slides for consistency; the script
    automatically sends those referenced slides through the `gpt-image-2` edit path.
 
@@ -162,12 +165,12 @@ The items run concurrently (bounded for API rate limits); the script prints one
 `IMAGEGEN_BATCH {...}` summary line with per-image success. A failed item is isolated and never
 aborts the batch.
 
-For PDF reports, all data charts AND structural diagrams (flow, network, mind-map, fishbone,
-organization-chart, sankey) are rendered through the `generate_chart` tool backed by the
-chart-visualization skill. You may ALSO use this image skill for up to **3 conceptual/editorial
-illustrations per report** (a cover/hero plus key concepts): subject-only prompts, no text baked
-into the image, theme-matched palette. Reserve generated images for conceptual/aesthetic figures —
-never for data or structure (those always go through `generate_chart`).
+For PDF reports, do NOT use this image skill for data charts or structural diagrams. The PDF
+workflow authors those figures as inline static `<svg>` inside one self-contained HTML file and
+renders the PDF with `render_html_to_pdf`; there is no remote chart tool in the report path.
+You may use this image skill for up to **3 conceptual/editorial illustrations per report** (a
+cover/hero plus key concepts): subject-only prompts, no text baked into the image,
+theme-matched palette. Reserve generated images for conceptual/aesthetic figures only.
 
 Reference library: for Excalidraw-style technical slide visuals, first inspect
 `/mnt/skills/public/image-generation/references/manifest.json`. It is a v2 style manifest:
