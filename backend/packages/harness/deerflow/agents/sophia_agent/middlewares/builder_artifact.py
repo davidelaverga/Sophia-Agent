@@ -202,6 +202,7 @@ _PDF_CREATION_TOOL_NAMES = frozenset(
 )
 _DECK_BUILD_TOOL_NAME = "build_deck_from_slides"
 _BUILDER_WRITE_TOOL_NAMES = {"write_file", "write_file_tool"}
+_BUILDER_EDIT_TOOL_NAMES = {"write_file", "write_file_tool", "str_replace", "str_replace_tool"}
 _BUILDER_RESEARCH_TOOL_NAMES = {"builder_web_search", "builder_web_fetch"}
 _BUILDER_SUBSTANTIVE_TOOL_NAMES = {
     "write_file",
@@ -4911,6 +4912,7 @@ class BuilderArtifactState(AgentState):
     builder_pptx_slide_count_repair_pending: NotRequired[bool]
     builder_pptx_slide_count_repair_requested: NotRequired[dict[str, int]]
     builder_pptx_compile_latch_pending: NotRequired[bool]
+    builder_pptx_compile_repair_pending: NotRequired[bool]
     builder_visual_design_correction_emitted: NotRequired[bool]
     builder_visual_asset_correction_emitted: NotRequired[bool]
     builder_graph_halted: NotRequired[bool]
@@ -7625,6 +7627,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return self._forced_simple_pdf_tool_choice()
 
     def _pptx_compile_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if state.get("builder_pptx_compile_repair_pending"):
+            return None
         if not (state.get("builder_pptx_compile_latch_pending") or _pptx_slide_assets_ready(state)):
             return None
         if not _pptx_slide_html_ready(state):
@@ -8780,6 +8784,31 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             update={
                 "messages": [result],
                 "builder_write_diagnostics": delta,
+                **(
+                    {"builder_pptx_compile_repair_pending": False}
+                    if delta["last_status"] == "success"
+                    else {}
+                ),
+            }
+        )
+
+    def _edit_result_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+    ) -> ToolMessage | Command:
+        tool_name = request.tool_call.get("name")
+        if tool_name in _BUILDER_WRITE_TOOL_NAMES:
+            return self._write_result_command(request, result)
+        if tool_name not in {"str_replace", "str_replace_tool"} or not isinstance(result, ToolMessage):
+            return result
+        text = self._tool_message_text(result).strip()
+        if not text.startswith("OK"):
+            return result
+        return Command(
+            update={
+                "messages": [result],
+                "builder_pptx_compile_repair_pending": False,
             }
         )
 
@@ -9350,11 +9379,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         delta = self._deck_builder_result_delta(request, result)
         if delta is None:
             return result
+        success = delta.get("pptx_generator_success_count") == 1
         return Command(
             update={
                 "messages": [result],
                 "builder_pptx_diagnostics": delta,
                 "builder_pptx_compile_latch_pending": False,
+                "builder_pptx_compile_repair_pending": not success,
             }
         )
 
@@ -9364,8 +9395,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         result: ToolMessage | Command,
     ) -> ToolMessage | Command:
         tool_name = request.tool_call.get("name")
-        if tool_name in _BUILDER_WRITE_TOOL_NAMES:
-            return self._write_result_command(request, result)
+        if tool_name in _BUILDER_EDIT_TOOL_NAMES:
+            return self._edit_result_command(request, result)
         if tool_name in _PDF_CREATION_TOOL_NAMES and isinstance(result, ToolMessage):
             return self._pdf_result_command(request, result)
         if tool_name == _DECK_BUILD_TOOL_NAME:

@@ -99,6 +99,26 @@ def test_missing_html_source(staged, monkeypatch):
     assert result["error_type"] == "missing_html"
 
 
+def test_rejects_symlinked_html_source_outside_outputs(staged, tmp_path):
+    secret = tmp_path / "secret.html"
+    secret.write_text("<html><body>outside outputs</body></html>")
+    link = staged / "report.html"
+    try:
+        link.symlink_to(secret)
+    except OSError as exc:
+        pytest.skip(f"symlink unavailable: {exc}")
+
+    result = _call(
+        runtime=_fake_runtime(),
+        html_path=f"{_OUTPUTS_PREFIX}report.html",
+        pdf_path=f"{_OUTPUTS_PREFIX}out.pdf",
+    )
+
+    assert result["success"] is False
+    assert result["error_type"] == "invalid_input"
+    assert "escapes the outputs directory" in result["error"]
+
+
 def test_node_unavailable(staged, monkeypatch):
     (staged / "report.html").write_text("<html><body>hi</body></html>")
     monkeypatch.setattr(render_html.shutil, "which", lambda _: None)

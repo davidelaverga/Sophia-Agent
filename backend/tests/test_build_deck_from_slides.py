@@ -227,3 +227,43 @@ def test_deck_builder_result_records_failure_and_ignores_garbage(tmp_path):
 
     garbage = ToolMessage(content="not json", tool_call_id="tc")
     assert BuilderArtifactMiddleware()._deck_builder_result_command(_deck_build_request(outputs_dir), garbage) is garbage
+
+
+def test_failed_deck_build_allows_repair_before_reforcing_compile(tmp_path):
+    from langchain_core.messages import ToolMessage
+
+    outputs_dir = tmp_path / "outputs"
+    slides_dir = outputs_dir / "slides"
+    slides_dir.mkdir(parents=True)
+    for index in range(1, 4):
+        (slides_dir / f"{index:02d}.html").write_text("<html><body>slide</body></html>")
+
+    mw = BuilderArtifactMiddleware()
+    failed = _deck_tool_message({"success": False, "error_type": "slide_render_failed", "slide_count": 3})
+    failed_cmd = mw._deck_builder_result_command(_deck_build_request(outputs_dir), failed)
+    assert isinstance(failed_cmd, Command)
+    assert failed_cmd.update["builder_pptx_compile_latch_pending"] is False
+    assert failed_cmd.update["builder_pptx_compile_repair_pending"] is True
+
+    blocked_state = {
+        "thread_data": {"outputs_path": str(outputs_dir)},
+        "builder_artifact_target_path": f"{_OUTPUTS}deck.pptx",
+        "builder_pptx_requested_slide_count": 3,
+        "builder_pptx_compile_repair_pending": True,
+        "builder_pptx_diagnostics": {"image_generation_success_count": 3},
+    }
+    assert mw._force_choice_for_state(blocked_state, None) is None
+
+    write_request = SimpleNamespace(
+        tool_call={"name": "write_file", "args": {"path": f"{_OUTPUTS}slides/02.html"}},
+        state=blocked_state,
+    )
+    write_cmd = mw._tool_result_command(write_request, ToolMessage(content="OK", tool_call_id="write"))
+    assert isinstance(write_cmd, Command)
+    assert write_cmd.update["builder_pptx_compile_repair_pending"] is False
+
+    repaired_state = {**blocked_state, **write_cmd.update}
+    assert mw._force_choice_for_state(repaired_state, None) == {
+        "type": "tool",
+        "name": "build_deck_from_slides",
+    }

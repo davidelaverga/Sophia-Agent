@@ -24,6 +24,7 @@ import os
 import shutil
 import subprocess  # noqa: S404 — node by absolute path + fixed bundled script
 from pathlib import Path
+from posixpath import normpath
 
 from langchain.tools import ToolRuntime, tool
 
@@ -150,6 +151,50 @@ def _html_pdf_path_error(html_path: str, pdf_path: str) -> str | None:
     return _ensure_relative_to_outputs("pdf_path", pdf_path)
 
 
+def _output_relative_parts(virtual_path: str) -> tuple[str, ...]:
+    normalized = virtual_path.strip().replace("\\", "/")
+    relative = normpath(normalized.removeprefix(_OUTPUTS_VIRTUAL_PREFIX)).lstrip("/")
+    return tuple(part for part in relative.split("/") if part and part != ".")
+
+
+def _host_outputs_root_for_virtual_path(host_path: Path, virtual_path: str) -> Path:
+    root = Path(host_path)
+    for _part in _output_relative_parts(virtual_path):
+        root = root.parent
+    return root
+
+
+def _resolved_host_path_error(label: str, virtual_path: str, host_path: Path) -> str | None:
+    outputs_root = _host_outputs_root_for_virtual_path(host_path, virtual_path)
+    try:
+        resolved_root = outputs_root.resolve(strict=True)
+    except OSError:
+        resolved_root = outputs_root.resolve(strict=False)
+    try:
+        resolved_path = host_path.resolve(strict=host_path.exists())
+    except OSError:
+        resolved_path = host_path.resolve(strict=False)
+    if not resolved_path.is_relative_to(resolved_root):
+        return (
+            f"{label}: resolved host path escapes the outputs directory. "
+            "Symlinks or redirected paths outside /mnt/user-data/outputs are not allowed."
+        )
+    return None
+
+
+def _html_pdf_host_path_error(
+    *,
+    html_path: str,
+    host_html: Path,
+    pdf_path: str,
+    host_pdf: Path,
+) -> str | None:
+    html_error = _resolved_host_path_error("html_path", html_path, host_html)
+    if html_error is not None:
+        return html_error
+    return _resolved_host_path_error("pdf_path", pdf_path, host_pdf)
+
+
 def _missing_html_result(host_html: Path, html_path: str) -> str | None:
     if host_html.is_file():
         return None
@@ -191,6 +236,14 @@ def render_html_to_pdf(
     thread_data = get_thread_data(runtime)
     host_html = _host_path_for_virtual_output(html_path, thread_data)
     host_pdf = _host_path_for_virtual_output(pdf_path, thread_data)
+    host_path_error = _html_pdf_host_path_error(
+        html_path=html_path,
+        host_html=host_html,
+        pdf_path=pdf_path,
+        host_pdf=host_pdf,
+    )
+    if host_path_error is not None:
+        return _result(success=False, error_type="invalid_input", error=host_path_error)
     missing_html = _missing_html_result(host_html, html_path)
     if missing_html is not None:
         return missing_html
