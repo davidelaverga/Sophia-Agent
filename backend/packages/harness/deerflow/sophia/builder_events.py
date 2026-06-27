@@ -55,7 +55,7 @@ _WEBHOOK_TIMEOUT_SECONDS = 2.0
 # NOT retried. Runs on a daemon thread so the sleeps never block the executor.
 _WEBHOOK_RETRY_BACKOFFS_SECONDS = (2.0, 5.0, 15.0)
 _INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
-    {"ledger", "uploads", ".builder", "sources", "source_artifact"}
+    {"ledger", "uploads", ".builder", "assets", "slides", "sources", "source_artifact"}
 )
 
 

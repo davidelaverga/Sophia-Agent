@@ -417,15 +417,23 @@ def test_list_artifacts_returns_output_files_sorted_by_modified_time(tmp_path, m
     outputs_dir = tmp_path / "outputs"
     nested_dir = outputs_dir / "nested"
     visuals_dir = outputs_dir / "visuals"
+    assets_dir = outputs_dir / "assets"
+    slides_dir = outputs_dir / "slides"
     nested_dir.mkdir(parents=True)
     visuals_dir.mkdir(parents=True)
+    assets_dir.mkdir(parents=True)
+    slides_dir.mkdir(parents=True)
 
     older_file = outputs_dir / "first.md"
     newer_file = nested_dir / "second.txt"
     support_file = visuals_dir / "chart.png"
+    asset_file = assets_dir / "slide-1.png"
+    slide_source_file = slides_dir / "slide-1.html"
     older_file.write_text("first", encoding="utf-8")
     newer_file.write_text("second", encoding="utf-8")
     support_file.write_bytes(b"png")
+    asset_file.write_bytes(b"png")
+    slide_source_file.write_text("<html></html>", encoding="utf-8")
     os.utime(older_file, (1_700_000_000, 1_700_000_000))
     os.utime(newer_file, (1_700_000_100, 1_700_000_100))
 
@@ -444,6 +452,8 @@ def test_list_artifacts_returns_output_files_sorted_by_modified_time(tmp_path, m
     assert response.artifacts[0].mime_type == "text/plain"
     assert response.artifacts[1].name == "first.md"
     assert all("visuals/" not in item.path for item in response.artifacts)
+    assert all("assets/" not in item.path for item in response.artifacts)
+    assert all("slides/" not in item.path for item in response.artifacts)
 
 
 def test_list_artifacts_includes_supabase_objects_when_local_outputs_are_missing(tmp_path, monkeypatch) -> None:
@@ -486,6 +496,18 @@ def test_list_artifacts_filters_supabase_visual_support_assets(tmp_path, monkeyp
             modified_at="2026-05-26T22:46:51Z",
             content_type="image/png",
         ),
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename="assets/slide-1.png",
+            size_bytes=4322,
+            modified_at="2026-05-26T22:46:52Z",
+            content_type="image/png",
+        ),
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename="slides/slide-1.html",
+            size_bytes=4323,
+            modified_at="2026-05-26T22:46:53Z",
+            content_type="text/html",
+        ),
     ]
 
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: missing_outputs)
@@ -507,6 +529,8 @@ def test_supabase_support_filter_keeps_toplevel_preview_but_hides_nested() -> No
     # ... but a .preview.pdf nested under an internal/support dir stays hidden
     # (the preview exemption must not re-expose support files).
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("visuals/x.preview.pdf") is True
+    assert artifacts_router._is_supabase_thread_list_support_artifact_path("assets/x.preview.pdf") is True
+    assert artifacts_router._is_supabase_thread_list_support_artifact_path("slides/x.preview.pdf") is True
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("sources/x.preview.pdf") is True
     assert artifacts_router._is_supabase_thread_list_support_artifact_path(".builder/x.preview.pdf") is True
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("source_artifact/x.preview.pdf") is True

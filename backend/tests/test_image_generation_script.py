@@ -222,6 +222,9 @@ class TestGeneratePathWithoutReferenceImages:
         assert script_module._langsmith_tracing_configured() is False
 
         monkeypatch.setenv("LANGSMITH_TRACING", "true")
+        assert script_module._langsmith_tracing_configured() is False
+
+        monkeypatch.delenv("SOPHIA_BUILDER_LANGSMITH_TRACING", raising=False)
         assert script_module._langsmith_tracing_configured() is True
 
     def test_langsmith_trace_context_forces_enabled_context_when_global_tracing_false(

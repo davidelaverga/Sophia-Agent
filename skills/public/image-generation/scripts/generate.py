@@ -193,6 +193,13 @@ def _env_flag_preferred(*names: str) -> bool:
     return False
 
 
+def _env_flag_value(name: str) -> bool | None:
+    value = os.getenv(name)
+    if value is None or not value.strip():
+        return None
+    return value.strip().lower() in _TRUTHY_VALUES
+
+
 def _env_value(*names: str) -> str | None:
     for name in names:
         value = os.getenv(name)
@@ -202,8 +209,11 @@ def _env_value(*names: str) -> str | None:
 
 
 def _langsmith_tracing_configured() -> bool:
-    tracing_requested = _env_flag_preferred("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING") or (
-        os.getenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "").strip().lower() in _TRUTHY_VALUES
+    builder_flag = _env_flag_value("SOPHIA_BUILDER_LANGSMITH_TRACING")
+    tracing_requested = (
+        builder_flag
+        if builder_flag is not None
+        else _env_flag_preferred("LANGSMITH_TRACING", "LANGCHAIN_TRACING_V2", "LANGCHAIN_TRACING")
     )
     if not tracing_requested:
         return False

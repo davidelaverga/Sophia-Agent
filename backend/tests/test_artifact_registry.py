@@ -609,6 +609,26 @@ def test_registry_hides_backfilled_support_and_wrapper_artifacts(tmp_path) -> No
         ),
         user_id="user-1",
     )
+    asset_support = registry.upsert(
+        _request(
+            source="file_library_backfill",
+            artifact_type="image",
+            renderer_kind="image",
+            title="Generated Slide Bitmap",
+            local_path="outputs/assets/slide-1.png",
+        ),
+        user_id="user-1",
+    )
+    slide_support = registry.upsert(
+        _request(
+            source="file_library_backfill",
+            artifact_type="html",
+            renderer_kind="html",
+            title="Generated Slide Source",
+            local_path="outputs/slides/slide-1.html",
+        ),
+        user_id="user-1",
+    )
     registry.upsert(
         _request(
             source="file_library_backfill",
@@ -627,8 +647,12 @@ def test_registry_hides_backfilled_support_and_wrapper_artifacts(tmp_path) -> No
     by_name = {artifact.filename: artifact for artifact in all_records.artifacts}
     assert wrapper.artifact_role == "wrapper"
     assert support.artifact_role == "support"
+    assert asset_support.artifact_role == "support"
+    assert slide_support.artifact_role == "support"
     assert "create-a-real-markdown-artifact-file-nam.html" not in by_name
     assert "chart.png" not in by_name
+    assert "slide-1.png" not in by_name
+    assert "slide-1.html" not in by_name
     assert by_name["readable-notes.md"].artifact_role == "primary"
 
 
@@ -1419,6 +1443,8 @@ def test_upsert_endpoint_uses_authenticated_user_when_client_user_id_absent(tmp_
         "thread-1/ledger/session.jsonl",
         "thread-1/uploads/secret.pdf",
         "thread-1/.builder/state.json",
+        "thread-1/assets/slide-1.png",
+        "thread-1/slides/slide-1.html",
         "thread-1/outputs/report.plan.json",
         "thread-1/outputs/deck.preview.pdf",
     ],

@@ -62,7 +62,7 @@ _FORBIDDEN_EXTRA_KEYS = {
 }
 _OUTPUTS_PREFIX = "mnt/user-data/outputs"
 _WORKSPACE_OUTPUTS_PREFIX = "mnt/user-data/workspace/outputs"
-_SUPPORT_ARTIFACT_DIRS = {"visuals", "sources", "source_artifact", ".builder"}
+_SUPPORT_ARTIFACT_DIRS = {"visuals", "assets", "slides", "sources", "source_artifact", ".builder"}
 _SUPPORT_ARTIFACT_SUFFIXES = (
     ".source.md",
     ".source.html",
@@ -200,7 +200,7 @@ def normalize_artifact_storage_object_path(path: str | None) -> str | None:
 # the list-side ``_is_builder_support_artifact_path`` so every read surface
 # excludes the same keyspaces.
 _INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
-    {"ledger", "uploads", ".builder", "sources", "source_artifact"}
+    {"ledger", "uploads", ".builder", "assets", "slides", "sources", "source_artifact"}
 )
 
 
