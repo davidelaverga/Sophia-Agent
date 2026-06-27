@@ -1187,6 +1187,7 @@ def _merge_builder_pptx_diagnostics(
 
 _PPTX_DIAGNOSTIC_LATEST_COUNT_KEYS = frozenset(
     {
+        "pptx_deck_missing_image_count",
         "pptx_generator_picture_count",
         "pptx_generator_slide_count",
         "pptx_plan_image_ref_count",
@@ -3769,6 +3770,43 @@ def _apply_hero_missing_quality_metadata(
     logger.warning(
         "[BuilderImageGeneration] phase=hero_missing_quality_warning requested_ext=%s",
         requested_ext,
+    )
+    return updated
+
+
+def _apply_pptx_deck_quality_metadata(
+    artifact: dict[str, Any],
+    state: dict[str, Any],
+) -> dict[str, Any]:
+    """Surface partial-image deck builds as honest artifact quality metadata."""
+    if _artifact_ext_from_path(artifact.get("artifact_path")) != "pptx":
+        return artifact
+    diagnostics = _pptx_diagnostics(state)
+    warning = diagnostics.get("pptx_deck_quality_warning")
+    try:
+        missing_count = int(diagnostics.get("pptx_deck_missing_image_count", 0) or 0)
+    except (TypeError, ValueError):
+        missing_count = 0
+    if warning != "visuals_partial" or missing_count <= 0:
+        return artifact
+
+    updated = dict(artifact)
+    updated["deck_visuals_partial"] = True
+    updated["missing_image_count"] = missing_count
+    if not updated.get("quality_warning"):
+        updated["quality_warning"] = "visuals_partial"
+        confidence = updated.get("confidence")
+        if isinstance(confidence, (int, float)):
+            updated["confidence"] = min(float(confidence), 0.75)
+        tone_hint = str(updated.get("companion_tone_hint") or "").strip()
+        degraded_hint = (
+            f"Note that the deck is usable, but {missing_count} slide visual"
+            f"{'' if missing_count == 1 else 's'} used a placeholder because source imagery was missing."
+        )
+        updated["companion_tone_hint"] = f"{tone_hint} {degraded_hint}".strip()
+    logger.warning(
+        "[BuilderArtifact] phase=pptx_visuals_partial_quality_warning missing_image_count=%d",
+        missing_count,
     )
     return updated
 
@@ -9388,6 +9426,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 pptx_path=pptx_path,
                 state=state,
             )
+            if payload.get("quality_warning") == "visuals_partial":
+                try:
+                    missing_count = int(payload.get("missing_image_count", 0) or 0)
+                except (TypeError, ValueError):
+                    missing_count = 0
+                if missing_count > 0:
+                    delta["pptx_deck_quality_warning"] = "visuals_partial"
+                    delta["pptx_deck_missing_image_count"] = missing_count
         return delta
 
     def _deck_builder_result_command(
@@ -10364,6 +10410,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     args = _apply_visual_missing_quality_metadata(args, state)
                     args = _apply_pdf_page_count_quality_metadata(args, state)
                     args = _apply_hero_missing_quality_metadata(args, state)
+                    args = _apply_pptx_deck_quality_metadata(args, state)
                     args = _apply_report_figure_quality_metadata(args, state)
                     args = self._attach_pptx_canvas_preview(args, state)
                     _log_pptx_diagnostics(

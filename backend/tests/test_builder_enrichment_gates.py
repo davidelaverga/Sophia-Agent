@@ -15,6 +15,7 @@ from types import SimpleNamespace
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
     _apply_hero_missing_quality_metadata,
+    _apply_pptx_deck_quality_metadata,
     _builder_image_enrichment_enabled,
     _image_generation_outcome_from_state,
     _image_generation_preflight_delta,
@@ -351,3 +352,25 @@ def test_stronger_quality_warning_not_overwritten():
     state = _deck_state(builder_hero_gate_rejections=1, builder_pptx_diagnostics={})
     artifact = {"quality_warning": "visuals_not_embedded"}
     assert _apply_hero_missing_quality_metadata(artifact, state) is artifact
+
+
+def test_pptx_partial_visuals_quality_warning_surfaces_to_artifact():
+    artifact = {
+        "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+        "confidence": 0.95,
+        "companion_tone_hint": "Concise.",
+    }
+    state = _deck_state(
+        builder_pptx_diagnostics={
+            "pptx_deck_quality_warning": "visuals_partial",
+            "pptx_deck_missing_image_count": 2,
+        }
+    )
+
+    updated = _apply_pptx_deck_quality_metadata(artifact, state)
+
+    assert updated["quality_warning"] == "visuals_partial"
+    assert updated["deck_visuals_partial"] is True
+    assert updated["missing_image_count"] == 2
+    assert updated["confidence"] == 0.75
+    assert "2 slide visuals used a placeholder" in updated["companion_tone_hint"]

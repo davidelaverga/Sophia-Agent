@@ -279,7 +279,15 @@ def test_deck_builder_result_records_pptx_diagnostics(tmp_path):
     outputs_dir = tmp_path / "outputs"
     outputs_dir.mkdir()
     (outputs_dir / "deck.pptx").write_bytes(b"PK\x03\x04 fake")
-    result = _deck_tool_message({"success": True, "pptx_path": f"{_OUTPUTS}deck.pptx", "slide_count": 4})
+    result = _deck_tool_message(
+        {
+            "success": True,
+            "pptx_path": f"{_OUTPUTS}deck.pptx",
+            "slide_count": 4,
+            "quality_warning": "visuals_partial",
+            "missing_image_count": 2,
+        }
+    )
     cmd = BuilderArtifactMiddleware()._deck_builder_result_command(_deck_build_request(outputs_dir), result)
     assert isinstance(cmd, Command)
     diag = cmd.update["builder_pptx_diagnostics"]
@@ -288,6 +296,8 @@ def test_deck_builder_result_records_pptx_diagnostics(tmp_path):
     # so the slide-count gate can verify/repair an explicit slide-count request.
     assert diag["pptx_generator_slide_count"] == 4
     assert diag["pptx_generator_picture_count"] == 4
+    assert diag["pptx_deck_quality_warning"] == "visuals_partial"
+    assert diag["pptx_deck_missing_image_count"] == 2
     assert diag["pptx_output_paths"] == [f"{_OUTPUTS}deck.pptx"]
     assert cmd.update["builder_pptx_compile_latch_pending"] is False
 
