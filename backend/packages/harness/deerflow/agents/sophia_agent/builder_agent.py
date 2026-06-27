@@ -57,11 +57,13 @@ def make_sophia_builder(config: RunnableConfig):
     )
     model_name = cfg.get("model_name")
     task_type = cfg.get("task_type")
+    artifact_target_ext = cfg.get("artifact_target_ext")
     return _create_builder_agent(
         user_id=user_id,
         model_name=model_name,
         trace_config=config,
         task_type=task_type if isinstance(task_type, str) else None,
+        artifact_target_ext=artifact_target_ext if isinstance(artifact_target_ext, str) else None,
     )
 
 
@@ -91,6 +93,7 @@ def _create_builder_agent(
     model_name: str | None = None,
     trace_config: RunnableConfig | None = None,
     task_type: str | None = None,
+    artifact_target_ext: str | None = None,
 ):
     """Create the Sophia builder agent with its dedicated middleware chain.
 
@@ -168,7 +171,11 @@ def _create_builder_agent(
     # builder's toolbox eliminates the conflict at the root: the model
     # cannot produce the bad combo, and ``emit_builder_artifact`` remains
     # the single, structured "I'm done" signal.
-    tools = build_builder_tools_for_task_type(task_type, vision_enabled=vision_enabled)
+    tools = build_builder_tools_for_task_type(
+        task_type,
+        vision_enabled=vision_enabled,
+        artifact_target_ext=artifact_target_ext,
+    )
 
     # D7 / C2 recursion guard (Phase-3 Stage 1 spec):
     # Builder must NEVER spawn AsyncSubAgents (no `start_async_task`) and

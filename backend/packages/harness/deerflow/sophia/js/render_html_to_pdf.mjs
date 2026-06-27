@@ -77,15 +77,37 @@ function isAllowedRenderRequest(url, htmlFile, outputRoot) {
   }
 }
 
+function localRenderPathForUrl(url) {
+  if (!url.startsWith("file:")) {
+    return null;
+  }
+  try {
+    return path.resolve(fileURLToPath(url));
+  } catch {
+    return null;
+  }
+}
+
 async function installRenderRequestPolicy(page, htmlFile) {
   const outputRoot = outputRootForHtml(htmlFile);
+  const missingLocalResources = [];
   await page.route("**/*", (route) => {
     const requestUrl = route.request().url();
     if (isAllowedRenderRequest(requestUrl, htmlFile, outputRoot)) {
+      const localPath = localRenderPathForUrl(requestUrl);
+      if (
+        localPath &&
+        requestUrl !== pathToFileURL(path.resolve(htmlFile)).href &&
+        !fs.existsSync(localPath)
+      ) {
+        missingLocalResources.push(localPath);
+        return route.abort("failed");
+      }
       return route.continue();
     }
     return route.abort("blockedbyclient");
   });
+  return missingLocalResources;
 }
 
 async function main() {
@@ -104,11 +126,15 @@ async function main() {
   try {
     const context = await browser.newContext({ javaScriptEnabled: false });
     const page = await context.newPage();
-    await installRenderRequestPolicy(page, args.htmlFile);
+    const missingLocalResources = await installRenderRequestPolicy(page, args.htmlFile);
     await page.goto(`file://${path.resolve(args.htmlFile)}`, {
       waitUntil: "networkidle",
       timeout: 60000,
     });
+    if (missingLocalResources.length > 0) {
+      const uniqueMissing = [...new Set(missingLocalResources)];
+      throw new Error(`missing local render assets: ${uniqueMissing.slice(0, 8).join(", ")}`);
+    }
     await page.pdf({
       path: args.pdfFile,
       format: "A4",

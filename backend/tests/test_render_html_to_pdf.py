@@ -349,6 +349,14 @@ def test_chromium_html_renderers_block_external_subresources():
         assert "outputRootForHtml" in source
 
 
+def test_html_pdf_renderer_rejects_missing_local_subresources():
+    pdf_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_pdf.mjs"
+    source = pdf_script.read_text(encoding="utf-8")
+    assert "missingLocalResources" in source
+    assert "missing local render assets" in source
+    assert "!fs.existsSync(localPath)" in source
+
+
 def test_slide_png_renderer_sets_viewport_on_browser_context():
     png_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_png.mjs"
     source = png_script.read_text(encoding="utf-8")

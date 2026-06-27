@@ -25,9 +25,27 @@ def _normalized_task_type(task_type: str | None) -> str:
     return str(task_type or "").strip().lower()
 
 
-def build_builder_tools_for_task_type(task_type: str | None, *, vision_enabled: bool) -> list:
+def _normalized_target_ext(artifact_target_ext: str | None = None) -> str:
+    ext = str(artifact_target_ext or "").strip().lower()
+    if ext and not ext.startswith("."):
+        ext = f".{ext}"
+    return ext
+
+
+def _presentation_toolset_required(task_type: str | None, artifact_target_ext: str | None = None) -> bool:
+    target_ext = _normalized_target_ext(artifact_target_ext)
+    if target_ext:
+        return target_ext in {".ppt", ".pptx"}
+    return _normalized_task_type(task_type) in _PRESENTATION_TASK_TYPES
+
+
+def build_builder_tools_for_task_type(
+    task_type: str | None,
+    *,
+    vision_enabled: bool,
+    artifact_target_ext: str | None = None,
+) -> list:
     """Build the Builder's tool list for the concrete delegated task type."""
-    normalized_task_type = _normalized_task_type(task_type)
     tools = [
         bash_tool,
         ls_tool,
@@ -39,7 +57,7 @@ def build_builder_tools_for_task_type(task_type: str | None, *, vision_enabled: 
         create_pdf_artifact,
         emit_builder_artifact,
     ]
-    if normalized_task_type in _PRESENTATION_TASK_TYPES:
+    if _presentation_toolset_required(task_type, artifact_target_ext):
         # Decks are authored as one self-contained HTML file per slide; the
         # harness renders each slide to a full-bleed PNG and wraps to .pptx
         # (build_deck_from_slides). The model NEVER compiles a deck — that

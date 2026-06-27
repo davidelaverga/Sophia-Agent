@@ -145,6 +145,34 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     # runtime.config["configurable"] at tool-execution time.
     assert config_payload["configurable"]["graph_id"] == "sophia_builder"
     assert config_payload["configurable"]["task_type"] == "presentation"
+    assert config_payload["configurable"]["artifact_target_ext"] == ".pptx"
+
+
+def test_start_builder_task_dispatches_resolved_pdf_target_ext_for_pdf_deck(monkeypatch):
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    fake_client, captured = _make_fake_sdk_client(thread_id="asgi-pdf-deck", run_id="run-1")
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+    runtime = _make_runtime(
+        {
+            "user_id": "alice",
+            "messages": [{"role": "user", "content": "make the slide deck in PDF format"}],
+        }
+    )
+
+    response = asyncio.run(
+        module.start_builder_task.coroutine(
+            description="Make the slide deck in PDF format",
+            task_type="presentation",
+            runtime=runtime,
+        )
+    )
+
+    assert isinstance(response, Command)
+    config_payload = captured["run_kwargs"]["config"]
+    run_input = captured["run_kwargs"]["input"]
+    assert config_payload["configurable"]["task_type"] == "presentation"
+    assert config_payload["configurable"]["artifact_target_ext"] == ".pdf"
+    assert run_input["builder_artifact_target_path"].endswith(".pdf")
 
 
 def test_edit_source_resolves_last_builder_artifact():

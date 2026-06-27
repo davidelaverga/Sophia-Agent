@@ -274,6 +274,38 @@ def test_report_builder_toolset_uses_render_html_to_pdf(monkeypatch) -> None:
     assert "generate_visual_asset" not in tool_names
 
 
+def test_pdf_target_overrides_presentation_task_toolset(monkeypatch) -> None:
+    builder_module = importlib.import_module("deerflow.agents.sophia_agent.builder_agent")
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    _reset_tracing_cache()
+    monkeypatch.setattr(builder_module, "ChatAnthropic", lambda **kwargs: {"model": kwargs["model"]})
+    monkeypatch.setattr(
+        builder_module,
+        "get_app_config",
+        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
+    )
+    captured = {}
+
+    class DummyAgent:
+        recursion_limit = 0
+
+    def _capture_builder(**kwargs):
+        captured["tools"] = kwargs["tools"]
+        return DummyAgent()
+
+    monkeypatch.setattr(builder_module, "create_agent", _capture_builder)
+
+    builder_module._create_builder_agent(
+        user_id="user_123",
+        task_type="presentation",
+        artifact_target_ext=".pdf",
+    )
+
+    tool_names = [getattr(tool, "name", None) for tool in captured["tools"]]
+    assert "render_html_to_pdf" in tool_names
+    assert "build_deck_from_slides" not in tool_names
+
+
 def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:
     """F1 (2026-06-11): 240s timeout, 1 retry, 32k output tokens.
 

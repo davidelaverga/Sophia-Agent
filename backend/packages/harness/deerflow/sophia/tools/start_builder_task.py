@@ -1824,6 +1824,7 @@ async def _dispatch_via_asgi(
             # time — explicit is safe.
             "graph_id": _ASYNC_BUILDER_AGENT_NAME,
             "task_type": task_type,
+            "artifact_target_ext": Path(str(delegation_context.get("artifact_target_path") or "")).suffix.lower(),
         }
     }
     if parent_model:
