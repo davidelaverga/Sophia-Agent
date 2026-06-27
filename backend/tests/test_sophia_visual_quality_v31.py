@@ -240,6 +240,23 @@ def test_pdf_requested_page_target_prefers_state_over_tool_payload() -> None:
     assert enriched["layout_warning"] == "page_count_off_target"
 
 
+def test_pdf_requested_page_target_clears_tolerated_renderer_warning() -> None:
+    enriched = _enrich_pdf_render_result_with_requested_pages(
+        {
+            "success": True,
+            "page_count": 11,
+            "requested_page_count": 10,
+            "layout_quality": "warning",
+            "layout_warning": "page_count_off_target",
+        },
+        {"builder_pdf_requested_page_count": 10},
+    )
+
+    assert enriched["requested_page_count"] == 10
+    assert enriched["layout_quality"] == "ok"
+    assert enriched["layout_warning"] is None
+
+
 def test_pdf_requested_page_range_prefers_state_over_tool_exact_payload() -> None:
     enriched = _enrich_pdf_render_result_with_requested_pages(
         {

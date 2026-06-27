@@ -2613,6 +2613,10 @@ def _enrich_pdf_render_result_with_requested_pages(
     ):
         enriched["layout_quality"] = "warning"
         enriched["layout_warning"] = "page_count_off_target"
+    elif enriched.get("layout_warning") == "page_count_off_target":
+        enriched["layout_warning"] = None
+        if enriched.get("layout_quality") == "warning":
+            enriched["layout_quality"] = "ok"
     return enriched
 
 
