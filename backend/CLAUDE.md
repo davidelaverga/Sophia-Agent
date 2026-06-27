@@ -454,6 +454,17 @@ From the 2026-06-27 forensics ([docs/audits/sophia-builder-deck-deploy-gap-foren
 
 Regression targets: `tests/test_builder_prompt_contract.py tests/test_builder_pptx_workflow_diagnostics.py tests/test_sophia_middlewares.py tests/test_build_deck_from_slides.py tests/test_local_sandbox_encoding.py`.
 
+### Deck fix-forward — image-gen reliability + partial-image resilience (2026-06-27)
+
+After redeploying the full Phase-0 + hardening stack (`8c7762c0`), an 8-slide deck STILL failed (prod `019f099a`). A spec ([docs/audits/sophia-builder-deck-deploy-gap-forensics-2026-06-27.md](../docs/audits/sophia-builder-deck-deploy-gap-forensics-2026-06-27.md) + `sophia_builder_final_plan_restore_decks_v1.md`) proposed **reverting** to the pre-Phase-0 `generate.py` compile; validation against the logs showed that premise was wrong (the old flow also never-compiled; runs `019f0473`/`019f047a`) and the steering is already coherent. The real, **compile-agnostic** blocker is image-gen yield + an all-or-nothing latch. Fix-forward (not revert):
+
+- **WS-A — image-gen reliability** ([skills/public/image-generation/scripts/generate.py](../skills/public/image-generation/scripts/generate.py)): `OpenAI(max_retries=0 → 3)` (new `_image_gen_max_retries`, env `SOPHIA_IMAGE_GEN_MAX_RETRIES`) so the SDK recovers transient 429/5xx — the prod batch saw **2/20** success purely because every concurrent 429 died with no retry (the 2 successes prove model/key/verification are fine ⇒ the rest were transient). `_image_gen_timeout_seconds` default `600 → 120`. Batch `SOPHIA_IMAGE_GEN_CONCURRENCY` default `4 → 3` so retries live within the RPM tier.
+- **WS-B — partial-image resilience (so a deck always ships).** The compile latch (`_pptx_compile_tool_choice_for_state` / `_maybe_inject_pptx_compile_latch`) now fires on `_pptx_compile_ready` (NEW: slide-HTML completeness, decoupled from image yield) instead of `_pptx_slide_assets_ready` (all images). With 2/8 images the old gate never fired → the model looped to the 45-turn ceiling. `render_html_to_png.mjs` now **degrades** a genuinely-missing local slide image to a clean placeholder (`route.fulfill` an SVG) and reports `missing_assets=N` rather than hard-failing — **the blocked-non-output/symlink-escape subresource still hard-fails (security)**. `build_deck_from_slides.py` aggregates the count and stamps `quality_warning="visuals_partial"` + `missing_image_count`. This intentionally **revises the `c1aa8dc7` guard**: ship the slides you have with placeholders + an honest warning, never zero deck.
+- **WS-C — trace 403 (operator-set, not code):** set `LANGSMITH_WORKSPACE_ID` (+`LANGCHAIN_WORKSPACE_ID`) on both Render services — an org-scoped key must send the workspace (`X-Tenant-Id`) or LangSmith ingest 403s.
+- **Withdrawn:** reverting the deck compile to `generate.py` (the old flow wasn't reliable; the dominant blocker is compile-agnostic). Regression C (image-gen subprocess hang) was already fixed in `8c7762c0` (process-group kill).
+
+Regression targets: `tests/test_image_generation_script.py tests/test_image_generation_batch.py tests/test_build_deck_from_slides.py tests/test_sophia_middlewares.py`.
+
 ### Correction wave — target-format truth (2026-06-12)
 
 From the 2026-06-12 prod analysis ([docs/audits/prod-log-analysis-2026-06-12.md](../docs/audits/prod-log-analysis-2026-06-12.md)): two intended-PDF runs dispatched as `target_ext=pptx` (description contamination + pptx-before-pdf ordering); one failed terminally with a correct PDF on disk.

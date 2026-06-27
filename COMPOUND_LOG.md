@@ -26,6 +26,25 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-06-27 · [deck-fix-forward · image-gen reliability + partial-image resilience] · PR #TBD
+**Author:** Claude · **Track:** backend · **Decision:** validated `sophia_builder_final_plan_restore_decks_v1.md` → **fix-forward, not revert** · forensics `docs/audits/sophia-builder-deck-deploy-gap-forensics-2026-06-27.md`
+
+### What changed
+- **WS-A image-gen reliability** (`generate.py`): `max_retries=0 → 3` (new `_image_gen_max_retries`, env override) so the OpenAI SDK recovers transient 429/5xx; `timeout 600 → 120s`; batch concurrency default `4 → 3`.
+- **WS-B partial-image resilience**: the deck compile latch now fires on `_pptx_compile_ready` (slide-HTML completeness, NEW) instead of `_pptx_slide_assets_ready` (all images); `render_html_to_png.mjs` degrades a missing local slide image to a clean placeholder + reports `missing_assets=N` (blocked/symlink subresources still hard-fail); `build_deck_from_slides.py` stamps `quality_warning="visuals_partial"`. Revises the `c1aa8dc7` all-or-nothing guard.
+- Docs: `backend/CLAUDE.md` "Deck fix-forward (2026-06-27)". WS-C (LangSmith `LANGSMITH_WORKSPACE_ID`) is operator-set in Render, not code.
+
+### What we learned
+- **Validate the spec's premise against logs before acting.** The proposal to revert assumed the old `generate.py` flow was "100% reliable"; the logs showed it ALSO never-compiled (`019f0473`/`019f047a`). Reverting would have reintroduced a known failure to fix a problem (image yield) that is **compile-agnostic** — every deck flow needs images.
+- **2-of-20 success is the tell.** Partial success on a transient-looking error proves the model/key/verification are fine, so the failures are transient (429) — `max_retries=0` was the bug. Retries + bounded concurrency is the fix.
+- **All-or-nothing gates turn "partial" into "nothing."** The latch required every image before compiling, so 2/8 images → zero deck. Decoupling compile-readiness from image yield + degrading missing images = the deck always ships what it has, honestly flagged.
+
+### CLAUDE.md Updates
+- `backend/CLAUDE.md`: "Deck fix-forward — image-gen reliability + partial-image resilience (2026-06-27)".
+
+### GEPA Log Entry
+- No prompt-file changes (middleware latch + tool config + renderer). Trace pair: prod `019f099a` (2/20 images, never compiled, ceiling=error) vs the fix-forward path (retried images + compile-on-HTML-ready + placeholder degradation).
+
 ## 2026-06-27 · [spec-D-phase-0 §2.6/§2.7 · deck steering single-source + image-gen hang] · PR #TBD
 **Author:** Claude · **Track:** backend · **Spec:** `sophia_spec_D_builder_build_pipeline_v1.1` (approved) · forensics `docs/audits/sophia-builder-deck-deploy-gap-forensics-2026-06-27.md`
 

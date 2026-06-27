@@ -160,6 +160,45 @@ def test_success_renders_each_slide_then_wraps(tmp_path, monkeypatch):
     assert (tmp_path / ".deck-render").is_dir()
 
 
+def test_partial_images_ship_deck_with_quality_warning(tmp_path, monkeypatch):
+    # §WS-B (2026-06-27): a deck whose slides reference some never-generated images
+    # still SHIPS — render_html_to_png degrades the missing image to a placeholder
+    # and reports `missing_assets=N`; build_deck_from_slides aggregates it into a
+    # quality_warning instead of failing. (Prod 019f099a shipped zero deck because
+    # 2/8 images made the whole build fail.)
+    outputs = tmp_path / "outputs"
+    slides = outputs / "slides"
+    slides.mkdir(parents=True)
+    (slides / "01.html").write_text("<html><body>a</body></html>")
+    (slides / "02.html").write_text("<html><body>b</body></html>")
+    monkeypatch.setattr(deck, "_host_path_for_virtual_output", lambda p, td: outputs / p.removeprefix(_OUTPUTS))
+    monkeypatch.setattr(deck.shutil, "which", lambda _: "/usr/bin/node")
+    monkeypatch.setattr(deck, "_js_script_path", lambda name: tmp_path / name)
+
+    def _fake_run(cmd, **kwargs):
+        if "--png-file" in cmd:
+            out = Path(cmd[cmd.index("--png-file") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"\x89PNG fake")
+            # slide-01 degraded one missing image; slide-02 had all assets.
+            missing = 1 if out.name == "slide-01.png" else 0
+            return SimpleNamespace(returncode=0, stdout="", stderr=f"[render_html_to_png] wrote {out} bytes=9 missing_assets={missing}")
+        if "--output-file" in cmd:
+            out = Path(cmd[cmd.index("--output-file") + 1])
+            out.parent.mkdir(parents=True, exist_ok=True)
+            out.write_bytes(b"PK\x03\x04 fake-pptx")
+        return SimpleNamespace(returncode=0, stdout="", stderr="")
+
+    monkeypatch.setattr(deck.subprocess, "run", _fake_run)
+
+    r = _call(runtime=_runtime(), output_path=f"{_OUTPUTS}deck.pptx")
+
+    assert r["success"] is True, r
+    assert r["pptx_path"] == f"{_OUTPUTS}deck.pptx"
+    assert r["quality_warning"] == "visuals_partial"
+    assert r["missing_image_count"] == 1
+
+
 def test_slide_render_failure_is_reported(tmp_path, monkeypatch):
     outputs = tmp_path / "outputs"
     slides = outputs / "slides"

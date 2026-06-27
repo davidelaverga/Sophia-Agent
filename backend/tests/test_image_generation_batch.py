@@ -96,10 +96,12 @@ def test_item_missing_required_fields_is_reported(tmp_path) -> None:
 # ---- per-call timeout (kills the ~10-min hang) ------------------------------
 
 
-def test_timeout_default_is_600s(monkeypatch) -> None:
+def test_timeout_default_is_120s(monkeypatch) -> None:
+    # 2026-06-27 fix-forward: default 600s -> 120s (calls finish in <~2min; the
+    # client now retries transient 429/5xx within this bound).
     module = _load_script_module()
     monkeypatch.delenv("SOPHIA_IMAGE_GEN_TIMEOUT", raising=False)
-    assert module._image_gen_timeout_seconds() == 600.0
+    assert module._image_gen_timeout_seconds() == 120.0
 
 
 def test_timeout_honors_env_override(monkeypatch) -> None:
@@ -112,10 +114,21 @@ def test_timeout_falls_back_to_default_on_garbage(monkeypatch) -> None:
     module = _load_script_module()
     for bad in ("bogus", "", "-1", "0"):
         monkeypatch.setenv("SOPHIA_IMAGE_GEN_TIMEOUT", bad)
-        assert module._image_gen_timeout_seconds() == 600.0
+        assert module._image_gen_timeout_seconds() == 120.0
 
 
-def test_openai_client_passes_timeout_and_disables_retries(monkeypatch) -> None:
+def test_max_retries_default_and_override(monkeypatch) -> None:
+    module = _load_script_module()
+    monkeypatch.delenv("SOPHIA_IMAGE_GEN_MAX_RETRIES", raising=False)
+    assert module._image_gen_max_retries() == 3
+    monkeypatch.setenv("SOPHIA_IMAGE_GEN_MAX_RETRIES", "5")
+    assert module._image_gen_max_retries() == 5
+    for bad in ("bogus", "", "-2"):
+        monkeypatch.setenv("SOPHIA_IMAGE_GEN_MAX_RETRIES", bad)
+        assert module._image_gen_max_retries() == 3
+
+
+def test_openai_client_passes_timeout_and_retries(monkeypatch) -> None:
     module = _load_script_module()
     pytest.importorskip("openai")
     import openai
@@ -129,10 +142,11 @@ def test_openai_client_passes_timeout_and_disables_retries(monkeypatch) -> None:
     monkeypatch.setattr(openai, "OpenAI", _FakeClient)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.setenv("SOPHIA_IMAGE_GEN_TIMEOUT", "75")
+    monkeypatch.delenv("SOPHIA_IMAGE_GEN_MAX_RETRIES", raising=False)
 
     module._openai_client_from_env()
 
     assert captured["timeout"] == 75.0
-    # max_retries=0 so a stuck request fails fast instead of compounding backoff.
-    assert captured["max_retries"] == 0
+    # max_retries=3 so the SDK recovers transient 429/5xx (the yield fix).
+    assert captured["max_retries"] == 3
     assert captured["api_key"] == "sk-test"

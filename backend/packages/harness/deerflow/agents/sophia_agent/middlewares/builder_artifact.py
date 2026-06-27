@@ -485,6 +485,24 @@ def _pptx_slide_html_ready(state: dict[str, Any]) -> bool:
     return _pptx_slide_html_count(state) >= target_count
 
 
+def _pptx_compile_ready(state: dict[str, Any]) -> bool:
+    """Deck is ready to compile via build_deck_from_slides.
+
+    Fires on slide-HTML COMPLETENESS, decoupled from image yield: the harness
+    renders any missing local slide image as a clean placeholder (with a
+    quality_warning), so a deck with partial images must still compile rather
+    than loop on image-gen to the turn ceiling. Prod run 019f099a generated only
+    2/8 images, so the old all-images gate (`_pptx_slide_assets_ready`) never
+    fired, build_deck_from_slides was never forced, and the run died at the
+    ceiling. (2026-06-27 fix-forward §WS-B.)
+    """
+    if not _requested_pptx_artifact(state):
+        return False
+    if not _pptx_slide_html_ready(state):
+        return False
+    return not _pptx_valid_output_already_terminal(state)
+
+
 def _pptx_latch_diagnostics_update(
     state: dict[str, Any],
     *,
@@ -7629,16 +7647,18 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _pptx_compile_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if state.get("builder_pptx_compile_repair_pending"):
             return None
-        if not (state.get("builder_pptx_compile_latch_pending") or _pptx_slide_assets_ready(state)):
-            return None
-        if not _pptx_slide_html_ready(state):
+        # Force the deterministic compile once ALL slide HTML exist — independent
+        # of image yield. Missing images degrade to placeholders in the renderer,
+        # so a partial-image deck compiles instead of looping to the ceiling
+        # (prod 019f099a: 2/8 images → never compiled). (§WS-B 2026-06-27.)
+        if not _pptx_compile_ready(state):
             return None
         logger.warning(
-            "BuilderArtifact: forcing tool_choice=build_deck_from_slides after PPTX slide assets "
-            "and slide HTML are ready success_count=%d target_slide_count=%d slide_html_count=%d",
-            _pptx_diagnostic_count(state, "image_generation_success_count"),
-            _pptx_latch_target_slide_count(state),
+            "BuilderArtifact: forcing tool_choice=build_deck_from_slides after slide HTML ready "
+            "slide_html_count=%d target_slide_count=%d image_success_count=%d",
             _pptx_slide_html_count(state),
+            _pptx_latch_target_slide_count(state),
+            _pptx_diagnostic_count(state, "image_generation_success_count"),
         )
         return self._forced_deck_build_tool_choice()
 
@@ -8295,15 +8315,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         }
 
     def _maybe_inject_pptx_compile_latch(self, state: BuilderArtifactState) -> dict[str, Any] | None:
-        if not _pptx_slide_assets_ready(state):
+        if not _pptx_compile_ready(state):
             return None
         if state.get("builder_pptx_compile_latch_pending"):
             return None
         logger.warning(
-            "BuilderArtifact: PPTX slide assets ready; injecting compile latch "
-            "success_count=%d target_slide_count=%d",
-            _pptx_diagnostic_count(state, "image_generation_success_count"),
+            "BuilderArtifact: slide HTML ready; injecting compile latch "
+            "slide_html_count=%d target_slide_count=%d image_success_count=%d",
+            _pptx_slide_html_count(state),
             _pptx_latch_target_slide_count(state),
+            _pptx_diagnostic_count(state, "image_generation_success_count"),
         )
         return {
             "messages": [HumanMessage(content=_pptx_compile_latch_message(state))],

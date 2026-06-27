@@ -22,6 +22,7 @@ from __future__ import annotations
 import json
 import logging
 import os
+import re
 import shutil
 import subprocess  # noqa: S404 — node by absolute path + fixed bundled scripts
 import tempfile
@@ -161,17 +162,35 @@ def _slide_render_failure(completed: subprocess.CompletedProcess[str] | None, ht
     )
 
 
-def _render_slide_pngs(node: str, png_script: Path, slide_files: list[Path], render_dir: Path) -> tuple[list[Path], str | None]:
+def _missing_assets_from_stderr(completed: subprocess.CompletedProcess[str] | None) -> int:
+    """Count missing local slide images the renderer degraded to placeholders.
+
+    render_html_to_png.mjs emits `... missing_assets=N` on its success line when a
+    slide referenced a local image that was never generated (partial image yield).
+    Those slides still render (placeholder), so the deck ships with a quality_warning
+    rather than failing. (§WS-B 2026-06-27.)
+    """
+    if completed is None or not completed.stderr:
+        return 0
+    match = re.search(r"missing_assets=(\d+)", completed.stderr)
+    return int(match.group(1)) if match else 0
+
+
+def _render_slide_pngs(
+    node: str, png_script: Path, slide_files: list[Path], render_dir: Path
+) -> tuple[list[Path], int, str | None]:
     render_dir.mkdir(parents=True, exist_ok=True)
     png_paths: list[Path] = []
+    missing_images = 0
     for index, html in enumerate(slide_files):
         png = render_dir / f"slide-{index + 1:02d}.png"
         completed, run_error = _run_slide_render(_slide_render_command(node, png_script, html, png), html)
         render_error = run_error or _slide_render_failure(completed, html, png)
         if render_error is not None:
-            return [], render_error
+            return [], 0, render_error
+        missing_images += _missing_assets_from_stderr(completed)
         png_paths.append(png)
-    return png_paths, None
+    return png_paths, missing_images, None
 
 
 def _run_wrap_command(wrap_cmd: list[str]) -> tuple[subprocess.CompletedProcess[str] | None, str | None]:
@@ -243,16 +262,18 @@ def _build_deck_artifact(
     slide_files: list[Path],
     title: str | None,
     thread_data: dict[str, Any] | None,
-) -> tuple[list[Path], str | None]:
+) -> tuple[list[Path], int, str | None]:
     node, png_script, wrap_script, runtime_error = _deck_runtime()
     if runtime_error is not None:
-        return [], runtime_error
+        return [], 0, runtime_error
     render_parent = _deck_render_temp_parent(host_pptx, thread_data)
     with tempfile.TemporaryDirectory(prefix=f"{host_pptx.stem}-", dir=render_parent) as render_tmp:
         render_dir = Path(render_tmp)
-        png_paths, render_error = _render_slide_pngs(node or "", png_script or Path(), slide_files, render_dir)
+        png_paths, missing_images, render_error = _render_slide_pngs(
+            node or "", png_script or Path(), slide_files, render_dir
+        )
         if render_error is not None:
-            return [], render_error
+            return [], 0, render_error
         wrap_error = _wrap_slide_pngs(
             node=node or "",
             wrap_script=wrap_script or Path(),
@@ -261,7 +282,7 @@ def _build_deck_artifact(
             png_paths=png_paths,
             title=title,
         )
-    return png_paths, wrap_error
+    return png_paths, missing_images, wrap_error
 
 
 @tool("build_deck_from_slides", parse_docstring=True)
@@ -310,21 +331,28 @@ def build_deck_from_slides(
     if no_slides_error is not None:
         return no_slides_error
 
-    png_paths, build_error = _build_deck_artifact(host_pptx, slide_files, title, thread_data)
+    png_paths, missing_images, build_error = _build_deck_artifact(host_pptx, slide_files, title, thread_data)
     if build_error is not None:
         return build_error
 
     size_bytes = host_pptx.stat().st_size
     logger.info(
-        "build_deck_from_slides: build_success final_artifact_ext=pptx slide_count=%s size_bytes=%s",
+        "build_deck_from_slides: build_success final_artifact_ext=pptx slide_count=%s size_bytes=%s missing_images=%s",
         len(png_paths),
         size_bytes,
+        missing_images,
     )
-    return _result(
-        success=True,
-        pptx_path=output_path,
-        slide_count=len(png_paths),
-        size_bytes=size_bytes,
-        engine="chromium+pptxgenjs",
-        engine_message="rendered slide HTML to full-bleed PNG and wrapped to PPTX",
-    )
+    result_kwargs: dict[str, Any] = {
+        "success": True,
+        "pptx_path": output_path,
+        "slide_count": len(png_paths),
+        "size_bytes": size_bytes,
+        "engine": "chromium+pptxgenjs",
+        "engine_message": "rendered slide HTML to full-bleed PNG and wrapped to PPTX",
+    }
+    if missing_images > 0:
+        # Deck shipped, but some slide images were never generated and rendered as
+        # placeholders. Honest signal — the companion surfaces this. (§WS-B.)
+        result_kwargs["quality_warning"] = "visuals_partial"
+        result_kwargs["missing_image_count"] = missing_images
+    return _result(**result_kwargs)

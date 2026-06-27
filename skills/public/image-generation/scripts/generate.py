@@ -540,16 +540,37 @@ def _call_image_api_with_trace(
 def _image_gen_timeout_seconds() -> float:
     """Per-call generation timeout. Bounds a single hung image-gen request.
 
-    Default 600s. A serial deck used to be able to hang ~10 min on one slide;
-    with max_retries=0 a stuck request fails fast instead of compounding via the
-    SDK's internal retry backoff.
+    Default 120s: gpt-image calls complete in well under ~2 min, so a 120s bound
+    fails a genuinely-stuck request fast and frees the worker thread (the old 600s
+    default equalled the whole sandbox budget and let one slow call wedge a batch).
+    The client retries transient 429/5xx within this bound (see max_retries below),
+    so a brief rate-limit recovers instead of dying instantly.
     """
     raw = (os.getenv("SOPHIA_IMAGE_GEN_TIMEOUT") or "").strip()
     try:
         value = float(raw)
     except ValueError:
-        return 600.0
-    return value if value > 0 else 600.0
+        return 120.0
+    return value if value > 0 else 120.0
+
+
+def _image_gen_max_retries() -> int:
+    """SDK retry budget for transient 429/5xx/connection errors.
+
+    Default 3 (overridable via SOPHIA_IMAGE_GEN_MAX_RETRIES). The OpenAI SDK
+    retries only transient classes (rate-limit / server / connection) with
+    exponential backoff and leaves user errors (bad request, content policy,
+    org-not-verified) alone. This is the yield fix: the prod batch saw 2/20
+    success with max_retries=0 because concurrent calls hit 429 and died with no
+    retry; the 2 successes prove the model/key/verification are fine, so the rest
+    were transient and recoverable.
+    """
+    raw = (os.getenv("SOPHIA_IMAGE_GEN_MAX_RETRIES") or "").strip()
+    try:
+        value = int(raw)
+    except ValueError:
+        return 3
+    return value if value >= 0 else 3
 
 
 def _openai_client_from_env() -> object:
@@ -560,7 +581,7 @@ def _openai_client_from_env() -> object:
         from openai import OpenAI  # transitive dep via langchain-openai
     except ImportError as e:  # pragma: no cover - sandbox should always have this
         _fail("api_error", f"openai SDK is not available in the sandbox: {type(e).__name__}", exit_code=2)
-    return OpenAI(api_key=api_key, timeout=_image_gen_timeout_seconds(), max_retries=0)
+    return OpenAI(api_key=api_key, timeout=_image_gen_timeout_seconds(), max_retries=_image_gen_max_retries())
 
 
 def _extract_payload_or_fail(response: object) -> str:
@@ -821,8 +842,12 @@ def _run_batch(manifest_path: str) -> int:
     if not isinstance(items, list) or not items:
         return _summary({"images_generated": 0, "requested": 0, "error": "manifest_empty"})
 
+    # Default 3 (was 4): keep the parallel speed win but stay within the org's
+    # gpt-image RPM tier so the per-call retries (max_retries=3) actually recover
+    # transient 429s instead of re-saturating the limit. Override via
+    # SOPHIA_IMAGE_GEN_CONCURRENCY (drop to 2 on a low tier).
     env_conc = os.environ.get("SOPHIA_IMAGE_GEN_CONCURRENCY", "").strip()
-    concurrency = int(env_conc) if env_conc.isdigit() and int(env_conc) > 0 else 4
+    concurrency = int(env_conc) if env_conc.isdigit() and int(env_conc) > 0 else 3
     requested_conc = manifest.get("concurrency")
     if isinstance(requested_conc, int) and requested_conc > 0:
         concurrency = requested_conc

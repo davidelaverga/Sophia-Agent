@@ -97,14 +97,24 @@ function localRenderPathForUrl(url) {
   }
 }
 
+// Clean neutral placeholder served in place of a slide image that was never
+// generated, so the slide renders intentionally (no broken-image glyph) and the
+// deck still compiles. The render reports the count as a quality warning rather
+// than failing — a deck with partial images must ship the slides it has, not die
+// at the turn ceiling (prod 019f099a: 2/8 images). (§WS-B fix-forward 2026-06-27.)
+const MISSING_ASSET_PLACEHOLDER_SVG =
+  '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">' +
+  '<rect width="100%" height="100%" fill="#ececf2"/>' +
+  '<text x="50%" y="50%" font-family="Helvetica,Arial,sans-serif" font-size="34" ' +
+  'fill="#9a9aa8" text-anchor="middle" dominant-baseline="middle">visual unavailable</text></svg>';
+
 async function installRenderRequestPolicy(page, htmlFile) {
   const outputRoot = outputRootForHtml(htmlFile);
-  // A slide referencing a local asset that was never generated (e.g.
-  // `../assets/slide-03.png`) must NOT silently screenshot a broken-image
-  // placeholder into a "successful" deck. Track allowed-but-missing local
-  // file: subresources and fail the render so build_deck_from_slides reports
-  // slide_render_failed and the builder gets a repair turn. (Codex P2,
-  // 2026-06-27 — mirrors the render_html_to_pdf.mjs pre-validation.)
+  // A slide may reference a local asset that was never generated (e.g.
+  // `../assets/slide-03.png` when image-gen partially failed). Degrade it to a
+  // clean placeholder so the slide renders intentionally and the deck compiles;
+  // track the count as a warning (NOT a hard failure). A BLOCKED non-output /
+  // symlink-escaping subresource still hard-fails (security — see below).
   const missingLocalResources = [];
   const blockedSubresources = [];
   await page.route("**/*", (route) => {
@@ -117,7 +127,7 @@ async function installRenderRequestPolicy(page, htmlFile) {
         !fs.existsSync(localPath)
       ) {
         missingLocalResources.push(localPath);
-        return route.abort("failed");
+        return route.fulfill({ status: 200, contentType: "image/svg+xml", body: MISSING_ASSET_PLACEHOLDER_SVG });
       }
       return route.continue();
     }
@@ -141,6 +151,7 @@ async function main() {
   const scale = Number.isFinite(args.scale) && args.scale > 0 ? args.scale : 2;
   fs.mkdirSync(path.dirname(path.resolve(args.pngFile)), { recursive: true });
 
+  let missingForReport = 0;
   const browser = await chromium.launch({
     headless: true,
     executablePath: process.env.SOPHIA_CHROMIUM_PATH || "/usr/bin/chromium",
@@ -158,13 +169,19 @@ async function main() {
       waitUntil: "networkidle",
       timeout: 60000,
     });
+    // Blocked (non-output / symlink-escaping) subresources are a security stop —
+    // still hard-fail. Missing local assets were degraded to placeholders above
+    // and are reported as a warning below, NOT a failure.
     if (blockedSubresources.length > 0) {
       const uniqueBlocked = [...new Set(blockedSubresources)];
       throw new Error(`blocked non-output render assets: ${uniqueBlocked.slice(0, 8).join(", ")}`);
     }
-    if (missingLocalResources.length > 0) {
-      const uniqueMissing = [...new Set(missingLocalResources)];
-      throw new Error(`missing local render assets: ${uniqueMissing.slice(0, 8).join(", ")}`);
+    const uniqueMissing = [...new Set(missingLocalResources)];
+    if (uniqueMissing.length > 0) {
+      console.error(
+        `[render_html_to_png] degraded ${uniqueMissing.length} missing local asset(s) to placeholder: ` +
+          uniqueMissing.slice(0, 8).join(", "),
+      );
     }
     // Clip to the exact deck canvas so a slightly-too-tall document still yields
     // a 16:9 frame (no scrollbar, no letterbox).
@@ -173,6 +190,7 @@ async function main() {
       clip: { x: 0, y: 0, width, height },
       type: "png",
     });
+    missingForReport = uniqueMissing.length;
   } finally {
     await browser.close();
   }
@@ -181,7 +199,8 @@ async function main() {
   if (bytes <= 0) {
     throw new Error(`render produced no bytes at ${args.pngFile}`);
   }
-  console.error(`[render_html_to_png] wrote ${args.pngFile} bytes=${bytes}`);
+  // Machine-readable so build_deck_from_slides can aggregate a quality_warning.
+  console.error(`[render_html_to_png] wrote ${args.pngFile} bytes=${bytes} missing_assets=${missingForReport}`);
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
