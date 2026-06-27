@@ -74,15 +74,43 @@ function isAllowedRenderRequest(url, htmlFile, outputRoot) {
   }
 }
 
+function localRenderPathForUrl(url) {
+  if (!url.startsWith("file:")) {
+    return null;
+  }
+  try {
+    return path.resolve(fileURLToPath(url));
+  } catch {
+    return null;
+  }
+}
+
 async function installRenderRequestPolicy(page, htmlFile) {
   const outputRoot = outputRootForHtml(htmlFile);
+  // A slide referencing a local asset that was never generated (e.g.
+  // `../assets/slide-03.png`) must NOT silently screenshot a broken-image
+  // placeholder into a "successful" deck. Track allowed-but-missing local
+  // file: subresources and fail the render so build_deck_from_slides reports
+  // slide_render_failed and the builder gets a repair turn. (Codex P2,
+  // 2026-06-27 — mirrors the render_html_to_pdf.mjs pre-validation.)
+  const missingLocalResources = [];
   await page.route("**/*", (route) => {
     const requestUrl = route.request().url();
     if (isAllowedRenderRequest(requestUrl, htmlFile, outputRoot)) {
+      const localPath = localRenderPathForUrl(requestUrl);
+      if (
+        localPath &&
+        requestUrl !== pathToFileURL(path.resolve(htmlFile)).href &&
+        !fs.existsSync(localPath)
+      ) {
+        missingLocalResources.push(localPath);
+        return route.abort("failed");
+      }
       return route.continue();
     }
     return route.abort("blockedbyclient");
   });
+  return missingLocalResources;
 }
 
 async function main() {
@@ -107,11 +135,15 @@ async function main() {
       deviceScaleFactor: scale,
     });
     const page = await context.newPage();
-    await installRenderRequestPolicy(page, args.htmlFile);
+    const missingLocalResources = await installRenderRequestPolicy(page, args.htmlFile);
     await page.goto(`file://${path.resolve(args.htmlFile)}`, {
       waitUntil: "networkidle",
       timeout: 60000,
     });
+    if (missingLocalResources.length > 0) {
+      const uniqueMissing = [...new Set(missingLocalResources)];
+      throw new Error(`missing local render assets: ${uniqueMissing.slice(0, 8).join(", ")}`);
+    }
     // Clip to the exact deck canvas so a slightly-too-tall document still yields
     // a 16:9 frame (no scrollbar, no letterbox).
     await page.screenshot({
