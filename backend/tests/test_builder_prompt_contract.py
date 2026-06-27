@@ -27,7 +27,10 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
 
     assert "Finish with `emit_builder_artifact`" in contract
     assert "requested primary artifact" in contract
-    assert "Generate one full-slide image per slide" in contract
+    assert "HTML-slide decks" in contract
+    assert "build_deck_from_slides" in contract
+    assert "Do not\n  bake slide titles" in contract
+    assert "full-slide image per slide" not in contract
     # PDF reports are authored as HTML and rendered via render_html_to_pdf; the
     # markdown→pandoc path and remote generate_chart are retired for reports.
     assert "render_html_to_pdf" in contract
@@ -40,7 +43,11 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
 def test_visual_composition_routes_pptx_and_pdf_to_separate_pipelines() -> None:
     directives = _sophia_prompt("visual_composition.md")
 
-    assert "Presentations (`.pptx`) are pure image-forward decks" in directives
+    assert "Presentations (`.pptx`) are HTML-slide image-forward decks" in directives
+    assert "16:9 visual asset per slide" in directives
+    assert "real HTML text" in directives
+    assert "build_deck_from_slides" in directives
+    assert "generated 16:9 bitmap" not in directives
     # PDF reports are authored as one self-contained HTML file with inline <svg>
     # figures and rendered via render_html_to_pdf (no remote chart service).
     assert "render_html_to_pdf" in directives

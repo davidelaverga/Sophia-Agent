@@ -1212,7 +1212,9 @@ def test_presentation_brief_gains_visual_expectations_line():
     assert line is not None
     assert "Visual expectations" in line
     assert "generated image-forward deck" in line
-    assert "full-slide visual" in line
+    assert "generated visual asset" in line
+    assert "real HTML" in line
+    assert "baked title" not in line
 
 
 def test_plain_deck_brief_keeps_image_forward_line():

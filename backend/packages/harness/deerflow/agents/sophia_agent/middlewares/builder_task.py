@@ -636,7 +636,7 @@ def _image_generation_enabled(
     """Whether the image-generation skill is offered to the builder.
 
     Image targets and explicit requests keep legacy behavior. PPTX builds use
-    gpt-image-2 full-slide visuals as the primary slide path. PDF reports get a
+    gpt-image-2 visual-area assets inside HTML slides as the primary slide path. PDF reports get a
     few conceptual/editorial illustrations on by default (cover/hero + key
     concepts) alongside the inline-``<svg>`` charts/diagrams the model draws in
     the report HTML; the per-build cap (``_IMAGE_GENERATION_MAX_CALLS_PDF``)
@@ -1229,7 +1229,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "the deliverable type (e.g. pdf-report for PDF reports, "
             "deep-research / academic-paper-review / systematic-literature-review for research-backed reports, "
             "ppt-generation for slide decks, "
-            "image-generation when listed for image deliverables, explicit generated imagery, or PPTX full-slide visuals, "
+            "image-generation when listed for image deliverables, explicit generated imagery, or PPTX slide visual assets, "
             "data-analysis for tabular data), USE IT — read its SKILL.md "
             "via read_file_tool and follow its workflow. Workflow cards are authoritative "
             "for PDF, PPTX, HTML, and research tasks. Do not replace them with ad hoc "

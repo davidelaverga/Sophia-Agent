@@ -10,11 +10,12 @@ medium. Do not mix workflows just because another tool is available.
 
 ## Medium Routing
 
-- Presentations (`.pptx`) are pure image-forward decks. Every slide is one
-  generated 16:9 bitmap with the title, visual, and any visible narrative baked
-  into the image. The PPTX compiler only places the full-slide bitmap and
-  speaker notes. It never draws compiler-side titles, captions, text boxes,
-  charts, or engine-composed layouts.
+- Presentations (`.pptx`) are HTML-slide image-forward decks. Generate one
+  16:9 visual asset per slide into `/mnt/user-data/outputs/assets/`, then place
+  that asset inside the `ppt-generation` HTML skeleton's `.visual` region.
+  Slide titles and visible narrative are real HTML text in `slides/*.html`, not
+  baked into the image. Convert with `build_deck_from_slides`; never hand-write
+  PPTX layouts or compiler scripts.
 - PDF reports are authored as ONE self-contained HTML file and rendered with
   `render_html_to_pdf`. Draw BOTH data evidence (bar / line / column for
   quantitative, comparative, ranking, composition, trend) AND structural
@@ -33,12 +34,11 @@ medium. Do not mix workflows just because another tool is available.
 ## Presentation Invariants
 
 - There is no alternate plain deck mode. A requested `.pptx` deck still follows
-  the image-forward pipeline.
-- Each generated slide image reserves the top 14% for a title band, the center
-  70% for the visual, and the bottom 16% for a concise visible narrative when
-  the slide type needs explanation.
-- Keep visible slide text sparse and explicit. All rendered labels must be
-  specified in the prompt as exact text.
+  the HTML-slide image-forward pipeline.
+- Each generated slide image is the visual-area asset only. Do not include a
+  title region, footer, narrative text, or slide chrome in the image.
+- Keep visible HTML slide text sparse and explicit. Essential labels inside the
+  generated visual asset must be specified in the prompt as exact text.
 - Add concise speaker notes for narrative context, but never rely on notes as
   the only visible explanation for content slides.
 - If a slide image fails QC, regenerate or repair once. If it still fails,
