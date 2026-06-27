@@ -69,6 +69,8 @@ def test_ppt_generation_skill_authors_html_slides() -> None:
     assert "build_deck_from_slides" in text
     assert "slides/" in text and "assets/" in text
     assert "../assets/" in text  # relative image path convention
+    assert "--slide-visual" in text
+    assert '"slide_visual": true' in text
     # The model never compiles the deck.
     assert "python-pptx" in text  # appears only as a prohibition
     assert "pptxgenjs" in text

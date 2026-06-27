@@ -17,18 +17,23 @@ Chromium substrate the PDF report path uses.
 1. **Plan the slides** — slide count and, per slide: the title, the body/narrative,
    and the image to generate.
 2. **Generate each slide's image into the deck `assets/` folder.** Use the
-   image-generation skill, writing the PNG under `/mnt/user-data/outputs/assets/`.
+   image-generation skill in `--slide-visual` mode, writing the PNG under `/mnt/user-data/outputs/assets/`.
    Generate the hero/cover first, then the rest in ONE `--manifest` batch (each
    item referencing the hero for visual consistency):
    ```bash
    # hero first (anchors the visual style)
    python /mnt/skills/public/image-generation/scripts/generate.py \
+     --slide-visual \
      --prompt-file /mnt/user-data/outputs/assets/01-cover.prompt.json \
      --output-file /mnt/user-data/outputs/assets/01-cover.png
-   # then ONE batch for the rest (each item: "reference_images": [".../assets/01-cover.png"])
+   # then ONE batch for the rest (each item: "slide_visual": true,
+   # "reference_images": [".../assets/01-cover.png"])
    python /mnt/skills/public/image-generation/scripts/generate.py \
      --manifest /mnt/user-data/outputs/assets/manifest.json
    ```
+   Every manifest item for deck assets must include `"slide_visual": true` so
+   generation uses the PPTX visual-region contract instead of the generic image
+   prompt path.
    Generated images are written as **local files** — reference them by relative
    path from your slide HTML, never a remote URL.
 3. **Author one self-contained HTML file per slide** under
