@@ -124,6 +124,8 @@ def _updated_task_entry(
     })
     if task_type := _resolve_effective_task_type(tracked, delegation_context):
         task["task_type"] = task_type
+    if target_ext := _resolve_artifact_target_ext(tracked, delegation_context):
+        task["artifact_target_ext"] = target_ext
     return task
 
 
@@ -154,6 +156,8 @@ def _update_run_config(
     }
     if task_type := _resolve_effective_task_type(tracked, delegation_context):
         configurable["task_type"] = task_type
+    if target_ext := _resolve_artifact_target_ext(tracked, delegation_context):
+        configurable["artifact_target_ext"] = target_ext
     runtime_config = getattr(runtime, "config", None)
     if isinstance(runtime_config, dict):
         source = runtime_config.get("configurable")
@@ -617,6 +621,31 @@ def _resolve_effective_task_type(
     return _extract_str(tracked, "task_type") or _extract_str(
         delegation_context, "task_type"
     )
+
+
+def _normal_target_ext(value: str | None) -> str | None:
+    if not value:
+        return None
+    ext = value.strip().lower()
+    if not ext:
+        return None
+    if not ext.startswith("."):
+        ext = f".{ext}"
+    return ext if re.fullmatch(r"\.[a-z0-9]{1,12}", ext) else None
+
+
+def _resolve_artifact_target_ext(
+    tracked: dict[str, Any] | None,
+    delegation_context: dict[str, Any] | None,
+) -> str | None:
+    for source in (tracked, delegation_context):
+        target_ext = _normal_target_ext(_extract_str(source, "artifact_target_ext"))
+        if target_ext:
+            return target_ext
+    target_path = _extract_str(tracked, "artifact_target_path") or _extract_str(
+        delegation_context, "artifact_target_path"
+    )
+    return _normal_target_ext(Path(target_path or "").suffix)
 
 
 def _resolve_target_path(

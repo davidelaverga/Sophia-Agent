@@ -367,6 +367,8 @@ def test_chromium_html_renderers_block_external_subresources():
         assert "blockedbyclient" in source
         assert "url.startsWith(\"file:\")" in source
         assert "outputRootForHtml" in source
+        assert "blockedSubresources" in source
+        assert "blocked non-output render assets" in source
 
 
 def test_html_pdf_renderer_rejects_missing_local_subresources():

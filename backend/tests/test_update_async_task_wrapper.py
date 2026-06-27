@@ -1002,12 +1002,12 @@ def test_wrapper_preserves_delegation_task_type_in_replacement_run_config():
                     "thread_id": "builder-thread-1",
                     "run_id": "run-old",
                     "status": "running",
-                    "artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+                    "artifact_target_path": "/mnt/user-data/outputs/deck.pdf",
                     "trace_id": "trace-original",
                     "edit_mode": "edit_existing_artifact",
                     "edit_context": {
-                        "source_artifact_path": "/mnt/user-data/outputs/deck.pptx",
-                        "source_object_path": "sophia_builder/parent/deck.pptx",
+                        "source_artifact_path": "/mnt/user-data/outputs/deck.pdf",
+                        "source_object_path": "sophia_builder/parent/deck.pdf",
                     },
                 }
             },
@@ -1031,14 +1031,16 @@ def test_wrapper_preserves_delegation_task_type_in_replacement_run_config():
     configurable = update_calls[0]["config"]["configurable"]
     assert configurable["thread_id"] == "builder-thread-1"
     assert configurable["task_type"] == "presentation"
+    assert configurable["artifact_target_ext"] == ".pdf"
     updated = response.update["async_tasks"]["task-1"]
     assert updated["task_type"] == "presentation"
+    assert updated["artifact_target_ext"] == ".pdf"
     assert updated["run_id"] == "run-new"
     assert updated["status"] == "running"
-    assert updated["artifact_target_path"] == "/mnt/user-data/outputs/deck.pptx"
+    assert updated["artifact_target_path"] == "/mnt/user-data/outputs/deck.pdf"
     assert updated["trace_id"] == "trace-original"
     assert updated["edit_mode"] == "edit_existing_artifact"
-    assert updated["edit_context"]["source_object_path"] == "sophia_builder/parent/deck.pptx"
+    assert updated["edit_context"]["source_object_path"] == "sophia_builder/parent/deck.pdf"
 
 
 def test_wrapper_augmentation_is_idempotent():

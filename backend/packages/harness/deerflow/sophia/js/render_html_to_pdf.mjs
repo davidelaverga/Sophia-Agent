@@ -103,6 +103,7 @@ function localRenderPathForUrl(url) {
 async function installRenderRequestPolicy(page, htmlFile) {
   const outputRoot = outputRootForHtml(htmlFile);
   const missingLocalResources = [];
+  const blockedSubresources = [];
   await page.route("**/*", (route) => {
     const requestUrl = route.request().url();
     if (isAllowedRenderRequest(requestUrl, htmlFile, outputRoot)) {
@@ -117,9 +118,14 @@ async function installRenderRequestPolicy(page, htmlFile) {
       }
       return route.continue();
     }
+    const request = route.request();
+    const resourceType = request.resourceType();
+    if (requestUrl !== pathToFileURL(path.resolve(htmlFile)).href) {
+      blockedSubresources.push(`${resourceType}:${requestUrl}`);
+    }
     return route.abort("blockedbyclient");
   });
-  return missingLocalResources;
+  return { missingLocalResources, blockedSubresources };
 }
 
 async function main() {
@@ -138,11 +144,15 @@ async function main() {
   try {
     const context = await browser.newContext({ javaScriptEnabled: false });
     const page = await context.newPage();
-    const missingLocalResources = await installRenderRequestPolicy(page, args.htmlFile);
+    const { missingLocalResources, blockedSubresources } = await installRenderRequestPolicy(page, args.htmlFile);
     await page.goto(`file://${path.resolve(args.htmlFile)}`, {
       waitUntil: "networkidle",
       timeout: 60000,
     });
+    if (blockedSubresources.length > 0) {
+      const uniqueBlocked = [...new Set(blockedSubresources)];
+      throw new Error(`blocked non-output render assets: ${uniqueBlocked.slice(0, 8).join(", ")}`);
+    }
     if (missingLocalResources.length > 0) {
       const uniqueMissing = [...new Set(missingLocalResources)];
       throw new Error(`missing local render assets: ${uniqueMissing.slice(0, 8).join(", ")}`);
