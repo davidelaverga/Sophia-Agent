@@ -43,4 +43,34 @@ describe('ArtifactsPanel builder deliverables', () => {
       '/api/threads/thread-123/artifacts/mnt/user-data/outputs/sprint-brief.md?download=true',
     );
   });
+
+  it('does not list a deck .preview.pdf as a downloadable row', () => {
+    // Regression (prod 019f0b8a): the .preview.pdf is a render-only canvas aid;
+    // it must never appear as a second downloadable file alongside the .pptx.
+    render(
+      <ArtifactsPanel
+        artifacts={null}
+        builderArtifact={{
+          artifactTitle: 'Research deck',
+          artifactType: 'presentation',
+          artifactPath: 'mnt/user-data/outputs/research_deck.pptx',
+          artifactPreviewFilename: 'research_deck.preview.pdf',
+          supportingFiles: ['mnt/user-data/outputs/research_deck.preview.pdf'],
+          decisionsMade: [],
+          companionSummary: 'The deck is ready.',
+        }}
+        threadId="thread-123"
+        onSelectedBuilderArtifactPathChange={vi.fn()}
+      />,
+    );
+
+    // The .pptx is downloadable…
+    expect(screen.getByLabelText('Download research_deck.pptx')).toHaveAttribute(
+      'href',
+      '/api/threads/thread-123/artifacts/mnt/user-data/outputs/research_deck.pptx?download=true',
+    );
+    // …the preview PDF is not offered as a download row.
+    expect(screen.queryByLabelText('Download research_deck.preview.pdf')).toBeNull();
+    expect(screen.queryByText('research_deck.preview.pdf')).toBeNull();
+  });
 });

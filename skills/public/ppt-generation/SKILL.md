@@ -57,8 +57,10 @@ Chromium substrate the PDF report path uses.
 <head>
 <meta charset="utf-8">
 <style>
-  /* A slide is exactly the deck canvas. No scroll, no margins. */
-  html, body { margin: 0; padding: 0; }
+  /* A slide is exactly the deck canvas. No scroll, no margins. The page
+     background MUST be opaque dark too — if any region is left uncovered it
+     renders in THIS color, never white. */
+  html, body { margin: 0; padding: 0; background: #0e1626; }
   .slide {
     width: 1920px; height: 1080px; box-sizing: border-box;
     background: #0e1626; color: #f3f6fc; overflow: hidden; position: relative;
@@ -67,6 +69,10 @@ Chromium substrate the PDF report path uses.
   .slide .title { position: absolute; top: 64px; left: 80px; right: 80px;
     font-size: 64px; font-weight: 700; line-height: 1.1; }
   .slide .visual { position: absolute; top: 200px; left: 80px; right: 80px; bottom: 200px; }
+  /* Diagram/content slides: `contain` keeps the whole image visible; any
+     letterbox gap now renders in the slide's opaque dark background, not white.
+     For a hero/cover or full-bleed visual, make the image cover the whole slide
+     instead — a full-frame `.slide .visual { inset: 0 }` + `object-fit: cover`. */
   .slide .visual img { width: 100%; height: 100%; object-fit: contain; }
   .slide .narrative { position: absolute; left: 80px; right: 80px; bottom: 72px;
     font-size: 30px; line-height: 1.35; color: #aebbd2; }
@@ -87,6 +93,10 @@ Chromium substrate the PDF report path uses.
 - **You author HTML only.** You never author or run deck-compilation code. Do NOT
   write `python-pptx` or `pptxgenjs` code, do NOT call any deck compiler, do NOT
   run `bash` to assemble a deck. The build system converts your slide HTML to PPTX.
+- **The slide must be opaque dark to all four edges.** Never leave the page
+  background visible: set a dark background on `html, body` AND on the slide
+  wrapper, and prefer full-bleed visuals for hero/cover slides. A white band or
+  gutter at any edge is a defect.
 - **Every slide visual is a relative `../assets/<file>` path.** A remote URL in a
   slide is an error — generate images into `assets/` first.
 - Generate images into `/mnt/user-data/outputs/assets/`; author slides into

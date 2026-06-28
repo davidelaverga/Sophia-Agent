@@ -26,6 +26,30 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-06-28 · [deck-quality · white space + single .pptx delivery + batch enforcement] · PR #TBD
+**Author:** Claude · **Track:** backend + frontend · forensics `docs/audits/sophia-builder-deck-quality-forensics-2026-06-28.md`
+
+### What Changed
+- **WS1 white space:** `render_html_to_png.mjs` now forces an opaque dark base via CDP `Emulation.setDefaultBackgroundColorOverride` (new `--bg-color`, default `#0e1626`) before screenshot — uncovered regions render navy not Chromium-default white. `build_deck_from_slides._slide_render_command` plumbs `--bg-color` (`_DECK_BG`). `ppt-generation/SKILL.md` + `visual_composition.md`: `html,body` dark background + opaque-to-edges rule.
+- **WS2 one .pptx everywhere (frontend):** `ArtifactsPanel` filters `role!=='preview'` from download rows; `BuilderCompletionCard` resolves download/open to the `primary` file in `event.artifact_files` (never the `.preview.pdf`). Canvas (`ArtifactStage`) unchanged — still renders via the preview.
+- **WS3 slowness:** hardened `_deck_batch_directive_rejection` (detect ANY post-hero non-`--manifest` image-gen call incl. bare `generate.py`; drop one-shot → keep rejecting until `image_generation_manifest_seen`; safety valve `_DECK_BATCH_REJECTION_CAP=2`; `phase=deck_batch_check` log) + one-shot `_slides_before_images_block_command` ordering guard.
+
+### What We Learned
+- The first GOOD deck (run `019f0b8a`, 8/8 images) is what surfaced these — all three are quality/UX/perf on a working build, not failures.
+- White was a HARNESS default, not the model: `page.screenshot` with `omitBackground` unset paints Chromium white; CDP default-bg-override is the JS-independent fix (page JS is disabled).
+- The PDF-vs-PPTX leak was FRONTEND: backend `artifact_path` is the `.pptx` everywhere; the preview leaked because download-row surfaces didn't respect the `preview` role that the canvas resolver needs the file for.
+- The batch backstop missed because it was one-shot AND only matched `--slide-visual`; a bare `generate.py` single call after one nudge serialized freely.
+- LangSmith run traces STILL 403 (`workspace_id` set, `/runs/multipart` Forbidden) — the `phase=deck_batch_check` log is the prod-visible substitute.
+
+### CLAUDE.md Updates
+- `backend/CLAUDE.md`: new section "Deck quality — white space, single .pptx delivery, batch enforcement (2026-06-28)".
+
+### Skills Created / Modified
+- `ppt-generation/SKILL.md` (slide skeleton `html,body` bg + opaque-edges hard rule); `sophia/visual_composition.md` (deck opaque-edges invariant).
+
+### GEPA Log Entry
+- Prompt files changed are skill contracts (deck skeleton/invariants), not GEPA-optimizable targets. Before: skeleton darkened only `.slide` → white bands when model markup left gaps. After: `html,body` dark + opaque-edges rule + harness CDP backstop. No tone delta (builder-side).
+
 ## 2026-06-27 · [deck-fix-forward · image-gen reliability + partial-image resilience] · PR #TBD
 **Author:** Claude · **Track:** backend · **Decision:** validated `sophia_builder_final_plan_restore_decks_v1.md` → **fix-forward, not revert** · forensics `docs/audits/sophia-builder-deck-deploy-gap-forensics-2026-06-27.md`
 

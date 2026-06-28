@@ -261,6 +261,12 @@ _SHELL_SEPARATORS = {"&&", "||", ";", "|", "&"}
 # generate images at all, the build must continue with charts/text instead of
 # burning turns.
 _IMAGE_GENERATION_MAX_CALLS = 20
+# Bounded safety valve for the deck hero-anchor batch backstop: after this many
+# rejections of post-hero serial image-gen calls with no --manifest batch seen,
+# stop rejecting so a model that genuinely cannot author a manifest still ships
+# (serial, with a quality note) instead of looping. See
+# ``_deck_batch_directive_rejection``.
+_DECK_BATCH_REJECTION_CAP = 2
 # PDF reports get up to a few conceptual/editorial illustrations (cover/hero +
 # key concepts) on by default; all charts and structural diagrams are drawn as
 # inline <svg> in the report HTML (rendered via render_html_to_pdf), not images.
@@ -9500,6 +9506,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             image_block = self._image_generation_block_command(request)
             if image_block is not None:
                 return image_block
+            order_block = self._slides_before_images_block_command(request)
+            if order_block is not None:
+                return order_block
             self._maybe_autowire_pptx_plan_visuals(request)
             _maybe_attach_image_trace_env(request)
             return self._tool_result_command(request, handler(request))
@@ -9642,12 +9651,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _deck_batch_directive_rejection(command: str, state: dict[str, Any]) -> str | None:
         """Backstop the deck hero-anchor batch workflow at bash time.
 
-        Decks must generate the hero first, then ALL remaining slides in one
+        Decks must generate the hero first, then ALL remaining slides in ONE
         ``--manifest`` batch (skills/public/ppt-generation). When the model
-        instead drifts back to serial single ``--slide-visual`` calls after the
-        hero, this nudges it onto the batch path ONCE. After the directive fires
-        (or once a batch has run), single calls are allowed — they are the
-        legitimate one-off repair path for a stray failed slide.
+        instead drifts back to serial single image-gen calls after the hero,
+        this rejects them and points at the batch path. It keeps rejecting until
+        a ``--manifest`` batch actually runs (``image_generation_manifest_seen``)
+        — NOT a one-shot nudge: the prior one-shot let the model keep serializing
+        (prod 019f0b8a: 0 nudges logged, ~9 serial calls, ~15 min). Detection is
+        ALSO broadened — ANY post-hero billable image-gen call without
+        ``--manifest`` is a serial call (the prior ``--slide-visual``-only
+        matcher missed bare ``generate.py`` invocations). A bounded safety valve
+        (``deck_batch_rejection_count`` >= ``_DECK_BATCH_REJECTION_CAP``) then
+        yields so a model that genuinely cannot author a manifest still ships
+        (serial) instead of looping.
 
         Returns the directive text to reject with, or ``None`` to allow.
         """
@@ -9656,8 +9672,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         diagnostics = _pptx_diagnostics(state)
         if diagnostics.get("image_generation_manifest_seen"):
             return None  # a batch already ran — single calls are repairs now
-        if diagnostics.get("deck_batch_directive_emitted"):
-            return None  # one-shot nudge already spent
+        # Bounded safety valve: after repeated rejections with no manifest, stop
+        # rejecting so the build can still finish (serial, with a quality note).
+        if _pptx_diagnostic_count(state, "deck_batch_rejection_count") >= _DECK_BATCH_REJECTION_CAP:
+            return None
         # Hero must already be done (>=1 success) before we expect a batch.
         if _pptx_diagnostic_count(state, "image_generation_success_count") < 1:
             return None
@@ -9666,15 +9684,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             for segment in _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS)
             if "--preflight" not in _command_parts(segment)
         ]
+        if not billable:
+            return None
         if any(_command_flag_value(segment, "--manifest") for segment in billable):
             return None  # this IS a batch call — allow
-        has_single_slide_visual = any(
-            _command_flag_value(segment, "--manifest") is None
-            and "--slide-visual" in _command_parts(segment)
-            for segment in billable
-        )
-        if not has_single_slide_visual:
-            return None
+        # Any post-hero billable image-gen call WITHOUT --manifest is the serial
+        # loop the batch path exists to prevent (bare ``generate.py`` counts too).
         return (
             "[Sophia/deck-batch] The hero slide is generated. Do NOT generate the remaining "
             "slides one at a time — that is the serial loop the batch path exists to prevent. "
@@ -9682,8 +9697,61 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "true` with the hero PNG in `reference_images`), then call the image-generation "
             "script ONCE with `--manifest /mnt/user-data/outputs/visuals/manifest.json`. All "
             "remaining slides will generate concurrently. See the ppt-generation SKILL.md "
-            "workflow. (Single --slide-visual calls are allowed only to repair a stray failed "
+            "workflow. (Single image-gen calls are allowed only to repair a stray failed "
             "slide AFTER the batch runs.)"
+        )
+
+    def _slides_before_images_block_command(self, request: ToolCallRequest) -> Command | None:
+        """Reject authoring ``slides/*.html`` before the slide images exist.
+
+        The deck workflow is: generate ALL images (hero + one ``--manifest``
+        batch), THEN author the slide HTML referencing them. Authoring slides
+        while the images are still being generated makes the model author them
+        TWICE (prod 019f0b8a: slides authored at turns 9-16 then re-authored
+        25-32 after the images landed — ~8 wasted turns). Nudge ONCE; never
+        hard-loop. Returns a redirect Command, or ``None`` to allow.
+        """
+        tool_name = str(request.tool_call.get("name") or "")
+        if tool_name not in {"write_file", "write_file_tool"}:
+            return None
+        args = request.tool_call.get("args") or {}
+        if not isinstance(args, dict):
+            return None
+        path = str(args.get("path") or args.get("file_path") or "").replace("\\", "/").lower()
+        if "/slides/" not in path or not path.endswith((".html", ".htm")):
+            return None
+        state = request.state or {}
+        if _requested_artifact_ext(state) != "pptx":
+            return None
+        diagnostics = _pptx_diagnostics(state)
+        if diagnostics.get("slides_before_images_directive_emitted"):
+            return None  # one-shot nudge already spent
+        if diagnostics.get("image_generation_manifest_seen"):
+            return None  # batch ran — images are ready, authoring is correct
+        target = _pptx_latch_target_slide_count(state)
+        if target <= 0:
+            return None  # can't determine image readiness — don't block
+        if _pptx_diagnostic_count(state, "image_generation_success_count") >= target:
+            return None  # all slide images present — authoring is correct
+        return Command(
+            update={
+                "messages": [
+                    _error_tool_message(
+                        content=(
+                            "[Sophia/deck-order] Generate ALL slide images FIRST, then author the "
+                            "slide HTML. Generate the hero, then ONE --manifest batch for the rest "
+                            "(see ppt-generation SKILL.md); only once the images exist under assets/ "
+                            "author slides/*.html referencing them by relative ../assets/<file> "
+                            "path. Authoring slides before the images means re-authoring them after "
+                            "the images land."
+                        ),
+                        tool_call_id=request.tool_call.get("id", ""),
+                        name=tool_name,
+                    ),
+                ],
+                "builder_pptx_diagnostics": {"slides_before_images_directive_emitted": True},
+            },
+            goto="model",
         )
 
     @staticmethod
@@ -9783,10 +9851,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             # VQ-3: preflight-only checks are free — never counted, never blocked.
             return None
         state = request.state or {}
-        # Deck hero-anchor batch backstop: nudge serial slide calls onto the
-        # parallel --manifest path ONCE (before the cap/error checks so the
-        # nudge isn't masked by an unrelated rejection).
+        # Deck hero-anchor batch backstop: reject post-hero serial image-gen
+        # calls and redirect to the parallel --manifest path (before the cap/error
+        # checks so the nudge isn't masked by an unrelated rejection). Keeps
+        # rejecting until a batch runs, bounded by a safety valve.
         deck_batch_directive = self._deck_batch_directive_rejection(command, state)
+        # Always log the gate decision so a missed batch is diagnosable from prod
+        # logs (LangSmith run traces are 403-blocked; bash args are not logged).
+        logger.info(
+            "[BuilderImageGeneration] phase=deck_batch_check rejected=%s manifest_seen=%s "
+            "success_count=%d rejection_count=%d",
+            deck_batch_directive is not None,
+            bool(_pptx_diagnostics(state).get("image_generation_manifest_seen")),
+            _pptx_diagnostic_count(state, "image_generation_success_count"),
+            _pptx_diagnostic_count(state, "deck_batch_rejection_count"),
+        )
         if deck_batch_directive is not None:
             logger.warning("[BuilderImageGeneration] phase=deck_batch_nudge")
             return Command(
@@ -9798,7 +9877,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             name=tool_name,
                         ),
                     ],
-                    "builder_pptx_diagnostics": {"deck_batch_directive_emitted": True},
+                    # Summing reducer: each rejection increments toward the
+                    # safety-valve cap (_DECK_BATCH_REJECTION_CAP).
+                    "builder_pptx_diagnostics": {"deck_batch_rejection_count": 1},
                 },
                 goto="model",
             )
@@ -10007,6 +10088,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             image_block = self._image_generation_block_command(request)
             if image_block is not None:
                 return image_block
+            order_block = self._slides_before_images_block_command(request)
+            if order_block is not None:
+                return order_block
             self._maybe_autowire_pptx_plan_visuals(request)
             _maybe_attach_image_trace_env(request)
             return self._tool_result_command(request, await handler(request))

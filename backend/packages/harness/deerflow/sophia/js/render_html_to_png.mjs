@@ -32,6 +32,8 @@ function parseArgs(argv) {
       args.height = parseInt(argv[++index], 10);
     } else if (value === "--scale") {
       args.scale = parseFloat(argv[++index]);
+    } else if (value === "--bg-color") {
+      args.bgColor = argv[++index];
     } else {
       throw new Error(`Unknown argument: ${value}`);
     }
@@ -141,6 +143,29 @@ async function installRenderRequestPolicy(page, htmlFile) {
   return { missingLocalResources, blockedSubresources };
 }
 
+// Parse #RRGGBB / #RGB into a CDP RGBA object (alpha 1). Falls back to the deck
+// navy on anything unparseable so the base-background override is always opaque.
+const DEFAULT_BG_COLOR = "#0e1626";
+function hexToCdpRgba(hex) {
+  const fallback = { r: 14, g: 22, b: 38, a: 1 };
+  if (typeof hex !== "string") {
+    return fallback;
+  }
+  let value = hex.trim().replace(/^#/, "");
+  if (value.length === 3) {
+    value = value.split("").map((char) => char + char).join("");
+  }
+  if (!/^[0-9a-fA-F]{6}$/.test(value)) {
+    return fallback;
+  }
+  return {
+    r: parseInt(value.slice(0, 2), 16),
+    g: parseInt(value.slice(2, 4), 16),
+    b: parseInt(value.slice(4, 6), 16),
+    a: 1,
+  };
+}
+
 async function main() {
   const args = parseArgs(process.argv.slice(2));
   if (!fs.existsSync(args.htmlFile)) {
@@ -149,6 +174,7 @@ async function main() {
   const width = Number.isFinite(args.width) && args.width > 0 ? args.width : 1920;
   const height = Number.isFinite(args.height) && args.height > 0 ? args.height : 1080;
   const scale = Number.isFinite(args.scale) && args.scale > 0 ? args.scale : 2;
+  const bgColor = typeof args.bgColor === "string" && args.bgColor.trim() ? args.bgColor.trim() : DEFAULT_BG_COLOR;
   fs.mkdirSync(path.dirname(path.resolve(args.pngFile)), { recursive: true });
 
   let missingForReport = 0;
@@ -182,6 +208,19 @@ async function main() {
         `[render_html_to_png] degraded ${uniqueMissing.length} missing local asset(s) to placeholder: ` +
           uniqueMissing.slice(0, 8).join(", "),
       );
+    }
+    // Force an opaque base background so any region the slide HTML leaves
+    // uncovered renders as the deck color, not Chromium's default WHITE (the
+    // white-band defect, prod 019f0b8a: a model-authored layout whose gutters
+    // fell on the unpainted body). CDP's default-background override is
+    // JS-independent (page JS is disabled here) and an opaque `.slide` still
+    // paints on top — only uncovered/transparent regions pick up this base.
+    // omitBackground stays unset so the override is captured. Non-fatal.
+    try {
+      const cdp = await context.newCDPSession(page);
+      await cdp.send("Emulation.setDefaultBackgroundColorOverride", { color: hexToCdpRgba(bgColor) });
+    } catch {
+      // CDP unavailable — fall back to pre-fix behavior (white default).
     }
     // Clip to the exact deck canvas so a slightly-too-tall document still yields
     // a 16:9 frame (no scrollbar, no letterbox).

@@ -160,6 +160,21 @@ def test_success_renders_each_slide_then_wraps(tmp_path, monkeypatch):
     assert (tmp_path / ".deck-render").is_dir()
 
 
+def test_slide_render_command_sets_opaque_dark_bg_color():
+    # The render harness must paint an opaque dark base so a slide that leaves a
+    # region uncovered renders navy, not Chromium's default white (white-band
+    # defect, prod 019f0b8a). The deck plumbs --bg-color into render_html_to_png.
+    cmd = deck._slide_render_command(
+        "/usr/bin/node",
+        Path("/x/render_html_to_png.mjs"),
+        Path("/s/01.html"),
+        Path("/o/01.png"),
+    )
+    assert "--bg-color" in cmd
+    assert cmd[cmd.index("--bg-color") + 1] == deck._DECK_BG
+    assert deck._DECK_BG == "#0e1626"
+
+
 def test_partial_images_ship_deck_with_quality_warning(tmp_path, monkeypatch):
     # §WS-B (2026-06-27): a deck whose slides reference some never-generated images
     # still SHIPS — render_html_to_png degrades the missing image to a placeholder

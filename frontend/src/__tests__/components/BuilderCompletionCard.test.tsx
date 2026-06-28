@@ -179,6 +179,33 @@ describe("BuilderCompletionCard — success variant", () => {
     expect(link).toHaveAttribute("download", "research_deck.pptx")
   })
 
+  it("downloads the .pptx, never the .preview.pdf, for a deck with artifact_files", () => {
+    // Regression (prod 019f0b8a): the delivery card must resolve the DOWNLOAD to
+    // the primary deliverable (.pptx), never the render-only .preview.pdf. Even
+    // if artifact_path points at the preview, the role-aware selection picks the
+    // primary .pptx from artifact_files.
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_path: "mnt/user-data/outputs/research_deck.preview.pdf",
+      artifact_url: undefined,
+      artifact_filename: "research_deck.preview.pdf",
+      artifact_type: "presentation",
+      artifact_files: [
+        { path: "mnt/user-data/outputs/research_deck.pptx", role: "primary", name: "research_deck.pptx" },
+        { path: "mnt/user-data/outputs/research_deck.preview.pdf", role: "preview", name: "research_deck.preview.pdf" },
+      ],
+    }
+
+    render(<BuilderCompletionCard event={event} />)
+
+    const link = screen.getByRole("link", { name: /download/i })
+    expect(link).toHaveAttribute(
+      "href",
+      "/api/threads/thread-1/artifacts/mnt/user-data/outputs/research_deck.pptx?download=true",
+    )
+    expect(link.getAttribute("href")).not.toContain(".preview.pdf")
+  })
+
   it("labels usable HTML fallbacks for slide deck requests explicitly", () => {
     const event: BuilderCompletionEventV1 = {
       ...SUCCESS_EVENT,

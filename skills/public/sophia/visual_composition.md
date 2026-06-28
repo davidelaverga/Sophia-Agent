@@ -35,6 +35,9 @@ medium. Do not mix workflows just because another tool is available.
 
 - There is no alternate plain deck mode. A requested `.pptx` deck still follows
   the HTML-slide image-forward pipeline.
+- Every slide must be opaque dark to all four edges — set a dark background on
+  `html, body` and on the slide wrapper. A white band/gutter at any edge is a
+  defect (the render fills uncovered regions with the deck background, not white).
 - Each generated slide image is the visual-area asset only. Do not include a
   title region, footer, narrative text, or slide chrome in the image.
 - Keep visible HTML slide text sparse and explicit. Essential labels inside the

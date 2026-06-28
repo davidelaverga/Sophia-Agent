@@ -82,6 +82,20 @@ def test_ppt_generation_skill_authors_html_slides() -> None:
     assert "generate_report_chart" not in text
 
 
+def test_ppt_generation_skeleton_demands_opaque_dark_slide() -> None:
+    """White-space defense (prod 019f0b8a): the slide skeleton must paint an
+    opaque dark background on html, body (not just .slide) and tell the model the
+    slide must be opaque to the edges, so an uncovered region never renders white.
+    """
+    text = _skill("ppt-generation")
+    # html, body carry the dark background, not only .slide.
+    assert "html, body { margin: 0; padding: 0; background: #0e1626; }" in text
+    # Explicit opaque-to-edges hard rule.
+    lowered = text.lower()
+    assert "opaque" in lowered
+    assert "to all four edges" in lowered or "to the edges" in lowered
+
+
 def test_pdf_report_skill_uses_html_and_inline_svg() -> None:
     text = _skill("pdf-report")
 

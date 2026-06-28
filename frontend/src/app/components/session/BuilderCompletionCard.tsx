@@ -194,13 +194,31 @@ export function BuilderCompletionCard({
   const meta = STATUS_META[event.status];
   const title = useMemo(() => deriveTitle(event), [event]);
   const body = useMemo(() => deriveBody(event), [event]);
+  // Resolve the DOWNLOAD target to the primary deliverable (the .pptx), never
+  // the render-only `.preview.pdf`. A deck completion carries artifact_files
+  // with a `primary` (the .pptx) and a `preview` (the canvas render aid); pick
+  // primary explicitly so the card can never download the preview, regardless of
+  // what artifact_path resolved to (prod 019f0b8a: one deck delivered both a
+  // .pdf and a .pptx). Falls back to artifact_path when no files array.
+  const primaryArtifactPath = useMemo(() => {
+    const files = event.artifact_files;
+    if (Array.isArray(files) && files.length > 0) {
+      const primary =
+        files.find((file) => file?.role === 'primary' && file?.path)
+        ?? files.find((file) => file?.path && file.role !== 'preview');
+      if (primary?.path) {
+        return primary.path;
+      }
+    }
+    return event.artifact_path ?? null;
+  }, [event.artifact_files, event.artifact_path]);
   const artifactProxyHref = useMemo(
-    () => buildThreadArtifactHref(event.thread_id, event.artifact_path),
-    [event.artifact_path, event.thread_id],
+    () => buildThreadArtifactHref(event.thread_id, primaryArtifactPath),
+    [primaryArtifactPath, event.thread_id],
   );
   const artifactProxyDownloadHref = useMemo(
-    () => buildThreadArtifactHref(event.thread_id, event.artifact_path, { download: true }),
-    [event.artifact_path, event.thread_id],
+    () => buildThreadArtifactHref(event.thread_id, primaryArtifactPath, { download: true }),
+    [primaryArtifactPath, event.thread_id],
   );
   const fallbackLabel = isFallbackCompletion(event) ? fallbackArtifactLabel(event).toLowerCase() : null;
   const showMissingActionHint = shouldShowMissingActionHint({

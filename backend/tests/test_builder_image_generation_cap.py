@@ -16,6 +16,7 @@ from types import SimpleNamespace
 from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
+    _DECK_BATCH_REJECTION_CAP,
     _IMAGE_GENERATION_MAX_CALLS,
     _IMAGE_GENERATION_MAX_CALLS_PDF,
     BuilderArtifactMiddleware,
@@ -82,6 +83,9 @@ def test_call_beyond_cap_is_rejected_with_generated_assets_listed():
     state = _state_with_image_diagnostics(
         image_generation_attempt_count=_IMAGE_GENERATION_MAX_CALLS,
         image_generation_success_count=3,
+        # A batch already ran (realistic way to reach the cap with successes) so
+        # the deck-batch backstop yields and the hard image cap is what fires.
+        image_generation_manifest_seen=True,
         image_output_paths=["/mnt/user-data/outputs/visuals/hero-launch.png"],
     )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
@@ -201,8 +205,49 @@ def test_deck_batch_backstop_nudges_second_serial_slide_call():
     content = result.update["messages"][0].content
     assert "[Sophia/deck-batch]" in content
     assert "--manifest" in content
-    # Idempotency stamp lands in the diagnostics channel.
-    assert result.update["builder_pptx_diagnostics"]["deck_batch_directive_emitted"] is True
+    # Each rejection increments the safety-valve counter (summing reducer).
+    assert result.update["builder_pptx_diagnostics"]["deck_batch_rejection_count"] == 1
+
+
+def test_deck_batch_backstop_rejects_bare_generate_py_single_call():
+    # Broadened detection: a post-hero single call WITHOUT --slide-visual (a bare
+    # generate.py invocation) is still the serial loop and must be rejected — the
+    # prior --slide-visual-only matcher missed these (prod 019f0b8a).
+    state = _state_with_image_diagnostics(image_generation_success_count=1)
+    command = f"python {_SCRIPT} --prompt-file s2.prompt.json --output-file s2.png"
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(command, state)
+    )
+    assert isinstance(result, Command)
+    assert "[Sophia/deck-batch]" in result.update["messages"][0].content
+
+
+def test_deck_batch_backstop_keeps_rejecting_until_manifest():
+    # NOT one-shot: after one prior rejection (count=1, below the cap) a further
+    # serial call is STILL rejected — the prior one-shot let the model keep
+    # serializing (prod 019f0b8a: 0 nudges logged, ~9 serial calls).
+    state = _state_with_image_diagnostics(
+        image_generation_success_count=1,
+        deck_batch_rejection_count=1,
+    )
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+    assert isinstance(result, Command)
+    assert "[Sophia/deck-batch]" in result.update["messages"][0].content
+
+
+def test_deck_batch_backstop_safety_valve_yields_at_cap():
+    # Bounded safety valve: at the rejection cap, stop rejecting so a model that
+    # genuinely cannot author a manifest still ships (serial) instead of looping.
+    state = _state_with_image_diagnostics(
+        image_generation_success_count=1,
+        deck_batch_rejection_count=_DECK_BATCH_REJECTION_CAP,
+    )
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+    assert result is None
 
 
 def test_deck_batch_backstop_allows_hero_first_call():
@@ -219,17 +264,6 @@ def test_deck_batch_backstop_allows_manifest_call():
     command = f"python {_SCRIPT} --manifest /mnt/user-data/outputs/visuals/manifest.json"
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(command, state)
-    )
-    assert result is None
-
-
-def test_deck_batch_backstop_is_idempotent_after_directive():
-    state = _state_with_image_diagnostics(
-        image_generation_success_count=1,
-        deck_batch_directive_emitted=True,
-    )
-    result = BuilderArtifactMiddleware()._image_generation_block_command(
-        _bash_request(_deck_single_slide_command(), state)
     )
     assert result is None
 
@@ -255,6 +289,70 @@ def test_deck_batch_backstop_only_fires_for_pptx():
     }
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(_deck_single_slide_command(), state)
+    )
+    assert result is None
+
+
+# ---- images-before-slides ordering guard ------------------------------------
+
+
+def _slide_write_request(path: str, state: dict):
+    return SimpleNamespace(
+        tool_call={"id": "tc-wf", "name": "write_file", "args": {"path": path, "content": "<html></html>"}},
+        state=state,
+        runtime=_runtime(),
+    )
+
+
+def test_slides_before_images_blocks_authoring_before_images():
+    # Target known (plan=8), only the hero generated (success=1): authoring a
+    # slide HTML now forces a re-author once images land — nudge once.
+    state = _state_with_image_diagnostics(image_generation_success_count=1, pptx_plan_slide_count=8)
+    result = BuilderArtifactMiddleware()._slides_before_images_block_command(
+        _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
+    )
+    assert isinstance(result, Command)
+    assert "[Sophia/deck-order]" in result.update["messages"][0].content
+    assert result.update["builder_pptx_diagnostics"]["slides_before_images_directive_emitted"] is True
+
+
+def test_slides_before_images_allows_when_all_images_present():
+    state = _state_with_image_diagnostics(image_generation_success_count=8, pptx_plan_slide_count=8)
+    result = BuilderArtifactMiddleware()._slides_before_images_block_command(
+        _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
+    )
+    assert result is None
+
+
+def test_slides_before_images_allows_after_batch_seen():
+    state = _state_with_image_diagnostics(
+        image_generation_success_count=2,
+        pptx_plan_slide_count=8,
+        image_generation_manifest_seen=True,
+    )
+    result = BuilderArtifactMiddleware()._slides_before_images_block_command(
+        _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
+    )
+    assert result is None
+
+
+def test_slides_before_images_is_one_shot():
+    state = _state_with_image_diagnostics(
+        image_generation_success_count=1,
+        pptx_plan_slide_count=8,
+        slides_before_images_directive_emitted=True,
+    )
+    result = BuilderArtifactMiddleware()._slides_before_images_block_command(
+        _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
+    )
+    assert result is None
+
+
+def test_slides_before_images_allows_when_target_unknown():
+    # No plan/requested count: can't determine readiness — never block.
+    state = _state_with_image_diagnostics(image_generation_success_count=1)
+    result = BuilderArtifactMiddleware()._slides_before_images_block_command(
+        _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
     )
     assert result is None
 

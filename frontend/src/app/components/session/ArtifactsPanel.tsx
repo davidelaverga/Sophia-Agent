@@ -510,7 +510,12 @@ export function BuilderDeliverableCard({
   selectedBuilderArtifactPath?: string | null;
   onSelectedBuilderArtifactPathChange?: (path: string | null) => void;
 }) {
-  const files = getBuilderArtifactFiles(builderArtifact);
+  // Exclude the render-only `.preview.pdf` from the DOWNLOADABLE rows: a deck's
+  // sole deliverable is the .pptx. The preview exists only so the canvas can
+  // render the deck (it stays in getBuilderArtifactFiles for ArtifactStage's
+  // resolveCanvasRenderFile) — it must never surface as a second download
+  // (prod 019f0b8a: users got a .pdf + a .pptx for one deck).
+  const files = getBuilderArtifactFiles(builderArtifact).filter((file) => file.role !== 'preview');
   const decisions = builderArtifact.decisionsMade?.filter(Boolean) ?? [];
   const sources = builderArtifact.sourcesUsed?.filter(Boolean) ?? [];
   const confidence = builderArtifact.confidence;

@@ -46,6 +46,10 @@ _WRAP_TIMEOUT_SECONDS = 120
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 _DECK_WIDTH = 1920
 _DECK_HEIGHT = 1080
+# Opaque base background for the render harness: any region a slide HTML leaves
+# uncovered renders this color instead of Chromium's default white (white-band
+# defect, prod 019f0b8a). Matches the ppt-generation SKILL.md slide skeleton.
+_DECK_BG = "#0e1626"
 
 
 def _js_script_path(filename: str) -> Path | None:
@@ -127,6 +131,7 @@ def _slide_render_command(node: str, png_script: Path, html: Path, png: Path) ->
         "--png-file", str(png),
         "--width", str(_DECK_WIDTH),
         "--height", str(_DECK_HEIGHT),
+        "--bg-color", _DECK_BG,
     ]
 
 
