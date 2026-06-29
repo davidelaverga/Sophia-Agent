@@ -221,3 +221,15 @@ class TestBuilderWorkflowCards:
         assert "<visual_composition>" in briefing
         assert "pdf-report" in briefing  # directives §5 name the report skill
         assert '<builder_workflow_card name="visuals"' not in briefing
+
+    def test_pdf_targeted_presentation_does_not_inject_pptx_slide_count(self) -> None:
+        state = _make_state("presentation")
+        state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/deck.pdf"
+        state["delegation_context"]["task"] = "Make a 10-slide deck in PDF format for the roadmap review."
+
+        result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
+        briefing = _briefing(result)
+
+        assert "<pptx_slide_count_target>" not in briefing
+        assert "Requested PPTX length" not in briefing
+        assert "render_html_to_pdf" in briefing

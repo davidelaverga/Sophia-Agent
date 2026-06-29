@@ -958,7 +958,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                     companion_artifact=companion_artifact,
                     artifact_target_path=artifact_target_path,
                 )
-        if artifact_target_ext == ".pptx" or task_type in {"presentation", "slides", "slide_deck", "deck"}:
+        if artifact_target_ext == ".pptx" or (
+            not artifact_target_ext and task_type in {"presentation", "slides", "slide_deck", "deck"}
+        ):
             value = state.get("builder_pptx_requested_slide_count")
             if isinstance(value, int):
                 slide_target_updates["builder_pptx_requested_slide_count"] = value
