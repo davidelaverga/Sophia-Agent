@@ -485,10 +485,13 @@ def _pptx_slide_html_count(state: dict[str, Any]) -> int:
 
 
 def _pptx_slide_html_ready(state: dict[str, Any]) -> bool:
+    slide_html_count = _pptx_slide_html_count(state)
+    if slide_html_count <= 0:
+        return False
     target_count = _pptx_latch_target_slide_count(state)
     if target_count <= 0:
-        return False
-    return _pptx_slide_html_count(state) >= target_count
+        return True
+    return slide_html_count >= target_count
 
 
 def _pptx_compile_ready(state: dict[str, Any]) -> bool:
