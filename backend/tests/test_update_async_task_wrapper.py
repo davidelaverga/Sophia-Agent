@@ -30,6 +30,7 @@ from langgraph.types import Command
 
 from deerflow.sophia.tools.start_builder_task import _has_active_builder_task
 from deerflow.sophia.tools.update_async_task_wrapper import (
+    _file_target_directive_block,
     make_update_async_task_wrapper,
 )
 
@@ -425,11 +426,10 @@ def test_terminal_redirect_successful_keeps_artifact_delivered_claim(successful_
 
 
 @pytest.mark.parametrize("binary_task_type", ["visual_report"])
-def test_directive_binary_task_type_does_not_prescribe_write_file_for_binary(binary_task_type):
-    """Codex P1 review 2026-05-22: binary deliverables (.pptx /.pdf)
-    cannot be authored by write_file — they need a generator
-    script run via bash_tool. The directive must NOT tell the model
-    "MUST use write_file" for these task_types."""
+def test_directive_visual_report_pdf_uses_html_renderer(binary_task_type):
+    """Visual-report PDFs are binary deliverables, but the supported authoring
+    workflow is HTML source plus ``render_html_to_pdf`` — not ad hoc reportlab /
+    weasyprint / chart-visualization scripts."""
     from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
 
     augmented = _augment_update_message(
@@ -440,10 +440,11 @@ def test_directive_binary_task_type_does_not_prescribe_write_file_for_binary(bin
     # Anti-pattern guard: must NOT say "write_file" can author the binary.
     assert "MUST use write_file" not in augmented
     assert "extend via `append=True` chunks" not in augmented
-    # Must instruct the script + bash approach.
-    assert "BINARY" in augmented
-    assert "generator script" in augmented.lower()
-    assert "bash_tool" in augmented
+    assert "render_html_to_pdf" in augmented
+    assert "HTML source" in augmented
+    assert "Do NOT create reportlab, weasyprint, chart-visualization" in augmented
+    assert "author a generator script" not in augmented
+    assert "bash_tool" not in augmented
     # Final-path requirement still present.
     assert "/mnt/user-data/outputs/" in augmented
 
@@ -545,7 +546,7 @@ def test_directive_visual_report_html_target_uses_text_writer():
     assert "generator script" not in augmented.lower()
 
 
-def test_directive_visual_report_pdf_target_keeps_binary_guidance():
+def test_directive_visual_report_pdf_target_uses_html_renderer_guidance():
     from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
 
     augmented = _augment_update_message(
@@ -558,8 +559,10 @@ def test_directive_visual_report_pdf_target_keeps_binary_guidance():
         delegation_context={"task": "Build a visual report", "task_type": "visual_report"},
     )
 
-    assert "BINARY" in augmented
-    assert "generator script" in augmented.lower()
+    assert "render_html_to_pdf" in augmented
+    assert "HTML source" in augmented
+    assert "Do NOT create reportlab, weasyprint, chart-visualization" in augmented
+    assert "author a generator script" not in augmented
 
 
 def test_update_filename_resolver_preserves_explicit_pptx_over_incidental_pdf():
@@ -878,6 +881,15 @@ def test_wrapper_augmentation_includes_prior_artifact_path_when_present():
     # Phase 2F.1: directive language asserts "RESUMING (not restarting)"
     # which is the canonical anti-re-research framing.
     assert "RESUMING" in msg or "resume" in msg.lower()
+
+
+def test_pdf_target_directive_routes_updates_through_html_renderer():
+    block = _file_target_directive_block("/mnt/user-data/outputs/report.pdf", "document")
+
+    assert "render_html_to_pdf" in block
+    assert "HTML source" in block
+    assert "Do NOT create reportlab, weasyprint, chart-visualization" in block
+    assert "author a generator script" not in block
 
 
 def test_wrapper_persists_update_urls_in_replacement_run_input():

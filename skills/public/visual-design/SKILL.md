@@ -18,12 +18,14 @@ be generated locally under `/mnt/user-data/outputs/`.
    artifact when the user requested visuals.
 2. Choose the minimum useful visual set: one clear chart/diagram is better
    than several decorative weak ones.
-3. Create local visual assets with `generate_chart` (the chart-visualization
-   skill) for both structural diagrams (flow, network, mind-map, fishbone,
-   organization-chart, sankey) and numeric/data charts; do not treat remote
-   chart URLs as deliverable assets.
-4. Embed or reference the local visual assets in the final HTML, PDF source, or
-   PPTX plan before emitting the artifact.
+3. For HTML/PDF reports, author visible inline static SVG charts/diagrams
+   directly in the HTML source, or reference local SVG/PNG assets already under
+   `/mnt/user-data/outputs/`; do not use `generate_chart`,
+   chart-visualization, remote chart URLs, or browser-only chart scripts.
+4. For PPTX decks, generate the required slide bitmaps with the image-generation
+   slide-visual workflow and reference those local files from the PPTX plan.
+5. Embed or reference the local visual evidence in the final HTML, PDF source,
+   or PPTX plan before emitting the artifact.
 
 ## Visual Quality Rules
 
@@ -53,8 +55,9 @@ be generated locally under `/mnt/user-data/outputs/`.
 ## Target-Specific Guidance
 
 - HTML: inline SVG or local SVG/PNG assets are both acceptable.
-- PDF: reference local SVG/PNG assets from the Markdown/HTML source before
-  rendering. Do not rely on browser-only scripts.
+- PDF: prefer visible inline static SVG figures in the HTML source before
+  rendering; local SVG/PNG assets are acceptable when they are under outputs.
+  Do not rely on browser-only scripts.
 - PPTX: generated slide images must contain the requested visual evidence
   directly in the bitmap.
 

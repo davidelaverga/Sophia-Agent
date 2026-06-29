@@ -724,6 +724,23 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
             "correction, report the failure honestly instead of emitting a source "
             "or preview file as the deck."
         )
+    if target_ext == "pdf":
+        return (
+            f"Concrete file target: `{target_path}`. This is a PDF report/document "
+            "update. Repair the HTML source under `/mnt/user-data/outputs/`, then "
+            "render the PDF with `render_html_to_pdf`.\n"
+            "\n"
+            "HARD rules:\n"
+            "  - Do NOT create reportlab, weasyprint, chart-visualization, or "
+            "ad hoc binary generator scripts for this PDF path.\n"
+            "  - Keep charts/diagrams as visible inline static SVG or local output "
+            "assets referenced by the HTML source; do not rely on browser scripts "
+            "or unavailable chart tools.\n"
+            "  - Call `render_html_to_pdf(html_path=..., pdf_path=...)` with the "
+            "final `pdf_path` under `/mnt/user-data/outputs/`.\n"
+            "  - After the PDF exists, call `emit_builder_artifact` with "
+            f"`{target_path}` (or the final rendered PDF path) and STOP."
+        )
     if not _target_uses_text_writer(target_path, task_type):
         return (
             f"Concrete file target: `{target_path}`. The deliverable for "

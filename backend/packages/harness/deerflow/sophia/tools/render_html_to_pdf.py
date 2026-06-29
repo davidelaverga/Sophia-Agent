@@ -23,6 +23,7 @@ import logging
 import os
 import shutil
 import subprocess  # noqa: S404 — node by absolute path + fixed bundled script
+from html.parser import HTMLParser
 from pathlib import Path
 from posixpath import normpath
 
@@ -40,20 +41,113 @@ logger = logging.getLogger(__name__)
 
 _RENDER_TIMEOUT_SECONDS = 120
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
+_SVG_STRUCTURAL_TAGS = {
+    "clippath",
+    "defs",
+    "desc",
+    "filter",
+    "lineargradient",
+    "mask",
+    "metadata",
+    "pattern",
+    "radialgradient",
+    "script",
+    "style",
+    "symbol",
+    "title",
+}
+_SVG_VISIBLE_CONTENT_TAGS = {
+    "circle",
+    "ellipse",
+    "foreignobject",
+    "image",
+    "line",
+    "path",
+    "polygon",
+    "polyline",
+    "rect",
+    "text",
+    "use",
+}
+
+
+def _attrs_hidden(attrs: list[tuple[str, str | None]]) -> bool:
+    attr_map = {str(key).lower(): (value or "") for key, value in attrs}
+    if "hidden" in attr_map or attr_map.get("aria-hidden", "").lower() == "true":
+        return True
+    style = attr_map.get("style", "").replace(" ", "").lower()
+    if "display:none" in style or "visibility:hidden" in style or "opacity:0" in style:
+        return True
+    if attr_map.get("width") in {"0", "0px"} or attr_map.get("height") in {"0", "0px"}:
+        return True
+    return False
+
+
+class _VisibleInlineSvgCounter(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.count = 0
+        self._stack: list[dict[str, int | bool]] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        tag_name = tag.lower()
+        if tag_name == "svg":
+            parent_hidden = bool(self._stack[-1]["hidden"]) if self._stack else False
+            self._stack.append(
+                {
+                    "hidden": parent_hidden or _attrs_hidden(attrs),
+                    "structural_depth": 0,
+                    "visible_content_count": 0,
+                }
+            )
+            return
+        if not self._stack:
+            return
+        current = self._stack[-1]
+        if tag_name in _SVG_STRUCTURAL_TAGS:
+            current["structural_depth"] = int(current["structural_depth"]) + 1
+            return
+        if (
+            tag_name in _SVG_VISIBLE_CONTENT_TAGS
+            and not current["hidden"]
+            and int(current["structural_depth"]) == 0
+            and not _attrs_hidden(attrs)
+        ):
+            current["visible_content_count"] = int(current["visible_content_count"]) + 1
+
+    def handle_endtag(self, tag: str) -> None:
+        tag_name = tag.lower()
+        if not self._stack:
+            return
+        if tag_name == "svg":
+            current = self._stack.pop()
+            if not current["hidden"] and int(current["visible_content_count"]) > 0:
+                self.count += 1
+            return
+        if tag_name in _SVG_STRUCTURAL_TAGS:
+            current = self._stack[-1]
+            current["structural_depth"] = max(0, int(current["structural_depth"]) - 1)
 
 
 def _count_inline_svg(host_html: Path) -> int:
-    """Count inline ``<svg>`` elements in the report HTML source (R2-2 signal).
+    """Count visible inline ``<svg>`` figures in the report HTML source.
 
     Chromium renders inline SVG as vector ops, not PDF /Image XObjects, so the
-    visual-presence gate cannot see them via image_count. The authored source is
-    the reliable signal that the report contains charts/diagrams.
+    visual-presence gate cannot see them via image_count. Count rendered-looking
+    SVGs only so hidden sprites, icon definitions, and comments do not satisfy
+    visual-report gates.
     """
     try:
         text = host_html.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         return 0
-    return text.lower().count("<svg")
+    parser = _VisibleInlineSvgCounter()
+    try:
+        parser.feed(text)
+        parser.close()
+    except Exception:  # noqa: BLE001 - malformed builder HTML falls back to no vector evidence.
+        return 0
+    return parser.count
 
 
 def _render_script_path() -> Path | None:

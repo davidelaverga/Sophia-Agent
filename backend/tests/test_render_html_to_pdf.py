@@ -153,7 +153,7 @@ def _wire_node(monkeypatch, tmp_path):
 
 
 def test_success_result_shape(staged, monkeypatch, tmp_path):
-    (staged / "report.html").write_text("<html><body><svg></svg></body></html>")
+    (staged / "report.html").write_text("<html><body><svg><rect width='10' height='10'/></svg></body></html>")
     _wire_node(monkeypatch, tmp_path)
 
     captured = {}
@@ -332,10 +332,14 @@ def test_html_pdf_visual_evidence_accepts_image_or_vector(tmp_path):
 
 
 def test_render_html_to_pdf_reports_vector_visual_count(staged, monkeypatch, tmp_path):
-    # The renderer counts inline <svg> in the source so the visual gate has a
-    # vector signal even when chromium keeps SVG as vector (image_count=0).
+    # The renderer counts visible inline <svg> figures in the source so the
+    # visual gate has a vector signal even when chromium keeps SVG as vector
+    # (image_count=0).
     (staged / "report.html").write_text(
-        "<html><body><figure><svg></svg></figure><figure><svg></svg></figure></body></html>"
+        "<html><body>"
+        "<figure><svg><rect width='10' height='10'/></svg></figure>"
+        "<figure><svg><circle cx='5' cy='5' r='4'/></svg></figure>"
+        "</body></html>"
     )
     _wire_node(monkeypatch, tmp_path)
 
@@ -355,6 +359,20 @@ def test_render_html_to_pdf_reports_vector_visual_count(staged, monkeypatch, tmp
     assert result["success"] is True
     assert result["image_count"] == 0  # chromium keeps SVG vector
     assert result["vector_visual_count"] == 2  # two inline <svg> figures counted
+
+
+def test_render_html_to_pdf_ignores_hidden_comment_and_sprite_svg(staged):
+    (staged / "report.html").write_text(
+        "<html><body>"
+        "<!-- <svg><rect width='100' height='100'/></svg> -->"
+        "<svg style='display:none'><rect width='100' height='100'/></svg>"
+        "<svg><defs><symbol id='icon'><path d='M0 0h1v1z'/></symbol></defs></svg>"
+        "<svg aria-hidden='true'><circle cx='5' cy='5' r='4'/></svg>"
+        "<figure><svg><path d='M0 0h10v10z'/></svg></figure>"
+        "</body></html>"
+    )
+
+    assert render_html._count_inline_svg(staged / "report.html") == 1
 
 
 def test_chromium_html_renderers_block_external_subresources():
