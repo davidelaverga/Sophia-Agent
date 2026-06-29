@@ -967,6 +967,7 @@ _PROMOTABLE_DELIVERABLE_EXTENSIONS = frozenset({
 })
 _PDF_FALLBACK_EXTENSIONS = frozenset({".md", ".html"})
 _PDF_RENDER_SOURCE_EXTENSIONS = frozenset({".md", ".markdown", ".html", ".htm"})
+_PDF_RENDERABLE_HTML_SOURCE_EXTENSIONS = frozenset({".html", ".htm"})
 _PPTX_FALLBACK_EXTENSIONS = frozenset({".md", ".html"})
 _PPTX_REQUIRED_ZIP_ENTRIES = frozenset({
     "[Content_Types].xml",
@@ -2780,7 +2781,11 @@ def _pdf_source_candidate_paths(state: dict[str, Any]) -> list[Path]:
 
 
 def _preferred_pdf_render_source_path(state: dict[str, Any]) -> str | None:
-    candidates = _pdf_source_candidate_paths(state)
+    candidates = [
+        candidate
+        for candidate in _pdf_source_candidate_paths(state)
+        if candidate.suffix.lower() in _PDF_RENDERABLE_HTML_SOURCE_EXTENSIONS
+    ]
     if not candidates:
         return None
     target = BuilderArtifactMiddleware._target_artifact_path(state)
@@ -5695,6 +5700,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 force_reason,
             )
             return self._forced_pdf_render_tool_choice()
+        if self._should_force_pdf_source_before_emit(state):
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=write_file before PDF fallback emit "
+                "because no HTML render source exists (non_artifact_turns=%s, "
+                "ceiling=%s, reason=%s)",
+                non_artifact_turns,
+                max_non_artifact_turns(state),
+                force_reason,
+            )
+            return self._forced_write_tool_choice()
         logger.warning(
             "BuilderArtifact: forcing tool_choice=emit_builder_artifact "
             "(non_artifact_turns=%s, ceiling=%s, reason=%s)",
@@ -5710,7 +5725,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return False
         if cls._has_requested_pdf_binary(state):
             return False
-        return not _pdf_render_attempted(state)
+        return not _pdf_render_attempted(state) and bool(_preferred_pdf_render_source_path(state))
+
+    @classmethod
+    def _should_force_pdf_source_before_emit(cls, state: BuilderArtifactState) -> bool:
+        if not _requested_pdf_artifact(state):
+            return False
+        if cls._has_requested_pdf_binary(state) or _pdf_render_attempted(state):
+            return False
+        return _preferred_pdf_render_source_path(state) is None
 
     def _generator_recovery_tool_choice(
         self,

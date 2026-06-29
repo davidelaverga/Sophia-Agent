@@ -3103,6 +3103,23 @@ class TestBuilderArtifactMiddleware:
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
         assert choice == {"type": "tool", "name": "render_html_to_pdf"}
 
+    def test_force_choice_pdf_target_does_not_render_markdown_as_html(self, tmp_path):
+        """Markdown sources are not valid html_path inputs for render_html_to_pdf."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.md").write_text("# Report\n\nMarkdown source only.")
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "builder_non_artifact_turns": 27,
+        }
+
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
+        assert choice == {"type": "tool", "name": "write_file"}
+
     def test_force_choice_visual_pdf_target_renders_html_source_before_fallback(self, tmp_path):
         """A visual PDF with an HTML source (inline <svg>) renders before any fallback."""
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
