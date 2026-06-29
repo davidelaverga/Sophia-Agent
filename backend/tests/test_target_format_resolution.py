@@ -446,6 +446,17 @@ def test_source_veto_does_not_break_plain_deck_requests():
     )
 
 
+def test_source_pdf_filename_does_not_beat_later_slide_deck_request():
+    resolution = _resolve_target_format(
+        current_user_text="Use the attached report.pdf to make a slide deck",
+        description=None,
+        task_type="presentation",
+    )
+
+    assert resolution.final_ext == "pptx"
+    assert resolution.rule == "explicit_presentation_deck"
+
+
 # ---- bare web-deliverable nouns (prod 2026-06-12, evening window) -----------------
 
 

@@ -128,6 +128,11 @@ async function installRenderRequestPolicy(page, htmlFile) {
         requestUrl !== pathToFileURL(path.resolve(htmlFile)).href &&
         !fs.existsSync(localPath)
       ) {
+        const resourceType = route.request().resourceType();
+        if (resourceType !== "image") {
+          blockedSubresources.push(`${resourceType}:${requestUrl}`);
+          return route.abort("failed");
+        }
         missingLocalResources.push(localPath);
         return route.fulfill({ status: 200, contentType: "image/svg+xml", body: MISSING_ASSET_PLACEHOLDER_SVG });
       }

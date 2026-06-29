@@ -405,3 +405,12 @@ def test_slide_png_renderer_sets_viewport_on_browser_context():
     assert "const context = await browser.newContext({\n      javaScriptEnabled: false,\n      viewport: { width, height },\n      deviceScaleFactor: scale," in source
     assert "const page = await context.newPage();" in source
     assert "context.newPage({\n      viewport" not in source
+
+
+def test_slide_png_renderer_only_placeholders_missing_images():
+    png_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_png.mjs"
+    source = png_script.read_text(encoding="utf-8")
+
+    assert 'resourceType !== "image"' in source
+    assert 'blockedSubresources.push(`${resourceType}:${requestUrl}`)' in source
+    assert 'route.abort("failed")' in source

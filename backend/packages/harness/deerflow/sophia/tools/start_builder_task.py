@@ -450,6 +450,15 @@ def _missing_presentation_rule_was_negated(
     )
 
 
+def _pdf_source_filename_precedes_pptx_output(
+    pdf_match: re.Match[str],
+    pptx_match: re.Match[str] | None,
+) -> bool:
+    if pptx_match is None or pptx_match.start() <= pdf_match.start():
+        return False
+    return ".pdf" in pdf_match.group(0).lower()
+
+
 def _extension_from_affirmative_pattern(
     text: str,
     *,
@@ -486,7 +495,11 @@ def _requested_output_extension_match_with_vetoes(
         return "pdf", "explicit_pdf_deck_deliverable", vetoed
     pdf_match = _first_affirmative_match(_PDF_OUTPUT_RE, text)
     pptx_match = _first_affirmative_match(_PPTX_OUTPUT_RE, text, source_veto=True)
-    if pdf_match is not None and (pptx_match is None or pdf_match.start() <= pptx_match.start()):
+    if (
+        pdf_match is not None
+        and (pptx_match is None or pdf_match.start() <= pptx_match.start())
+        and not _pdf_source_filename_precedes_pptx_output(pdf_match, pptx_match)
+    ):
         if _has_negated_presentation_format_mention(text):
             vetoed.append("explicit_presentation_deck")
         return "pdf", "explicit_pdf_deliverable", vetoed
