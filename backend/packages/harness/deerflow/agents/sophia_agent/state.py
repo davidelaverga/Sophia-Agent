@@ -170,6 +170,7 @@ _PPTX_DIAGNOSTIC_LATEST_COUNT_KEYS = frozenset(
     {
         "pptx_generator_picture_count",
         "pptx_generator_slide_count",
+        "pptx_deck_missing_image_count",
         "pptx_plan_image_ref_count",
         "pptx_plan_slide_count",
     }

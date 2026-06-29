@@ -196,8 +196,10 @@ describe("BuilderCompletionCard — success variant", () => {
       ],
     }
 
-    render(<BuilderCompletionCard event={event} />)
+    render(<BuilderCompletionCard event={event} onOpen={vi.fn()} />)
 
+    expect(screen.queryByRole("button", { name: /view in canvas/i })).toBeNull()
+    expect(screen.queryByRole("link", { name: /open artifact in new tab/i })).toBeNull()
     const link = screen.getByRole("link", { name: /download/i })
     expect(link).toHaveAttribute(
       "href",

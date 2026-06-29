@@ -137,14 +137,21 @@ function artifactExtension(event: BuilderCompletionEventV1): string {
   if (event.artifact_ext) {
     return event.artifact_ext.toLowerCase().replace(/^\./u, '');
   }
-  const candidate = event.artifact_filename || event.artifact_path || event.artifact_url || '';
+  return extensionFromArtifactPath(event.artifact_filename || event.artifact_path || event.artifact_url);
+}
+
+function extensionFromArtifactPath(candidate: string | null | undefined): string {
+  if (!candidate) {
+    return '';
+  }
   const clean = candidate.split('?')[0]?.split('#')[0] ?? '';
   const ext = clean.split('.').pop();
   return ext && ext !== clean ? ext.toLowerCase() : '';
 }
 
-function isDownloadFirstArtifact(event: BuilderCompletionEventV1): boolean {
-  return DOWNLOAD_FIRST_EXTENSIONS.has(artifactExtension(event));
+function isDownloadFirstArtifact(event: BuilderCompletionEventV1, resolvedArtifactPath?: string | null): boolean {
+  const resolvedExt = extensionFromArtifactPath(resolvedArtifactPath);
+  return DOWNLOAD_FIRST_EXTENSIONS.has(resolvedExt || artifactExtension(event));
 }
 
 function isFallbackCompletion(event: BuilderCompletionEventV1): boolean {
@@ -223,6 +230,7 @@ export function BuilderCompletionCard({
   const fallbackLabel = isFallbackCompletion(event) ? fallbackArtifactLabel(event).toLowerCase() : null;
   const showMissingActionHint = shouldShowMissingActionHint({
     event,
+    primaryArtifactPath,
     artifactProxyHref,
     artifactProxyDownloadHref,
     hasPreviewHandler: Boolean(onOpen),
@@ -331,6 +339,7 @@ export function BuilderCompletionCard({
           event={event}
           meta={meta}
           compact={compact}
+          primaryArtifactPath={primaryArtifactPath}
           artifactProxyHref={artifactProxyHref}
           artifactProxyDownloadHref={artifactProxyDownloadHref}
           onOpen={onOpen}
@@ -359,6 +368,7 @@ function BuilderCompletionActions({
   event,
   meta,
   compact,
+  primaryArtifactPath,
   artifactProxyHref,
   artifactProxyDownloadHref,
   onOpen,
@@ -368,6 +378,7 @@ function BuilderCompletionActions({
   event: BuilderCompletionEventV1;
   meta: StatusMeta;
   compact: boolean;
+  primaryArtifactPath: string | null;
   artifactProxyHref: string | null;
   artifactProxyDownloadHref: string | null;
   onOpen?: (event: BuilderCompletionEventV1) => void;
@@ -376,7 +387,7 @@ function BuilderCompletionActions({
 }) {
   const openHref = artifactProxyHref || event.artifact_url || null;
   const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
-  const downloadFirst = isDownloadFirstArtifact(event);
+  const downloadFirst = isDownloadFirstArtifact(event, primaryArtifactPath);
 
   return (
     <>
@@ -556,11 +567,13 @@ function RetryAction({
 
 function shouldShowMissingActionHint({
   event,
+  primaryArtifactPath,
   artifactProxyHref,
   artifactProxyDownloadHref,
   hasPreviewHandler,
 }: {
   event: BuilderCompletionEventV1;
+  primaryArtifactPath: string | null;
   artifactProxyHref: string | null;
   artifactProxyDownloadHref: string | null;
   hasPreviewHandler: boolean;
@@ -568,7 +581,7 @@ function shouldShowMissingActionHint({
   if (event.status !== 'success') {
     return false;
   }
-  const downloadFirst = isDownloadFirstArtifact(event);
+  const downloadFirst = isDownloadFirstArtifact(event, primaryArtifactPath);
   const openHref = artifactProxyHref || event.artifact_url || null;
   const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
   return !(artifactProxyHref && !downloadFirst && hasPreviewHandler)

@@ -48,6 +48,7 @@ from langchain.agents import AgentState
 from deerflow.agents.sophia_agent import middlewares as _middlewares_pkg
 from deerflow.agents.sophia_agent.state import (
     SophiaState,
+    _merge_builder_pptx_diagnostics,
     _merge_builder_visual_diagnostics,
     _merge_builder_web_budget,
     _merge_search_sources,
@@ -424,6 +425,25 @@ def test_merge_builder_web_budget_distinct_counter_keys_accumulate_independently
     assert state["search_calls"] == 4  # 2 + 1 + 1
     assert state["fetch_calls"] == 10  # 7 + 1 + 2
     assert state["search_limit"] == 5  # untouched
+
+
+def test_merge_builder_pptx_diagnostics_treats_deck_missing_image_count_as_latest():
+    current = {
+        "pptx_generator_attempt_count": 1,
+        "pptx_deck_missing_image_count": 2,
+        "pptx_generator_slide_count": 6,
+    }
+    update = {
+        "pptx_generator_attempt_count": 1,
+        "pptx_deck_missing_image_count": 0,
+        "pptx_generator_slide_count": 6,
+    }
+
+    merged = _merge_builder_pptx_diagnostics(current, update)
+
+    assert merged["pptx_generator_attempt_count"] == 2
+    assert merged["pptx_deck_missing_image_count"] == 0
+    assert merged["pptx_generator_slide_count"] == 6
 
 
 def test_union_string_list_preserves_order_and_dedups():
