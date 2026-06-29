@@ -182,6 +182,8 @@ _PDF_DECK_DELIVERY_RE = re.compile(
     r"|(?:export|render|convert|save|download|deliver|produce|make|create|build)\s+[^.?!\n]{0,80}?"
     r"\b(?:slides?|slide\s+deck|deck|presentation)\b[^.?!\n]{0,80}?"
     r"\b(?:as|to|in|into)\s+(?:an?\s+)?pdf(?:\s+format)?"
+    r"|(?:export|render|convert|save|download|deliver|produce|make|create|build)\s+[^.?!\n]{0,80}?"
+    r"\b(?:slides?|slide\s+deck|deck|presentation)\b\s+(?:an?\s+)?pdf(?:\s+format)?"
     r"|pdf\s+(?:slides?|slide\s+deck|deck|presentation)"
     r")",
     re.IGNORECASE,
@@ -1171,6 +1173,7 @@ def _build_enriched_description(
     ritual_phase: str | None,
     explicit_user_urls: list[str],
     delegation_digest: str | None = None,
+    target_ext: str | None = None,
 ) -> str:
     """Embed live session context into the builder's task description.
 
@@ -1213,7 +1216,7 @@ def _build_enriched_description(
         joined = ", ".join(explicit_user_urls)
         sections.append(f"Explicit URLs the user provided (treat as authoritative): {joined}.")
 
-    visual_line = _visual_expectations_line(description, task_type)
+    visual_line = _visual_expectations_line(description, task_type, target_ext=target_ext)
     if visual_line:
         sections.append(visual_line)
 
@@ -1237,7 +1240,12 @@ _VISUAL_STYLE_KEYWORDS = (
 )
 
 
-def _visual_expectations_line(description: str, task_type: str) -> str | None:
+def _visual_expectations_line(
+    description: str,
+    task_type: str,
+    *,
+    target_ext: str | None = None,
+) -> str | None:
     """One explicit visual-expectations line for visual deliverable briefs.
 
     Gives the builder-side enrichment gating (``_image_generation_enabled``)
@@ -1248,7 +1256,8 @@ def _visual_expectations_line(description: str, task_type: str) -> str | None:
     lowered = description.lower()
     styles = [kw for kw in _VISUAL_STYLE_KEYWORDS if kw in lowered]
     style_note = f" Preferred style cues from the user: {', '.join(styles[:3])}." if styles else ""
-    if task_type == "presentation":
+    normalized_ext = str(target_ext or "").strip().lower().lstrip(".")
+    if task_type == "presentation" and (not normalized_ext or normalized_ext == "pptx"):
         return (
             "Visual expectations: create a generated image-forward deck. Every slide "
             "should use one generated visual asset inside an HTML slide shell; titles "
@@ -2113,6 +2122,7 @@ async def _start_builder_task_impl(
         ritual_phase=ritual_phase,
         explicit_user_urls=explicit_user_urls,
         delegation_digest=delegation_digest,
+        target_ext=target_ext,
     )
 
     delegation_context = _build_delegation_context(

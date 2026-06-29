@@ -475,6 +475,19 @@ def test_presentation_in_pdf_format_targets_pdf():
     assert target.endswith(".pdf")
 
 
+def test_make_deck_a_pdf_targets_pdf():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    resolution = module._resolve_target_format(
+        current_user_text="Please make the deck a PDF.",
+        description="Create a slide deck about the launch.",
+        task_type="presentation",
+    )
+
+    assert resolution.final_ext == "pdf"
+    assert resolution.rule == "explicit_pdf_deck_deliverable"
+
+
 def test_status_context_slides_with_pdf_report_targets_pdf():
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 
@@ -1236,13 +1249,32 @@ def test_start_builder_task_treats_failed_status_as_terminal(monkeypatch):
 def test_presentation_brief_gains_visual_expectations_line():
     from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
 
-    line = _visual_expectations_line("Build an investor deck about our roadmap", "presentation")
+    line = _visual_expectations_line(
+        "Build an investor deck about our roadmap",
+        "presentation",
+        target_ext="pptx",
+    )
     assert line is not None
     assert "Visual expectations" in line
     assert "generated image-forward deck" in line
     assert "generated visual asset" in line
     assert "real HTML" in line
     assert "baked title" not in line
+
+
+def test_pdf_bound_presentation_omits_deck_visual_expectations_line():
+    from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
+
+    line = _visual_expectations_line(
+        "Make the presentation a PDF",
+        "presentation",
+        target_ext="pdf",
+    )
+
+    assert line is not None
+    assert "generated image-forward deck" not in line
+    assert "HTML slide shell" not in line
+    assert "polished, visual artifact" in line
 
 
 def test_plain_deck_brief_keeps_image_forward_line():
