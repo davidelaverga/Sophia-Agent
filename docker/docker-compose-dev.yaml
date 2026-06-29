@@ -143,7 +143,7 @@ services:
   langgraph:
     build:
       context: ../
-      dockerfile: backend/Dockerfile
+      dockerfile: backend/Dockerfile.langgraph
       # cache_from disabled - requires manual setup: mkdir -p /tmp/docker-cache-langgraph
     container_name: deer-flow-langgraph
     command: sh -c "cd backend && uv run langgraph dev --no-browser --allow-blocking --host 0.0.0.0 --port 2024 > /app/logs/langgraph.log 2>&1"
