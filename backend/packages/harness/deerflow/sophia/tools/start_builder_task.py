@@ -165,6 +165,16 @@ _GENERIC_REPORT_OUTPUT_RE = re.compile(
     re.IGNORECASE,
 )
 _REPORT_OUTPUT_NOUN_RE = re.compile(r"\b(?:report|write[- ]?up)\b", re.IGNORECASE)
+# A requested document/report-class OBJECT after a create verb (used only by the
+# topical-presentation guard, NOT for routing). Broader than the report-only
+# noun so "create a document about presentation skills" is recognized as a
+# document request whose "presentation" mention is topical (Codex P2, 2026-06-29).
+_DOC_OR_REPORT_OBJECT_RE = re.compile(
+    r"\b(?:build|create|make|generate|produce|write|render|export|draft|prepare)\s+"
+    r"(?:me\s+)?(?:an?\s+|the\s+)?(?:[\w-]+\s+){0,4}?"
+    r"(?:report|write[- ]?up|document|summary|brief|article|explainer)\b",
+    re.IGNORECASE,
+)
 _PPTX_OUTPUT_RE = re.compile(
     r"\b(?:"
     r"pptx|\.pptx|power\s*point"
@@ -407,34 +417,37 @@ def _pattern_affirmative_match(
     return _first_affirmative_match(pattern, text, source_veto=source_veto) is not None
 
 
-def _generic_report_precedes_topical_presentation_word(
+def _document_or_report_precedes_topical_presentation_word(
     text: str,
     *,
-    report_match: re.Match[str] | None,
     pptx_match: re.Match[str] | None,
 ) -> bool:
-    """True when the report is the requested object and PPTX words are topical.
+    """True when a document/report object precedes a TOPICAL presentation word.
 
     The broad PPTX branch intentionally catches "write a presentation deck",
     but it can also span from the verb through a later topic noun:
-    "write a report about presentation design".  In that shape, the report
-    noun appears before the first presentation/deck/slide word and the bridge
-    is topical rather than a target conversion ("as/to/into presentation").
+    "write a report about presentation design" or "create a document about
+    presentation skills".  In that shape, the document/report object noun
+    appears before the first presentation/deck/slide word and the bridge is
+    topical rather than a target conversion ("as/to/into presentation").
+    Broadened from report-only to the document family (Codex P2, 2026-06-29) so
+    topical "presentation"/"slides"/"deck" mentions in a document request are
+    not misrouted to PPTX.
     """
-    if report_match is None or pptx_match is None:
+    if pptx_match is None:
         return False
-    report_noun = _REPORT_OUTPUT_NOUN_RE.search(report_match.group(0))
-    if report_noun is None:
+    obj_match = _DOC_OR_REPORT_OBJECT_RE.search(text)
+    if obj_match is None:
         return False
-    report_end = report_match.start() + report_noun.end()
-    search_start = max(report_end, pptx_match.start())
+    obj_end = obj_match.end()
+    search_start = max(obj_end, pptx_match.start())
     search_end = max(search_start, pptx_match.end())
     presentation_word = _PRESENTATION_FORMAT_WORD_RE.search(
         text, search_start, search_end
     )
     if presentation_word is None:
         return False
-    bridge = text[report_end : presentation_word.start()]
+    bridge = text[obj_end : presentation_word.start()]
     if re.search(r"\b(?:as|in|to|into)\b", bridge, re.IGNORECASE):
         return False
     return True
@@ -465,7 +478,6 @@ def _extension_from_affirmative_pattern(
     ext: str,
     reason: str,
     pattern: re.Pattern[str],
-    generic_report_match: re.Match[str] | None,
 ) -> tuple[str, str] | None:
     match = _first_affirmative_match(
         pattern, text, source_veto=reason in _SOURCE_VETO_RULES
@@ -474,9 +486,8 @@ def _extension_from_affirmative_pattern(
         return None
     if (
         reason == "explicit_presentation_deck"
-        and _generic_report_precedes_topical_presentation_word(
+        and _document_or_report_precedes_topical_presentation_word(
             text,
-            report_match=generic_report_match,
             pptx_match=match,
         )
     ):
@@ -503,7 +514,6 @@ def _requested_output_extension_match_with_vetoes(
         if _has_negated_presentation_format_mention(text):
             vetoed.append("explicit_presentation_deck")
         return "pdf", "explicit_pdf_deliverable", vetoed
-    generic_report_match = _first_affirmative_match(_GENERIC_REPORT_OUTPUT_RE, text)
     for ext, reason, pattern in _REQUESTED_OUTPUT_EXTENSION_PATTERNS:
         if not pattern.search(text):
             if _missing_presentation_rule_was_negated(reason, text, vetoed):
@@ -514,7 +524,6 @@ def _requested_output_extension_match_with_vetoes(
             ext=ext,
             reason=reason,
             pattern=pattern,
-            generic_report_match=generic_report_match,
         )
         if matched is not None:
             return *matched, vetoed

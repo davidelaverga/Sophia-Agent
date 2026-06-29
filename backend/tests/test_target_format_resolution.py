@@ -159,6 +159,40 @@ def test_explicit_presentation_deck_about_report_topic_stays_pptx():
     assert resolution.rule == "explicit_presentation_deck"
 
 
+def test_document_about_presentation_topic_does_not_resolve_to_pptx():
+    # Codex P2 (2026-06-29): a document request whose only "presentation" mention
+    # is topical must NOT grab the deck toolchain. Broadened topical guard now
+    # covers the document family, not just report/write-up.
+    for text in (
+        "create a document about presentation skills",
+        "write a summary about slide decks",
+        "draft a brief on presentation design",
+        "create an article about deck-building techniques",
+    ):
+        resolution = _resolve_target_format(
+            current_user_text=text,
+            description=text,
+            task_type="document",
+        )
+        assert resolution.final_ext != "pptx", text
+
+
+def test_real_deck_requests_still_resolve_to_pptx():
+    # Guard against over-correction: genuine deck asks must still be PPTX.
+    for text in (
+        "create a presentation about our roadmap",
+        "build an 8-slide deck on self-improving harnesses",
+        "make a slide deck about presentation skills",
+    ):
+        resolution = _resolve_target_format(
+            current_user_text=text,
+            description=text,
+            task_type="presentation",
+        )
+        assert resolution.final_ext == "pptx", text
+        assert resolution.rule == "explicit_presentation_deck"
+
+
 def test_report_as_presentation_slides_stays_pptx():
     resolution = _resolve_target_format(
         current_user_text="write the report as presentation slides",
