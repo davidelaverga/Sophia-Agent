@@ -193,6 +193,24 @@ def test_real_deck_requests_still_resolve_to_pptx():
         assert resolution.rule == "explicit_presentation_deck"
 
 
+def test_explicit_non_pdf_format_survives_topical_deck_word():
+    # Codex P2 (2026-06-29): the topical guard must VETO the PPTX match and keep
+    # scanning, not hard-code PDF — an explicit HTML/Markdown ask whose only
+    # presentation/deck mention is topical must keep its requested format.
+    html = _resolve_target_format(
+        current_user_text="create an HTML article about presentation design",
+        description="create an HTML article about presentation design",
+        task_type="document",
+    )
+    assert html.final_ext == "html", html.rule
+    md = _resolve_target_format(
+        current_user_text="write a markdown brief about slide decks",
+        description="write a markdown brief about slide decks",
+        task_type="document",
+    )
+    assert md.final_ext == "md", md.rule
+
+
 def test_report_as_presentation_slides_stays_pptx():
     resolution = _resolve_target_format(
         current_user_text="write the report as presentation slides",

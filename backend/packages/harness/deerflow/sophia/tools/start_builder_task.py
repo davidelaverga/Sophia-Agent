@@ -491,7 +491,13 @@ def _extension_from_affirmative_pattern(
             pptx_match=match,
         )
     ):
-        return "pdf", "explicit_pdf_deliverable"
+        # Topical presentation/deck mention inside a document/report request: VETO
+        # this PPTX match and keep scanning the remaining explicit-format patterns
+        # so an explicit non-PDF format (HTML, Markdown, …) still wins, or a
+        # generic-report pattern resolves PDF later. Do NOT hard-code PDF here —
+        # that overrode explicit HTML/Markdown asks like "create an HTML article
+        # about presentation design" (Codex P2, 2026-06-29).
+        return None
     return ext, reason
 
 
