@@ -8051,11 +8051,24 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return self._forced_simple_pdf_tool_choice()
 
     def _pptx_compile_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
-        # Restored image-forward decks compile by running the ppt-generation
-        # script through bash_tool with a plan JSON. There is no single tool-choice
-        # payload that can force that whole command, so the before-model latch is
-        # the steering mechanism.
-        return None
+        if state.get("builder_pptx_compile_repair_pending"):
+            return None
+        # Force the deterministic HTML-slide compile (build_deck_from_slides) once
+        # ALL slide HTML exist — independent of image yield. Missing images degrade
+        # to placeholders in the renderer, so a partial-image deck compiles instead
+        # of looping to the ceiling (prod 019f099a: 2/8 images → never compiled).
+        # Restored 2026-06-29 (Codex P2): the hook returned None, so a run that
+        # authored slides but skipped the compile call could ignore the one-shot
+        # latch message and fall through to the ceiling without a deck.
+        if not _pptx_compile_ready(state):
+            return None
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=build_deck_from_slides "
+            "(slide_html_count=%d target_slide_count=%d)",
+            _pptx_slide_html_count(state),
+            _pptx_latch_target_slide_count(state),
+        )
+        return self._forced_deck_build_tool_choice()
 
     def _pdf_terminal_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_pdf_artifact(state) or not _successful_pdf_ready_to_emit(state):

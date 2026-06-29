@@ -377,6 +377,22 @@ def test_render_html_to_pdf_ignores_hidden_comment_and_sprite_svg(staged):
     assert render_html._count_inline_svg(staged / "report.html") == 1
 
 
+def test_render_html_to_pdf_counts_semi_transparent_svg_but_not_zero_opacity(staged):
+    # Codex P2 (2026-06-29): a visible semi-transparent figure (opacity:0.85) must
+    # count; only EXACTLY zero opacity is hidden. The prior `"opacity:0" in style`
+    # substring check wrongly hid fractional opacities.
+    (staged / "report.html").write_text(
+        "<html><body>"
+        "<figure><svg style='opacity:0.85'><path d='M0 0h10v10z'/></svg></figure>"
+        "<figure><svg style='opacity:0.5'><rect width='10' height='10'/></svg></figure>"
+        "<svg style='opacity:0'><circle cx='5' cy='5' r='4'/></svg>"
+        "<svg style='opacity:0.0'><circle cx='5' cy='5' r='4'/></svg>"
+        "</body></html>"
+    )
+
+    assert render_html._count_inline_svg(staged / "report.html") == 2
+
+
 def test_chromium_html_renderers_block_external_subresources():
     pdf_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_pdf.mjs"
     png_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_png.mjs"

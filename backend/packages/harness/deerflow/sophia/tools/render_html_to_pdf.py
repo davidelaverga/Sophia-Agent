@@ -76,8 +76,20 @@ def _attrs_hidden(attrs: list[tuple[str, str | None]]) -> bool:
     if "hidden" in attr_map or attr_map.get("aria-hidden", "").lower() == "true":
         return True
     style = attr_map.get("style", "").replace(" ", "").lower()
-    if "display:none" in style or "visibility:hidden" in style or "opacity:0" in style:
+    if "display:none" in style or "visibility:hidden" in style:
         return True
+    if "opacity:" in style:
+        # Only EXACTLY zero opacity hides. The prior `"opacity:0" in style`
+        # substring check wrongly matched fractional values like opacity:0.85,
+        # so a visible semi-transparent <svg> was counted as hidden and an
+        # illustrated report could be false-rejected as having no figures
+        # (Codex P2, 2026-06-29).
+        opacity_val = style.split("opacity:", 1)[1].split(";", 1)[0]
+        try:
+            if float(opacity_val) == 0:
+                return True
+        except ValueError:
+            pass
     if attr_map.get("width") in {"0", "0px"} or attr_map.get("height") in {"0", "0px"}:
         return True
     return False

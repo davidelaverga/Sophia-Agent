@@ -338,7 +338,13 @@ def test_deck_builder_result_records_failure_and_ignores_garbage(tmp_path):
     assert BuilderArtifactMiddleware()._deck_builder_result_command(_deck_build_request(outputs_dir), garbage) is garbage
 
 
-def test_failed_legacy_deck_build_result_does_not_reforce_removed_tool(tmp_path):
+def test_deck_build_failure_suppresses_force_then_reforces_after_slide_repair(tmp_path):
+    # HTML-slide restore (2026-06-29): a slide_render_failed deck build sets
+    # repair_pending — the compile force MUST stay suppressed while the model
+    # rewrites the broken slide HTML. Once the fix lands (repair_pending cleared)
+    # the force RE-FIRES build_deck_from_slides to recompile the repaired deck.
+    # (The image-forward era asserted the opposite because the tool was unwired;
+    #  build_deck_from_slides is the authoritative deck compiler again.)
     from langchain_core.messages import ToolMessage
 
     outputs_dir = tmp_path / "outputs"
@@ -361,6 +367,7 @@ def test_failed_legacy_deck_build_result_does_not_reforce_removed_tool(tmp_path)
         "builder_pptx_compile_repair_pending": True,
         "builder_pptx_diagnostics": {"image_generation_success_count": 3},
     }
+    # Repair pending → no force; let the model rewrite the broken slide first.
     assert mw._force_choice_for_state(blocked_state, None) is None
 
     write_request = SimpleNamespace(
@@ -371,5 +378,6 @@ def test_failed_legacy_deck_build_result_does_not_reforce_removed_tool(tmp_path)
     assert isinstance(write_cmd, Command)
     assert write_cmd.update["builder_pptx_compile_repair_pending"] is False
 
+    # Slide repaired → the compile force re-fires the deterministic HTML compiler.
     repaired_state = {**blocked_state, **write_cmd.update}
-    assert mw._force_choice_for_state(repaired_state, None) is None
+    assert mw._force_choice_for_state(repaired_state, None) == {"type": "tool", "name": "build_deck_from_slides"}
