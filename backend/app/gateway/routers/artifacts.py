@@ -375,27 +375,11 @@ def _is_builder_support_artifact_path(relative_path: str) -> bool:
 def _is_supabase_thread_list_support_artifact_path(relative_path: str) -> bool:
     """Return True for Supabase artifacts hidden from the thread render library.
 
-    PPTX preview PDFs are support files for tray/card display, but the canvas
-    resolver needs them in the thread artifact list when only durable storage
-    survives a deploy.
+    PPTX preview PDFs are render support files. The canvas can discover them
+    through completion metadata, but the general artifact library must not
+    expose them as additional downloadable files.
     """
     normalized = relative_path.strip().lstrip("/").replace("\\", "/")
-    name = PurePosixPath(normalized).name.lower()
-    parts = [part for part in normalized.split("/") if part]
-    in_support_dir = len(parts) > 1 and parts[0] in {
-        "visuals",
-        "assets",
-        "slides",
-        "sources",
-        "source_artifact",
-        ".builder",
-    }
-    # A top-level deck preview (`<deck>.preview.pdf` beside the .pptx) is kept in
-    # the list so the canvas resolver can find it after a deploy. A `.preview.pdf`
-    # NESTED under an internal/support directory stays hidden — the preview
-    # exemption must not re-expose support files (Codex P2, 2026-06-25).
-    if name.endswith(".preview.pdf") and not in_support_dir:
-        return False
     return _is_builder_support_artifact_path(normalized)
 
 
