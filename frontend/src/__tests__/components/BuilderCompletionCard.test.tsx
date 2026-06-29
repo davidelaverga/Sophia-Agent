@@ -205,6 +205,7 @@ describe("BuilderCompletionCard — success variant", () => {
       "href",
       "/api/threads/thread-1/artifacts/mnt/user-data/outputs/research_deck.pptx?download=true",
     )
+    expect(link).toHaveAttribute("download", "research_deck.pptx")
     expect(link.getAttribute("href")).not.toContain(".preview.pdf")
   })
 
