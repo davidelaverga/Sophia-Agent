@@ -1277,26 +1277,24 @@ def test_pdf_bound_presentation_omits_deck_visual_expectations_line():
     assert "polished, visual artifact" in line
 
 
-def test_plain_deck_brief_keeps_image_forward_line():
+def test_plain_text_only_deck_brief_omits_image_forward_line():
     from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
 
     line = _visual_expectations_line("A plain text-only deck please", "presentation")
-    assert line is not None
-    assert "restrained design" in line
-    assert "non-visual workflow" in line
+    assert line is None
 
 
-def test_no_image_deck_brief_keeps_image_forward_line():
+def test_no_image_deck_brief_omits_image_forward_line():
     from deerflow.sophia.tools.start_builder_task import _visual_expectations_line
 
     for brief in (
         "Build a no-image deck",
         "Build a no image deck",
         "Build a deck without images",
+        "Build a deck with no visuals",
     ):
         line = _visual_expectations_line(brief, "presentation")
-        assert line is not None
-        assert "generated image-forward deck" in line
+        assert line is None
 
 
 def test_bare_plain_style_with_images_keeps_visual_expectations_line():

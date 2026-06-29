@@ -1239,6 +1239,20 @@ _VISUAL_STYLE_KEYWORDS = (
     "cartoon",
 )
 
+_PRESENTATION_IMAGE_OPTOUT_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bno[-\s]+(?:generated\s+|ai[-\s]+generated\s+)?(?:images?|imagery|visuals?|illustrations?)\b",
+        r"\bwithout\s+(?:any\s+)?(?:generated\s+|ai[-\s]+generated\s+)?(?:images?|imagery|visuals?|illustrations?)\b",
+        r"\b(?:avoid|exclude|skip)\s+(?:generated\s+|ai[-\s]+generated\s+)?(?:images?|imagery|visuals?|illustrations?)\b",
+        r"\b(?:text[-\s]+only|non[-\s]+visual)\b",
+    )
+)
+
+
+def _presentation_image_opted_out(description: str) -> bool:
+    return any(pattern.search(description or "") for pattern in _PRESENTATION_IMAGE_OPTOUT_PATTERNS)
+
 
 def _visual_expectations_line(
     description: str,
@@ -1258,6 +1272,8 @@ def _visual_expectations_line(
     style_note = f" Preferred style cues from the user: {', '.join(styles[:3])}." if styles else ""
     normalized_ext = str(target_ext or "").strip().lower().lstrip(".")
     if task_type == "presentation" and (not normalized_ext or normalized_ext == "pptx"):
+        if _presentation_image_opted_out(description):
+            return None
         return (
             "Visual expectations: create a generated image-forward deck. Every slide "
             "should use one generated visual asset inside an HTML slide shell; titles "

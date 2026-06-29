@@ -457,25 +457,26 @@ def test_explicit_image_request_enables_generation():
     ) is True
 
 
-def test_plain_deck_marker_does_not_opt_out():
+def test_plain_text_only_deck_marker_opts_out():
     assert _image_generation_enabled(
         {"task": "Build a plain text-only deck about our roadmap"},
         artifact_target_ext=".pptx",
         task_type="presentation",
-    ) is True
+    ) is False
 
 
-def test_no_image_phrasing_does_not_opt_out_of_deck_images():
+def test_no_image_phrasing_opts_out_of_deck_images():
     for task in (
         "Build a no-image deck about our roadmap",
         "Build a no image deck about our roadmap",
         "Build a deck without images about our roadmap",
+        "Build a deck with no visuals about our roadmap",
     ):
         assert _image_generation_enabled(
             {"task": task},
             artifact_target_ext=".pptx",
             task_type="presentation",
-        ) is True
+        ) is False
 
 
 def test_bare_plain_style_does_not_disable_requested_deck_images():

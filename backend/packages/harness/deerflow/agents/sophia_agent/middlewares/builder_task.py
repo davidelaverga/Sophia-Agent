@@ -623,8 +623,22 @@ _POLISHED_DECK_IMAGE_MARKERS = (
     "full bleed",
 )
 
+_IMAGE_GENERATION_OPTOUT_PATTERNS = tuple(
+    re.compile(pattern, re.IGNORECASE)
+    for pattern in (
+        r"\bno[-\s]+(?:generated\s+|ai[-\s]+generated\s+)?(?:images?|imagery|visuals?|illustrations?)\b",
+        r"\bwithout\s+(?:any\s+)?(?:generated\s+|ai[-\s]+generated\s+)?(?:images?|imagery|visuals?|illustrations?)\b",
+        r"\b(?:avoid|exclude|skip)\s+(?:generated\s+|ai[-\s]+generated\s+)?(?:images?|imagery|visuals?|illustrations?)\b",
+        r"\b(?:text[-\s]+only|non[-\s]+visual)\b",
+    )
+)
+
 def _text_marker_present(text: str, marker: str) -> bool:
     return re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", text) is not None
+
+
+def _image_generation_explicitly_opted_out(text: str) -> bool:
+    return any(pattern.search(text or "") for pattern in _IMAGE_GENERATION_OPTOUT_PATTERNS)
 
 
 def _image_generation_enabled(
@@ -648,6 +662,8 @@ def _image_generation_enabled(
     task = str(delegation_context.get("task") or "").lower()
     description = str(delegation_context.get("description") or "").lower()
     combined = f"{task}\n{description}"
+    if _image_generation_explicitly_opted_out(combined):
+        return False
     if _is_pptx_image_generation_target(artifact_target_ext, task_type):
         return True
     if _is_pdf_image_generation_target(artifact_target_ext, task_type):
