@@ -259,8 +259,15 @@ def test_deck_batch_backstop_allows_hero_first_call():
     assert result is None
 
 
-def test_deck_batch_backstop_allows_manifest_call():
+def test_deck_batch_backstop_allows_manifest_call(tmp_path):
+    manifest_dir = tmp_path / "visuals"
+    manifest_dir.mkdir()
+    (manifest_dir / "manifest.json").write_text(
+        json.dumps({"items": [{"prompt_file": "p1.json"}, {"prompt_file": "p2.json"}]}),
+        encoding="utf-8",
+    )
     state = _state_with_image_diagnostics(image_generation_success_count=1)
+    state["thread_data"] = {"outputs_path": str(tmp_path)}
     command = f"python {_SCRIPT} --manifest /mnt/user-data/outputs/visuals/manifest.json"
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(command, state)
@@ -586,6 +593,22 @@ def test_manifest_unreadable_falls_back_to_one(tmp_path) -> None:
     )
 
 
+def test_manifest_batch_requires_readable_manifest_before_run(tmp_path) -> None:
+    state = _state_with_image_diagnostics(image_generation_attempt_count=0)
+    state["thread_data"] = {"outputs_path": str(tmp_path)}
+
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(f"python {_SCRIPT} --manifest /mnt/user-data/outputs/missing.json", state)
+    )
+
+    assert isinstance(result, Command)
+    assert result.goto == "model"
+    message = result.update["messages"][0]
+    assert message.status == "error"
+    assert "manifest must be written" in message.content
+    assert "manifest_not_readable" in message.content
+
+
 def test_parse_image_batch_summary_returns_successful_paths() -> None:
     line = (
         'noise\nIMAGEGEN_BATCH {"images_generated": 2, "requested": 3, "items": ['
@@ -593,9 +616,41 @@ def test_parse_image_batch_summary_returns_successful_paths() -> None:
         '{"output_file": "b.png", "success": false},'
         '{"output_file": "c.png", "success": true}]}'
     )
-    requested, paths = _parse_image_batch_summary(line)
-    assert requested == 3
-    assert paths == ["a.png", "c.png"]
+    summary = _parse_image_batch_summary(line)
+    assert summary["requested"] == 3
+    assert summary["images_generated"] == 2
+    assert summary["complete"] is False
+    assert summary["successful_paths"] == ["a.png", "c.png"]
+
+
+def test_manifest_batch_terminal_failure_updates_image_error_class(tmp_path) -> None:
+    manifest = tmp_path / "m.json"
+    manifest.write_text(
+        json.dumps({"items": [{"prompt_file": f"p{i}"} for i in range(3)]}),
+        encoding="utf-8",
+    )
+    state = {"thread_data": {"outputs_path": str(tmp_path)}}
+    command = f"python {_SCRIPT} --manifest /mnt/user-data/outputs/m.json"
+
+    delta = BuilderArtifactMiddleware._image_generation_bash_delta(
+        command=command,
+        text="worker-1\nIMAGEGEN_FAIL reason=missing_api_key\nworker-2\n",
+        state=state,
+    )
+
+    assert delta["image_generation_attempt_count"] == 3
+    assert delta["image_generation_success_count"] == 0
+    assert delta["image_generation_error_class"] == "missing_api_key"
+
+
+def test_manifest_batch_summary_uses_terminal_error_histogram() -> None:
+    summary = _parse_image_batch_summary(
+        'IMAGEGEN_BATCH {"requested": 3, "failed": 3, '
+        '"error_class_histogram": {"auth_invalid": 3}, "items": []}'
+    )
+
+    assert summary["requested"] == 3
+    assert summary["error_class"] == "auth_invalid"
 
 
 def test_manifest_batch_under_cap_passes_through(tmp_path) -> None:

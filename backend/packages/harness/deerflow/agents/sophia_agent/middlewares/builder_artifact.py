@@ -714,26 +714,181 @@ def _image_generation_billable_invocations_in_command(command: str) -> int:
     )
 
 
-def _manifest_item_count(state: dict[str, Any] | None, manifest_path: str) -> int:
-    """Best-effort count of items in an image-gen batch manifest (>=1).
+def _manifest_item_count_status(
+    state: dict[str, Any] | None,
+    manifest_path: str | None,
+) -> tuple[int, str | None]:
+    """Return ``(item_count, error_reason)`` for an image batch manifest."""
 
-    The model writes the manifest (via write_file -> /mnt/user-data/outputs/...)
-    before invoking ``generate.py --manifest``, so the file exists on disk at
-    bash-intercept time. Falls back to 1 when it cannot be read so a single
-    unreadable manifest never silently bypasses the per-build image cap by
-    counting as zero.
-    """
-    if state is not None and manifest_path:
-        host = BuilderArtifactMiddleware._host_path_for_plan_file(state, manifest_path)
-        if host is not None and host.is_file():
-            try:
-                data = json.loads(host.read_text(encoding="utf-8"))
-            except (OSError, ValueError):
-                return 1
-            items = data.get("items") if isinstance(data, dict) else None
-            if isinstance(items, list) and items:
-                return len(items)
-    return 1
+    if not manifest_path:
+        return 0, "manifest_path_missing"
+    if state is None:
+        return 0, "manifest_state_missing"
+    host = BuilderArtifactMiddleware._host_path_for_plan_file(state, manifest_path)
+    if host is None:
+        return 0, "manifest_path_not_outputs"
+    if not host.is_file():
+        return 0, "manifest_not_readable"
+    try:
+        data = json.loads(host.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0, "manifest_invalid_json"
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list) or not items:
+        return 0, "manifest_items_missing"
+    return len(items), None
+
+
+def _manifest_item_count(state: dict[str, Any] | None, manifest_path: str | None) -> int:
+    """Best-effort count of items in an image-gen batch manifest (>=1)."""
+
+    count, error_reason = _manifest_item_count_status(state, manifest_path)
+    return count if error_reason is None else 1
+
+
+def _unreadable_manifest_rejection(command: str, state: dict[str, Any] | None) -> str | None:
+    for segment in _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS):
+        if "--preflight" in _command_parts(segment):
+            continue
+        manifest_path = _command_flag_value(segment, "--manifest")
+        if not manifest_path:
+            continue
+        count, error_reason = _manifest_item_count_status(state, manifest_path)
+        if error_reason is None and count > 0:
+            continue
+        return (
+            "[Sophia/image-generation] The image batch manifest must be written "
+            "as a readable JSON file under `/mnt/user-data/outputs/` before "
+            "`generate.py --manifest` is invoked. The current manifest cannot "
+            f"be used ({error_reason or 'manifest_not_readable'}). Write the "
+            "manifest in one tool call, then run the batch in a separate bash "
+            "call so the harness can count and enforce the image budget before "
+            "any API calls run."
+        )
+    return None
+
+
+def _manifest_error_class_from_text(text: str, fallback: str = "missing_batch_summary") -> str:
+    error_class = _classify_image_generation_error(text, False, 0)
+    if error_class in _IMAGE_GENERATION_TERMINAL_ERRORS or error_class == "content_blocked":
+        return error_class
+    return fallback
+
+
+_MANIFEST_ERROR_KEYS = ("error_class", "error_type", "reason", "error")
+
+
+def _first_manifest_error_value(record: object) -> str | None:
+    if not isinstance(record, dict):
+        return None
+    return next(
+        (
+            value.strip()
+            for key in _MANIFEST_ERROR_KEYS
+            for value in [record.get(key)]
+            if isinstance(value, str) and value.strip()
+        ),
+        None,
+    )
+
+
+def _manifest_histogram_errors(payload: dict[str, Any]) -> list[str]:
+    histogram = payload.get("error_class_histogram")
+    if not isinstance(histogram, dict):
+        return []
+    return [str(key) for key, count in histogram.items() if count]
+
+
+def _manifest_item_errors(payload: dict[str, Any]) -> list[str]:
+    items = payload.get("items") if isinstance(payload.get("items"), list) else []
+    return [
+        item_error
+        for item in items
+        if isinstance(item, dict) and not item.get("success")
+        for item_error in [_first_manifest_error_value(item)]
+        if item_error
+    ]
+
+
+def _manifest_error_values(payload: dict[str, Any]) -> list[str]:
+    values = _manifest_histogram_errors(payload)
+    if payload_error := _first_manifest_error_value(payload):
+        values.append(payload_error)
+    values.extend(_manifest_item_errors(payload))
+    return values
+
+
+def _manifest_error_class_from_payload(payload: dict[str, Any], text: str) -> str | None:
+    values = _manifest_error_values(payload)
+    terminal = next((value for value in values if value in _IMAGE_GENERATION_TERMINAL_ERRORS), None)
+    if terminal:
+        return terminal
+    if values:
+        return values[0]
+    classified = _manifest_error_class_from_text(text, fallback="")
+    return classified or None
+
+
+def _empty_image_batch_summary(text: str, fallback: str) -> dict[str, Any]:
+    return {
+        "requested": 0,
+        "successful_paths": [],
+        "error_class": _manifest_error_class_from_text(text, fallback),
+    }
+
+
+def _image_batch_payload_from_text(text: str) -> tuple[dict[str, Any] | None, str]:
+    for line in reversed((text or "").splitlines()):
+        stripped = line.strip()
+        if not stripped.startswith("IMAGEGEN_BATCH"):
+            continue
+        payload_str = stripped[len("IMAGEGEN_BATCH"):].strip()
+        try:
+            payload = json.loads(payload_str)
+        except json.JSONDecodeError:
+            return None, "invalid_batch_summary"
+        return (payload, "") if isinstance(payload, dict) else (None, "invalid_batch_summary")
+    return None, "missing_batch_summary"
+
+
+def _image_batch_items(payload: dict[str, Any]) -> list[Any]:
+    items = payload.get("items")
+    return items if isinstance(items, list) else []
+
+
+def _image_batch_successful_paths(items: list[Any]) -> list[str]:
+    return [
+        str(item.get("output_file"))
+        for item in items
+        if isinstance(item, dict) and item.get("success") and item.get("output_file")
+    ]
+
+
+def _image_batch_error_histogram(payload: dict[str, Any]) -> dict[Any, Any]:
+    histogram = payload.get("error_class_histogram")
+    return histogram if isinstance(histogram, dict) else {}
+
+
+def _image_batch_complete(payload: dict[str, Any], requested: int, generated: int) -> bool:
+    if "complete" in payload:
+        return bool(payload.get("complete"))
+    return requested > 0 and generated == requested
+
+
+def _image_batch_summary_from_payload(payload: dict[str, Any], text: str) -> dict[str, Any]:
+    items = _image_batch_items(payload)
+    requested = int(payload.get("requested") or 0) or len(items)
+    generated = int(payload.get("images_generated") or 0)
+    failed = int(payload.get("failed") or max(0, requested - generated))
+    return {
+        "requested": requested,
+        "images_generated": generated,
+        "failed": failed,
+        "complete": _image_batch_complete(payload, requested, generated),
+        "successful_paths": _image_batch_successful_paths(items),
+        "error_class_histogram": _image_batch_error_histogram(payload),
+        "error_class": _manifest_error_class_from_payload(payload, text),
+    }
 
 
 def _image_generation_images_in_command(command: str, state: dict[str, Any] | None = None) -> int:
@@ -753,33 +908,57 @@ def _image_generation_images_in_command(command: str, state: dict[str, Any] | No
     return total
 
 
-def _parse_image_batch_summary(text: str) -> tuple[int, list[str]]:
+def _parse_image_batch_summary(text: str) -> dict[str, Any]:
     """Parse the ``IMAGEGEN_BATCH`` JSON summary line from a batch run.
 
-    Returns ``(requested_count, successful_output_paths)``. The batch script
-    asserts non-empty bytes before marking an item successful, so a reported
-    success implies a written file.
+    Returns structured batch diagnostics. The harness still verifies reported
+    output paths locally before counting them as successful.
     """
-    for line in reversed((text or "").splitlines()):
-        stripped = line.strip()
-        if not stripped.startswith("IMAGEGEN_BATCH"):
-            continue
-        payload_str = stripped[len("IMAGEGEN_BATCH"):].strip()
-        try:
-            payload = json.loads(payload_str)
-        except json.JSONDecodeError:
-            return 0, []
-        if not isinstance(payload, dict):
-            return 0, []
-        items = payload.get("items") if isinstance(payload.get("items"), list) else []
-        requested = int(payload.get("requested") or 0) or len(items)
-        paths = [
-            str(item.get("output_file"))
-            for item in items
-            if isinstance(item, dict) and item.get("success") and item.get("output_file")
-        ]
-        return requested, paths
-    return 0, []
+    payload, error_class = _image_batch_payload_from_text(text)
+    if payload is None:
+        return _empty_image_batch_summary(text, error_class)
+    return _image_batch_summary_from_payload(payload, text)
+
+
+def _existing_image_batch_paths(
+    state: dict[str, Any],
+    paths: list[str],
+) -> tuple[list[str], int, int]:
+    existing: list[str] = []
+    bytes_total = 0
+    missing = 0
+    for path in paths:
+        exists, bytes_count, _status_reason = _virtual_output_status(state, path)
+        if exists:
+            existing.append(path)
+            bytes_total += bytes_count
+        else:
+            missing += 1
+    return existing, bytes_total, missing
+
+
+def _image_generation_manifest_result_delta(
+    state: dict[str, Any],
+    text: str,
+) -> tuple[list[str], int, str | None, dict[str, Any]]:
+    batch_summary = _parse_image_batch_summary(text)
+    batch_paths, batch_bytes, batch_missing_outputs = _existing_image_batch_paths(
+        state,
+        list(batch_summary.get("successful_paths") or []),
+    )
+    requested = int(batch_summary.get("requested", 0) or 0)
+    generated = len(batch_paths)
+    error_class = "missing_batch_output" if batch_missing_outputs else batch_summary.get("error_class")
+    delta: dict[str, Any] = {
+        "image_generation_manifest_seen": True,
+        "image_generation_manifest_requested_count": requested,
+        "image_generation_manifest_success_count": generated,
+        "image_generation_manifest_failed_count": max(0, requested - generated),
+        "image_generation_manifest_complete": requested > 0 and generated == requested and batch_missing_outputs == 0,
+    }
+    if batch_summary.get("error_class_histogram"):
+        delta["image_generation_manifest_error_histogram"] = batch_summary.get("error_class_histogram")
+    return batch_paths, batch_bytes, error_class, delta
 
 
 def _autowire_plan_path(request: "ToolCallRequest") -> str | None:
@@ -9131,12 +9310,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             None,
         )
 
-        # Manifest (batch) segments: one invocation produces N images. The
-        # generated paths come from the IMAGEGEN_BATCH summary line (the batch
-        # script asserts non-empty bytes before reporting success).
+        manifest_delta: dict[str, Any] = {}
         if manifest_segments:
-            _batch_requested, batch_paths = _parse_image_batch_summary(text)
+            batch_paths, batch_bytes, batch_error_class, manifest_delta = _image_generation_manifest_result_delta(
+                state,
+                text,
+            )
             successful_paths.extend(batch_paths)
+            bytes_total += batch_bytes
+            error_class = error_class or batch_error_class
 
         # attempt_count tracks IMAGES (manifest item counts + one per single
         # call) so the per-build cap and the cost breaker bound generated images.
@@ -9148,10 +9330,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "image_generation_bytes_total": bytes_total,
             "image_generation_error_class": error_class,
         }
-        if manifest_segments:
-            # Records that the deck used the parallel batch path — the deck-batch
-            # backstop allows single-image repair calls only AFTER a batch ran.
-            delta["image_generation_manifest_seen"] = True
+        delta.update(manifest_delta)
         delta.update(_image_generation_success_path_delta(state, successful_paths))
         return delta
 
@@ -9877,6 +10056,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             # VQ-3: preflight-only checks are free — never counted, never blocked.
             return None
         state = request.state or {}
+        manifest_rejection = _unreadable_manifest_rejection(command, state)
+        if manifest_rejection is not None:
+            logger.warning("[BuilderImageGeneration] phase=manifest_rejected")
+            return Command(
+                update={
+                    "messages": [
+                        _error_tool_message(
+                            content=manifest_rejection,
+                            tool_call_id=request.tool_call.get("id", ""),
+                            name=tool_name,
+                        ),
+                    ],
+                },
+                goto="model",
+            )
         # Deck hero-anchor batch backstop: reject post-hero serial image-gen
         # calls and redirect to the parallel --manifest path (before the cap/error
         # checks so the nudge isn't masked by an unrelated rejection). Keeps
