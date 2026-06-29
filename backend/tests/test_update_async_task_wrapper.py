@@ -461,11 +461,11 @@ def test_directive_pptx_target_requires_presentation_skill_workflow():
     assert "PPTX slide-deck update" in augmented
     assert "/mnt/skills/public/ppt-generation/SKILL.md" in augmented
     assert "/mnt/skills/public/image-generation/scripts/generate.py" in augmented
-    assert "/mnt/user-data/outputs/slides/" in augmented
-    assert "/mnt/user-data/outputs/assets/" in augmented
-    assert "build_deck_from_slides" in augmented
-    assert "/mnt/skills/public/ppt-generation/scripts/generate.py" not in augmented
-    assert "full-slide image" not in augmented
+    assert "/mnt/user-data/outputs/visuals/" in augmented
+    assert "/mnt/user-data/outputs/deck_plan.json" in augmented
+    assert "build_deck_from_slides" not in augmented
+    assert "/mnt/skills/public/ppt-generation/scripts/generate.py" in augmented
+    assert "full-slide" in augmented
     assert "Do NOT call `write_file` to author the PPTX binary" in augmented
     assert "python-pptx/write_file loops" in augmented
 

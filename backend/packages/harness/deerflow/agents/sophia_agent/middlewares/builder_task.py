@@ -650,7 +650,7 @@ def _image_generation_enabled(
     """Whether the image-generation skill is offered to the builder.
 
     Image targets and explicit requests keep legacy behavior. PPTX builds use
-    gpt-image-2 visual-area assets inside HTML slides as the primary slide path. PDF reports get a
+    gpt-image-2 full-slide assets as the primary slide path. PDF reports get a
     few conceptual/editorial illustrations on by default (cover/hero + key
     concepts) alongside the inline-``<svg>`` charts/diagrams the model draws in
     the report HTML; the per-build cap (``_IMAGE_GENERATION_MAX_CALLS_PDF``)
@@ -659,13 +659,13 @@ def _image_generation_enabled(
     """
     if artifact_target_ext in _IMAGE_OUTPUT_EXTENSIONS:
         return True
+    if _is_pptx_image_generation_target(artifact_target_ext, task_type):
+        return True
     task = str(delegation_context.get("task") or "").lower()
     description = str(delegation_context.get("description") or "").lower()
     combined = f"{task}\n{description}"
     if _image_generation_explicitly_opted_out(combined):
         return False
-    if _is_pptx_image_generation_target(artifact_target_ext, task_type):
-        return True
     if _is_pdf_image_generation_target(artifact_target_ext, task_type):
         return True
     if any(marker in combined for marker in _EXPLICIT_IMAGE_GENERATION_MARKERS):
@@ -1192,11 +1192,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "- Other: markdown, requests, httpx\n"
             "If you ever see ModuleNotFoundError for one of these, the import path is wrong — check the module name above. "
             "Never call `pip install` via bash_tool; it wastes your turn budget.\n"
-            "Important: these libraries do NOT replace target workflow cards. For PDF, author "
-            "HTML with inline <svg> and render via render_html_to_pdf instead of reportlab/fpdf "
-            "scripts. For PPTX, author one HTML file per slide and call build_deck_from_slides — "
-            "NEVER write python-pptx/pptxgenjs scripts. The build system renders + converts "
-            "deterministically, handling font, encoding, embedding, and validation correctly.\n"
+                "Important: these libraries do NOT replace target workflow cards. For PDF, author "
+                "HTML with inline <svg> and render via render_html_to_pdf instead of reportlab/fpdf "
+                "scripts. For PPTX, generate one full-slide image per slide and compile with "
+                "`/mnt/skills/public/ppt-generation/scripts/generate.py`; NEVER write custom "
+                "python-pptx/pptxgenjs scripts.\n"
             "</preinstalled_libraries>"
         )
 
@@ -1225,15 +1225,16 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 "costs 90+ seconds of LLM output, so re-writing the same file twice burns the budget.\n"
             )
         pptx_visual_guidance = (
-            "Decks are authored as one self-contained 1920x1080 HTML file per slide; the build system renders each "
-            "slide to a full-bleed image and converts to PPTX. You NEVER write python-pptx/pptxgenjs or call a deck "
-            "compiler. Generate each slide's image into /mnt/user-data/outputs/assets/ IN ONE PARALLEL BATCH: draft "
-            "the slide plan, generate the hero/cover image first (a single call), then write ONE JSON manifest "
-            "listing every remaining slide image and call `image-generation/scripts/generate.py --manifest <path>` "
-            "ONCE — give each manifest item the hero PNG in its `reference_images` for visual consistency. Then "
-            "author one HTML file per slide under /mnt/user-data/outputs/slides/ (real title + narrative text, with "
-            "the image referenced by a RELATIVE ../assets/<file> path), and call "
-            "build_deck_from_slides(output_path=..., title=...) ONCE to produce the .pptx; emit the returned file."
+            "Decks are pure image-forward PPTX builds. Generate each full-slide image into "
+            "/mnt/user-data/outputs/visuals/: draft the slide plan, generate the hero/cover image first "
+            "(a single call), then write ONE JSON manifest listing every remaining slide image and call "
+            "`image-generation/scripts/generate.py --manifest <path>` ONCE — give each manifest item the "
+            "hero PNG in its `reference_images` for visual consistency. Repair only failed/missing images "
+            "with at most two attempts per slide. Then write `/mnt/user-data/outputs/deck_plan.json` with "
+            "one `image_path` per slide plus speaker notes, compile with "
+            "`python /mnt/skills/public/ppt-generation/scripts/generate.py --plan-file "
+            "/mnt/user-data/outputs/deck_plan.json --output-file /mnt/user-data/outputs/<deck>.pptx`, "
+            "and emit the compiled .pptx."
             if image_generation_enabled
             else "Image generation is not listed for this non-PPTX run. Use the medium-specific local figure workflow."
         )
@@ -1288,11 +1289,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "as inline static `<svg>` (bar/line/column for quantitative data; box-and-arrow flow / comparison / "
             "mind-map for structure); NO remote `generate_chart`, NO client-side JS. Vary the figure family to "
             "fit each figure's content; never route every figure to the same kind.\n"
-            "    * **PPTX / presentation**: author one self-contained HTML file per slide under "
-            "/mnt/user-data/outputs/slides/ (images in /mnt/user-data/outputs/assets/, referenced by relative "
-            "path), then call build_deck_from_slides to convert to a valid .pptx. NEVER write python-pptx/pptxgenjs "
-            f"or compile the deck yourself. {pptx_visual_guidance} "
-            "Slide diagrams are inline HTML/SVG inside each slide.\n"
+                "    * **PPTX / presentation**: follow the ppt-generation skill. The deck is one generated "
+                "full-slide image per slide, compiled by the provided ppt-generation script. NEVER write custom "
+                f"python-pptx/pptxgenjs code. {pptx_visual_guidance}\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"
             "    * **Standalone chart / image**: use the image-generation skill, or author the chart as a "

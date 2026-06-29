@@ -31,15 +31,16 @@ This file is for the Sophia builder only.
 
 ## Presentation Rules
 
-- Presentations are HTML-slide decks. Generate one visual asset per slide into
-  `/mnt/user-data/outputs/assets/`, then author one HTML slide per slide under
-  `/mnt/user-data/outputs/slides/` using the ppt-generation skeleton.
-- The generated image asset belongs only in the HTML `.visual` region. Do not
-  bake slide titles, bottom narrative, footers, or page chrome into the image;
-  titles and 1-2 sentence narratives are real HTML text in `slides/*.html`.
+- Presentations are pure image-forward decks. Generate one full-slide image per
+  slide into `/mnt/user-data/outputs/visuals/`, then compile with the
+  ppt-generation script and a `deck_plan.json` containing one `image_path` per
+  slide.
+- The generated image is the complete visible slide. Bake slide titles, concise
+  bottom narrative, labels, diagrams, and layout into the image; speaker notes
+  remain in the plan JSON.
 - Do not use engine-composed PPTX layouts, compiler-drawn text overlays,
-  hand-written deck compiler scripts, or generated PDF previews as the primary
-  deck artifact. Convert the HTML slides with `build_deck_from_slides`.
+  hand-written deck compiler scripts, HTML slide conversion, or generated PDF
+  previews as the primary deck artifact.
 - When the requested PPTX exists, opens, and has embedded slide pictures,
   emit immediately after at most one slide-count repair nudge.
 

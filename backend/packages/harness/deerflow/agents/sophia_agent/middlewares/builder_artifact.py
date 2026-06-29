@@ -495,21 +495,9 @@ def _pptx_slide_html_ready(state: dict[str, Any]) -> bool:
 
 
 def _pptx_compile_ready(state: dict[str, Any]) -> bool:
-    """Deck is ready to compile via build_deck_from_slides.
+    """Deck is ready for the image-forward ppt-generation compiler."""
 
-    Fires on slide-HTML COMPLETENESS, decoupled from image yield: the harness
-    renders any missing local slide image as a clean placeholder (with a
-    quality_warning), so a deck with partial images must still compile rather
-    than loop on image-gen to the turn ceiling. Prod run 019f099a generated only
-    2/8 images, so the old all-images gate (`_pptx_slide_assets_ready`) never
-    fired, build_deck_from_slides was never forced, and the run died at the
-    ceiling. (2026-06-27 fix-forward §WS-B.)
-    """
-    if not _requested_pptx_artifact(state):
-        return False
-    if not _pptx_slide_html_ready(state):
-        return False
-    return not _pptx_valid_output_already_terminal(state)
+    return _pptx_slide_assets_ready(state)
 
 
 def _pptx_latch_diagnostics_update(
@@ -574,12 +562,11 @@ def _pptx_slide_count_repair_message(repair: dict[str, int]) -> str:
         "[Sophia/PPTX slide-count repair]\n"
         f"The current PPTX is valid, but it has {generated} slides while the "
         f"user explicitly requested exactly {requested} total slides. Use this "
-        f"one bounded repair turn to {direction} slide HTML file(s) under "
-        "`/mnt/user-data/outputs/slides/` so there are exactly "
-        f"{requested} total slides, including cover and summary, then call "
-        "`build_deck_from_slides(output_path=...)` again to rebuild the deck. "
-        "Do not polish unrelated content and do not run a deck compiler; the "
-        "harness rebuilds the .pptx from the slide HTML."
+        f"one bounded repair turn to {direction} slide image/plan entry so "
+        f"`/mnt/user-data/outputs/deck_plan.json` has exactly {requested} slides, "
+        "including cover and summary, then re-run "
+        "`/mnt/skills/public/ppt-generation/scripts/generate.py` with the same "
+        "requested `.pptx` output path. Do not polish unrelated content."
     )
 
 
@@ -885,6 +872,9 @@ def _image_batch_summary_from_payload(payload: dict[str, Any], text: str) -> dic
         "images_generated": generated,
         "failed": failed,
         "complete": _image_batch_complete(payload, requested, generated),
+        "concurrency": payload.get("concurrency"),
+        "requested_concurrency": payload.get("requested_concurrency"),
+        "max_concurrency": payload.get("max_concurrency"),
         "successful_paths": _image_batch_successful_paths(items),
         "error_class_histogram": _image_batch_error_histogram(payload),
         "error_class": _manifest_error_class_from_payload(payload, text),
@@ -958,6 +948,8 @@ def _image_generation_manifest_result_delta(
     }
     if batch_summary.get("error_class_histogram"):
         delta["image_generation_manifest_error_histogram"] = batch_summary.get("error_class_histogram")
+    if batch_summary.get("concurrency") is not None:
+        delta["image_generation_manifest_concurrency"] = batch_summary.get("concurrency")
     return batch_paths, batch_bytes, error_class, delta
 
 
@@ -1357,6 +1349,141 @@ def _maybe_attach_image_trace_env(request: ToolCallRequest) -> None:
     updated_args = dict(args)
     updated_args["command"] = f"{_image_trace_export_command(env)} {command}"
     request.tool_call["args"] = updated_args
+
+
+def _safe_langsmith_span(
+    name: str,
+    *,
+    inputs: dict[str, Any] | None = None,
+    outputs: dict[str, Any] | None = None,
+    metadata: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+) -> None:
+    try:
+        from langsmith import trace
+        from langsmith.run_helpers import get_current_run_tree
+
+        run_tree = get_current_run_tree()
+        parent = getattr(run_tree, "dotted_order", None) if run_tree is not None else None
+        trace_tags = ["sophia", "builder", *(tags or [])]
+        trace_metadata = {
+            "sophia_component": "builder_pptx_workflow",
+            **(metadata or {}),
+        }
+        with trace(
+            name,
+            run_type="tool",
+            inputs=inputs or {},
+            metadata=trace_metadata,
+            tags=trace_tags,
+            parent=parent,
+        ) as run:
+            try:
+                run.end(outputs=outputs or {})
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception:  # noqa: BLE001
+        logger.debug("LangSmith builder span skipped: %s", name, exc_info=True)
+
+
+def _manifest_trace_items(state: dict[str, Any], manifest_path: str) -> tuple[int, list[dict[str, Any]]]:
+    host = BuilderArtifactMiddleware._host_path_for_plan_file(state, manifest_path)
+    if host is None or not host.is_file():
+        return 0, []
+    try:
+        data = json.loads(host.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return 0, []
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return 0, []
+    traced: list[dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        prompt_file = str(item.get("prompt_file") or "")
+        prompt_hash = None
+        prompt_host = BuilderArtifactMiddleware._host_path_for_plan_file(state, prompt_file)
+        if prompt_host is not None and prompt_host.is_file():
+            try:
+                prompt_hash = hashlib.sha256(prompt_host.read_bytes()).hexdigest()[:16]
+            except OSError:
+                prompt_hash = None
+        refs = item.get("reference_images") if isinstance(item.get("reference_images"), list) else []
+        traced.append(
+            {
+                "item_index": index,
+                "prompt_file": PurePosixPath(prompt_file).name,
+                "prompt_hash": prompt_hash,
+                "output_file": PurePosixPath(str(item.get("output_file") or "")).name,
+                "reference_image_count": len(refs),
+                "reference_images": [PurePosixPath(str(ref)).name for ref in refs],
+                "slide_visual": bool(item.get("slide_visual")),
+            }
+        )
+    return len(items), traced
+
+
+def _trace_pptx_image_manifest_prepared(command: str, state: dict[str, Any]) -> None:
+    manifest_paths = [
+        path
+        for segment in _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS)
+        if (path := _command_flag_value(segment, "--manifest"))
+    ]
+    for manifest_path in manifest_paths:
+        requested, items = _manifest_trace_items(state, manifest_path)
+        target = _pptx_latch_target_slide_count(state)
+        _safe_langsmith_span(
+            "Sophia PPTX Image Manifest Prepared",
+            inputs={
+                "manifest_file": PurePosixPath(manifest_path).name,
+                "expected_slide_count": target,
+                "requested_item_count": requested,
+                "items": items,
+            },
+            outputs={
+                "manifest_readable": requested > 0,
+                "requested_item_count": requested,
+            },
+            metadata={
+                "sophia_component": "builder_pptx_manifest",
+                "pptx_expected_slide_count": target,
+                "manifest_item_count": requested,
+            },
+            tags=["pptx", "image_manifest"],
+        )
+
+
+def _trace_pptx_compile_decision(
+    *,
+    state: dict[str, Any],
+    decision: str,
+    reason: str,
+    outputs: dict[str, Any] | None = None,
+) -> None:
+    diagnostics = _pptx_diagnostics(state)
+    target = _pptx_latch_target_slide_count(state)
+    _safe_langsmith_span(
+        "Sophia PPTX Compile Decision",
+        inputs={
+            "target_slide_count": target,
+            "image_success_count": int(diagnostics.get("image_generation_success_count", 0) or 0),
+            "manifest_seen": bool(diagnostics.get("image_generation_manifest_seen")),
+            "manifest_complete": bool(diagnostics.get("image_generation_manifest_complete")),
+            "pptx_generator_invoked": bool(_pptx_generator_invoked_seen(state)),
+        },
+        outputs={
+            "decision": decision,
+            "reason": reason,
+            **(outputs or {}),
+        },
+        metadata={
+            "sophia_component": "builder_pptx_compile_decision",
+            "pptx_decision": decision,
+            "pptx_decision_reason": reason,
+        },
+        tags=["pptx", "compile_decision"],
+    )
 
 
 def _merge_builder_pptx_diagnostics(
@@ -4995,15 +5122,7 @@ def _log_pptx_skill_correction(
 
 
 def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
-    """The single source of truth for deck steering.
-
-    Gate-agnostic on purpose: this one message is injected by every deck
-    correction site (compile latch when slide images are ready, AND the
-    early drift/skill correction before any image exists). It never names a
-    slide-plan JSON, ``--plan-file``, ``image_path``, or the retired
-    ``ppt-generation/scripts/generate.py`` compiler — the harness owns the
-    HTML→PNG→PPTX conversion. (Phase 0 §2.6 single-source consolidation.)
-    """
+    """The single source of truth for image-forward deck steering."""
     diagnostics = _pptx_diagnostics(state)
     target_count = _pptx_latch_target_slide_count(state)
     success_count = int(diagnostics.get("image_generation_success_count", 0) or 0)
@@ -5021,17 +5140,17 @@ def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
     return (
         "[Sophia/deck compile latch]\n"
         + opener
-        + "Generate each slide's visual-area image into `/mnt/user-data/outputs/assets/` "
-        "(hero first, then ONE image-generation `--manifest` batch; the image is the "
-        "visual area only — never bake the slide title, narrative, footer, or page chrome "
-        "into it). Author one self-contained 1920x1080 HTML file per slide under "
-        "`/mnt/user-data/outputs/slides/` (real DOM title + 1-2 sentence narrative; the "
-        "image referenced by a RELATIVE `../assets/<file>` path), then call "
-        f"`build_deck_from_slides(output_path='{target}')` ONCE — the harness renders each "
-        "slide to a full-bleed PNG and wraps them into the deck.\n\n"
-        "Do NOT write or run python-pptx, pptxgenjs, a slide-plan JSON, or any deck-compiler "
-        "script — the harness owns the HTML→PNG→PPTX conversion. Do not emit PDF, Markdown, "
-        "or HTML as a substitute for the .pptx."
+        + "Generate one full-slide image per slide into `/mnt/user-data/outputs/visuals/` "
+        "(hero first, then ONE image-generation `--manifest` batch for the rest). "
+        "Repair only failed or missing slide images, with at most two attempts per failed slide. "
+        "If required slide images are still missing after bounded repair, stop cleanly instead of "
+        "compiling a partial deck.\n\n"
+        "When all slide images exist, write `/mnt/user-data/outputs/deck_plan.json` with one "
+        "`image_path` per slide plus concise `speaker_notes`, then compile with:\n"
+        "`python /mnt/skills/public/ppt-generation/scripts/generate.py --plan-file "
+        f"/mnt/user-data/outputs/deck_plan.json --output-file {target}`\n\n"
+        "Do NOT call build_deck_from_slides, author slide HTML, write custom python-pptx/pptxgenjs, "
+        "or emit PDF, Markdown, HTML, prompt JSON, or preview files as a substitute for the .pptx."
     )
 
 
@@ -5069,10 +5188,9 @@ def _visual_design_skill_message() -> str:
         "is available:\n"
         "`read_file(description='read visual design skill', "
         "path='/mnt/skills/public/visual-design/SKILL.md')`.\n"
-        "For PPTX decks, author one HTML file per slide under "
-        "`/mnt/user-data/outputs/slides/` (title + narrative as real DOM text, the visual "
-        "as a relative `../assets/<file>` image) and call build_deck_from_slides — the "
-        "harness converts to PPTX. For PDF reports, draw both charts AND structural diagrams "
+        "For PPTX decks, generate one full-slide image per slide, write "
+        "`/mnt/user-data/outputs/deck_plan.json` with one `image_path` per slide, and compile "
+        "with `/mnt/skills/public/ppt-generation/scripts/generate.py`. For PDF reports, draw both charts AND structural diagrams "
         "as inline static `<svg>` directly in the report HTML (bar / line / column for "
         "data; box-and-arrow flow / comparison / mind-map for structure) — NO remote "
         "`generate_chart`, NO client-side JS — then render via render_html_to_pdf."
@@ -7211,11 +7329,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "Error: emit_builder_artifact rejected — the PPTX deck failed Sophia "
             "structural validation:\n"
             f"{listing}\n\n"
-            "Repair the deck now: ensure each `/mnt/user-data/outputs/slides/*.html` slide "
-            "is well-formed (1920x1080, real DOM title + narrative, the visual as a relative "
-            "`../assets/<file>` image), then call "
-            "`build_deck_from_slides(output_path=...)` so the harness produces a `.pptx` with "
-            "one full-bleed slide per slide HTML. Do not write python-pptx or run a deck compiler."
+            "Repair the deck now: ensure `/mnt/user-data/outputs/deck_plan.json` has one slide "
+            "entry per requested slide, each with an existing `image_path`, then re-run "
+            "`/mnt/skills/public/ppt-generation/scripts/generate.py` with the requested `.pptx` "
+            "output path. Do not write custom python-pptx or emit a fallback file."
         )
 
     @classmethod
@@ -7238,11 +7355,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 subject = "cover"
             else:
                 wiring = (
-                    "save it as /mnt/user-data/outputs/assets/hero-<desc>.png and "
-                    "reference it from your title slide's HTML under "
-                    "/mnt/user-data/outputs/slides/ with a relative "
-                    "`<img src=\"../assets/hero-<desc>.png\">`, then call "
-                    "build_deck_from_slides"
+                    "save it as /mnt/user-data/outputs/visuals/slide-01.png, then create "
+                    "deck_plan.json with that path as the first slide's `image_path` and "
+                    "compile with the ppt-generation script"
                 )
                 subject = "hero"
             return (
@@ -7287,12 +7402,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 requested_ext = _requested_artifact_ext(state)
                 if requested_ext == "pptx":
                     embed_hint = (
-                        "Reference each generated PNG from its slide's HTML under "
-                        "`/mnt/user-data/outputs/slides/` with a RELATIVE "
-                        "`<img src=\"../assets/<name>.png\">` (the image is the slide's "
-                        "visual area; keep the title and narrative as real DOM text), "
-                        "then call `build_deck_from_slides(output_path=...)` to rebuild "
-                        "the deck. Do not write a plan JSON or run a deck compiler."
+                        "Reference each generated PNG from `/mnt/user-data/outputs/deck_plan.json` "
+                        "as a slide `image_path`, then run "
+                        "`/mnt/skills/public/ppt-generation/scripts/generate.py --plan-file "
+                        "/mnt/user-data/outputs/deck_plan.json --output-file ...` to rebuild "
+                        "the deck."
                     )
                 elif requested_ext == "pdf":
                     embed_hint = (
@@ -7357,7 +7471,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "Error: emit_builder_artifact rejected — this is a slide-deck "
                 "request. The normal final artifact must be a structurally valid "
                 ".pptx PowerPoint package under /mnt/user-data/outputs/. A .md/.html "
-                "fallback is allowed only after build_deck_from_slides has been attempted, "
+                "fallback is allowed only after the ppt-generation compiler has been attempted, "
                 "no valid deck exists, and the fallback is marked with "
                 "requested_artifact_ext='pptx', artifact_is_fallback=true, and a "
                 "safe fallback_reason. Do not emit Python files, placeholder decks, "
@@ -7894,22 +8008,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return self._forced_simple_pdf_tool_choice()
 
     def _pptx_compile_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
-        if state.get("builder_pptx_compile_repair_pending"):
-            return None
-        # Force the deterministic compile once ALL slide HTML exist — independent
-        # of image yield. Missing images degrade to placeholders in the renderer,
-        # so a partial-image deck compiles instead of looping to the ceiling
-        # (prod 019f099a: 2/8 images → never compiled). (§WS-B 2026-06-27.)
-        if not _pptx_compile_ready(state):
-            return None
-        logger.warning(
-            "BuilderArtifact: forcing tool_choice=build_deck_from_slides after slide HTML ready "
-            "slide_html_count=%d target_slide_count=%d image_success_count=%d",
-            _pptx_slide_html_count(state),
-            _pptx_latch_target_slide_count(state),
-            _pptx_diagnostic_count(state, "image_generation_success_count"),
-        )
-        return self._forced_deck_build_tool_choice()
+        # Restored image-forward decks compile by running the ppt-generation
+        # script through bash_tool with a plan JSON. There is no single tool-choice
+        # payload that can force that whole command, so the before-model latch is
+        # the steering mechanism.
+        return None
 
     def _pdf_terminal_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_pdf_artifact(state) or not _successful_pdf_ready_to_emit(state):
@@ -8569,11 +8672,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if state.get("builder_pptx_compile_latch_pending"):
             return None
         logger.warning(
-            "BuilderArtifact: slide HTML ready; injecting compile latch "
-            "slide_html_count=%d target_slide_count=%d image_success_count=%d",
-            _pptx_slide_html_count(state),
+            "BuilderArtifact: slide images ready; injecting image-forward compile latch "
+            "target_slide_count=%d image_success_count=%d",
             _pptx_latch_target_slide_count(state),
             _pptx_diagnostic_count(state, "image_generation_success_count"),
+        )
+        _trace_pptx_compile_decision(
+            state=state,
+            decision="inject_compile_latch",
+            reason="slide_images_ready",
         )
         return {
             "messages": [HumanMessage(content=_pptx_compile_latch_message(state))],
@@ -8592,9 +8699,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return update
 
     def _maybe_inject_pptx_structural_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
-        # Phase 0 §2.6: the retired slide-plan-JSON correction is gone (decks are
-        # HTML; there is no plan JSON). Slide-count repair is the only structural
-        # correction that still applies to the HTML-slide flow.
+        # Slide-count repair remains the only structural correction; plan JSON
+        # repairs are handled by the ppt-generation compiler diagnostics.
         return self._maybe_inject_pptx_slide_count_repair(state)
 
     def _maybe_inject_pptx_skill_correction(self, state: BuilderArtifactState) -> dict[str, Any] | None:
@@ -8620,10 +8726,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         return {
             "messages": [
-                # Phase 0 §2.6: single source of truth — the early drift/skill
-                # correction injects the SAME gate-agnostic deck-steering contract
-                # as the compile latch (build_deck_from_slides HTML flow), never the
-                # retired generate.py/plan-JSON path.
+                # Single source of truth: the early drift/skill correction
+                # injects the same image-forward deck-steering contract as the
+                # compile latch.
                 HumanMessage(content=_pptx_compile_latch_message(state))
             ],
             "builder_pptx_skill_correction_emitted": True,
@@ -8653,12 +8758,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "Image generation has failed "
                         f"{attempts} times with no usable output "
                         f"(last error: {diagnostics.get('image_generation_error_class') or 'unknown'}). "
-                        "Stop calling the image-generation script in this build. A Sophia deck is "
-                        "authored as HTML slides (one `slides/*.html` per slide, the image as the "
-                        "visual area), so do not switch to python-pptx or engine-composed slides. "
-                        "If usable slide images already exist, author the slide HTML (text-forward "
-                        "where an image is missing) and call build_deck_from_slides; otherwise emit "
-                        "artifact_path=null with an honest summary."
+                        "Stop calling the image-generation script in this build. A Sophia deck "
+                        "requires one complete generated full-slide image per slide; do not switch "
+                        "to python-pptx, HTML slides, placeholders, or engine-composed slides. If "
+                        "all required slide images already exist, compile with the ppt-generation "
+                        "script; otherwise emit artifact_path=null with an honest summary."
                     )
                 )
             ],
@@ -9471,6 +9575,29 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             error_class,
             status_reason,
         )
+        _safe_langsmith_span(
+            "Sophia PPTX Compile",
+            inputs={
+                "compiler": "ppt-generation/scripts/generate.py",
+                "output_file": output_path,
+                "expected_slide_image_count": slide_count,
+                "plan": _pptx_plan_diagnostics_from_command(pptx_command, state).get("pptx_plan_json"),
+            },
+            outputs={
+                "success": valid_pptx,
+                "output_bytes": bytes_count if valid_pptx else 0,
+                "slide_count": generated_slide_count,
+                "picture_count": picture_count,
+                "error_class": error_class,
+                "status_reason": status_reason,
+            },
+            metadata={
+                "sophia_component": "builder_pptx_compile",
+                "pptx_compile_success": valid_pptx,
+                "pptx_compile_error_class": error_class,
+            },
+            tags=["pptx", "compile"],
+        )
         delta: dict[str, Any] = {
             "pptx_generator_attempt_count": 1,
             "pptx_generator_success_count": 1 if valid_pptx else 0,
@@ -9865,10 +9992,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         (prod 019f0b8a: 0 nudges logged, ~9 serial calls, ~15 min). Detection is
         ALSO broadened — ANY post-hero billable image-gen call without
         ``--manifest`` is a serial call (the prior ``--slide-visual``-only
-        matcher missed bare ``generate.py`` invocations). A bounded safety valve
-        (``deck_batch_rejection_count`` >= ``_DECK_BATCH_REJECTION_CAP``) then
-        yields so a model that genuinely cannot author a manifest still ships
-        (serial) instead of looping.
+        matcher missed bare ``generate.py`` invocations). After repeated nudges,
+        the directive changes to an explicit clean-failure path instead of
+        silently allowing a fully serial deck.
 
         Returns the directive text to reject with, or ``None`` to allow.
         """
@@ -9876,11 +10002,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         diagnostics = _pptx_diagnostics(state)
         if diagnostics.get("image_generation_manifest_seen"):
-            return None  # a batch already ran — single calls are repairs now
-        # Bounded safety valve: after repeated rejections with no manifest, stop
-        # rejecting so the build can still finish (serial, with a quality note).
-        if _pptx_diagnostic_count(state, "deck_batch_rejection_count") >= _DECK_BATCH_REJECTION_CAP:
-            return None
+            requested = int(diagnostics.get("image_generation_manifest_requested_count", 0) or 0)
+            if requested > 0:
+                return None  # a real batch ran — single calls are bounded repairs now
         # Hero must already be done (>=1 success) before we expect a batch.
         if _pptx_diagnostic_count(state, "image_generation_success_count") < 1:
             return None
@@ -9895,6 +10019,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None  # this IS a batch call — allow
         # Any post-hero billable image-gen call WITHOUT --manifest is the serial
         # loop the batch path exists to prevent (bare ``generate.py`` counts too).
+        if _pptx_diagnostic_count(state, "deck_batch_rejection_count") >= _DECK_BATCH_REJECTION_CAP:
+            return (
+                "[Sophia/deck-batch] A readable image batch manifest is still required before "
+                "serial image repair is allowed. Write one manifest JSON for all remaining slides "
+                "and run `image-generation/scripts/generate.py --manifest <path>`. If you cannot "
+                "create or run a manifest, stop cleanly with artifact_path=null rather than "
+                "serializing the whole deck."
+            )
         return (
             "[Sophia/deck-batch] The hero slide is generated. Do NOT generate the remaining "
             "slides one at a time — that is the serial loop the batch path exists to prevent. "
@@ -9907,15 +10039,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
 
     def _slides_before_images_block_command(self, request: ToolCallRequest) -> Command | None:
-        """Reject authoring ``slides/*.html`` before the slide images exist.
-
-        The deck workflow is: generate ALL images (hero + one ``--manifest``
-        batch), THEN author the slide HTML referencing them. Authoring slides
-        while the images are still being generated makes the model author them
-        TWICE (prod 019f0b8a: slides authored at turns 9-16 then re-authored
-        25-32 after the images landed — ~8 wasted turns). Nudge ONCE; never
-        hard-loop. Returns a redirect Command, or ``None`` to allow.
-        """
+        """Reject the removed slide-HTML PPTX path."""
         tool_name = str(request.tool_call.get("name") or "")
         if tool_name not in {"write_file", "write_file_tool"}:
             return None
@@ -9931,24 +10055,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         diagnostics = _pptx_diagnostics(state)
         if diagnostics.get("slides_before_images_directive_emitted"):
             return None  # one-shot nudge already spent
-        if diagnostics.get("image_generation_manifest_seen"):
-            return None  # batch ran — images are ready, authoring is correct
-        target = _pptx_latch_target_slide_count(state)
-        if target <= 0:
-            return None  # can't determine image readiness — don't block
-        if _pptx_diagnostic_count(state, "image_generation_success_count") >= target:
-            return None  # all slide images present — authoring is correct
         return Command(
             update={
                 "messages": [
                     _error_tool_message(
                         content=(
-                            "[Sophia/deck-order] Generate ALL slide images FIRST, then author the "
-                            "slide HTML. Generate the hero, then ONE --manifest batch for the rest "
-                            "(see ppt-generation SKILL.md); only once the images exist under assets/ "
-                            "author slides/*.html referencing them by relative ../assets/<file> "
-                            "path. Authoring slides before the images means re-authoring them after "
-                            "the images land."
+                            "[Sophia/deck-path] Do not author `slides/*.html` for PPTX decks. "
+                            "Generate one full-slide image per slide under `/mnt/user-data/outputs/visuals/`, "
+                            "write `/mnt/user-data/outputs/deck_plan.json` with one `image_path` per slide, "
+                            "then compile with `/mnt/skills/public/ppt-generation/scripts/generate.py`."
                         ),
                         tool_call_id=request.tool_call.get("id", ""),
                         name=tool_name,
@@ -9967,7 +10082,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         path = str(args.get("path") or args.get("file_path") or "").lower()
         if path.endswith((".html", ".htm")):
-            return None  # slide HTML authoring is the sanctioned path
+            return None  # handled by _slides_before_images_block_command for PPTX
         if not path.endswith((".py", ".js", ".mjs", ".ts")):
             return None  # only code files can carry deck-compilation improvisation
         content = str(
@@ -9980,14 +10095,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
     @staticmethod
     def _deck_improvisation_rejection(request: ToolCallRequest) -> Command | None:
-        """Block model-run deck compilation for `.pptx` targets (Spec D §2.5).
+        """Block custom model-run deck compilation for `.pptx` targets.
 
-        Decks are authored as slide HTML and converted by
-        ``build_deck_from_slides``; the model must NEVER write
-        ``python-pptx``/``pptxgenjs`` code or invoke a deck compiler — that
-        improvisation produced no `.pptx` and hard-ceiling-timed-out in prod
-        (2026-06-26, runs 019f0473 / 019f047a). Reject with a redirect; slide
-        HTML authoring (``.html``) is always allowed.
+        The provided ``ppt-generation/scripts/generate.py`` compiler is
+        sanctioned. Custom python-pptx/pptxgenjs and direct JS compiler scripts
+        remain blocked.
         """
         state = request.state or {}
         if not _requested_pptx_artifact(state):
@@ -10005,7 +10117,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "pptxgenjs",
             "python-pptx",
             "compile_pptx",
-            "ppt-generation/scripts/generate.py",
             "presentation(",  # python-pptx API constructor
         )
         if not any(sig in haystack for sig in signals):
@@ -10016,13 +10127,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "messages": [
                     _error_tool_message(
                         content=(
-                            "[Sophia/deck-build] Decks are authored as slide HTML and the build "
-                            "system converts them to PPTX — do NOT write python-pptx/pptxgenjs "
-                            "code or invoke a deck compiler. Author one self-contained 1920x1080 "
-                            "HTML file per slide under /mnt/user-data/outputs/slides/ (images "
-                            "referenced by relative ../assets/<file> paths), then call "
-                            "build_deck_from_slides(output_path='/mnt/user-data/outputs/<deck>.pptx') "
-                            "to produce the deck."
+                            "[Sophia/deck-build] Do not write custom python-pptx/pptxgenjs code or "
+                            "invoke direct JS deck compilers. Generate one full-slide image per slide, "
+                            "write `/mnt/user-data/outputs/deck_plan.json`, then use the sanctioned "
+                            "`/mnt/skills/public/ppt-generation/scripts/generate.py` compiler."
                         ),
                         tool_call_id=request.tool_call.get("id", ""),
                         name=name,
@@ -10071,6 +10179,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 },
                 goto="model",
             )
+        if any(_command_flag_value(segment, "--manifest") for segment in _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS)):
+            _trace_pptx_image_manifest_prepared(command, state)
         # Deck hero-anchor batch backstop: reject post-hero serial image-gen
         # calls and redirect to the parallel --manifest path (before the cap/error
         # checks so the nudge isn't masked by an unrelated rejection). Keeps
@@ -10088,6 +10198,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         if deck_batch_directive is not None:
             logger.warning("[BuilderImageGeneration] phase=deck_batch_nudge")
+            _trace_pptx_compile_decision(
+                state=state,
+                decision="image_batch_nudge",
+                reason="post_hero_serial_image_call_without_manifest",
+            )
             return Command(
                 update={
                     "messages": [
@@ -10111,6 +10226,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             billable_in_command=images_in_command,
         )
         if rejection is None:
+            if _requested_artifact_ext(state) == "pptx":
+                _trace_pptx_compile_decision(
+                    state=state,
+                    decision="image_generation_allowed",
+                    reason="within_budget_and_not_terminal",
+                    outputs={"billable_images_in_command": images_in_command},
+                )
             return None
         logger.warning(
             "[BuilderImageGeneration] phase=call_blocked attempts=%d in_command=%d "
@@ -10119,6 +10241,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             billable_in_command,
             successes,
             error_class,
+        )
+        _trace_pptx_compile_decision(
+            state=state,
+            decision="image_generation_blocked",
+            reason=str(error_class or "budget_or_terminal_rejection"),
+            outputs={"billable_images_in_command": images_in_command},
         )
         return Command(
             update={

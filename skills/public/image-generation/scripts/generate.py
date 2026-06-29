@@ -26,10 +26,13 @@ from __future__ import annotations
 import argparse
 import base64
 import contextlib
+import contextvars
 import hashlib
 import json as _json
 import os
 import sys
+import time
+from collections import Counter
 from pathlib import Path
 from typing import Any
 
@@ -58,6 +61,14 @@ _EDIT_MODEL = "gpt-image-2"
 _TRUTHY_VALUES = {"1", "true", "yes", "on"}
 _TRACE_PROMPT_MAX = 12000
 _LANGSMITH_CLIENT: Any | None = None
+_CAPTURE_FAILURES: contextvars.ContextVar[bool] = contextvars.ContextVar(
+    "image_generation_capture_failures",
+    default=False,
+)
+_TRACE_PARENT_OVERRIDE: contextvars.ContextVar[str | None] = contextvars.ContextVar(
+    "image_generation_trace_parent_override",
+    default=None,
+)
 
 _SOPHIA_SLIDE_STYLE = (
     "Visual system: a premium presentation slide with a single coherent style chosen "
@@ -85,13 +96,11 @@ _SOPHIA_SLIDE_AVOID = (
 )
 
 _SOPHIA_SLIDE_ZONE_CONTRACT = (
-    "Slide visual asset contract: render only the image that will sit inside the PPTX HTML "
-    "slide skeleton's `.visual` region. Do not bake the slide title, bottom narrative, footer, "
-    "or page chrome into this image; those are real HTML text in `slides/*.html`. Fill the "
-    "frame with the visual substance (diagram, architecture map, chart, comparison, scene, or "
-    "concept illustration). Essential in-diagram labels are allowed, but keep them short, "
-    "high-contrast, and away from the image edges so the HTML title and narrative cannot "
-    "overlap them."
+    "Slide image contract: render the entire 16:9 presentation slide as a complete bitmap. "
+    "Bake in the visible slide title, bottom narrative, labels, diagrams, and layout. Keep the "
+    "top title band, center visual safe area, and bottom narrative band separated with no overlap. "
+    "Essential labels must be short, exact, high-contrast, and legible. Fill the whole slide canvas "
+    "with the chosen style; avoid unintended blank gutters or transparent edges."
 )
 
 _SOPHIA_IMAGE_STYLE = (
@@ -151,6 +160,24 @@ def _extract_raw_error(exc: BaseException) -> str:
     return detail
 
 
+class ImageGenerationFailure(Exception):
+    """Structured failure raised inside batch workers instead of exiting."""
+
+    def __init__(
+        self,
+        reason: str,
+        message: str,
+        *,
+        raw_error: str = "",
+        exit_code: int = 1,
+    ) -> None:
+        super().__init__(message)
+        self.reason = reason
+        self.message = message
+        self.raw_error = raw_error
+        self.exit_code = exit_code
+
+
 def _fail(reason: str, message: str, *, raw_error: str = "", exit_code: int = 1) -> None:
     """Emit one machine-readable failure line plus a short safe message.
 
@@ -158,6 +185,13 @@ def _fail(reason: str, message: str, *, raw_error: str = "", exit_code: int = 1)
     diagnosable from logs alone instead of just ``reason=api_error``. It is
     surfaced both on the machine-readable line and as its own stderr line.
     """
+    if _CAPTURE_FAILURES.get():
+        raise ImageGenerationFailure(
+            reason,
+            message,
+            raw_error=raw_error,
+            exit_code=exit_code,
+        )
     line = f"IMAGEGEN_FAIL reason={reason}"
     if raw_error:
         line += f" raw_error={raw_error!r}"
@@ -170,18 +204,47 @@ def _fail(reason: str, message: str, *, raw_error: str = "", exit_code: int = 1)
 
 def _classify_exception(exc: BaseException) -> str:
     text = f"{type(exc).__name__}: {exc}".lower()
+    status_code = getattr(exc, "status_code", None)
+    code = str(getattr(exc, "code", "") or "").lower()
     if "organization" in text and ("verified" in text or "verify" in text):
         return "org_not_verified"
     if any(token in text for token in ("invalid api key", "incorrect api key", "401", "unauthorized", "authentication")):
         return "auth_invalid"
+    if "insufficient_quota" in code or any(
+        token in text for token in ("insufficient_quota", "quota", "billing hard limit", "exceeded your current quota")
+    ):
+        return "quota_exceeded"
+    if status_code == 429 or "rate_limit" in code or any(
+        token in text for token in ("rate limit", "rate_limit", "too many requests", "429")
+    ):
+        return "rate_limit"
+    if status_code in {500, 502, 503, 504} or any(
+        token in text
+        for token in (
+            "internal server error",
+            "bad gateway",
+            "service unavailable",
+            "gateway timeout",
+            "server error",
+            "500",
+            "502",
+            "503",
+            "504",
+        )
+    ):
+        return "server_error"
     if any(token in text for token in ("content policy", "content_policy", "safety", "blocked", "moderation")):
         return "content_blocked"
     if any(token in text for token in ("timeout", "timed out", "readtimeout")):
         return "timeout"
     if any(token in text for token in ("connection", "connecterror", "network", "proxy", "name resolution", "dns")):
         return "egress_blocked"
+    if "reference image" in text or "invalid_reference" in text:
+        return "invalid_reference_image"
     if "size" in text and any(token in text for token in ("invalid", "unsupported", "not one of")):
         return "invalid_size"
+    if "empty output" in text or "no usable image bytes" in text or "no bytes landed" in text:
+        return "empty_output"
     return "api_error"
 
 
@@ -254,7 +317,7 @@ def _langsmith_parent_metadata() -> dict[str, str]:
 
 
 def _langsmith_parent_for_trace() -> Any | None:
-    return _env_value("SOPHIA_PARENT_DOTTED_ORDER", "LANGSMITH_DOTTED_ORDER")
+    return _TRACE_PARENT_OVERRIDE.get() or _env_value("SOPHIA_PARENT_DOTTED_ORDER", "LANGSMITH_DOTTED_ORDER")
 
 
 def _truncate_trace_text(value: str, limit: int = _TRACE_PROMPT_MAX) -> tuple[str, bool]:
@@ -316,46 +379,63 @@ class _EnabledLangSmithTraceContext:
         return self._stack.__exit__(exc_type, exc, tb)
 
 
-def _langsmith_trace_context(*, prompt: str, valid_refs: list[str], size: str, quality: str | None) -> Any | None:
+def _langsmith_tool_trace_context(
+    name: str,
+    *,
+    inputs: dict[str, Any],
+    metadata: dict[str, Any] | None = None,
+    tags: list[str] | None = None,
+    parent: Any | None = None,
+) -> Any | None:
     client = _langsmith_client()
     if client is None:
         return None
-    model = _image_request_model(valid_refs)
     try:
         from langsmith import trace, tracing_context
 
         project_name = _langsmith_project_name()
-        metadata = {
+        trace_metadata = {
             "sophia_component": "builder_image_generation",
             **_langsmith_parent_metadata(),
+            **(metadata or {}),
         }
-        parent = _langsmith_parent_for_trace()
+        trace_parent = parent if parent is not None else _langsmith_parent_for_trace()
+        trace_tags = ["sophia", "image_generation", *(tags or [])]
         enabled_context = tracing_context(
             enabled=True,
             client=client,
             project_name=project_name,
-            parent=parent,
-            tags=["sophia", "image_generation", "openai"],
-            metadata=metadata,
+            parent=trace_parent,
+            tags=trace_tags,
+            metadata=trace_metadata,
         )
         trace_context = trace(
-            "Sophia Image Generation OpenAI Call",
+            name,
             run_type="tool",
             project_name=project_name,
-            inputs=_image_trace_inputs(prompt=prompt, valid_refs=valid_refs, size=size, quality=quality),
-            metadata={
-                **metadata,
-                "ls_provider": "openai",
-                "ls_model_name": model,
-                "image_endpoint": "edit" if valid_refs else "generate",
-            },
-            tags=["sophia", "image_generation", "openai"],
+            inputs=inputs,
+            metadata=trace_metadata,
+            tags=trace_tags,
             client=client,
-            parent=parent,
+            parent=trace_parent,
         )
         return _EnabledLangSmithTraceContext(enabled_context, trace_context)
     except Exception:
         return None
+
+
+def _langsmith_trace_context(*, prompt: str, valid_refs: list[str], size: str, quality: str | None) -> Any | None:
+    model = _image_request_model(valid_refs)
+    return _langsmith_tool_trace_context(
+        "Sophia Image Generation OpenAI Call",
+        inputs=_image_trace_inputs(prompt=prompt, valid_refs=valid_refs, size=size, quality=quality),
+        metadata={
+            "ls_provider": "openai",
+            "ls_model_name": model,
+            "image_endpoint": "edit" if valid_refs else "generate",
+        },
+        tags=["openai"],
+    )
 
 
 def _flush_langsmith_traces() -> None:
@@ -666,16 +746,14 @@ def _normalize_slide_visual_aspect(output_file: str) -> None:
             if abs(current_ratio - _SLIDE_VISUAL_ASPECT_RATIO) < 0.001:
                 return
             if current_ratio > _SLIDE_VISUAL_ASPECT_RATIO:
-                canvas_width = width
-                canvas_height = max(1, round(width / _SLIDE_VISUAL_ASPECT_RATIO))
+                crop_width = max(1, round(height * _SLIDE_VISUAL_ASPECT_RATIO))
+                left = max(0, (width - crop_width) // 2)
+                source = source.crop((left, 0, left + crop_width, height))
             else:
-                canvas_width = max(1, round(height * _SLIDE_VISUAL_ASPECT_RATIO))
-                canvas_height = height
-            canvas = Image.new("RGBA", (canvas_width, canvas_height), (255, 255, 255, 255))
-            left = max(0, (canvas_width - width) // 2)
-            top = max(0, (canvas_height - height) // 2)
-            canvas.alpha_composite(source, (left, top))
-            canvas.convert("RGB").save(output_file)
+                crop_height = max(1, round(width / _SLIDE_VISUAL_ASPECT_RATIO))
+                top = max(0, (height - crop_height) // 2)
+                source = source.crop((0, top, width, top + crop_height))
+            source.convert("RGB").save(output_file)
     except Exception as e:
         _fail(
             "empty_output",
@@ -810,13 +888,100 @@ def _parse_args(argv: list[str] | None = None) -> argparse.Namespace:
             '{"items": [{"prompt_file", "output_file", "reference_images"?, '
             '"aspect_ratio"?, "slide_visual"?, "size"?}, ...], "concurrency"?: int}. '
             "Generates all items concurrently (bounded by SOPHIA_IMAGE_GEN_CONCURRENCY, "
-            "default 4). Mutually exclusive with --prompt-file/--output-file."
+            "default 2). Mutually exclusive with --prompt-file/--output-file."
         ),
     )
     args = parser.parse_args(argv)
     if not args.preflight and not args.manifest and (not args.prompt_file or not args.output_file):
         parser.error("--prompt-file and --output-file are required unless --preflight or --manifest is used")
     return args
+
+
+def _safe_basename(value: object) -> str:
+    try:
+        return Path(str(value or "")).name
+    except Exception:
+        return str(value or "")
+
+
+def _safe_prompt_hash(prompt_file: object, *, slide_visual: bool) -> str | None:
+    if not prompt_file:
+        return None
+    try:
+        prompt = _build_prompt(str(prompt_file), slide_visual=slide_visual)
+    except Exception:
+        try:
+            prompt = Path(str(prompt_file)).read_text(encoding="utf-8")
+        except Exception:
+            return None
+    return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
+
+
+def _batch_item_trace_inputs(item: dict, index: int) -> dict[str, Any]:
+    refs = list(item.get("reference_images") or [])
+    slide_visual = bool(item.get("slide_visual"))
+    return {
+        "item_index": index,
+        "prompt_file": _safe_basename(item.get("prompt_file")),
+        "prompt_hash": _safe_prompt_hash(item.get("prompt_file"), slide_visual=slide_visual),
+        "output_file": _safe_basename(item.get("output_file")),
+        "reference_image_count": len(refs),
+        "reference_images": [_safe_basename(path) for path in refs],
+        "endpoint": "images.edit" if refs else "images.generate",
+        "slide_visual": slide_visual,
+        "size": item.get("size"),
+        "aspect_ratio": item.get("aspect_ratio") or "16:9",
+    }
+
+
+def _batch_trace_inputs(
+    *,
+    manifest_path: str,
+    items: list,
+    concurrency: int,
+    requested_concurrency: object,
+    max_concurrency: int,
+) -> dict[str, Any]:
+    normalized_items = [item for item in items if isinstance(item, dict)]
+    return {
+        "manifest_file": _safe_basename(manifest_path),
+        "requested": len(items),
+        "concurrency": concurrency,
+        "requested_concurrency": requested_concurrency,
+        "max_concurrency": max_concurrency,
+        "sdk_timeout_seconds": _image_gen_timeout_seconds(),
+        "sdk_max_retries": _image_gen_max_retries(),
+        "items": [
+            {
+                "item_index": index,
+                "prompt_file": _safe_basename(item.get("prompt_file")),
+                "prompt_hash": _safe_prompt_hash(item.get("prompt_file"), slide_visual=bool(item.get("slide_visual"))),
+                "output_file": _safe_basename(item.get("output_file")),
+                "reference_image_count": len(list(item.get("reference_images") or [])),
+                "endpoint": "images.edit" if item.get("reference_images") else "images.generate",
+            }
+            for index, item in enumerate(normalized_items, start=1)
+        ],
+    }
+
+
+def _error_histogram(results: list[dict]) -> dict[str, int]:
+    return dict(
+        Counter(
+            str(result.get("error_class") or result.get("error") or "unknown")
+            for result in results
+            if not result.get("success")
+        )
+    )
+
+
+def _finish_trace(run: Any, *, outputs: dict[str, Any]) -> None:
+    if run is None:
+        return
+    try:
+        run.end(outputs=outputs)
+    except Exception:
+        pass
 
 
 def _run_batch(manifest_path: str) -> int:
@@ -833,16 +998,21 @@ def _run_batch(manifest_path: str) -> int:
     failure is ISOLATED — ``generate_image()`` hard-exits via ``sys.exit`` on
     failure, which we catch per worker so a single bad image never aborts the
     batch. Prints exactly one ``IMAGEGEN_BATCH`` JSON summary line on stdout;
-    exits 0 when at least one image succeeded, else 1. Hero-anchor consistency
-    is the caller's job: generate the hero first, then list it in each item's
-    ``reference_images``.
+    exits 0 only when every requested image succeeds, else 1 with structured
+    per-item failures. Hero-anchor consistency is the caller's job: generate the
+    hero first, then list it in each item's ``reference_images``.
     """
     import json as _json
     from concurrent.futures import ThreadPoolExecutor
 
+    batch_run: Any | None = None
+
     def _summary(payload: dict) -> int:
+        payload.setdefault("complete", bool(payload.get("requested")) and payload.get("images_generated") == payload.get("requested"))
         print(f"IMAGEGEN_BATCH {_json.dumps(payload)}")
-        return 0 if payload.get("images_generated", 0) else 1
+        _finish_trace(batch_run, outputs=payload)
+        _flush_langsmith_traces()
+        return 0 if payload.get("complete") else 1
 
     try:
         manifest = _json.loads(Path(manifest_path).read_text(encoding="utf-8"))
@@ -852,49 +1022,151 @@ def _run_batch(manifest_path: str) -> int:
     if not isinstance(items, list) or not items:
         return _summary({"images_generated": 0, "requested": 0, "error": "manifest_empty"})
 
-    # Default 3 (was 4): keep the parallel speed win but stay within the org's
-    # gpt-image RPM tier so the per-call retries (max_retries=3) actually recover
-    # transient 429s instead of re-saturating the limit. Override via
-    # SOPHIA_IMAGE_GEN_CONCURRENCY (drop to 2 on a low tier).
+    # Default 2: keep the parallel speed win but stay within lower image RPM tiers
+    # while the per-call retries recover transient 429/5xx instead of re-saturating.
+    # Override via SOPHIA_IMAGE_GEN_CONCURRENCY after traces prove a higher stable tier.
     env_conc = os.environ.get("SOPHIA_IMAGE_GEN_CONCURRENCY", "").strip()
-    max_concurrency = int(env_conc) if env_conc.isdigit() and int(env_conc) > 0 else 3
+    max_concurrency = int(env_conc) if env_conc.isdigit() and int(env_conc) > 0 else 2
     concurrency = max_concurrency
     requested_conc = manifest.get("concurrency")
     if isinstance(requested_conc, int) and requested_conc > 0:
         concurrency = min(requested_conc, max_concurrency)
     concurrency = max(1, min(concurrency, len(items)))
 
-    def _one(item: dict) -> dict:
-        out = str(item.get("output_file") or "")
-        if not item.get("prompt_file") or not out:
-            return {"output_file": out, "success": False, "error": "missing_prompt_or_output"}
-        try:
-            status = generate_image(
-                str(item.get("prompt_file")),
-                list(item.get("reference_images") or []),
-                out,
-                str(item.get("aspect_ratio") or "16:9"),
-                slide_visual=bool(item.get("slide_visual")),
-                size=item.get("size"),
-            )
-            return {"output_file": out, "success": True, "status": status}
-        except SystemExit as exc:  # generate_image -> _fail() -> sys.exit; isolate per item
-            return {"output_file": out, "success": False, "error": f"exit_{exc.code}"}
-        except Exception as exc:  # noqa: BLE001 — one bad image must never abort the batch
-            return {"output_file": out, "success": False, "error": f"{type(exc).__name__}: {exc}"}
-
-    with ThreadPoolExecutor(max_workers=concurrency) as pool:
-        results = list(pool.map(_one, items))
-
-    succeeded = sum(1 for r in results if r.get("success"))
-    return _summary(
-        {
-            "images_generated": succeeded,
-            "requested": len(items),
-            "concurrency": concurrency,
-            "items": results,
-        }
+    batch_context = _langsmith_tool_trace_context(
+        "Sophia Image Batch",
+        inputs=_batch_trace_inputs(
+            manifest_path=manifest_path,
+            items=items,
+            concurrency=concurrency,
+            requested_concurrency=requested_conc,
+            max_concurrency=max_concurrency,
+        ),
+        metadata={
+            "sophia_component": "builder_image_batch",
+            "manifest_file": _safe_basename(manifest_path),
+            "image_batch_requested_count": len(items),
+            "image_batch_concurrency": concurrency,
+            "image_batch_requested_concurrency": requested_conc,
+            "image_batch_max_concurrency": max_concurrency,
+        },
+        tags=["batch"],
     )
+
+    def _one(index_and_item: tuple[int, dict]) -> dict:
+        index, item = index_and_item
+        started = time.perf_counter()
+        out = str(item.get("output_file") or "")
+        item_context = _langsmith_tool_trace_context(
+            "Sophia Image Batch Item",
+            inputs=_batch_item_trace_inputs(item, index),
+            metadata={
+                "sophia_component": "builder_image_batch_item",
+                "image_batch_item_index": index,
+                "image_endpoint": "edit" if item.get("reference_images") else "generate",
+            },
+            tags=["batch_item"],
+            parent=getattr(batch_run, "dotted_order", None),
+        )
+        with (item_context or contextlib.nullcontext()) as item_run:
+            if not item.get("prompt_file") or not out:
+                result = {
+                    "item_index": index,
+                    "output_file": out,
+                    "success": False,
+                    "error": "missing_prompt_or_output",
+                    "error_class": "missing_prompt_or_output",
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                }
+                _finish_trace(item_run, outputs=result)
+                return result
+            if not Path(str(item.get("prompt_file"))).is_file():
+                result = {
+                    "item_index": index,
+                    "output_file": out,
+                    "success": False,
+                    "error": "missing_prompt_file",
+                    "error_class": "missing_prompt_file",
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                }
+                _finish_trace(item_run, outputs=result)
+                return result
+            capture_token = _CAPTURE_FAILURES.set(True)
+            parent_token = _TRACE_PARENT_OVERRIDE.set(getattr(item_run, "dotted_order", None))
+            try:
+                status = generate_image(
+                    str(item.get("prompt_file")),
+                    list(item.get("reference_images") or []),
+                    out,
+                    str(item.get("aspect_ratio") or "16:9"),
+                    slide_visual=bool(item.get("slide_visual")),
+                    size=item.get("size"),
+                )
+                bytes_count = Path(out).stat().st_size if Path(out).is_file() else 0
+                result = {
+                    "item_index": index,
+                    "output_file": out,
+                    "success": True,
+                    "status": status,
+                    "bytes": bytes_count,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                }
+            except ImageGenerationFailure as exc:
+                result = {
+                    "item_index": index,
+                    "output_file": out,
+                    "success": False,
+                    "error": exc.message,
+                    "error_class": exc.reason,
+                    "raw_error_excerpt": exc.raw_error,
+                    "exit_code": exc.exit_code,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                }
+            except SystemExit as exc:  # defensive: isolate any uncaptured legacy hard-exit
+                result = {
+                    "item_index": index,
+                    "output_file": out,
+                    "success": False,
+                    "error": f"exit_{exc.code}",
+                    "error_class": "process_exit",
+                    "exit_code": exc.code,
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                }
+            except Exception as exc:  # noqa: BLE001 — one bad image must never abort the batch
+                result = {
+                    "item_index": index,
+                    "output_file": out,
+                    "success": False,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "error_class": _classify_exception(exc),
+                    "raw_error_excerpt": _extract_raw_error(exc),
+                    "duration_ms": int((time.perf_counter() - started) * 1000),
+                }
+            finally:
+                _TRACE_PARENT_OVERRIDE.reset(parent_token)
+                _CAPTURE_FAILURES.reset(capture_token)
+            _finish_trace(item_run, outputs=result)
+            return result
+
+    with (batch_context or contextlib.nullcontext()) as run:
+        batch_run = run
+        with ThreadPoolExecutor(max_workers=concurrency) as pool:
+            results = list(pool.map(_one, enumerate(items, start=1)))
+        succeeded = sum(1 for r in results if r.get("success"))
+        errors = _error_histogram(results)
+        return _summary(
+            {
+                "images_generated": succeeded,
+                "requested": len(items),
+                "failed": len(items) - succeeded,
+                "complete": succeeded == len(items),
+                "concurrency": concurrency,
+                "requested_concurrency": requested_conc,
+                "max_concurrency": max_concurrency,
+                "error_class_histogram": errors,
+                "items": results,
+            }
+        )
 
 
 def main(argv: list[str] | None = None) -> int:

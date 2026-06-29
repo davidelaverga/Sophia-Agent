@@ -282,12 +282,12 @@ class TestGeneratePathWithoutReferenceImages:
         assert tracing_call["enabled"] is True
         assert tracing_call["client"] is fake_client
         assert tracing_call["project_name"] == "Sophia"
-        assert tracing_call["metadata"] == {
-            "sophia_component": "builder_image_generation",
-            "parent_trace_id": "trace-1",
-            "parent_run_id": "run-1",
-            "thread_id": "thread-1",
-        }
+        assert tracing_call["metadata"]["sophia_component"] == "builder_image_generation"
+        assert tracing_call["metadata"]["parent_trace_id"] == "trace-1"
+        assert tracing_call["metadata"]["parent_run_id"] == "run-1"
+        assert tracing_call["metadata"]["thread_id"] == "thread-1"
+        assert tracing_call["metadata"]["ls_provider"] == "openai"
+        assert tracing_call["metadata"]["ls_model_name"] == "gpt-image-2"
         trace_call = next(payload for name, payload in calls if name == "trace")
         assert trace_call["project_name"] == "Sophia"
         assert trace_call["metadata"]["parent_trace_id"] == "trace-1"
@@ -483,8 +483,8 @@ class TestSlideVisualMode:
         assert kwargs["prompt"].startswith('A professional slide. Title: "THE TEXT READS: Roadmap".')
         assert script_module._SOPHIA_SLIDE_STYLE in kwargs["prompt"]
         assert script_module._SOPHIA_SLIDE_AVOID in kwargs["prompt"]
-        assert "Do not bake the slide title" in kwargs["prompt"]
-        assert "real HTML text" in kwargs["prompt"]
+        assert "render the entire 16:9 presentation slide" in kwargs["prompt"]
+        assert "Bake in the visible slide title" in kwargs["prompt"]
         assert "top 14%" not in kwargs["prompt"]
         assert "bottom 16%" not in kwargs["prompt"]
         captured = capsys.readouterr()
@@ -495,7 +495,7 @@ class TestSlideVisualMode:
         assert "[gen] result: ext=.png bytes=" in captured.out
         assert "ref_images=0" in captured.out
         with script_module.Image.open(output_file) as img:
-            assert img.size == (178, 100)
+            assert img.size == (160, 90)
 
     def test_slide_visual_passes_quality_to_edit_path(
         self, script_module, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -524,25 +524,26 @@ class TestSlideVisualMode:
         assert kwargs["size"] == "1536x1024"
         assert kwargs["quality"] == "high"
         with script_module.Image.open(output_file) as img:
-            assert img.size == (178, 100)
+            assert img.size == (160, 90)
 
-    def test_slide_visual_normalization_pads_instead_of_cropping(
+    def test_slide_visual_normalization_crops_without_white_padding(
         self,
         script_module,
         tmp_path: Path,
     ) -> None:
         output_file = tmp_path / "slide.png"
-        image = script_module.Image.new("RGB", (160, 100), (255, 255, 255))
-        image.putpixel((0, 0), (255, 0, 0))
-        image.putpixel((159, 99), (0, 0, 255))
+        image = script_module.Image.new("RGB", (160, 100), (20, 30, 40))
+        for x in range(160):
+            image.putpixel((x, 0), (255, 0, 0))
+            image.putpixel((x, 99), (0, 0, 255))
         image.save(output_file)
 
         script_module._normalize_slide_visual_aspect(str(output_file))
 
         with script_module.Image.open(output_file) as normalized:
-            assert normalized.size == (178, 100)
-            assert normalized.getpixel((9, 0)) == (255, 0, 0)
-            assert normalized.getpixel((168, 99)) == (0, 0, 255)
+            assert normalized.size == (160, 90)
+            assert normalized.getpixel((0, 0)) == (20, 30, 40)
+            assert normalized.getpixel((159, 89)) == (20, 30, 40)
 
 
 class TestApiFailuresExitNonZero:
@@ -597,9 +598,13 @@ class TestApiFailuresExitNonZero:
         [
             ("Your organization must be verified to use this model", "org_not_verified"),
             ("Incorrect API key provided", "auth_invalid"),
+            ("insufficient_quota: exceeded your current quota", "quota_exceeded"),
+            ("Rate limit reached for images", "rate_limit"),
+            ("503 Service Unavailable", "server_error"),
             ("Request blocked by content policy", "content_blocked"),
             ("ReadTimeout: timed out", "timeout"),
             ("ConnectError: DNS failure", "egress_blocked"),
+            ("Reference image validation failed", "invalid_reference_image"),
             ("Invalid size value", "invalid_size"),
             ("some other provider issue", "api_error"),
         ],

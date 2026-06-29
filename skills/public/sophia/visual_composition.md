@@ -10,12 +10,11 @@ medium. Do not mix workflows just because another tool is available.
 
 ## Medium Routing
 
-- Presentations (`.pptx`) are HTML-slide image-forward decks. Generate one
-  16:9 visual asset per slide into `/mnt/user-data/outputs/assets/`, then place
-  that asset inside the `ppt-generation` HTML skeleton's `.visual` region.
-  Slide titles and visible narrative are real HTML text in `slides/*.html`, not
-  baked into the image. Convert with `build_deck_from_slides`; never hand-write
-  PPTX layouts or compiler scripts.
+- Presentations (`.pptx`) are pure image-forward decks. Generate one full-slide
+  16:9 bitmap per slide into `/mnt/user-data/outputs/visuals/`, then compile
+  with the `ppt-generation` script and a `deck_plan.json` containing one
+  `image_path` per slide. Do not hand-write PPTX layouts or custom compiler
+  scripts.
 - PDF reports are authored as ONE self-contained HTML file and rendered with
   `render_html_to_pdf`. Draw BOTH data evidence (bar / line / column for
   quantitative, comparative, ranking, composition, trend) AND structural
@@ -33,15 +32,13 @@ medium. Do not mix workflows just because another tool is available.
 
 ## Presentation Invariants
 
-- There is no alternate plain deck mode. A requested `.pptx` deck still follows
-  the HTML-slide image-forward pipeline.
-- Every slide must be opaque dark to all four edges — set a dark background on
-  `html, body` and on the slide wrapper. A white band/gutter at any edge is a
-  defect (the render fills uncovered regions with the deck background, not white).
-- Each generated slide image is the visual-area asset only. Do not include a
-  title region, footer, narrative text, or slide chrome in the image.
-- Keep visible HTML slide text sparse and explicit. Essential labels inside the
-  generated visual asset must be specified in the prompt as exact text.
+- There is no alternate plain deck mode. A requested `.pptx` deck follows the
+  full-slide image-forward pipeline.
+- The slide style may be light or dark according to the user request and subject.
+  A blank band/gutter at any edge is a defect, but dark backgrounds are not
+  mandatory.
+- Each generated slide image is the complete visible slide. Include a concise
+  title, bottom narrative, and any required labels directly in the image prompt.
 - Add concise speaker notes for narrative context, but never rely on notes as
   the only visible explanation for content slides.
 - If a slide image fails QC, regenerate or repair once. If it still fails,

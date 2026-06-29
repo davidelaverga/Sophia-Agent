@@ -86,6 +86,7 @@ def test_call_beyond_cap_is_rejected_with_generated_assets_listed():
         # A batch already ran (realistic way to reach the cap with successes) so
         # the deck-batch backstop yields and the hard image cap is what fires.
         image_generation_manifest_seen=True,
+        image_generation_manifest_requested_count=3,
         image_output_paths=["/mnt/user-data/outputs/visuals/hero-launch.png"],
     )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
@@ -237,9 +238,7 @@ def test_deck_batch_backstop_keeps_rejecting_until_manifest():
     assert "[Sophia/deck-batch]" in result.update["messages"][0].content
 
 
-def test_deck_batch_backstop_safety_valve_yields_at_cap():
-    # Bounded safety valve: at the rejection cap, stop rejecting so a model that
-    # genuinely cannot author a manifest still ships (serial) instead of looping.
+def test_deck_batch_backstop_at_cap_requires_manifest_or_clean_failure():
     state = _state_with_image_diagnostics(
         image_generation_success_count=1,
         deck_batch_rejection_count=_DECK_BATCH_REJECTION_CAP,
@@ -247,7 +246,8 @@ def test_deck_batch_backstop_safety_valve_yields_at_cap():
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(_deck_single_slide_command(), state)
     )
-    assert result is None
+    assert isinstance(result, Command)
+    assert "readable image batch manifest is still required" in result.update["messages"][0].content
 
 
 def test_deck_batch_backstop_allows_hero_first_call():
@@ -280,11 +280,24 @@ def test_deck_batch_backstop_allows_single_repair_after_batch_ran():
     state = _state_with_image_diagnostics(
         image_generation_success_count=5,
         image_generation_manifest_seen=True,
+        image_generation_manifest_requested_count=7,
     )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(_deck_single_slide_command(), state)
     )
     assert result is None
+
+
+def test_deck_batch_backstop_rejects_repair_when_manifest_summary_missing():
+    state = _state_with_image_diagnostics(
+        image_generation_success_count=5,
+        image_generation_manifest_seen=True,
+        image_generation_manifest_requested_count=0,
+    )
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+    assert isinstance(result, Command)
 
 
 def test_deck_batch_backstop_only_fires_for_pptx():
@@ -300,7 +313,7 @@ def test_deck_batch_backstop_only_fires_for_pptx():
     assert result is None
 
 
-# ---- images-before-slides ordering guard ------------------------------------
+# ---- removed slide-HTML deck path guard -------------------------------------
 
 
 def _slide_write_request(path: str, state: dict):
@@ -311,27 +324,25 @@ def _slide_write_request(path: str, state: dict):
     )
 
 
-def test_slides_before_images_blocks_authoring_before_images():
-    # Target known (plan=8), only the hero generated (success=1): authoring a
-    # slide HTML now forces a re-author once images land — nudge once.
+def test_slide_html_authoring_is_blocked_for_pptx():
     state = _state_with_image_diagnostics(image_generation_success_count=1, pptx_plan_slide_count=8)
     result = BuilderArtifactMiddleware()._slides_before_images_block_command(
         _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
     )
     assert isinstance(result, Command)
-    assert "[Sophia/deck-order]" in result.update["messages"][0].content
+    assert "[Sophia/deck-path]" in result.update["messages"][0].content
     assert result.update["builder_pptx_diagnostics"]["slides_before_images_directive_emitted"] is True
 
 
-def test_slides_before_images_allows_when_all_images_present():
+def test_slide_html_authoring_stays_blocked_when_images_present():
     state = _state_with_image_diagnostics(image_generation_success_count=8, pptx_plan_slide_count=8)
     result = BuilderArtifactMiddleware()._slides_before_images_block_command(
         _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
     )
-    assert result is None
+    assert isinstance(result, Command)
 
 
-def test_slides_before_images_allows_after_batch_seen():
+def test_slide_html_authoring_blocks_after_batch_seen():
     state = _state_with_image_diagnostics(
         image_generation_success_count=2,
         pptx_plan_slide_count=8,
@@ -340,10 +351,10 @@ def test_slides_before_images_allows_after_batch_seen():
     result = BuilderArtifactMiddleware()._slides_before_images_block_command(
         _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
     )
-    assert result is None
+    assert isinstance(result, Command)
 
 
-def test_slides_before_images_is_one_shot():
+def test_slide_html_path_guard_is_one_shot():
     state = _state_with_image_diagnostics(
         image_generation_success_count=1,
         pptx_plan_slide_count=8,
@@ -355,13 +366,12 @@ def test_slides_before_images_is_one_shot():
     assert result is None
 
 
-def test_slides_before_images_allows_when_target_unknown():
-    # No plan/requested count: can't determine readiness — never block.
+def test_slide_html_authoring_blocks_when_target_unknown():
     state = _state_with_image_diagnostics(image_generation_success_count=1)
     result = BuilderArtifactMiddleware()._slides_before_images_block_command(
         _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
     )
-    assert result is None
+    assert isinstance(result, Command)
 
 
 def test_transient_error_does_not_short_circuit():
@@ -464,15 +474,15 @@ def test_explicit_image_request_enables_generation():
     ) is True
 
 
-def test_plain_text_only_deck_marker_opts_out():
+def test_plain_text_only_deck_marker_keeps_pptx_image_forward_pipeline():
     assert _image_generation_enabled(
         {"task": "Build a plain text-only deck about our roadmap"},
         artifact_target_ext=".pptx",
         task_type="presentation",
-    ) is False
+    ) is True
 
 
-def test_no_image_phrasing_opts_out_of_deck_images():
+def test_no_image_phrasing_keeps_pptx_image_forward_pipeline():
     for task in (
         "Build a no-image deck about our roadmap",
         "Build a no image deck about our roadmap",
@@ -483,7 +493,7 @@ def test_no_image_phrasing_opts_out_of_deck_images():
             {"task": task},
             artifact_target_ext=".pptx",
             task_type="presentation",
-        ) is False
+        ) is True
 
 
 def test_bare_plain_style_does_not_disable_requested_deck_images():

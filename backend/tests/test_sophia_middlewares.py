@@ -3214,18 +3214,11 @@ class TestBuilderArtifactMiddleware:
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state, _make_runtime(thread_id="thread-x"))
         assert choice == {"type": "tool", "name": "emit_builder_artifact"}
 
-    def test_partial_images_with_slide_html_still_latches_deck_builder(self, tmp_path):
-        # 2026-06-27 fix-forward §WS-B regression guard for prod run 019f099a: the
-        # compile latch must fire on slide-HTML completeness even when image yield
-        # is PARTIAL (1 of 3). The old all-images gate never fired at 2/8 → the
-        # deck looped to the ceiling. Missing images degrade to placeholders.
+    def test_partial_images_do_not_latch_image_forward_compiler(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
-        slides_dir = outputs_dir / "slides"
-        slides_dir.mkdir(parents=True)
-        for index in range(1, 4):
-            (slides_dir / f"{index:02d}.html").write_text("<html><body>slide</body></html>")
+        outputs_dir.mkdir()
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
             "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
@@ -3237,19 +3230,9 @@ class TestBuilderArtifactMiddleware:
         mw = BuilderArtifactMiddleware()
 
         update = mw._combined_before_model_updates(state, _make_runtime(thread_id="thread-x"))
-        assert update is not None
-        assert update["builder_pptx_compile_latch_pending"] is True
-        message = update["messages"][0].content
-        assert "deck compile latch" in message
-        assert "build_deck_from_slides" in message
+        assert update is None
 
-        latched_state = {**state, **update}
-        choice = mw._force_choice_for_state(latched_state, _make_runtime(thread_id="thread-x"))
-        assert choice == {"type": "tool", "name": "build_deck_from_slides"}
-
-    def test_no_slide_html_does_not_latch_deck_builder(self, tmp_path):
-        # Negative: images present but NO slides/*.html yet → latch must NOT fire
-        # (nothing to compile; forcing build_deck_from_slides would error no_slides).
+    def test_complete_slide_images_latch_image_forward_compiler(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3261,17 +3244,21 @@ class TestBuilderArtifactMiddleware:
             "builder_pptx_diagnostics": {"image_generation_success_count": 3},
         }
         mw = BuilderArtifactMiddleware()
-        choice = mw._force_choice_for_state(state, _make_runtime(thread_id="thread-x"))
-        assert choice != {"type": "tool", "name": "build_deck_from_slides"}
 
-    def test_pptx_slide_html_ready_forces_deck_builder_tool(self, tmp_path):
+        update = mw._combined_before_model_updates(state, _make_runtime(thread_id="thread-x"))
+
+        assert update is not None
+        assert update["builder_pptx_compile_latch_pending"] is True
+        content = update["messages"][0].content
+        assert "ppt-generation/scripts/generate.py" in content
+        assert "--plan-file" in content
+        assert "image_path" in content
+
+    def test_pptx_slide_images_ready_does_not_force_removed_deck_builder_tool(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
-        slides_dir = outputs_dir / "slides"
-        slides_dir.mkdir(parents=True)
-        for index in range(1, 4):
-            (slides_dir / f"{index:02d}.html").write_text("<html><body>slide</body></html>")
+        outputs_dir.mkdir()
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
             "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
@@ -3288,9 +3275,8 @@ class TestBuilderArtifactMiddleware:
             _make_runtime(thread_id="thread-x"),
         )
 
-        assert choice == {"type": "tool", "name": "build_deck_from_slides"}
-        assert update is not None
-        assert update["builder_pptx_diagnostics"]["compile_forced_at_turn"] == 3
+        assert choice is None
+        assert update is None
 
     def test_deck_builder_result_records_pptx_diagnostics(self, tmp_path):
         from langchain_core.messages import ToolMessage
@@ -4365,9 +4351,8 @@ class TestBuilderArtifactMiddleware:
         assert "builder-thread" not in calls
 
     def test_pptx_skill_read_alone_still_gets_deck_steering_correction(self, tmp_path):
-        # Phase 0 §2.6: the drift/skill correction still fires, but now injects the
-        # single canonical deck-steering message (HTML slides + build_deck_from_slides),
-        # never the retired generate.py/plan-JSON flow.
+        # The drift/skill correction still fires and injects the canonical
+        # image-forward compiler steering message.
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -4388,11 +4373,10 @@ class TestBuilderArtifactMiddleware:
         assert result is not None
         assert result["builder_pptx_skill_correction_emitted"] is True
         content = result["messages"][0].content
-        assert "build_deck_from_slides" in content
-        assert "/mnt/user-data/outputs/slides/" in content
-        assert "/mnt/skills/public/ppt-generation/scripts/generate.py" not in content
-        assert "--plan-file" not in content
-        assert "image_path" not in content
+        assert "/mnt/skills/public/ppt-generation/scripts/generate.py" in content
+        assert "--plan-file" in content
+        assert "image_path" in content
+        assert "build_deck_from_slides" in content  # prohibition only
 
     def test_pptx_generator_invocation_suppresses_skill_correction(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware

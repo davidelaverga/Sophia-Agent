@@ -124,10 +124,10 @@ class TestVisualCapabilityPrompt:
         assert "image-generation" in skill_names
         assert "Image generation is disabled for this run" not in briefing
         assert "do not run the image-generation script" not in briefing
-        assert "HTML-slide image-forward decks" in briefing
-        assert "16:9 visual asset per slide" in briefing
-        assert "Slide titles and visible narrative are real HTML text" in briefing
-        assert "baked into the image" in briefing
+        assert "pure image-forward PPTX builds" in briefing
+        assert "full-slide image" in briefing
+        assert "deck_plan.json" in briefing
+        assert "ppt-generation/scripts/generate.py" in briefing
 
 
 def _available_skills_section(briefing: str) -> str:

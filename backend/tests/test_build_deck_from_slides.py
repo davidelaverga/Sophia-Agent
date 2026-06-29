@@ -35,9 +35,10 @@ def _call(**kwargs) -> dict:
 # ---- toolset wiring --------------------------------------------------------
 
 
-def test_presentation_toolset_offers_deck_builder_not_pdf_renderer():
+def test_presentation_toolset_uses_bash_compiler_not_deck_builder_tool():
     names = [getattr(t, "name", "") for t in build_builder_tools_for_task_type("presentation", vision_enabled=False)]
-    assert "build_deck_from_slides" in names
+    assert "bash" in names
+    assert "build_deck_from_slides" not in names
     assert "render_html_to_pdf" not in names
     # report path is unchanged
     rnames = [getattr(t, "name", "") for t in build_builder_tools_for_task_type("document", vision_enabled=False)]
@@ -240,7 +241,8 @@ def test_backstop_blocks_bash_python_pptx():
         _req("bash", {"command": "python -c 'from pptx import Presentation'"})
     )
     assert isinstance(r, Command)
-    assert "build_deck_from_slides" in r.update["messages"][0].content
+    assert "ppt-generation/scripts/generate.py" in r.update["messages"][0].content
+    assert "build_deck_from_slides" not in r.update["messages"][0].content
 
 
 def test_backstop_blocks_py_writefile_with_pptx():
@@ -250,11 +252,11 @@ def test_backstop_blocks_py_writefile_with_pptx():
     assert isinstance(r, Command)
 
 
-def test_backstop_allows_slide_html_authoring():
+def test_backstop_ignores_slide_html_authoring_for_separate_path_guard():
     r = BuilderArtifactMiddleware._deck_improvisation_rejection(
         _req("write_file", {"path": f"{_OUTPUTS}slides/01.html", "content": "<html>pptx presentation(</html>"})
     )
-    assert r is None  # .html is always allowed even if it mentions pptx words
+    assert r is None
 
 
 def test_backstop_allows_innocuous_bash():
@@ -334,7 +336,7 @@ def test_deck_builder_result_records_failure_and_ignores_garbage(tmp_path):
     assert BuilderArtifactMiddleware()._deck_builder_result_command(_deck_build_request(outputs_dir), garbage) is garbage
 
 
-def test_failed_deck_build_allows_repair_before_reforcing_compile(tmp_path):
+def test_failed_legacy_deck_build_result_does_not_reforce_removed_tool(tmp_path):
     from langchain_core.messages import ToolMessage
 
     outputs_dir = tmp_path / "outputs"
@@ -368,7 +370,4 @@ def test_failed_deck_build_allows_repair_before_reforcing_compile(tmp_path):
     assert write_cmd.update["builder_pptx_compile_repair_pending"] is False
 
     repaired_state = {**blocked_state, **write_cmd.update}
-    assert mw._force_choice_for_state(repaired_state, None) == {
-        "type": "tool",
-        "name": "build_deck_from_slides",
-    }
+    assert mw._force_choice_for_state(repaired_state, None) is None

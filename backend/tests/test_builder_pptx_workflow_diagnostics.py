@@ -1224,10 +1224,8 @@ def test_failed_image_generation_after_correction_does_not_force_fallback(tmp_pa
 
 
 def test_invalid_plan_json_no_longer_injects_plan_correction(tmp_path: Path) -> None:
-    # Phase 0 §2.6: the retired slide-plan-JSON correction is deleted — there is
-    # no plan JSON in the HTML-slide deck flow. A stale ``invalid_plan_json``
-    # diagnostic must NOT inject the old "re-emit plan JSON / run the PPT generator"
-    # directive (the steering that deadlocked prod decks on 2026-06-27).
+    # The old dedicated plan-correction state machine stays deleted; the
+    # restored image-forward flow uses the general compile latch instead.
     outputs = tmp_path / "outputs"
     outputs.mkdir()
     state = {
@@ -1246,8 +1244,6 @@ def test_invalid_plan_json_no_longer_injects_plan_correction(tmp_path: Path) -> 
     if result is not None:
         content = result["messages"][0].content if result.get("messages") else ""
         assert "presentation-plan correction" not in content
-        assert "--plan-file" not in content
-        assert "image_path" not in content
         assert "builder_pptx_plan_correction_emitted" not in result
 
 

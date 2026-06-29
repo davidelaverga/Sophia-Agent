@@ -121,14 +121,11 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 
 ## Two modes
 
-1. **Slide visual assets (`--slide-visual`)** — for `.pptx` slides, this skill renders the
-   image that goes inside the `ppt-generation` HTML skeleton's `.visual` region. Do NOT bake
-   the slide title, bottom narrative, footer, or page chrome into this PNG; those are real
-   HTML text in `slides/*.html`. Use `--slide-visual` (quality=high, 16:9) for the visual
-   substance only: diagrams, architecture maps, comparison panels, scenes, charts, or
-   conceptual illustrations. Diagram labels inside the visual are allowed when essential;
-   wrap required label copy as "THE TEXT READS: ...", keep labels 8 words or fewer, and keep
-   them away from the image edges so the HTML title/narrative never overlap the asset.
+1. **Slide visuals (`--slide-visual`)** — for `.pptx` slides, this skill renders full slides
+   with the visible title, bottom narrative, diagrams, labels, and layout baked into the image.
+   Wrap required copy as "THE TEXT READS: ...", keep labels 8 words or fewer, and use
+   `--slide-visual` (quality=high, 16:9). The `ppt-generation` compiler will place one
+   generated image full bleed on each slide and attach speaker notes.
    Pass the first slide as `--reference-images` to later slides for consistency; the script
    automatically sends those referenced slides through the `gpt-image-2` edit path.
 

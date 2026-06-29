@@ -27,10 +27,10 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
 
     assert "Finish with `emit_builder_artifact`" in contract
     assert "requested primary artifact" in contract
-    assert "HTML-slide decks" in contract
-    assert "build_deck_from_slides" in contract
-    assert "Do not\n  bake slide titles" in contract
-    assert "full-slide image per slide" not in contract
+    assert "pure image-forward decks" in contract
+    assert "full-slide image per\n  slide" in contract
+    assert "deck_plan.json" in contract
+    assert "build_deck_from_slides" not in contract
     # PDF reports are authored as HTML and rendered via render_html_to_pdf; the
     # markdown→pandoc path and remote generate_chart are retired for reports.
     assert "render_html_to_pdf" in contract
@@ -43,11 +43,10 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
 def test_visual_composition_routes_pptx_and_pdf_to_separate_pipelines() -> None:
     directives = _sophia_prompt("visual_composition.md")
 
-    assert "Presentations (`.pptx`) are HTML-slide image-forward decks" in directives
-    assert "16:9 visual asset per slide" in directives
-    assert "real HTML text" in directives
-    assert "build_deck_from_slides" in directives
-    assert "generated 16:9 bitmap" not in directives
+    assert "Presentations (`.pptx`) are pure image-forward decks" in directives
+    assert "full-slide\n  16:9 bitmap per slide" in directives
+    assert "deck_plan.json" in directives
+    assert "build_deck_from_slides" not in directives
     # PDF reports are authored as one self-contained HTML file with inline <svg>
     # figures and rendered via render_html_to_pdf (no remote chart service).
     assert "render_html_to_pdf" in directives
@@ -60,40 +59,33 @@ def test_visual_composition_routes_pptx_and_pdf_to_separate_pipelines() -> None:
     assert "generate_report_chart" not in directives
 
 
-def test_ppt_generation_skill_authors_html_slides() -> None:
-    """Spec D Phase 0: decks are authored as slide HTML; harness converts to PPTX."""
+def test_ppt_generation_skill_authors_image_forward_decks() -> None:
     text = _skill("ppt-generation")
 
-    # New HTML-slide contract.
-    assert "slide HTML" in text or "HTML file per slide" in text
-    assert "build_deck_from_slides" in text
-    assert "slides/" in text and "assets/" in text
-    assert "../assets/" in text  # relative image path convention
+    assert "pure image-forward" in text
+    assert "Every slide is a single 16:9 image" in text
+    assert "deck_plan.json" in text
+    assert "image_path" in text
     assert "--slide-visual" in text
     assert '"slide_visual": true' in text
-    # The model never compiles the deck.
+    assert "--plan-file" in text
+    assert "/mnt/skills/public/ppt-generation/scripts/generate.py" in text
     assert "python-pptx" in text  # appears only as a prohibition
     assert "pptxgenjs" in text
-    assert "never" in text.lower() or "do not" in text.lower() or "do NOT" in text
-    # Old contract retired.
-    assert "Every slide is a single 16:9 image" not in text
-    assert "--plan-file" not in text  # model no longer runs the compiler
+    assert "build_deck_from_slides" in text  # appears only as a prohibition
+    assert "slides/" not in text
+    assert "../assets/" not in text
     assert "generate_visual_asset" not in text
     assert "generate_report_chart" not in text
 
 
-def test_ppt_generation_skeleton_demands_opaque_dark_slide() -> None:
-    """White-space defense (prod 019f0b8a): the slide skeleton must paint an
-    opaque dark background on html, body (not just .slide) and tell the model the
-    slide must be opaque to the edges, so an uncovered region never renders white.
-    """
+def test_ppt_generation_skill_does_not_force_dark_theme() -> None:
     text = _skill("ppt-generation")
-    # html, body carry the dark background, not only .slide.
-    assert "html, body { margin: 0; padding: 0; background: #0e1626; }" in text
-    # Explicit opaque-to-edges hard rule.
     lowered = text.lower()
-    assert "opaque" in lowered
-    assert "to all four edges" in lowered or "to the edges" in lowered
+    assert "light or dark" in lowered
+    assert "no unintended blank gutters" in lowered
+    assert "opaque dark" not in lowered
+    assert "html, body" not in lowered
 
 
 def test_pdf_report_skill_uses_html_and_inline_svg() -> None:
@@ -129,8 +121,8 @@ def test_image_generation_skill_allows_bounded_pdf_conceptual_images() -> None:
     assert "3 conceptual/editorial" in text
     assert "render_html_to_pdf" in text
     assert "generate_chart" not in text
-    assert "Do NOT bake" in text
-    assert "HTML text" in text
+    assert "renders full slides" in text
+    assert "generated image full bleed" in text
     assert "generate_visual_asset" not in text
     assert "anti_slop.md" not in text
 
@@ -173,34 +165,18 @@ def test_brand_tokens_resolve_the_georgia_conflict() -> None:
     assert "graphviz" in tokens
 
 
-# Phase 0 §2.6 — deck steering is a single source of truth. No deck-facing
-# correction message may steer the RETIRED full-slide-bitmap + slide-plan-JSON +
-# ppt-generation/scripts/generate.py compiler flow. The deck failure (prod
-# 2026-06-27, runs 019f0668 timeout + 019f0679 hang) was the turn-3
-# `_pptx_skill_correction_message` commanding `generate.py --plan-file` while the
-# improvisation backstop blocked that exact script — a deadlock with no path to
-# `build_deck_from_slides`. This guard fails if any retired-flow steering returns.
-
-# Retired-flow INSTRUCTION tokens that must never appear in a rendered deck
-# correction (python-pptx / pptxgenjs are allowed only as prohibitions, so they
-# are intentionally excluded from this list).
-# Unambiguous RETIRED-flow instruction tokens. python-pptx / pptxgenjs / "deck
-# compiler" / "slide-plan JSON" appear only as PROHIBITIONS in the new messages,
-# so they are intentionally excluded (their presence is correct, not a leak).
-_RETIRED_DECK_TOKENS = (
-    "ppt-generation/scripts/generate.py",
-    "--plan-file",
-    "image_path",
-    "full_bleed_image",
-    "full-slide image per slide",
-    "full-slide png",
-    "pptx compiler",
-    "embedded full-slide picture",
-    "image-forward",
-    "ppt-generation has been attempted",
-    "ppt-generation script",
-    "re-run the ppt-generation",
-    "run the ppt generator",
+# Deck steering must use the restored image-forward compiler path and must not
+# reintroduce the removed HTML-slide/build_deck_from_slides route as guidance.
+_RETIRED_HTML_DECK_TOKENS = (
+    "author one self-contained 1920x1080 html",
+    "author one html",
+    "slides/*.html",
+    "../assets/",
+    "real dom text",
+    "real html text",
+    "visual-area image",
+    "visual area only",
+    "call build_deck_from_slides",
 )
 
 
@@ -246,16 +222,18 @@ def _render_deck_corrections() -> dict[str, str]:
     return {k: v for k, v in messages.items() if isinstance(v, str) and v}
 
 
-def test_deck_corrections_use_html_slide_flow_not_retired_compiler() -> None:
+def test_deck_corrections_use_image_forward_compiler_not_html_slide_flow() -> None:
     rendered = _render_deck_corrections()
-    # The canonical deck-steering message must name the HTML-slide tool + dir.
     canonical = rendered["compile_latch_ready"].lower()
-    assert "build_deck_from_slides" in canonical
-    assert "slides/" in canonical
-    # No rendered deck correction may carry a retired-flow instruction token.
+    assert "/mnt/skills/public/ppt-generation/scripts/generate.py" in canonical
+    assert "--plan-file" in canonical
+    assert "deck_plan.json" in canonical
+    assert "image_path" in canonical
     for name, message in rendered.items():
         low = message.lower()
-        for token in _RETIRED_DECK_TOKENS:
+        for token in _RETIRED_HTML_DECK_TOKENS:
+            if token == "call build_deck_from_slides" and "do not call build_deck_from_slides" in low:
+                continue
             assert token not in low, f"retired deck token {token!r} in {name} correction"
 
 
@@ -269,16 +247,10 @@ def test_retired_deck_correction_functions_are_deleted() -> None:
         "_visual_asset_required_message",
     ):
         assert not hasattr(ba, gone), f"{gone} must be deleted (Phase 0 §2.6 single source of truth)"
-    assert not hasattr(
-        ba.BuilderArtifactMiddleware, "_maybe_inject_pptx_plan_correction"
-    ), "_maybe_inject_pptx_plan_correction must be deleted (no slide-plan JSON in the HTML flow)"
+    assert not hasattr(ba.BuilderArtifactMiddleware, "_maybe_inject_pptx_plan_correction")
 
 
-def test_pptx_emit_rejection_messages_use_html_slide_flow(monkeypatch) -> None:
-    # The emit-time visual rejection paths (visual-presence + hero gates) are
-    # gate-locked, so force them open and assert their pptx branch steers the
-    # build_deck_from_slides HTML flow — NOT "presentation plan JSON / re-run the
-    # ppt-generation script" (the live leak the 2026-06-27 review caught).
+def test_pptx_emit_rejection_messages_use_image_forward_flow(monkeypatch) -> None:
     from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
 
     out = "/mnt/user-data/outputs/"
@@ -290,13 +262,15 @@ def test_pptx_emit_rejection_messages_use_html_slide_flow(monkeypatch) -> None:
     monkeypatch.setattr(ba, "_requested_artifact_ext", lambda _s: "pptx")
     visual_presence = ba.BuilderArtifactMiddleware._visual_presence_rejection_message({}, state)
     assert visual_presence, "visual-presence rejection should render for a pptx with unembedded assets"
-    assert "build_deck_from_slides" in visual_presence
-    for token in _RETIRED_DECK_TOKENS:
+    assert "deck_plan.json" in visual_presence
+    assert "ppt-generation/scripts/generate.py" in visual_presence
+    for token in _RETIRED_HTML_DECK_TOKENS:
         assert token not in visual_presence.lower(), f"retired token {token!r} in visual-presence rejection"
 
     monkeypatch.setattr(ba.BuilderArtifactMiddleware, "_hero_gate_blocks_emit", classmethod(lambda _cls, _a, _s: True))
     monkeypatch.setattr(ba, "_visuals_requested", lambda _s: False)  # opens the hero guard
     hero = ba.BuilderArtifactMiddleware._hero_rejection_message({}, state)
     assert hero, "hero rejection should render when the hero gate blocks"
-    for token in _RETIRED_DECK_TOKENS:
+    assert "deck_plan.json" in hero
+    for token in _RETIRED_HTML_DECK_TOKENS:
         assert token not in hero.lower(), f"retired token {token!r} in hero rejection"

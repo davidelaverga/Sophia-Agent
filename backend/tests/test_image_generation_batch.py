@@ -78,8 +78,12 @@ def test_per_item_failure_is_isolated(tmp_path) -> None:
     assert summary is not None
     assert summary["requested"] == 2
     assert summary["images_generated"] == 0
+    assert summary["failed"] == 2
+    assert summary["complete"] is False
+    assert summary["error_class_histogram"] == {"missing_prompt_file": 2}
     assert len(summary["items"]) == 2
     assert all(item["success"] is False for item in summary["items"])
+    assert all(item["error_class"] == "missing_prompt_file" for item in summary["items"])
     # Output paths are echoed back so the harness can reconcile per-item status.
     assert {item["output_file"] for item in summary["items"]} == {
         str(tmp_path / "o1.png"),
@@ -102,6 +106,7 @@ def test_manifest_concurrency_is_capped_by_env_override(tmp_path) -> None:
     assert summary is not None
     assert summary["requested"] == 4
     assert summary["concurrency"] == 2
+    assert summary["max_concurrency"] == 2
     assert code == 1
 
 
@@ -111,6 +116,7 @@ def test_item_missing_required_fields_is_reported(tmp_path) -> None:
     assert summary is not None
     assert summary["items"][0]["success"] is False
     assert summary["items"][0]["error"] == "missing_prompt_or_output"
+    assert summary["items"][0]["error_class"] == "missing_prompt_or_output"
 
 
 # ---- per-call timeout (kills the ~10-min hang) ------------------------------
