@@ -483,8 +483,12 @@ class TestSlideVisualMode:
         assert kwargs["prompt"].startswith('A professional slide. Title: "THE TEXT READS: Roadmap".')
         assert script_module._SOPHIA_SLIDE_STYLE in kwargs["prompt"]
         assert script_module._SOPHIA_SLIDE_AVOID in kwargs["prompt"]
-        assert "render the entire 16:9 presentation slide" in kwargs["prompt"]
-        assert "Bake in the visible slide title" in kwargs["prompt"]
+        # HTML-slide path (Codex P2, 2026-06-29): --slide-visual is VISUAL-ONLY —
+        # the title/narrative stay real HTML text, never baked into the image.
+        assert "Visual-only slide asset" in kwargs["prompt"]
+        assert "Do NOT bake in the slide title" in kwargs["prompt"]
+        assert "render the entire 16:9 presentation slide" not in kwargs["prompt"]
+        assert "Bake in the visible slide title" not in kwargs["prompt"]
         assert "top 14%" not in kwargs["prompt"]
         assert "bottom 16%" not in kwargs["prompt"]
         captured = capsys.readouterr()

@@ -96,11 +96,13 @@ _SOPHIA_SLIDE_AVOID = (
 )
 
 _SOPHIA_SLIDE_ZONE_CONTRACT = (
-    "Slide image contract: render the entire 16:9 presentation slide as a complete bitmap. "
-    "Bake in the visible slide title, bottom narrative, labels, diagrams, and layout. Keep the "
-    "top title band, center visual safe area, and bottom narrative band separated with no overlap. "
-    "Essential labels must be short, exact, high-contrast, and legible. Fill the whole slide canvas "
-    "with the chosen style; avoid unintended blank gutters or transparent edges."
+    "Visual-only slide asset: render ONLY the slide's visual — the diagram, illustration, or chart "
+    "— to fill a 16:9 frame. This image is embedded inside the HTML slide's visual region while the "
+    "slide title and bottom narrative stay as real HTML text OUTSIDE the image. Do NOT bake in the "
+    "slide title, a bottom narrative band, a footer, page numbers, or any slide chrome. Only short, "
+    "essential labels that belong INSIDE the diagram itself (e.g. node names or axis labels) are "
+    "allowed — exact, high-contrast, and legible. Fill the whole frame with the chosen style; avoid "
+    "unintended blank gutters or transparent edges."
 )
 
 _SOPHIA_IMAGE_STYLE = (
