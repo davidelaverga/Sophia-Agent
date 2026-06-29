@@ -313,7 +313,7 @@ def test_deck_batch_backstop_only_fires_for_pptx():
     assert result is None
 
 
-# ---- removed slide-HTML deck path guard -------------------------------------
+# ---- HTML-slide deck path: slide HTML authoring is allowed ------------------
 
 
 def _slide_write_request(path: str, state: dict):
@@ -324,54 +324,16 @@ def _slide_write_request(path: str, state: dict):
     )
 
 
-def test_slide_html_authoring_is_blocked_for_pptx():
+def test_slide_html_authoring_is_allowed_for_pptx():
+    # HTML-slide deck path restored (2026-06-29): authoring slides/*.html is the
+    # sanctioned flow. The image-forward _slides_before_images_block_command is
+    # gone, and the improvisation gate explicitly allows .html authoring.
+    assert not hasattr(BuilderArtifactMiddleware, "_slides_before_images_block_command")
     state = _state_with_image_diagnostics(image_generation_success_count=1, pptx_plan_slide_count=8)
-    result = BuilderArtifactMiddleware()._slides_before_images_block_command(
-        _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
-    )
-    assert isinstance(result, Command)
-    assert "[Sophia/deck-path]" in result.update["messages"][0].content
-    assert result.update["builder_pptx_diagnostics"]["slides_before_images_directive_emitted"] is True
-
-
-def test_slide_html_authoring_stays_blocked_when_images_present():
-    state = _state_with_image_diagnostics(image_generation_success_count=8, pptx_plan_slide_count=8)
-    result = BuilderArtifactMiddleware()._slides_before_images_block_command(
-        _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
-    )
-    assert isinstance(result, Command)
-
-
-def test_slide_html_authoring_blocks_after_batch_seen():
-    state = _state_with_image_diagnostics(
-        image_generation_success_count=2,
-        pptx_plan_slide_count=8,
-        image_generation_manifest_seen=True,
-    )
-    result = BuilderArtifactMiddleware()._slides_before_images_block_command(
-        _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
-    )
-    assert isinstance(result, Command)
-
-
-def test_slide_html_path_guard_is_one_shot():
-    state = _state_with_image_diagnostics(
-        image_generation_success_count=1,
-        pptx_plan_slide_count=8,
-        slides_before_images_directive_emitted=True,
-    )
-    result = BuilderArtifactMiddleware()._slides_before_images_block_command(
+    result = BuilderArtifactMiddleware._deck_improvisation_rejection(
         _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
     )
     assert result is None
-
-
-def test_slide_html_authoring_blocks_when_target_unknown():
-    state = _state_with_image_diagnostics(image_generation_success_count=1)
-    result = BuilderArtifactMiddleware()._slides_before_images_block_command(
-        _slide_write_request("/mnt/user-data/outputs/slides/02-overview.html", state)
-    )
-    assert isinstance(result, Command)
 
 
 def test_transient_error_does_not_short_circuit():

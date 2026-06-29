@@ -8,6 +8,7 @@ gate. Behavior remains owned by the builder factory tests.
 from __future__ import annotations
 
 from deerflow.sandbox.tools import bash_tool, ls_tool, read_file_tool, str_replace_tool, write_file_tool
+from deerflow.sophia.tools.build_deck_from_slides import build_deck_from_slides
 from deerflow.sophia.tools.builder_web_fetch import builder_web_fetch
 from deerflow.sophia.tools.builder_web_search import builder_web_search
 from deerflow.sophia.tools.create_pdf_artifact import create_pdf_artifact
@@ -56,7 +57,19 @@ def build_builder_tools_for_task_type(
         create_pdf_artifact,
         emit_builder_artifact,
     ]
-    if not _presentation_toolset_required(task_type, artifact_target_ext):
+    if _presentation_toolset_required(task_type, artifact_target_ext):
+        # Decks (HTML-slide path, restored 2026-06-29): the model authors one
+        # self-contained 1920x1080 HTML file per slide (real DOM title/narrative +
+        # one embedded VISUAL-ONLY generated image by relative ../assets path),
+        # then calls build_deck_from_slides — which renders each slide to a
+        # full-bleed PNG (headless Chromium) and wraps to .pptx. The model never
+        # writes python-pptx/pptxgenjs or shells a deck compiler. Crisp,
+        # unclippable DOM text + a partial-image floor (missing visuals render as
+        # placeholders, the deck still ships). The image-forward generate.py
+        # --plan-file path stays on disk but is no longer offered.
+        insert_at = tools.index(emit_builder_artifact)
+        tools.insert(insert_at, build_deck_from_slides)
+    else:
         # Report/document builds render via HTML→PDF (headless Chromium): the
         # model authors ONE HTML file with inline <svg> charts/diagrams, then
         # calls render_html_to_pdf. Both the remote generate_chart (GPT-Vis,

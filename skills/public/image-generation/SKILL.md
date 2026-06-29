@@ -49,7 +49,7 @@ Parameters:
 - `--reference-images`: Absolute paths to reference images (optional, space-separated)
 - `--output-file`: Absolute path to output image file (required)
 - `--aspect-ratio`: Aspect ratio of the generated image (optional, default: 16:9)
-- `--slide-visual`: Full-slide PPTX visual mode (quality=high, 16:9; optional)
+- `--slide-visual`: PPTX slide VISUAL-ONLY mode (quality=high, 16:9; optional) — generates the visual area only, never the title/narrative/chrome
 
 [!NOTE]
 Do NOT read the python file, just call it with the parameters.
@@ -121,11 +121,14 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 
 ## Two modes
 
-1. **Slide visuals (`--slide-visual`)** — for `.pptx` slides, this skill renders full slides
-   with the visible title, bottom narrative, diagrams, labels, and layout baked into the image.
-   Wrap required copy as "THE TEXT READS: ...", keep labels 8 words or fewer, and use
-   `--slide-visual` (quality=high, 16:9). The `ppt-generation` compiler will place one
-   generated image full bleed on each slide and attach speaker notes.
+1. **Slide visual assets (`--slide-visual`)** — for `.pptx` slides, this skill renders the
+   image that goes inside the `ppt-generation` HTML skeleton's `.visual` region. Do NOT bake
+   the slide title, bottom narrative, footer, or page chrome into this PNG; those are real
+   HTML text in `slides/*.html`. Use `--slide-visual` (quality=high, 16:9) for the visual
+   substance only: diagrams, architecture maps, comparison panels, scenes, charts, or
+   conceptual illustrations. Diagram labels inside the visual are allowed when essential;
+   wrap required label copy as "THE TEXT READS: ...", keep labels 8 words or fewer, and keep
+   them away from the image edges so the HTML title/narrative never overlap the asset.
    Pass the first slide as `--reference-images` to later slides for consistency; the script
    automatically sends those referenced slides through the `gpt-image-2` edit path.
 
@@ -144,19 +147,24 @@ For multi-image decks, do NOT call the script once per slide across turns (that 
 ```json
 {"items": [
   {"prompt_file": "/mnt/user-data/workspace/slide-02.json",
-   "output_file": "/mnt/user-data/outputs/visuals/slide-02.png",
+   "output_file": "/mnt/user-data/outputs/assets/slide-02.png",
    "slide_visual": true,
-   "reference_images": ["/mnt/user-data/outputs/visuals/hero.png"]},
+   "reference_images": ["/mnt/user-data/outputs/assets/hero.png"]},
   {"prompt_file": "/mnt/user-data/workspace/slide-03.json",
-   "output_file": "/mnt/user-data/outputs/visuals/slide-03.png",
+   "output_file": "/mnt/user-data/outputs/assets/slide-03.png",
    "slide_visual": true,
-   "reference_images": ["/mnt/user-data/outputs/visuals/hero.png"]}
+   "reference_images": ["/mnt/user-data/outputs/assets/hero.png"]}
 ]}
 ```
 ```bash
 python /mnt/skills/public/image-generation/scripts/generate.py \
-  --manifest /mnt/user-data/outputs/visuals/slide-manifest.json
+  --manifest /mnt/user-data/outputs/assets/slide-manifest.json
 ```
+
+Deck slide assets live under `/mnt/user-data/outputs/assets/`; the slide HTML
+references them by a relative `../assets/<file>` path (see the `ppt-generation`
+skill). The slide title and narrative are real HTML text — never baked into the
+image.
 
 The items run concurrently (bounded for API rate limits); the script prints one
 `IMAGEGEN_BATCH {...}` summary line with per-image success. A failed item is isolated and never

@@ -1289,9 +1289,9 @@ def _visual_expectations_line(
         if _presentation_image_opted_out(description):
             return None
         return (
-            "Visual expectations: create a generated image-forward deck. Every slide "
-            "should use one generated visual asset inside an HTML slide shell; titles "
-            "and concise narrative/takeaway text are real HTML, not baked into the image; "
+            "Visual expectations: create an HTML-slide deck. Each slide is a self-contained "
+            "HTML file with a real HTML title and concise narrative/takeaway text (not baked "
+            "into the image), plus at most one visual asset inside the HTML slide shell; "
             f"minimal/plain wording means restrained design, not a non-visual workflow.{style_note}"
         )
     return (

@@ -26,6 +26,29 @@ Every merged PR appends an entry here. This file is the team's accumulating inst
 ## Log
 <!-- Append new entries below this line -->
 
+## 2026-06-29 · [decks · restore HTML-slide path + partial-image floor + truthful image errors] · PR #TBD
+**Author:** Claude · **Track:** backend + skills · forensics `docs/audits/sophia-builder-deck-revert-and-trace-forensics-2026-06-29.md`
+
+### What Changed
+- Reverted decks from the 2026-06-29 "image-forward" detour (one full-slide baked-text gpt-image per slide → `generate.py --plan-file`) back to the **HTML-slide substrate** (`slides/*.html` real DOM text + one embedded visual-only image → `build_deck_from_slides`). Wiring: toolset re-add; `_pptx_compile_ready → _pptx_slide_html_ready` (**floor restored**); deleted `_slides_before_images_block_command`; all live deck-steering messages flipped to HTML.
+- Flipped all 7 deck PROMPT surfaces to one HTML contract, zero image-forward residue; `--slide-visual` → visual-only; standardized `assets/` + `slides/` + relative `../assets/<file>`.
+- Floor + truthful errors: `quota_exceeded` → terminal (fast-fail to floor, ship placeholders + `visuals_partial`); stop-message steers to `build_deck_from_slides`; `raw_error` surfaced in the `[BuilderImageGeneration]` log.
+- Flipped + extended the `test_builder_prompt_contract.py` invariant guard (no image-forward residue; no command+forbid contradiction). 1268 backend tests pass.
+
+### What We Learned
+- The image-gen outage is **compile-path-agnostic**; the HTML path's value is crisp unclippable DOM text + the partial-image FLOOR. The detour lost the floor → a partial outage looped to the ceiling and shipped 2/8 slides.
+- The detour had real wins worth keeping (white-pad→crop aspect fix, error classes, download-filename card, manifest validation) — restore was a composition-path flip, not a blanket revert.
+- Trace 403 was a **wrong workspace id** (`464e1fa8` vs correct EU `26b7385f`), not a key-scope problem — corrects the earlier "needs runs:write" guess.
+
+### CLAUDE.md Updates
+- `backend/CLAUDE.md`: new section "Decks: HTML-slide path RESTORED + partial-image floor + truthful image errors (2026-06-29)".
+
+### Skills Created / Modified
+- `ppt-generation/SKILL.md`, `image-generation/SKILL.md`, `visual-design/SKILL.md`, `sophia/visual_composition.md`, `sophia/builder_obligations.md` — unified HTML-slide deck contract; `--slide-visual` visual-only.
+
+### GEPA Log Entry
+- Prompt files are skill contracts (not GEPA targets). Before: contradictory image-forward decks (baked text → clipping, no floor → 2/8 looping). After: one coherent HTML-slide contract (crisp DOM text, opaque-dark edges, placeholder floor). No tone delta (builder-side).
+
 ## 2026-06-28 · [deck-quality · white space + single .pptx delivery + batch enforcement] · PR #TBD
 **Author:** Claude · **Track:** backend + frontend · forensics `docs/audits/sophia-builder-deck-quality-forensics-2026-06-28.md`
 

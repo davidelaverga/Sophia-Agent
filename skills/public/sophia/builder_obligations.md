@@ -31,18 +31,21 @@ This file is for the Sophia builder only.
 
 ## Presentation Rules
 
-- Presentations are pure image-forward decks. Generate one full-slide image per
-  slide into `/mnt/user-data/outputs/visuals/`, then compile with the
-  ppt-generation script and a `deck_plan.json` containing one `image_path` per
-  slide.
-- The generated image is the complete visible slide. Bake slide titles, concise
-  bottom narrative, labels, diagrams, and layout into the image; speaker notes
-  remain in the plan JSON.
-- Do not use engine-composed PPTX layouts, compiler-drawn text overlays,
-  hand-written deck compiler scripts, HTML slide conversion, or generated PDF
-  previews as the primary deck artifact.
-- When the requested PPTX exists, opens, and has embedded slide pictures,
-  emit immediately after at most one slide-count repair nudge.
+- Presentations are HTML-slide decks. Generate at most one visual-only asset per
+  slide into `/mnt/user-data/outputs/assets/`, then author one self-contained
+  1920×1080 HTML slide per slide under `/mnt/user-data/outputs/slides/` using the
+  ppt-generation skeleton. A plain slide may have no image at all.
+- The generated image asset belongs only in the HTML `.visual` region, referenced
+  by a relative `../assets/<file>` path. Do not bake slide titles, bottom
+  narrative, footers, or page chrome into the image; titles and 1-2 sentence
+  narratives are real HTML text in `slides/*.html`.
+- Do not use hand-written PPTX layouts, python-pptx/pptxgenjs scripts, or any
+  custom deck compiler. Convert the HTML slides by calling `build_deck_from_slides`
+  once; emit the returned `.pptx`.
+- A genuinely missing slide image is fine — the build renders a neutral
+  placeholder and the deck still ships. When the requested PPTX exists, opens,
+  and has slide pictures, emit immediately after at most one slide-count repair
+  nudge.
 
 ## PDF Report Rules
 

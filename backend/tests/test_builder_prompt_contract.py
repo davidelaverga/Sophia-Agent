@@ -27,10 +27,12 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
 
     assert "Finish with `emit_builder_artifact`" in contract
     assert "requested primary artifact" in contract
-    assert "pure image-forward decks" in contract
-    assert "full-slide image per\n  slide" in contract
-    assert "deck_plan.json" in contract
-    assert "build_deck_from_slides" not in contract
+    # HTML-slide decks (restored 2026-06-29): author slides/*.html + build_deck_from_slides.
+    assert "Presentations are HTML-slide decks" in contract
+    assert "build_deck_from_slides" in contract
+    assert "../assets/<file>" in contract
+    assert "pure image-forward" not in contract
+    assert "deck_plan.json" not in contract
     # PDF reports are authored as HTML and rendered via render_html_to_pdf; the
     # markdown→pandoc path and remote generate_chart are retired for reports.
     assert "render_html_to_pdf" in contract
@@ -43,15 +45,15 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
 def test_visual_composition_routes_pptx_and_pdf_to_separate_pipelines() -> None:
     directives = _sophia_prompt("visual_composition.md")
 
-    assert "Presentations (`.pptx`) are pure image-forward decks" in directives
-    assert "full-slide\n  16:9 bitmap per slide" in directives
-    assert "deck_plan.json" in directives
-    assert "build_deck_from_slides" not in directives
+    assert "Presentations (`.pptx`) are HTML-slide decks" in directives
+    assert "build_deck_from_slides" in directives
+    assert "../assets/<file>" in directives
+    assert "pure image-forward" not in directives
+    assert "deck_plan.json" not in directives
     # PDF reports are authored as one self-contained HTML file with inline <svg>
     # figures and rendered via render_html_to_pdf (no remote chart service).
     assert "render_html_to_pdf" in directives
     assert "inline static" in directives
-    assert "There is no alternate plain deck mode" in directives
     # Custom excalidraw tool removed AND remote generate_chart retired for reports.
     assert "generate_excalidraw_diagram" not in directives
     assert "no remote `generate_chart`" in directives
@@ -59,33 +61,33 @@ def test_visual_composition_routes_pptx_and_pdf_to_separate_pipelines() -> None:
     assert "generate_report_chart" not in directives
 
 
-def test_ppt_generation_skill_authors_image_forward_decks() -> None:
+def test_ppt_generation_skill_authors_html_slide_decks() -> None:
     text = _skill("ppt-generation")
 
-    assert "pure image-forward" in text
-    assert "Every slide is a single 16:9 image" in text
-    assert "deck_plan.json" in text
-    assert "image_path" in text
+    assert "build_deck_from_slides" in text
+    assert "slides/" in text
+    assert "../assets/" in text
     assert "--slide-visual" in text
-    assert '"slide_visual": true' in text
-    assert "--plan-file" in text
-    assert "/mnt/skills/public/ppt-generation/scripts/generate.py" in text
+    assert "VISUAL-ONLY" in text or "visual area only" in text.lower()
     assert "python-pptx" in text  # appears only as a prohibition
     assert "pptxgenjs" in text
-    assert "build_deck_from_slides" in text  # appears only as a prohibition
-    assert "slides/" not in text
-    assert "../assets/" not in text
+    # image-forward residue absent
+    assert "pure image-forward" not in text
+    assert "deck_plan.json" not in text
+    assert "--plan-file" not in text
+    assert "Every slide is a single 16:9 image" not in text
     assert "generate_visual_asset" not in text
     assert "generate_report_chart" not in text
 
 
-def test_ppt_generation_skill_does_not_force_dark_theme() -> None:
+def test_ppt_generation_skill_requires_opaque_edges() -> None:
+    # White-space guarantee for the HTML path: the slide must be opaque dark to
+    # all four edges (html, body background), so no uncovered region renders white.
     text = _skill("ppt-generation")
+    assert "html, body { margin: 0; padding: 0; background: #0e1626; }" in text
     lowered = text.lower()
-    assert "light or dark" in lowered
-    assert "no unintended blank gutters" in lowered
-    assert "opaque dark" not in lowered
-    assert "html, body" not in lowered
+    assert "opaque dark to all four edges" in lowered
+    assert "never baked into the image" in lowered
 
 
 def test_pdf_report_skill_uses_html_and_inline_svg() -> None:
@@ -121,8 +123,11 @@ def test_image_generation_skill_allows_bounded_pdf_conceptual_images() -> None:
     assert "3 conceptual/editorial" in text
     assert "render_html_to_pdf" in text
     assert "generate_chart" not in text
-    assert "renders full slides" in text
-    assert "generated image full bleed" in text
+    # --slide-visual is VISUAL-ONLY now (slide title/narrative are real HTML);
+    # the old image-forward "renders full slides / full bleed" contract is gone.
+    assert "visual area only" in text.lower() or "visual-only" in text.lower()
+    assert "renders full slides" not in text
+    assert "generated image full bleed" not in text
     assert "generate_visual_asset" not in text
     assert "anti_slop.md" not in text
 
@@ -143,7 +148,9 @@ def test_forbidden_double_path_prompt_tokens_are_absent() -> None:
         "title_strategy",
         "native",
         "fallback",
-        "text-only",
+        # "text-only" is intentionally NOT forbidden: HTML-slide decks support
+        # plain no-image slides ("clean text-only slides"), and PDF reports
+        # describe non-text-only figures — both legitimate (2026-06-29).
         "opt-out",
         "deterministic chart",
         "section-divider",
@@ -165,18 +172,20 @@ def test_brand_tokens_resolve_the_georgia_conflict() -> None:
     assert "graphviz" in tokens
 
 
-# Deck steering must use the restored image-forward compiler path and must not
-# reintroduce the removed HTML-slide/build_deck_from_slides route as guidance.
-_RETIRED_HTML_DECK_TOKENS = (
-    "author one self-contained 1920x1080 html",
-    "author one html",
-    "slides/*.html",
-    "../assets/",
-    "real dom text",
-    "real html text",
-    "visual-area image",
-    "visual area only",
-    "call build_deck_from_slides",
+# Deck steering must use the restored HTML-slide path (build_deck_from_slides)
+# and must not reintroduce image-forward compiler guidance (2026-06-29). These
+# tokens are POSITIVE image-forward instructions that must never appear in a deck
+# correction; `build_deck_from_slides` legitimately mentions `generate.py
+# --plan-file` only inside a "do NOT run …" prohibition, so that phrase is not
+# banned here — these tokens are.
+_IMAGE_FORWARD_DECK_TOKENS = (
+    "pure image-forward",
+    "full-slide image",
+    "full-slide bitmap",
+    "baked into the bitmap",
+    "deck_plan.json",
+    "image_path",
+    "engine-composed",
 )
 
 
@@ -222,19 +231,16 @@ def _render_deck_corrections() -> dict[str, str]:
     return {k: v for k, v in messages.items() if isinstance(v, str) and v}
 
 
-def test_deck_corrections_use_image_forward_compiler_not_html_slide_flow() -> None:
+def test_deck_corrections_use_html_slide_flow_not_image_forward() -> None:
     rendered = _render_deck_corrections()
     canonical = rendered["compile_latch_ready"].lower()
-    assert "/mnt/skills/public/ppt-generation/scripts/generate.py" in canonical
-    assert "--plan-file" in canonical
-    assert "deck_plan.json" in canonical
-    assert "image_path" in canonical
+    assert "build_deck_from_slides" in canonical
+    assert "/mnt/user-data/outputs/slides/" in canonical
+    assert "../assets/" in canonical
     for name, message in rendered.items():
         low = message.lower()
-        for token in _RETIRED_HTML_DECK_TOKENS:
-            if token == "call build_deck_from_slides" and "do not call build_deck_from_slides" in low:
-                continue
-            assert token not in low, f"retired deck token {token!r} in {name} correction"
+        for token in _IMAGE_FORWARD_DECK_TOKENS:
+            assert token not in low, f"image-forward token {token!r} in {name} correction"
 
 
 def test_retired_deck_correction_functions_are_deleted() -> None:
@@ -250,7 +256,7 @@ def test_retired_deck_correction_functions_are_deleted() -> None:
     assert not hasattr(ba.BuilderArtifactMiddleware, "_maybe_inject_pptx_plan_correction")
 
 
-def test_pptx_emit_rejection_messages_use_image_forward_flow(monkeypatch) -> None:
+def test_pptx_emit_rejection_messages_use_html_slide_flow(monkeypatch) -> None:
     from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
 
     out = "/mnt/user-data/outputs/"
@@ -262,15 +268,15 @@ def test_pptx_emit_rejection_messages_use_image_forward_flow(monkeypatch) -> Non
     monkeypatch.setattr(ba, "_requested_artifact_ext", lambda _s: "pptx")
     visual_presence = ba.BuilderArtifactMiddleware._visual_presence_rejection_message({}, state)
     assert visual_presence, "visual-presence rejection should render for a pptx with unembedded assets"
-    assert "deck_plan.json" in visual_presence
-    assert "ppt-generation/scripts/generate.py" in visual_presence
-    for token in _RETIRED_HTML_DECK_TOKENS:
-        assert token not in visual_presence.lower(), f"retired token {token!r} in visual-presence rejection"
+    assert "build_deck_from_slides" in visual_presence
+    assert "../assets/" in visual_presence
+    for token in _IMAGE_FORWARD_DECK_TOKENS:
+        assert token not in visual_presence.lower(), f"image-forward token {token!r} in visual-presence rejection"
 
     monkeypatch.setattr(ba.BuilderArtifactMiddleware, "_hero_gate_blocks_emit", classmethod(lambda _cls, _a, _s: True))
     monkeypatch.setattr(ba, "_visuals_requested", lambda _s: False)  # opens the hero guard
     hero = ba.BuilderArtifactMiddleware._hero_rejection_message({}, state)
     assert hero, "hero rejection should render when the hero gate blocks"
-    assert "deck_plan.json" in hero
-    for token in _RETIRED_HTML_DECK_TOKENS:
-        assert token not in hero.lower(), f"retired token {token!r} in hero rejection"
+    assert "build_deck_from_slides" in hero
+    for token in _IMAGE_FORWARD_DECK_TOKENS:
+        assert token not in hero.lower(), f"image-forward token {token!r} in hero rejection"

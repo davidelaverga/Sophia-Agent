@@ -3232,16 +3232,24 @@ class TestBuilderArtifactMiddleware:
         update = mw._combined_before_model_updates(state, _make_runtime(thread_id="thread-x"))
         assert update is None
 
-    def test_complete_slide_images_latch_image_forward_compiler(self, tmp_path):
+    def test_complete_slide_html_latches_deck_builder(self, tmp_path):
+        # HTML-slide path + floor (2026-06-29): the compile latch fires on
+        # slide-HTML completeness, decoupled from image yield. Here 3/3 slide
+        # HTML files exist but only 1 image succeeded — the latch still fires and
+        # steers to build_deck_from_slides (the harness placeholders the missing
+        # visuals), instead of looping for all images.
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
-        outputs_dir.mkdir()
+        slides_dir = outputs_dir / "slides"
+        slides_dir.mkdir(parents=True)
+        for name in ("01.html", "02.html", "03.html"):
+            (slides_dir / name).write_text("<html><body>slide</body></html>")
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
             "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
             "builder_pptx_requested_slide_count": 3,
-            "builder_pptx_diagnostics": {"image_generation_success_count": 3},
+            "builder_pptx_diagnostics": {"image_generation_success_count": 1},
         }
         mw = BuilderArtifactMiddleware()
 
@@ -3250,9 +3258,11 @@ class TestBuilderArtifactMiddleware:
         assert update is not None
         assert update["builder_pptx_compile_latch_pending"] is True
         content = update["messages"][0].content
-        assert "ppt-generation/scripts/generate.py" in content
-        assert "--plan-file" in content
-        assert "image_path" in content
+        assert "build_deck_from_slides" in content
+        # deck_plan.json / image_path are image-forward residue and must be absent
+        # ("generate.py --plan-file" may still appear inside the do-NOT prohibition).
+        assert "deck_plan.json" not in content
+        assert "image_path" not in content
 
     def test_pptx_slide_images_ready_does_not_force_removed_deck_builder_tool(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -4352,7 +4362,7 @@ class TestBuilderArtifactMiddleware:
 
     def test_pptx_skill_read_alone_still_gets_deck_steering_correction(self, tmp_path):
         # The drift/skill correction still fires and injects the canonical
-        # image-forward compiler steering message.
+        # HTML-slide deck steering message (build_deck_from_slides), not image-forward.
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -4373,10 +4383,10 @@ class TestBuilderArtifactMiddleware:
         assert result is not None
         assert result["builder_pptx_skill_correction_emitted"] is True
         content = result["messages"][0].content
-        assert "/mnt/skills/public/ppt-generation/scripts/generate.py" in content
-        assert "--plan-file" in content
-        assert "image_path" in content
-        assert "build_deck_from_slides" in content  # prohibition only
+        assert "build_deck_from_slides" in content
+        assert "/mnt/user-data/outputs/slides/" in content
+        assert "deck_plan.json" not in content
+        assert "image_path" not in content
 
     def test_pptx_generator_invocation_suppresses_skill_correction(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware

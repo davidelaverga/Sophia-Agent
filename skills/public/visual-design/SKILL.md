@@ -22,10 +22,14 @@ be generated locally under `/mnt/user-data/outputs/`.
    directly in the HTML source, or reference local SVG/PNG assets already under
    `/mnt/user-data/outputs/`; do not use `generate_chart`,
    chart-visualization, remote chart URLs, or browser-only chart scripts.
-4. For PPTX decks, generate the required slide bitmaps with the image-generation
-   slide-visual workflow and reference those local files from the PPTX plan.
+4. For PPTX decks, author one self-contained HTML slide per slide (real DOM
+   title + narrative) and embed at most one visual-only image per slide from
+   `/mnt/user-data/outputs/assets/` by a relative `../assets/<file>` path; the
+   image-generation slide-visual workflow produces the visual area only — titles
+   and narrative are HTML text, never baked into the image. Convert with
+   `build_deck_from_slides`.
 5. Embed or reference the local visual evidence in the final HTML, PDF source,
-   or PPTX plan before emitting the artifact.
+   or HTML slides before emitting the artifact.
 
 ## Visual Quality Rules
 
@@ -58,8 +62,10 @@ be generated locally under `/mnt/user-data/outputs/`.
 - PDF: prefer visible inline static SVG figures in the HTML source before
   rendering; local SVG/PNG assets are acceptable when they are under outputs.
   Do not rely on browser-only scripts.
-- PPTX: generated slide images must contain the requested visual evidence
-  directly in the bitmap.
+- PPTX: each slide is an HTML document with real DOM title/narrative text plus at
+  most one visual-only image embedded by a relative `../assets/<file>` path; the
+  generated image carries the visual evidence, never the slide text. Convert with
+  `build_deck_from_slides`.
 
 ## Done Criteria
 

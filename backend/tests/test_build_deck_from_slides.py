@@ -35,12 +35,13 @@ def _call(**kwargs) -> dict:
 # ---- toolset wiring --------------------------------------------------------
 
 
-def test_presentation_toolset_uses_bash_compiler_not_deck_builder_tool():
+def test_presentation_toolset_offers_deck_builder_not_pdf_renderer():
+    # HTML-slide deck path restored (2026-06-29): presentations get
+    # build_deck_from_slides, NOT the report HTML→PDF renderer.
     names = [getattr(t, "name", "") for t in build_builder_tools_for_task_type("presentation", vision_enabled=False)]
-    assert "bash" in names
-    assert "build_deck_from_slides" not in names
+    assert "build_deck_from_slides" in names
     assert "render_html_to_pdf" not in names
-    # report path is unchanged
+    # report path is unchanged — renderer yes, deck builder no
     rnames = [getattr(t, "name", "") for t in build_builder_tools_for_task_type("document", vision_enabled=False)]
     assert "render_html_to_pdf" in rnames
     assert "build_deck_from_slides" not in rnames
@@ -241,8 +242,9 @@ def test_backstop_blocks_bash_python_pptx():
         _req("bash", {"command": "python -c 'from pptx import Presentation'"})
     )
     assert isinstance(r, Command)
-    assert "ppt-generation/scripts/generate.py" in r.update["messages"][0].content
-    assert "build_deck_from_slides" not in r.update["messages"][0].content
+    # HTML-slide path: the block steers to build_deck_from_slides, not generate.py.
+    assert "build_deck_from_slides" in r.update["messages"][0].content
+    assert "generate.py --plan-file" not in r.update["messages"][0].content
 
 
 def test_backstop_blocks_py_writefile_with_pptx():

@@ -1256,8 +1256,8 @@ def test_presentation_brief_gains_visual_expectations_line():
     )
     assert line is not None
     assert "Visual expectations" in line
-    assert "generated image-forward deck" in line
-    assert "generated visual asset" in line
+    assert "HTML-slide deck" in line
+    assert "visual asset" in line
     assert "real HTML" in line
     assert "baked title" not in line
 
@@ -1303,7 +1303,7 @@ def test_bare_plain_style_with_images_keeps_visual_expectations_line():
     line = _visual_expectations_line("A plain-English deck with illustrations", "presentation")
     assert line is not None
     assert "do NOT use generated imagery" not in line
-    assert "generated image-forward deck" in line
+    assert "HTML-slide deck" in line
 
 
 def test_explaining_deck_uses_image_forward_line():
@@ -1312,7 +1312,7 @@ def test_explaining_deck_uses_image_forward_line():
     line = _visual_expectations_line("Build a deck explaining OpenClaw", "presentation")
     assert line is not None
     assert "do NOT use generated imagery" not in line
-    assert "generated image-forward deck" in line
+    assert "HTML-slide deck" in line
 
 
 def test_style_keywords_surface_in_brief():
