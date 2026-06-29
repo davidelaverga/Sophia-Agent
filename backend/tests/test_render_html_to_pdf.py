@@ -366,6 +366,8 @@ def test_render_html_to_pdf_ignores_hidden_comment_and_sprite_svg(staged):
         "<html><body>"
         "<!-- <svg><rect width='100' height='100'/></svg> -->"
         "<svg style='display:none'><rect width='100' height='100'/></svg>"
+        "<div style='display:none'><svg><rect width='100' height='100'/></svg></div>"
+        "<figure hidden><svg><rect width='100' height='100'/></svg></figure>"
         "<svg><defs><symbol id='icon'><path d='M0 0h1v1z'/></symbol></defs></svg>"
         "<svg aria-hidden='true'><circle cx='5' cy='5' r='4'/></svg>"
         "<figure><svg><path d='M0 0h10v10z'/></svg></figure>"

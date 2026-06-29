@@ -87,12 +87,19 @@ class _VisibleInlineSvgCounter(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.count = 0
+        self._html_stack: list[dict[str, str | bool]] = []
         self._stack: list[dict[str, int | bool]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag_name = tag.lower()
         if tag_name == "svg":
-            parent_hidden = bool(self._stack[-1]["hidden"]) if self._stack else False
+            parent_hidden = (
+                bool(self._stack[-1]["hidden"])
+                if self._stack
+                else bool(self._html_stack[-1]["hidden"])
+                if self._html_stack
+                else False
+            )
             self._stack.append(
                 {
                     "hidden": parent_hidden or _attrs_hidden(attrs),
@@ -102,6 +109,13 @@ class _VisibleInlineSvgCounter(HTMLParser):
             )
             return
         if not self._stack:
+            parent_hidden = bool(self._html_stack[-1]["hidden"]) if self._html_stack else False
+            self._html_stack.append(
+                {
+                    "tag": tag_name,
+                    "hidden": parent_hidden or _attrs_hidden(attrs),
+                }
+            )
             return
         current = self._stack[-1]
         if tag_name in _SVG_STRUCTURAL_TAGS:
@@ -118,6 +132,10 @@ class _VisibleInlineSvgCounter(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         tag_name = tag.lower()
         if not self._stack:
+            for index in range(len(self._html_stack) - 1, -1, -1):
+                if self._html_stack[index]["tag"] == tag_name:
+                    del self._html_stack[index:]
+                    break
             return
         if tag_name == "svg":
             current = self._stack.pop()
