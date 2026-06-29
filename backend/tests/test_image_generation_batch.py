@@ -33,14 +33,17 @@ def _load_script_module():
     return module
 
 
-def _run_manifest(manifest: dict, tmp_path: Path) -> tuple[int, dict | None]:
+def _run_manifest(manifest: dict, tmp_path: Path, *, env: dict[str, str] | None = None) -> tuple[int, dict | None]:
     manifest_path = tmp_path / "manifest.json"
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    proc_env = {"PATH": "/usr/bin:/bin", "OPENAI_API_KEY": ""}
+    if env:
+        proc_env.update(env)
     proc = subprocess.run(
         [sys.executable, str(_SCRIPT), "--manifest", str(manifest_path)],
         capture_output=True,
         text=True,
-        env={"PATH": "/usr/bin:/bin", "OPENAI_API_KEY": ""},
+        env=proc_env,
     )
     summary = None
     for line in proc.stdout.splitlines():
@@ -82,6 +85,23 @@ def test_per_item_failure_is_isolated(tmp_path) -> None:
         str(tmp_path / "o1.png"),
         str(tmp_path / "o2.png"),
     }
+    assert code == 1
+
+
+def test_manifest_concurrency_is_capped_by_env_override(tmp_path) -> None:
+    manifest = {
+        "items": [
+            {"prompt_file": str(tmp_path / f"missing-{index}.json"), "output_file": str(tmp_path / f"o{index}.png")}
+            for index in range(4)
+        ],
+        "concurrency": 8,
+    }
+
+    code, summary = _run_manifest(manifest, tmp_path, env={"SOPHIA_IMAGE_GEN_CONCURRENCY": "2"})
+
+    assert summary is not None
+    assert summary["requested"] == 4
+    assert summary["concurrency"] == 2
     assert code == 1
 
 

@@ -857,10 +857,11 @@ def _run_batch(manifest_path: str) -> int:
     # transient 429s instead of re-saturating the limit. Override via
     # SOPHIA_IMAGE_GEN_CONCURRENCY (drop to 2 on a low tier).
     env_conc = os.environ.get("SOPHIA_IMAGE_GEN_CONCURRENCY", "").strip()
-    concurrency = int(env_conc) if env_conc.isdigit() and int(env_conc) > 0 else 3
+    max_concurrency = int(env_conc) if env_conc.isdigit() and int(env_conc) > 0 else 3
+    concurrency = max_concurrency
     requested_conc = manifest.get("concurrency")
     if isinstance(requested_conc, int) and requested_conc > 0:
-        concurrency = requested_conc
+        concurrency = min(requested_conc, max_concurrency)
     concurrency = max(1, min(concurrency, len(items)))
 
     def _one(item: dict) -> dict:
