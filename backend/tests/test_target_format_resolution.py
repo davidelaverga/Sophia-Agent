@@ -85,6 +85,22 @@ def test_pdf_slide_deck_resolves_to_pdf():
     assert reason == "explicit_pdf_deck_deliverable"
 
 
+def test_pdf_presentation_source_context_does_not_force_pdf_output():
+    ext, reason = _requested_output_extension_match(
+        "summarize my PDF presentation into speaker notes"
+    )
+    assert ext is None
+    assert reason is None
+
+    resolution = _resolve_target_format(
+        current_user_text="summarize my PDF presentation into speaker notes",
+        description=None,
+        task_type="document",
+    )
+    assert resolution.final_ext == "md"
+    assert resolution.source == "task_type_default"
+
+
 def test_pdf_about_presentation_topic_resolves_to_pdf():
     ext, reason = _requested_output_extension_match(
         "write a PDF summary of presentation skills"

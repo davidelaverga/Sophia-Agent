@@ -184,7 +184,8 @@ _PDF_DECK_DELIVERY_RE = re.compile(
     r"\b(?:as|to|in|into)\s+(?:an?\s+)?pdf(?:\s+format)?"
     r"|(?:export|render|convert|save|download|deliver|produce|make|create|build)\s+[^.?!\n]{0,80}?"
     r"\b(?:slides?|slide\s+deck|deck|presentation)\b\s+(?:an?\s+)?pdf(?:\s+format)?"
-    r"|pdf\s+(?:slides?|slide\s+deck|deck|presentation)"
+    r"|(?:export|render|convert|save|download|deliver|produce|make|create|build)\s+"
+    r"(?:an?\s+)?pdf\s+(?:slides?|slide\s+deck|deck|presentation)"
     r")",
     re.IGNORECASE,
 )
