@@ -9211,6 +9211,27 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return "", False
         return Path(path).suffix.lower().lstrip("."), _extract_output_relative_path(path) is not None
 
+    @staticmethod
+    def _is_slide_html_edit(request: ToolCallRequest) -> bool:
+        """True when this write/edit targets an ``outputs/slides/*.html`` slide file.
+
+        Only a real slide-HTML edit may clear ``builder_pptx_compile_repair_pending``.
+        The repair latch is set by both the slide_render_failed repair and the
+        slide-quality gate — in both cases the model must edit the slide HTML before
+        the compile force re-fires. If ANY write (a manifest, notes, an asset, scratch)
+        cleared the latch, the compile force could recompile UNCHANGED slides and —
+        because the one-shot quality gate is already spent — ship the stale deck
+        (Codex P2, review 4601126059).
+        """
+        args = request.tool_call.get("args")
+        if not isinstance(args, dict):
+            return False
+        raw = str(args.get("path") or args.get("file_path") or "").strip().replace("\\", "/")
+        if not raw:
+            return False
+        pure = PurePosixPath(raw)
+        return pure.suffix.lower() in {".html", ".htm"} and pure.parent.name == "slides"
+
     def _write_result_command(
         self,
         request: ToolCallRequest,
@@ -9235,9 +9256,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             update={
                 "messages": [result],
                 "builder_write_diagnostics": delta,
+                # Clear the compile-repair latch ONLY on a successful slide-HTML edit
+                # (Codex P2 4601126059) — a scratch/manifest write must not unlock a
+                # recompile of unchanged slides past the spent quality gate.
                 **(
                     {"builder_pptx_compile_repair_pending": False}
-                    if delta["last_status"] == "success"
+                    if delta["last_status"] == "success" and self._is_slide_html_edit(request)
                     else {}
                 ),
             }
@@ -9259,7 +9283,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return Command(
             update={
                 "messages": [result],
-                "builder_pptx_compile_repair_pending": False,
+                # Same slide-HTML-only latch clear as _write_result_command.
+                **(
+                    {"builder_pptx_compile_repair_pending": False}
+                    if self._is_slide_html_edit(request)
+                    else {}
+                ),
             }
         )
 

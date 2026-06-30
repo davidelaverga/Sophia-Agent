@@ -503,3 +503,58 @@ def test_slide_quality_gate_only_for_pptx_targets(tmp_path):
     request.state["delegation_context"] = {"task_type": "document"}
     result = _deck_tool_message({"success": True, "overflow_slides": [{"slide": 1, "overflow_px": 300}]})
     assert BuilderArtifactMiddleware()._slide_quality_rejection_command(request, result, {}) is None
+
+
+# ---- Codex P2 4601126059: repair latch clears ONLY on a slide-HTML edit -------
+
+
+def _write_request(path: str, tool: str = "write_file"):
+    return SimpleNamespace(
+        tool_call={"name": tool, "args": {"path": path}, "id": "w"},
+        state={},
+    )
+
+
+def test_repair_latch_clears_on_slide_html_write():
+    from langchain_core.messages import ToolMessage
+
+    mw = BuilderArtifactMiddleware()
+    cmd = mw._tool_result_command(
+        _write_request(f"{_OUTPUTS}slides/03.html"),
+        ToolMessage(content="OK wrote file", tool_call_id="w"),
+    )
+    assert isinstance(cmd, Command)
+    assert cmd.update["builder_pptx_compile_repair_pending"] is False
+
+
+def test_repair_latch_not_cleared_by_non_slide_write():
+    # A manifest / notes / asset write during a deck repair must NOT clear the
+    # latch — else the compile force recompiles unchanged slides and ships the
+    # stale deck past the spent quality gate.
+    from langchain_core.messages import ToolMessage
+
+    mw = BuilderArtifactMiddleware()
+    for path in (
+        f"{_OUTPUTS}assets/manifest.json",
+        f"{_OUTPUTS}notes.md",
+        f"{_OUTPUTS}deck.html",  # html but not under slides/
+    ):
+        cmd = mw._tool_result_command(_write_request(path), ToolMessage(content="OK wrote file", tool_call_id="w"))
+        assert isinstance(cmd, Command)
+        assert "builder_pptx_compile_repair_pending" not in cmd.update, path
+
+
+def test_repair_latch_str_replace_only_clears_for_slide_html():
+    from langchain_core.messages import ToolMessage
+
+    mw = BuilderArtifactMiddleware()
+    slide_edit = mw._tool_result_command(
+        _write_request(f"{_OUTPUTS}slides/01.html", tool="str_replace"),
+        ToolMessage(content="OK edited", tool_call_id="w"),
+    )
+    assert slide_edit.update["builder_pptx_compile_repair_pending"] is False
+    scratch_edit = mw._tool_result_command(
+        _write_request(f"{_OUTPUTS}notes.md", tool="str_replace"),
+        ToolMessage(content="OK edited", tool_call_id="w"),
+    )
+    assert "builder_pptx_compile_repair_pending" not in scratch_edit.update
