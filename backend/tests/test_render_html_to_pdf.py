@@ -396,6 +396,22 @@ def test_render_html_to_pdf_counts_semi_transparent_svg_but_not_zero_opacity(sta
     assert render_html._count_inline_svg(staged / "report.html") == 2
 
 
+def test_render_html_to_pdf_counts_self_closing_svg_marks(staged):
+    # Codex review 4601262227 worried self-closing <path/>/<circle/>/<rect/> bypass
+    # the counter via handle_startendtag. Verified FALSE: HTMLParser's default
+    # handle_startendtag delegates to handle_starttag, so self-closing marks (bare
+    # and inside <g>) ARE counted. Lock that behavior (the counter was refactored
+    # in db74b179 for hidden-container tracking).
+    (staged / "report.html").write_text(
+        "<html><body>"
+        "<svg><path d='M0 0h10v10z'/></svg>"
+        "<svg><circle cx='5' cy='5' r='4'/></svg>"
+        "<figure><svg><g><rect width='10' height='10'/></g></svg></figure>"
+        "</body></html>"
+    )
+    assert render_html._count_inline_svg(staged / "report.html") == 3
+
+
 def test_render_html_to_pdf_ignores_svg_hidden_via_container_group(staged):
     # Codex P2 (review 4600605339): marks wrapped in a hidden SVG container group
     # (<g style="display:none"> / <g opacity="0"> / nested) must NOT count — only
