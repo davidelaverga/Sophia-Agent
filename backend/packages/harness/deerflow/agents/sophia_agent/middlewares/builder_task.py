@@ -383,6 +383,20 @@ _PAGE_TARGET_OUTPUT_NOUN_BEFORE_COUNT_RE = re.compile(
     re.IGNORECASE,
 )
 _PAGE_TARGET_SOURCE_NOUN_RE = re.compile(r"\b(?:report|document|source|memo|paper|file|article)\b", re.IGNORECASE)
+# A page count glued to "PDF" ("10-page PDF") names an OUTPUT length only when the
+# PDF is being created ("create a 2-page PDF"). When the same compound is
+# introduced as an EXISTING document — by a demonstrative/possessive ("this
+# 10-page PDF", "my 10-page PDF") or an explicit source word ("the attached
+# 10-page PDF") — the count describes the SOURCE, not the requested length, so the
+# after-PDF heuristic must NOT claim it. Bare "a"/"an"/"the" are intentionally NOT
+# source markers (they front output requests). Codex P2 (2026-06-29): "summarize
+# this 10-page PDF into a 2-page brief" wrongly targeted requested_pages=10.
+_PAGE_SOURCE_CONTEXT_BEFORE_RE = re.compile(
+    r"\b(?:this|that|these|those|my|our|your|its|their|"
+    r"attached|uploaded|provided|given|existing|enclosed|original|source|input)\b"
+    r"(?:\s+[\w-]+){0,3}\s*$",
+    re.IGNORECASE,
+)
 _SLIDE_COUNT_RE = re.compile(r"(?<!\d)(\d{1,2})\s*(?:-| )?\s*slides?\b", re.IGNORECASE)
 _SLIDE_TARGET_OUTPUT_BEFORE_RE = re.compile(
     r"\b(?:presentation|deck|slides?|pptx|slideshow|deliverable|output)\b.{0,80}"
@@ -426,6 +440,7 @@ def _page_target_is_output_context(text: str, match: re.Match[str]) -> bool:
         after_pdf
         and len(re.findall(r"\w+", after[: after_pdf.start()])) <= 4
         and not _PAGE_TARGET_SOURCE_NOUN_RE.search(after[: after_pdf.start()])
+        and not _PAGE_SOURCE_CONTEXT_BEFORE_RE.search(before)
     )
     after_targets_output_noun = bool(
         _PAGE_TARGET_OUTPUT_VERB_BEFORE_RE.search(before)

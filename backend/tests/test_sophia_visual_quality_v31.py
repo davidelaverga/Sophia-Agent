@@ -415,3 +415,40 @@ def test_pdf_page_target_accepts_count_after_summary_brief_and_article_nouns() -
         )
 
         assert updates["builder_pdf_requested_page_count"] == expected
+
+
+def test_pdf_page_target_ignores_source_n_page_pdf_compound() -> None:
+    # Codex P2 (2026-06-29): "N-page PDF" introduced by a demonstrative/possessive
+    # or explicit source word names the SOURCE document, not the requested length.
+    # The after-PDF heuristic must not target the source count.
+    source_cases = [
+        "Summarize this 10-page PDF into a 2-page brief.",
+        "Shorten my 9-page PDF to the key points.",
+        "Condense the attached 12-page PDF for me.",
+    ]
+    for task in source_cases:
+        updates = _pdf_page_target_updates(
+            {"task_type": "pdf", "task": task},
+            companion_artifact={},
+            artifact_target_path="/mnt/user-data/outputs/brief.pdf",
+        )
+        # The source page count must never become the requested length.
+        for source_count in (10, 9, 12):
+            assert updates.get("builder_pdf_requested_page_count") != source_count
+
+
+def test_pdf_page_target_still_accepts_output_n_page_pdf_compound() -> None:
+    # The "N-page PDF" compound fronted by a build verb + indefinite article is a
+    # genuine OUTPUT length and must still be captured (regression guard for the
+    # source-context veto above).
+    output_cases = [
+        ("Create a 10-page PDF report on agentic RL.", 10),
+        ("Generate a 6-page PDF on retrieval quality.", 6),
+    ]
+    for task, expected in output_cases:
+        updates = _pdf_page_target_updates(
+            {"task_type": "pdf", "task": task},
+            companion_artifact={},
+            artifact_target_path="/mnt/user-data/outputs/retrieval-quality.pdf",
+        )
+        assert updates["builder_pdf_requested_page_count"] == expected
