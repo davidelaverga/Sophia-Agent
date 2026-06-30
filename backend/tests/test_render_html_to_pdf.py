@@ -396,6 +396,25 @@ def test_render_html_to_pdf_counts_semi_transparent_svg_but_not_zero_opacity(sta
     assert render_html._count_inline_svg(staged / "report.html") == 2
 
 
+def test_render_html_to_pdf_ignores_svg_hidden_via_container_group(staged):
+    # Codex P2 (review 4600605339): marks wrapped in a hidden SVG container group
+    # (<g style="display:none"> / <g opacity="0"> / nested) must NOT count — only
+    # the descendant's own attrs + the <svg> hidden flag were checked before, so a
+    # hidden sprite could satisfy vector_visual_count with no visible figure.
+    (staged / "report.html").write_text(
+        "<html><body>"
+        "<svg><g style='display:none'><path d='M0 0h10v10z'/></g></svg>"
+        "<svg><g opacity='0'><rect width='10' height='10'/></g></svg>"
+        "<svg><g><g style='display:none'><circle cx='5' cy='5' r='4'/></g></g></svg>"
+        "<svg><a style='visibility:hidden'><path d='M0 0h4v4z'/></a></svg>"
+        # The one genuinely-visible figure: a renderable <g> with real marks.
+        "<figure><svg><g><path d='M0 0h10v10z'/></g></svg></figure>"
+        "</body></html>"
+    )
+
+    assert render_html._count_inline_svg(staged / "report.html") == 1
+
+
 def test_chromium_html_renderers_block_external_subresources():
     pdf_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_pdf.mjs"
     png_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_png.mjs"

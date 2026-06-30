@@ -152,6 +152,11 @@ services:
       # Preserve the .venv built during Docker image build — mounting the full backend/
       # directory above would otherwise shadow it with the (empty) host directory.
       - langgraph-venv:/app/backend/.venv
+      # Same reason for the JS node_modules (playwright-core/pptxgenjs) installed at
+      # image-build time — the backend/ bind mount above shadows them, breaking the
+      # render_html_to_pdf / build_deck_from_slides node scripts (Codex review 4600541428).
+      # (readabilipy's node_modules lives under .venv, already preserved above.)
+      - langgraph-js-node-modules:/app/backend/packages/harness/deerflow/sophia/js/node_modules
       - ../config.yaml:/app/config.yaml
       - ../extensions_config.json:/app/extensions_config.json
       - ../skills:/app/skills
@@ -180,6 +185,8 @@ volumes:
   # image build are not shadowed by the host backend/ directory mount.
   gateway-venv:
   langgraph-venv:
+  # Same, for the langgraph JS node_modules built during image build.
+  langgraph-js-node-modules:
 
 networks:
   deer-flow-dev:

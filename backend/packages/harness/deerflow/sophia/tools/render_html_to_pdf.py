@@ -69,6 +69,14 @@ _SVG_VISIBLE_CONTENT_TAGS = {
     "text",
     "use",
 }
+# Renderable SVG container groups that can carry display:none / opacity:0 / hidden
+# on themselves and hide everything inside. The hidden state must propagate to
+# descendant content (a hidden <g> sprite must NOT satisfy the visual gate).
+_SVG_CONTAINER_TAGS = {
+    "g",
+    "a",
+    "switch",
+}
 
 
 def _attrs_hidden(attrs: list[tuple[str, str | None]]) -> bool:
@@ -92,6 +100,20 @@ def _attrs_hidden(attrs: list[tuple[str, str | None]]) -> bool:
             pass
     if attr_map.get("width") in {"0", "0px"} or attr_map.get("height") in {"0", "0px"}:
         return True
+    # SVG presentation attributes (the style-less form, e.g. `<g opacity="0">` /
+    # `<g visibility="hidden">` / `<g display="none">`) hide the same way as the
+    # CSS properties above (Codex P2, review 4600605339).
+    if attr_map.get("display", "").strip().lower() == "none":
+        return True
+    if attr_map.get("visibility", "").strip().lower() in {"hidden", "collapse"}:
+        return True
+    opacity_attr = attr_map.get("opacity")
+    if opacity_attr is not None and opacity_attr.strip() != "":
+        try:
+            if float(opacity_attr) == 0:
+                return True
+        except ValueError:
+            pass
     return False
 
 
@@ -100,13 +122,27 @@ class _VisibleInlineSvgCounter(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.count = 0
         self._html_stack: list[dict[str, str | bool]] = []
-        self._stack: list[dict[str, int | bool]] = []
+        self._stack: list[dict[str, object]] = []
+
+    def _current_svg_hidden(self) -> bool:
+        """Effective hidden state at the cursor inside the current <svg>.
+
+        Walks the open SVG container groups (innermost wins) and falls back to
+        the <svg>'s own hidden flag — so a <path> inside a hidden <g> / <defs> /
+        <mask> is NOT counted even though its own attrs are clean (Codex P2,
+        review 4600605339).
+        """
+        current = self._stack[-1]
+        containers = current["containers"]
+        if containers:
+            return bool(containers[-1]["hidden"])
+        return bool(current["hidden"])
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag_name = tag.lower()
         if tag_name == "svg":
             parent_hidden = (
-                bool(self._stack[-1]["hidden"])
+                self._current_svg_hidden()
                 if self._stack
                 else bool(self._html_stack[-1]["hidden"])
                 if self._html_stack
@@ -115,7 +151,7 @@ class _VisibleInlineSvgCounter(HTMLParser):
             self._stack.append(
                 {
                     "hidden": parent_hidden or _attrs_hidden(attrs),
-                    "structural_depth": 0,
+                    "containers": [],
                     "visible_content_count": 0,
                 }
             )
@@ -130,15 +166,17 @@ class _VisibleInlineSvgCounter(HTMLParser):
             )
             return
         current = self._stack[-1]
+        parent_hidden = self._current_svg_hidden()
+        # Structural tags (defs/mask/symbol/…) never render — their whole subtree
+        # is hidden. Renderable container groups (g/a/switch) hide their subtree
+        # only when their own attrs hide them (or a parent already did).
         if tag_name in _SVG_STRUCTURAL_TAGS:
-            current["structural_depth"] = int(current["structural_depth"]) + 1
+            current["containers"].append({"tag": tag_name, "hidden": True})
             return
-        if (
-            tag_name in _SVG_VISIBLE_CONTENT_TAGS
-            and not current["hidden"]
-            and int(current["structural_depth"]) == 0
-            and not _attrs_hidden(attrs)
-        ):
+        if tag_name in _SVG_CONTAINER_TAGS:
+            current["containers"].append({"tag": tag_name, "hidden": parent_hidden or _attrs_hidden(attrs)})
+            return
+        if tag_name in _SVG_VISIBLE_CONTENT_TAGS and not parent_hidden and not _attrs_hidden(attrs):
             current["visible_content_count"] = int(current["visible_content_count"]) + 1
 
     def handle_endtag(self, tag: str) -> None:
@@ -154,9 +192,12 @@ class _VisibleInlineSvgCounter(HTMLParser):
             if not current["hidden"] and int(current["visible_content_count"]) > 0:
                 self.count += 1
             return
-        if tag_name in _SVG_STRUCTURAL_TAGS:
-            current = self._stack[-1]
-            current["structural_depth"] = max(0, int(current["structural_depth"]) - 1)
+        if tag_name in _SVG_STRUCTURAL_TAGS or tag_name in _SVG_CONTAINER_TAGS:
+            containers = self._stack[-1]["containers"]
+            for index in range(len(containers) - 1, -1, -1):
+                if containers[index]["tag"] == tag_name:
+                    del containers[index:]
+                    break
 
 
 def _count_inline_svg(host_html: Path) -> int:
