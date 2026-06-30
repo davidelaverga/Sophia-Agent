@@ -165,14 +165,18 @@ _GENERIC_REPORT_OUTPUT_RE = re.compile(
     re.IGNORECASE,
 )
 _REPORT_OUTPUT_NOUN_RE = re.compile(r"\b(?:report|write[- ]?up)\b", re.IGNORECASE)
-# A requested document/report-class OBJECT after a create verb (used only by the
-# topical-presentation guard, NOT for routing). Broader than the report-only
-# noun so "create a document about presentation skills" is recognized as a
-# document request whose "presentation" mention is topical (Codex P2, 2026-06-29).
+# A requested document/report/spreadsheet-class OBJECT after a create verb (used
+# only by the topical-presentation guard, NOT for routing). Broader than the
+# report-only noun so "create a document about presentation skills" is recognized
+# as a document request whose "presentation" mention is topical (Codex P2,
+# 2026-06-29). Spreadsheet/tabular objects (excel/spreadsheet/workbook/xlsx/csv)
+# are included too so "create an Excel spreadsheet about presentation design"
+# vetoes the topical-deck PPTX match and resolves to xlsx/csv (Codex P2, 2026-06-30).
 _DOC_OR_REPORT_OBJECT_RE = re.compile(
     r"\b(?:build|create|make|generate|produce|write|render|export|draft|prepare)\s+"
     r"(?:me\s+)?(?:an?\s+|the\s+)?(?:[\w-]+\s+){0,4}?"
-    r"(?:report|write[- ]?up|document|summary|brief|article|explainer)\b",
+    r"(?:report|write[- ]?up|document|summary|brief|article|explainer"
+    r"|spreadsheet|excel|workbook|xlsx|csv)\b",
     re.IGNORECASE,
 )
 _PPTX_OUTPUT_RE = re.compile(
