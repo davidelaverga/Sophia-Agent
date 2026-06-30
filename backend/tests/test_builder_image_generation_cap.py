@@ -16,7 +16,7 @@ from types import SimpleNamespace
 from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
-    _DECK_BATCH_REJECTION_CAP,
+    _DECK_FLOOR_ESCAPE_FRICTION_CAP,
     _IMAGE_GENERATION_MAX_CALLS,
     _IMAGE_GENERATION_MAX_CALLS_PDF,
     BuilderArtifactMiddleware,
@@ -238,16 +238,80 @@ def test_deck_batch_backstop_keeps_rejecting_until_manifest():
     assert "[Sophia/deck-batch]" in result.update["messages"][0].content
 
 
-def test_deck_batch_backstop_at_cap_requires_manifest_or_clean_failure():
+def test_deck_floor_escape_fires_at_friction_cap():
+    # FIX 1 (2026-06-30): at the friction cap the old dead-end ("require a
+    # manifest or quit with null") is REPLACED by the floor escape — author
+    # slides + build_deck_from_slides + placeholders, so the deck always ships.
     state = _state_with_image_diagnostics(
         image_generation_success_count=1,
-        deck_batch_rejection_count=_DECK_BATCH_REJECTION_CAP,
+        deck_batch_rejection_count=_DECK_FLOOR_ESCAPE_FRICTION_CAP,
     )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(_deck_single_slide_command(), state)
     )
     assert isinstance(result, Command)
-    assert "readable image batch manifest is still required" in result.update["messages"][0].content
+    assert result.goto == "model"
+    content = result.update["messages"][0].content
+    assert "[Sophia/deck-floor]" in content
+    assert "build_deck_from_slides" in content
+    assert "placeholder" in content.lower()
+    assert result.update["builder_pptx_diagnostics"]["deck_floor_escape_emitted"] is True
+
+
+def test_deck_floor_escape_fires_on_mixed_manifest_and_batch_friction():
+    # Mixed friction: one unreadable-manifest rejection + one serial-call
+    # rejection sum to the cap → floor escape.
+    state = _state_with_image_diagnostics(
+        image_generation_success_count=1,
+        manifest_rejection_count=1,
+        deck_batch_rejection_count=1,
+    )
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+    assert isinstance(result, Command)
+    assert "[Sophia/deck-floor]" in result.update["messages"][0].content
+
+
+def test_deck_floor_escape_is_sticky_once_emitted():
+    # Once emitted, every further image-gen call keeps getting the floor
+    # directive (so the model can't drift back to images), even at zero friction.
+    state = _state_with_image_diagnostics(
+        image_generation_success_count=1,
+        deck_floor_escape_emitted=True,
+    )
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+    assert isinstance(result, Command)
+    assert "[Sophia/deck-floor]" in result.update["messages"][0].content
+
+
+def test_deck_floor_escape_not_triggered_for_pdf_target():
+    # The escape is deck-only; a PDF report below the friction cap is unaffected.
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+        "delegation_context": {"task_type": "document"},
+        "builder_pptx_diagnostics": {
+            "image_generation_success_count": 1,
+            "deck_batch_rejection_count": _DECK_FLOOR_ESCAPE_FRICTION_CAP,
+        },
+    }
+    assert BuilderArtifactMiddleware()._deck_floor_escape_command(
+        _bash_request(_deck_single_slide_command(), state), state
+    ) is None
+
+
+def test_unreadable_manifest_rejection_increments_friction_counter():
+    # An unreadable --manifest call (below the friction cap) is rejected AND
+    # bumps manifest_rejection_count so repeated failures converge on the floor.
+    state = _state_with_image_diagnostics(image_generation_success_count=1)
+    command = f"python {_SCRIPT} --manifest /mnt/user-data/outputs/assets/missing.json"
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(command, state)
+    )
+    assert isinstance(result, Command)
+    assert result.update["builder_pptx_diagnostics"]["manifest_rejection_count"] == 1
 
 
 def test_deck_batch_backstop_allows_hero_first_call():

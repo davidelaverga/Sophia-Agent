@@ -381,3 +381,100 @@ def test_deck_build_failure_suppresses_force_then_reforces_after_slide_repair(tm
     # Slide repaired → the compile force re-fires the deterministic HTML compiler.
     repaired_state = {**blocked_state, **write_cmd.update}
     assert mw._force_choice_for_state(repaired_state, None) == {"type": "tool", "name": "build_deck_from_slides"}
+
+
+# ---- FIX 2: deterministic slide-quality gate ---------------------------------
+
+
+def _quality_request(outputs_dir: Path, **extra):
+    return SimpleNamespace(
+        tool_call={
+            "name": "build_deck_from_slides",
+            "args": {"output_path": f"{_OUTPUTS}deck.pptx"},
+            "id": "tc",
+        },
+        state={
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": f"{_OUTPUTS}deck.pptx",
+            "delegation_context": {"task_type": "presentation"},
+            **extra,
+        },
+    )
+
+
+def _write_clean_slide(outputs_dir: Path) -> None:
+    slides = outputs_dir / "slides"
+    slides.mkdir(parents=True, exist_ok=True)
+    (slides / "01.html").write_text(
+        "<html><body><div class='slide'><h1 class='title'>T</h1>"
+        "<p class='narrative'>Short narrative.</p></div></body></html>",
+        encoding="utf-8",
+    )
+
+
+def test_slide_quality_gate_blocks_overflowing_deck(tmp_path):
+    outputs = tmp_path / "outputs"
+    _write_clean_slide(outputs)
+    result = _deck_tool_message(
+        {"success": True, "slide_count": 1, "overflow_slides": [{"slide": 1, "overflow_px": 240}]}
+    )
+    cmd = BuilderArtifactMiddleware()._slide_quality_rejection_command(
+        _quality_request(outputs), result, {"pptx_generator_success_count": 1}
+    )
+    assert isinstance(cmd, Command)
+    assert cmd.goto == "model"
+    content = cmd.update["messages"][0].content
+    assert "[Sophia/slide-quality]" in content
+    assert "build_deck_from_slides" in content
+    assert cmd.update["builder_slide_quality_rejections"] == 1
+    assert cmd.update["build_iterations"] == 1
+    # Suppress the compile force until the model edits a slide.
+    assert cmd.update["builder_pptx_compile_repair_pending"] is True
+
+
+def test_slide_quality_gate_blocks_invented_chrome(tmp_path):
+    outputs = tmp_path / "outputs"
+    slides = outputs / "slides"
+    slides.mkdir(parents=True)
+    (slides / "01.html").write_text(
+        "<html><body><nav class='eyebrow'>A B C D</nav><h1>T</h1></body></html>", encoding="utf-8"
+    )
+    cmd = BuilderArtifactMiddleware()._slide_quality_rejection_command(
+        _quality_request(outputs), _deck_tool_message({"success": True, "slide_count": 1}), {}
+    )
+    assert isinstance(cmd, Command)
+    assert "chrome" in cmd.update["messages"][0].content.lower()
+
+
+def test_slide_quality_gate_passes_clean_deck(tmp_path):
+    outputs = tmp_path / "outputs"
+    _write_clean_slide(outputs)
+    assert (
+        BuilderArtifactMiddleware()._slide_quality_rejection_command(
+            _quality_request(outputs), _deck_tool_message({"success": True, "slide_count": 1}), {}
+        )
+        is None
+    )
+
+
+def test_slide_quality_gate_soft_passes_after_one_reauthor(tmp_path):
+    # One bounded repair: once spent, an still-overflowing deck soft-passes (ships).
+    outputs = tmp_path / "outputs"
+    _write_clean_slide(outputs)
+    result = _deck_tool_message({"success": True, "overflow_slides": [{"slide": 1, "overflow_px": 300}]})
+    assert (
+        BuilderArtifactMiddleware()._slide_quality_rejection_command(
+            _quality_request(outputs, builder_slide_quality_rejections=1), result, {}
+        )
+        is None
+    )
+
+
+def test_slide_quality_gate_only_for_pptx_targets(tmp_path):
+    outputs = tmp_path / "outputs"
+    _write_clean_slide(outputs)
+    request = _quality_request(outputs)
+    request.state["builder_artifact_target_path"] = f"{_OUTPUTS}report.pdf"
+    request.state["delegation_context"] = {"task_type": "document"}
+    result = _deck_tool_message({"success": True, "overflow_slides": [{"slide": 1, "overflow_px": 300}]})
+    assert BuilderArtifactMiddleware()._slide_quality_rejection_command(request, result, {}) is None

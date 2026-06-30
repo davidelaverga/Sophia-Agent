@@ -161,10 +161,21 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
   --manifest /mnt/user-data/outputs/assets/slide-manifest.json
 ```
 
+**Write the manifest in its own `write_file` call FIRST, then run `--manifest`
+in a SEPARATE bash call.** The harness reads the manifest from disk at dispatch
+to count images against the budget — a manifest written and run in the same
+`&&`-chained command does not exist yet at that check and is rejected. One
+`write_file` (the JSON), then one `bash` (`--manifest <path>`).
+
 Deck slide assets live under `/mnt/user-data/outputs/assets/`; the slide HTML
 references them by a relative `../assets/<file>` path (see the `ppt-generation`
 skill). The slide title and narrative are real HTML text — never baked into the
 image.
+
+If image generation keeps failing or being rejected, do NOT keep retrying it.
+Author the slides with whatever images already exist in `assets/` and call
+`build_deck_from_slides` — missing visuals become clean placeholders and the
+deck still ships (a complete deck beats one that never finishes).
 
 The items run concurrently (bounded for API rate limits); the script prints one
 `IMAGEGEN_BATCH {...}` summary line with per-image success. A failed item is isolated and never

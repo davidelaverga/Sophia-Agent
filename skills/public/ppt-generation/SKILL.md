@@ -120,6 +120,15 @@ the user did not ask for.
   `/mnt/user-data/outputs/<deck>.pptx`.
 - Keep visible slide text concise (title 4–9 words; narrative 1–2 sentences). The
   text is real HTML now — it renders crisply, but a wall of text still looks bad.
+- **No invented chrome.** A slide is ONLY a title, a visual, and a concise
+  narrative. Do NOT add a top eyebrow/nav row, a bottom icon strip, a page-number
+  footer (`page 2 of 4`), breadcrumbs, or `<nav>`/`<footer>` elements. The harness
+  flags these and makes you re-author the slide.
+- **Density: at most ~3 short columns and a comfortable amount of body text per
+  slide.** If the content does not fit at a comfortable size, CUT content — do NOT
+  shrink the font or cram more columns. Content that overruns the 1920×1080 frame
+  is clipped by the renderer; the harness measures this and rejects a clipped
+  slide for one re-author.
 
 ## QA Checklist
 

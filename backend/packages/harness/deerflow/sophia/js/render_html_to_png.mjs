@@ -183,6 +183,7 @@ async function main() {
   fs.mkdirSync(path.dirname(path.resolve(args.pngFile)), { recursive: true });
 
   let missingForReport = 0;
+  let overflowForReport = 0;
   const browser = await chromium.launch({
     headless: true,
     executablePath: process.env.SOPHIA_CHROMIUM_PATH || "/usr/bin/chromium",
@@ -224,6 +225,22 @@ async function main() {
     try {
       const cdp = await context.newCDPSession(page);
       await cdp.send("Emulation.setDefaultBackgroundColorOverride", { color: hexToCdpRgba(bgColor) });
+      // Slide-quality overflow probe (FIX 2, 2026-06-30). The screenshot clips to
+      // the 16:9 canvas, so content that overruns the 1080-tall frame is silently
+      // cut off (cramped/clipped text — the page-1 defect). page JS is disabled,
+      // so measure layout via CDP (not page.evaluate): cssContentSize is the full
+      // scrollable content rect in CSS px; the excess over the viewport is the
+      // clipped amount. Reported on stderr; build_deck_from_slides aggregates it
+      // and SlideQualityMiddleware gates one bounded re-author on it. Non-fatal.
+      try {
+        const metrics = await cdp.send("Page.getLayoutMetrics");
+        const content = metrics.cssContentSize || metrics.contentSize || {};
+        const overV = Math.max(0, Math.round((content.height || 0) - height));
+        const overH = Math.max(0, Math.round((content.width || 0) - width));
+        overflowForReport = Math.max(overV, overH);
+      } catch {
+        // Layout-metrics unavailable — report no overflow (gate stays permissive).
+      }
     } catch {
       // CDP unavailable — fall back to pre-fix behavior (white default).
     }
@@ -244,7 +261,9 @@ async function main() {
     throw new Error(`render produced no bytes at ${args.pngFile}`);
   }
   // Machine-readable so build_deck_from_slides can aggregate a quality_warning.
-  console.error(`[render_html_to_png] wrote ${args.pngFile} bytes=${bytes} missing_assets=${missingForReport}`);
+  console.error(
+    `[render_html_to_png] wrote ${args.pngFile} bytes=${bytes} missing_assets=${missingForReport} overflow=${overflowForReport}`,
+  );
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {

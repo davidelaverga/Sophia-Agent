@@ -42,6 +42,11 @@ from deerflow.agents.sophia_agent.middlewares.builder_task import (
     BuilderTaskMiddleware,
     _image_generation_enabled,
 )
+from deerflow.agents.sophia_agent.middlewares.slide_quality import (
+    SlideQualityInspector,
+    SlideSignals,
+    format_slide_quality_feedback,
+)
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.sophia.build_condition import (
     brief_gate_unmet_conditions,
@@ -267,6 +272,18 @@ _IMAGE_GENERATION_MAX_CALLS = 20
 # (serial, with a quality note) instead of looping. See
 # ``_deck_batch_directive_rejection``.
 _DECK_BATCH_REJECTION_CAP = 2
+# FIX 1 (2026-06-30) — deck image-batch deadlock escape. After this many total
+# image-gen frictions on a deck (``manifest_rejection_count`` +
+# ``deck_batch_rejection_count``), there is no productive image-gen path left
+# (an unreadable ``--manifest`` is rejected at dispatch AND post-hero serial
+# calls are rejected by the batch directive). Instead of looping to the 45-turn
+# ceiling (prod 2026-06-30, 8-slide timeout), route the model to the HTML-slide
+# floor: author ``slides/*.html`` + ``build_deck_from_slides``, where the
+# renderer placeholders any missing visual and the deck ships ``visuals_partial``.
+_DECK_FLOOR_ESCAPE_FRICTION_CAP = 2
+# FIX 2 (2026-06-30) — the deterministic slide-quality gate. One shared inspector
+# (declarative checks, grader slot OFF) consulted on a successful build_deck_from_slides.
+_SLIDE_QUALITY_INSPECTOR = SlideQualityInspector()
 # PDF reports get up to a few conceptual/editorial illustrations (cover/hero +
 # key concepts) on by default; all charts and structural diagrams are drawn as
 # inline <svg> in the report HTML (rendered via render_html_to_pdf), not images.
@@ -5300,6 +5317,8 @@ class BuilderArtifactState(AgentState):
     # VQ-4: hero/cover gate — one bounded repair turn when enrichment was
     # enabled but zero generated images succeeded without an honest skip.
     builder_hero_gate_rejections: NotRequired[int]
+    # FIX 2 (2026-06-30): one bounded slide-quality re-author per deck build.
+    builder_slide_quality_rejections: NotRequired[int]
     # VQ-10: shared repair-iteration counter across ALL quality gates
     # (visual embed, hero/cover, advisory). Capped by
     # SOPHIA_BUILDER_MAX_ITERATIONS (default 3; 1 = legacy one-shot).
@@ -9843,6 +9862,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if delta is None:
             return result
         success = delta.get("pptx_generator_success_count") == 1
+        if success:
+            # FIX 2 (2026-06-30): a compiled deck still has to pass the deterministic
+            # slide-quality gate (overflow / chrome / density). One bounded re-author
+            # turn when it doesn't — HTML only, images reused.
+            quality_gate = self._slide_quality_rejection_command(request, result, delta)
+            if quality_gate is not None:
+                return quality_gate
         return Command(
             update={
                 "messages": [result],
@@ -9850,6 +9876,86 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_pptx_compile_latch_pending": False,
                 "builder_pptx_compile_repair_pending": not success,
             }
+        )
+
+    def _collect_slide_quality_signals(
+        self, request: ToolCallRequest, result: ToolMessage
+    ) -> SlideSignals | None:
+        """Read the build_deck result + slide HTML sources into pure check inputs."""
+        state = request.state or {}
+        payload = self._deck_builder_result_payload(result)
+        overflow_slides = payload.get("overflow_slides") if isinstance(payload, dict) else None
+        outputs_root = _outputs_root_from_state(state)
+        slide_sources: list[tuple[str, str]] = []
+        if outputs_root is not None:
+            slides_dir = outputs_root / "slides"
+            if slides_dir.is_dir():
+                try:
+                    for path in sorted(slides_dir.iterdir(), key=lambda p: p.name):
+                        if path.is_file() and path.suffix.lower() in {".html", ".htm"}:
+                            try:
+                                slide_sources.append((path.name, path.read_text(encoding="utf-8", errors="replace")))
+                            except OSError:
+                                continue
+                except OSError:
+                    slide_sources = []
+        if not slide_sources and not overflow_slides:
+            return None
+        return SlideSignals(
+            slide_sources=slide_sources,
+            overflow_slides=list(overflow_slides) if isinstance(overflow_slides, list) else [],
+        )
+
+    def _slide_quality_rejection_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage,
+        delta: dict[str, Any],
+    ) -> Command | None:
+        """One bounded slide-quality re-author turn (FIX 2). None = accept."""
+        state = request.state or {}
+        if not _requested_pptx_artifact(state):
+            return None
+        if int(state.get("builder_slide_quality_rejections", 0) or 0) >= 1:
+            return None  # one bounded repair — then soft-pass (advisory), never loop.
+        if not _repair_iteration_grantable(state):
+            return None
+        signals = self._collect_slide_quality_signals(request, result)
+        if signals is None:
+            return None
+        gaps = _SLIDE_QUALITY_INSPECTOR.inspect(signals)
+        if not gaps:
+            return None
+        logger.warning(
+            "[BuilderSlideQuality] gate=blocked gaps=%d checks=%s slides=%s",
+            len(gaps),
+            sorted({gap.check for gap in gaps}),
+            sorted({gap.slide for gap in gaps}),
+        )
+        _trace_pptx_compile_decision(
+            state=state,
+            decision="slide_quality_reauthor",
+            reason="deterministic_gate_gaps",
+            outputs={"gap_count": len(gaps), "checks": sorted({gap.check for gap in gaps})},
+        )
+        return Command(
+            update={
+                "messages": [
+                    _error_tool_message(
+                        content=format_slide_quality_feedback(gaps),
+                        tool_call_id=request.tool_call.get("id", ""),
+                        name=_DECK_BUILD_TOOL_NAME,
+                    ),
+                ],
+                "builder_pptx_diagnostics": delta,
+                "builder_pptx_compile_latch_pending": False,
+                # Suppress the compile force until the model edits a slide (the
+                # write clears this) so it can't immediately re-compile the same deck.
+                "builder_pptx_compile_repair_pending": True,
+                "builder_slide_quality_rejections": 1,
+                "build_iterations": iterations_used(state) + 1,
+            },
+            goto="model",
         )
 
     def _tool_result_command(
@@ -10162,6 +10268,66 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             goto="model",
         )
 
+    @staticmethod
+    def _deck_floor_escape_directive() -> str:
+        return (
+            "[Sophia/deck-floor] Image generation has repeatedly failed or been rejected on this "
+            "build, so there is no productive image-gen path left. STOP calling the image-generation "
+            "script. Use the slide images already in `/mnt/user-data/outputs/assets/` (reference each "
+            "by its relative `../assets/<file>` path). Author every slide now as a self-contained "
+            "1920x1080 HTML file under `/mnt/user-data/outputs/slides/` (real DOM title + narrative; "
+            "embed the slide's image only if it already exists in assets/), then call "
+            "`build_deck_from_slides(output_path, title)`. The renderer fills any missing visual with "
+            "a clean placeholder and the deck ships with `quality_warning=\"visuals_partial\"` — a "
+            "complete deck beats a perfect one that never finishes."
+        )
+
+    def _deck_floor_escape_command(self, request: ToolCallRequest, state: dict[str, Any]) -> Command | None:
+        """FIX 1 (2026-06-30): break the manifest_rejected ↔ deck_batch_nudge deadlock.
+
+        Post-hero, an unreadable ``--manifest`` is rejected at bash-dispatch (the
+        pre-spend budget read) AND post-hero serial calls are rejected by the
+        batch directive. With no escape, the model looped to the 45-turn ceiling
+        (prod 2026-06-30 8-slide timeout). Once total friction
+        (``manifest_rejection_count`` + ``deck_batch_rejection_count``) reaches the
+        cap — or the escape already fired — route to the HTML-slide floor instead
+        of rejecting again. Budget-safe: this pre-empts the rejections but never
+        defers/removes the manifest readability+budget read.
+        """
+        if _requested_artifact_ext(state) != "pptx":
+            return None
+        diagnostics = _pptx_diagnostics(state)
+        already = bool(diagnostics.get("deck_floor_escape_emitted"))
+        friction = _pptx_diagnostic_count(state, "manifest_rejection_count") + _pptx_diagnostic_count(
+            state, "deck_batch_rejection_count"
+        )
+        if not already and friction < _DECK_FLOOR_ESCAPE_FRICTION_CAP:
+            return None
+        logger.warning(
+            "[BuilderImageGeneration] phase=deck_floor_escape friction=%d already=%s",
+            friction,
+            already,
+        )
+        _trace_pptx_compile_decision(
+            state=state,
+            decision="deck_floor_escape",
+            reason="image_gen_friction_cap_reached",
+            outputs={"friction": friction},
+        )
+        return Command(
+            update={
+                "messages": [
+                    _error_tool_message(
+                        content=self._deck_floor_escape_directive(),
+                        tool_call_id=request.tool_call.get("id", ""),
+                        name=str(request.tool_call.get("name") or "bash"),
+                    ),
+                ],
+                "builder_pptx_diagnostics": {"deck_floor_escape_emitted": True},
+            },
+            goto="model",
+        )
+
     def _image_generation_block_command(self, request: ToolCallRequest) -> Command | None:
         """Enforce the per-build image-generation discipline at bash time.
 
@@ -10186,6 +10352,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             # VQ-3: preflight-only checks are free — never counted, never blocked.
             return None
         state = request.state or {}
+        # FIX 1 (2026-06-30): once a deck has accumulated repeated image-gen
+        # friction (unreadable --manifest + post-hero serial rejections), there
+        # is no productive image-gen path left — route to the HTML-slide floor
+        # instead of rejecting again (which looped to the ceiling). Checked BEFORE
+        # the manifest/batch rejections so it pre-empts the deadlock; it does NOT
+        # touch the pre-spend manifest read (the budget gate stays intact).
+        floor_escape = self._deck_floor_escape_command(request, state)
+        if floor_escape is not None:
+            return floor_escape
         manifest_rejection = _unreadable_manifest_rejection(command, state)
         if manifest_rejection is not None:
             logger.warning("[BuilderImageGeneration] phase=manifest_rejected")
@@ -10198,6 +10373,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             name=tool_name,
                         ),
                     ],
+                    # Friction toward the floor escape (summing reducer).
+                    "builder_pptx_diagnostics": {"manifest_rejection_count": 1},
                 },
                 goto="model",
             )
