@@ -272,7 +272,21 @@ def _html_pdf_path_error(html_path: str, pdf_path: str) -> str | None:
     html_error = _ensure_relative_to_outputs("html_path", html_path)
     if html_error is not None:
         return html_error
-    return _ensure_relative_to_outputs("pdf_path", pdf_path)
+    pdf_error = _ensure_relative_to_outputs("pdf_path", pdf_path)
+    if pdf_error is not None:
+        return pdf_error
+    # Chromium writes PDF bytes regardless of the output filename, and the
+    # authoritative PDF emit path can later stamp this file as artifact_ext=pdf —
+    # so a non-.pdf name (e.g. report.html) would deliver a PDF under the wrong
+    # extension. Require the .pdf suffix up front (parity with build_deck_from_slides
+    # requiring .pptx). Codex P2 (2026-06-30).
+    if not pdf_path.strip().lower().endswith(".pdf"):
+        return (
+            f"pdf_path: must end with .pdf (got: {pdf_path.strip()!r}). "
+            "Chromium writes PDF bytes; a non-.pdf name would deliver a PDF "
+            "under the wrong extension."
+        )
+    return None
 
 
 def _output_relative_parts(virtual_path: str) -> tuple[str, ...]:

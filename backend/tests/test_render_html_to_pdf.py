@@ -75,6 +75,9 @@ def staged(tmp_path, monkeypatch):
         (f"{_OUTPUTS_PREFIX}report.html", "/tmp/elsewhere.pdf", "pdf_path"),
         ("/etc/passwd", f"{_OUTPUTS_PREFIX}out.pdf", "html_path"),
         (f"{_OUTPUTS_PREFIX}../secret.html", f"{_OUTPUTS_PREFIX}out.pdf", "traversal"),
+        # Under outputs but wrong extension — Chromium would write PDF bytes to
+        # an .html name and the emit path could stamp it artifact_ext=pdf.
+        (f"{_OUTPUTS_PREFIX}report.html", f"{_OUTPUTS_PREFIX}report.html", "pdf_path"),
     ],
 )
 def test_rejects_paths_outside_outputs(staged, html_path, pdf_path, error_part):
