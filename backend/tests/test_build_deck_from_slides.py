@@ -430,6 +430,31 @@ def test_slide_quality_gate_blocks_overflowing_deck(tmp_path):
     assert cmd.update["build_iterations"] == 1
     # Suppress the compile force until the model edits a slide.
     assert cmd.update["builder_pptx_compile_repair_pending"] is True
+    # Codex P2 (review 4598184111): the rejected build's success diagnostics must
+    # NOT persist, or _pptx_valid_output_already_terminal would treat the rejected
+    # deck as terminal and the compile force would never re-fire after the edit.
+    assert "builder_pptx_diagnostics" not in cmd.update
+
+
+def test_slide_quality_rejection_keeps_deck_recompilable(tmp_path):
+    # Regression for the stale-deck bug: after a quality rejection, the success
+    # diagnostics (picture/output-path) are NOT written, so _pptx_compile_ready
+    # stays True and the compile force can re-fire once the model edits a slide.
+    outputs = tmp_path / "outputs"
+    _write_clean_slide(outputs)
+    result = _deck_tool_message({"success": True, "overflow_slides": [{"slide": 1, "overflow_px": 260}]})
+    delta_with_success = {
+        "pptx_generator_success_count": 1,
+        "pptx_generator_picture_count": 1,
+        "pptx_generator_slide_count": 1,
+        "pptx_output_paths": [f"{_OUTPUTS}deck.pptx"],
+    }
+    cmd = BuilderArtifactMiddleware()._slide_quality_rejection_command(
+        _quality_request(outputs), result, delta_with_success
+    )
+    assert isinstance(cmd, Command)
+    # None of the terminal-triggering success markers leak into state.
+    assert "builder_pptx_diagnostics" not in cmd.update
 
 
 def test_slide_quality_gate_blocks_invented_chrome(tmp_path):

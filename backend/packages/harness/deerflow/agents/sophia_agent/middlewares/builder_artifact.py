@@ -9947,7 +9947,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         name=_DECK_BUILD_TOOL_NAME,
                     ),
                 ],
-                "builder_pptx_diagnostics": delta,
+                # Codex P2 (review 4598184111): do NOT persist the success `delta`
+                # (pptx_generator_success_count / picture_count / pptx_output_paths)
+                # while the quality repair is pending — it would make
+                # _pptx_valid_output_already_terminal() treat this REJECTED deck as a
+                # valid terminal PPTX, so _pptx_compile_ready() goes False and the
+                # compile force never re-fires after the model edits the slides,
+                # shipping the stale pre-repair deck. The repaired build_deck call
+                # records its own (legitimately terminal) delta; the .pptx on disk is
+                # still found by the filesystem rglob in _latest_valid_pptx_output_file.
                 "builder_pptx_compile_latch_pending": False,
                 # Suppress the compile force until the model edits a slide (the
                 # write clears this) so it can't immediately re-compile the same deck.
