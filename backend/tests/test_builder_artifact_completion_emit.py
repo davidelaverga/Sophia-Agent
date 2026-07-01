@@ -459,6 +459,10 @@ def test_completion_payload_preserves_image_generation_metadata():
         artifact_type="pptx",
         image_generation_status="failed",
         image_generation_reason="org_not_verified",
+        primary_image_batch_status="failed",
+        primary_image_batch_error_class="auth_invalid",
+        serial_repair_count=2,
+        manifest_authoring_failure_count=1,
     )
 
     with patch.object(builder_events, "_signed_artifact_url", return_value=None):
@@ -468,6 +472,10 @@ def test_completion_payload_preserves_image_generation_metadata():
 
     assert payload["image_generation_status"] == "failed"
     assert payload["image_generation_reason"] == "org_not_verified"
+    assert payload["primary_image_batch_status"] == "failed"
+    assert payload["primary_image_batch_error_class"] == "auth_invalid"
+    assert payload["serial_repair_count"] == 2
+    assert payload["manifest_authoring_failure_count"] == 1
 
 
 def test_build_completion_payload_run_id_is_none_when_runtime_missing_it():

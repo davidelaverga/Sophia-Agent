@@ -8,15 +8,16 @@ silently cut off) and invented "template chrome" (a top eyebrow/nav row, a botto
 icon strip, page-number footers) that the SKILL never asked for.
 
 This module owns ALL slide-quality logic in ONE place, as a *declarative list of
-checks* so a new dimension is a new entry, not new tangled middleware. v1 ships
-three deterministic checks (overflow / chrome / density); a future LLM-as-judge
-grader plugs in as check N+1 via :class:`GraderConfig` (the socket is built here;
-the plug is OFF in v1 — see ``SlideQualityInspector.__init__``).
+checks* so a new dimension is a new entry, not new tangled middleware. The
+deterministic checks cover overflow, chrome, density, and visual prompt
+contract. A mockable LLM-as-judge grader plugs in as check N+1 via
+:class:`GraderConfig`.
 
 Pure: no I/O. The caller (``BuilderArtifactMiddleware``) collects the signals
-(the ``build_deck_from_slides`` result + the slide HTML sources) and passes them
-in; the inspector returns the gaps; the middleware spends ONE bounded re-author
-turn (HTML only — existing images are reused, never regenerated).
+(the ``build_deck_from_slides`` result + the slide HTML/prompt sources) and
+passes them in; the inspector returns the gaps; the middleware spends ONE
+bounded repair turn. Layout gaps are HTML/CSS only; visual-contract gaps may
+regenerate only the affected image.
 """
 
 from __future__ import annotations
@@ -65,6 +66,15 @@ _STYLE_BLOCK_RE = re.compile(r"<(style|script)\b[^>]*>.*?</\1>", re.IGNORECASE |
 _TAG_RE = re.compile(r"<[^>]+>")
 _GRID_COLUMNS_RE = re.compile(r"grid-template-columns\s*:\s*([^;}\"']+)", re.IGNORECASE)
 _REPEAT_RE = re.compile(r"repeat\(\s*(\d+)", re.IGNORECASE)
+_GENERATED_TEXT_RE = re.compile(
+    r"\b(the\s+text\s+reads|large\s+labels?|label\s+copy|render(?:ed)?\s+text|text\s+inside\s+the\s+image)\b",
+    re.IGNORECASE,
+)
+_BANNED_AESTHETIC_RE = re.compile(
+    r"\b(chalkboard|blackboard|whiteboard|hand[-\s]?written|hand[-\s]?drawn|sketch|sketched|marker[-\s]?like)\b",
+    re.IGNORECASE,
+)
+_NEGATED_STYLE_RE = re.compile(r"(?:\bno\b|\bavoid\b|\bwithout\b|\bnever\b|\bdo\s+not\b)", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -78,6 +88,7 @@ class SlideSignals:
     """
 
     slide_sources: list[tuple[str, str]] = field(default_factory=list)
+    prompt_sources: list[tuple[str, str]] = field(default_factory=list)
     overflow_slides: list[dict] = field(default_factory=list)
 
 
@@ -186,22 +197,53 @@ def chrome_check(signals: SlideSignals) -> list[QualityGap]:
     return gaps
 
 
-DEFAULT_CHECKS: tuple[QualityCheck, ...] = (overflow_check, chrome_check, density_check)
+def visual_contract_check(signals: SlideSignals) -> list[QualityGap]:
+    """Flag prompt/source contracts that bake text or odd aesthetics into images."""
+    gaps: list[QualityGap] = []
+    for name, source in signals.prompt_sources:
+        reasons: list[str] = []
+        if _GENERATED_TEXT_RE.search(source):
+            reasons.append("asks the image model to render text/labels/formulas")
+        aesthetic_match = next(
+            (
+                match
+                for match in _BANNED_AESTHETIC_RE.finditer(source)
+                if not _NEGATED_STYLE_RE.search(source[max(0, match.start() - 32): match.start()])
+            ),
+            None,
+        )
+        if aesthetic_match is not None:
+            reasons.append("uses an unrequested chalkboard/handwritten/sketch aesthetic")
+        if reasons:
+            gaps.append(
+                QualityGap(
+                    slide=name,
+                    check="visual_contract",
+                    detail=(
+                        "rewrite the visual prompt as a mostly text-free, restrained professional "
+                        "technical visual — " + "; ".join(reasons)
+                    ),
+                )
+            )
+    return gaps
+
+
+DEFAULT_CHECKS: tuple[QualityCheck, ...] = (overflow_check, chrome_check, density_check, visual_contract_check)
 
 
 @dataclass(frozen=True)
 class GraderConfig:
-    """The designed-in LLM-as-judge slot (OFF in v1).
+    """The designed-in, mockable visual judge slot.
 
-    When enabled, the inspector would run an LLM judge as check N+1, GROUNDED in
-    the deterministic signals (the overflow/chrome/density facts) with
-    ``max_iterations=1`` and HTML-only revisions. Deliberately inert until the
-    deterministic base is stable and there is evidence subjective quality is the
-    gap (see the spec). Build the socket, defer the plug.
+    When enabled with a ``judge`` callable, the inspector appends one bounded
+    subjective pass as check N+1, grounded in deterministic signals and mocked
+    in unit tests. Production can wire an LLM judge here without changing the
+    middleware loop semantics.
     """
 
     enabled: bool = False
     model_name: str | None = None
+    judge: Callable[[SlideSignals], list[QualityGap]] | None = None
 
 
 class SlideQualityInspector:
@@ -211,14 +253,16 @@ class SlideQualityInspector:
         grader: GraderConfig | None = None,
     ) -> None:
         self.checks = checks
-        self.grader = grader  # v1: always None / disabled — the future plug.
+        self.grader = grader
 
     def inspect(self, signals: SlideSignals) -> list[QualityGap]:
         gaps: list[QualityGap] = []
         for check in self.checks:
             gaps.extend(check(signals))
-        # Grader slot (OFF in v1): if self.grader and self.grader.enabled, append
-        # an LLM-judge pass here, grounded in `gaps`. Intentionally not wired.
+        if self.grader and self.grader.enabled and self.grader.judge is not None:
+            judged = self.grader.judge(signals)
+            if isinstance(judged, list):
+                gaps.extend(gap for gap in judged if isinstance(gap, QualityGap))
         return gaps
 
 
@@ -226,13 +270,14 @@ def format_slide_quality_feedback(gaps: list[QualityGap]) -> str:
     """One re-author directive listing the per-slide gaps (HTML-only, reuse images)."""
     by_slide: dict[str, list[str]] = {}
     for gap in gaps:
-        by_slide.setdefault(gap.slide, []).append(gap.detail)
+        by_slide.setdefault(gap.slide, []).append(f"{gap.check}: {gap.detail}")
     lines = [f"- {slide}: " + "; ".join(details) for slide, details in by_slide.items()]
     return (
-        "[Sophia/slide-quality] The deck compiled, but these slides have fixable layout issues. "
-        "Re-author ONLY the affected `slides/*.html` (HTML/CSS only — REUSE the existing images in "
-        "`assets/`, do NOT regenerate any image), then call `build_deck_from_slides` again:\n"
+        "[Sophia/slide-quality] The deck compiled, but these slides have fixable layout/visual-contract issues. "
+        "Re-author ONLY the affected `slides/*.html` and/or visual prompt JSON files. Reuse existing good "
+        "images, but regenerate any affected visual whose prompt baked text or an odd aesthetic into the image, "
+        "then call `build_deck_from_slides` again:\n"
         + "\n".join(lines)
         + "\nKeep each slide to the title, the visual, and a concise narrative — no eyebrow/nav row, "
-        "no bottom icon strip, no page numbers."
+        "no bottom icon strip, no page numbers, and no image-baked typography unless the user explicitly asked for it."
     )

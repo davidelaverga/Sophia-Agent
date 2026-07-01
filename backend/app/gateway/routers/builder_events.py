@@ -60,6 +60,10 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "image_generation_status",
     "image_generation_reason",
     "image_generation_outcome",
+    "primary_image_batch_status",
+    "primary_image_batch_error_class",
+    "serial_repair_count",
+    "manifest_authoring_failure_count",
     "iterations_used",
     "unmet_conditions",
     "brief_assumptions",
@@ -111,6 +115,10 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "image_generation_status",
         "image_generation_reason",
         "image_generation_outcome",
+        "primary_image_batch_status",
+        "primary_image_batch_error_class",
+        "serial_repair_count",
+        "manifest_authoring_failure_count",
         "iterations_used",
         "unmet_conditions",
         "brief_assumptions",
@@ -322,6 +330,10 @@ class BuilderCompletionEvent(BaseModel):
     format_conflict_original_target_ext: str | None = None
     image_generation_status: str | None = None
     image_generation_reason: str | None = None
+    primary_image_batch_status: str | None = None
+    primary_image_batch_error_class: str | None = None
+    serial_repair_count: int | None = None
+    manifest_authoring_failure_count: int | None = None
     image_generation_outcome: dict[str, Any] | None = Field(
         None,
         description="VQ-3 harness-stamped enrichment outcome: "

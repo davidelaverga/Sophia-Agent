@@ -69,25 +69,31 @@ _TRACE_PARENT_OVERRIDE: contextvars.ContextVar[str | None] = contextvars.Context
     "image_generation_trace_parent_override",
     default=None,
 )
+_OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
+_WORKSPACE_VIRTUAL_PREFIX = "/mnt/user-data/workspace/"
+_OUTPUTS_HOST_ENV = "SOPHIA_OUTPUTS_HOST_PATH"
+_WORKSPACE_HOST_ENV = "SOPHIA_WORKSPACE_HOST_PATH"
 
 _SOPHIA_SLIDE_STYLE = (
-    "Visual system: a premium presentation slide with a single coherent style chosen "
-    "by the prompt. Preserve that named style faithfully across the whole deck. "
-    "Use generous white space, clear visual hierarchy, and one confident focal element. "
+    "Visual system: restrained professional technical presentation visuals with a single "
+    "coherent style chosen by the prompt. Preserve that named style faithfully across the "
+    "whole deck. Use generous white space, clear hierarchy, precise geometry, and one "
+    "confident focal element. "
     "Brand palette: deep ink navy (#1F2A37) for primary text; considered blue (#2E5AAC) "
     "as the lead accent; warm teal (#2A9D8F) and restrained gold (#D4AF37) as secondary "
     "accents; soft coral (#E76F51) sparingly; on light paper (#FFFFFF / #F5F7FA) or a "
-    "purposeful dark canvas when the chosen style requires it. Typography must be crisp, "
-    "high-contrast, and perfectly legible. Avoid template sameness; vary diagram structure "
-    "while keeping the deck's chosen style cohesive. Looks like a slide from a deck that "
-    "took real design care."
+    "purposeful dark canvas only when requested or clearly appropriate. Avoid template "
+    "sameness; vary diagram structure while keeping the deck's chosen style cohesive. "
+    "Looks like a slide visual from a deck that took real design care."
 )
 
 _SOPHIA_SLIDE_AVOID = (
     "Avoid: generic AI gradient meshes and purple/pink glow; glossy or plastic 3D render; "
     "oversaturated stock-photo treatment; clip-art, emoji, or decorative borders; busy, "
     "cluttered, or cramped layouts; tiny or low-contrast text; watermarks or logos; "
-    "literal 'AI' clichés (glowing brains, circuit boards, robots, binary)."
+    "chalkboard, blackboard, whiteboard, handwritten, hand-drawn, sketch, classroom, or "
+    "playful styles unless explicitly requested; literal 'AI' clichés (glowing brains, "
+    "circuit boards, robots, binary)."
 )
 _SOPHIA_SLIDE_AVOID = (
     _SOPHIA_SLIDE_AVOID
@@ -98,11 +104,12 @@ _SOPHIA_SLIDE_AVOID = (
 _SOPHIA_SLIDE_ZONE_CONTRACT = (
     "Visual-only slide asset: render ONLY the slide's visual — the diagram, illustration, or chart "
     "— to fill a 16:9 frame. This image is embedded inside the HTML slide's visual region while the "
-    "slide title and bottom narrative stay as real HTML text OUTSIDE the image. Do NOT bake in the "
-    "slide title, a bottom narrative band, a footer, page numbers, or any slide chrome. Only short, "
-    "essential labels that belong INSIDE the diagram itself (e.g. node names or axis labels) are "
-    "allowed — exact, high-contrast, and legible. Fill the whole frame with the chosen style; avoid "
-    "unintended blank gutters or transparent edges."
+    "slide title, labels, annotations, formulas, and bottom narrative stay as real HTML text OUTSIDE "
+    "the image. Do NOT bake in the slide title, diagram labels, axis labels, formulas, paragraph text, "
+    "a bottom narrative band, a footer, page numbers, or any slide chrome unless the user explicitly "
+    "requested image-baked typography. Prefer mostly text-free structure, shapes, spatial grouping, "
+    "and visual metaphor. Fill the whole frame with the chosen style; avoid unintended blank gutters "
+    "or transparent edges."
 )
 
 _SOPHIA_IMAGE_STYLE = (
@@ -467,6 +474,54 @@ def _resolve_request_size(
     return resolved
 
 
+def _safe_relative_virtual_path(value: str) -> Path | None:
+    normalized = value.replace("\\", "/").strip()
+    if not normalized:
+        return None
+    parts = Path(normalized).parts
+    if any(part == ".." for part in parts):
+        return None
+    return Path(*parts) if parts else None
+
+
+def _virtual_mapping(value: str) -> tuple[str, str] | None:
+    normalized = value.replace("\\", "/").strip()
+    for prefix, env_name in (
+        (_OUTPUTS_VIRTUAL_PREFIX, _OUTPUTS_HOST_ENV),
+        (_WORKSPACE_VIRTUAL_PREFIX, _WORKSPACE_HOST_ENV),
+    ):
+        if normalized.startswith(prefix):
+            return env_name, normalized[len(prefix):].lstrip("/")
+    return None
+
+
+def _resolve_sophia_path(
+    value: str,
+    *,
+    base_dir: Path | None = None,
+    for_output: bool = False,
+) -> str:
+    """Map Sophia virtual paths to the host filesystem when the harness exports roots."""
+    raw = str(value or "").strip()
+    if not raw:
+        return raw
+    path = Path(raw)
+    if path.exists() or (for_output and path.is_absolute() and not _virtual_mapping(raw)):
+        return str(path)
+    mapping = _virtual_mapping(raw)
+    if mapping is not None:
+        env_name, relative_raw = mapping
+        root = os.environ.get(env_name, "").strip()
+        relative = _safe_relative_virtual_path(relative_raw)
+        if root and relative is not None:
+            return str(Path(root) / relative)
+    if base_dir is not None and not path.is_absolute():
+        relative = _safe_relative_virtual_path(raw)
+        if relative is not None:
+            return str(base_dir / relative)
+    return raw
+
+
 def _prompt_field_text(key: str, value: object) -> str | None:
     if value is None:
         return None
@@ -778,10 +833,14 @@ def generate_image(
     Hard-exits the process on missing API key or any API failure so the
     builder's bash subprocess sees a non-zero exit code and stops looping.
     """
-    prompt = _build_prompt(prompt_file, slide_visual=slide_visual)
+    actual_prompt_file = _resolve_sophia_path(prompt_file)
+    actual_output_file = _resolve_sophia_path(output_file, for_output=True)
+    actual_reference_images = [_resolve_sophia_path(path) for path in (reference_images or [])]
+
+    prompt = _build_prompt(actual_prompt_file, slide_visual=slide_visual)
     quality = "high" if slide_visual else None
     client = _openai_client_from_env()
-    valid_refs = _filter_valid_references(reference_images or [])
+    valid_refs = _filter_valid_references(actual_reference_images)
     resolved_size = _resolve_request_size(
         explicit_size=size,
         slide_visual=slide_visual,
@@ -806,11 +865,11 @@ def generate_image(
     finally:
         _flush_langsmith_traces()
     payload = _extract_payload_or_fail(response)
-    _decode_to_file(payload, output_file)
+    _decode_to_file(payload, actual_output_file)
     if slide_visual:
-        _normalize_slide_visual_aspect(output_file)
-    _assert_output_file_written(output_file)
-    _emit_generation_result(output_file, valid_refs)
+        _normalize_slide_visual_aspect(actual_output_file)
+    _assert_output_file_written(actual_output_file)
+    _emit_generation_result(actual_output_file, valid_refs)
 
     return f"IMAGEGEN_OK model={_image_request_model(valid_refs)} output_file={output_file}"
 
@@ -906,26 +965,27 @@ def _safe_basename(value: object) -> str:
         return str(value or "")
 
 
-def _safe_prompt_hash(prompt_file: object, *, slide_visual: bool) -> str | None:
+def _safe_prompt_hash(prompt_file: object, *, slide_visual: bool, base_dir: Path | None = None) -> str | None:
     if not prompt_file:
         return None
+    resolved = _resolve_sophia_path(str(prompt_file), base_dir=base_dir)
     try:
-        prompt = _build_prompt(str(prompt_file), slide_visual=slide_visual)
+        prompt = _build_prompt(resolved, slide_visual=slide_visual)
     except Exception:
         try:
-            prompt = Path(str(prompt_file)).read_text(encoding="utf-8")
+            prompt = Path(resolved).read_text(encoding="utf-8")
         except Exception:
             return None
     return hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16]
 
 
-def _batch_item_trace_inputs(item: dict, index: int) -> dict[str, Any]:
+def _batch_item_trace_inputs(item: dict, index: int, *, manifest_dir: Path | None = None) -> dict[str, Any]:
     refs = list(item.get("reference_images") or [])
     slide_visual = bool(item.get("slide_visual"))
     return {
         "item_index": index,
         "prompt_file": _safe_basename(item.get("prompt_file")),
-        "prompt_hash": _safe_prompt_hash(item.get("prompt_file"), slide_visual=slide_visual),
+        "prompt_hash": _safe_prompt_hash(item.get("prompt_file"), slide_visual=slide_visual, base_dir=manifest_dir),
         "output_file": _safe_basename(item.get("output_file")),
         "reference_image_count": len(refs),
         "reference_images": [_safe_basename(path) for path in refs],
@@ -943,6 +1003,7 @@ def _batch_trace_inputs(
     concurrency: int,
     requested_concurrency: object,
     max_concurrency: int,
+    manifest_dir: Path | None = None,
 ) -> dict[str, Any]:
     normalized_items = [item for item in items if isinstance(item, dict)]
     return {
@@ -957,7 +1018,11 @@ def _batch_trace_inputs(
             {
                 "item_index": index,
                 "prompt_file": _safe_basename(item.get("prompt_file")),
-                "prompt_hash": _safe_prompt_hash(item.get("prompt_file"), slide_visual=bool(item.get("slide_visual"))),
+                "prompt_hash": _safe_prompt_hash(
+                    item.get("prompt_file"),
+                    slide_visual=bool(item.get("slide_visual")),
+                    base_dir=manifest_dir,
+                ),
                 "output_file": _safe_basename(item.get("output_file")),
                 "reference_image_count": len(list(item.get("reference_images") or [])),
                 "endpoint": "images.edit" if item.get("reference_images") else "images.generate",
@@ -1016,8 +1081,10 @@ def _run_batch(manifest_path: str) -> int:
         _flush_langsmith_traces()
         return 0 if payload.get("complete") else 1
 
+    resolved_manifest_path = _resolve_sophia_path(manifest_path)
+    manifest_dir = Path(resolved_manifest_path).parent
     try:
-        manifest = _json.loads(Path(manifest_path).read_text(encoding="utf-8"))
+        manifest = _json.loads(Path(resolved_manifest_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
         return _summary({"images_generated": 0, "requested": 0, "error": f"manifest_unreadable: {exc}"})
     items = manifest.get("items") if isinstance(manifest, dict) else None
@@ -1043,6 +1110,7 @@ def _run_batch(manifest_path: str) -> int:
             concurrency=concurrency,
             requested_concurrency=requested_conc,
             max_concurrency=max_concurrency,
+            manifest_dir=manifest_dir,
         ),
         metadata={
             "sophia_component": "builder_image_batch",
@@ -1059,9 +1127,16 @@ def _run_batch(manifest_path: str) -> int:
         index, item = index_and_item
         started = time.perf_counter()
         out = str(item.get("output_file") or "")
+        prompt_file = str(item.get("prompt_file") or "")
+        prompt_actual = _resolve_sophia_path(prompt_file, base_dir=manifest_dir)
+        out_actual = _resolve_sophia_path(out, base_dir=manifest_dir, for_output=True)
+        refs_actual = [
+            _resolve_sophia_path(str(ref), base_dir=manifest_dir)
+            for ref in list(item.get("reference_images") or [])
+        ]
         item_context = _langsmith_tool_trace_context(
             "Sophia Image Batch Item",
-            inputs=_batch_item_trace_inputs(item, index),
+            inputs=_batch_item_trace_inputs(item, index, manifest_dir=manifest_dir),
             metadata={
                 "sophia_component": "builder_image_batch_item",
                 "image_batch_item_index": index,
@@ -1082,13 +1157,13 @@ def _run_batch(manifest_path: str) -> int:
                 }
                 _finish_trace(item_run, outputs=result)
                 return result
-            if not Path(str(item.get("prompt_file"))).is_file():
+            if not Path(prompt_actual).is_file():
                 result = {
                     "item_index": index,
                     "output_file": out,
                     "success": False,
-                    "error": "missing_prompt_file",
-                    "error_class": "missing_prompt_file",
+                    "error": "manifest_prompt_missing",
+                    "error_class": "manifest_prompt_missing",
                     "duration_ms": int((time.perf_counter() - started) * 1000),
                 }
                 _finish_trace(item_run, outputs=result)
@@ -1097,14 +1172,14 @@ def _run_batch(manifest_path: str) -> int:
             parent_token = _TRACE_PARENT_OVERRIDE.set(getattr(item_run, "dotted_order", None))
             try:
                 status = generate_image(
-                    str(item.get("prompt_file")),
-                    list(item.get("reference_images") or []),
-                    out,
+                    prompt_actual,
+                    refs_actual,
+                    out_actual,
                     str(item.get("aspect_ratio") or "16:9"),
                     slide_visual=bool(item.get("slide_visual")),
                     size=item.get("size"),
                 )
-                bytes_count = Path(out).stat().st_size if Path(out).is_file() else 0
+                bytes_count = Path(out_actual).stat().st_size if Path(out_actual).is_file() else 0
                 result = {
                     "item_index": index,
                     "output_file": out,

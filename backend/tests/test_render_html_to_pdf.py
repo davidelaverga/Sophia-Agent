@@ -75,6 +75,9 @@ def staged(tmp_path, monkeypatch):
         (f"{_OUTPUTS_PREFIX}report.html", "/tmp/elsewhere.pdf", "pdf_path"),
         ("/etc/passwd", f"{_OUTPUTS_PREFIX}out.pdf", "html_path"),
         (f"{_OUTPUTS_PREFIX}../secret.html", f"{_OUTPUTS_PREFIX}out.pdf", "traversal"),
+        # Markdown/text sources are not valid Chromium inputs for this tool; the
+        # builder must author real HTML first so failed attempts get a repair turn.
+        (f"{_OUTPUTS_PREFIX}report.md", f"{_OUTPUTS_PREFIX}out.pdf", "html_path"),
         # Under outputs but wrong extension — Chromium would write PDF bytes to
         # an .html name and the emit path could stamp it artifact_ext=pdf.
         (f"{_OUTPUTS_PREFIX}report.html", f"{_OUTPUTS_PREFIX}report.html", "pdf_path"),

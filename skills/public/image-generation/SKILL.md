@@ -123,12 +123,13 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 
 1. **Slide visual assets (`--slide-visual`)** — for `.pptx` slides, this skill renders the
    image that goes inside the `ppt-generation` HTML skeleton's `.visual` region. Do NOT bake
-   the slide title, bottom narrative, footer, or page chrome into this PNG; those are real
-   HTML text in `slides/*.html`. Use `--slide-visual` (quality=high, 16:9) for the visual
-   substance only: diagrams, architecture maps, comparison panels, scenes, charts, or
-   conceptual illustrations. Diagram labels inside the visual are allowed when essential;
-   wrap required label copy as "THE TEXT READS: ...", keep labels 8 words or fewer, and keep
-   them away from the image edges so the HTML title/narrative never overlap the asset.
+   the slide title, bottom narrative, footer, page chrome, diagram labels, formulas, axis
+   labels, or paragraph text into this PNG; those are real HTML text in `slides/*.html`.
+   Use `--slide-visual` (quality=high, 16:9) for the visual substance only: diagrams,
+   architecture maps, comparison panels, scenes, charts, or conceptual illustrations.
+   Default to a restrained professional technical aesthetic. Do not use chalkboard,
+   handwritten, whiteboard, sketch, playful, or classroom styling unless the user explicitly
+   requested that look.
    Pass the first slide as `--reference-images` to later slides for consistency; the script
    automatically sends those referenced slides through the `gpt-image-2` edit path.
 
@@ -170,12 +171,14 @@ to count images against the budget — a manifest written and run in the same
 Deck slide assets live under `/mnt/user-data/outputs/assets/`; the slide HTML
 references them by a relative `../assets/<file>` path (see the `ppt-generation`
 skill). The slide title and narrative are real HTML text — never baked into the
-image.
+image. Keep generated slide visuals mostly text-free; place meaningful labels,
+annotations, formulas, and chart text in slide HTML over or beside the visual.
 
-If image generation keeps failing or being rejected, do NOT keep retrying it.
-Author the slides with whatever images already exist in `assets/` and call
-`build_deck_from_slides` — missing visuals become clean placeholders and the
-deck still ships (a complete deck beats one that never finishes).
+If the batch manifest is rejected because prompt files are missing, materialize
+the prompt JSON files and rerun the same ONE `--manifest` batch. Do not switch
+to serial image generation until a readable batch has actually attempted
+generation. If a real batch attempt leaves failed/missing images, retry only
+those failed images serially; do not regenerate successful images.
 
 The items run concurrently (bounded for API rate limits); the script prints one
 `IMAGEGEN_BATCH {...}` summary line with per-image success. A failed item is isolated and never
@@ -200,8 +203,9 @@ no ref for that type, do not invent a path; rely on the text prompt anchor.
 - swimlane / staged process -> `process_guards`
 - conceptual loop/metaphor -> `experiment_loop`
 
-The reference sets the look; the prompt still supplies the exact structure, labels, brand
-palette, and "THE TEXT READS: ..." strings. Keep one visual style per deck.
+The reference sets the look; the prompt still supplies the exact structure and
+brand palette. Keep one visual style per deck, but keep text and labels out of
+the generated bitmap by default.
 
 Before accepting a presentation slide visual, check hierarchy, specificity, restraint, and
 variety. Reject purple/pink generic hero slides, single-font template looks, and stock-deck

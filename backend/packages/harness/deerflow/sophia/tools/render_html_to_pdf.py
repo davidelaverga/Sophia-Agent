@@ -316,6 +316,14 @@ def _html_pdf_path_error(html_path: str, pdf_path: str) -> str | None:
     pdf_error = _ensure_relative_to_outputs("pdf_path", pdf_path)
     if pdf_error is not None:
         return pdf_error
+    # The Chromium path expects browser-renderable HTML. If a builder accidentally
+    # passes an existing Markdown/text source, Chromium may still produce a blank
+    # or unstyled PDF instead of giving the model a useful repair signal.
+    if not html_path.strip().lower().endswith((".html", ".htm")):
+        return (
+            f"html_path: must end with .html or .htm (got: {html_path.strip()!r}). "
+            "Author a self-contained HTML report before calling render_html_to_pdf."
+        )
     # Chromium writes PDF bytes regardless of the output filename, and the
     # authoritative PDF emit path can later stamp this file as artifact_ext=pdf —
     # so a non-.pdf name (e.g. report.html) would deliver a PDF under the wrong

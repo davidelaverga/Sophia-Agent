@@ -1240,17 +1240,21 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             )
         pptx_visual_guidance = (
             "Decks are HTML-slide builds. Generate each slide's VISUAL-ONLY image into "
-            "/mnt/user-data/outputs/assets/ (no title/narrative/labels/chrome baked in — those are real "
-            "HTML text): draft the slide plan, generate the hero/cover image first (a single "
+            "/mnt/user-data/outputs/assets/ (no title/narrative/diagram labels/formulas/axis labels/chrome "
+            "baked in — those are real HTML text): draft the slide plan, generate the hero/cover image first (a single "
             "`--slide-visual` call), then write ONE JSON manifest listing every remaining slide image and "
             "call `image-generation/scripts/generate.py --manifest <path>` ONCE — give each manifest item "
-            "the hero PNG in its `reference_images` for visual consistency. A plain slide may omit its "
-            "image. Then author one self-contained 1920×1080 HTML file per slide under "
+            "the hero PNG in its `reference_images` for visual consistency. If the manifest is rejected "
+            "because prompt files are missing, materialize those prompt JSON files and rerun the batch; "
+            "only use serial repair for images that failed after a readable batch actually attempted generation. "
+            "A plain slide may omit its image. Then author one self-contained 1920×1080 HTML file per slide under "
             "/mnt/user-data/outputs/slides/ (real DOM title + concise narrative, the visual embedded by a "
-            "relative ../assets/<file> path, opaque dark background to all four edges), and call "
+            "relative ../assets/<file> path, opaque background to all four edges, light or dark according to the "
+            "request), and call "
             "`build_deck_from_slides(output_path=\"/mnt/user-data/outputs/<deck>.pptx\", title=\"...\")` "
-            "ONCE to compile and emit the .pptx. NEVER write python-pptx/pptxgenjs or run a compiler "
-            "script — the build system converts your slide HTML to PPTX."
+            "ONCE to compile and emit the .pptx. Default to restrained professional technical visuals; do not "
+            "use chalkboard, handwritten, whiteboard, sketch, or playful styles unless explicitly requested. "
+            "NEVER write python-pptx/pptxgenjs or run a compiler script — the build system converts your slide HTML to PPTX."
             if image_generation_enabled
             else "Image generation is not listed for this non-PPTX run. Use the medium-specific local figure workflow."
         )

@@ -14,6 +14,7 @@ from types import SimpleNamespace
 
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
+    _apply_artifact_request_metadata,
     _apply_hero_missing_quality_metadata,
     _apply_pptx_deck_quality_metadata,
     _builder_image_enrichment_enabled,
@@ -374,3 +375,55 @@ def test_pptx_partial_visuals_quality_warning_surfaces_to_artifact():
     assert updated["missing_image_count"] == 2
     assert updated["confidence"] == 0.75
     assert "2 slide visuals used a placeholder" in updated["companion_tone_hint"]
+
+
+def test_pptx_visual_quality_warning_surfaces_to_artifact():
+    artifact = {
+        "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+        "confidence": 0.95,
+        "companion_tone_hint": "Concise.",
+    }
+    state = _deck_state(builder_pptx_diagnostics={"pptx_deck_quality_warning": "visual_quality_warning"})
+
+    updated = _apply_pptx_deck_quality_metadata(artifact, state)
+
+    assert updated["quality_warning"] == "visual_quality_warning"
+    assert updated["deck_visual_quality_warning"] is True
+    assert updated["confidence"] == 0.75
+    assert "visual-quality repair was already spent" in updated["companion_tone_hint"]
+
+
+def test_image_generation_metadata_reports_success_after_repair():
+    state = _deck_state(
+        builder_pptx_diagnostics={
+            "image_generation_attempt_count": 9,
+            "image_generation_success_count": 5,
+            "primary_image_batch_status": "repaired",
+            "primary_image_batch_error_class": "rate_limit",
+            "serial_repair_count": 4,
+        }
+    )
+
+    updated = _apply_artifact_request_metadata({"artifact_path": "/mnt/user-data/outputs/deck.pptx"}, state)
+
+    assert updated["image_generation_status"] == "success_after_repair"
+    assert updated["primary_image_batch_status"] == "repaired"
+    assert updated["primary_image_batch_error_class"] == "rate_limit"
+    assert updated["serial_repair_count"] == 4
+    assert updated["image_generation_outcome"]["primary_batch_status"] == "repaired"
+
+
+def test_image_generation_metadata_reports_manifest_authoring_failure_without_api_attempt():
+    state = _deck_state(
+        builder_pptx_diagnostics={
+            "manifest_authoring_failure_count": 1,
+            "primary_image_batch_status": "failed",
+            "primary_image_batch_error_class": "manifest_prompt_missing",
+        }
+    )
+
+    updated = _apply_artifact_request_metadata({"artifact_path": "/mnt/user-data/outputs/deck.pptx"}, state)
+
+    assert updated["image_generation_status"] == "failed"
+    assert updated["image_generation_reason"] == "manifest_prompt_missing"
+    assert updated["manifest_authoring_failure_count"] == 1

@@ -86,7 +86,9 @@ def test_call_beyond_cap_is_rejected_with_generated_assets_listed():
         # A batch already ran (realistic way to reach the cap with successes) so
         # the deck-batch backstop yields and the hard image cap is what fires.
         image_generation_manifest_seen=True,
+        image_generation_manifest_generation_attempted=True,
         image_generation_manifest_requested_count=3,
+        image_generation_manifest_failed_count=1,
         image_output_paths=["/mnt/user-data/outputs/visuals/hero-launch.png"],
     )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
@@ -238,10 +240,8 @@ def test_deck_batch_backstop_keeps_rejecting_until_manifest():
     assert "[Sophia/deck-batch]" in result.update["messages"][0].content
 
 
-def test_deck_floor_escape_fires_at_friction_cap():
-    # FIX 1 (2026-06-30): at the friction cap the old dead-end ("require a
-    # manifest or quit with null") is REPLACED by the floor escape — author
-    # slides + build_deck_from_slides + placeholders, so the deck always ships.
+def test_deck_loop_breaker_fires_at_friction_cap_without_degraded_compile():
+    # At the friction cap, break the loop without authorizing a placeholder deck.
     state = _state_with_image_diagnostics(
         image_generation_success_count=1,
         deck_batch_rejection_count=_DECK_FLOOR_ESCAPE_FRICTION_CAP,
@@ -252,13 +252,13 @@ def test_deck_floor_escape_fires_at_friction_cap():
     assert isinstance(result, Command)
     assert result.goto == "model"
     content = result.update["messages"][0].content
-    assert "[Sophia/deck-floor]" in content
-    assert "build_deck_from_slides" in content
-    assert "placeholder" in content.lower()
+    assert "[Sophia/deck-batch]" in content
+    assert "artifact_path=null" in content
+    assert "do not compile a partial placeholder deck" in content
     assert result.update["builder_pptx_diagnostics"]["deck_floor_escape_emitted"] is True
 
 
-def test_deck_floor_escape_fires_on_mixed_manifest_and_batch_friction():
+def test_deck_loop_breaker_fires_on_mixed_manifest_and_batch_friction():
     # Mixed friction: one unreadable-manifest rejection + one serial-call
     # rejection sum to the cap → floor escape.
     state = _state_with_image_diagnostics(
@@ -270,12 +270,12 @@ def test_deck_floor_escape_fires_on_mixed_manifest_and_batch_friction():
         _bash_request(_deck_single_slide_command(), state)
     )
     assert isinstance(result, Command)
-    assert "[Sophia/deck-floor]" in result.update["messages"][0].content
+    assert "[Sophia/deck-batch]" in result.update["messages"][0].content
 
 
-def test_deck_floor_escape_is_sticky_once_emitted():
-    # Once emitted, every further image-gen call keeps getting the floor
-    # directive (so the model can't drift back to images), even at zero friction.
+def test_deck_loop_breaker_is_sticky_once_emitted():
+    # Once emitted, every further image-gen call keeps getting the loop-breaker
+    # directive (so the model can't drift back to serial images), even at zero friction.
     state = _state_with_image_diagnostics(
         image_generation_success_count=1,
         deck_floor_escape_emitted=True,
@@ -284,7 +284,7 @@ def test_deck_floor_escape_is_sticky_once_emitted():
         _bash_request(_deck_single_slide_command(), state)
     )
     assert isinstance(result, Command)
-    assert "[Sophia/deck-floor]" in result.update["messages"][0].content
+    assert "[Sophia/deck-batch]" in result.update["messages"][0].content
 
 
 def test_deck_floor_escape_not_triggered_for_pdf_target():
@@ -302,16 +302,21 @@ def test_deck_floor_escape_not_triggered_for_pdf_target():
     ) is None
 
 
-def test_unreadable_manifest_rejection_increments_friction_counter():
+def test_unreadable_manifest_rejection_increments_friction_counter(tmp_path):
     # An unreadable --manifest call (below the friction cap) is rejected AND
-    # bumps manifest_rejection_count so repeated failures converge on the floor.
+    # bumps authoring diagnostics so repeated failures do not unlock serial repair.
     state = _state_with_image_diagnostics(image_generation_success_count=1)
+    state["thread_data"] = {"outputs_path": str(tmp_path)}
     command = f"python {_SCRIPT} --manifest /mnt/user-data/outputs/assets/missing.json"
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(command, state)
     )
     assert isinstance(result, Command)
-    assert result.update["builder_pptx_diagnostics"]["manifest_rejection_count"] == 1
+    diag = result.update["builder_pptx_diagnostics"]
+    assert diag["manifest_rejection_count"] == 1
+    assert diag["manifest_authoring_failure_count"] == 1
+    assert diag["primary_image_batch_status"] == "failed"
+    assert diag["primary_image_batch_error_class"] == "manifest_not_readable"
 
 
 def test_deck_batch_backstop_allows_hero_first_call():
@@ -326,8 +331,17 @@ def test_deck_batch_backstop_allows_hero_first_call():
 def test_deck_batch_backstop_allows_manifest_call(tmp_path):
     manifest_dir = tmp_path / "visuals"
     manifest_dir.mkdir()
+    (manifest_dir / "p1.json").write_text('{"prompt":"professional visual 1"}', encoding="utf-8")
+    (manifest_dir / "p2.json").write_text('{"prompt":"professional visual 2"}', encoding="utf-8")
     (manifest_dir / "manifest.json").write_text(
-        json.dumps({"items": [{"prompt_file": "p1.json"}, {"prompt_file": "p2.json"}]}),
+        json.dumps(
+            {
+                "items": [
+                    {"prompt_file": "p1.json", "output_file": "o1.png"},
+                    {"prompt_file": "p2.json", "output_file": "o2.png"},
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     state = _state_with_image_diagnostics(image_generation_success_count=1)
@@ -339,12 +353,36 @@ def test_deck_batch_backstop_allows_manifest_call(tmp_path):
     assert result is None
 
 
+def test_manifest_with_missing_prompt_is_authoring_rejection(tmp_path):
+    manifest_dir = tmp_path / "visuals"
+    manifest_dir.mkdir()
+    (manifest_dir / "manifest.json").write_text(
+        json.dumps({"items": [{"prompt_file": "missing.json", "output_file": "o1.png"}]}),
+        encoding="utf-8",
+    )
+    state = _state_with_image_diagnostics(image_generation_success_count=1)
+    state["thread_data"] = {"outputs_path": str(tmp_path)}
+    command = f"python {_SCRIPT} --manifest /mnt/user-data/outputs/visuals/manifest.json"
+
+    result = BuilderArtifactMiddleware()._image_generation_block_command(_bash_request(command, state))
+
+    assert isinstance(result, Command)
+    content = result.update["messages"][0].content
+    assert "prompt_file" in content
+    assert "Do not switch to serial" in content
+    diag = result.update["builder_pptx_diagnostics"]
+    assert diag["manifest_authoring_failure_count"] == 1
+    assert diag["primary_image_batch_error_class"] == "manifest_prompt_missing"
+
+
 def test_deck_batch_backstop_allows_single_repair_after_batch_ran():
     # Once a batch ran, single calls are the legitimate stray-failure repair path.
     state = _state_with_image_diagnostics(
         image_generation_success_count=5,
         image_generation_manifest_seen=True,
+        image_generation_manifest_generation_attempted=True,
         image_generation_manifest_requested_count=7,
+        image_generation_manifest_failed_count=2,
     )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(_deck_single_slide_command(), state)
@@ -352,16 +390,34 @@ def test_deck_batch_backstop_allows_single_repair_after_batch_ran():
     assert result is None
 
 
-def test_deck_batch_backstop_rejects_repair_when_manifest_summary_missing():
+def test_deck_batch_backstop_rejects_repair_when_manifest_seen_but_no_generation_attempt():
     state = _state_with_image_diagnostics(
         image_generation_success_count=5,
         image_generation_manifest_seen=True,
-        image_generation_manifest_requested_count=0,
+        image_generation_manifest_requested_count=4,
+        primary_image_batch_error_class="manifest_prompt_missing",
     )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(_deck_single_slide_command(), state)
     )
     assert isinstance(result, Command)
+    assert "did not make a real batch generation attempt" in result.update["messages"][0].content
+
+
+def test_deck_batch_backstop_rejects_serial_repair_after_repair_budget_spent():
+    state = _state_with_image_diagnostics(
+        image_generation_success_count=5,
+        image_generation_manifest_seen=True,
+        image_generation_manifest_generation_attempted=True,
+        image_generation_manifest_requested_count=7,
+        image_generation_manifest_failed_count=1,
+        serial_repair_count=2,
+    )
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+    assert isinstance(result, Command)
+    assert "Serial image repair is exhausted" in result.update["messages"][0].content
 
 
 def test_deck_batch_backstop_only_fires_for_pptx():
@@ -594,8 +650,18 @@ def test_images_in_command_preflight_is_free() -> None:
 
 def test_images_in_command_manifest_counts_items(tmp_path) -> None:
     manifest = tmp_path / "m.json"
+    for name in ("a", "b", "c"):
+        (tmp_path / f"{name}.json").write_text('{"prompt":"x"}', encoding="utf-8")
     manifest.write_text(
-        '{"items": [{"prompt_file": "a"}, {"prompt_file": "b"}, {"prompt_file": "c"}]}',
+        json.dumps(
+            {
+                "items": [
+                    {"prompt_file": "a.json", "output_file": "a.png"},
+                    {"prompt_file": "b.json", "output_file": "b.png"},
+                    {"prompt_file": "c.json", "output_file": "c.png"},
+                ]
+            }
+        ),
         encoding="utf-8",
     )
     state = {"thread_data": {"outputs_path": str(tmp_path)}}
@@ -608,7 +674,19 @@ def test_images_in_command_manifest_counts_items(tmp_path) -> None:
 
 def test_images_in_command_mixed_hero_then_batch(tmp_path) -> None:
     manifest = tmp_path / "m.json"
-    manifest.write_text('{"items": [{"prompt_file": "a"}, {"prompt_file": "b"}]}', encoding="utf-8")
+    (tmp_path / "a.json").write_text('{"prompt":"a"}', encoding="utf-8")
+    (tmp_path / "b.json").write_text('{"prompt":"b"}', encoding="utf-8")
+    manifest.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"prompt_file": "a.json", "output_file": "a.png"},
+                    {"prompt_file": "b.json", "output_file": "b.png"},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
     state = {"thread_data": {"outputs_path": str(tmp_path)}}
     command = (
         f"python {_SCRIPT} --slide-visual --prompt-file hero.json --output-file hero.png"
@@ -661,8 +739,10 @@ def test_parse_image_batch_summary_returns_successful_paths() -> None:
 
 def test_manifest_batch_terminal_failure_updates_image_error_class(tmp_path) -> None:
     manifest = tmp_path / "m.json"
+    for index in range(3):
+        (tmp_path / f"p{index}.json").write_text('{"prompt":"x"}', encoding="utf-8")
     manifest.write_text(
-        json.dumps({"items": [{"prompt_file": f"p{i}"} for i in range(3)]}),
+        json.dumps({"items": [{"prompt_file": f"p{i}.json", "output_file": f"o{i}.png"} for i in range(3)]}),
         encoding="utf-8",
     )
     state = {"thread_data": {"outputs_path": str(tmp_path)}}
@@ -692,7 +772,12 @@ def test_manifest_batch_summary_uses_terminal_error_histogram() -> None:
 def test_manifest_batch_under_cap_passes_through(tmp_path) -> None:
     # A single manifest of 12 images (under the 20 deck cap) is allowed.
     manifest = tmp_path / "m.json"
-    manifest.write_text(json.dumps({"items": [{"prompt_file": f"p{i}"} for i in range(12)]}), encoding="utf-8")
+    for index in range(12):
+        (tmp_path / f"p{index}.json").write_text('{"prompt":"x"}', encoding="utf-8")
+    manifest.write_text(
+        json.dumps({"items": [{"prompt_file": f"p{i}.json", "output_file": f"o{i}.png"} for i in range(12)]}),
+        encoding="utf-8",
+    )
     state = _state_with_image_diagnostics(image_generation_attempt_count=0)
     state["thread_data"] = {"outputs_path": str(tmp_path)}
     result = BuilderArtifactMiddleware()._image_generation_block_command(
@@ -704,7 +789,12 @@ def test_manifest_batch_under_cap_passes_through(tmp_path) -> None:
 def test_manifest_batch_over_cap_is_rejected(tmp_path) -> None:
     # A manifest whose item count would exceed the remaining image budget is blocked.
     manifest = tmp_path / "m.json"
-    manifest.write_text(json.dumps({"items": [{"prompt_file": f"p{i}"} for i in range(15)]}), encoding="utf-8")
+    for index in range(15):
+        (tmp_path / f"p{index}.json").write_text('{"prompt":"x"}', encoding="utf-8")
+    manifest.write_text(
+        json.dumps({"items": [{"prompt_file": f"p{i}.json", "output_file": f"o{i}.png"} for i in range(15)]}),
+        encoding="utf-8",
+    )
     state = _state_with_image_diagnostics(image_generation_attempt_count=10)  # 10 + 15 > 20
     state["thread_data"] = {"outputs_path": str(tmp_path)}
     result = BuilderArtifactMiddleware()._image_generation_block_command(

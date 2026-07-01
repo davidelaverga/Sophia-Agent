@@ -10,7 +10,9 @@ renders each slide to a full-bleed image and converts the deck to PPTX. **You do
 not compile the deck yourself.** Each slide is a self-contained `1920×1080` HTML
 document — real DOM text (a crisp title + concise narrative) plus AT MOST one
 generated VISUAL-ONLY image referenced by a **relative** `../assets/<file>`
-path. This is the same Chromium substrate the PDF report path uses.
+path. This is the same Chromium substrate the PDF report path uses. Default to
+a restrained professional technical aesthetic unless the user explicitly asks
+for a different style.
 
 A slide may omit the image when the request is plain — honor no-image deck
 requests by authoring a clean text-only slide. Never invent decorative imagery
@@ -22,8 +24,8 @@ the user did not ask for.
    body/narrative, and the visual to generate (if any).
 2. **Generate each slide's image into the deck `assets/` folder.** Use the
    image-generation skill in `--slide-visual` mode (the VISUAL AREA ONLY — no
-   title, narrative, labels, or chrome baked in; those are real HTML text in the
-   slide). Write the PNG under `/mnt/user-data/outputs/assets/`. Generate the
+   title, narrative, diagram labels, formulas, axis labels, or chrome baked in;
+   those are real HTML text in the slide). Write the PNG under `/mnt/user-data/outputs/assets/`. Generate the
    hero/cover first, then the rest in ONE `--manifest` batch (each item
    referencing the hero PNG in `reference_images` for visual consistency):
    ```bash
@@ -54,9 +56,7 @@ the user did not ask for.
    build_deck_from_slides(output_path="/mnt/user-data/outputs/<deck>.pptx", title="<Deck title>")
    ```
    The build system renders every `slides/*.html` to a full-bleed PNG and wraps
-   them into the `.pptx`. It returns the `.pptx` path and slide count. A slide
-   whose image is missing renders with a neutral placeholder — the deck still
-   ships; do not fail or loop on a single missing image.
+   them into the `.pptx`. It returns the `.pptx` path and slide count.
 5. **Emit** the returned `.pptx` with `emit_builder_artifact(artifact_type="presentation")`.
 
 ## Slide HTML skeleton
@@ -68,24 +68,24 @@ the user did not ask for.
 <meta charset="utf-8">
 <style>
   /* A slide is exactly the deck canvas. No scroll, no margins. The page
-     background MUST be opaque dark too — if any region is left uncovered it
-     renders in THIS color, never white. */
-  html, body { margin: 0; padding: 0; background: #0e1626; }
+     background MUST be opaque too — if any region is left uncovered it
+     renders in THIS color, never transparent/white by accident. */
+  html, body { margin: 0; padding: 0; background: #f7f9fc; }
   .slide {
     width: 1920px; height: 1080px; box-sizing: border-box;
-    background: #0e1626; color: #f3f6fc; overflow: hidden; position: relative;
+    background: #f7f9fc; color: #1f2a37; overflow: hidden; position: relative;
     font-family: "Helvetica Neue", Arial, sans-serif;
   }
   .slide .title { position: absolute; top: 64px; left: 80px; right: 80px;
     font-size: 64px; font-weight: 700; line-height: 1.1; }
   .slide .visual { position: absolute; top: 200px; left: 80px; right: 80px; bottom: 200px; }
   /* Diagram/content slides: `contain` keeps the whole image visible; any
-     letterbox gap now renders in the slide's opaque dark background, not white.
+     letterbox gap renders in the slide's opaque background, not white by accident.
      For a hero/cover or full-bleed visual, make the image cover the whole slide
      instead — a full-frame `.slide .visual { inset: 0 }` + `object-fit: cover`. */
   .slide .visual img { width: 100%; height: 100%; object-fit: contain; }
   .slide .narrative { position: absolute; left: 80px; right: 80px; bottom: 72px;
-    font-size: 30px; line-height: 1.35; color: #aebbd2; }
+    font-size: 30px; line-height: 1.35; color: #4b5b73; }
 </style>
 </head>
 <body>
@@ -105,16 +105,21 @@ the user did not ask for.
   run `bash` to assemble a deck. Always finish by calling
   `build_deck_from_slides(...)` once — the build system converts your slide HTML
   to PPTX.
-- **The slide must be opaque dark to all four edges.** Never leave the page
-  background visible: set a dark background on `html, body` AND on the slide
-  wrapper, and prefer full-bleed visuals for hero/cover slides. A white band or
-  gutter at any edge is a defect.
+- **The slide must be opaque to all four edges.** The background may be light or
+  dark according to the deck style and user request, but never leave the page
+  background transparent or accidentally white: set an opaque background on
+  `html, body` AND on the slide wrapper, and prefer full-bleed visuals for
+  hero/cover slides. A stray band or gutter at any edge is a defect.
 - **Every slide visual is a relative `../assets/<file>` path.** A remote URL in a
   slide is an error — generate images into `assets/` first. A slide may also have
   no image at all when the content is plain text.
-- **The generated image is the visual area only.** Titles and narrative are real
-  HTML text in `slides/*.html`; never bake a title, footer, narrative, or page
-  chrome into the image.
+- **The generated image is the visual area only.** Titles, narrative, formulas,
+  axis labels, diagram labels, and annotations are real HTML text in
+  `slides/*.html`; never bake a title, footer, narrative, page chrome, or large
+  typography into the image unless the user explicitly requests image-baked text.
+- **Default aesthetic:** restrained professional technical. Do not use
+  chalkboard, handwritten, whiteboard, sketch, playful, or classroom styles
+  unless the user explicitly requests that look.
 - Generate images into `/mnt/user-data/outputs/assets/`; author slides into
   `/mnt/user-data/outputs/slides/`; the deck is built to
   `/mnt/user-data/outputs/<deck>.pptx`.
@@ -134,8 +139,8 @@ the user did not ask for.
 
 - Slides authored as `slides/*.html`; images in `assets/`, referenced relatively.
 - The deck was produced by `build_deck_from_slides`, not hand-written PPTX code.
-- At most one image per slide; titles/narrative are real HTML text, legible and
-  not clipped, never baked into the image.
+- At most one image per slide; titles/narrative/labels are real HTML text,
+  legible and not clipped, never baked into the image by default.
 - Plain (no-image) requests ship clean text-only slides.
 - Expected slide count; correct primary extension `.pptx`.
 - Emit promptly once the build returns a valid `.pptx`.

@@ -81,12 +81,14 @@ def test_ppt_generation_skill_authors_html_slide_decks() -> None:
 
 
 def test_ppt_generation_skill_requires_opaque_edges() -> None:
-    # White-space guarantee for the HTML path: the slide must be opaque dark to
-    # all four edges (html, body background), so no uncovered region renders white.
+    # White-space guarantee for the HTML path: the slide must be opaque to all
+    # four edges, without forcing a dark aesthetic.
     text = _skill("ppt-generation")
-    assert "html, body { margin: 0; padding: 0; background: #0e1626; }" in text
+    assert "html, body { margin: 0; padding: 0; background: #f7f9fc; }" in text
     lowered = text.lower()
-    assert "opaque dark to all four edges" in lowered
+    assert "opaque to all four edges" in lowered
+    assert "light or\n  dark" in lowered
+    assert "opaque dark to all four edges" not in lowered
     assert "never baked into the image" in lowered
 
 
@@ -126,6 +128,9 @@ def test_image_generation_skill_allows_bounded_pdf_conceptual_images() -> None:
     # --slide-visual is VISUAL-ONLY now (slide title/narrative are real HTML);
     # the old image-forward "renders full slides / full bleed" contract is gone.
     assert "visual area only" in text.lower() or "visual-only" in text.lower()
+    assert "THE TEXT READS" not in text
+    assert "chalkboard" in text
+    assert "unless the user explicitly" in text
     assert "renders full slides" not in text
     assert "generated image full bleed" not in text
     assert "generate_visual_asset" not in text

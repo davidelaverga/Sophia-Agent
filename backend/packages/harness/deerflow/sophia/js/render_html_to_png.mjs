@@ -150,7 +150,7 @@ async function installRenderRequestPolicy(page, htmlFile) {
 
 // Parse #RRGGBB / #RGB into a CDP RGBA object (alpha 1). Falls back to the deck
 // navy on anything unparseable so the base-background override is always opaque.
-const DEFAULT_BG_COLOR = "#0e1626";
+const DEFAULT_BG_COLOR = "#f7f9fc";
 function hexToCdpRgba(hex) {
   const fallback = { r: 14, g: 22, b: 38, a: 1 };
   if (typeof hex !== "string") {

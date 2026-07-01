@@ -80,10 +80,10 @@ def test_per_item_failure_is_isolated(tmp_path) -> None:
     assert summary["images_generated"] == 0
     assert summary["failed"] == 2
     assert summary["complete"] is False
-    assert summary["error_class_histogram"] == {"missing_prompt_file": 2}
+    assert summary["error_class_histogram"] == {"manifest_prompt_missing": 2}
     assert len(summary["items"]) == 2
     assert all(item["success"] is False for item in summary["items"])
-    assert all(item["error_class"] == "missing_prompt_file" for item in summary["items"])
+    assert all(item["error_class"] == "manifest_prompt_missing" for item in summary["items"])
     # Output paths are echoed back so the harness can reconcile per-item status.
     assert {item["output_file"] for item in summary["items"]} == {
         str(tmp_path / "o1.png"),
@@ -117,6 +117,95 @@ def test_item_missing_required_fields_is_reported(tmp_path) -> None:
     assert summary["items"][0]["success"] is False
     assert summary["items"][0]["error"] == "missing_prompt_or_output"
     assert summary["items"][0]["error_class"] == "missing_prompt_or_output"
+
+
+def test_virtual_outputs_path_resolves_through_exported_host_root(tmp_path, monkeypatch) -> None:
+    module = _load_script_module()
+    outputs = tmp_path / "outputs"
+    (outputs / "assets").mkdir(parents=True)
+    monkeypatch.setenv("SOPHIA_OUTPUTS_HOST_PATH", str(outputs))
+
+    resolved = module._resolve_sophia_path("/mnt/user-data/outputs/assets/prompt.json")
+
+    assert resolved == str(outputs / "assets" / "prompt.json")
+
+
+def test_batch_relative_prompt_resolves_against_manifest_dir(tmp_path, monkeypatch, capsys) -> None:
+    module = _load_script_module()
+    (tmp_path / "slide-02.prompt.json").write_text('{"prompt":"professional architecture visual"}', encoding="utf-8")
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "prompt_file": "slide-02.prompt.json",
+                        "output_file": "slide-02.png",
+                        "slide_visual": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    def _fake_generate(prompt_file, _refs, output_file, _aspect_ratio, **_kwargs):
+        assert prompt_file == str(tmp_path / "slide-02.prompt.json")
+        Path(output_file).write_bytes(b"\x89PNG fake")
+        return "IMAGEGEN_OK fake"
+
+    monkeypatch.setattr(module, "generate_image", _fake_generate)
+
+    assert module._run_batch(str(manifest_path)) == 0
+    summary = None
+    for line in capsys.readouterr().out.splitlines():
+        if line.startswith("IMAGEGEN_BATCH "):
+            summary = json.loads(line[len("IMAGEGEN_BATCH "):])
+    assert summary is not None
+    assert summary["complete"] is True
+    assert summary["items"][0]["output_file"] == "slide-02.png"
+    assert (tmp_path / "slide-02.png").is_file()
+
+
+def test_batch_virtual_paths_write_host_files_but_echo_virtual_paths(tmp_path, monkeypatch, capsys) -> None:
+    module = _load_script_module()
+    outputs = tmp_path / "outputs"
+    assets = outputs / "assets"
+    assets.mkdir(parents=True)
+    (assets / "slide-02.prompt.json").write_text('{"prompt":"professional system map"}', encoding="utf-8")
+    manifest_path = assets / "manifest.json"
+    manifest_path.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {
+                        "prompt_file": "/mnt/user-data/outputs/assets/slide-02.prompt.json",
+                        "output_file": "/mnt/user-data/outputs/assets/slide-02.png",
+                        "slide_visual": True,
+                    }
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SOPHIA_OUTPUTS_HOST_PATH", str(outputs))
+
+    def _fake_generate(prompt_file, _refs, output_file, _aspect_ratio, **_kwargs):
+        assert prompt_file == str(assets / "slide-02.prompt.json")
+        assert output_file == str(assets / "slide-02.png")
+        Path(output_file).write_bytes(b"\x89PNG fake")
+        return "IMAGEGEN_OK fake"
+
+    monkeypatch.setattr(module, "generate_image", _fake_generate)
+
+    assert module._run_batch("/mnt/user-data/outputs/assets/manifest.json") == 0
+    summary = None
+    for line in capsys.readouterr().out.splitlines():
+        if line.startswith("IMAGEGEN_BATCH "):
+            summary = json.loads(line[len("IMAGEGEN_BATCH "):])
+    assert summary is not None
+    assert summary["items"][0]["output_file"] == "/mnt/user-data/outputs/assets/slide-02.png"
+    assert (assets / "slide-02.png").is_file()
 
 
 # ---- per-call timeout (kills the ~10-min hang) ------------------------------

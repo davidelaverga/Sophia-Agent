@@ -162,10 +162,10 @@ def test_success_renders_each_slide_then_wraps(tmp_path, monkeypatch):
     assert (tmp_path / ".deck-render").is_dir()
 
 
-def test_slide_render_command_sets_opaque_dark_bg_color():
-    # The render harness must paint an opaque dark base so a slide that leaves a
-    # region uncovered renders navy, not Chromium's default white (white-band
-    # defect, prod 019f0b8a). The deck plumbs --bg-color into render_html_to_png.
+def test_slide_render_command_sets_opaque_neutral_bg_color():
+    # The render harness must paint an opaque base so a slide that leaves a
+    # region uncovered does not expose Chromium's default page background.
+    # The deck plumbs --bg-color into render_html_to_png without forcing dark style.
     cmd = deck._slide_render_command(
         "/usr/bin/node",
         Path("/x/render_html_to_png.mjs"),
@@ -174,7 +174,7 @@ def test_slide_render_command_sets_opaque_dark_bg_color():
     )
     assert "--bg-color" in cmd
     assert cmd[cmd.index("--bg-color") + 1] == deck._DECK_BG
-    assert deck._DECK_BG == "#0e1626"
+    assert deck._DECK_BG == "#f7f9fc"
 
 
 def test_partial_images_ship_deck_with_quality_warning(tmp_path, monkeypatch):
@@ -319,6 +319,37 @@ def test_deck_builder_result_records_pptx_diagnostics(tmp_path):
     assert diag["pptx_deck_missing_image_count"] == 2
     assert diag["pptx_output_paths"] == [f"{_OUTPUTS}deck.pptx"]
     assert cmd.update["builder_pptx_compile_latch_pending"] is False
+
+
+def test_deck_builder_result_emits_build_deck_compile_span(tmp_path, monkeypatch):
+    from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
+
+    outputs_dir = tmp_path / "outputs"
+    outputs_dir.mkdir()
+    (outputs_dir / "deck.pptx").write_bytes(b"PK\x03\x04 fake")
+    spans = []
+    monkeypatch.setattr(
+        ba,
+        "_safe_langsmith_span",
+        lambda name, **kwargs: spans.append({"name": name, **kwargs}),
+    )
+    result = _deck_tool_message(
+        {
+            "success": True,
+            "pptx_path": f"{_OUTPUTS}deck.pptx",
+            "slide_count": 5,
+            "quality_warning": "visual_quality_warning",
+            "overflow_slides": [{"slide": 3, "overflow_px": 12}],
+        }
+    )
+
+    BuilderArtifactMiddleware()._deck_builder_result_command(_deck_build_request(outputs_dir), result)
+
+    compile_span = next(span for span in spans if span["name"] == "Sophia PPTX Compile")
+    assert compile_span["inputs"]["compiler"] == "build_deck_from_slides"
+    assert compile_span["outputs"]["actual_slide_count"] == 5
+    assert compile_span["outputs"]["picture_count"] == 5
+    assert compile_span["outputs"]["quality_warning"] == "visual_quality_warning"
 
 
 def test_deck_builder_result_records_failure_and_ignores_garbage(tmp_path):
@@ -487,12 +518,30 @@ def test_slide_quality_gate_soft_passes_after_one_reauthor(tmp_path):
     outputs = tmp_path / "outputs"
     _write_clean_slide(outputs)
     result = _deck_tool_message({"success": True, "overflow_slides": [{"slide": 1, "overflow_px": 300}]})
-    assert (
-        BuilderArtifactMiddleware()._slide_quality_rejection_command(
-            _quality_request(outputs, builder_slide_quality_rejections=1), result, {}
-        )
-        is None
+    delta = {}
+    assert BuilderArtifactMiddleware()._slide_quality_rejection_command(
+        _quality_request(outputs, builder_slide_quality_rejections=1), result, delta
+    ) is None
+    assert delta["pptx_deck_quality_warning"] == "visual_quality_warning"
+    assert delta["pptx_deck_visual_quality_gap_count"] == 1
+
+
+def test_slide_quality_gate_blocks_visual_contract_prompt(tmp_path):
+    outputs = tmp_path / "outputs"
+    _write_clean_slide(outputs)
+    assets = outputs / "assets"
+    assets.mkdir(parents=True)
+    (assets / "02.prompt.json").write_text(
+        '{"prompt":"chalkboard diagram with THE TEXT READS: throughput"}',
+        encoding="utf-8",
     )
+    cmd = BuilderArtifactMiddleware()._slide_quality_rejection_command(
+        _quality_request(outputs), _deck_tool_message({"success": True, "slide_count": 1}), {}
+    )
+    assert isinstance(cmd, Command)
+    content = cmd.update["messages"][0].content.lower()
+    assert "visual_contract" in content
+    assert "regenerate" in content
 
 
 def test_slide_quality_gate_only_for_pptx_targets(tmp_path):

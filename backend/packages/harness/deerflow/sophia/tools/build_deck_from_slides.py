@@ -47,9 +47,9 @@ _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 _DECK_WIDTH = 1920
 _DECK_HEIGHT = 1080
 # Opaque base background for the render harness: any region a slide HTML leaves
-# uncovered renders this color instead of Chromium's default white (white-band
-# defect, prod 019f0b8a). Matches the ppt-generation SKILL.md slide skeleton.
-_DECK_BG = "#0e1626"
+# uncovered renders this color instead of Chromium's transparent/default page
+# background. The slide itself may be light or dark.
+_DECK_BG = "#f7f9fc"
 # Slide content may exceed the 1080-tall canvas by a few px from sub-pixel
 # rounding without any visible clipping — only flag meaningful overflow. (FIX 2.)
 _SLIDE_OVERFLOW_TOLERANCE_PX = 8

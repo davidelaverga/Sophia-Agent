@@ -10,6 +10,8 @@ from deerflow.agents.sophia_agent.middlewares.slide_quality import (
     density_check,
     format_slide_quality_feedback,
     overflow_check,
+    visual_contract_check,
+    QualityGap,
 )
 
 _CLEAN_SLIDE = (
@@ -86,7 +88,7 @@ def test_inspector_aggregates_all_checks_and_feedback_is_actionable():
     feedback = format_slide_quality_feedback(gaps)
     assert feedback.startswith("[Sophia/slide-quality]")
     assert "build_deck_from_slides" in feedback
-    assert "REUSE the existing images" in feedback
+    assert "Reuse existing good images" in feedback
     assert "01.html" in feedback
 
 
@@ -101,3 +103,32 @@ def test_grader_slot_is_off_by_default():
     # The socket exists but is inert: a disabled grader adds no gaps.
     inspector_with_disabled_grader = SlideQualityInspector(grader=GraderConfig(enabled=False))
     assert inspector_with_disabled_grader.inspect(SlideSignals(slide_sources=[("01.html", _CLEAN_SLIDE)])) == []
+
+
+def test_visual_contract_check_flags_generated_text_and_banned_style():
+    signals = SlideSignals(
+        prompt_sources=[
+            (
+                "02.prompt.json",
+                '{"prompt":"chalkboard system diagram. THE TEXT READS: model loop"}',
+            )
+        ]
+    )
+    gaps = visual_contract_check(signals)
+    assert len(gaps) == 1
+    assert gaps[0].check == "visual_contract"
+    assert "chalkboard" in gaps[0].detail
+
+
+def test_visual_contract_check_ignores_negated_banned_style():
+    signals = SlideSignals(prompt_sources=[("ok.prompt.json", '{"prompt":"professional visual, no chalkboard style"}')])
+    assert visual_contract_check(signals) == []
+
+
+def test_enabled_grader_uses_mocked_judge():
+    def _judge(_signals):
+        return [QualityGap(slide="01.html", check="visual_grader", detail="unrequested aesthetic")]
+
+    inspector = SlideQualityInspector(grader=GraderConfig(enabled=True, judge=_judge))
+    gaps = inspector.inspect(SlideSignals(slide_sources=[("01.html", _CLEAN_SLIDE)]))
+    assert any(gap.check == "visual_grader" for gap in gaps)

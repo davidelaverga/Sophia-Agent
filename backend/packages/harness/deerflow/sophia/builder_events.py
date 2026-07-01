@@ -778,6 +778,10 @@ def _artifact_completion_fields(
         "format_conflict_original_target_ext": artifact.get("format_conflict_original_target_ext"),
         "image_generation_status": artifact.get("image_generation_status"),
         "image_generation_reason": artifact.get("image_generation_reason"),
+        "primary_image_batch_status": artifact.get("primary_image_batch_status"),
+        "primary_image_batch_error_class": artifact.get("primary_image_batch_error_class"),
+        "serial_repair_count": artifact.get("serial_repair_count"),
+        "manifest_authoring_failure_count": artifact.get("manifest_authoring_failure_count"),
         # VQ-3: harness-stamped enrichment outcome — attempted/succeeded/
         # skip_reason. A build with image generation enabled never ends
         # ambiguous.
