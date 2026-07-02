@@ -14,9 +14,9 @@ path. This is the same Chromium substrate the PDF report path uses. Default to
 a restrained professional technical aesthetic unless the user explicitly asks
 for a different style.
 
-A slide may omit the image when the request is plain — honor no-image deck
-requests by authoring a clean text-only slide. Never invent decorative imagery
-the user did not ask for.
+Only an explicitly plain text-only/no-visual deck request may omit slide images.
+For normal presentation decks, every slide must have a generated local visual
+asset; never compile a no-image deck after image generation fails.
 
 ## Building a deck
 
@@ -25,17 +25,11 @@ the user did not ask for.
 2. **Generate each slide's image into the deck `assets/` folder.** Use the
    image-generation skill in `--slide-visual` mode (the VISUAL AREA ONLY — no
    title, narrative, diagram labels, formulas, axis labels, or chrome baked in;
-   those are real HTML text in the slide). Write the PNG under `/mnt/user-data/outputs/assets/`. Generate the
-   hero/cover first, then the rest in ONE `--manifest` batch (each item
-   referencing the hero PNG in `reference_images` for visual consistency):
+   those are real HTML text in the slide). Write the PNG under `/mnt/user-data/outputs/assets/`.
+   Generate ALL slide visuals, including the hero/cover, in ONE `--manifest`
+   batch. Use consistent shared style instructions across prompt JSON files
+   instead of relying on a serial hero reference:
    ```bash
-   # hero first (anchors the visual style)
-   python /mnt/skills/public/image-generation/scripts/generate.py \
-     --slide-visual \
-     --prompt-file /mnt/user-data/outputs/assets/01-cover.prompt.json \
-     --output-file /mnt/user-data/outputs/assets/01-cover.png
-   # then ONE batch for the rest (each item: "slide_visual": true,
-   # "reference_images": [".../assets/01-cover.png"])
    python /mnt/skills/public/image-generation/scripts/generate.py \
      --manifest /mnt/user-data/outputs/assets/manifest.json
    ```
@@ -44,13 +38,15 @@ the user did not ask for.
    prompt path. The batch items run concurrently (bounded for API rate limits)
    and print one `IMAGEGEN_BATCH {...}` summary line. Generated images are
    written as **local files** — reference them by relative path from your slide
-   HTML, never a remote URL.
+   HTML, never a remote URL. If the readable manifest batch runs but leaves
+   failed/missing images, repair only those images serially with the same prompt
+   files and output filenames. Do not switch to fully serial generation.
 3. **Author one self-contained HTML file per slide** under
    `/mnt/user-data/outputs/slides/`, named so they sort in order (e.g.
    `slides/01-cover.html`, `slides/02-overview.html`). Each is a `1920×1080`
    document. Use the skeleton below. Reference the slide's image by **relative**
-   path only (`../assets/01-cover.png`). A slide without a visual simply omits
-   the `.visual` block.
+   path only (`../assets/01-cover.png`). A slide without a visual is allowed
+   only for an explicitly text-only/no-visual deck request.
 4. **Convert to PPTX.** Call the build tool once:
    ```
    build_deck_from_slides(output_path="/mnt/user-data/outputs/<deck>.pptx", title="<Deck title>")
@@ -110,9 +106,9 @@ the user did not ask for.
   background transparent or accidentally white: set an opaque background on
   `html, body` AND on the slide wrapper, and prefer full-bleed visuals for
   hero/cover slides. A stray band or gutter at any edge is a defect.
-- **Every slide visual is a relative `../assets/<file>` path.** A remote URL in a
-  slide is an error — generate images into `assets/` first. A slide may also have
-  no image at all when the content is plain text.
+- **Every normal slide visual is a relative `../assets/<file>` path.** A remote
+  URL in a slide is an error — generate images into `assets/` first. Slides may
+  omit visuals only when the user explicitly requested a text-only/no-visual deck.
 - **The generated image is the visual area only.** Titles, narrative, formulas,
   axis labels, diagram labels, and annotations are real HTML text in
   `slides/*.html`; never bake a title, footer, narrative, page chrome, or large
@@ -133,7 +129,7 @@ the user did not ask for.
   slide.** If the content does not fit at a comfortable size, CUT content — do NOT
   shrink the font or cram more columns. Content that overruns the 1920×1080 frame
   is clipped by the renderer; the harness measures this and rejects a clipped
-  slide for one re-author.
+  slide for bounded re-authoring.
 
 ## QA Checklist
 
@@ -141,6 +137,7 @@ the user did not ask for.
 - The deck was produced by `build_deck_from_slides`, not hand-written PPTX code.
 - At most one image per slide; titles/narrative/labels are real HTML text,
   legible and not clipped, never baked into the image by default.
-- Plain (no-image) requests ship clean text-only slides.
+- Explicit plain/no-image requests ship clean text-only slides; normal decks do
+  not compile until generated visuals are complete.
 - Expected slide count; correct primary extension `.pptx`.
 - Emit promptly once the build returns a valid `.pptx`.

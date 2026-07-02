@@ -15,8 +15,8 @@ contract. A mockable LLM-as-judge grader plugs in as check N+1 via
 
 Pure: no I/O. The caller (``BuilderArtifactMiddleware``) collects the signals
 (the ``build_deck_from_slides`` result + the slide HTML/prompt sources) and
-passes them in; the inspector returns the gaps; the middleware spends ONE
-bounded repair turn. Layout gaps are HTML/CSS only; visual-contract gaps may
+passes them in; the inspector returns the gaps; the middleware spends bounded
+repair turns. Layout gaps are HTML/CSS only; visual-contract gaps may
 regenerate only the affected image.
 """
 
@@ -75,6 +75,13 @@ _BANNED_AESTHETIC_RE = re.compile(
     re.IGNORECASE,
 )
 _NEGATED_STYLE_RE = re.compile(r"(?:\bno\b|\bavoid\b|\bwithout\b|\bnever\b|\bdo\s+not\b)", re.IGNORECASE)
+_UNREQUESTED_STYLE_RE = re.compile(
+    r"\b(cyberpunk|neon|matrix|hacker|terminal\s+green|glowing\s+grid|chalkboard|blackboard|whiteboard|"
+    r"hand[-\s]?written|hand[-\s]?drawn|sketch|sketched)\b",
+    re.IGNORECASE,
+)
+_TINY_FONT_RE = re.compile(r"font-size\s*:\s*(?:[0-9]|1[0-5])px\b", re.IGNORECASE)
+_CARD_CLASS_RE = re.compile(r"\b(?:class|id)\s*=\s*['\"][^'\"]*\bcard\b", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -228,7 +235,47 @@ def visual_contract_check(signals: SlideSignals) -> list[QualityGap]:
     return gaps
 
 
-DEFAULT_CHECKS: tuple[QualityCheck, ...] = (overflow_check, chrome_check, density_check, visual_contract_check)
+def visual_style_check(signals: SlideSignals) -> list[QualityGap]:
+    """Flag narrow source patterns behind unrequested bad deck aesthetics."""
+    gaps: list[QualityGap] = []
+    for name, html in signals.slide_sources:
+        reasons: list[str] = []
+        style_match = next(
+            (
+                match
+                for match in _UNREQUESTED_STYLE_RE.finditer(html)
+                if not _NEGATED_STYLE_RE.search(html[max(0, match.start() - 32): match.start()])
+            ),
+            None,
+        )
+        if style_match is not None:
+            reasons.append(f"unrequested {style_match.group(1)} aesthetic")
+        if _TINY_FONT_RE.search(html):
+            reasons.append("font-size below 16px")
+        card_count = len(_CARD_CLASS_RE.findall(html))
+        if card_count > 4:
+            reasons.append(f"{card_count} card-style panels")
+        if reasons:
+            gaps.append(
+                QualityGap(
+                    slide=name,
+                    check="visual_style",
+                    detail=(
+                        "use restrained professional technical styling with legible text and fewer "
+                        "UI/card panels — " + "; ".join(reasons)
+                    ),
+                )
+            )
+    return gaps
+
+
+DEFAULT_CHECKS: tuple[QualityCheck, ...] = (
+    overflow_check,
+    chrome_check,
+    density_check,
+    visual_contract_check,
+    visual_style_check,
+)
 
 
 @dataclass(frozen=True)

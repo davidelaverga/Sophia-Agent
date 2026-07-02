@@ -11,6 +11,7 @@ from deerflow.agents.sophia_agent.middlewares.slide_quality import (
     format_slide_quality_feedback,
     overflow_check,
     visual_contract_check,
+    visual_style_check,
     QualityGap,
 )
 
@@ -123,6 +124,21 @@ def test_visual_contract_check_flags_generated_text_and_banned_style():
 def test_visual_contract_check_ignores_negated_banned_style():
     signals = SlideSignals(prompt_sources=[("ok.prompt.json", '{"prompt":"professional visual, no chalkboard style"}')])
     assert visual_contract_check(signals) == []
+
+
+def test_visual_style_check_flags_neon_tiny_text_and_card_overload():
+    html = (
+        "<html><body><section class='neon matrix'>"
+        "<style>.tiny{font-size:12px}</style>"
+        + "".join("<div class='card'>x</div>" for _ in range(5))
+        + "</section></body></html>"
+    )
+    gaps = visual_style_check(SlideSignals(slide_sources=[("bad.html", html)]))
+    assert len(gaps) == 1
+    assert gaps[0].check == "visual_style"
+    assert "neon" in gaps[0].detail
+    assert "font-size" in gaps[0].detail
+    assert "card-style" in gaps[0].detail
 
 
 def test_enabled_grader_uses_mocked_judge():

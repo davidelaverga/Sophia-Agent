@@ -782,6 +782,12 @@ def _artifact_completion_fields(
         "primary_image_batch_error_class": artifact.get("primary_image_batch_error_class"),
         "serial_repair_count": artifact.get("serial_repair_count"),
         "manifest_authoring_failure_count": artifact.get("manifest_authoring_failure_count"),
+        "presentation_route": artifact.get("presentation_route"),
+        "expected_generated_visual_count": artifact.get("expected_generated_visual_count"),
+        "successful_generated_visual_count": artifact.get("successful_generated_visual_count"),
+        "referenced_visual_count": artifact.get("referenced_visual_count"),
+        "missing_expected_visual_count": artifact.get("missing_expected_visual_count"),
+        "visual_quality_gap_count": artifact.get("visual_quality_gap_count"),
         # VQ-3: harness-stamped enrichment outcome — attempted/succeeded/
         # skip_reason. A build with image generation enabled never ends
         # ambiguous.

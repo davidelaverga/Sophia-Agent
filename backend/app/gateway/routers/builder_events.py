@@ -64,6 +64,12 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "primary_image_batch_error_class",
     "serial_repair_count",
     "manifest_authoring_failure_count",
+    "presentation_route",
+    "expected_generated_visual_count",
+    "successful_generated_visual_count",
+    "referenced_visual_count",
+    "missing_expected_visual_count",
+    "visual_quality_gap_count",
     "iterations_used",
     "unmet_conditions",
     "brief_assumptions",
@@ -119,6 +125,12 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "primary_image_batch_error_class",
         "serial_repair_count",
         "manifest_authoring_failure_count",
+        "presentation_route",
+        "expected_generated_visual_count",
+        "successful_generated_visual_count",
+        "referenced_visual_count",
+        "missing_expected_visual_count",
+        "visual_quality_gap_count",
         "iterations_used",
         "unmet_conditions",
         "brief_assumptions",
@@ -334,6 +346,12 @@ class BuilderCompletionEvent(BaseModel):
     primary_image_batch_error_class: str | None = None
     serial_repair_count: int | None = None
     manifest_authoring_failure_count: int | None = None
+    presentation_route: str | None = None
+    expected_generated_visual_count: int | None = None
+    successful_generated_visual_count: int | None = None
+    referenced_visual_count: int | None = None
+    missing_expected_visual_count: int | None = None
+    visual_quality_gap_count: int | None = None
     image_generation_outcome: dict[str, Any] | None = Field(
         None,
         description="VQ-3 harness-stamped enrichment outcome: "

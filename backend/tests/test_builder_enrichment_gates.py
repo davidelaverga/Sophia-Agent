@@ -121,14 +121,14 @@ def test_enrichment_enabled_mirror_reads_state():
     assert _builder_image_enrichment_enabled(_pdf_state(task="plain text summary")) is True
 
 
-def test_pdf_cap_is_three_and_deck_cap_is_twenty():
+def test_pdf_cap_is_three_and_deck_cap_is_thirty():
     from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
         _image_generation_max_calls,
     )
 
     # Caps count IMAGES (a --manifest batch produces N images in one call).
     assert _image_generation_max_calls(_pdf_state()) == 3
-    assert _image_generation_max_calls(_deck_state()) == 20
+    assert _image_generation_max_calls(_deck_state()) == 30
 
 
 # ---- VQ-3: preflight delta + outcome accounting -------------------------------
@@ -178,7 +178,10 @@ def test_outcome_none_when_enrichment_disabled():
 def test_outcome_model_skipped_when_no_attempts():
     state = _deck_state(builder_pptx_diagnostics={})
     outcome = _image_generation_outcome_from_state(state)
-    assert outcome == {"attempted": 0, "succeeded": 0, "skip_reason": "model_skipped"}
+    assert outcome["attempted"] == 0
+    assert outcome["succeeded"] == 0
+    assert outcome["skip_reason"] == "model_skipped"
+    assert "expected_generated_visual_count" in outcome
 
 
 def test_outcome_env_missing_from_preflight():
@@ -197,7 +200,10 @@ def test_outcome_success_has_no_skip_reason():
         }
     )
     outcome = _image_generation_outcome_from_state(state)
-    assert outcome == {"attempted": 2, "succeeded": 2}
+    assert outcome["attempted"] == 2
+    assert outcome["succeeded"] == 2
+    assert "skip_reason" not in outcome
+    assert outcome["successful_generated_visual_count"] == 2
 
 
 def test_outcome_failed_after_retry():

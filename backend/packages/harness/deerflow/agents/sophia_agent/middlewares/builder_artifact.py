@@ -43,6 +43,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_task import (
     _image_generation_enabled,
 )
 from deerflow.agents.sophia_agent.middlewares.slide_quality import (
+    QualityGap,
     SlideQualityInspector,
     SlideSignals,
     format_slide_quality_feedback,
@@ -265,7 +266,7 @@ _SHELL_SEPARATORS = {"&&", "||", ";", "|", "&"}
 # Terminal error classes short-circuit retries — when the environment cannot
 # generate images at all, the build must continue with charts/text instead of
 # burning turns.
-_IMAGE_GENERATION_MAX_CALLS = 20
+_IMAGE_GENERATION_MAX_CALLS = 30
 # Bounded safety valve for the deck hero-anchor batch backstop: after this many
 # rejections of post-hero serial image-gen calls with no --manifest batch seen,
 # stop rejecting so a model that genuinely cannot author a manifest still ships
@@ -291,6 +292,13 @@ _MANIFEST_AUTHORING_ERRORS = frozenset(
     }
 )
 _SERIAL_REPAIR_ATTEMPTS_PER_FAILED_SLIDE = 2
+_PPTX_VISUAL_QUALITY_REPAIR_MAX = 2
+_PPTX_TEXT_ONLY_REQUEST_RE = re.compile(
+    r"\b(?:plain\s+text[-\s]?only|text[-\s]?only|no[-\s]?image|no\s+images?"
+    r"|no\s+visuals?|without\s+(?:images?|visuals?)|with\s+no\s+(?:images?|visuals?))\b",
+    re.IGNORECASE,
+)
+_PPTX_SEVERE_QUALITY_CHECKS = frozenset({"overflow", "chrome", "visual_contract", "visual_style", "visual_grader"})
 # FIX 2 (2026-06-30) — the deterministic slide-quality gate. One shared inspector
 # (declarative checks plus a mockable grader slot) consulted on successful decks.
 _SLIDE_QUALITY_INSPECTOR = SlideQualityInspector()
@@ -306,7 +314,7 @@ _IMAGE_GENERATION_MAX_CALLS_PDF = 3
 _PDF_PAGE_COUNT_REPAIR_MAX = 2
 # Accept a small band around the requested length — an 11-page PDF for a
 # "10-page" request is a delivered artifact, not a failure. An off-band render
-# (after the one repair) ships with a quality_warning, never a terminal failure
+# after bounded repair ships with a quality_warning, never a terminal failure
 # or artifact_path=null.
 _PDF_PAGE_COUNT_TOLERANCE_FRACTION = 0.1
 # Terminal image-gen error classes: further retries are pointless, so the build
@@ -360,6 +368,8 @@ def _presentation_completion_ready(state: dict[str, Any]) -> bool:
     if pptx_file is None:
         return False
     if not _pptx_picture_count_satisfies_slide_count(diagnostics):
+        return False
+    if not _pptx_generated_visuals_complete(state):
         return False
     if _pptx_target_slide_count_needs_one_repair(diagnostics, state):
         return False
@@ -483,18 +493,131 @@ def _pptx_assets_success_count(state: dict[str, Any]) -> int:
     return int(diagnostics.get("image_generation_success_count", 0) or 0)
 
 
+def _pptx_explicit_text_only_requested(state: dict[str, Any]) -> bool:
+    haystack_parts: list[str] = []
+    for source in (
+        state,
+        state.get("delegation_context") if isinstance(state.get("delegation_context"), dict) else {},
+        state.get("builder_task") if isinstance(state.get("builder_task"), dict) else {},
+    ):
+        if not isinstance(source, dict):
+            continue
+        for key in ("task", "task_brief", "description", "user_request"):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                haystack_parts.append(value)
+    return bool(_PPTX_TEXT_ONLY_REQUEST_RE.search("\n".join(haystack_parts)))
+
+
+def _pptx_generated_visuals_required(state: dict[str, Any]) -> bool:
+    return (
+        _requested_pptx_artifact(state)
+        and _builder_image_enrichment_enabled(state)
+        and not _pptx_explicit_text_only_requested(state)
+    )
+
+
+def _pptx_slide_visual_reference_count(state: dict[str, Any]) -> int:
+    outputs_root = _outputs_root_from_state(state)
+    if outputs_root is None:
+        return 0
+    slides_dir = outputs_root / "slides"
+    assets_dir = outputs_root / "assets"
+    if not slides_dir.is_dir() or not assets_dir.is_dir():
+        return 0
+    referenced_slides = 0
+    try:
+        slide_files = sorted(
+            path
+            for path in slides_dir.iterdir()
+            if path.is_file() and path.suffix.lower() in {".html", ".htm"}
+        )
+    except OSError:
+        return 0
+    for slide in slide_files:
+        try:
+            source = slide.read_text(encoding="utf-8", errors="replace")
+        except OSError:
+            continue
+        matches = re.findall(r"<img\b[^>]*\bsrc=[\"']\.\./assets/([^\"']+)[\"']", source, flags=re.IGNORECASE)
+        for raw_ref in matches:
+            ref = raw_ref.strip().replace("\\", "/")
+            pure = PurePosixPath(ref)
+            if not ref or pure.is_absolute() or ".." in pure.parts:
+                continue
+            if (assets_dir / Path(*pure.parts)).is_file():
+                referenced_slides += 1
+                break
+    return referenced_slides
+
+
+def _pptx_expected_generated_visual_count(state: dict[str, Any]) -> int:
+    if not _pptx_generated_visuals_required(state):
+        return 0
+    diagnostics = _pptx_diagnostics(state)
+    for key in ("expected_generated_visual_count", "image_generation_manifest_requested_count"):
+        value = diagnostics.get(key)
+        if isinstance(value, int) and value > 0:
+            return value
+    target = _pptx_latch_target_slide_count(state)
+    if target > 0:
+        return target
+    slide_count = _pptx_slide_html_count(state)
+    return slide_count if slide_count > 0 else 0
+
+
+def _pptx_successful_generated_visual_count(state: dict[str, Any]) -> int:
+    diagnostics = _pptx_diagnostics(state)
+    return int(diagnostics.get("image_generation_success_count", 0) or 0)
+
+
+def _pptx_visual_completeness_counts(state: dict[str, Any]) -> dict[str, int]:
+    expected = _pptx_expected_generated_visual_count(state)
+    successful = _pptx_successful_generated_visual_count(state)
+    referenced = _pptx_slide_visual_reference_count(state)
+    missing = 0
+    if expected > 0:
+        missing = max(0, expected - successful, expected - referenced)
+    return {
+        "expected_generated_visual_count": expected,
+        "successful_generated_visual_count": successful,
+        "referenced_visual_count": referenced,
+        "missing_expected_visual_count": missing,
+    }
+
+
+def _pptx_generated_visuals_complete(state: dict[str, Any]) -> bool:
+    if not _pptx_generated_visuals_required(state):
+        return True
+    counts = _pptx_visual_completeness_counts(state)
+    return (
+        counts["expected_generated_visual_count"] > 0
+        and counts["successful_generated_visual_count"] >= counts["expected_generated_visual_count"]
+        and counts["referenced_visual_count"] >= counts["expected_generated_visual_count"]
+        and counts["missing_expected_visual_count"] == 0
+    )
+
+
 def _pptx_valid_output_already_terminal(state: dict[str, Any]) -> bool:
     latest_pptx = _latest_valid_pptx_output_file(state)
-    return latest_pptx is not None and _pptx_picture_count_satisfies_slide_count(_pptx_diagnostics(state))
+    return (
+        latest_pptx is not None
+        and _pptx_picture_count_satisfies_slide_count(_pptx_diagnostics(state))
+        and _pptx_generated_visuals_complete(state)
+    )
+
+
+def _pptx_visual_completeness_diagnostics_update(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "presentation_route": "html_slide_to_pptx_raster",
+        **_pptx_visual_completeness_counts(state),
+    }
 
 
 def _pptx_slide_assets_ready(state: dict[str, Any]) -> bool:
     if not _requested_pptx_artifact(state):
         return False
-    target_count = _pptx_latch_target_slide_count(state)
-    if target_count <= 0:
-        return False
-    if _pptx_assets_success_count(state) < target_count:
+    if not _pptx_generated_visuals_complete(state):
         return False
     return not _pptx_valid_output_already_terminal(state)
 
@@ -536,6 +659,10 @@ def _pptx_compile_ready(state: dict[str, Any]) -> bool:
     if not _requested_pptx_artifact(state):
         return False
     if not _pptx_slide_html_ready(state):
+        return False
+    if state.get("builder_pptx_terminal_quality_failed") is True:
+        return False
+    if not _pptx_generated_visuals_complete(state):
         return False
     return not _pptx_valid_output_already_terminal(state)
 
@@ -687,6 +814,7 @@ def _image_generation_outcome_from_state(state: dict[str, Any]) -> dict[str, Any
             else:
                 skip_reason = "failed_after_retry"
     outcome: dict[str, Any] = {"attempted": attempted, "succeeded": succeeded}
+    outcome.update(_pptx_visual_completeness_counts(state))
     for source_key, outcome_key in (
         ("primary_image_batch_status", "primary_batch_status"),
         ("primary_image_batch_error_class", "primary_batch_error_class"),
@@ -1053,13 +1181,15 @@ def _existing_image_batch_paths(
 def _image_generation_manifest_result_delta(
     state: dict[str, Any],
     text: str,
+    *,
+    requested_hint: int = 0,
 ) -> tuple[list[str], int, str | None, dict[str, Any]]:
     batch_summary = _parse_image_batch_summary(text)
     batch_paths, batch_bytes, batch_missing_outputs = _existing_image_batch_paths(
         state,
         list(batch_summary.get("successful_paths") or []),
     )
-    requested = int(batch_summary.get("requested", 0) or 0)
+    requested = int(batch_summary.get("requested", 0) or 0) or int(requested_hint or 0)
     generated = len(batch_paths)
     error_class = "missing_batch_output" if batch_missing_outputs else batch_summary.get("error_class")
     manifest_complete = requested > 0 and generated == requested and batch_missing_outputs == 0
@@ -1073,6 +1203,8 @@ def _image_generation_manifest_result_delta(
         "image_generation_manifest_generation_attempted": requested > 0 and not authoring_failure,
         "primary_image_batch_status": "success" if manifest_complete else "failed",
         "primary_image_batch_error_class": None if manifest_complete else error_class,
+        "expected_generated_visual_count": requested,
+        "successful_generated_visual_count": generated,
     }
     if authoring_failure:
         delta["manifest_authoring_failure_count"] = 1
@@ -1600,6 +1732,7 @@ def _trace_pptx_compile_decision(
 ) -> None:
     diagnostics = _pptx_diagnostics(state)
     target = _pptx_latch_target_slide_count(state)
+    visual_counts = _pptx_visual_completeness_counts(state)
     _safe_langsmith_span(
         "Sophia PPTX Compile Decision",
         inputs={
@@ -1607,6 +1740,9 @@ def _trace_pptx_compile_decision(
             "image_success_count": int(diagnostics.get("image_generation_success_count", 0) or 0),
             "manifest_seen": bool(diagnostics.get("image_generation_manifest_seen")),
             "manifest_complete": bool(diagnostics.get("image_generation_manifest_complete")),
+            "expected_generated_visual_count": visual_counts["expected_generated_visual_count"],
+            "referenced_visual_count": visual_counts["referenced_visual_count"],
+            "missing_expected_visual_count": visual_counts["missing_expected_visual_count"],
             "pptx_generator_invoked": bool(_pptx_generator_invoked_seen(state)),
         },
         outputs={
@@ -1640,11 +1776,16 @@ def _merge_builder_pptx_diagnostics(
 
 _PPTX_DIAGNOSTIC_LATEST_COUNT_KEYS = frozenset(
     {
+        "expected_generated_visual_count",
+        "missing_expected_visual_count",
         "pptx_deck_missing_image_count",
+        "pptx_deck_visual_quality_gap_count",
         "pptx_generator_picture_count",
         "pptx_generator_slide_count",
         "pptx_plan_image_ref_count",
         "pptx_plan_slide_count",
+        "referenced_visual_count",
+        "successful_generated_visual_count",
     }
 )
 
@@ -2686,10 +2827,27 @@ def _apply_image_generation_metadata(artifact: dict[str, Any], state: dict[str, 
         "primary_image_batch_error_class",
         "serial_repair_count",
         "manifest_authoring_failure_count",
+        "presentation_route",
+        "expected_generated_visual_count",
+        "successful_generated_visual_count",
+        "referenced_visual_count",
+        "missing_expected_visual_count",
+        "pptx_deck_visual_quality_gap_count",
     ):
-        value = diagnostics.get(key)
+        value = (
+            _pptx_visual_completeness_diagnostics_update(state).get(key)
+            if key
+            in {
+                "presentation_route",
+                "expected_generated_visual_count",
+                "successful_generated_visual_count",
+                "referenced_visual_count",
+                "missing_expected_visual_count",
+            }
+            else diagnostics.get(key)
+        )
         if value not in (None, "", 0):
-            artifact[key] = value
+            artifact["visual_quality_gap_count" if key == "pptx_deck_visual_quality_gap_count" else key] = value
 
 
 def _apply_edit_context_metadata(artifact: dict[str, Any], state: dict[str, Any]) -> None:
@@ -4496,6 +4654,72 @@ def _extract_image_generation_raw_error(text: str) -> str | None:
     return detail or None
 
 
+def _host_path_for_image_command_path(state: dict[str, Any], raw_path: str | None) -> Path | None:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return None
+    normalized = raw_path.replace("\\", "/").strip()
+    host = BuilderArtifactMiddleware._host_path_for_plan_file(state, normalized)
+    if host is not None:
+        return host
+    if normalized.startswith("/"):
+        return None
+    outputs_root = _outputs_root_from_state(state)
+    if outputs_root is None:
+        return None
+    pure = PurePosixPath(normalized)
+    if pure.is_absolute() or ".." in pure.parts:
+        return None
+    return outputs_root / Path(*pure.parts)
+
+
+def _trace_pptx_image_single_item(
+    *,
+    segment: str,
+    state: dict[str, Any],
+    output_path: str | None,
+    valid_image: bool,
+    bytes_count: int,
+    error_class: str | None,
+    status_reason: str | None,
+    raw_error: str | None,
+) -> None:
+    prompt_file = _command_flag_value(segment, "--prompt-file")
+    prompt_host = _host_path_for_image_command_path(state, prompt_file)
+    prompt_hash = None
+    if prompt_host is not None and prompt_host.is_file():
+        try:
+            prompt_hash = hashlib.sha256(prompt_host.read_bytes()).hexdigest()[:16]
+        except OSError:
+            prompt_hash = None
+    diagnostics = _pptx_diagnostics(state)
+    real_batch_attempted = bool(diagnostics.get("image_generation_manifest_generation_attempted"))
+    _safe_langsmith_span(
+        "Sophia Image Single Item",
+        inputs={
+            "mode": "serial_repair" if real_batch_attempted else "single",
+            "command_hash": hashlib.sha256(segment.encode("utf-8", errors="ignore")).hexdigest()[:16],
+            "prompt_file": PurePosixPath(str(prompt_file or "")).name or None,
+            "prompt_readable": bool(prompt_host is not None and prompt_host.is_file()),
+            "prompt_hash": prompt_hash,
+            "output_file": PurePosixPath(str(output_path or "")).name or None,
+            "reference_count": len(_command_flag_values(segment, "--reference-images")),
+        },
+        outputs={
+            "success": valid_image,
+            "bytes": bytes_count,
+            "error_class": error_class,
+            "status_reason": status_reason,
+            "raw_error_excerpt": raw_error,
+        },
+        metadata={
+            "sophia_component": "builder_image_single_item",
+            "image_single_success": valid_image,
+            "image_single_error_class": error_class,
+        },
+        tags=["pptx", "image_single"],
+    )
+
+
 def _image_generation_segment_status(
     *,
     segment: str,
@@ -4518,6 +4742,16 @@ def _image_generation_segment_status(
         status_reason,
         raw_error,
     )
+    _trace_pptx_image_single_item(
+        segment=segment,
+        state=state,
+        output_path=output_path,
+        valid_image=valid_image,
+        bytes_count=bytes_count,
+        error_class=error_class,
+        status_reason=status_reason,
+        raw_error=raw_error,
+    )
     return output_path, valid_image, bytes_count, error_class, status_reason
 
 
@@ -4528,6 +4762,9 @@ def _image_generation_metadata_from_state(state: dict[str, Any]) -> tuple[str | 
     if attempts <= 0 and manifest_authoring_failures <= 0:
         return None, None
     successes = int(diagnostics.get("image_generation_success_count", 0) or 0)
+    visual_counts = _pptx_visual_completeness_counts(state)
+    if visual_counts["missing_expected_visual_count"] > 0:
+        return "partial", "visuals_partial"
     if _pptx_diagnostic_count(state, "pptx_deck_missing_image_count") > 0:
         return "partial", "visuals_partial"
     if successes > 0:
@@ -5335,9 +5572,11 @@ def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
         + "Author one self-contained 1920x1080 HTML file per slide under "
         "`/mnt/user-data/outputs/slides/` — real DOM title + concise narrative text, plus one "
         "generated VISUAL-ONLY image embedded by a relative `../assets/<file>` path. Text lives in "
-        "the HTML and is never baked into the image. Generate the hero image first, then ONE "
-        "image-generation `--manifest` batch for the rest; a slide may omit the image if the "
-        "request is plain.\n\n"
+        "the HTML and is never baked into the image. Generate every slide visual, including the "
+        "cover/hero, through ONE image-generation `--manifest` batch. If a readable batch attempts "
+        "generation but leaves failed/missing visuals, repair only those visuals serially with the "
+        "same prompt/output filenames. Do not compile a no-image deck unless the user explicitly "
+        "asked for a plain text-only/no-visual presentation.\n\n"
         "When the slide HTML files exist, compile the deck by calling the tool ONCE:\n"
         f"`build_deck_from_slides(output_path='{target}', title='<deck title>')`\n"
         "It renders each slide to a full-bleed PNG and wraps them into the .pptx. Then emit that .pptx.\n\n"
@@ -5445,11 +5684,14 @@ class BuilderArtifactState(AgentState):
     # F1 (2026-06-11): one-shot chunking correction when missing tool args
     # were caused by max_tokens truncation of an oversized single-call write.
     builder_truncation_correction_emitted: NotRequired[bool]
-    # VQ-4: hero/cover gate — one bounded repair turn when enrichment was
-    # enabled but zero generated images succeeded without an honest skip.
+    # VQ-4: legacy hero/cover gate for PDFs and non-normal deck edge cases when
+    # enrichment was enabled but zero generated images succeeded without an
+    # honest skip.
     builder_hero_gate_rejections: NotRequired[int]
-    # FIX 2 (2026-06-30): one bounded slide-quality re-author per deck build.
+    # FIX 2 (2026-06-30), extended 2026-07-01: two bounded slide-quality
+    # re-authors per deck build, then warning/failure depending on severity.
     builder_slide_quality_rejections: NotRequired[int]
+    builder_pptx_terminal_quality_failed: NotRequired[bool]
     # VQ-10: shared repair-iteration counter across ALL quality gates
     # (visual embed, hero/cover, advisory). Capped by
     # SOPHIA_BUILDER_MAX_ITERATIONS (default 3; 1 = legacy one-shot).
@@ -5480,10 +5722,10 @@ class BuilderArtifactState(AgentState):
     builder_graph_halted: NotRequired[bool]
     builder_terminal_halt_reason: NotRequired[str]
     builder_lifecycle_markers: NotRequired[dict[str, Any]]
-    # Visual hard gate: count emit attempts rejected because requested
-    # visuals were not embedded in the artifact. The first rejection buys
-    # one repair turn; afterwards the emit soft-passes with a quality
-    # warning so the build cannot loop on visual embedding.
+    # Visual hard gate: count emit attempts rejected because requested visuals
+    # were not embedded in the artifact. Normal PPTX decks now fail/repair via
+    # generated-visual completeness before compile; other visual artifacts keep
+    # this bounded warning path.
     builder_visual_embed_rejections: NotRequired[int]
     # Idempotency flag for the one-shot image-generation stop directive
     # (injected after repeated failed image-gen attempts so enrichment-by-
@@ -8203,6 +8445,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _pptx_compile_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if state.get("builder_pptx_compile_repair_pending"):
             return None
+        if state.get("builder_pptx_terminal_quality_failed"):
+            return None
         # Force the deterministic HTML-slide compile (build_deck_from_slides) once
         # all slide HTML exists. Image batch/repair discipline is enforced before
         # this point; compile should not be used as a substitute for serial repair.
@@ -8210,6 +8454,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         # authored slides but skipped the compile call could ignore the one-shot
         # latch message and fall through to the ceiling without a deck.
         if not _pptx_compile_ready(state):
+            if _requested_pptx_artifact(state) and _pptx_slide_html_ready(state) and not _pptx_generated_visuals_complete(state):
+                _trace_pptx_compile_decision(
+                    state=state,
+                    decision="compile_latch_blocked",
+                    reason="generated_visuals_incomplete",
+                    outputs=_pptx_visual_completeness_counts(state),
+                )
             return None
         logger.warning(
             "BuilderArtifact: forcing tool_choice=build_deck_from_slides "
@@ -8950,6 +9201,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if attempts < 2 or successes > 0:
             return None
         diagnostics = _pptx_diagnostics(state)
+        requested = int(diagnostics.get("image_generation_manifest_requested_count", 0) or 0)
+        failed = int(diagnostics.get("image_generation_manifest_failed_count", 0) or 0)
+        real_batch_attempted = bool(diagnostics.get("image_generation_manifest_generation_attempted")) and requested > 0
+        if real_batch_attempted and failed > 0:
+            used_repairs = int(diagnostics.get("serial_repair_count", 0) or 0)
+            allowed_repairs = failed * _SERIAL_REPAIR_ATTEMPTS_PER_FAILED_SLIDE
+            if used_repairs < allowed_repairs:
+                return None
         logger.warning(
             "[BuilderImageGeneration] phase=stop_directive attempts=%d error_class=%s",
             attempts,
@@ -9650,9 +9909,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         manifest_delta: dict[str, Any] = {}
         if manifest_segments:
+            manifest_requested_hint = sum(
+                _manifest_item_count(state, _command_flag_value(segment, "--manifest"))
+                for segment in manifest_segments
+            )
             batch_paths, batch_bytes, batch_error_class, manifest_delta = _image_generation_manifest_result_delta(
                 state,
                 text,
+                requested_hint=manifest_requested_hint,
             )
             successful_paths.extend(batch_paths)
             bytes_total += batch_bytes
@@ -9669,6 +9933,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "image_generation_error_class": error_class,
         }
         diagnostics = _pptx_diagnostics(state)
+        expected_visuals = int(
+            manifest_delta.get("expected_generated_visual_count")
+            or diagnostics.get("expected_generated_visual_count")
+            or _pptx_latch_target_slide_count(state)
+            or 0
+        )
+        if expected_visuals > 0:
+            delta["expected_generated_visual_count"] = expected_visuals
+        delta["successful_generated_visual_count"] = (
+            int(diagnostics.get("image_generation_success_count", 0) or 0) + len(successful_paths)
+        )
         if (
             single_segments
             and diagnostics.get("image_generation_manifest_generation_attempted")
@@ -9995,6 +10270,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         success = payload.get("success") is True and exists
         slide_count = int(payload.get("slide_count") or 0)
         error_class = None if success else payload.get("error_type") or status_reason or "deck_build_failed"
+        visual_counts = _pptx_visual_completeness_diagnostics_update(state)
         try:
             missing_count = int(payload.get("missing_image_count", 0) or 0)
         except (TypeError, ValueError):
@@ -10006,7 +10282,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "compiler": "build_deck_from_slides",
                 "output_file": pptx_path,
                 "expected_slide_count": _pptx_latch_target_slide_count(state),
-                "expected_image_count": _pptx_latch_target_slide_count(state),
+                "expected_image_count": visual_counts["expected_generated_visual_count"],
+                "presentation_route": "html_slide_to_pptx_raster",
             },
             outputs={
                 "success": success,
@@ -10014,6 +10291,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "actual_slide_count": slide_count,
                 "picture_count": slide_count if success else 0,
                 "missing_images": missing_count,
+                "successful_generated_visual_count": visual_counts["successful_generated_visual_count"],
+                "referenced_visual_count": visual_counts["referenced_visual_count"],
+                "missing_expected_visual_count": visual_counts["missing_expected_visual_count"],
                 "overflow_slides": overflow_slides,
                 "quality_warning": payload.get("quality_warning"),
                 "error_class": error_class,
@@ -10033,6 +10313,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             error_class=error_class,
             slide_count=slide_count,
         )
+        delta.update(visual_counts)
         if pptx_path and success:
             BuilderArtifactMiddleware._attach_deck_builder_success_fields(
                 delta,
@@ -10129,7 +10410,46 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         gaps = _SLIDE_QUALITY_INSPECTOR.inspect(signals)
         if not gaps:
             return None
-        if int(state.get("builder_slide_quality_rejections", 0) or 0) >= 1 or not _repair_iteration_grantable(state):
+        used_quality_repairs = int(state.get("builder_slide_quality_rejections", 0) or 0)
+        severe_gaps = [gap for gap in gaps if gap.check in _PPTX_SEVERE_QUALITY_CHECKS]
+        if used_quality_repairs >= _PPTX_VISUAL_QUALITY_REPAIR_MAX:
+            if severe_gaps:
+                logger.warning(
+                    "[BuilderSlideQuality] gate=terminal_failure gaps=%d severe=%d checks=%s slides=%s",
+                    len(gaps),
+                    len(severe_gaps),
+                    sorted({gap.check for gap in gaps}),
+                    sorted({gap.slide for gap in gaps}),
+                )
+                _trace_pptx_compile_decision(
+                    state=state,
+                    decision="slide_quality_failed",
+                    reason="severe_gaps_after_repairs",
+                    outputs={"gap_count": len(gaps), "checks": sorted({gap.check for gap in gaps})},
+                )
+                return Command(
+                    update={
+                        "messages": [
+                            _error_tool_message(
+                                content=(
+                                    format_slide_quality_feedback(gaps)
+                                    + "\nTwo visual-quality repair turns are already spent and severe "
+                                    "issues remain. Stop cleanly with artifact_path=null; do not recompile "
+                                    "or ship this deck."
+                                ),
+                                tool_call_id=request.tool_call.get("id", ""),
+                                name=_DECK_BUILD_TOOL_NAME,
+                            ),
+                        ],
+                        "builder_pptx_terminal_quality_failed": True,
+                        "builder_pptx_compile_repair_pending": False,
+                        "builder_pptx_diagnostics": {
+                            "pptx_deck_quality_warning": "visual_quality_failed",
+                            "pptx_deck_visual_quality_gap_count": len(gaps),
+                        },
+                    },
+                    goto="model",
+                )
             delta["pptx_deck_quality_warning"] = "visual_quality_warning"
             delta["pptx_deck_visual_quality_gap_count"] = len(gaps)
             logger.warning(
@@ -10142,6 +10462,22 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 state=state,
                 decision="slide_quality_soft_pass",
                 reason="repair_spent_or_not_grantable",
+                outputs={"gap_count": len(gaps), "checks": sorted({gap.check for gap in gaps})},
+            )
+            return None
+        if not _repair_iteration_grantable(state):
+            delta["pptx_deck_quality_warning"] = "visual_quality_warning"
+            delta["pptx_deck_visual_quality_gap_count"] = len(gaps)
+            logger.warning(
+                "[BuilderSlideQuality] gate=soft_pass_budget_denied gaps=%d checks=%s slides=%s",
+                len(gaps),
+                sorted({gap.check for gap in gaps}),
+                sorted({gap.slide for gap in gaps}),
+            )
+            _trace_pptx_compile_decision(
+                state=state,
+                decision="slide_quality_soft_pass",
+                reason="repair_not_grantable",
                 outputs={"gap_count": len(gaps), "checks": sorted({gap.check for gap in gaps})},
             )
             return None
@@ -10226,6 +10562,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             deck_block = self._deck_improvisation_rejection(request)
             if deck_block is not None:
                 return deck_block
+            deck_compile_block = self._deck_compile_visuals_rejection(request)
+            if deck_compile_block is not None:
+                return deck_compile_block
             image_block = self._image_generation_block_command(request)
             if image_block is not None:
                 return image_block
@@ -10369,28 +10708,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
     @staticmethod
     def _deck_batch_directive_rejection(command: str, state: dict[str, Any]) -> str | None:
-        """Backstop the deck hero-anchor batch workflow at bash time.
+        """Backstop the deck batch-first image workflow at bash time.
 
-        Decks must generate the hero first, then ALL remaining slides in ONE
-        ``--manifest`` batch (skills/public/ppt-generation). When the model
-        instead drifts back to serial single image-gen calls after the hero,
-        this rejects them and points at the batch path. It keeps rejecting until
-        a ``--manifest`` batch actually runs (``image_generation_manifest_seen``)
-        — NOT a one-shot nudge: the prior one-shot let the model keep serializing
-        (prod 019f0b8a: 0 nudges logged, ~9 serial calls, ~15 min). Detection is
-        ALSO broadened — ANY post-hero billable image-gen call without
-        ``--manifest`` is a serial call (the prior ``--slide-visual``-only
-        matcher missed bare ``generate.py`` invocations). After repeated nudges,
-        the directive changes to an explicit clean-failure path instead of
-        silently allowing a fully serial deck.
+        Normal decks must generate every slide visual, including the cover, in
+        ONE ``--manifest`` batch. Single image-generation calls are allowed only
+        as bounded serial repair after a readable batch made a real generation
+        attempt and left failed/missing images.
 
         Returns the directive text to reject with, or ``None`` to allow.
         """
         if _requested_artifact_ext(state) != "pptx":
             return None
         diagnostics = _pptx_diagnostics(state)
-        # Hero must already be done (>=1 success) before we expect a batch.
-        if _pptx_diagnostic_count(state, "image_generation_success_count") < 1:
+        if _pptx_explicit_text_only_requested(state):
             return None
         billable = [
             segment
@@ -10420,7 +10750,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "single-image repair attempt(s). Stop cleanly with artifact_path=null rather than "
                     "compiling a partial placeholder deck."
                 )
-            return None  # a readable batch attempted generation — bounded single repairs are allowed
+            return None  # a readable batch attempted generation; bounded serial repairs are allowed
         if diagnostics.get("image_generation_manifest_seen") and requested > 0:
             error_class = diagnostics.get("primary_image_batch_error_class") or "manifest_authoring_failed"
             return (
@@ -10428,25 +10758,24 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 f"attempt ({error_class}). Fix/materialize the prompt JSON files and rerun the ONE "
                 "`--manifest` batch before any serial repairs."
             )
-        # Any post-hero billable image-gen call WITHOUT --manifest is the serial
-        # loop the batch path exists to prevent (bare ``generate.py`` counts too).
+        # Any billable deck image-gen call WITHOUT --manifest before a real batch
+        # is the serial loop the batch path exists to prevent (bare
+        # ``generate.py`` counts too).
         if _pptx_diagnostic_count(state, "deck_batch_rejection_count") >= _DECK_BATCH_REJECTION_CAP:
             return (
                 "[Sophia/deck-batch] A readable image batch manifest is still required before "
-                "serial image repair is allowed. Write one manifest JSON for all remaining slides "
+                "serial image repair is allowed. Write one manifest JSON for every slide visual "
                 "and run `image-generation/scripts/generate.py --manifest <path>`. If you cannot "
                 "create or run a manifest, stop cleanly with artifact_path=null rather than "
                 "serializing the whole deck."
             )
         return (
-            "[Sophia/deck-batch] The hero slide is generated. Do NOT generate the remaining "
-            "slides one at a time — that is the serial loop the batch path exists to prevent. "
-            "Write ONE manifest JSON listing every remaining slide (each item `slide_visual: "
-            "true` with the hero PNG in `reference_images`), then call the image-generation "
-            "script ONCE with `--manifest /mnt/user-data/outputs/visuals/manifest.json`. All "
-            "remaining slides will generate concurrently. See the ppt-generation SKILL.md "
-            "workflow. (Single image-gen calls are allowed only to repair a stray failed "
-            "slide AFTER the batch runs.)"
+            "[Sophia/deck-batch] Do NOT generate deck visuals one at a time. Write ONE manifest "
+            "JSON listing every slide visual, including the cover/hero (each item `slide_visual: "
+            "true` with a readable `prompt_file` and expected `output_file`), then call the "
+            "image-generation script ONCE with `--manifest /mnt/user-data/outputs/assets/manifest.json`. "
+            "All slide visuals generate concurrently. Single image-gen calls are allowed only to "
+            "repair failed or missing images AFTER a readable batch actually attempts generation."
         )
 
     @staticmethod
@@ -10514,6 +10843,56 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         name=name,
                     ),
                 ],
+            },
+            goto="model",
+        )
+
+    @staticmethod
+    def _deck_compile_visuals_rejection(request: ToolCallRequest) -> Command | None:
+        if request.tool_call.get("name") != _DECK_BUILD_TOOL_NAME:
+            return None
+        state = request.state or {}
+        if not _pptx_generated_visuals_required(state) or _pptx_generated_visuals_complete(state):
+            return None
+        diagnostics = _pptx_diagnostics(state)
+        counts = _pptx_visual_completeness_diagnostics_update(state)
+        manifest_attempted = bool(diagnostics.get("image_generation_manifest_generation_attempted"))
+        if manifest_attempted:
+            next_step = (
+                "The primary manifest batch has run but required visuals are still missing. "
+                "Generate only the failed/missing slide visuals serially using the same prompt files "
+                "and output filenames, then call `build_deck_from_slides`."
+            )
+        else:
+            next_step = (
+                "Before compiling, write prompt JSON files and ONE manifest containing every slide "
+                "visual, including the cover/hero, then run "
+                "`image-generation/scripts/generate.py --manifest /mnt/user-data/outputs/assets/manifest.json`."
+            )
+        _trace_pptx_compile_decision(
+            state=state,
+            decision="compile_blocked_missing_visuals",
+            reason="generated_visuals_incomplete",
+            outputs=counts,
+        )
+        return Command(
+            update={
+                "messages": [
+                    _error_tool_message(
+                        content=(
+                            "[Sophia/PPTX visual completeness]\n"
+                            "Do not compile this presentation yet. Expected "
+                            f"{counts['expected_generated_visual_count']} generated slide visual(s), "
+                            f"found {counts['successful_generated_visual_count']} successful generation(s), "
+                            f"and {counts['referenced_visual_count']} slide HTML visual reference(s). "
+                            f"{next_step} If the required visuals cannot be produced after bounded batch "
+                            "plus serial recovery, stop cleanly with artifact_path=null."
+                        ),
+                        tool_call_id=request.tool_call.get("id", ""),
+                        name=_DECK_BUILD_TOOL_NAME,
+                    )
+                ],
+                "builder_pptx_diagnostics": counts,
             },
             goto="model",
         )
@@ -10627,9 +11006,42 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
         if any(_command_flag_value(segment, "--manifest") for segment in _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS)):
             _trace_pptx_image_manifest_prepared(command, state)
-        # Deck hero-anchor batch backstop: reject post-hero serial image-gen
-        # calls and redirect to the parallel --manifest path (before the cap/error
-        # checks so the nudge isn't masked by an unrelated rejection). Keeps
+        # The cap counts IMAGES: a single ``--manifest`` call produces N images,
+        # so the budget math uses the manifest item count, not the invocation count.
+        images_in_command = max(1, _image_generation_images_in_command(command, state))
+        rejection, attempts, successes, error_class = self._image_generation_rejection_text(
+            state,
+            billable_in_command=images_in_command,
+        )
+        if rejection is not None:
+            logger.warning(
+                "[BuilderImageGeneration] phase=call_blocked attempts=%d in_command=%d "
+                "successes=%d error_class=%s",
+                attempts,
+                billable_in_command,
+                successes,
+                error_class,
+            )
+            _trace_pptx_compile_decision(
+                state=state,
+                decision="image_generation_blocked",
+                reason=str(error_class or "budget_or_terminal_rejection"),
+                outputs={"billable_images_in_command": images_in_command},
+            )
+            return Command(
+                update={
+                    "messages": [
+                        _error_tool_message(
+                            content=rejection,
+                            tool_call_id=request.tool_call.get("id", ""),
+                            name=tool_name,
+                        ),
+                    ],
+                },
+                goto="model",
+            )
+        # Deck batch-first backstop: reject serial image-gen calls until a
+        # readable --manifest batch has made a real generation attempt. Keeps
         # rejecting until a batch runs, bounded by a safety valve.
         deck_batch_directive = self._deck_batch_directive_rejection(command, state)
         # Always log the gate decision so a missed batch is diagnosable from prod
@@ -10664,48 +11076,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 },
                 goto="model",
             )
-        # The cap counts IMAGES: a single ``--manifest`` call produces N images,
-        # so the budget math uses the manifest item count, not the invocation count.
-        images_in_command = max(1, _image_generation_images_in_command(command, state))
-        rejection, attempts, successes, error_class = self._image_generation_rejection_text(
-            state,
-            billable_in_command=images_in_command,
-        )
-        if rejection is None:
-            if _requested_artifact_ext(state) == "pptx":
-                _trace_pptx_compile_decision(
-                    state=state,
-                    decision="image_generation_allowed",
-                    reason="within_budget_and_not_terminal",
-                    outputs={"billable_images_in_command": images_in_command},
-                )
-            return None
-        logger.warning(
-            "[BuilderImageGeneration] phase=call_blocked attempts=%d in_command=%d "
-            "successes=%d error_class=%s",
-            attempts,
-            billable_in_command,
-            successes,
-            error_class,
-        )
-        _trace_pptx_compile_decision(
-            state=state,
-            decision="image_generation_blocked",
-            reason=str(error_class or "budget_or_terminal_rejection"),
-            outputs={"billable_images_in_command": images_in_command},
-        )
-        return Command(
-            update={
-                "messages": [
-                    _error_tool_message(
-                        content=rejection,
-                        tool_call_id=request.tool_call.get("id", ""),
-                        name=tool_name,
-                    ),
-                ],
-            },
-            goto="model",
-        )
+        if _requested_artifact_ext(state) == "pptx":
+            _trace_pptx_compile_decision(
+                state=state,
+                decision="image_generation_allowed",
+                reason="within_budget_and_not_terminal",
+                outputs={"billable_images_in_command": images_in_command},
+            )
+        return None
 
     def _visual_gate_rejection_command(
         self,
@@ -10832,7 +11210,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         artifact_args: dict[str, Any],
         state: BuilderArtifactState,
     ) -> bool:
-        """Hero/cover gate (Spec VQ-4), bounded to ONE repair turn.
+        """Legacy hero/cover gate (Spec VQ-4), bounded to one repair turn.
 
         "On by default" becomes enforced-by-default: an enrichment-enabled
         deck/PDF with ZERO successful generated images, no honest skip_reason
@@ -10879,6 +11257,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             deck_block = self._deck_improvisation_rejection(request)
             if deck_block is not None:
                 return deck_block
+            deck_compile_block = self._deck_compile_visuals_rejection(request)
+            if deck_compile_block is not None:
+                return deck_compile_block
             image_block = self._image_generation_block_command(request)
             if image_block is not None:
                 return image_block

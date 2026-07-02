@@ -294,6 +294,34 @@ def _deck_build_request(outputs_dir: Path):
     )
 
 
+def test_deck_compile_rejected_when_required_visuals_missing(tmp_path):
+    outputs_dir = tmp_path / "outputs"
+    slides = outputs_dir / "slides"
+    slides.mkdir(parents=True)
+    for index in range(1, 4):
+        (slides / f"{index:02d}.html").write_text("<html><body>slide</body></html>", encoding="utf-8")
+    request = SimpleNamespace(
+        tool_call={
+            "name": "build_deck_from_slides",
+            "id": "tc",
+            "args": {"output_path": f"{_OUTPUTS}deck.pptx"},
+        },
+        state={
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": f"{_OUTPUTS}deck.pptx",
+            "builder_pptx_requested_slide_count": 3,
+            "delegation_context": {"task_type": "presentation"},
+            "builder_pptx_diagnostics": {"image_generation_success_count": 0},
+        },
+    )
+
+    cmd = BuilderArtifactMiddleware._deck_compile_visuals_rejection(request)
+
+    assert isinstance(cmd, Command)
+    assert "Do not compile this presentation yet" in cmd.update["messages"][0].content
+    assert cmd.update["builder_pptx_diagnostics"]["missing_expected_visual_count"] == 3
+
+
 def test_deck_builder_result_records_pptx_diagnostics(tmp_path):
     outputs_dir = tmp_path / "outputs"
     outputs_dir.mkdir()
@@ -380,9 +408,14 @@ def test_deck_build_failure_suppresses_force_then_reforces_after_slide_repair(tm
 
     outputs_dir = tmp_path / "outputs"
     slides_dir = outputs_dir / "slides"
+    assets_dir = outputs_dir / "assets"
     slides_dir.mkdir(parents=True)
+    assets_dir.mkdir(parents=True)
     for index in range(1, 4):
-        (slides_dir / f"{index:02d}.html").write_text("<html><body>slide</body></html>")
+        (assets_dir / f"{index:02d}.png").write_bytes(b"png")
+        (slides_dir / f"{index:02d}.html").write_text(
+            f"<html><body>slide<div class='visual'><img src='../assets/{index:02d}.png'></div></body></html>"
+        )
 
     mw = BuilderArtifactMiddleware()
     failed = _deck_tool_message({"success": False, "error_type": "slide_render_failed", "slide_count": 3})
@@ -394,10 +427,11 @@ def test_deck_build_failure_suppresses_force_then_reforces_after_slide_repair(tm
     blocked_state = {
         "thread_data": {"outputs_path": str(outputs_dir)},
         "builder_artifact_target_path": f"{_OUTPUTS}deck.pptx",
-        "builder_pptx_requested_slide_count": 3,
-        "builder_pptx_compile_repair_pending": True,
-        "builder_pptx_diagnostics": {"image_generation_success_count": 3},
-    }
+            "builder_pptx_requested_slide_count": 3,
+            "builder_pptx_compile_repair_pending": True,
+            "builder_pptx_diagnostics": {"image_generation_success_count": 3},
+            "delegation_context": {"task_type": "presentation"},
+        }
     # Repair pending → no force; let the model rewrite the broken slide first.
     assert mw._force_choice_for_state(blocked_state, None) is None
 
@@ -513,14 +547,41 @@ def test_slide_quality_gate_passes_clean_deck(tmp_path):
     )
 
 
-def test_slide_quality_gate_soft_passes_after_one_reauthor(tmp_path):
-    # One bounded repair: once spent, an still-overflowing deck soft-passes (ships).
+def test_slide_quality_gate_allows_second_reauthor(tmp_path):
     outputs = tmp_path / "outputs"
     _write_clean_slide(outputs)
     result = _deck_tool_message({"success": True, "overflow_slides": [{"slide": 1, "overflow_px": 300}]})
     delta = {}
-    assert BuilderArtifactMiddleware()._slide_quality_rejection_command(
+    cmd = BuilderArtifactMiddleware()._slide_quality_rejection_command(
         _quality_request(outputs, builder_slide_quality_rejections=1), result, delta
+    )
+    assert isinstance(cmd, Command)
+    assert cmd.update["builder_slide_quality_rejections"] == 1
+
+
+def test_slide_quality_gate_fails_severe_gaps_after_two_reauthors(tmp_path):
+    outputs = tmp_path / "outputs"
+    _write_clean_slide(outputs)
+    result = _deck_tool_message({"success": True, "overflow_slides": [{"slide": 1, "overflow_px": 300}]})
+    delta = {}
+    cmd = BuilderArtifactMiddleware()._slide_quality_rejection_command(
+        _quality_request(outputs, builder_slide_quality_rejections=2), result, delta
+    )
+    assert isinstance(cmd, Command)
+    assert cmd.update["builder_pptx_terminal_quality_failed"] is True
+    assert "artifact_path=null" in cmd.update["messages"][0].content
+
+
+def test_slide_quality_gate_soft_passes_minor_gaps_after_two_reauthors(tmp_path):
+    outputs = tmp_path / "outputs"
+    slides = outputs / "slides"
+    slides.mkdir(parents=True)
+    body = " ".join(f"word{i}" for i in range(160))
+    (slides / "01.html").write_text(f"<html><body><p>{body}</p></body></html>", encoding="utf-8")
+    result = _deck_tool_message({"success": True, "slide_count": 1})
+    delta = {}
+    assert BuilderArtifactMiddleware()._slide_quality_rejection_command(
+        _quality_request(outputs, builder_slide_quality_rejections=2), result, delta
     ) is None
     assert delta["pptx_deck_quality_warning"] == "visual_quality_warning"
     assert delta["pptx_deck_visual_quality_gap_count"] == 1

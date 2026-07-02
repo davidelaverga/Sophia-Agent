@@ -71,8 +71,14 @@ def test_invocation_count_zero_for_unrelated_commands():
 # ---- hard cap ---------------------------------------------------------------
 
 
-def test_call_below_cap_passes_through():
-    state = _state_with_image_diagnostics(image_generation_attempt_count=1)
+def test_serial_repair_below_cap_passes_after_batch_attempt():
+    state = _state_with_image_diagnostics(
+        image_generation_attempt_count=3,
+        image_generation_manifest_seen=True,
+        image_generation_manifest_generation_attempted=True,
+        image_generation_manifest_requested_count=3,
+        image_generation_manifest_failed_count=1,
+    )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(f"python {_SCRIPT} --prompt-file p.json", state)
     )
@@ -189,7 +195,7 @@ def test_preflight_chained_with_generation_honors_terminal_error_short_circuit()
     assert "missing_api_key" in content
 
 
-# ---- deck hero-anchor batch backstop ----------------------------------------
+# ---- deck batch-first backstop ----------------------------------------------
 
 
 def _deck_single_slide_command() -> str:
@@ -197,8 +203,8 @@ def _deck_single_slide_command() -> str:
 
 
 def test_deck_batch_backstop_nudges_second_serial_slide_call():
-    # Hero already generated (success_count=1); a second SINGLE --slide-visual
-    # call is the serial loop — nudge it onto the --manifest batch once.
+    # Before a real manifest batch attempt, any SINGLE --slide-visual call is
+    # the serial loop — nudge it onto the --manifest batch.
     state = _state_with_image_diagnostics(image_generation_success_count=1)
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(_deck_single_slide_command(), state)
@@ -319,13 +325,14 @@ def test_unreadable_manifest_rejection_increments_friction_counter(tmp_path):
     assert diag["primary_image_batch_error_class"] == "manifest_not_readable"
 
 
-def test_deck_batch_backstop_allows_hero_first_call():
-    # No slide generated yet (success_count=0): the hero call must pass.
+def test_deck_batch_backstop_rejects_hero_first_call():
+    # The new contract is batch-first: cover/hero is included in the manifest.
     state = _state_with_image_diagnostics(image_generation_success_count=0)
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(_deck_single_slide_command(), state)
     )
-    assert result is None
+    assert isinstance(result, Command)
+    assert "including the cover/hero" in result.update["messages"][0].content
 
 
 def test_deck_batch_backstop_allows_manifest_call(tmp_path):
@@ -461,6 +468,10 @@ def test_transient_error_does_not_short_circuit():
         image_generation_attempt_count=1,
         image_generation_success_count=0,
         image_generation_error_class="api_error",
+        image_generation_manifest_seen=True,
+        image_generation_manifest_generation_attempted=True,
+        image_generation_manifest_requested_count=3,
+        image_generation_manifest_failed_count=1,
     )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(f"python {_SCRIPT} --prompt-file p.json", state)
@@ -635,8 +646,8 @@ def test_explicit_marker_still_wins_for_documents():
 
 
 def test_image_caps_are_image_counts() -> None:
-    # Deck cap is 20 images (a --manifest batch makes many in one call); PDF 3.
-    assert _IMAGE_GENERATION_MAX_CALLS == 20
+    # Deck cap is 30 images (a --manifest batch makes many in one call); PDF 3.
+    assert _IMAGE_GENERATION_MAX_CALLS == 30
     assert _IMAGE_GENERATION_MAX_CALLS_PDF == 3
 
 
@@ -737,6 +748,28 @@ def test_parse_image_batch_summary_returns_successful_paths() -> None:
     assert summary["successful_paths"] == ["a.png", "c.png"]
 
 
+def test_single_image_failure_emits_structured_span(tmp_path, monkeypatch) -> None:
+    from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
+
+    prompt = tmp_path / "prompt.json"
+    prompt.write_text('{"prompt":"professional technical visual"}', encoding="utf-8")
+    spans = []
+    monkeypatch.setattr(ba, "_safe_langsmith_span", lambda name, **kwargs: spans.append({"name": name, **kwargs}))
+    state = {"thread_data": {"outputs_path": str(tmp_path)}, "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx"}
+    command = (
+        f"python {_SCRIPT} --prompt-file /mnt/user-data/outputs/prompt.json "
+        "--output-file /mnt/user-data/outputs/missing.png"
+    )
+
+    delta = BuilderArtifactMiddleware._image_generation_bash_delta(command=command, text="", state=state)
+
+    assert delta["image_generation_error_class"] == "missing_output"
+    span = next(item for item in spans if item["name"] == "Sophia Image Single Item")
+    assert span["inputs"]["prompt_readable"] is True
+    assert span["outputs"]["success"] is False
+    assert span["outputs"]["error_class"] == "missing_output"
+
+
 def test_manifest_batch_terminal_failure_updates_image_error_class(tmp_path) -> None:
     manifest = tmp_path / "m.json"
     for index in range(3):
@@ -770,7 +803,7 @@ def test_manifest_batch_summary_uses_terminal_error_histogram() -> None:
 
 
 def test_manifest_batch_under_cap_passes_through(tmp_path) -> None:
-    # A single manifest of 12 images (under the 20 deck cap) is allowed.
+    # A single manifest of 12 images (under the deck cap) is allowed.
     manifest = tmp_path / "m.json"
     for index in range(12):
         (tmp_path / f"p{index}.json").write_text('{"prompt":"x"}', encoding="utf-8")
@@ -795,7 +828,7 @@ def test_manifest_batch_over_cap_is_rejected(tmp_path) -> None:
         json.dumps({"items": [{"prompt_file": f"p{i}.json", "output_file": f"o{i}.png"} for i in range(15)]}),
         encoding="utf-8",
     )
-    state = _state_with_image_diagnostics(image_generation_attempt_count=10)  # 10 + 15 > 20
+    state = _state_with_image_diagnostics(image_generation_attempt_count=20)  # 20 + 15 > 30
     state["thread_data"] = {"outputs_path": str(tmp_path)}
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(f"python {_SCRIPT} --manifest /mnt/user-data/outputs/m.json", state)

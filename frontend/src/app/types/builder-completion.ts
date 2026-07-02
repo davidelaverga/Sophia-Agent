@@ -120,6 +120,17 @@ export type BuilderCompletionEventV1 = {
   budget_stop_reason?: string | null;
   image_generation_status?: string | null;
   image_generation_reason?: string | null;
+  image_generation_outcome?: Record<string, unknown> | null;
+  primary_image_batch_status?: string | null;
+  primary_image_batch_error_class?: string | null;
+  serial_repair_count?: number | null;
+  manifest_authoring_failure_count?: number | null;
+  presentation_route?: string | null;
+  expected_generated_visual_count?: number | null;
+  successful_generated_visual_count?: number | null;
+  referenced_visual_count?: number | null;
+  missing_expected_visual_count?: number | null;
+  visual_quality_gap_count?: number | null;
   source_artifact_path?: string | null;
   revision_of_artifact_path?: string | null;
   summary?: string | null;

@@ -31,10 +31,12 @@ This file is for the Sophia builder only.
 
 ## Presentation Rules
 
-- Presentations are HTML-slide decks. Generate at most one visual-only asset per
-  slide into `/mnt/user-data/outputs/assets/`, then author one self-contained
-  1920×1080 HTML slide per slide under `/mnt/user-data/outputs/slides/` using the
-  ppt-generation skeleton. A plain slide may have no image at all.
+- Presentations are HTML-slide decks. For normal decks, generate one visual-only
+  asset per slide into `/mnt/user-data/outputs/assets/` through a single manifest
+  batch that includes the cover/hero, then author one self-contained 1920×1080
+  HTML slide per slide under `/mnt/user-data/outputs/slides/` using the
+  ppt-generation skeleton. Only explicitly text-only/no-visual deck requests may
+  omit images.
 - The generated image asset belongs only in the HTML `.visual` region, referenced
   by a relative `../assets/<file>` path. Do not bake slide titles, bottom
   narrative, footers, or page chrome into the image; titles and 1-2 sentence
@@ -42,10 +44,10 @@ This file is for the Sophia builder only.
 - Do not use hand-written PPTX layouts, python-pptx/pptxgenjs scripts, or any
   custom deck compiler. Convert the HTML slides by calling `build_deck_from_slides`
   once; emit the returned `.pptx`.
-- A genuinely missing slide image is fine — the build renders a neutral
-  placeholder and the deck still ships. When the requested PPTX exists, opens,
-  and has slide pictures, emit immediately after at most one slide-count repair
-  nudge.
+- Do not ship placeholder or no-image decks when generated visuals were required.
+  If the manifest batch fails or is partial, repair only failed/missing images
+  serially. When the requested PPTX exists, opens, has complete generated visual
+  references, and passes bounded quality repair, emit it.
 
 ## PDF Report Rules
 
@@ -70,7 +72,7 @@ This file is for the Sophia builder only.
 
 ## Failure Handling
 
-- If a required capability fails, stop cleanly after one bounded repair attempt.
+- If a required capability fails, stop cleanly after bounded repair attempts.
   Do not loop on the same failing action.
 - If no valid requested-format artifact exists, emit a safe failure with
   `artifact_path=null` and a clear explanation.

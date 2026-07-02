@@ -141,20 +141,18 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 For multi-image decks, do NOT call the script once per slide across turns (that serializes
 ~2 min/image). Instead:
 
-1. Generate the hero/cover image first with a single `--slide-visual` call.
-2. Write ONE JSON manifest of all remaining slide images and call the script once with
-   `--manifest`. Give every item the hero PNG in `reference_images` so the deck stays consistent:
+1. Write ONE JSON manifest of all slide images, including the hero/cover, and call the script once with
+   `--manifest`. Use the same restrained professional technical style instructions across prompt
+   files so the deck stays consistent:
 
 ```json
 {"items": [
+  {"prompt_file": "/mnt/user-data/workspace/slide-01.json",
+   "output_file": "/mnt/user-data/outputs/assets/slide-01.png",
+   "slide_visual": true},
   {"prompt_file": "/mnt/user-data/workspace/slide-02.json",
    "output_file": "/mnt/user-data/outputs/assets/slide-02.png",
-   "slide_visual": true,
-   "reference_images": ["/mnt/user-data/outputs/assets/hero.png"]},
-  {"prompt_file": "/mnt/user-data/workspace/slide-03.json",
-   "output_file": "/mnt/user-data/outputs/assets/slide-03.png",
-   "slide_visual": true,
-   "reference_images": ["/mnt/user-data/outputs/assets/hero.png"]}
+   "slide_visual": true}
 ]}
 ```
 ```bash
