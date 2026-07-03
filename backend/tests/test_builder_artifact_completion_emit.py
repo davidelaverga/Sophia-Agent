@@ -416,6 +416,61 @@ def test_required_builder_upload_success_sets_verified_user_scoped_metadata(tmp_
     assert "signed" not in serialized.lower()
 
 
+def test_required_builder_upload_promotes_primary_artifact_before_preview(tmp_path, monkeypatch):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "deck.pptx").write_bytes(b"pptx bytes")
+    (outputs / "deck.preview.pdf").write_bytes(b"preview bytes")
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-role-placeholder")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+    uploaded: list[tuple[str, bytes]] = []
+    mirrored: list[str] = []
+
+    def upload_object(object_path, content, **_kwargs):
+        uploaded.append((object_path, content))
+        return object_path
+
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "upload_artifact_object",
+        upload_object,
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "check_artifact_object_exists",
+        lambda _path: True,
+    )
+
+    def mirror_file(host_path, *_args):
+        mirrored.append(host_path)
+        return "uploaded"
+
+    monkeypatch.setattr(builder_artifact_module, "maybe_mirror_file", mirror_file)
+    artifact = {
+        "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+        "artifact_type": "presentation",
+        "user_id": "alice",
+        "artifact_files": [
+            {"path": "/mnt/user-data/outputs/deck.preview.pdf", "role": "preview"},
+            {"path": "/mnt/user-data/outputs/deck.pptx", "role": "primary"},
+        ],
+    }
+
+    result = builder_artifact_module._upload_builder_outputs_to_supabase(
+        thread_id="thread-1",
+        outputs_host_path=str(outputs),
+        artifact_args=artifact,
+    )
+
+    assert result == "uploaded"
+    assert uploaded[0] == (artifact["storage_object_path"], b"pptx bytes")
+    assert mirrored == [str(outputs / "deck.preview.pdf")]
+    assert artifact["storage_object_path"].endswith("/deck.pptx")
+
+
 def test_completion_payload_preserves_fallback_metadata():
     runtime = _make_runtime(
         builder_thread_id="t-build",

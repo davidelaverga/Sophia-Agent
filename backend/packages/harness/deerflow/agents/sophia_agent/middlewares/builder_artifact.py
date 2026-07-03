@@ -2441,7 +2441,7 @@ def _dedupe_artifact_file_entries(entries: list[dict[str, str]]) -> list[dict[st
         previous = deduped.get(path)
         if previous is None or role_priority[entry["role"]] < role_priority[previous["role"]]:
             deduped[path] = entry
-    return list(deduped.values())
+    return sorted(deduped.values(), key=lambda entry: role_priority.get(entry.get("role", "internal"), 4))
 
 
 def _artifact_file_entries(artifact_args: dict[str, Any]) -> list[dict[str, str]]:
