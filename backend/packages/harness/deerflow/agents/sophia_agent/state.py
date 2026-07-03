@@ -2,6 +2,7 @@ from typing import Annotated, Any, NotRequired
 
 from langchain.agents import AgentState
 
+from deerflow.agents.sophia_agent.pptx_diagnostics import _merge_builder_pptx_diagnostics
 from deerflow.agents.thread_state import ViewedImageData, merge_viewed_images
 
 
@@ -145,50 +146,6 @@ def _merge_builder_write_diagnostic_value(
         return
     if key in {"successful_output_paths", "successful_deliverable_output_paths"} and isinstance(value, list):
         merged[key] = _merge_string_list(merged.get(key), value)
-        return
-    merged[key] = value
-
-
-def _merge_builder_pptx_diagnostics(
-    current: dict | None, update: dict | None
-) -> dict:
-    """Reducer for safe PPTX/image-generation diagnostics."""
-    if current is None and update is None:
-        return {}
-    if current is None:
-        return dict(update or {})
-    if update is None:
-        return dict(current)
-
-    merged = dict(current)
-    for key, value in update.items():
-        _merge_builder_pptx_diagnostic_value(merged, key, value)
-    return merged
-
-
-_PPTX_DIAGNOSTIC_LATEST_COUNT_KEYS = frozenset(
-    {
-        "pptx_generator_picture_count",
-        "pptx_generator_slide_count",
-        "pptx_deck_missing_image_count",
-        "pptx_plan_image_ref_count",
-        "pptx_plan_slide_count",
-    }
-)
-
-
-def _merge_builder_pptx_diagnostic_value(merged: dict, key: str, value: object) -> None:
-    if key in _PPTX_DIAGNOSTIC_LATEST_COUNT_KEYS:
-        merged[key] = value
-        return
-    if (key.endswith("_count") or key.endswith("_bytes_total")) and isinstance(value, int):
-        merged[key] = int(merged.get(key, 0) or 0) + value
-        return
-    if key in {"image_output_paths", "pptx_output_paths", "qc_reasons"} and isinstance(value, list):
-        merged[key] = _merge_string_list(merged.get(key), value)
-        return
-    if key == "qc_results" and isinstance(value, list):
-        merged[key] = [*(merged.get(key) if isinstance(merged.get(key), list) else []), *value]
         return
     merged[key] = value
 

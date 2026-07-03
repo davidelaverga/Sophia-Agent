@@ -142,6 +142,7 @@ def test_image_generation_bash_result_records_output_bytes(tmp_path: Path) -> No
         "image_generation_success_count": 1,
         "image_generation_bytes_total": len(b"jpeg-bytes"),
         "image_generation_error_class": None,
+        "successful_generated_visual_count": 1,
         "image_output_paths": ["/mnt/user-data/outputs/slide-01.jpg"],
         "image_output_records": [
             {
@@ -1177,6 +1178,7 @@ def test_image_generation_and_slide_qc_bash_result_merge_diagnostics(tmp_path: P
         "image_generation_success_count": 1,
         "image_generation_bytes_total": len(b"png-bytes"),
         "image_generation_error_class": None,
+        "successful_generated_visual_count": 1,
         "image_output_paths": ["/mnt/user-data/outputs/slide-01.png"],
         "image_output_records": [
             {

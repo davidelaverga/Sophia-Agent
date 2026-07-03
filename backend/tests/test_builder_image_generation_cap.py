@@ -78,9 +78,10 @@ def test_serial_repair_below_cap_passes_after_batch_attempt():
         image_generation_manifest_generation_attempted=True,
         image_generation_manifest_requested_count=3,
         image_generation_manifest_failed_count=1,
+        image_generation_manifest_unresolved_outputs=["/mnt/user-data/outputs/s2.png"],
     )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
-        _bash_request(f"python {_SCRIPT} --prompt-file p.json", state)
+        _bash_request(_deck_single_slide_command(), state)
     )
     assert result is None
 
@@ -98,7 +99,7 @@ def test_call_beyond_cap_is_rejected_with_generated_assets_listed():
         image_output_paths=["/mnt/user-data/outputs/visuals/hero-launch.png"],
     )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
-        _bash_request(f"python {_SCRIPT} --prompt-file p.json", state)
+        _bash_request(_deck_single_slide_command(), state)
     )
     assert isinstance(result, Command)
     assert result.goto == "model"
@@ -166,7 +167,7 @@ def test_terminal_error_short_circuits_after_single_failure():
         image_generation_error_class="missing_api_key",
     )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
-        _bash_request(f"python {_SCRIPT} --prompt-file p.json", state)
+        _bash_request(_deck_single_slide_command(), state)
     )
     assert isinstance(result, Command)
     content = result.update["messages"][0].content
@@ -390,11 +391,28 @@ def test_deck_batch_backstop_allows_single_repair_after_batch_ran():
         image_generation_manifest_generation_attempted=True,
         image_generation_manifest_requested_count=7,
         image_generation_manifest_failed_count=2,
+        image_generation_manifest_unresolved_outputs=["/mnt/user-data/outputs/s2.png"],
     )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
         _bash_request(_deck_single_slide_command(), state)
     )
     assert result is None
+
+
+def test_deck_batch_backstop_rejects_serial_repair_for_non_manifest_output():
+    state = _state_with_image_diagnostics(
+        image_generation_success_count=5,
+        image_generation_manifest_seen=True,
+        image_generation_manifest_generation_attempted=True,
+        image_generation_manifest_requested_count=7,
+        image_generation_manifest_failed_count=2,
+        image_generation_manifest_unresolved_outputs=["/mnt/user-data/outputs/assets/slide-07.png"],
+    )
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+    assert isinstance(result, Command)
+    assert "may only target failed/missing outputs" in result.update["messages"][0].content
 
 
 def test_deck_batch_backstop_rejects_repair_when_manifest_seen_but_no_generation_attempt():
@@ -472,9 +490,10 @@ def test_transient_error_does_not_short_circuit():
         image_generation_manifest_generation_attempted=True,
         image_generation_manifest_requested_count=3,
         image_generation_manifest_failed_count=1,
+        image_generation_manifest_unresolved_outputs=["/mnt/user-data/outputs/s2.png"],
     )
     result = BuilderArtifactMiddleware()._image_generation_block_command(
-        _bash_request(f"python {_SCRIPT} --prompt-file p.json", state)
+        _bash_request(_deck_single_slide_command(), state)
     )
     assert result is None
 
@@ -792,6 +811,75 @@ def test_manifest_batch_terminal_failure_updates_image_error_class(tmp_path) -> 
     assert delta["image_generation_error_class"] == "missing_api_key"
 
 
+def test_manifest_batch_missing_summary_does_not_unlock_serial_repair(tmp_path) -> None:
+    manifest = tmp_path / "m.json"
+    for index in range(3):
+        (tmp_path / f"p{index}.json").write_text('{"prompt":"x"}', encoding="utf-8")
+    manifest.write_text(
+        json.dumps(
+            {
+                "items": [
+                    {"prompt_file": f"p{i}.json", "output_file": f"/mnt/user-data/outputs/o{i}.png"}
+                    for i in range(3)
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    state = _state_with_image_diagnostics(image_generation_attempt_count=0)
+    state["thread_data"] = {"outputs_path": str(tmp_path)}
+    command = f"python {_SCRIPT} --manifest /mnt/user-data/outputs/m.json"
+
+    delta = BuilderArtifactMiddleware._image_generation_bash_delta(
+        command=command,
+        text="worker exited without structured summary",
+        state=state,
+    )
+
+    assert delta["image_generation_attempt_count"] == 3
+    assert delta["primary_image_batch_error_class"] == "batch_summary_missing"
+    assert delta["batch_summary_missing_count"] == 1
+    assert delta["image_generation_manifest_generation_attempted"] is False
+    assert delta["image_generation_manifest_unresolved_outputs"] == [
+        "/mnt/user-data/outputs/o0.png",
+        "/mnt/user-data/outputs/o1.png",
+        "/mnt/user-data/outputs/o2.png",
+    ]
+
+    repaired_state = _state_with_image_diagnostics(**delta)
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), repaired_state)
+    )
+    assert isinstance(result, Command)
+    assert "did not emit a trusted `IMAGEGEN_BATCH`" in result.update["messages"][0].content
+
+
+def test_second_missing_batch_summary_fails_clearly_without_serial_repair() -> None:
+    state = _state_with_image_diagnostics(
+        image_generation_manifest_seen=True,
+        image_generation_manifest_requested_count=3,
+        image_generation_manifest_failed_count=3,
+        image_generation_manifest_generation_attempted=False,
+        primary_image_batch_status="failed",
+        primary_image_batch_error_class="batch_summary_missing",
+        batch_summary_missing_count=2,
+        image_generation_manifest_unresolved_outputs=[
+            "/mnt/user-data/outputs/s2.png",
+            "/mnt/user-data/outputs/s3.png",
+        ],
+    )
+
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+
+    assert isinstance(result, Command)
+    content = result.update["messages"][0].content
+    assert "after the allowed rerun" in content
+    assert "Do not attempt serial repairs" in content
+    assert "artifact_path=null" in content
+
+
 def test_manifest_batch_summary_uses_terminal_error_histogram() -> None:
     summary = _parse_image_batch_summary(
         'IMAGEGEN_BATCH {"requested": 3, "failed": 3, '
@@ -817,6 +905,28 @@ def test_manifest_batch_under_cap_passes_through(tmp_path) -> None:
         _bash_request(f"python {_SCRIPT} --manifest /mnt/user-data/outputs/m.json", state)
     )
     assert result is None
+
+
+def test_pptx_manifest_larger_than_slide_count_is_rejected(tmp_path) -> None:
+    manifest = tmp_path / "m.json"
+    for index in range(18):
+        (tmp_path / f"p{index}.json").write_text('{"prompt":"x"}', encoding="utf-8")
+    manifest.write_text(
+        json.dumps({"items": [{"prompt_file": f"p{i}.json", "output_file": f"o{i}.png"} for i in range(18)]}),
+        encoding="utf-8",
+    )
+    state = _state_with_image_diagnostics(image_generation_attempt_count=0)
+    state["thread_data"] = {"outputs_path": str(tmp_path)}
+    state["builder_pptx_requested_slide_count"] = 6
+
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(f"python {_SCRIPT} --manifest /mnt/user-data/outputs/m.json", state)
+    )
+
+    assert isinstance(result, Command)
+    content = result.update["messages"][0].content
+    assert "more slide-visual items than the requested deck slide count" in content
+    assert "one item per slide" in content
 
 
 def test_manifest_batch_over_cap_is_rejected(tmp_path) -> None:

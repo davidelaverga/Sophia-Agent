@@ -1075,6 +1075,7 @@ def _run_batch(manifest_path: str) -> int:
     batch_run: Any | None = None
 
     def _summary(payload: dict) -> int:
+        payload.setdefault("failed", max(0, int(payload.get("requested") or 0) - int(payload.get("images_generated") or 0)))
         payload.setdefault("complete", bool(payload.get("requested")) and payload.get("images_generated") == payload.get("requested"))
         print(f"IMAGEGEN_BATCH {_json.dumps(payload)}")
         _finish_trace(batch_run, outputs=payload)
@@ -1227,8 +1228,25 @@ def _run_batch(manifest_path: str) -> int:
 
     with (batch_context or contextlib.nullcontext()) as run:
         batch_run = run
-        with ThreadPoolExecutor(max_workers=concurrency) as pool:
-            results = list(pool.map(_one, enumerate(items, start=1)))
+        try:
+            with ThreadPoolExecutor(max_workers=concurrency) as pool:
+                results = list(pool.map(_one, enumerate(items, start=1)))
+        except Exception as exc:  # noqa: BLE001 - still emit the batch contract on executor-level failure.
+            return _summary(
+                {
+                    "images_generated": 0,
+                    "requested": len(items),
+                    "failed": len(items),
+                    "complete": False,
+                    "concurrency": concurrency,
+                    "requested_concurrency": requested_conc,
+                    "max_concurrency": max_concurrency,
+                    "error": f"{type(exc).__name__}: {exc}",
+                    "error_class": _classify_exception(exc),
+                    "raw_error_excerpt": _extract_raw_error(exc),
+                    "items": [],
+                }
+            )
         succeeded = sum(1 for r in results if r.get("success"))
         errors = _error_histogram(results)
         return _summary(

@@ -464,10 +464,12 @@ def test_slide_png_renderer_sets_viewport_on_browser_context():
     assert "context.newPage({\n      viewport" not in source
 
 
-def test_slide_png_renderer_only_placeholders_missing_images():
+def test_slide_png_renderer_rejects_missing_images():
     png_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_png.mjs"
     source = png_script.read_text(encoding="utf-8")
 
     assert 'resourceType !== "image"' in source
     assert 'blockedSubresources.push(`${resourceType}:${requestUrl}`)' in source
     assert 'route.abort("failed")' in source
+    assert "missing local render assets" in source
+    assert "fulfill({ status: 200" not in source

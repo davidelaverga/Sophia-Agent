@@ -64,9 +64,10 @@ def build_builder_tools_for_task_type(
         # then calls build_deck_from_slides — which renders each slide to a
         # full-bleed PNG (headless Chromium) and wraps to .pptx. The model never
         # writes python-pptx/pptxgenjs or shells a deck compiler. Crisp,
-        # unclippable DOM text + a partial-image floor (missing visuals render as
-        # placeholders, the deck still ships). The image-forward generate.py
-        # --plan-file path stays on disk but is no longer offered.
+        # unclippable DOM text + required generated visuals; missing local slide
+        # images fail the deck render rather than shipping placeholders. The
+        # image-forward generate.py --plan-file path stays on disk but is no
+        # longer offered.
         insert_at = tools.index(emit_builder_artifact)
         tools.insert(insert_at, build_deck_from_slides)
     else:

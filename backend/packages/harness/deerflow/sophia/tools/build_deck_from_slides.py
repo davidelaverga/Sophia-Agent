@@ -171,12 +171,11 @@ def _slide_render_failure(completed: subprocess.CompletedProcess[str] | None, ht
 
 
 def _missing_assets_from_stderr(completed: subprocess.CompletedProcess[str] | None) -> int:
-    """Count missing local slide images the renderer degraded to placeholders.
+    """Count renderer-reported missing local slide images.
 
-    render_html_to_png.mjs emits `... missing_assets=N` on its success line when a
-    slide referenced a local image that was never generated (partial image yield).
-    Those slides still render (placeholder), so the deck ships with a quality_warning
-    rather than failing. (§WS-B 2026-06-27.)
+    The current slide PNG renderer hard-fails missing local images. This parser is
+    retained for compatibility with any future compile path that deliberately
+    returns a partial-image warning.
     """
     if completed is None or not completed.stderr:
         return 0
@@ -380,8 +379,8 @@ def build_deck_from_slides(
         "engine_message": "rendered slide HTML to full-bleed PNG and wrapped to PPTX",
     }
     if missing_images > 0:
-        # Deck shipped, but some slide images were never generated and rendered as
-        # placeholders. Honest signal — the companion surfaces this. (§WS-B.)
+        # Compatibility: if a future renderer reports a valid-but-partial deck,
+        # surface that warning honestly in completion metadata.
         result_kwargs["quality_warning"] = "visuals_partial"
         result_kwargs["missing_image_count"] = missing_images
     if overflow_slides:

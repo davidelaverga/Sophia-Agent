@@ -177,12 +177,10 @@ def test_slide_render_command_sets_opaque_neutral_bg_color():
     assert deck._DECK_BG == "#f7f9fc"
 
 
-def test_partial_images_ship_deck_with_quality_warning(tmp_path, monkeypatch):
-    # §WS-B (2026-06-27): a deck whose slides reference some never-generated images
-    # still SHIPS — render_html_to_png degrades the missing image to a placeholder
-    # and reports `missing_assets=N`; build_deck_from_slides aggregates it into a
-    # quality_warning instead of failing. (Prod 019f099a shipped zero deck because
-    # 2/8 images made the whole build fail.)
+def test_missing_slide_images_fail_deck_render(tmp_path, monkeypatch):
+    # Generated visuals are mandatory for normal decks. A slide that references
+    # an absent local image must fail render instead of screenshotting a broken or
+    # placeholder image into a "successful" PPTX.
     outputs = tmp_path / "outputs"
     slides = outputs / "slides"
     slides.mkdir(parents=True)
@@ -194,26 +192,22 @@ def test_partial_images_ship_deck_with_quality_warning(tmp_path, monkeypatch):
 
     def _fake_run(cmd, **kwargs):
         if "--png-file" in cmd:
-            out = Path(cmd[cmd.index("--png-file") + 1])
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(b"\x89PNG fake")
-            # slide-01 degraded one missing image; slide-02 had all assets.
-            missing = 1 if out.name == "slide-01.png" else 0
-            return SimpleNamespace(returncode=0, stdout="", stderr=f"[render_html_to_png] wrote {out} bytes=9 missing_assets={missing}")
+            return SimpleNamespace(
+                returncode=1,
+                stdout="",
+                stderr="Error: missing local render assets: /tmp/outputs/assets/slide-01.png",
+            )
         if "--output-file" in cmd:
-            out = Path(cmd[cmd.index("--output-file") + 1])
-            out.parent.mkdir(parents=True, exist_ok=True)
-            out.write_bytes(b"PK\x03\x04 fake-pptx")
+            raise AssertionError("wrap should not run when slide render fails")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(deck.subprocess, "run", _fake_run)
 
     r = _call(runtime=_runtime(), output_path=f"{_OUTPUTS}deck.pptx")
 
-    assert r["success"] is True, r
-    assert r["pptx_path"] == f"{_OUTPUTS}deck.pptx"
-    assert r["quality_warning"] == "visuals_partial"
-    assert r["missing_image_count"] == 1
+    assert r["success"] is False
+    assert r["error_type"] == "slide_render_failed"
+    assert "missing local render assets" in r["stderr"]
 
 
 def test_slide_render_failure_is_reported(tmp_path, monkeypatch):
@@ -320,6 +314,39 @@ def test_deck_compile_rejected_when_required_visuals_missing(tmp_path):
     assert isinstance(cmd, Command)
     assert "Do not compile this presentation yet" in cmd.update["messages"][0].content
     assert cmd.update["builder_pptx_diagnostics"]["missing_expected_visual_count"] == 3
+
+
+def test_deck_compile_missing_visuals_ignores_inflated_expected_count(tmp_path):
+    outputs_dir = tmp_path / "outputs"
+    slides = outputs_dir / "slides"
+    slides.mkdir(parents=True)
+    for index in range(1, 7):
+        (slides / f"{index:02d}.html").write_text("<html><body>slide</body></html>", encoding="utf-8")
+    request = SimpleNamespace(
+        tool_call={
+            "name": "build_deck_from_slides",
+            "id": "tc",
+            "args": {"output_path": f"{_OUTPUTS}deck.pptx"},
+        },
+        state={
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": f"{_OUTPUTS}deck.pptx",
+            "builder_pptx_requested_slide_count": 6,
+            "delegation_context": {"task_type": "presentation"},
+            "builder_pptx_diagnostics": {
+                "image_generation_success_count": 0,
+                "image_generation_manifest_requested_count": 18,
+                "expected_generated_visual_count": 4608,
+                "missing_expected_visual_count": 4608,
+            },
+        },
+    )
+
+    cmd = BuilderArtifactMiddleware._deck_compile_visuals_rejection(request)
+
+    assert isinstance(cmd, Command)
+    assert cmd.update["builder_pptx_diagnostics"]["expected_generated_visual_count"] == 6
+    assert cmd.update["builder_pptx_diagnostics"]["missing_expected_visual_count"] == 6
 
 
 def test_deck_builder_result_records_pptx_diagnostics(tmp_path):

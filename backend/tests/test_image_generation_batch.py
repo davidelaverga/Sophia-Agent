@@ -8,6 +8,7 @@ the per-item isolation we want to assert).
 
 from __future__ import annotations
 
+import concurrent.futures
 import importlib.util
 import json
 import subprocess
@@ -90,6 +91,40 @@ def test_per_item_failure_is_isolated(tmp_path) -> None:
         str(tmp_path / "o2.png"),
     }
     assert code == 1
+
+
+def test_executor_level_failure_still_emits_batch_summary(tmp_path, monkeypatch, capsys) -> None:
+    module = _load_script_module()
+    prompt = tmp_path / "p.json"
+    prompt.write_text('{"prompt":"x"}', encoding="utf-8")
+    manifest = tmp_path / "manifest.json"
+    manifest.write_text(
+        json.dumps({"items": [{"prompt_file": str(prompt), "output_file": str(tmp_path / "o.png")}]}),
+        encoding="utf-8",
+    )
+
+    class ExplodingExecutor:
+        def __init__(self, *args, **kwargs):
+            pass
+
+        def __enter__(self):
+            raise RuntimeError("executor unavailable")
+
+        def __exit__(self, *args):
+            return False
+
+    monkeypatch.setattr(concurrent.futures, "ThreadPoolExecutor", ExplodingExecutor)
+
+    code = module._run_batch(str(manifest))
+    summary_line = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("IMAGEGEN_BATCH "))
+    summary = json.loads(summary_line[len("IMAGEGEN_BATCH "):])
+
+    assert code == 1
+    assert summary["requested"] == 1
+    assert summary["failed"] == 1
+    assert summary["complete"] is False
+    assert summary["error_class"] == "api_error"
+    assert "executor unavailable" in summary["error"]
 
 
 def test_manifest_concurrency_is_capped_by_env_override(tmp_path) -> None:

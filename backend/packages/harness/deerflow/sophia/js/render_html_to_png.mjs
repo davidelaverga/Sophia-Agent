@@ -99,24 +99,12 @@ function localRenderPathForUrl(url) {
   }
 }
 
-// Clean neutral placeholder served in place of a slide image that was never
-// generated, so the slide renders intentionally (no broken-image glyph) and the
-// deck still compiles. The render reports the count as a quality warning rather
-// than failing — a deck with partial images must ship the slides it has, not die
-// at the turn ceiling (prod 019f099a: 2/8 images). (§WS-B fix-forward 2026-06-27.)
-const MISSING_ASSET_PLACEHOLDER_SVG =
-  '<svg xmlns="http://www.w3.org/2000/svg" width="1280" height="720">' +
-  '<rect width="100%" height="100%" fill="#ececf2"/>' +
-  '<text x="50%" y="50%" font-family="Helvetica,Arial,sans-serif" font-size="34" ' +
-  'fill="#9a9aa8" text-anchor="middle" dominant-baseline="middle">visual unavailable</text></svg>';
-
 async function installRenderRequestPolicy(page, htmlFile) {
   const outputRoot = outputRootForHtml(htmlFile);
   // A slide may reference a local asset that was never generated (e.g.
-  // `../assets/slide-03.png` when image-gen partially failed). Degrade it to a
-  // clean placeholder so the slide renders intentionally and the deck compiles;
-  // track the count as a warning (NOT a hard failure). A BLOCKED non-output /
-  // symlink-escaping subresource still hard-fails (security — see below).
+  // `../assets/slide-03.png` when image-gen partially failed). Treat that as a
+  // render failure: normal PPTX decks require generated visuals, and compiling a
+  // screenshot with a broken/placeholder image hides the real build defect.
   const missingLocalResources = [];
   const blockedSubresources = [];
   await page.route("**/*", (route) => {
@@ -134,7 +122,7 @@ async function installRenderRequestPolicy(page, htmlFile) {
           return route.abort("failed");
         }
         missingLocalResources.push(localPath);
-        return route.fulfill({ status: 200, contentType: "image/svg+xml", body: MISSING_ASSET_PLACEHOLDER_SVG });
+        return route.abort("failed");
       }
       return route.continue();
     }
@@ -201,19 +189,16 @@ async function main() {
       waitUntil: "networkidle",
       timeout: 60000,
     });
-    // Blocked (non-output / symlink-escaping) subresources are a security stop —
-    // still hard-fail. Missing local assets were degraded to placeholders above
-    // and are reported as a warning below, NOT a failure.
+    // Blocked (non-output / symlink-escaping) subresources are a security stop.
+    // Missing local images are also a correctness stop for deck builds: a slide
+    // that references an absent generated visual is not ready to compile.
     if (blockedSubresources.length > 0) {
       const uniqueBlocked = [...new Set(blockedSubresources)];
       throw new Error(`blocked non-output render assets: ${uniqueBlocked.slice(0, 8).join(", ")}`);
     }
     const uniqueMissing = [...new Set(missingLocalResources)];
     if (uniqueMissing.length > 0) {
-      console.error(
-        `[render_html_to_png] degraded ${uniqueMissing.length} missing local asset(s) to placeholder: ` +
-          uniqueMissing.slice(0, 8).join(", "),
-      );
+      throw new Error(`missing local render assets: ${uniqueMissing.slice(0, 8).join(", ")}`);
     }
     // Force an opaque base background so any region the slide HTML leaves
     // uncovered renders as the deck color, not Chromium's default WHITE (the

@@ -446,6 +446,32 @@ def test_merge_builder_pptx_diagnostics_treats_deck_missing_image_count_as_lates
     assert merged["pptx_generator_slide_count"] == 6
 
 
+def test_merge_builder_pptx_diagnostics_treats_visual_completeness_counts_as_latest():
+    current = {
+        "image_generation_attempt_count": 18,
+        "expected_generated_visual_count": 18,
+        "successful_generated_visual_count": 0,
+        "referenced_visual_count": 0,
+        "missing_expected_visual_count": 18,
+    }
+    update = {
+        "image_generation_attempt_count": 18,
+        "expected_generated_visual_count": 18,
+        "successful_generated_visual_count": 0,
+        "referenced_visual_count": 0,
+        "missing_expected_visual_count": 18,
+    }
+
+    merged = _merge_builder_pptx_diagnostics(current, update)
+    merged = _merge_builder_pptx_diagnostics(merged, update)
+
+    assert merged["image_generation_attempt_count"] == 54
+    assert merged["expected_generated_visual_count"] == 18
+    assert merged["successful_generated_visual_count"] == 0
+    assert merged["referenced_visual_count"] == 0
+    assert merged["missing_expected_visual_count"] == 18
+
+
 def test_union_string_list_preserves_order_and_dedups():
     assert _union_string_list(["a", "b"], ["b", "c"]) == ["a", "b", "c"]
     assert _union_string_list(None, ["a"]) == ["a"]

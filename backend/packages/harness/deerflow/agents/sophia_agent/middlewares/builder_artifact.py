@@ -48,6 +48,7 @@ from deerflow.agents.sophia_agent.middlewares.slide_quality import (
     SlideSignals,
     format_slide_quality_feedback,
 )
+from deerflow.agents.sophia_agent.pptx_diagnostics import _merge_builder_pptx_diagnostics
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.sophia.build_condition import (
     brief_gate_unmet_conditions,
@@ -286,6 +287,7 @@ _MANIFEST_AUTHORING_ERRORS = frozenset(
         "manifest_not_readable",
         "manifest_invalid_json",
         "manifest_items_missing",
+        "manifest_item_count_exceeds_slide_count",
         "manifest_path_missing",
         "manifest_path_not_outputs",
         "manifest_state_missing",
@@ -296,6 +298,11 @@ _PPTX_VISUAL_QUALITY_REPAIR_MAX = 2
 _PPTX_TEXT_ONLY_REQUEST_RE = re.compile(
     r"\b(?:plain\s+text[-\s]?only|text[-\s]?only|no[-\s]?image|no\s+images?"
     r"|no\s+visuals?|without\s+(?:images?|visuals?)|with\s+no\s+(?:images?|visuals?))\b",
+    re.IGNORECASE,
+)
+_PPTX_EXTRA_GENERATED_VISUALS_REQUEST_RE = re.compile(
+    r"\b(?:extra|additional|multiple|several)\s+(?:generated\s+)?(?:visuals?|images?|illustrations?|assets?)"
+    r"|(?:two|three|four|\d+)\s+(?:generated\s+)?(?:visuals?|images?|illustrations?|assets?)\s+per\s+slide\b",
     re.IGNORECASE,
 )
 _PPTX_SEVERE_QUALITY_CHECKS = frozenset({"overflow", "chrome", "visual_contract", "visual_style", "visual_grader"})
@@ -494,6 +501,14 @@ def _pptx_assets_success_count(state: dict[str, Any]) -> int:
 
 
 def _pptx_explicit_text_only_requested(state: dict[str, Any]) -> bool:
+    return bool(_PPTX_TEXT_ONLY_REQUEST_RE.search(_pptx_request_haystack(state)))
+
+
+def _pptx_extra_generated_visuals_requested(state: dict[str, Any]) -> bool:
+    return bool(_PPTX_EXTRA_GENERATED_VISUALS_REQUEST_RE.search(_pptx_request_haystack(state)))
+
+
+def _pptx_request_haystack(state: dict[str, Any]) -> str:
     haystack_parts: list[str] = []
     for source in (
         state,
@@ -506,7 +521,7 @@ def _pptx_explicit_text_only_requested(state: dict[str, Any]) -> bool:
             value = source.get(key)
             if isinstance(value, str) and value.strip():
                 haystack_parts.append(value)
-    return bool(_PPTX_TEXT_ONLY_REQUEST_RE.search("\n".join(haystack_parts)))
+    return "\n".join(haystack_parts)
 
 
 def _pptx_generated_visuals_required(state: dict[str, Any]) -> bool:
@@ -555,11 +570,12 @@ def _pptx_expected_generated_visual_count(state: dict[str, Any]) -> int:
     if not _pptx_generated_visuals_required(state):
         return 0
     diagnostics = _pptx_diagnostics(state)
-    for key in ("expected_generated_visual_count", "image_generation_manifest_requested_count"):
-        value = diagnostics.get(key)
-        if isinstance(value, int) and value > 0:
-            return value
     target = _pptx_latch_target_slide_count(state)
+    requested = diagnostics.get("image_generation_manifest_requested_count")
+    if isinstance(requested, int) and requested > 0:
+        if target > 0 and requested > target and not _pptx_extra_generated_visuals_requested(state):
+            return target
+        return requested
     if target > 0:
         return target
     slide_count = _pptx_slide_html_count(state)
@@ -955,6 +971,88 @@ def _manifest_item_count(state: dict[str, Any] | None, manifest_path: str | None
     return count if error_reason is None else 1
 
 
+def _pptx_manifest_count_rejection_reason(state: dict[str, Any] | None, count: int) -> str | None:
+    if not isinstance(state, dict) or count <= 0:
+        return None
+    if not _pptx_generated_visuals_required(state):
+        return None
+    target = _pptx_latch_target_slide_count(state)
+    if target <= 0 or count <= target:
+        return None
+    if _pptx_extra_generated_visuals_requested(state):
+        return None
+    return "manifest_item_count_exceeds_slide_count"
+
+
+def _serial_repair_output_paths_for_segments(segments: list[str]) -> list[str]:
+    outputs: list[str] = []
+    for segment in segments:
+        output_file = _command_flag_value(segment, "--output-file")
+        canonical = _canonical_outputs_artifact_path(output_file)
+        outputs.append(canonical or "")
+    return outputs
+
+
+def _serial_repair_allowed_outputs(diagnostics: dict[str, Any]) -> set[str]:
+    raw_outputs = diagnostics.get("image_generation_manifest_unresolved_outputs")
+    if not isinstance(raw_outputs, list) or not raw_outputs:
+        raw_outputs = diagnostics.get("image_generation_manifest_failed_outputs")
+    if not isinstance(raw_outputs, list):
+        return set()
+    return {
+        canonical
+        for raw in raw_outputs
+        for canonical in [_canonical_outputs_artifact_path(raw)]
+        if canonical is not None
+    }
+
+
+def _serial_repair_output_attempts(diagnostics: dict[str, Any]) -> dict[str, int]:
+    raw = diagnostics.get("serial_repair_output_attempts")
+    if not isinstance(raw, dict):
+        return {}
+    return {
+        key: int(value)
+        for key, value in raw.items()
+        if isinstance(key, str) and isinstance(value, int) and value > 0
+    }
+
+
+def _serial_repair_rejection_reason(
+    diagnostics: dict[str, Any],
+    billable_segments: list[str],
+) -> str | None:
+    allowed_outputs = _serial_repair_allowed_outputs(diagnostics)
+    if not allowed_outputs:
+        return (
+            "[Sophia/deck-batch] Serial image repair requires structured batch item diagnostics. "
+            "Rerun the manifest batch once to obtain `IMAGEGEN_BATCH`, or stop cleanly with "
+            "artifact_path=null if the batch summary is still missing."
+        )
+    attempts = _serial_repair_output_attempts(diagnostics)
+    requested_this_call: dict[str, int] = {}
+    for output_file in _serial_repair_output_paths_for_segments(billable_segments):
+        if not output_file:
+            return (
+                "[Sophia/deck-batch] Serial image repair must write to an explicit "
+                "`/mnt/user-data/outputs/...` output_file from the failed manifest item."
+            )
+        if output_file not in allowed_outputs:
+            return (
+                "[Sophia/deck-batch] Serial image repair may only target failed/missing outputs "
+                "from the original manifest. Use the same manifest `prompt_file` and `output_file` "
+                f"for {output_file}, or stop cleanly with artifact_path=null."
+            )
+        requested_this_call[output_file] = requested_this_call.get(output_file, 0) + 1
+        if attempts.get(output_file, 0) + requested_this_call[output_file] > _SERIAL_REPAIR_ATTEMPTS_PER_FAILED_SLIDE:
+            return (
+                "[Sophia/deck-batch] Serial image repair is exhausted for one or more failed "
+                "manifest outputs. Stop cleanly with artifact_path=null rather than compiling "
+                "a partial placeholder deck."
+            )
+    return None
+
+
 def _manifest_rejection_reason(command: str, state: dict[str, Any] | None) -> str | None:
     for segment in _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS):
         if "--preflight" in _command_parts(segment):
@@ -964,6 +1062,9 @@ def _manifest_rejection_reason(command: str, state: dict[str, Any] | None) -> st
             continue
         count, error_reason = _manifest_item_count_status(state, manifest_path)
         if error_reason is None and count > 0:
+            count_rejection = _pptx_manifest_count_rejection_reason(state, count)
+            if count_rejection is not None:
+                return count_rejection
             continue
         return error_reason or "manifest_not_readable"
     return None
@@ -996,6 +1097,14 @@ def _unreadable_manifest_rejection(command: str, state: dict[str, Any] | None) -
             "and `output_file`. Fix the manifest and rerun the ONE `--manifest` batch. Do not "
             "switch to serial image calls."
         )
+    if error_reason == "manifest_item_count_exceeds_slide_count":
+        target = _pptx_latch_target_slide_count(state or {})
+        return (
+            "[Sophia/image-generation] The PPTX image batch manifest has more slide-visual items "
+            f"than the requested deck slide count ({target}). Normal decks require exactly one "
+            "generated visual per slide. Rewrite the same manifest to contain one item per slide "
+            "and rerun the ONE `--manifest` batch; do not switch to serial image calls."
+        )
     return (
         "[Sophia/image-generation] The image batch manifest must be written "
         "as a readable JSON file under `/mnt/user-data/outputs/` before "
@@ -1006,7 +1115,7 @@ def _unreadable_manifest_rejection(command: str, state: dict[str, Any] | None) -
     )
 
 
-def _manifest_error_class_from_text(text: str, fallback: str = "missing_batch_summary") -> str:
+def _manifest_error_class_from_text(text: str, fallback: str = "batch_summary_missing") -> str:
     error_class = _classify_image_generation_error(text, False, 0)
     if error_class in _IMAGE_GENERATION_TERMINAL_ERRORS or error_class == "content_blocked":
         return error_class
@@ -1071,6 +1180,7 @@ def _empty_image_batch_summary(text: str, fallback: str) -> dict[str, Any]:
     return {
         "requested": 0,
         "successful_paths": [],
+        "summary_present": False,
         "error_class": _manifest_error_class_from_text(text, fallback),
     }
 
@@ -1086,7 +1196,7 @@ def _image_batch_payload_from_text(text: str) -> tuple[dict[str, Any] | None, st
         except json.JSONDecodeError:
             return None, "invalid_batch_summary"
         return (payload, "") if isinstance(payload, dict) else (None, "invalid_batch_summary")
-    return None, "missing_batch_summary"
+    return None, "batch_summary_missing"
 
 
 def _image_batch_items(payload: dict[str, Any]) -> list[Any]:
@@ -1123,10 +1233,12 @@ def _image_batch_summary_from_payload(payload: dict[str, Any], text: str) -> dic
         "images_generated": generated,
         "failed": failed,
         "complete": _image_batch_complete(payload, requested, generated),
+        "summary_present": True,
         "concurrency": payload.get("concurrency"),
         "requested_concurrency": payload.get("requested_concurrency"),
         "max_concurrency": payload.get("max_concurrency"),
         "successful_paths": _image_batch_successful_paths(items),
+        "items": items,
         "error_class_histogram": _image_batch_error_histogram(payload),
         "error_class": _manifest_error_class_from_payload(payload, text),
     }
@@ -1178,11 +1290,80 @@ def _existing_image_batch_paths(
     return existing, bytes_total, missing
 
 
+def _manifest_expected_items(state: dict[str, Any], manifest_path: str) -> list[dict[str, Any]]:
+    host = BuilderArtifactMiddleware._host_path_for_plan_file(state, manifest_path)
+    if host is None or not host.is_file():
+        return []
+    try:
+        data = json.loads(host.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return []
+    items = data.get("items") if isinstance(data, dict) else None
+    if not isinstance(items, list):
+        return []
+    expected: list[dict[str, Any]] = []
+    for index, item in enumerate(items, start=1):
+        if not isinstance(item, dict):
+            continue
+        prompt_file = str(item.get("prompt_file") or "")
+        prompt_host = _host_path_for_manifest_item_path(state, prompt_file, manifest_host=host)
+        prompt_hash = None
+        prompt_readable = prompt_host is not None and prompt_host.is_file()
+        if prompt_readable:
+            try:
+                prompt_hash = hashlib.sha256(prompt_host.read_bytes()).hexdigest()[:16]
+            except OSError:
+                prompt_hash = None
+        output_file = str(item.get("output_file") or "")
+        canonical_output = _canonical_outputs_artifact_path(output_file)
+        slide_index = item.get("slide_index") or item.get("slide_number") or item.get("slide")
+        expected.append(
+            {
+                "item_index": index,
+                "slide_index": slide_index if isinstance(slide_index, int) and slide_index > 0 else index,
+                "prompt_file": PurePosixPath(prompt_file).name,
+                "prompt_hash": prompt_hash,
+                "prompt_readable": prompt_readable,
+                "output_file": canonical_output or output_file,
+                "output_basename": PurePosixPath(output_file).name,
+                "slide_visual": bool(item.get("slide_visual")),
+            }
+        )
+    return expected
+
+
+def _manifest_expected_items_for_paths(state: dict[str, Any], manifest_paths: list[str]) -> list[dict[str, Any]]:
+    return [
+        item
+        for manifest_path in manifest_paths
+        for item in _manifest_expected_items(state, manifest_path)
+    ]
+
+
+def _manifest_expected_output_paths(expected_items: list[dict[str, Any]]) -> list[str]:
+    return [
+        output_file
+        for item in expected_items
+        for output_file in [item.get("output_file")]
+        if isinstance(output_file, str) and _canonical_outputs_artifact_path(output_file) is not None
+    ]
+
+
+def _unresolved_manifest_output_paths(state: dict[str, Any], expected_items: list[dict[str, Any]]) -> list[str]:
+    unresolved: list[str] = []
+    for output_file in _manifest_expected_output_paths(expected_items):
+        exists, _bytes_count, _reason = _virtual_output_status(state, output_file)
+        if not exists:
+            unresolved.append(output_file)
+    return unresolved
+
+
 def _image_generation_manifest_result_delta(
     state: dict[str, Any],
     text: str,
     *,
     requested_hint: int = 0,
+    manifest_paths: list[str] | None = None,
 ) -> tuple[list[str], int, str | None, dict[str, Any]]:
     batch_summary = _parse_image_batch_summary(text)
     batch_paths, batch_bytes, batch_missing_outputs = _existing_image_batch_paths(
@@ -1190,22 +1371,34 @@ def _image_generation_manifest_result_delta(
         list(batch_summary.get("successful_paths") or []),
     )
     requested = int(batch_summary.get("requested", 0) or 0) or int(requested_hint or 0)
+    expected_items = _manifest_expected_items_for_paths(state, list(manifest_paths or []))
+    if expected_items and requested <= 0:
+        requested = len(expected_items)
     generated = len(batch_paths)
     error_class = "missing_batch_output" if batch_missing_outputs else batch_summary.get("error_class")
     manifest_complete = requested > 0 and generated == requested and batch_missing_outputs == 0
     authoring_failure = error_class in _MANIFEST_AUTHORING_ERRORS
+    summary_present = bool(batch_summary.get("summary_present"))
+    generation_attempted = requested > 0 and summary_present and not authoring_failure
+    unresolved_outputs = _unresolved_manifest_output_paths(state, expected_items)
     delta: dict[str, Any] = {
         "image_generation_manifest_seen": True,
         "image_generation_manifest_requested_count": requested,
         "image_generation_manifest_success_count": generated,
         "image_generation_manifest_failed_count": max(0, requested - generated),
         "image_generation_manifest_complete": manifest_complete,
-        "image_generation_manifest_generation_attempted": requested > 0 and not authoring_failure,
+        "image_generation_manifest_generation_attempted": generation_attempted,
         "primary_image_batch_status": "success" if manifest_complete else "failed",
         "primary_image_batch_error_class": None if manifest_complete else error_class,
         "expected_generated_visual_count": requested,
         "successful_generated_visual_count": generated,
     }
+    if expected_items:
+        delta["image_generation_manifest_expected_items"] = expected_items
+        delta["image_generation_manifest_unresolved_outputs"] = unresolved_outputs
+        delta["image_generation_manifest_failed_outputs"] = unresolved_outputs if generation_attempted else []
+    if error_class in {"batch_summary_missing", "invalid_batch_summary"}:
+        delta["batch_summary_missing_count"] = 1
     if authoring_failure:
         delta["manifest_authoring_failure_count"] = 1
     if batch_summary.get("error_class_histogram"):
@@ -1757,59 +1950,6 @@ def _trace_pptx_compile_decision(
         },
         tags=["pptx", "compile_decision"],
     )
-
-
-def _merge_builder_pptx_diagnostics(
-    current: dict | None, update: dict | None
-) -> dict:
-    if current is None and update is None:
-        return {}
-    if current is None:
-        return dict(update or {})
-    if update is None:
-        return dict(current)
-    merged = dict(current)
-    for key, value in update.items():
-        _merge_builder_pptx_diagnostic_value(merged, key, value)
-    return merged
-
-
-_PPTX_DIAGNOSTIC_LATEST_COUNT_KEYS = frozenset(
-    {
-        "expected_generated_visual_count",
-        "missing_expected_visual_count",
-        "pptx_deck_missing_image_count",
-        "pptx_deck_visual_quality_gap_count",
-        "pptx_generator_picture_count",
-        "pptx_generator_slide_count",
-        "pptx_plan_image_ref_count",
-        "pptx_plan_slide_count",
-        "referenced_visual_count",
-        "successful_generated_visual_count",
-    }
-)
-
-
-def _merge_builder_pptx_diagnostic_value(merged: dict, key: str, value: object) -> None:
-    if key in _PPTX_DIAGNOSTIC_LATEST_COUNT_KEYS:
-        merged[key] = value
-        return
-    if (key.endswith("_count") or key.endswith("_bytes_total")) and isinstance(value, int):
-        merged[key] = int(merged.get(key, 0) or 0) + value
-        return
-    if key in {"image_output_paths", "pptx_output_paths", "qc_reasons"} and isinstance(value, list):
-        merged[key] = _merge_string_list(merged.get(key), value)
-        return
-    if key in {"image_output_records", "qc_image_records"} and isinstance(value, list):
-        merged[key] = _merge_record_list(merged.get(key), value)
-        return
-    if key == "qc_results" and isinstance(value, list):
-        merged[key] = [*(merged.get(key) if isinstance(merged.get(key), list) else []), *value]
-        return
-    if key == "pptx_slide_title_results" and isinstance(value, list):
-        merged[key] = value
-        return
-    merged[key] = value
 
 
 def _merge_builder_visual_diagnostics(
@@ -9201,6 +9341,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if attempts < 2 or successes > 0:
             return None
         diagnostics = _pptx_diagnostics(state)
+        if (
+            diagnostics.get("primary_image_batch_error_class") in {"batch_summary_missing", "invalid_batch_summary"}
+            and int(diagnostics.get("batch_summary_missing_count", 0) or 0) < 2
+        ):
+            return None
         requested = int(diagnostics.get("image_generation_manifest_requested_count", 0) or 0)
         failed = int(diagnostics.get("image_generation_manifest_failed_count", 0) or 0)
         real_batch_attempted = bool(diagnostics.get("image_generation_manifest_generation_attempted")) and requested > 0
@@ -9909,14 +10054,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         manifest_delta: dict[str, Any] = {}
         if manifest_segments:
-            manifest_requested_hint = sum(
-                _manifest_item_count(state, _command_flag_value(segment, "--manifest"))
+            manifest_paths = [
+                manifest_path
                 for segment in manifest_segments
+                for manifest_path in [_command_flag_value(segment, "--manifest")]
+                if manifest_path
+            ]
+            manifest_requested_hint = sum(
+                _manifest_item_count(state, manifest_path)
+                for manifest_path in manifest_paths
             )
             batch_paths, batch_bytes, batch_error_class, manifest_delta = _image_generation_manifest_result_delta(
                 state,
                 text,
                 requested_hint=manifest_requested_hint,
+                manifest_paths=manifest_paths,
             )
             successful_paths.extend(batch_paths)
             bytes_total += batch_bytes
@@ -9950,6 +10102,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             and int(diagnostics.get("image_generation_manifest_requested_count", 0) or 0) > 0
         ):
             delta["serial_repair_count"] = len(single_segments)
+            repair_attempts = _serial_repair_output_attempts(diagnostics)
+            for output_file in _serial_repair_output_paths_for_segments(single_segments):
+                if output_file:
+                    repair_attempts[output_file] = repair_attempts.get(output_file, 0) + 1
+            if repair_attempts:
+                delta["serial_repair_output_attempts"] = repair_attempts
             if len(successful_paths) > 0 and diagnostics.get("primary_image_batch_status") == "failed":
                 delta["primary_image_batch_status"] = "repaired"
         delta.update(manifest_delta)
@@ -10750,9 +10908,26 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "single-image repair attempt(s). Stop cleanly with artifact_path=null rather than "
                     "compiling a partial placeholder deck."
                 )
+            repair_rejection = _serial_repair_rejection_reason(diagnostics, billable)
+            if repair_rejection is not None:
+                return repair_rejection
             return None  # a readable batch attempted generation; bounded serial repairs are allowed
         if diagnostics.get("image_generation_manifest_seen") and requested > 0:
             error_class = diagnostics.get("primary_image_batch_error_class") or "manifest_authoring_failed"
+            if error_class in {"batch_summary_missing", "invalid_batch_summary"}:
+                if int(diagnostics.get("batch_summary_missing_count", 0) or 0) >= 2:
+                    return (
+                        "[Sophia/deck-batch] The manifest batch still did not emit a trusted "
+                        f"`IMAGEGEN_BATCH` summary after the allowed rerun ({error_class}). "
+                        "Do not attempt serial repairs because there is no structured batch item "
+                        "diagnostic table. Stop cleanly with artifact_path=null."
+                    )
+                return (
+                    "[Sophia/deck-batch] The manifest batch did not emit a trusted `IMAGEGEN_BATCH` "
+                    f"summary ({error_class}). Rerun the exact same `--manifest` batch once before "
+                    "any serial repairs. If the summary is still missing, stop cleanly with "
+                    "artifact_path=null."
+                )
             return (
                 "[Sophia/deck-batch] A manifest was seen, but it did not make a real batch generation "
                 f"attempt ({error_class}). Fix/materialize the prompt JSON files and rerun the ONE "
@@ -10973,11 +11148,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         state = request.state or {}
         # FIX 1 (2026-06-30): once a deck has accumulated repeated image-gen
-        # friction (unreadable --manifest + post-hero serial rejections), there
-        # is no productive image-gen path left — route to the HTML-slide floor
-        # instead of rejecting again (which looped to the ceiling). Checked BEFORE
-        # the manifest/batch rejections so it pre-empts the deadlock; it does NOT
-        # touch the pre-spend manifest read (the budget gate stays intact).
+        # friction (unreadable --manifest + premature serial rejections), break
+        # the loop with one explicit manifest correction path and otherwise fail
+        # cleanly. Checked BEFORE the manifest/batch rejections so it pre-empts
+        # the deadlock; it does NOT touch the pre-spend manifest read.
         floor_escape = self._deck_floor_escape_command(request, state)
         if floor_escape is not None:
             return floor_escape
