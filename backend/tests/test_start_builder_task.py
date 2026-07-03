@@ -501,6 +501,45 @@ def test_status_context_slides_with_pdf_report_targets_pdf():
     assert resolution.source == "current_user_turn"
 
 
+def test_source_pptx_filename_does_not_override_pdf_target():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    resolution = module._resolve_target_format(
+        current_user_text="Use deck.pptx to make a PDF summary.",
+        description=None,
+        task_type="document",
+    )
+
+    assert resolution.final_ext == "pdf"
+    assert resolution.rule == "explicit_pdf_deliverable"
+
+
+def test_source_pptx_filename_does_not_override_html_target():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    resolution = module._resolve_target_format(
+        current_user_text="Convert slides.pptx into an HTML page.",
+        description=None,
+        task_type="frontend",
+    )
+
+    assert resolution.final_ext == "html"
+    assert resolution.rule == "explicit_html_deliverable"
+
+
+def test_explicit_pptx_output_filename_still_targets_presentation():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    resolution = module._resolve_target_format(
+        current_user_text="Save the final deliverable as deck.pptx.",
+        description=None,
+        task_type="presentation",
+    )
+
+    assert resolution.final_ext == "pptx"
+    assert resolution.rule == "explicit_presentation_deck"
+
+
 def test_creation_context_slides_still_targets_pptx():
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
 

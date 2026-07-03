@@ -43,7 +43,6 @@ from deerflow.agents.sophia_agent.middlewares.builder_task import (
     _image_generation_enabled,
 )
 from deerflow.agents.sophia_agent.middlewares.slide_quality import (
-    QualityGap,
     SlideQualityInspector,
     SlideSignals,
     format_slide_quality_feedback,
@@ -290,6 +289,7 @@ _MANIFEST_AUTHORING_ERRORS = frozenset(
         "manifest_invalid_json",
         "manifest_items_missing",
         "manifest_item_count_exceeds_slide_count",
+        "manifest_output_not_outputs",
         "manifest_path_missing",
         "manifest_path_not_outputs",
         "manifest_state_missing",
@@ -928,6 +928,18 @@ def _host_path_for_manifest_item_path(
     return manifest_host.parent / Path(*pure.parts)
 
 
+def _manifest_output_targets_outputs(raw_path: object) -> bool:
+    if not isinstance(raw_path, str) or not raw_path.strip():
+        return False
+    normalized = raw_path.replace("\\", "/").strip()
+    if normalized.startswith("/mnt/user-data/outputs/"):
+        return True
+    if normalized.startswith("/mnt/user-data/workspace/"):
+        return False
+    pure = PurePosixPath(normalized)
+    return not pure.is_absolute() and ".." not in pure.parts
+
+
 def _manifest_authoring_error(
     state: dict[str, Any] | None,
     manifest_host: Path,
@@ -945,6 +957,8 @@ def _manifest_authoring_error(
             or not output_file.strip()
         ):
             return "manifest_prompt_or_output_missing"
+        if not _manifest_output_targets_outputs(output_file):
+            return "manifest_output_not_outputs"
         prompt_host = _host_path_for_manifest_item_path(state, prompt_file, manifest_host=manifest_host)
         if prompt_host is None or not prompt_host.is_file():
             return "manifest_prompt_missing"
@@ -1111,6 +1125,12 @@ def _unreadable_manifest_rejection(command: str, state: dict[str, Any] | None) -
             "[Sophia/image-generation] Every batch manifest item must include both `prompt_file` "
             "and `output_file`. Fix the manifest and rerun the ONE `--manifest` batch. Do not "
             "switch to serial image calls."
+        )
+    if error_reason == "manifest_output_not_outputs":
+        return (
+            "[Sophia/image-generation] Every batch manifest item `output_file` must point inside "
+            "`/mnt/user-data/outputs/...` or use a relative path under the manifest directory. "
+            "Fix the manifest and rerun the ONE `--manifest` batch before any image generation."
         )
     if error_reason == "manifest_item_count_exceeds_slide_count":
         target = _pptx_latch_target_slide_count(state or {})

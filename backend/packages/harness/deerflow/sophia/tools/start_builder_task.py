@@ -359,6 +359,11 @@ _STATUS_CONTEXT_AFTER_MATCH_RE = re.compile(
     r"(?:failing|broken|bad|wrong|off|poor|ugly|rough|stale|not\s+working|missing|miscomposed)\b",
     re.IGNORECASE,
 )
+_OUTPUT_FILENAME_CONTEXT_BEFORE_RE = re.compile(
+    r"(?:\bas\b|\bto\b|\binto\b|\bin\b)\s+"
+    r"(?:an?\s+)?(?:file\s+)?(?:named\s+|called\s+)?$",
+    re.IGNORECASE,
+)
 _PRESENTATION_FORMAT_WORD_RE = re.compile(
     r"\b(?:pptx|power\s*point|slide\s+deck|\d+\s*[- ]?\s*slides?|slides?|deck|presentation)\b",
     re.IGNORECASE,
@@ -394,6 +399,25 @@ def _has_negated_presentation_format_mention(text: str) -> bool:
     return False
 
 
+def _presentation_match_is_source_pptx_filename(text: str, match: re.Match[str]) -> bool:
+    group = match.group(0).lower()
+    if group == "pptx" and match.start() > 0 and text[match.start() - 1] == ".":
+        dot_start = match.start() - 1
+    elif group == ".pptx":
+        dot_start = match.start()
+    else:
+        return False
+
+    stem_start = dot_start
+    while stem_start > 0 and re.match(r"[\w./~@%+=,:;()\\-]", text[stem_start - 1]):
+        stem_start -= 1
+    if stem_start == dot_start:
+        return False
+
+    prefix = text[max(0, stem_start - 80) : stem_start]
+    return not _OUTPUT_FILENAME_CONTEXT_BEFORE_RE.search(prefix)
+
+
 def _first_affirmative_match(
     pattern: re.Pattern[str], text: str, *, source_veto: bool = False
 ) -> re.Match[str] | None:
@@ -403,6 +427,8 @@ def _first_affirmative_match(
         if _NEGATION_BEFORE_MATCH_RE.search(prefix):
             continue
         if source_veto and _presentation_format_word_negated_inside(match):
+            continue
+        if source_veto and _presentation_match_is_source_pptx_filename(text, match):
             continue
         if source_veto and _SOURCE_CONTEXT_BEFORE_MATCH_RE.search(prefix):
             continue
