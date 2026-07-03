@@ -11,6 +11,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import importlib.util
+import json
 import os
 import subprocess
 import sys
@@ -94,6 +95,91 @@ class TestMissingApiKeyHardFails:
         assert "IMAGEGEN_FAIL reason=missing_api_key" in result.stderr
         assert "OPENAI_API_KEY is not set" in result.stderr
         assert not output_file.exists()
+
+    def test_manifest_subprocess_missing_key_emits_structured_batch_summary(self, tmp_path: Path) -> None:
+        prompt_file = tmp_path / "prompt.json"
+        prompt_file.write_text('{"prompt":"make a slide visual"}', encoding="utf-8")
+        output_file = tmp_path / "out.png"
+        manifest_file = tmp_path / "manifest.json"
+        manifest_file.write_text(
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "prompt_file": str(prompt_file),
+                            "output_file": str(output_file),
+                            "slide_visual": True,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        env = {k: v for k, v in os.environ.items() if k != "OPENAI_API_KEY"}
+        result = subprocess.run(
+            [
+                sys.executable,
+                str(_SCRIPT_PATH),
+                "--manifest",
+                str(manifest_file),
+            ],
+            env=env,
+            capture_output=True,
+            text=True,
+            timeout=15,
+        )
+
+        assert result.returncode == 1
+        line = next(line for line in result.stdout.splitlines() if line.startswith("IMAGEGEN_BATCH "))
+        payload = json.loads(line.removeprefix("IMAGEGEN_BATCH "))
+        assert payload["requested"] == 1
+        assert payload["complete"] is False
+        assert payload["error_class_histogram"] == {"missing_api_key": 1}
+        assert payload["items"][0]["error_class"] == "missing_api_key"
+        assert not output_file.exists()
+
+
+class TestManifestStartupFailures:
+    def test_manifest_mode_wraps_post_argument_startup_exception(
+        self,
+        script_module,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        prompt_file = tmp_path / "prompt.json"
+        prompt_file.write_text('{"prompt":"x"}', encoding="utf-8")
+        manifest_file = tmp_path / "manifest.json"
+        manifest_file.write_text(
+            json.dumps(
+                {
+                    "items": [
+                        {
+                            "prompt_file": str(prompt_file),
+                            "output_file": str(tmp_path / "out.png"),
+                            "slide_visual": True,
+                        }
+                    ]
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        def crash(_manifest_path: str) -> int:
+            raise ModuleNotFoundError("No module named 'openai'")
+
+        monkeypatch.setattr(script_module, "_run_batch", crash)
+
+        assert script_module.main(["--manifest", str(manifest_file)]) == 1
+        line = next(line for line in capsys.readouterr().out.splitlines() if line.startswith("IMAGEGEN_BATCH "))
+        payload = json.loads(line.removeprefix("IMAGEGEN_BATCH "))
+        assert payload["requested"] == 1
+        assert payload["complete"] is False
+        assert payload["error_class"] == "import_error"
+        assert payload["items"][0]["prompt_file"] == "prompt.json"
+        assert payload["items"][0]["prompt_hash"]
+        assert payload["items"][0]["error_class"] == "import_error"
 
 
 # ---------------------------------------------------------------------------
@@ -180,7 +266,8 @@ class TestGeneratePathWithoutReferenceImages:
             "provider": "openai",
             "model": "gpt-image-2",
             "endpoint": "images.edit",
-            "prompt": prompt,
+            "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16],
+            "prompt_chars": len(prompt),
             "prompt_truncated": False,
             "reference_image_count": 1,
             "reference_images": ["secret-reference-name.png"],
@@ -498,7 +585,9 @@ class TestSlideVisualMode:
         assert "THE TEXT READS: Roadmap" not in captured.out
         assert "[gen] result: ext=.png bytes=" in captured.out
         assert "ref_images=0" in captured.out
-        with script_module.Image.open(output_file) as img:
+        from PIL import Image
+
+        with Image.open(output_file) as img:
             assert img.size == (160, 90)
 
     def test_slide_visual_passes_quality_to_edit_path(
@@ -527,7 +616,9 @@ class TestSlideVisualMode:
         assert kwargs["model"] == "gpt-image-2"
         assert kwargs["size"] == "1536x1024"
         assert kwargs["quality"] == "high"
-        with script_module.Image.open(output_file) as img:
+        from PIL import Image
+
+        with Image.open(output_file) as img:
             assert img.size == (160, 90)
 
     def test_slide_visual_normalization_crops_without_white_padding(
@@ -535,8 +626,10 @@ class TestSlideVisualMode:
         script_module,
         tmp_path: Path,
     ) -> None:
+        from PIL import Image
+
         output_file = tmp_path / "slide.png"
-        image = script_module.Image.new("RGB", (160, 100), (20, 30, 40))
+        image = Image.new("RGB", (160, 100), (20, 30, 40))
         for x in range(160):
             image.putpixel((x, 0), (255, 0, 0))
             image.putpixel((x, 99), (0, 0, 255))
@@ -544,7 +637,7 @@ class TestSlideVisualMode:
 
         script_module._normalize_slide_visual_aspect(str(output_file))
 
-        with script_module.Image.open(output_file) as normalized:
+        with Image.open(output_file) as normalized:
             assert normalized.size == (160, 90)
             assert normalized.getpixel((0, 0)) == (20, 30, 40)
             assert normalized.getpixel((159, 89)) == (20, 30, 40)

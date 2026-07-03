@@ -285,6 +285,8 @@ _MANIFEST_AUTHORING_ERRORS = frozenset(
         "missing_prompt_file",
         "missing_prompt_or_output",
         "manifest_not_readable",
+        "manifest_unreadable",
+        "manifest_empty",
         "manifest_invalid_json",
         "manifest_items_missing",
         "manifest_item_count_exceeds_slide_count",
@@ -331,6 +333,17 @@ _PDF_PAGE_COUNT_TOLERANCE_FRACTION = 0.1
 # retries them and a single slow image should not abort the batch.)
 _IMAGE_GENERATION_TERMINAL_ERRORS = frozenset(
     {"missing_api_key", "auth_invalid", "org_not_verified", "egress_blocked", "quota_exceeded"}
+)
+_IMAGE_GENERATION_STARTUP_ERRORS = frozenset(
+    {
+        "image_script_not_found",
+        "python_not_found",
+        "import_error",
+        "permission_denied",
+        "shell_error",
+        "batch_summary_missing",
+        "invalid_batch_summary",
+    }
 )
 _QC_PARSE_FAILURE_MARKERS = (
     "invalid json",
@@ -836,6 +849,8 @@ def _image_generation_outcome_from_state(state: dict[str, Any]) -> dict[str, Any
         ("primary_image_batch_error_class", "primary_batch_error_class"),
         ("serial_repair_count", "serial_repair_count"),
         ("manifest_authoring_failure_count", "manifest_authoring_failure_count"),
+        ("image_generation_startup_error_class", "startup_error_class"),
+        ("image_generation_exit_code", "exit_code"),
     ):
         value = diagnostics.get(source_key)
         if value not in (None, "", 0):
@@ -1122,6 +1137,122 @@ def _manifest_error_class_from_text(text: str, fallback: str = "batch_summary_mi
     return fallback
 
 
+def _safe_image_generation_error_excerpt(text: str, *, limit: int = 500) -> str | None:
+    if not text:
+        return None
+    safe_lines: list[str] = []
+    for line in text.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        if "PROMPT_SENT_FULL" in stripped:
+            stripped = "[gen] PROMPT_SENT_FULL: [redacted]"
+        stripped = re.sub(r"\bsk-[A-Za-z0-9_-]+", "sk-[redacted]", stripped)
+        stripped = re.sub(r"\blsv2_[A-Za-z0-9_-]+", "lsv2_[redacted]", stripped)
+        stripped = re.sub(
+            r"(api[_-]?key|authorization|bearer)\s*[:=]\s*['\"]?[^'\"\s]+",
+            r"\1=[redacted]",
+            stripped,
+            flags=re.IGNORECASE,
+        )
+        safe_lines.append(stripped)
+    if not safe_lines:
+        return None
+    excerpt = "\n".join(safe_lines[-8:])
+    if len(excerpt) > limit:
+        excerpt = excerpt[-limit:]
+        excerpt = "...[truncated]" + excerpt
+    return excerpt
+
+
+def _image_generation_exit_code_from_text(text: str) -> int | None:
+    patterns = (
+        r"\bexit(?:\s+code)?\s*[:=]\s*(\d+)\b",
+        r"\breturncode\s*[:=]\s*(\d+)\b",
+        r"\bexit_(\d+)\b",
+        r"returned non-zero exit status\s+(\d+)",
+    )
+    for pattern in patterns:
+        match = re.search(pattern, text or "", flags=re.IGNORECASE)
+        if match:
+            try:
+                return int(match.group(1))
+            except (TypeError, ValueError):
+                continue
+    return None
+
+
+def _image_generation_command_basename(command: str | None) -> str | None:
+    if not command:
+        return None
+    for part in _command_parts(command):
+        if "image-generation/scripts/generate.py" in part:
+            return PurePosixPath(part).name or Path(part).name or "generate.py"
+    return None
+
+
+def _image_generation_script_exists_from_command(command: str | None) -> bool | None:
+    if not command:
+        return None
+    for part in _command_parts(command):
+        if "image-generation/scripts/generate.py" not in part:
+            continue
+        if part.startswith("/mnt/"):
+            return None
+        try:
+            return Path(part).is_file()
+        except OSError:
+            return False
+    return None
+
+
+def _classify_image_batch_startup_error(text: str, fallback: str) -> str:
+    lowered = (text or "").lower()
+    if (
+        ("can't open file" in lowered or "no such file or directory" in lowered)
+        and "image-generation/scripts/generate.py" in lowered
+    ):
+        return "image_script_not_found"
+    if (
+        re.search(r"\bpython(?:3)?\s*:\s*(?:command not found|not found)", lowered)
+        or "no such file or directory: 'python" in lowered
+        or "failed to find interpreter" in lowered
+    ):
+        return "python_not_found"
+    if "modulenotfounderror" in lowered or "importerror" in lowered or "no module named" in lowered:
+        return "import_error"
+    if "permission denied" in lowered:
+        return "permission_denied"
+    if (
+        "shell error" in lowered
+        or "syntax error" in lowered
+        or "unexpected eof" in lowered
+        or "bad substitution" in lowered
+    ):
+        return "shell_error"
+    return _manifest_error_class_from_text(text, fallback)
+
+
+def _image_generation_startup_diagnostics(
+    text: str,
+    *,
+    command: str | None,
+    fallback: str,
+) -> dict[str, Any]:
+    command_hash = hashlib.sha256((command or "").encode("utf-8")).hexdigest()[:16] if command else None
+    diagnostics: dict[str, Any] = {
+        "startup_error_class": _classify_image_batch_startup_error(text, fallback),
+        "raw_error_excerpt": _safe_image_generation_error_excerpt(text),
+        "exit_code": _image_generation_exit_code_from_text(text),
+        "command_hash": command_hash,
+        "command_basename": _image_generation_command_basename(command),
+        "script_exists": _image_generation_script_exists_from_command(command),
+        "stdout_chars": len(text or ""),
+        "stderr_chars": 0,
+    }
+    return {key: value for key, value in diagnostics.items() if value not in (None, "")}
+
+
 _MANIFEST_ERROR_KEYS = ("error_class", "error_type", "reason", "error")
 
 
@@ -1176,12 +1307,15 @@ def _manifest_error_class_from_payload(payload: dict[str, Any], text: str) -> st
     return classified or None
 
 
-def _empty_image_batch_summary(text: str, fallback: str) -> dict[str, Any]:
+def _empty_image_batch_summary(text: str, fallback: str, *, command: str | None = None) -> dict[str, Any]:
+    diagnostics = _image_generation_startup_diagnostics(text, command=command, fallback=fallback)
+    error_class = str(diagnostics.get("startup_error_class") or _manifest_error_class_from_text(text, fallback))
     return {
         "requested": 0,
         "successful_paths": [],
         "summary_present": False,
-        "error_class": _manifest_error_class_from_text(text, fallback),
+        "error_class": error_class,
+        **diagnostics,
     }
 
 
@@ -1241,6 +1375,8 @@ def _image_batch_summary_from_payload(payload: dict[str, Any], text: str) -> dic
         "items": items,
         "error_class_histogram": _image_batch_error_histogram(payload),
         "error_class": _manifest_error_class_from_payload(payload, text),
+        "exit_code": payload.get("exit_code"),
+        "raw_error_excerpt": payload.get("raw_error_excerpt"),
     }
 
 
@@ -1261,7 +1397,7 @@ def _image_generation_images_in_command(command: str, state: dict[str, Any] | No
     return total
 
 
-def _parse_image_batch_summary(text: str) -> dict[str, Any]:
+def _parse_image_batch_summary(text: str, *, command: str | None = None) -> dict[str, Any]:
     """Parse the ``IMAGEGEN_BATCH`` JSON summary line from a batch run.
 
     Returns structured batch diagnostics. The harness still verifies reported
@@ -1269,7 +1405,7 @@ def _parse_image_batch_summary(text: str) -> dict[str, Any]:
     """
     payload, error_class = _image_batch_payload_from_text(text)
     if payload is None:
-        return _empty_image_batch_summary(text, error_class)
+        return _empty_image_batch_summary(text, error_class, command=command)
     return _image_batch_summary_from_payload(payload, text)
 
 
@@ -1364,8 +1500,9 @@ def _image_generation_manifest_result_delta(
     *,
     requested_hint: int = 0,
     manifest_paths: list[str] | None = None,
+    command: str | None = None,
 ) -> tuple[list[str], int, str | None, dict[str, Any]]:
-    batch_summary = _parse_image_batch_summary(text)
+    batch_summary = _parse_image_batch_summary(text, command=command)
     batch_paths, batch_bytes, batch_missing_outputs = _existing_image_batch_paths(
         state,
         list(batch_summary.get("successful_paths") or []),
@@ -1397,7 +1534,7 @@ def _image_generation_manifest_result_delta(
         delta["image_generation_manifest_expected_items"] = expected_items
         delta["image_generation_manifest_unresolved_outputs"] = unresolved_outputs
         delta["image_generation_manifest_failed_outputs"] = unresolved_outputs if generation_attempted else []
-    if error_class in {"batch_summary_missing", "invalid_batch_summary"}:
+    if not summary_present or error_class in {"batch_summary_missing", "invalid_batch_summary"}:
         delta["batch_summary_missing_count"] = 1
     if authoring_failure:
         delta["manifest_authoring_failure_count"] = 1
@@ -1405,6 +1542,21 @@ def _image_generation_manifest_result_delta(
         delta["image_generation_manifest_error_histogram"] = batch_summary.get("error_class_histogram")
     if batch_summary.get("concurrency") is not None:
         delta["image_generation_manifest_concurrency"] = batch_summary.get("concurrency")
+    if batch_summary.get("startup_error_class"):
+        delta["image_generation_startup_error_class"] = batch_summary.get("startup_error_class")
+    if batch_summary.get("exit_code") is not None:
+        delta["image_generation_exit_code"] = batch_summary.get("exit_code")
+    if batch_summary.get("raw_error_excerpt"):
+        delta["image_generation_raw_error_excerpt"] = batch_summary.get("raw_error_excerpt")
+    for source_key, target_key in (
+        ("command_hash", "image_generation_command_hash"),
+        ("command_basename", "image_generation_command_basename"),
+        ("script_exists", "image_generation_script_exists"),
+        ("stdout_chars", "image_generation_stdout_chars"),
+        ("stderr_chars", "image_generation_stderr_chars"),
+    ):
+        if source_key in batch_summary:
+            delta[target_key] = batch_summary[source_key]
     return batch_paths, batch_bytes, error_class, delta
 
 
@@ -2980,6 +3132,9 @@ def _apply_image_generation_metadata(artifact: dict[str, Any], state: dict[str, 
         "primary_image_batch_error_class",
         "serial_repair_count",
         "manifest_authoring_failure_count",
+        "image_generation_startup_error_class",
+        "image_generation_exit_code",
+        "image_generation_raw_error_excerpt",
         "presentation_route",
         "expected_generated_visual_count",
         "successful_generated_visual_count",
@@ -4774,6 +4929,17 @@ def _classify_image_generation_error(text: str, exists: bool, bytes_count: int) 
     explicit = re.search(r"\bimagegen_fail\s+reason=([a-z0-9_:-]+)", lowered)
     if explicit:
         return explicit.group(1)
+    if (
+        ("can't open file" in lowered or "no such file or directory" in lowered)
+        and "image-generation/scripts/generate.py" in lowered
+    ):
+        return "image_script_not_found"
+    if re.search(r"\bpython(?:3)?\s*:\s*(?:command not found|not found)", lowered):
+        return "python_not_found"
+    if "modulenotfounderror" in lowered or "importerror" in lowered or "no module named" in lowered:
+        return "import_error"
+    if "permission denied" in lowered:
+        return "permission_denied"
     if "openai_api_key" in lowered:
         return "missing_api_key"
     if "openai image generation failed" in lowered:
@@ -4916,9 +5082,9 @@ def _image_generation_metadata_from_state(state: dict[str, Any]) -> tuple[str | 
         return None, None
     successes = int(diagnostics.get("image_generation_success_count", 0) or 0)
     visual_counts = _pptx_visual_completeness_counts(state)
-    if visual_counts["missing_expected_visual_count"] > 0:
+    if successes > 0 and visual_counts["missing_expected_visual_count"] > 0:
         return "partial", "visuals_partial"
-    if _pptx_diagnostic_count(state, "pptx_deck_missing_image_count") > 0:
+    if successes > 0 and _pptx_diagnostic_count(state, "pptx_deck_missing_image_count") > 0:
         return "partial", "visuals_partial"
     if successes > 0:
         if (
@@ -9355,7 +9521,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         diagnostics = _pptx_diagnostics(state)
         if (
-            diagnostics.get("primary_image_batch_error_class") in {"batch_summary_missing", "invalid_batch_summary"}
+            int(diagnostics.get("batch_summary_missing_count", 0) or 0) > 0
             and int(diagnostics.get("batch_summary_missing_count", 0) or 0) < 2
         ):
             return None
@@ -10082,6 +10248,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 text,
                 requested_hint=manifest_requested_hint,
                 manifest_paths=manifest_paths,
+                command=command,
             )
             successful_paths.extend(batch_paths)
             bytes_total += batch_bytes
@@ -10710,6 +10877,128 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._visual_asset_result_command(result)
         return result
 
+    @staticmethod
+    def _is_null_artifact_path(value: object) -> bool:
+        return value is None or (isinstance(value, str) and value.strip().lower() in {"", "null", "none"})
+
+    @staticmethod
+    def _intentional_pptx_failure_emit_reason(args: dict[str, Any], state: dict[str, Any]) -> str | None:
+        if not _requested_pptx_artifact(state):
+            return None
+        if not BuilderArtifactMiddleware._is_null_artifact_path(args.get("artifact_path")):
+            return None
+        diagnostics = _pptx_diagnostics(state)
+        image_status, image_reason = _image_generation_metadata_from_state(state)
+        visual_counts = _pptx_visual_completeness_diagnostics_update(state)
+        missing_expected = int(
+            visual_counts.get("missing_expected_visual_count")
+            or diagnostics.get("missing_expected_visual_count")
+            or 0
+        )
+        attempted = int(diagnostics.get("image_generation_attempt_count", 0) or 0)
+        if image_status in {"failed", "partial"} or missing_expected > 0 or attempted > 0:
+            return (
+                image_reason
+                or str(diagnostics.get("primary_image_batch_error_class") or "")
+                or str(diagnostics.get("image_generation_startup_error_class") or "")
+                or "required_slide_visuals_missing"
+            )
+        return None
+
+    def _terminal_pptx_failure_fallback(
+        self,
+        args: dict[str, Any],
+        state: dict[str, Any],
+        runtime: Runtime,
+        *,
+        reason: str,
+        steps_completed: int,
+    ) -> dict[str, Any]:
+        fallback = {
+            "artifact_path": None,
+            "artifact_type": "presentation",
+            "artifact_title": args.get("artifact_title") or "PPTX deck generation failed",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": (
+                "The PPTX build stopped before creating a deck because required generated "
+                "slide visuals could not be completed."
+            ),
+            "companion_tone_hint": "Direct and apologetic — the build failed before a quality deck was available.",
+            "user_next_action": "Ask me to retry after the image-generation issue is fixed.",
+            "confidence": 0.0,
+            "status": "error",
+            "error_reason": reason,
+            "artifact_acceptance_status": "failed",
+            "failure_code": reason,
+        }
+        fallback = _apply_artifact_request_metadata(
+            fallback,
+            state,
+            fallback_reason="pptx_generation_not_completed",
+        )
+        self._attach_terminal_failure_diagnostics(
+            state,
+            runtime,
+            fallback,
+            failure_stage="image_generation",
+            failure_code=reason,
+            failure_reason=(
+                "Builder intentionally emitted artifact_path=null after required PPTX "
+                "slide imagery failed or remained incomplete."
+            ),
+            emit_attempted=True,
+            emit_tool_call_seen=True,
+        )
+        self._upload_fallback_and_fire(
+            state=state,
+            runtime=runtime,
+            fallback=fallback,
+            status="failed",
+        )
+        return fallback
+
+    def _terminal_pptx_failure_emit_command(
+        self,
+        request: ToolCallRequest,
+        args: dict[str, Any],
+    ) -> Command | None:
+        reason = self._intentional_pptx_failure_emit_reason(args, request.state)
+        if reason is None:
+            return None
+        fallback = self._terminal_pptx_failure_fallback(
+            args,
+            request.state,
+            request.runtime,
+            reason=reason,
+            steps_completed=int(request.state.get("builder_non_artifact_turns", 0) or 0) + 1,
+        )
+        tool_call_id = request.tool_call.get("id", "")
+        logger.warning(
+            "BuilderArtifact: accepted terminal PPTX failure emit reason=%s",
+            reason,
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=json.dumps(fallback, default=str),
+                        tool_call_id=str(tool_call_id or ""),
+                        name="emit_builder_artifact",
+                    )
+                ],
+                "builder_result": fallback,
+                "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
+                "builder_non_artifact_turns": 0,
+                "builder_task_started_at_ms": 0,
+                "builder_consecutive_empty_emit_rejections": 0,
+                "builder_last_missing_emit_path": None,
+                "builder_consecutive_missing_emit_path_rejections": 0,
+                **_terminal_halt_fields(request.state, "pptx_image_generation_failed"),
+            },
+            goto="end",
+        )
+
     @override
     def wrap_tool_call(
         self,
@@ -10762,6 +11051,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         target_skill_block = self._block_emit_before_target_skill(request)
         if target_skill_block is not None:
             return target_skill_block
+        terminal_pptx_failure = self._terminal_pptx_failure_emit_command(request, args)
+        if terminal_pptx_failure is not None:
+            return terminal_pptx_failure
         authoritative_pdf_args = self._authoritative_pdf_emit_args(args, request.state, request.runtime)
         if authoritative_pdf_args is not None:
             request.tool_call["args"] = authoritative_pdf_args
@@ -10927,17 +11219,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None  # a readable batch attempted generation; bounded serial repairs are allowed
         if diagnostics.get("image_generation_manifest_seen") and requested > 0:
             error_class = diagnostics.get("primary_image_batch_error_class") or "manifest_authoring_failed"
-            if error_class in {"batch_summary_missing", "invalid_batch_summary"}:
-                if int(diagnostics.get("batch_summary_missing_count", 0) or 0) >= 2:
+            missing_summary_count = int(diagnostics.get("batch_summary_missing_count", 0) or 0)
+            if missing_summary_count > 0:
+                startup_error = diagnostics.get("image_generation_startup_error_class") or error_class
+                if missing_summary_count >= 2:
                     return (
                         "[Sophia/deck-batch] The manifest batch still did not emit a trusted "
-                        f"`IMAGEGEN_BATCH` summary after the allowed rerun ({error_class}). "
-                        "Do not attempt serial repairs because there is no structured batch item "
-                        "diagnostic table. Stop cleanly with artifact_path=null."
+                        "`IMAGEGEN_BATCH` summary after the allowed rerun "
+                        f"({startup_error}). Do not attempt serial repairs because there is no "
+                        "structured batch item diagnostic table. Stop cleanly with artifact_path=null."
                     )
                 return (
                     "[Sophia/deck-batch] The manifest batch did not emit a trusted `IMAGEGEN_BATCH` "
-                    f"summary ({error_class}). Rerun the exact same `--manifest` batch once before "
+                    f"summary ({startup_error}). Rerun the exact same `--manifest` batch once before "
                     "any serial repairs. If the summary is still missing, stop cleanly with "
                     "artifact_path=null."
                 )
@@ -11471,6 +11765,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         target_skill_block = self._block_emit_before_target_skill(request)
         if target_skill_block is not None:
             return target_skill_block
+        terminal_pptx_failure = self._terminal_pptx_failure_emit_command(request, args)
+        if terminal_pptx_failure is not None:
+            return terminal_pptx_failure
         authoritative_pdf_args = self._authoritative_pdf_emit_args(args, request.state, request.runtime)
         if authoritative_pdf_args is not None:
             request.tool_call["args"] = authoritative_pdf_args
@@ -11585,6 +11882,44 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             original_target_ext,
                             _requested_target_suffix(state).lstrip("."),
                         )
+
+                    terminal_reason = self._intentional_pptx_failure_emit_reason(args, state)
+                    if terminal_reason is not None:
+                        non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0) + 1
+                        history = self._append_turn_summary(
+                            state,
+                            {
+                                "turn": non_artifact_turns,
+                                "tool_names": tool_names,
+                                "has_emit_builder_artifact": True,
+                                "terminal_failed_artifact": True,
+                                **pptx_skill_flags,
+                                **visual_skill_flags,
+                            },
+                        )
+                        fallback = self._terminal_pptx_failure_fallback(
+                            args,
+                            state,
+                            runtime,
+                            reason=terminal_reason,
+                            steps_completed=non_artifact_turns,
+                        )
+                        return {
+                            "builder_result": fallback,
+                            "builder_non_artifact_turns": 0,
+                            "builder_last_tool_names": tool_names,
+                            "builder_tool_turn_summaries": history,
+                            "builder_skill_reads": state.get("builder_skill_reads"),
+                            "builder_visual_force_count": state.get("builder_visual_force_count", 0),
+                            "builder_research_diagnostics": research_diagnostics,
+                            "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
+                            "builder_task_started_at_ms": 0,
+                            "builder_consecutive_empty_emit_rejections": 0,
+                            "builder_last_missing_emit_path": None,
+                            "builder_consecutive_missing_emit_path_rejections": 0,
+                            **_terminal_halt_fields(state, "pptx_image_generation_failed"),
+                            "jump_to": "end",
+                        }
 
                     emit_files_ok = self._artifact_files_exist(args, state, runtime)
                     visual_gate_blocked = emit_files_ok and self._visual_gate_blocks_emit(args, state)

@@ -30,13 +30,12 @@ import contextvars
 import hashlib
 import json as _json
 import os
+import re
 import sys
 import time
 from collections import Counter
 from pathlib import Path
 from typing import Any
-
-from PIL import Image
 
 # OpenAI's ``gpt-image-2`` supports a small set of canonical sizes. We map
 # the human-friendly aspect-ratio strings used by the SKILL.md examples
@@ -164,6 +163,8 @@ def _extract_raw_error(exc: BaseException) -> str:
     except Exception:  # noqa: BLE001 - never let capture itself raise
         pass
     detail = " | ".join(p for p in parts if p)
+    detail = re.sub(r"\bsk-[A-Za-z0-9_-]+", "sk-[redacted]", detail)
+    detail = re.sub(r"\blsv2_[A-Za-z0-9_-]+", "lsv2_[redacted]", detail)
     if len(detail) > _RAW_ERROR_MAX:
         detail = detail[:_RAW_ERROR_MAX] + "...[truncated]"
     return detail
@@ -215,6 +216,12 @@ def _classify_exception(exc: BaseException) -> str:
     text = f"{type(exc).__name__}: {exc}".lower()
     status_code = getattr(exc, "status_code", None)
     code = str(getattr(exc, "code", "") or "").lower()
+    if isinstance(exc, (ImportError, ModuleNotFoundError)):
+        return "import_error"
+    if isinstance(exc, PermissionError):
+        return "permission_denied"
+    if isinstance(exc, FileNotFoundError):
+        return "file_not_found"
     if "organization" in text and ("verified" in text or "verify" in text):
         return "org_not_verified"
     if any(token in text for token in ("invalid api key", "incorrect api key", "401", "unauthorized", "authentication")):
@@ -348,13 +355,14 @@ def _image_request_model(valid_refs: list[str]) -> str:
 
 def _image_trace_inputs(*, prompt: str, valid_refs: list[str], size: str, quality: str | None) -> dict[str, Any]:
     model = _image_request_model(valid_refs)
-    traced_prompt, truncated = _truncate_trace_text(prompt)
+    prompt_chars = len(prompt)
     return {
         "provider": "openai",
         "model": model,
         "endpoint": "images.edit" if valid_refs else "images.generate",
-        "prompt": traced_prompt,
-        "prompt_truncated": truncated,
+        "prompt_hash": hashlib.sha256(prompt.encode("utf-8")).hexdigest()[:16],
+        "prompt_chars": prompt_chars,
+        "prompt_truncated": prompt_chars > _TRACE_PROMPT_MAX,
         "reference_image_count": len(valid_refs),
         "reference_images": [_trace_reference_name(path) for path in valid_refs],
         "size": size,
@@ -566,8 +574,22 @@ def _build_prompt(prompt_file: str, *, slide_visual: bool) -> str:
     return f"{subject}\n\n{_SOPHIA_IMAGE_STYLE}\n\n{_SOPHIA_IMAGE_AVOID}"
 
 
+def _load_pillow_image() -> Any:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        _fail(
+            "import_error",
+            f"Pillow is not available in the sandbox: {type(exc).__name__}",
+            raw_error=_extract_raw_error(exc),
+            exit_code=2,
+        )
+    return Image
+
+
 def _validate_reference_image(image_path: str) -> bool:
     """True iff Pillow can fully load the file as an image."""
+    Image = _load_pillow_image()
     try:
         with Image.open(image_path) as img:
             img.verify()
@@ -727,7 +749,12 @@ def _openai_client_from_env() -> object:
     try:
         from openai import OpenAI  # transitive dep via langchain-openai
     except ImportError as e:  # pragma: no cover - sandbox should always have this
-        _fail("api_error", f"openai SDK is not available in the sandbox: {type(e).__name__}", exit_code=2)
+        _fail(
+            "import_error",
+            f"openai SDK is not available in the sandbox: {type(e).__name__}",
+            raw_error=_extract_raw_error(e),
+            exit_code=2,
+        )
     return OpenAI(api_key=api_key, timeout=_image_gen_timeout_seconds(), max_retries=_image_gen_max_retries())
 
 
@@ -793,6 +820,7 @@ def _assert_output_file_written(output_file: str) -> None:
 
 
 def _normalize_slide_visual_aspect(output_file: str) -> None:
+    Image = _load_pillow_image()
     try:
         with Image.open(output_file) as img:
             source = img.convert("RGBA")
@@ -1051,6 +1079,85 @@ def _finish_trace(run: Any, *, outputs: dict[str, Any]) -> None:
         pass
 
 
+def _system_exit_code(exc: SystemExit) -> int:
+    code = exc.code
+    if isinstance(code, int):
+        return code if code != 0 else 1
+    if isinstance(code, str) and code.strip().isdigit():
+        value = int(code.strip())
+        return value if value != 0 else 1
+    return 1
+
+
+def _manifest_items_for_failure_summary(manifest_path: str) -> tuple[int, list[dict[str, Any]]]:
+    try:
+        resolved_manifest_path = _resolve_sophia_path(manifest_path)
+        manifest_dir = Path(resolved_manifest_path).parent
+        manifest = _json.loads(Path(resolved_manifest_path).read_text(encoding="utf-8"))
+    except Exception:
+        return 0, []
+    raw_items = manifest.get("items") if isinstance(manifest, dict) else None
+    if not isinstance(raw_items, list):
+        return 0, []
+    items: list[dict[str, Any]] = []
+    for index, item in enumerate(raw_items, start=1):
+        if not isinstance(item, dict):
+            items.append(
+                {
+                    "item_index": index,
+                    "success": False,
+                    "error": "invalid_manifest_item",
+                    "error_class": "invalid_manifest_item",
+                }
+            )
+            continue
+        prompt_file = str(item.get("prompt_file") or "")
+        prompt_actual = _resolve_sophia_path(prompt_file, base_dir=manifest_dir) if prompt_file else ""
+        prompt_readable = bool(prompt_actual and Path(prompt_actual).is_file())
+        items.append(
+            {
+                "item_index": index,
+                "prompt_file": _safe_basename(prompt_file),
+                "prompt_readable": prompt_readable,
+                "prompt_hash": (
+                    _safe_prompt_hash(prompt_file, slide_visual=bool(item.get("slide_visual")), base_dir=manifest_dir)
+                    if prompt_readable
+                    else None
+                ),
+                "output_file": str(item.get("output_file") or ""),
+                "success": False,
+            }
+        )
+    return len(raw_items), items
+
+
+def _emit_manifest_startup_failure(manifest_path: str, exc: BaseException, *, exit_code: int = 1) -> int:
+    error_class = "process_exit" if isinstance(exc, SystemExit) else _classify_exception(exc)
+    raw_error = _extract_raw_error(exc)
+    requested, items = _manifest_items_for_failure_summary(manifest_path)
+    item_error = f"{type(exc).__name__}: {exc}"
+    for item in items:
+        item.setdefault("error", item_error)
+        item.setdefault("error_class", error_class)
+        item.setdefault("raw_error_excerpt", raw_error)
+        item.setdefault("exit_code", exit_code)
+    payload = {
+        "images_generated": 0,
+        "requested": requested,
+        "failed": requested,
+        "complete": False,
+        "error": item_error,
+        "error_class": error_class,
+        "raw_error_excerpt": raw_error,
+        "exit_code": exit_code,
+        "items": items,
+        "error_class_histogram": {error_class: requested or 1},
+    }
+    print(f"IMAGEGEN_BATCH {_json.dumps(payload)}")
+    _flush_langsmith_traces()
+    return exit_code if exit_code else 1
+
+
 def _run_batch(manifest_path: str) -> int:
     """Generate multiple images concurrently from a JSON manifest.
 
@@ -1087,10 +1194,31 @@ def _run_batch(manifest_path: str) -> int:
     try:
         manifest = _json.loads(Path(resolved_manifest_path).read_text(encoding="utf-8"))
     except (OSError, ValueError) as exc:
-        return _summary({"images_generated": 0, "requested": 0, "error": f"manifest_unreadable: {exc}"})
+        return _summary(
+            {
+                "images_generated": 0,
+                "requested": 0,
+                "complete": False,
+                "error": f"manifest_unreadable: {exc}",
+                "error_class": "manifest_unreadable",
+                "raw_error_excerpt": _extract_raw_error(exc),
+                "items": [],
+                "error_class_histogram": {"manifest_unreadable": 1},
+            }
+        )
     items = manifest.get("items") if isinstance(manifest, dict) else None
     if not isinstance(items, list) or not items:
-        return _summary({"images_generated": 0, "requested": 0, "error": "manifest_empty"})
+        return _summary(
+            {
+                "images_generated": 0,
+                "requested": 0,
+                "complete": False,
+                "error": "manifest_empty",
+                "error_class": "manifest_empty",
+                "items": [],
+                "error_class_histogram": {"manifest_empty": 1},
+            }
+        )
 
     # Default 2: keep the parallel speed win but stay within lower image RPM tiers
     # while the per-call retries recover transient 429/5xx instead of re-saturating.
@@ -1269,7 +1397,12 @@ def main(argv: list[str] | None = None) -> int:
     if args.preflight:
         return preflight()
     if args.manifest:
-        return _run_batch(args.manifest)
+        try:
+            return _run_batch(args.manifest)
+        except SystemExit as exc:
+            return _emit_manifest_startup_failure(args.manifest, exc, exit_code=_system_exit_code(exc))
+        except Exception as exc:  # noqa: BLE001 - manifest mode must always emit IMAGEGEN_BATCH.
+            return _emit_manifest_startup_failure(args.manifest, exc, exit_code=1)
     print(
         generate_image(
             args.prompt_file,

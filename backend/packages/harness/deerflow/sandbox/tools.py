@@ -1,4 +1,5 @@
 import logging
+import os
 import re
 from pathlib import Path
 
@@ -36,6 +37,7 @@ _LOCAL_BASH_SYSTEM_PATH_PREFIXES = (
 )
 
 _DEFAULT_SKILLS_CONTAINER_PATH = "/mnt/skills"
+_PRODUCTION_SKILLS_HOST_PATH = "/app/skills"
 
 
 def _maybe_mirror_tool_output(
@@ -83,6 +85,33 @@ def _get_skills_container_path() -> str:
         return _DEFAULT_SKILLS_CONTAINER_PATH
 
 
+def _skills_host_path_candidates(configured_path: Path | None = None) -> list[Path]:
+    candidates: list[Path] = []
+    if configured_path is not None:
+        candidates.append(configured_path)
+    env_path = os.environ.get("DEER_FLOW_HOST_SKILLS_PATH")
+    if env_path and env_path.strip():
+        candidates.append(Path(env_path.strip()))
+    candidates.append(Path(_PRODUCTION_SKILLS_HOST_PATH))
+    try:
+        candidates.append(Path(__file__).resolve().parents[5] / "skills")
+    except IndexError:
+        pass
+
+    unique: list[Path] = []
+    seen: set[str] = set()
+    for candidate in candidates:
+        try:
+            key = str(candidate.expanduser().resolve())
+        except OSError:
+            key = str(candidate.expanduser())
+        if key in seen:
+            continue
+        seen.add(key)
+        unique.append(candidate.expanduser())
+    return unique
+
+
 def _get_skills_host_path() -> str | None:
     """Get the skills host filesystem path from config.
 
@@ -94,17 +123,22 @@ def _get_skills_host_path() -> str | None:
     cached = getattr(_get_skills_host_path, "_cached", None)
     if cached is not None:
         return cached
+    configured_path: Path | None = None
     try:
         from deerflow.config import get_app_config
 
         config = get_app_config()
-        skills_path = config.skills.get_skills_path()
-        if skills_path.exists():
-            value = str(skills_path)
-            _get_skills_host_path._cached = value  # type: ignore[attr-defined]
-            return value
+        configured_path = config.skills.get_skills_path()
     except Exception:
-        pass
+        configured_path = None
+    for skills_path in _skills_host_path_candidates(configured_path):
+        try:
+            if skills_path.is_dir():
+                value = str(skills_path.resolve())
+                _get_skills_host_path._cached = value  # type: ignore[attr-defined]
+                return value
+        except OSError:
+            continue
     return None
 
 

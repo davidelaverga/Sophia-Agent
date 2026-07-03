@@ -461,6 +461,9 @@ def test_completion_payload_preserves_image_generation_metadata():
         image_generation_reason="org_not_verified",
         primary_image_batch_status="failed",
         primary_image_batch_error_class="auth_invalid",
+        image_generation_startup_error_class="import_error",
+        image_generation_exit_code=1,
+        image_generation_raw_error_excerpt="ModuleNotFoundError: No module named openai",
         serial_repair_count=2,
         manifest_authoring_failure_count=1,
         presentation_route="html_slide_to_pptx_raster",
@@ -480,6 +483,9 @@ def test_completion_payload_preserves_image_generation_metadata():
     assert payload["image_generation_reason"] == "org_not_verified"
     assert payload["primary_image_batch_status"] == "failed"
     assert payload["primary_image_batch_error_class"] == "auth_invalid"
+    assert payload["image_generation_startup_error_class"] == "import_error"
+    assert payload["image_generation_exit_code"] == 1
+    assert payload["image_generation_raw_error_excerpt"] == "ModuleNotFoundError: No module named openai"
     assert payload["serial_repair_count"] == 2
     assert payload["manifest_authoring_failure_count"] == 1
     assert payload["presentation_route"] == "html_slide_to_pptx_raster"

@@ -38,6 +38,10 @@ COPY skills ./skills
 RUN --mount=type=cache,target=/root/.cache/uv \
     sh -c "cd backend && uv sync"
 
+RUN cd /app/backend \
+    && uv run python ../skills/public/image-generation/scripts/generate.py --help >/dev/null \
+    && uv run python -c "import PIL, openai, langsmith"
+
 # Diagrams moved to graphviz (the `dot` binary, installed above) — the
 # Node compile_diagram.mjs + its excalidraw/mermaid-to-excalidraw/jsdom/
 # dompurify deps were retired (Sophia Artifact Visual System, Phase 2).

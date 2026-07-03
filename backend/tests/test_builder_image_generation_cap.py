@@ -854,6 +854,31 @@ def test_manifest_batch_missing_summary_does_not_unlock_serial_repair(tmp_path) 
     assert "did not emit a trusted `IMAGEGEN_BATCH`" in result.update["messages"][0].content
 
 
+def test_manifest_batch_missing_summary_classifies_startup_error(tmp_path) -> None:
+    manifest = tmp_path / "m.json"
+    (tmp_path / "p0.json").write_text('{"prompt":"x"}', encoding="utf-8")
+    manifest.write_text(
+        json.dumps({"items": [{"prompt_file": "p0.json", "output_file": "/mnt/user-data/outputs/o0.png"}]}),
+        encoding="utf-8",
+    )
+    state = _state_with_image_diagnostics(image_generation_attempt_count=0)
+    state["thread_data"] = {"outputs_path": str(tmp_path)}
+    command = f"python {_SCRIPT} --manifest /mnt/user-data/outputs/m.json"
+    text = "python: can't open file '/mnt/skills/public/image-generation/scripts/generate.py': [Errno 2] No such file or directory"
+
+    delta = BuilderArtifactMiddleware._image_generation_bash_delta(
+        command=command,
+        text=text,
+        state=state,
+    )
+
+    assert delta["primary_image_batch_error_class"] == "image_script_not_found"
+    assert delta["image_generation_startup_error_class"] == "image_script_not_found"
+    assert delta["batch_summary_missing_count"] == 1
+    assert delta["image_generation_manifest_generation_attempted"] is False
+    assert "can't open file" in delta["image_generation_raw_error_excerpt"]
+
+
 def test_second_missing_batch_summary_fails_clearly_without_serial_repair() -> None:
     state = _state_with_image_diagnostics(
         image_generation_manifest_seen=True,
@@ -861,7 +886,8 @@ def test_second_missing_batch_summary_fails_clearly_without_serial_repair() -> N
         image_generation_manifest_failed_count=3,
         image_generation_manifest_generation_attempted=False,
         primary_image_batch_status="failed",
-        primary_image_batch_error_class="batch_summary_missing",
+        primary_image_batch_error_class="image_script_not_found",
+        image_generation_startup_error_class="image_script_not_found",
         batch_summary_missing_count=2,
         image_generation_manifest_unresolved_outputs=[
             "/mnt/user-data/outputs/s2.png",
@@ -876,8 +902,51 @@ def test_second_missing_batch_summary_fails_clearly_without_serial_repair() -> N
     assert isinstance(result, Command)
     content = result.update["messages"][0].content
     assert "after the allowed rerun" in content
+    assert "image_script_not_found" in content
     assert "Do not attempt serial repairs" in content
     assert "artifact_path=null" in content
+
+
+def test_null_pptx_emit_is_terminal_error_after_image_failure(monkeypatch) -> None:
+    state = _state_with_image_diagnostics(
+        image_generation_attempt_count=6,
+        image_generation_success_count=0,
+        image_generation_error_class="image_script_not_found",
+        primary_image_batch_status="failed",
+        primary_image_batch_error_class="image_script_not_found",
+        image_generation_startup_error_class="image_script_not_found",
+        expected_generated_visual_count=6,
+        successful_generated_visual_count=0,
+        missing_expected_visual_count=6,
+    )
+    request = SimpleNamespace(
+        tool_call={
+            "id": "tc-emit",
+            "name": "emit_builder_artifact",
+            "args": {"artifact_path": "null", "artifact_title": "Deck"},
+        },
+        state=state,
+        runtime=_runtime(),
+    )
+    monkeypatch.setattr(
+        BuilderArtifactMiddleware,
+        "_upload_fallback_and_fire",
+        staticmethod(lambda **_kwargs: None),
+    )
+
+    result = BuilderArtifactMiddleware()._terminal_pptx_failure_emit_command(
+        request,
+        request.tool_call["args"],
+    )
+
+    assert isinstance(result, Command)
+    assert result.goto == "end"
+    artifact = result.update["builder_result"]
+    assert artifact["artifact_path"] is None
+    assert artifact["status"] == "error"
+    assert artifact["image_generation_status"] == "failed"
+    assert artifact["image_generation_startup_error_class"] == "image_script_not_found"
+    assert result.update["builder_graph_halted"] is True
 
 
 def test_manifest_batch_summary_uses_terminal_error_histogram() -> None:

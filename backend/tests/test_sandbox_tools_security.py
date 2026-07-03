@@ -3,6 +3,7 @@ from unittest.mock import patch
 
 import pytest
 
+from deerflow.sandbox import tools as tools_module
 from deerflow.sandbox.tools import (
     VIRTUAL_PATH_PREFIX,
     _is_skills_path,
@@ -161,6 +162,24 @@ def test_resolve_skills_path_raises_when_not_configured() -> None:
     ):
         with pytest.raises(FileNotFoundError, match="Skills directory not available"):
             _resolve_skills_path("/mnt/skills/public/bootstrap/SKILL.md")
+
+
+def test_get_skills_host_path_uses_existing_fallback(tmp_path: Path) -> None:
+    """If the configured skills root is absent, use the next verified candidate."""
+    missing = tmp_path / "missing-skills"
+    fallback = tmp_path / "app" / "skills"
+    fallback.mkdir(parents=True)
+    if hasattr(tools_module._get_skills_host_path, "_cached"):
+        delattr(tools_module._get_skills_host_path, "_cached")
+    try:
+        with patch(
+            "deerflow.sandbox.tools._skills_host_path_candidates",
+            return_value=[missing, fallback],
+        ):
+            assert tools_module._get_skills_host_path() == str(fallback.resolve())
+    finally:
+        if hasattr(tools_module._get_skills_host_path, "_cached"):
+            delattr(tools_module._get_skills_host_path, "_cached")
 
 
 # ---------- _resolve_and_validate_user_data_path ----------

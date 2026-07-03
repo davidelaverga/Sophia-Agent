@@ -78,6 +78,7 @@ def test_ppt_generation_skill_authors_html_slide_decks() -> None:
     assert "Every slide is a single 16:9 image" not in text
     assert "generate_visual_asset" not in text
     assert "generate_report_chart" not in text
+    assert text.count('<div class="visual"><img src="../assets/01-cover.png" alt="..."></div>') == 1
 
 
 def test_ppt_generation_skill_requires_opaque_edges() -> None:
