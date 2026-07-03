@@ -583,7 +583,7 @@ def test_slide_quality_gate_allows_second_reauthor(tmp_path):
         _quality_request(outputs, builder_slide_quality_rejections=1), result, delta
     )
     assert isinstance(cmd, Command)
-    assert cmd.update["builder_slide_quality_rejections"] == 1
+    assert cmd.update["builder_slide_quality_rejections"] == 2
 
 
 def test_slide_quality_gate_fails_severe_gaps_after_two_reauthors(tmp_path):

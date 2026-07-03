@@ -10686,7 +10686,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 # Suppress the compile force until the model edits a slide (the
                 # write clears this) so it can't immediately re-compile the same deck.
                 "builder_pptx_compile_repair_pending": True,
-                "builder_slide_quality_rejections": 1,
+                "builder_slide_quality_rejections": used_quality_repairs + 1,
                 "build_iterations": iterations_used(state) + 1,
             },
             goto="model",
