@@ -55,7 +55,6 @@ from langgraph.runtime import Runtime
 from deerflow.agents.sophia_agent.utils import extract_last_human_text, log_middleware
 from deerflow.sophia.builder_memory_filter import (
     DEFAULT_BUILDER_MEMORY_TOP_K,
-    builder_task_terms,
     should_exclude_builder_memory,
 )
 
@@ -217,7 +216,7 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
             entry_content = entry.get("content")
             if isinstance(entry_content, str) and entry_content.strip():
                 snippet = entry_content.strip()
-                if _generic_artifact_style_memory(snippet, builder_task_terms(query), task_type=task_type):
+                if _generic_artifact_style_memory(snippet, query, task_type=task_type):
                     continue
                 if len(snippet) > _MAX_SNIPPET_CHARS:
                     snippet = snippet[: _MAX_SNIPPET_CHARS - 1] + "…"
@@ -361,13 +360,13 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
 
 def _generic_artifact_style_memory(
     snippet: str,
-    task_terms: set[str],
+    query: str,
     *,
     task_type: str | None = None,
 ) -> bool:
     """Return True for stale aesthetic memories unrelated to the current task."""
     return should_exclude_builder_memory(
         snippet,
-        query=" ".join(sorted(task_terms)),
+        query=query,
         task_type=task_type,
     )

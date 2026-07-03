@@ -281,6 +281,51 @@ class TestRetrievalAsync:
         assert result["injected_memories"] == ["subject"]
 
     @pytest.mark.anyio
+    async def test_same_modality_broad_style_memory_kept(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        _patch_search(
+            monkeypatch,
+            [
+                {
+                    "id": "style",
+                    "content": "User prefers minimalist slide decks.",
+                },
+                {
+                    "id": "neon",
+                    "content": "User prefers neon slide decks.",
+                },
+                {
+                    "id": "stale",
+                    "content": "For investor pitch decks, user prefers neon visuals.",
+                },
+                {
+                    "id": "subject",
+                    "content": "User is evaluating Kubernetes orchestration tradeoffs.",
+                },
+            ],
+        )
+        mw = BuilderMem0RetrievalMiddleware()
+        state = {
+            "user_id": "u",
+            "delegation_context": {
+                "normalized_brief": "Create a presentation on Kubernetes orchestration."
+            },
+            "messages": [
+                {"type": "human", "content": "Create a presentation on Kubernetes orchestration."}
+            ],
+        }
+
+        result = await mw.abefore_agent(state, runtime=None)
+
+        assert result["injected_memory_contents"] == [
+            "User prefers minimalist slide decks.",
+            "User prefers neon slide decks.",
+            "User is evaluating Kubernetes orchestration tradeoffs.",
+        ]
+        assert result["injected_memories"] == ["style", "neon", "subject"]
+
+    @pytest.mark.anyio
     async def test_task_specific_artifact_style_memory_kept(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:

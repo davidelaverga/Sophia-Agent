@@ -20,20 +20,49 @@ _ARTIFACT_STYLE_RE = re.compile(
 )
 _PRESENTATION_RE = re.compile(r"\b(?:deck|decks|pptx|presentation|slide|slides|slideshow|keynote)\b", re.IGNORECASE)
 _REPORT_RE = re.compile(r"\b(?:document|pdf|report|reports|paper|memo|brief|article|write[- ]?up)\b", re.IGNORECASE)
+_STYLE_TOPIC_SCOPE_RE = re.compile(
+    r"\b(?:for|about|on)\s+(.{1,80}?)\s+"
+    r"(?:deck|decks|pptx|presentation|slide|slides|slideshow|keynote|"
+    r"document|pdf|report|reports|paper|memo|brief|article|write[- ]?up)\b",
+    re.IGNORECASE,
+)
 _TASK_TOKEN_STOPWORDS = frozenset({
     "about",
+    "aesthetic",
     "artifact",
     "build",
+    "chart",
+    "color",
+    "colour",
     "create",
+    "dark",
     "deck",
+    "decks",
     "deliver",
+    "diagram",
     "generate",
+    "heavy",
+    "layout",
+    "light",
     "make",
+    "minimal",
+    "minimalist",
+    "palette",
+    "prefer",
+    "prefers",
     "presentation",
+    "presentations",
+    "preferred",
     "report",
+    "reports",
     "slide",
     "slides",
+    "style",
+    "theme",
     "technical",
+    "user",
+    "visual",
+    "visuals",
     "with",
 })
 
@@ -74,6 +103,13 @@ def builder_task_terms(query: str) -> set[str]:
     return terms
 
 
+def _style_topic_terms(snippet: str) -> set[str]:
+    terms: set[str] = set()
+    for match in _STYLE_TOPIC_SCOPE_RE.finditer(snippet):
+        terms.update(builder_task_terms(match.group(1)))
+    return terms
+
+
 def should_exclude_builder_memory(
     snippet: str,
     *,
@@ -96,6 +132,8 @@ def should_exclude_builder_memory(
     task_terms = builder_task_terms(query)
     if task_terms and any(term in lowered for term in task_terms):
         return False
+    if current_modality and current_modality in snippet_modalities:
+        return bool(_style_topic_terms(normalized))
     return True
 
 
