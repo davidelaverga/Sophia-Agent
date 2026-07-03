@@ -413,6 +413,34 @@ def test_manifest_with_non_output_output_file_is_authoring_rejection(tmp_path):
     assert diag["primary_image_batch_error_class"] == "manifest_output_not_outputs"
 
 
+def test_workspace_manifest_with_relative_output_is_rejected_before_batch(tmp_path):
+    outputs_dir = tmp_path / "outputs"
+    workspace_dir = tmp_path / "workspace"
+    manifest_dir = workspace_dir / "visuals"
+    manifest_dir.mkdir(parents=True)
+    outputs_dir.mkdir()
+    (manifest_dir / "p1.json").write_text('{"prompt":"professional visual"}', encoding="utf-8")
+    (manifest_dir / "manifest.json").write_text(
+        json.dumps({"items": [{"prompt_file": "p1.json", "output_file": "slide.png"}]}),
+        encoding="utf-8",
+    )
+    state = _state_with_image_diagnostics(image_generation_success_count=1)
+    state["thread_data"] = {
+        "outputs_path": str(outputs_dir),
+        "workspace_path": str(workspace_dir),
+    }
+    command = f"python {_SCRIPT} --manifest /mnt/user-data/workspace/visuals/manifest.json"
+
+    result = BuilderArtifactMiddleware()._image_generation_block_command(_bash_request(command, state))
+
+    assert isinstance(result, Command)
+    content = result.update["messages"][0].content
+    assert "`/mnt/user-data/outputs/`" in content
+    diag = result.update["builder_pptx_diagnostics"]
+    assert diag["manifest_authoring_failure_count"] == 1
+    assert diag["primary_image_batch_error_class"] == "manifest_path_not_outputs"
+
+
 def test_deck_batch_backstop_allows_single_repair_after_batch_ran():
     # Once a batch ran, single calls are the legitimate stray-failure repair path.
     state = _state_with_image_diagnostics(

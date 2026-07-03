@@ -975,6 +975,9 @@ def _manifest_item_count_status(
         return 0, "manifest_path_missing"
     if state is None:
         return 0, "manifest_state_missing"
+    normalized_manifest = str(manifest_path).replace("\\", "/").strip()
+    if not normalized_manifest.startswith("/mnt/user-data/outputs/"):
+        return 0, "manifest_path_not_outputs"
     host = BuilderArtifactMiddleware._host_path_for_plan_file(state, manifest_path)
     if host is None:
         return 0, "manifest_path_not_outputs"
