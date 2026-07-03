@@ -522,8 +522,8 @@ def test_list_artifacts_filters_supabase_visual_support_assets(tmp_path, monkeyp
     assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/deck.pptx"]
 
 
-def test_supabase_support_filter_hides_preview_pdfs() -> None:
-    assert artifacts_router._is_supabase_thread_list_support_artifact_path("deck.preview.pdf") is True
+def test_supabase_support_filter_keeps_root_preview_pdfs_discoverable() -> None:
+    assert artifacts_router._is_supabase_thread_list_support_artifact_path("deck.preview.pdf") is False
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("outputs/deck.preview.pdf") is True
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("visuals/x.preview.pdf") is True
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("assets/x.preview.pdf") is True
@@ -533,7 +533,7 @@ def test_supabase_support_filter_hides_preview_pdfs() -> None:
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("source_artifact/x.preview.pdf") is True
 
 
-def test_list_artifacts_filters_supabase_deck_preview_pdf_from_library(tmp_path, monkeypatch) -> None:
+def test_list_artifacts_keeps_supabase_deck_preview_pdf_for_canvas_lookup(tmp_path, monkeypatch) -> None:
     missing_outputs = tmp_path / "missing" / "outputs"
     supabase_items = [
         artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
@@ -565,7 +565,10 @@ def test_list_artifacts_filters_supabase_deck_preview_pdf_from_library(tmp_path,
 
     response = asyncio.run(artifacts_router.list_artifacts("thread-1"))
 
-    assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/deck.pptx"]
+    assert [item.path for item in response.artifacts] == [
+        "mnt/user-data/outputs/deck.preview.pdf",
+        "mnt/user-data/outputs/deck.pptx",
+    ]
 
 
 def test_list_artifacts_merges_and_dedupes_local_and_supabase(tmp_path, monkeypatch) -> None:

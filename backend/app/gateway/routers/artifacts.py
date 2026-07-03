@@ -375,11 +375,14 @@ def _is_builder_support_artifact_path(relative_path: str) -> bool:
 def _is_supabase_thread_list_support_artifact_path(relative_path: str) -> bool:
     """Return True for Supabase artifacts hidden from the thread render library.
 
-    PPTX preview PDFs are render support files. The canvas can discover them
-    through completion metadata, but the general artifact library must not
-    expose them as additional downloadable files.
+    Root-level PPTX preview PDFs must stay discoverable here: reopened decks may
+    only have the primary registry row plus this thread artifact lookup, and the
+    frontend hides preview-role files from user download rows.
     """
     normalized = relative_path.strip().lstrip("/").replace("\\", "/")
+    parts = [part for part in normalized.split("/") if part]
+    if len(parts) == 1 and parts[0].lower().endswith(".preview.pdf"):
+        return False
     return _is_builder_support_artifact_path(normalized)
 
 
