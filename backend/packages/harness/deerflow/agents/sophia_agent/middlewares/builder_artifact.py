@@ -2273,13 +2273,26 @@ def _artifact_file_entries(artifact_args: dict[str, Any]) -> list[dict[str, str]
     primary = artifact_args.get("artifact_path")
     preview_name = str(artifact_args.get("artifact_preview_filename") or "").strip()
     preview_basename = PurePosixPath(preview_name).name if preview_name else ""
-    entries: list[dict[str, str]] = []
+    payload_entries = _artifact_file_entries_from_payload(artifact_args.get("artifact_files"))
+    primary_role = (
+        "preview"
+        if preview_basename and PurePosixPath(str(primary or "")).name == preview_basename
+        else "primary"
+    )
+    primary_entry = _artifact_file_entry(primary, primary_role)
+    payload_has_primary = any(entry.get("role") == "primary" for entry in payload_entries)
 
-    primary_entry = _artifact_file_entry(primary, "primary")
+    entries: list[dict[str, str]] = []
+    if payload_has_primary:
+        entries.extend(payload_entries)
+    elif primary_entry is not None:
+        entries.append(primary_entry)
+        primary_entry = None
+        entries.extend(payload_entries)
+    else:
+        entries.extend(payload_entries)
     if primary_entry is not None:
         entries.append(primary_entry)
-
-    entries.extend(_artifact_file_entries_from_payload(artifact_args.get("artifact_files")))
     entries.extend(_supporting_artifact_file_entries(artifact_args.get("supporting_files"), preview_basename))
     return _dedupe_artifact_file_entries(entries)
 

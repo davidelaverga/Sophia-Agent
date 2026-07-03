@@ -314,3 +314,25 @@ def test_artifact_file_roles_surface_only_primary_and_preview() -> None:
         "/mnt/user-data/outputs/report.pdf",
         "/mnt/user-data/outputs/report.preview.pdf",
     ]
+
+
+def test_explicit_primary_artifact_file_precedes_preview_artifact_path() -> None:
+    args = {
+        "artifact_path": "/mnt/user-data/outputs/deck.preview.pdf",
+        "artifact_preview_filename": "deck.preview.pdf",
+        "artifact_files": [
+            {"path": "/mnt/user-data/outputs/deck.pptx", "role": "primary"},
+            {"path": "/mnt/user-data/outputs/deck.preview.pdf", "role": "preview"},
+        ],
+    }
+
+    entries = _artifact_file_entries(args)
+
+    assert entries == [
+        {"path": "/mnt/user-data/outputs/deck.pptx", "role": "primary"},
+        {"path": "/mnt/user-data/outputs/deck.preview.pdf", "role": "preview"},
+    ]
+    assert _artifact_file_paths_for_roles(args, _USER_SURFACE_ARTIFACT_FILE_ROLES) == [
+        "/mnt/user-data/outputs/deck.pptx",
+        "/mnt/user-data/outputs/deck.preview.pdf",
+    ]
