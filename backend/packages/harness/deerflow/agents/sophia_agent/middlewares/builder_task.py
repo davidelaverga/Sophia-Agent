@@ -370,6 +370,10 @@ _PAGE_TARGET_OUTPUT_VERB_BEFORE_RE = re.compile(
     r"\b(?:build|create|make|generate|produce|write|render|draft|prepare|deliver)\b(?:\s+\w+){0,6}\s*$",
     re.IGNORECASE,
 )
+_PAGE_TARGET_OUTPUT_TRANSITION_BEFORE_RE = re.compile(
+    r"\b(?:to|into|as)\s+(?:a|an|the)?\s*$",
+    re.IGNORECASE,
+)
 _PAGE_TARGET_OUTPUT_NOUN_AFTER_RE = re.compile(
     r"^\s*(?:(?:technical|concise|detailed|short|long|final|pdf)\s+){0,6}"
     r"(?:pdf\s+)?(?:report|document|summary|brief|article|explainer|deliverable|output|write[- ]?up)\b",
@@ -443,7 +447,10 @@ def _page_target_is_output_context(text: str, match: re.Match[str]) -> bool:
         and not _PAGE_SOURCE_CONTEXT_BEFORE_RE.search(before)
     )
     after_targets_output_noun = bool(
-        _PAGE_TARGET_OUTPUT_VERB_BEFORE_RE.search(before)
+        (
+            _PAGE_TARGET_OUTPUT_VERB_BEFORE_RE.search(before)
+            or _PAGE_TARGET_OUTPUT_TRANSITION_BEFORE_RE.search(before)
+        )
         and _PAGE_TARGET_OUTPUT_NOUN_AFTER_RE.search(after)
     )
     return bool(

@@ -437,6 +437,19 @@ def test_pdf_page_target_ignores_source_n_page_pdf_compound() -> None:
             assert updates.get("builder_pdf_requested_page_count") != source_count
 
 
+def test_pdf_page_target_accepts_target_count_after_source_pdf_transition() -> None:
+    updates = _pdf_page_target_updates(
+        {
+            "task_type": "pdf",
+            "task": "Summarize this 10-page PDF into a 2-page brief.",
+        },
+        companion_artifact={},
+        artifact_target_path="/mnt/user-data/outputs/brief.pdf",
+    )
+
+    assert updates["builder_pdf_requested_page_count"] == 2
+
+
 def test_pdf_page_target_still_accepts_output_n_page_pdf_compound() -> None:
     # The "N-page PDF" compound fronted by a build verb + indefinite article is a
     # genuine OUTPUT length and must still be captured (regression guard for the
