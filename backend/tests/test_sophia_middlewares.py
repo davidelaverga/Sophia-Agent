@@ -3103,6 +3103,65 @@ class TestBuilderArtifactMiddleware:
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
         assert choice == {"type": "tool", "name": "render_html_to_pdf"}
 
+    def test_force_choice_pdf_report_about_slide_decks_stays_report_renderer(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        outputs_dir.mkdir()
+        (outputs_dir / "report.html").write_text(
+            "<!doctype html><html><body><h1>Slide deck report</h1>"
+            "<p>" + ("analysis " * 16) + "</p></body></html>",
+            encoding="utf-8",
+        )
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
+            "builder_non_artifact_turns": 27,
+            "builder_search_sources": [{"url": "https://example.com/source"}],
+            "delegation_context": {
+                "task_type": "document",
+                "task": "Write a PDF report about slide deck quality.",
+            },
+        }
+
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
+        assert choice == {"type": "tool", "name": "render_html_to_pdf"}
+
+    def test_force_choice_pdf_presentation_target_uses_deck_compile(self, tmp_path):
+        """PDF slide exports use the deck path, not the report PDF renderer."""
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        slides_dir = outputs_dir / "slides"
+        assets_dir = outputs_dir / "assets"
+        slides_dir.mkdir(parents=True)
+        assets_dir.mkdir()
+        (assets_dir / "slide-01.png").write_bytes(b"fake-png")
+        (slides_dir / "01.html").write_text(
+            '<!doctype html><html><body><img src="../assets/slide-01.png"></body></html>',
+            encoding="utf-8",
+        )
+
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pdf",
+            "builder_non_artifact_turns": 27,
+            "builder_search_sources": [{"url": "https://example.com/source"}],
+            "delegation_context": {
+                "task_type": "presentation",
+                "task": "Create a one-slide presentation in PDF format.",
+            },
+            "builder_pptx_requested_slide_count": 1,
+            "builder_pptx_diagnostics": {
+                "image_generation_manifest_requested_count": 1,
+                "image_generation_success_count": 1,
+            },
+        }
+
+        choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
+        assert choice == {"type": "tool", "name": "build_deck_from_slides"}
+
     def test_force_choice_pdf_target_does_not_render_markdown_as_html(self, tmp_path):
         """Markdown sources are not valid html_path inputs for render_html_to_pdf."""
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware

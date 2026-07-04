@@ -3065,6 +3065,19 @@ def _requested_target_suffix(state: dict[str, Any]) -> str:
     return PurePosixPath(target.strip()).suffix.lower()
 
 
+_PRESENTATION_TASK_TYPES = frozenset({"presentation", "slides", "slide_deck", "deck"})
+
+
+def _requested_pdf_slide_artifact(state: dict[str, Any]) -> bool:
+    if _requested_target_suffix(state) != ".pdf":
+        return False
+    delegation = state.get("delegation_context")
+    task_type = ""
+    if isinstance(delegation, dict):
+        task_type = str(delegation.get("task_type") or "").strip().lower()
+    return task_type in _PRESENTATION_TASK_TYPES
+
+
 # Correction wave 2026-06-12 — emit-time format-conflict guard.
 #
 # Prod incident: dispatch misderived target_ext=pptx for an explicit "actual
@@ -3141,11 +3154,11 @@ def _stamp_format_conflict_metadata(
 
 
 def _requested_pdf_artifact(state: dict[str, Any]) -> bool:
-    return _requested_target_suffix(state) == ".pdf"
+    return _requested_target_suffix(state) == ".pdf" and not _requested_pdf_slide_artifact(state)
 
 
 def _requested_pptx_artifact(state: dict[str, Any]) -> bool:
-    return _requested_target_suffix(state) == ".pptx"
+    return _requested_target_suffix(state) == ".pptx" or _requested_pdf_slide_artifact(state)
 
 
 def _requested_html_artifact(state: dict[str, Any]) -> bool:
