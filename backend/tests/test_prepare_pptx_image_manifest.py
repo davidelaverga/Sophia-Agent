@@ -97,6 +97,63 @@ def test_prepare_pptx_image_manifest_writes_deterministic_schema(tmp_path) -> No
     }
 
 
+def test_prepare_pptx_image_manifest_custom_manifest_keeps_outputs_in_assets(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "slide-01.json").write_text('{"prompt":"professional system map"}', encoding="utf-8")
+
+    result = _call(
+        runtime=_runtime(outputs=outputs),
+        prompt_files=[f"{_OUTPUTS}slide-01.json"],
+        manifest_path=f"{_OUTPUTS}slide-visuals.manifest.json",
+    )
+
+    assert result["success"] is True
+    assert result["manifest_path"] == f"{_OUTPUTS}slide-visuals.manifest.json"
+    assert result["items"][0]["output_path"] == f"{_OUTPUTS}assets/slide-01.png"
+    manifest = json.loads((outputs / "slide-visuals.manifest.json").read_text(encoding="utf-8"))
+    assert manifest["items"][0]["output_file"] == f"{_OUTPUTS}assets/slide-01.png"
+    assert (outputs / "assets").is_dir()
+
+
+def test_prepare_pptx_image_manifest_accepts_twenty_five_slide_manifest(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    prompt_files = []
+    for index in range(1, 26):
+        path = outputs / f"slide-{index:02d}.json"
+        path.write_text(f'{{"prompt":"slide {index}"}}', encoding="utf-8")
+        prompt_files.append(f"{_OUTPUTS}slide-{index:02d}.json")
+
+    result = _call(
+        runtime=_runtime(outputs=outputs),
+        prompt_files=prompt_files,
+    )
+
+    assert result["success"] is True
+    assert result["expected_count"] == 25
+    assert result["items"][-1]["output_path"] == f"{_OUTPUTS}assets/slide-25.png"
+
+
+def test_prepare_pptx_image_manifest_rejects_over_budget_slide_manifest(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    prompt_files = []
+    for index in range(1, 32):
+        path = outputs / f"slide-{index:02d}.json"
+        path.write_text(f'{{"prompt":"slide {index}"}}', encoding="utf-8")
+        prompt_files.append(f"{_OUTPUTS}slide-{index:02d}.json")
+
+    result = _call(
+        runtime=_runtime(outputs=outputs),
+        prompt_files=prompt_files,
+    )
+
+    assert result["success"] is False
+    assert result["error_type"] == "invalid_input"
+    assert "at most 30 slide prompts" in result["error"]
+
+
 def test_prepare_pptx_image_manifest_rejects_missing_prompt(tmp_path) -> None:
     outputs = tmp_path / "outputs"
     workspace = tmp_path / "workspace"

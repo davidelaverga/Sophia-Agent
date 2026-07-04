@@ -24,8 +24,10 @@ logger = logging.getLogger(__name__)
 
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 _WORKSPACE_VIRTUAL_PREFIX = "/mnt/user-data/workspace/"
+_ASSETS_VIRTUAL_PREFIX = f"{_OUTPUTS_VIRTUAL_PREFIX}assets"
 _DEFAULT_MANIFEST_PATH = f"{_OUTPUTS_VIRTUAL_PREFIX}assets/slide-visuals.manifest.json"
 _MANIFEST_SCHEMA_VERSION = "sophia-pptx-image-manifest/v1"
+_MAX_PROMPT_FILES = 30
 
 
 def _trace_manifest_tool(
@@ -152,10 +154,10 @@ def prepare_pptx_image_manifest(
             prompt_files=[],
             manifest_path=manifest_path,
         )
-    if len(prompt_files) > 20:
+    if len(prompt_files) > _MAX_PROMPT_FILES:
         return _error_payload(
             "invalid_input",
-            "prompt_files may contain at most 20 slide prompts.",
+            f"prompt_files may contain at most {_MAX_PROMPT_FILES} slide prompts.",
             prompt_files=prompt_files,
             manifest_path=manifest_path,
         )
@@ -214,13 +216,13 @@ def prepare_pptx_image_manifest(
 
     manifest_host = _host_path_for_virtual(manifest_path, thread_data)
     manifest_host.parent.mkdir(parents=True, exist_ok=True)
-    assets_prefix = str(PurePosixPath(manifest_path).parent)
+    _host_path_for_virtual(_ASSETS_VIRTUAL_PREFIX, thread_data).mkdir(parents=True, exist_ok=True)
     items = [
         {
             "schema_version": _MANIFEST_SCHEMA_VERSION,
             "slide_index": prompt["slide_index"],
             "prompt_file": prompt["prompt_file"],
-            "output_file": f"{assets_prefix}/slide-{prompt['slide_index']:02d}.png",
+            "output_file": f"{_ASSETS_VIRTUAL_PREFIX}/slide-{prompt['slide_index']:02d}.png",
             "slide_visual": True,
             "aspect_ratio": "16:9",
         }
