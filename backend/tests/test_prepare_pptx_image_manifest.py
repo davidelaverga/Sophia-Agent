@@ -39,6 +39,25 @@ def test_presentation_toolset_offers_manifest_preparer() -> None:
     assert "prepare_pptx_image_manifest" not in report_names
 
 
+def test_prepare_pptx_image_manifest_schema_excludes_runtime() -> None:
+    schema = manifest_tool.prepare_pptx_image_manifest.tool_call_schema.model_json_schema()
+
+    properties = schema.get("properties", {})
+    assert "runtime" not in properties
+    assert {"prompt_files", "manifest_path"}.issubset(properties)
+
+
+def test_presentation_builder_tool_schemas_generate() -> None:
+    failures = {}
+    for tool in build_builder_tools_for_task_type("presentation", vision_enabled=False):
+        try:
+            tool.tool_call_schema.model_json_schema()
+        except Exception as exc:  # noqa: BLE001 - assertion reports every broken tool.
+            failures[getattr(tool, "name", type(tool).__name__)] = f"{type(exc).__name__}: {exc}"
+
+    assert failures == {}
+
+
 def test_prepare_pptx_image_manifest_writes_deterministic_schema(tmp_path) -> None:
     outputs = tmp_path / "outputs"
     workspace = tmp_path / "workspace"

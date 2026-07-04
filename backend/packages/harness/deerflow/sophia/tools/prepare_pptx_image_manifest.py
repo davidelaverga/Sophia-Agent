@@ -131,9 +131,9 @@ def _error_payload(error_type: str, error: str, *, prompt_files: list[str], mani
 
 @tool("prepare_pptx_image_manifest", parse_docstring=True)
 def prepare_pptx_image_manifest(
+    runtime: ToolRuntime,
     prompt_files: list[str],
     manifest_path: str = _DEFAULT_MANIFEST_PATH,
-    runtime: ToolRuntime | None = None,
 ) -> str:
     """Create the deterministic PPTX slide-visual image manifest.
 
