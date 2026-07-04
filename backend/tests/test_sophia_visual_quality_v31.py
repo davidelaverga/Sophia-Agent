@@ -163,6 +163,16 @@ def test_presentation_completion_ready_allows_advisory_qc_parse_failures(tmp_pat
     pptx = outputs / "deck.pptx"
     pptx.write_bytes(b"fake-pptx")
     (outputs / "deck.preview.pdf").write_bytes(b"%PDF-1.4\n%%EOF")
+    assets = outputs / "assets"
+    assets.mkdir()
+    slides = outputs / "slides"
+    slides.mkdir()
+    for index in (1, 2):
+        (assets / f"slide-{index}.png").write_bytes(b"fake-png")
+        (slides / f"{index:02d}.html").write_text(
+            f'<html><body><img src="../assets/slide-{index}.png"></body></html>',
+            encoding="utf-8",
+        )
     monkeypatch.setattr(builder_artifact_module, "_pptx_integrity_error_for_file", lambda _path: None)
     state = {
         "thread_data": {"outputs_path": str(outputs)},
@@ -172,6 +182,8 @@ def test_presentation_completion_ready_allows_advisory_qc_parse_failures(tmp_pat
             "pptx_generator_slide_count": 2,
             "pptx_plan_slide_count": 2,
             "pptx_generator_picture_count": 2,
+            "image_generation_manifest_requested_count": 2,
+            "image_generation_success_count": 2,
             "pptx_output_paths": ["/mnt/user-data/outputs/deck.pptx"],
             "pptx_plan_json": {
                 "slides": [
@@ -445,6 +457,32 @@ def test_pdf_page_target_accepts_target_count_after_source_pdf_transition() -> N
         },
         companion_artifact={},
         artifact_target_path="/mnt/user-data/outputs/brief.pdf",
+    )
+
+    assert updates["builder_pdf_requested_page_count"] == 2
+
+
+def test_pdf_page_target_ignores_source_n_page_pdf_after_source_action() -> None:
+    updates = _pdf_page_target_updates(
+        {
+            "task_type": "pdf",
+            "task": "Use the 10-page PDF to create a 2-page brief.",
+        },
+        companion_artifact={},
+        artifact_target_path="/mnt/user-data/outputs/brief.pdf",
+    )
+
+    assert updates["builder_pdf_requested_page_count"] == 2
+
+
+def test_pdf_page_target_source_action_veto_preserves_transition_output_pdf() -> None:
+    updates = _pdf_page_target_updates(
+        {
+            "task_type": "pdf",
+            "task": "Convert the research memo into a 2-page PDF.",
+        },
+        companion_artifact={},
+        artifact_target_path="/mnt/user-data/outputs/research-brief.pdf",
     )
 
     assert updates["builder_pdf_requested_page_count"] == 2

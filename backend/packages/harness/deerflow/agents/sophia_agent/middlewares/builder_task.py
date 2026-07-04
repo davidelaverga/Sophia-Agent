@@ -401,6 +401,13 @@ _PAGE_SOURCE_CONTEXT_BEFORE_RE = re.compile(
     r"(?:\s+[\w-]+){0,3}\s*$",
     re.IGNORECASE,
 )
+_PAGE_SOURCE_ACTION_BEFORE_RE = re.compile(
+    r"\b(?:use|read|review|summari[sz]e|convert|condense|shorten|extract|reference|consult)\s+"
+    r"(?:this|that|these|those|my|our|your|its|their|the|attached|uploaded|provided|given|"
+    r"existing|enclosed|original|source|input)\b"
+    r"(?:(?!\s+(?:to|into|as)\b)\s+[\w-]+){0,4}\s*$",
+    re.IGNORECASE,
+)
 _SLIDE_COUNT_RE = re.compile(r"(?<!\d)(\d{1,2})\s*(?:-| )?\s*slides?\b", re.IGNORECASE)
 _SLIDE_TARGET_OUTPUT_BEFORE_RE = re.compile(
     r"\b(?:presentation|deck|slides?|pptx|slideshow|deliverable|output)\b.{0,80}"
@@ -443,12 +450,16 @@ def _valid_page_count(value: str) -> int | None:
 def _page_target_is_output_context(text: str, match: re.Match[str]) -> bool:
     before = text[max(0, match.start() - 100): match.start()]
     after = text[match.end(): match.end() + 100]
+    source_context_before = bool(
+        _PAGE_SOURCE_CONTEXT_BEFORE_RE.search(before)
+        or _PAGE_SOURCE_ACTION_BEFORE_RE.search(before)
+    )
     after_pdf = _PAGE_TARGET_OUTPUT_AFTER_RE.search(after)
     after_targets_pdf = bool(
         after_pdf
         and len(re.findall(r"\w+", after[: after_pdf.start()])) <= 4
         and not _PAGE_TARGET_SOURCE_NOUN_RE.search(after[: after_pdf.start()])
-        and not _PAGE_SOURCE_CONTEXT_BEFORE_RE.search(before)
+        and not source_context_before
     )
     after_targets_output_noun = bool(
         (
