@@ -171,12 +171,17 @@ _REPORT_OUTPUT_NOUN_RE = re.compile(r"\b(?:report|write[- ]?up)\b", re.IGNORECAS
 # as a document request whose "presentation" mention is topical (Codex P2,
 # 2026-06-29). Spreadsheet/tabular objects (excel/spreadsheet/workbook/xlsx/csv)
 # are included too so "create an Excel spreadsheet about presentation design"
-# vetoes the topical-deck PPTX match and resolves to xlsx/csv (Codex P2, 2026-06-30).
+# vetoes the topical-deck PPTX match and resolves to xlsx/csv (Codex P2,
+# 2026-06-30). Web/page/site deliverables are included for the same reason:
+# "create a website about presentation skills" should resolve to HTML, not PPTX
+# (Codex P2, 2026-07-04).
 _DOC_OR_REPORT_OBJECT_RE = re.compile(
     r"\b(?:build|create|make|generate|produce|write|render|export|draft|prepare)\s+"
     r"(?:me\s+)?(?:an?\s+|the\s+)?(?:[\w-]+\s+){0,4}?"
     r"(?:report|write[- ]?up|document|summary|brief|article|explainer"
-    r"|spreadsheet|excel|workbook|xlsx|csv)\b",
+    r"|spreadsheet|excel|workbook|xlsx|csv"
+    r"|html\s+(?:page|site|website|web\s*page|web\s+site|web\s+app(?:lication)?)"
+    r"|web\s*page|website|web\s+site|landing\s+page|web\s+app(?:lication)?|site|page)\b",
     re.IGNORECASE,
 )
 _PPTX_OUTPUT_RE = re.compile(

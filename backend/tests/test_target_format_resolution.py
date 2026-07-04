@@ -195,6 +195,25 @@ def test_spreadsheet_about_presentation_topic_resolves_to_tabular_not_pptx():
         assert resolution.final_ext == expected, (text, resolution.final_ext)
 
 
+def test_web_deliverable_about_presentation_topic_resolves_to_html_not_pptx():
+    # Codex P2 (2026-07-04): a web/page/site request whose only "presentation"
+    # mention is topical must let the HTML/web rule win over the broad PPTX span.
+    cases = (
+        "create a website about presentation skills",
+        "build a web page about slide deck metrics",
+        "make a landing page about presentation design",
+        "generate a web app about presentation engagement",
+    )
+    for text in cases:
+        resolution = _resolve_target_format(
+            current_user_text=text,
+            description=text,
+            task_type="frontend",
+        )
+        assert resolution.final_ext == "html", (text, resolution.final_ext, resolution.rule)
+        assert resolution.rule == "explicit_html_deliverable", text
+
+
 def test_real_deck_requests_still_resolve_to_pptx():
     # Guard against over-correction: genuine deck asks must still be PPTX.
     for text in (
