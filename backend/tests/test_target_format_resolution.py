@@ -578,6 +578,38 @@ def test_source_office_filename_veto_preserves_true_office_outputs():
         assert resolution.final_ext == expected, (text, resolution.final_ext, resolution.rule)
 
 
+def test_source_text_data_filename_does_not_beat_later_explicit_deliverable():
+    cases = {
+        "Use page.html to write a markdown summary": "md",
+        "Use data.csv to create a JSON file": "json",
+        "Use notes.md to create an HTML page": "html",
+        "Convert payload.json into a CSV file": "csv",
+    }
+    for text, expected in cases.items():
+        resolution = _resolve_target_format(
+            current_user_text=text,
+            description=None,
+            task_type="document",
+        )
+        assert resolution.final_ext == expected, (text, resolution.final_ext, resolution.rule)
+
+
+def test_source_filename_veto_preserves_true_text_data_output_names():
+    cases = {
+        "Export the summary to a file named notes.md": "md",
+        "Export the data to a file called data.csv": "csv",
+        "Export the payload to a file named payload.json": "json",
+        "Export the page to a file named page.html": "html",
+    }
+    for text, expected in cases.items():
+        resolution = _resolve_target_format(
+            current_user_text=text,
+            description=None,
+            task_type="document",
+        )
+        assert resolution.final_ext == expected, (text, resolution.final_ext, resolution.rule)
+
+
 # ---- bare web-deliverable nouns (prod 2026-06-12, evening window) -----------------
 
 

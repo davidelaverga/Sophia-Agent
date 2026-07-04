@@ -375,11 +375,16 @@ _PRESENTATION_FORMAT_WORD_RE = re.compile(
 )
 _SOURCE_VETO_RULES = frozenset(
     {
+        "explicit_csv_deliverable",
+        "explicit_html_deliverable",
+        "explicit_json_deliverable",
+        "explicit_markdown_deliverable",
         "explicit_presentation_deck",
         "explicit_spreadsheet",
         "explicit_word_document",
     }
 )
+_SOURCE_FILENAME_EXTENSIONS = frozenset({"csv", "docx", "html", "htm", "json", "md", "pptx", "xlsx"})
 _NEGATION_LOOKBACK_CHARS = 32
 _STATUS_LOOKAHEAD_CHARS = 48
 
@@ -429,12 +434,16 @@ def _presentation_match_is_source_pptx_filename(text: str, match: re.Match[str])
     return not _OUTPUT_FILENAME_CONTEXT_BEFORE_RE.search(prefix)
 
 
-def _match_is_source_office_filename(text: str, match: re.Match[str]) -> bool:
-    group = match.group(0).lower()
-    if group not in {"docx", "xlsx"} or match.start() <= 0 or text[match.start() - 1] != ".":
+def _match_is_source_filename_extension(text: str, match: re.Match[str]) -> bool:
+    group = match.group(0).lower().lstrip(".")
+    if group not in _SOURCE_FILENAME_EXTENSIONS:
         return False
-
-    dot_start = match.start() - 1
+    if match.group(0).startswith("."):
+        dot_start = match.start()
+    elif match.start() > 0 and text[match.start() - 1] == ".":
+        dot_start = match.start() - 1
+    else:
+        return False
     stem_start = dot_start
     while stem_start > 0 and re.match(r"[\w./~@%+=,:;()\\-]", text[stem_start - 1]):
         stem_start -= 1
@@ -457,7 +466,7 @@ def _first_affirmative_match(
             continue
         if source_veto and _presentation_match_is_source_pptx_filename(text, match):
             continue
-        if source_veto and _match_is_source_office_filename(text, match):
+        if source_veto and _match_is_source_filename_extension(text, match):
             continue
         if source_veto and _SOURCE_CONTEXT_BEFORE_MATCH_RE.search(prefix):
             continue
