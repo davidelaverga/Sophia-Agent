@@ -385,6 +385,15 @@ _SOURCE_VETO_RULES = frozenset(
     }
 )
 _SOURCE_FILENAME_EXTENSIONS = frozenset({"csv", "docx", "html", "htm", "json", "md", "pptx", "xlsx"})
+_BARE_WEB_OUTPUT_WORD_RE = re.compile(
+    r"\b(?:web\s*page|website|web\s+site|landing\s+page|web\s+app(?:lication)?|single[- ]page\s+(?:app|site))\b",
+    re.IGNORECASE,
+)
+_SOURCE_WEB_CONTEXT_BEFORE_RE = re.compile(
+    r"\b(?:read|use|using|check|review|analy[sz]e|summari[sz]e|inspect|crawl|scrape|look\s+at|based\s+on)\s+"
+    r"(?:(?:the|this|that|my|our|their|a|an|attached|provided|source|existing|current)\s+){0,4}$",
+    re.IGNORECASE,
+)
 _NEGATION_LOOKBACK_CHARS = 32
 _STATUS_LOOKAHEAD_CHARS = 48
 
@@ -454,6 +463,13 @@ def _match_is_source_filename_extension(text: str, match: re.Match[str]) -> bool
     return not _OUTPUT_FILENAME_CONTEXT_BEFORE_RE.search(prefix)
 
 
+def _match_is_source_web_mention(text: str, match: re.Match[str]) -> bool:
+    if _BARE_WEB_OUTPUT_WORD_RE.fullmatch(match.group(0).strip()) is None:
+        return False
+    prefix = text[max(0, match.start() - 100) : match.start()]
+    return bool(_SOURCE_WEB_CONTEXT_BEFORE_RE.search(prefix))
+
+
 def _first_affirmative_match(
     pattern: re.Pattern[str], text: str, *, source_veto: bool = False
 ) -> re.Match[str] | None:
@@ -467,6 +483,8 @@ def _first_affirmative_match(
         if source_veto and _presentation_match_is_source_pptx_filename(text, match):
             continue
         if source_veto and _match_is_source_filename_extension(text, match):
+            continue
+        if source_veto and _match_is_source_web_mention(text, match):
             continue
         if source_veto and _SOURCE_CONTEXT_BEFORE_MATCH_RE.search(prefix):
             continue

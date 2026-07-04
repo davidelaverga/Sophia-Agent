@@ -637,6 +637,22 @@ def test_website_and_landing_page_nouns_resolve_to_html():
     assert _requested_output_extension_match("make a web app that shows the data")[0] == "html"
 
 
+def test_source_web_mentions_do_not_beat_later_deliverables():
+    cases = {
+        "read the website and write a report": "pdf",
+        "use this web page to create a summary": "md",
+        "review the web app and create a JSON file": "json",
+        "check the landing page and write a markdown brief": "md",
+    }
+    for text, expected in cases.items():
+        resolution = _resolve_target_format(
+            current_user_text=text,
+            description=None,
+            task_type="document",
+        )
+        assert resolution.final_ext == expected, (text, resolution.final_ext, resolution.rule)
+
+
 def test_web_nouns_do_not_hijack_deck_requests():
     ext, _reason = _requested_output_extension_match(
         "make a slide deck about our website redesign"
