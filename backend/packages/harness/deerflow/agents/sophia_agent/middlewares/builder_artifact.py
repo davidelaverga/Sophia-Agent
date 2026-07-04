@@ -10147,8 +10147,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         raw = str(args.get("path") or args.get("file_path") or "").strip().replace("\\", "/")
         if not raw:
             return False
-        pure = PurePosixPath(raw)
-        return pure.suffix.lower() in {".html", ".htm"} and pure.parent.name == "slides"
+        relative = _extract_output_relative_path(raw)
+        if relative is None:
+            return False
+        pure = PurePosixPath(relative)
+        return pure.suffix.lower() in {".html", ".htm"} and len(pure.parts) == 2 and pure.parts[0] == "slides"
 
     def _write_result_command(
         self,

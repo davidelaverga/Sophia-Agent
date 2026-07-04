@@ -710,6 +710,7 @@ def test_repair_latch_not_cleared_by_non_slide_write():
         f"{_OUTPUTS}assets/manifest.json",
         f"{_OUTPUTS}notes.md",
         f"{_OUTPUTS}deck.html",  # html but not under slides/
+        "/mnt/user-data/workspace/slides/draft.html",  # scratch slide, not compiled
     ):
         cmd = mw._tool_result_command(_write_request(path), ToolMessage(content="OK wrote file", tool_call_id="w"))
         assert isinstance(cmd, Command)
