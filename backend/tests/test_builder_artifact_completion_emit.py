@@ -471,6 +471,31 @@ def test_required_builder_upload_promotes_primary_artifact_before_preview(tmp_pa
     assert artifact["storage_object_path"].endswith("/deck.pptx")
 
 
+def test_artifact_files_promote_repointed_artifact_path_over_stale_payload_primary():
+    artifact = {
+        "artifact_path": "/mnt/user-data/outputs/compiled-deck.pptx",
+        "artifact_type": "presentation",
+        "artifact_files": [
+            {"path": "/mnt/user-data/outputs/model-deck.pptx", "role": "primary"},
+            {"path": "/mnt/user-data/outputs/compiled-deck.preview.pdf", "role": "preview"},
+        ],
+    }
+
+    entries = builder_artifact_module._artifact_file_entries(artifact)
+    primary_paths = [
+        entry["path"]
+        for entry in entries
+        if entry.get("role") == "primary"
+    ]
+
+    assert primary_paths == ["/mnt/user-data/outputs/compiled-deck.pptx"]
+    assert entries[0]["path"] == "/mnt/user-data/outputs/compiled-deck.pptx"
+    assert "/mnt/user-data/outputs/model-deck.pptx" not in {
+        entry["path"]
+        for entry in entries
+    }
+
+
 def test_completion_payload_preserves_fallback_metadata():
     runtime = _make_runtime(
         builder_thread_id="t-build",

@@ -2631,7 +2631,23 @@ def _artifact_file_entries(artifact_args: dict[str, Any]) -> list[dict[str, str]
     payload_has_primary = any(entry.get("role") == "primary" for entry in payload_entries)
 
     entries: list[dict[str, str]] = []
-    if payload_has_primary:
+    if primary_entry is not None and primary_entry.get("role") == "primary":
+        matching_payload_primary = next(
+            (
+                entry
+                for entry in payload_entries
+                if entry.get("role") == "primary" and entry.get("path") == primary_entry["path"]
+            ),
+            None,
+        )
+        entries.append(matching_payload_primary or primary_entry)
+        entries.extend(
+            entry
+            for entry in payload_entries
+            if entry.get("role") != "primary" or entry.get("path") == primary_entry["path"]
+        )
+        primary_entry = None
+    elif payload_has_primary:
         entries.extend(payload_entries)
     elif primary_entry is not None:
         entries.append(primary_entry)
