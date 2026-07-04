@@ -13,6 +13,7 @@ from deerflow.sophia.tools.builder_web_fetch import builder_web_fetch
 from deerflow.sophia.tools.builder_web_search import builder_web_search
 from deerflow.sophia.tools.create_pdf_artifact import create_pdf_artifact
 from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
+from deerflow.sophia.tools.prepare_pptx_image_manifest import prepare_pptx_image_manifest
 from deerflow.sophia.tools.read_session_context import read_session_context, read_tool_enabled
 from deerflow.sophia.tools.render_html_to_pdf import render_html_to_pdf
 from deerflow.tools.builtins.view_image_tool import view_image_tool
@@ -61,13 +62,11 @@ def build_builder_tools_for_task_type(
         # Decks (HTML-slide path, restored 2026-06-29): the model authors one
         # self-contained 1920x1080 HTML file per slide (real DOM title/narrative +
         # one embedded VISUAL-ONLY generated image by relative ../assets path),
-        # then calls build_deck_from_slides — which renders each slide to a
-        # full-bleed PNG (headless Chromium) and wraps to .pptx. The model never
-        # writes python-pptx/pptxgenjs or shells a deck compiler. Crisp,
-        # unclippable DOM text + required generated visuals; missing local slide
-        # images fail the deck render rather than shipping placeholders. The
-        # image-forward generate.py --plan-file path stays on disk but is no
-        # longer offered.
+        # with the manifest JSON prepared by prepare_pptx_image_manifest and
+        # compiled by build_deck_from_slides. The model never writes python-pptx,
+        # pptxgenjs, ad hoc manifest JSON, or deck compiler code.
+        insert_at = tools.index(emit_builder_artifact)
+        tools.insert(insert_at, prepare_pptx_image_manifest)
         insert_at = tools.index(emit_builder_artifact)
         tools.insert(insert_at, build_deck_from_slides)
     else:

@@ -26,14 +26,16 @@ asset; never compile a no-image deck after image generation fails.
    image-generation skill in `--slide-visual` mode (the VISUAL AREA ONLY — no
    title, narrative, diagram labels, formulas, axis labels, or chrome baked in;
    those are real HTML text in the slide). Write the PNG under `/mnt/user-data/outputs/assets/`.
-   Generate ALL slide visuals, including the hero/cover, in ONE `--manifest`
+   Write one prompt JSON file per slide, including the hero/cover. Then call
+   `prepare_pptx_image_manifest(prompt_files=[...])`; do not hand-write the
+   batch manifest JSON. Run the returned `manifest_path` in ONE `--manifest`
    batch. Use consistent shared style instructions across prompt JSON files
    instead of relying on a serial hero reference:
    ```bash
    python /mnt/skills/public/image-generation/scripts/generate.py \
-     --manifest /mnt/user-data/outputs/assets/manifest.json
+     --manifest /mnt/user-data/outputs/assets/slide-visuals.manifest.json
    ```
-   Every manifest item for deck assets must include `"slide_visual": true` so
+   The manifest tool writes every deck item with `"slide_visual": true` so
    generation uses the visual-region contract instead of the generic image
    prompt path. The batch items run concurrently (bounded for API rate limits)
    and print one `IMAGEGEN_BATCH {...}` summary line. Generated images are

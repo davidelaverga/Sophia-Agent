@@ -1173,8 +1173,8 @@ def _run_batch(manifest_path: str) -> int:
     failure, which we catch per worker so a single bad image never aborts the
     batch. Prints exactly one ``IMAGEGEN_BATCH`` JSON summary line on stdout;
     exits 0 only when every requested image succeeds, else 1 with structured
-    per-item failures. Hero-anchor consistency is the caller's job: generate the
-    hero first, then list it in each item's ``reference_images``.
+    per-item failures. Deck style consistency is the caller's job: use the same
+    style instructions across prompt files and optional ``reference_images``.
     """
     import json as _json
     from concurrent.futures import ThreadPoolExecutor

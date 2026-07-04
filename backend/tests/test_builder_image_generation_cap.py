@@ -30,6 +30,8 @@ from deerflow.agents.sophia_agent.middlewares.builder_task import (
 )
 
 _SCRIPT = "/mnt/skills/public/image-generation/scripts/generate.py"
+_MANIFEST_SCHEMA = "sophia-pptx-image-manifest/v1"
+_MANIFEST_AUTHOR = "prepare_pptx_image_manifest"
 
 
 def _runtime():
@@ -49,6 +51,24 @@ def _state_with_image_diagnostics(**diagnostics) -> dict:
         "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
         "delegation_context": {"task_type": "presentation"},
         "builder_pptx_diagnostics": diagnostics,
+    }
+
+
+def _manifest_payload(items: list[dict]) -> dict:
+    normalized = []
+    for index, item in enumerate(items, start=1):
+        normalized.append(
+            {
+                "schema_version": _MANIFEST_SCHEMA,
+                "slide_index": item.get("slide_index", index),
+                "slide_visual": item.get("slide_visual", True),
+                **item,
+            }
+        )
+    return {
+        "schema_version": _MANIFEST_SCHEMA,
+        "manifest_author": _MANIFEST_AUTHOR,
+        "items": normalized,
     }
 
 
@@ -343,12 +363,12 @@ def test_deck_batch_backstop_allows_manifest_call(tmp_path):
     (manifest_dir / "p2.json").write_text('{"prompt":"professional visual 2"}', encoding="utf-8")
     (manifest_dir / "manifest.json").write_text(
         json.dumps(
-            {
-                "items": [
+            _manifest_payload(
+                [
                     {"prompt_file": "p1.json", "output_file": "o1.png"},
                     {"prompt_file": "p2.json", "output_file": "o2.png"},
                 ]
-            }
+            )
         ),
         encoding="utf-8",
     )
@@ -365,7 +385,7 @@ def test_manifest_with_missing_prompt_is_authoring_rejection(tmp_path):
     manifest_dir = tmp_path / "visuals"
     manifest_dir.mkdir()
     (manifest_dir / "manifest.json").write_text(
-        json.dumps({"items": [{"prompt_file": "missing.json", "output_file": "o1.png"}]}),
+        json.dumps(_manifest_payload([{"prompt_file": "missing.json", "output_file": "o1.png"}])),
         encoding="utf-8",
     )
     state = _state_with_image_diagnostics(image_generation_success_count=1)
@@ -389,12 +409,12 @@ def test_manifest_with_non_output_output_file_is_authoring_rejection(tmp_path):
     (manifest_dir / "p1.json").write_text('{"prompt":"professional visual"}', encoding="utf-8")
     (manifest_dir / "manifest.json").write_text(
         json.dumps(
-            {
-                "items": [
+            _manifest_payload(
+                [
                     {"prompt_file": "p1.json", "output_file": "/mnt/user-data/workspace/slide.png"},
                     {"prompt_file": "p1.json", "output_file": "/tmp/slide.png"},
                 ]
-            }
+            )
         ),
         encoding="utf-8",
     )
@@ -421,7 +441,7 @@ def test_workspace_manifest_with_relative_output_is_rejected_before_batch(tmp_pa
     outputs_dir.mkdir()
     (manifest_dir / "p1.json").write_text('{"prompt":"professional visual"}', encoding="utf-8")
     (manifest_dir / "manifest.json").write_text(
-        json.dumps({"items": [{"prompt_file": "p1.json", "output_file": "slide.png"}]}),
+        json.dumps(_manifest_payload([{"prompt_file": "p1.json", "output_file": "slide.png"}])),
         encoding="utf-8",
     )
     state = _state_with_image_diagnostics(image_generation_success_count=1)
@@ -807,7 +827,7 @@ def test_manifest_batch_requires_readable_manifest_before_run(tmp_path) -> None:
     assert result.goto == "model"
     message = result.update["messages"][0]
     assert message.status == "error"
-    assert "manifest must be written" in message.content
+    assert "manifest must be prepared" in message.content
     assert "manifest_not_readable" in message.content
 
 
@@ -875,12 +895,12 @@ def test_manifest_batch_missing_summary_does_not_unlock_serial_repair(tmp_path) 
         (tmp_path / f"p{index}.json").write_text('{"prompt":"x"}', encoding="utf-8")
     manifest.write_text(
         json.dumps(
-            {
-                "items": [
+            _manifest_payload(
+                [
                     {"prompt_file": f"p{i}.json", "output_file": f"/mnt/user-data/outputs/o{i}.png"}
                     for i in range(3)
                 ]
-            }
+            )
         ),
         encoding="utf-8",
     )
@@ -1023,7 +1043,11 @@ def test_manifest_batch_under_cap_passes_through(tmp_path) -> None:
     for index in range(12):
         (tmp_path / f"p{index}.json").write_text('{"prompt":"x"}', encoding="utf-8")
     manifest.write_text(
-        json.dumps({"items": [{"prompt_file": f"p{i}.json", "output_file": f"o{i}.png"} for i in range(12)]}),
+        json.dumps(
+            _manifest_payload(
+                [{"prompt_file": f"p{i}.json", "output_file": f"o{i}.png"} for i in range(12)]
+            )
+        ),
         encoding="utf-8",
     )
     state = _state_with_image_diagnostics(image_generation_attempt_count=0)
@@ -1034,12 +1058,43 @@ def test_manifest_batch_under_cap_passes_through(tmp_path) -> None:
     assert result is None
 
 
+def test_pptx_hand_written_manifest_is_rejected(tmp_path, monkeypatch) -> None:
+    from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
+
+    manifest = tmp_path / "m.json"
+    (tmp_path / "p0.json").write_text('{"prompt":"x"}', encoding="utf-8")
+    manifest.write_text(
+        json.dumps({"items": [{"prompt_file": "p0.json", "output_file": "o0.png"}]}),
+        encoding="utf-8",
+    )
+    spans = []
+    monkeypatch.setattr(ba, "_safe_langsmith_span", lambda name, **kwargs: spans.append({"name": name, **kwargs}))
+    state = _state_with_image_diagnostics(image_generation_attempt_count=0)
+    state["thread_data"] = {"outputs_path": str(tmp_path)}
+
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(f"python {_SCRIPT} --manifest /mnt/user-data/outputs/m.json", state)
+    )
+
+    assert isinstance(result, Command)
+    content = result.update["messages"][0].content
+    assert "prepare_pptx_image_manifest" in content
+    assert result.update["builder_pptx_diagnostics"]["primary_image_batch_error_class"] == "manifest_not_deterministic"
+    span = next(item for item in spans if item["name"] == "Sophia PPTX Image Manifest Rejected")
+    assert span["outputs"]["error_class"] == "manifest_not_deterministic"
+    assert span["inputs"]["shape"]["top_level_keys"] == ["items"]
+
+
 def test_pptx_manifest_larger_than_slide_count_is_rejected(tmp_path) -> None:
     manifest = tmp_path / "m.json"
     for index in range(18):
         (tmp_path / f"p{index}.json").write_text('{"prompt":"x"}', encoding="utf-8")
     manifest.write_text(
-        json.dumps({"items": [{"prompt_file": f"p{i}.json", "output_file": f"o{i}.png"} for i in range(18)]}),
+        json.dumps(
+            _manifest_payload(
+                [{"prompt_file": f"p{i}.json", "output_file": f"o{i}.png"} for i in range(18)]
+            )
+        ),
         encoding="utf-8",
     )
     state = _state_with_image_diagnostics(image_generation_attempt_count=0)
@@ -1053,7 +1108,7 @@ def test_pptx_manifest_larger_than_slide_count_is_rejected(tmp_path) -> None:
     assert isinstance(result, Command)
     content = result.update["messages"][0].content
     assert "more slide-visual items than the requested deck slide count" in content
-    assert "one item per slide" in content
+    assert "one prompt file per slide" in content
 
 
 def test_manifest_batch_over_cap_is_rejected(tmp_path) -> None:
@@ -1062,7 +1117,11 @@ def test_manifest_batch_over_cap_is_rejected(tmp_path) -> None:
     for index in range(15):
         (tmp_path / f"p{index}.json").write_text('{"prompt":"x"}', encoding="utf-8")
     manifest.write_text(
-        json.dumps({"items": [{"prompt_file": f"p{i}.json", "output_file": f"o{i}.png"} for i in range(15)]}),
+        json.dumps(
+            _manifest_payload(
+                [{"prompt_file": f"p{i}.json", "output_file": f"o{i}.png"} for i in range(15)]
+            )
+        ),
         encoding="utf-8",
     )
     state = _state_with_image_diagnostics(image_generation_attempt_count=20)  # 20 + 15 > 30
@@ -1072,3 +1131,38 @@ def test_manifest_batch_over_cap_is_rejected(tmp_path) -> None:
     )
     assert isinstance(result, Command)
     assert "budget reached" in result.update["messages"][0].content
+
+
+def test_terminal_provider_batch_error_does_not_unlock_serial_repair() -> None:
+    state = _state_with_image_diagnostics(
+        image_generation_manifest_seen=True,
+        image_generation_manifest_generation_attempted=True,
+        image_generation_manifest_requested_count=3,
+        image_generation_manifest_failed_count=3,
+        primary_image_batch_error_class="auth_invalid",
+        image_generation_manifest_unresolved_outputs=["/mnt/user-data/outputs/assets/slide-01.png"],
+    )
+
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+
+    assert isinstance(result, Command)
+    content = result.update["messages"][0].content
+    assert "terminal provider error" in content
+    assert "artifact_path=null" in content
+
+
+def test_pptx_route_selected_span_emits_once(monkeypatch) -> None:
+    from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
+
+    spans = []
+    monkeypatch.setattr(ba, "_safe_langsmith_span", lambda name, **kwargs: spans.append({"name": name, **kwargs}))
+    state = _state_with_image_diagnostics()
+
+    update = BuilderArtifactMiddleware().before_model(state, _runtime())
+
+    assert update["builder_pptx_route_trace_emitted"] is True
+    span = next(item for item in spans if item["name"] == "Sophia PPTX Route Selected")
+    assert span["outputs"]["presentation_route"] == "html_slide_to_pptx_raster"
+    assert span["outputs"]["visuals_required"] is True

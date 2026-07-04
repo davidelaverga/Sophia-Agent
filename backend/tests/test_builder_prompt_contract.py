@@ -65,9 +65,14 @@ def test_ppt_generation_skill_authors_html_slide_decks() -> None:
     text = _skill("ppt-generation")
 
     assert "build_deck_from_slides" in text
+    assert "prepare_pptx_image_manifest" in text
+    assert "do not hand-write the" in text.lower()
     assert "slides/" in text
     assert "../assets/" in text
     assert "--slide-visual" in text
+    assert "prepare_pptx_image_manifest" in text
+    lowered = text.lower()
+    assert "hand-write the" in lowered and "batch manifest" in lowered
     assert "VISUAL-ONLY" in text or "visual area only" in text.lower()
     assert "python-pptx" in text  # appears only as a prohibition
     assert "pptxgenjs" in text

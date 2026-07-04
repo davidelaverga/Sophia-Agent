@@ -14,6 +14,7 @@ of completing with a phantom artifact.
 import hashlib
 import json
 import logging
+import os
 import re
 import shlex
 import time
@@ -207,6 +208,7 @@ _PDF_CREATION_TOOL_NAMES = frozenset(
     {"render_markdown_to_pdf", _REPORT_PDF_RENDER_TOOL_NAME, _SIMPLE_PDF_TOOL_NAME}
 )
 _DECK_BUILD_TOOL_NAME = "build_deck_from_slides"
+_PPTX_IMAGE_MANIFEST_TOOL_NAME = "prepare_pptx_image_manifest"
 _BUILDER_WRITE_TOOL_NAMES = {"write_file", "write_file_tool"}
 _BUILDER_EDIT_TOOL_NAMES = {"write_file", "write_file_tool", "str_replace", "str_replace_tool"}
 _BUILDER_RESEARCH_TOOL_NAMES = {"builder_web_search", "builder_web_fetch"}
@@ -267,8 +269,8 @@ _SHELL_SEPARATORS = {"&&", "||", ";", "|", "&"}
 # generate images at all, the build must continue with charts/text instead of
 # burning turns.
 _IMAGE_GENERATION_MAX_CALLS = 30
-# Bounded safety valve for the deck hero-anchor batch backstop: after this many
-# rejections of post-hero serial image-gen calls with no --manifest batch seen,
+# Bounded safety valve for the deck batch-first backstop: after this many
+# rejections of serial image-gen calls with no --manifest batch seen,
 # stop rejecting so a model that genuinely cannot author a manifest still ships
 # (serial, with a quality note) instead of looping. See
 # ``_deck_batch_directive_rejection``.
@@ -277,8 +279,11 @@ _DECK_BATCH_REJECTION_CAP = 2
 # materializing a readable manifest and rerunning the batch, not by falling back
 # to fully serial generation or placeholder slides.
 _DECK_FLOOR_ESCAPE_FRICTION_CAP = 2
+_PPTX_IMAGE_MANIFEST_SCHEMA_VERSION = "sophia-pptx-image-manifest/v1"
+_PPTX_IMAGE_MANIFEST_AUTHOR = "prepare_pptx_image_manifest"
 _MANIFEST_AUTHORING_ERRORS = frozenset(
     {
+        "manifest_not_deterministic",
         "manifest_prompt_missing",
         "manifest_prompt_or_output_missing",
         "missing_prompt_file",
@@ -940,6 +945,28 @@ def _manifest_output_targets_outputs(raw_path: object) -> bool:
     return not pure.is_absolute() and ".." not in pure.parts
 
 
+def _manifest_schema_authoring_error(state: dict[str, Any] | None, data: Any, items: list[Any]) -> str | None:
+    if not isinstance(state, dict) or not _pptx_generated_visuals_required(state):
+        return None
+    if not isinstance(data, dict):
+        return "manifest_items_missing"
+    if data.get("schema_version") != _PPTX_IMAGE_MANIFEST_SCHEMA_VERSION:
+        return "manifest_not_deterministic"
+    if data.get("manifest_author") != _PPTX_IMAGE_MANIFEST_AUTHOR:
+        return "manifest_not_deterministic"
+    for item in items:
+        if not isinstance(item, dict):
+            return "manifest_items_missing"
+        if item.get("schema_version") != _PPTX_IMAGE_MANIFEST_SCHEMA_VERSION:
+            return "manifest_not_deterministic"
+        slide_index = item.get("slide_index")
+        if not isinstance(slide_index, int) or slide_index <= 0:
+            return "manifest_not_deterministic"
+        if item.get("slide_visual") is not True:
+            return "manifest_not_deterministic"
+    return None
+
+
 def _manifest_authoring_error(
     state: dict[str, Any] | None,
     manifest_host: Path,
@@ -990,6 +1017,9 @@ def _manifest_item_count_status(
     items = data.get("items") if isinstance(data, dict) else None
     if not isinstance(items, list) or not items:
         return 0, "manifest_items_missing"
+    schema_error = _manifest_schema_authoring_error(state, data, items)
+    if schema_error is not None:
+        return len(items), schema_error
     authoring_error = _manifest_authoring_error(state, host, items)
     if authoring_error is not None:
         return len(items), authoring_error
@@ -1120,36 +1150,48 @@ def _unreadable_manifest_rejection(command: str, state: dict[str, Any] | None) -
         return (
             "[Sophia/image-generation] The batch manifest exists, but at least one `prompt_file` "
             "does not resolve to a readable JSON prompt. Materialize every prompt JSON first, keep "
-            "the same manifest/output filenames, then rerun the ONE `--manifest` batch. Do not "
-            "switch to serial image calls."
+            "the same prompt file order, call `prepare_pptx_image_manifest(prompt_files=[...])`, "
+            "then rerun the returned `--manifest` batch. Do not switch to serial image calls."
         )
     if error_reason == "manifest_prompt_or_output_missing":
         return (
-            "[Sophia/image-generation] Every batch manifest item must include both `prompt_file` "
-            "and `output_file`. Fix the manifest and rerun the ONE `--manifest` batch. Do not "
-            "switch to serial image calls."
+            "[Sophia/image-generation] The batch manifest is missing required prompt/output fields. "
+            "Do not edit the manifest by hand. Write one prompt JSON file per slide, call "
+            "`prepare_pptx_image_manifest(prompt_files=[...])`, then rerun the returned "
+            "`--manifest` batch. Do not switch to serial image calls."
+        )
+    if error_reason == "manifest_not_deterministic":
+        return (
+            "[Sophia/image-generation] Normal PPTX decks must use the deterministic manifest "
+            "prepared by `prepare_pptx_image_manifest`; do not hand-write or improvise the "
+            "batch manifest JSON. Write one prompt JSON file per requested slide, call "
+            "`prepare_pptx_image_manifest(prompt_files=[...])`, then run the returned "
+            "`manifest_path` with `image-generation/scripts/generate.py --manifest <path>`. "
+            "Do not switch to serial image calls."
         )
     if error_reason == "manifest_output_not_outputs":
         return (
             "[Sophia/image-generation] Every batch manifest item `output_file` must point inside "
             "`/mnt/user-data/outputs/...` or use a relative path under the manifest directory. "
-            "Fix the manifest and rerun the ONE `--manifest` batch before any image generation."
+            "Do not edit the manifest by hand; call `prepare_pptx_image_manifest(prompt_files=[...])` "
+            "again and rerun the returned `--manifest` batch before any image generation."
         )
     if error_reason == "manifest_item_count_exceeds_slide_count":
         target = _pptx_latch_target_slide_count(state or {})
         return (
             "[Sophia/image-generation] The PPTX image batch manifest has more slide-visual items "
             f"than the requested deck slide count ({target}). Normal decks require exactly one "
-            "generated visual per slide. Rewrite the same manifest to contain one item per slide "
-            "and rerun the ONE `--manifest` batch; do not switch to serial image calls."
+            "generated visual per slide. Use exactly one prompt file per slide, call "
+            "`prepare_pptx_image_manifest(prompt_files=[...])`, and rerun the returned "
+            "`--manifest` batch; do not switch to serial image calls."
         )
     return (
-        "[Sophia/image-generation] The image batch manifest must be written "
-        "as a readable JSON file under `/mnt/user-data/outputs/` before "
-        "`generate.py --manifest` is invoked. The current manifest cannot "
-        f"be used ({error_reason}). Write the manifest in one tool call, then run the batch "
-        "in a separate bash call so the harness can count and enforce the image budget before "
-        "any API calls run."
+        "[Sophia/image-generation] The image batch manifest must be prepared as a readable JSON "
+        "file under `/mnt/user-data/outputs/` before `generate.py --manifest` is invoked. "
+        f"The current manifest cannot be used ({error_reason}). Write one prompt JSON file per "
+        "slide, call `prepare_pptx_image_manifest(prompt_files=[...])`, then run the returned "
+        "manifest path in a separate bash call so the harness can count and enforce the image "
+        "budget before any API calls run."
     )
 
 
@@ -2023,6 +2065,128 @@ def _safe_langsmith_span(
         logger.debug("LangSmith builder span skipped: %s", name, exc_info=True)
 
 
+def _trace_pptx_route_selected(state: dict[str, Any]) -> None:
+    if not _requested_pptx_artifact(state):
+        return
+    visual_counts = _pptx_visual_completeness_counts(state)
+    _safe_langsmith_span(
+        "Sophia PPTX Route Selected",
+        inputs={
+            "requested_artifact_ext": _requested_artifact_ext(state),
+            "target_slide_count": _pptx_latch_target_slide_count(state),
+            "explicit_text_only": _pptx_explicit_text_only_requested(state),
+        },
+        outputs={
+            "presentation_route": "html_slide_to_pptx_raster",
+            "visuals_required": _pptx_generated_visuals_required(state),
+            "expected_generated_visual_count": visual_counts["expected_generated_visual_count"],
+        },
+        metadata={
+            "sophia_component": "builder_pptx_route",
+            "pptx_route": "html_slide_to_pptx_raster",
+        },
+        tags=["pptx", "route"],
+    )
+
+
+def _manifest_shape_summary_for_trace(state: dict[str, Any] | None, manifest_path: str | None) -> dict[str, Any]:
+    if state is None or not manifest_path:
+        return {"manifest_path_present": bool(manifest_path)}
+    host = BuilderArtifactMiddleware._host_path_for_plan_file(state, manifest_path)
+    if host is None:
+        return {"manifest_path_present": True, "host_resolved": False}
+    if not host.is_file():
+        return {"manifest_path_present": True, "host_resolved": True, "readable": False}
+    try:
+        data = json.loads(host.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        return {
+            "manifest_path_present": True,
+            "host_resolved": True,
+            "readable": True,
+            "json_valid": False,
+            "error_class": type(exc).__name__,
+        }
+    if not isinstance(data, dict):
+        return {"top_level_type": type(data).__name__, "json_valid": True}
+    items = data.get("items")
+    return {
+        "top_level_type": "object",
+        "top_level_keys": sorted(str(key) for key in data.keys())[:20],
+        "schema_version": data.get("schema_version"),
+        "manifest_author": data.get("manifest_author"),
+        "items_type": type(items).__name__ if items is not None else None,
+        "item_count": len(items) if isinstance(items, list) else None,
+    }
+
+
+def _trace_pptx_image_manifest_rejected(
+    *,
+    command: str,
+    state: dict[str, Any],
+    error_class: str,
+) -> None:
+    manifest_paths = [
+        path
+        for segment in _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS)
+        if (path := _command_flag_value(segment, "--manifest"))
+    ]
+    for manifest_path in manifest_paths or [None]:
+        _safe_langsmith_span(
+            "Sophia PPTX Image Manifest Rejected",
+            inputs={
+                "manifest_file": PurePosixPath(str(manifest_path or "")).name or None,
+                "expected_slide_count": _pptx_latch_target_slide_count(state),
+                "shape": _manifest_shape_summary_for_trace(state, manifest_path),
+            },
+            outputs={
+                "success": False,
+                "error_class": error_class,
+            },
+            metadata={
+                "sophia_component": "builder_pptx_manifest",
+                "pptx_manifest_error_class": error_class,
+            },
+            tags=["pptx", "image_manifest", "manifest_rejected"],
+        )
+
+
+def _trace_pptx_terminal_outcome(
+    *,
+    state: dict[str, Any],
+    artifact: dict[str, Any],
+    status: str,
+    failure_code: str | None = None,
+) -> None:
+    if not _requested_pptx_artifact(state):
+        return
+    visual_counts = _pptx_visual_completeness_counts(state)
+    image_status, image_reason = _image_generation_metadata_from_state(state)
+    _safe_langsmith_span(
+        "Sophia PPTX Terminal Outcome",
+        inputs={
+            "presentation_route": "html_slide_to_pptx_raster",
+            "target_slide_count": _pptx_latch_target_slide_count(state),
+        },
+        outputs={
+            "status": status,
+            "artifact_path_present": bool(artifact.get("artifact_path")),
+            "failure_code": failure_code,
+            "image_generation_status": image_status,
+            "image_generation_reason": image_reason,
+            "quality_warning": artifact.get("quality_warning"),
+            "visual_quality_warning": artifact.get("visual_quality_warning"),
+            **visual_counts,
+        },
+        metadata={
+            "sophia_component": "builder_pptx_terminal_outcome",
+            "pptx_terminal_status": status,
+            "pptx_failure_code": failure_code,
+        },
+        tags=["pptx", "terminal"],
+    )
+
+
 def _manifest_trace_items(state: dict[str, Any], manifest_path: str) -> tuple[int, list[dict[str, Any]]]:
     host = BuilderArtifactMiddleware._host_path_for_plan_file(state, manifest_path)
     if host is None or not host.is_file():
@@ -2069,21 +2233,30 @@ def _trace_pptx_image_manifest_prepared(command: str, state: dict[str, Any]) -> 
     ]
     for manifest_path in manifest_paths:
         requested, items = _manifest_trace_items(state, manifest_path)
+        shape = _manifest_shape_summary_for_trace(state, manifest_path)
         target = _pptx_latch_target_slide_count(state)
         _safe_langsmith_span(
             "Sophia PPTX Image Manifest Prepared",
             inputs={
                 "manifest_file": PurePosixPath(manifest_path).name,
+                "schema_version": shape.get("schema_version"),
+                "manifest_author": shape.get("manifest_author"),
                 "expected_slide_count": target,
                 "requested_item_count": requested,
+                "prompt_readable_count": sum(1 for item in items if item.get("prompt_hash")),
+                "requested_concurrency": None,
+                "env_capped_concurrency": os.getenv("SOPHIA_IMAGE_GEN_CONCURRENCY") or "2",
                 "items": items,
             },
             outputs={
                 "manifest_readable": requested > 0,
                 "requested_item_count": requested,
+                "shape": shape,
             },
             metadata={
                 "sophia_component": "builder_pptx_manifest",
+                "pptx_manifest_schema_version": shape.get("schema_version"),
+                "pptx_manifest_author": shape.get("manifest_author"),
                 "pptx_expected_slide_count": target,
                 "manifest_item_count": requested,
             },
@@ -5035,6 +5208,10 @@ def _trace_pptx_image_single_item(
             prompt_hash = None
     diagnostics = _pptx_diagnostics(state)
     real_batch_attempted = bool(diagnostics.get("image_generation_manifest_generation_attempted"))
+    canonical_output = _canonical_outputs_artifact_path(output_path)
+    allowed_outputs = _serial_repair_allowed_outputs(diagnostics)
+    repair_attempts = _serial_repair_output_attempts(diagnostics)
+    current_attempts = repair_attempts.get(canonical_output or "", 0)
     _safe_langsmith_span(
         "Sophia Image Single Item",
         inputs={
@@ -5045,6 +5222,8 @@ def _trace_pptx_image_single_item(
             "prompt_hash": prompt_hash,
             "output_file": PurePosixPath(str(output_path or "")).name or None,
             "reference_count": len(_command_flag_values(segment, "--reference-images")),
+            "allowed_manifest_output": bool(canonical_output and canonical_output in allowed_outputs),
+            "repair_attempt_no": current_attempts + 1 if real_batch_attempted else None,
         },
         outputs={
             "success": valid_image,
@@ -5914,10 +6093,11 @@ def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
         + "Author one self-contained 1920x1080 HTML file per slide under "
         "`/mnt/user-data/outputs/slides/` — real DOM title + concise narrative text, plus one "
         "generated VISUAL-ONLY image embedded by a relative `../assets/<file>` path. Text lives in "
-        "the HTML and is never baked into the image. Generate every slide visual, including the "
-        "cover/hero, through ONE image-generation `--manifest` batch. If a readable batch attempts "
-        "generation but leaves failed/missing visuals, repair only those visuals serially with the "
-        "same prompt/output filenames. Do not compile a no-image deck unless the user explicitly "
+        "the HTML and is never baked into the image. Write one prompt JSON file per slide, call "
+        "`prepare_pptx_image_manifest(prompt_files=[...])`, then run the returned manifest path "
+        "through ONE image-generation `--manifest` batch. If a readable batch attempts generation "
+        "but leaves failed/missing visuals, repair only those visuals serially with the same "
+        "prompt/output filenames. Do not compile a no-image deck unless the user explicitly "
         "asked for a plain text-only/no-visual presentation.\n\n"
         "When the slide HTML files exist, compile the deck by calling the tool ONCE:\n"
         f"`build_deck_from_slides(output_path='{target}', title='<deck title>')`\n"
@@ -6059,6 +6239,7 @@ class BuilderArtifactState(AgentState):
     builder_pptx_slide_count_repair_requested: NotRequired[dict[str, int]]
     builder_pptx_compile_latch_pending: NotRequired[bool]
     builder_pptx_compile_repair_pending: NotRequired[bool]
+    builder_pptx_route_trace_emitted: NotRequired[bool]
     builder_visual_design_correction_emitted: NotRequired[bool]
     builder_visual_asset_correction_emitted: NotRequired[bool]
     builder_graph_halted: NotRequired[bool]
@@ -9670,6 +9851,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         reset + Phase 2F.3 path-correction injection) and merge their
         returns into a single update dict for the langgraph reducer."""
         update: dict[str, Any] = {}
+        if _requested_pptx_artifact(state) and not state.get("builder_pptx_route_trace_emitted"):
+            _trace_pptx_route_selected(state)
+            update["builder_pptx_route_trace_emitted"] = True
         reset = self._maybe_reset_turn_budget(state)
         if isinstance(reset, dict):
             update.update(reset)
@@ -10576,6 +10760,60 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return payload if isinstance(payload, dict) else None
 
     @staticmethod
+    def _pptx_manifest_tool_result_delta(result: ToolMessage) -> dict[str, Any] | None:
+        text = BuilderArtifactMiddleware._tool_message_text(result)
+        try:
+            payload = json.loads(text)
+        except (TypeError, ValueError):
+            return None
+        if not isinstance(payload, dict):
+            return None
+        success = payload.get("success") is True
+        expected_count = int(payload.get("expected_count") or 0)
+        raw_items = payload.get("items") if isinstance(payload.get("items"), list) else []
+        expected_items: list[dict[str, Any]] = []
+        unresolved_outputs: list[str] = []
+        for index, item in enumerate(raw_items, start=1):
+            if not isinstance(item, dict):
+                continue
+            output_path = str(item.get("output_path") or "")
+            expected_items.append(
+                {
+                    "item_index": index,
+                    "slide_index": item.get("slide_index") if isinstance(item.get("slide_index"), int) else index,
+                    "prompt_file": str(item.get("prompt_file") or ""),
+                    "prompt_hash": item.get("prompt_hash"),
+                    "prompt_readable": True,
+                    "output_file": output_path,
+                    "output_basename": PurePosixPath(output_path).name,
+                    "slide_visual": True,
+                }
+            )
+            if _canonical_outputs_artifact_path(output_path) is not None:
+                unresolved_outputs.append(output_path)
+        if success:
+            return {
+                "image_generation_manifest_seen": True,
+                "image_generation_manifest_requested_count": expected_count,
+                "image_generation_manifest_complete": False,
+                "image_generation_manifest_generation_attempted": False,
+                "image_generation_manifest_expected_items": expected_items,
+                "image_generation_manifest_unresolved_outputs": unresolved_outputs,
+                "expected_generated_visual_count": expected_count,
+                "successful_generated_visual_count": 0,
+                "primary_image_batch_status": "skipped",
+                "primary_image_batch_error_class": None,
+            }
+        error_type = str(payload.get("error_type") or "manifest_authoring_failed")
+        return {
+            "manifest_authoring_failure_count": 1,
+            "primary_image_batch_status": "failed",
+            "primary_image_batch_error_class": error_type,
+            "expected_generated_visual_count": expected_count,
+            "successful_generated_visual_count": 0,
+        }
+
+    @staticmethod
     def _deck_builder_output_path(request: ToolCallRequest, payload: dict[str, Any]) -> str | None:
         args = request.tool_call.get("args") or {}
         pptx_path = payload.get("pptx_path")
@@ -10894,6 +11132,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._pdf_result_command(request, result)
         if tool_name == _DECK_BUILD_TOOL_NAME:
             return self._deck_builder_result_command(request, result)
+        if tool_name == _PPTX_IMAGE_MANIFEST_TOOL_NAME and isinstance(result, ToolMessage):
+            delta = self._pptx_manifest_tool_result_delta(result)
+            if delta:
+                return Command(update={"messages": [result], "builder_pptx_diagnostics": delta})
+            return result
         if tool_name in {"bash", "bash_tool"}:
             return self._pptx_bash_result_command(request, result)
         if tool_name in _VISUAL_ASSET_TOOL_NAMES:
@@ -10972,6 +11215,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             ),
             emit_attempted=True,
             emit_tool_call_seen=True,
+        )
+        _trace_pptx_terminal_outcome(
+            state=state,
+            artifact=fallback,
+            status="error",
+            failure_code=reason,
         )
         self._upload_fallback_and_fire(
             state=state,
@@ -11221,6 +11470,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         real_batch_attempted = bool(diagnostics.get("image_generation_manifest_generation_attempted")) and requested > 0
         if real_batch_attempted:
             failed_count = int(diagnostics.get("image_generation_manifest_failed_count", 0) or 0)
+            error_class = str(diagnostics.get("primary_image_batch_error_class") or "")
+            if error_class in _IMAGE_GENERATION_TERMINAL_ERRORS or error_class == "content_blocked":
+                return (
+                    "[Sophia/deck-batch] The primary image batch failed with a terminal provider "
+                    f"error ({error_class}). Do not retry the same provider call serially for every "
+                    "slide. Stop cleanly with artifact_path=null and report the image-generation "
+                    "failure metadata."
+                )
             allowed_repairs = failed_count * _SERIAL_REPAIR_ATTEMPTS_PER_FAILED_SLIDE
             used_repairs = int(diagnostics.get("serial_repair_count", 0) or 0)
             if failed_count <= 0:
@@ -11260,7 +11517,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 )
             return (
                 "[Sophia/deck-batch] A manifest was seen, but it did not make a real batch generation "
-                f"attempt ({error_class}). Fix/materialize the prompt JSON files and rerun the ONE "
+                f"attempt ({error_class}). Fix/materialize one prompt JSON file per slide, call "
+                "`prepare_pptx_image_manifest(prompt_files=[...])`, and rerun the returned "
                 "`--manifest` batch before any serial repairs."
             )
         # Any billable deck image-gen call WITHOUT --manifest before a real batch
@@ -11269,18 +11527,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if _pptx_diagnostic_count(state, "deck_batch_rejection_count") >= _DECK_BATCH_REJECTION_CAP:
             return (
                 "[Sophia/deck-batch] A readable image batch manifest is still required before "
-                "serial image repair is allowed. Write one manifest JSON for every slide visual "
-                "and run `image-generation/scripts/generate.py --manifest <path>`. If you cannot "
-                "create or run a manifest, stop cleanly with artifact_path=null rather than "
-                "serializing the whole deck."
+                "serial image repair is allowed. Write one prompt JSON file per slide, call "
+                "`prepare_pptx_image_manifest(prompt_files=[...])`, then run the returned "
+                "manifest path with `image-generation/scripts/generate.py --manifest <path>`. "
+                "If you cannot create or run that manifest, stop cleanly with artifact_path=null "
+                "rather than serializing the whole deck."
             )
         return (
-            "[Sophia/deck-batch] Do NOT generate deck visuals one at a time. Write ONE manifest "
-            "JSON listing every slide visual, including the cover/hero (each item `slide_visual: "
-            "true` with a readable `prompt_file` and expected `output_file`), then call the "
-            "image-generation script ONCE with `--manifest /mnt/user-data/outputs/assets/manifest.json`. "
-            "All slide visuals generate concurrently. Single image-gen calls are allowed only to "
-            "repair failed or missing images AFTER a readable batch actually attempts generation."
+            "[Sophia/deck-batch] Do NOT generate deck visuals one at a time. Write one prompt JSON "
+            "file for every slide visual, including the cover/hero, call "
+            "`prepare_pptx_image_manifest(prompt_files=[...])`, then call the image-generation "
+            "script ONCE with `--manifest <returned manifest_path>`. All slide visuals generate concurrently. "
+            "Single image-gen calls are allowed only to repair failed or missing images AFTER a "
+            "readable batch actually attempts generation."
         )
 
     @staticmethod
@@ -11370,9 +11629,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
         else:
             next_step = (
-                "Before compiling, write prompt JSON files and ONE manifest containing every slide "
-                "visual, including the cover/hero, then run "
-                "`image-generation/scripts/generate.py --manifest /mnt/user-data/outputs/assets/manifest.json`."
+                "Before compiling, write one prompt JSON file per slide, call "
+                "`prepare_pptx_image_manifest(prompt_files=[...])`, then run the returned "
+                "`manifest_path` with `image-generation/scripts/generate.py --manifest <path>`."
             )
         _trace_pptx_compile_decision(
             state=state,
@@ -11406,10 +11665,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _deck_floor_escape_directive() -> str:
         return (
             "[Sophia/deck-batch] Image generation has repeatedly been rejected before a readable "
-            "parallel batch could run. STOP making serial image-generation calls. If the manifest "
-            "prompt JSON files can be materialized, write/fix them now and rerun the ONE `--manifest` "
-            "batch. If they cannot, stop cleanly with artifact_path=null and explain that the deck "
-            "image manifest could not be prepared; do not compile a partial placeholder deck."
+            "parallel batch could run. STOP making serial image-generation calls. If the prompt "
+            "JSON files can be materialized, write/fix them now, call "
+            "`prepare_pptx_image_manifest(prompt_files=[...])`, and rerun the returned "
+            "`--manifest` batch. If they cannot, stop cleanly with artifact_path=null and explain "
+            "that the deck image manifest could not be prepared; do not compile a partial "
+            "placeholder deck."
         )
 
     def _deck_floor_escape_command(self, request: ToolCallRequest, state: dict[str, Any]) -> Command | None:
@@ -11489,6 +11750,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if manifest_rejection is not None:
             manifest_reason = _manifest_rejection_reason(command, state) or "manifest_not_readable"
             logger.warning("[BuilderImageGeneration] phase=manifest_rejected")
+            _trace_pptx_image_manifest_rejected(
+                command=command,
+                state=state,
+                error_class=manifest_reason,
+            )
             return Command(
                 update={
                     "messages": [
@@ -12268,6 +12534,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         diagnostics=research_diagnostics,
                         allow_web_research=allow_web_research,
                         sources_used=args.get("sources_used"),
+                    )
+                    _trace_pptx_terminal_outcome(
+                        state=state,
+                        artifact=args,
+                        status="completed",
                     )
                     annotate_builder_completion(state, args)
                     log_middleware(

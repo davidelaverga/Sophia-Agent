@@ -39,10 +39,12 @@ def test_presentation_toolset_offers_deck_builder_not_pdf_renderer():
     # HTML-slide deck path restored (2026-06-29): presentations get
     # build_deck_from_slides, NOT the report HTML→PDF renderer.
     names = [getattr(t, "name", "") for t in build_builder_tools_for_task_type("presentation", vision_enabled=False)]
+    assert "prepare_pptx_image_manifest" in names
     assert "build_deck_from_slides" in names
     assert "render_html_to_pdf" not in names
     # report path is unchanged — renderer yes, deck builder no
     rnames = [getattr(t, "name", "") for t in build_builder_tools_for_task_type("document", vision_enabled=False)]
+    assert "prepare_pptx_image_manifest" not in rnames
     assert "render_html_to_pdf" in rnames
     assert "build_deck_from_slides" not in rnames
 

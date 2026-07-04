@@ -141,30 +141,27 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 For multi-image decks, do NOT call the script once per slide across turns (that serializes
 ~2 min/image). Instead:
 
-1. Write ONE JSON manifest of all slide images, including the hero/cover, and call the script once with
-   `--manifest`. Use the same restrained professional technical style instructions across prompt
-   files so the deck stays consistent:
+1. Write one prompt JSON file per slide, including the hero/cover, then call
+   `prepare_pptx_image_manifest(prompt_files=[...])`. The harness writes the
+   canonical manifest and output filenames. Then call the script once with the
+   returned `manifest_path`. Use the same restrained professional technical
+   style instructions across prompt files so the deck stays consistent:
 
 ```json
-{"items": [
-  {"prompt_file": "/mnt/user-data/workspace/slide-01.json",
-   "output_file": "/mnt/user-data/outputs/assets/slide-01.png",
-   "slide_visual": true},
-  {"prompt_file": "/mnt/user-data/workspace/slide-02.json",
-   "output_file": "/mnt/user-data/outputs/assets/slide-02.png",
-   "slide_visual": true}
-]}
+["/mnt/user-data/workspace/slide-01.json",
+ "/mnt/user-data/workspace/slide-02.json"]
+```
+```text
+prepare_pptx_image_manifest(prompt_files=[...])
 ```
 ```bash
 python /mnt/skills/public/image-generation/scripts/generate.py \
-  --manifest /mnt/user-data/outputs/assets/slide-manifest.json
+  --manifest /mnt/user-data/outputs/assets/slide-visuals.manifest.json
 ```
 
-**Write the manifest in its own `write_file` call FIRST, then run `--manifest`
-in a SEPARATE bash call.** The harness reads the manifest from disk at dispatch
-to count images against the budget — a manifest written and run in the same
-`&&`-chained command does not exist yet at that check and is rejected. One
-`write_file` (the JSON), then one `bash` (`--manifest <path>`).
+**Do not hand-write the batch manifest JSON.** The manifest must be prepared by
+`prepare_pptx_image_manifest`, then run in a separate bash call. The harness
+reads the manifest from disk at dispatch to count images against the budget.
 
 Deck slide assets live under `/mnt/user-data/outputs/assets/`; the slide HTML
 references them by a relative `../assets/<file>` path (see the `ppt-generation`
@@ -172,11 +169,12 @@ skill). The slide title and narrative are real HTML text — never baked into th
 image. Keep generated slide visuals mostly text-free; place meaningful labels,
 annotations, formulas, and chart text in slide HTML over or beside the visual.
 
-If the batch manifest is rejected because prompt files are missing, materialize
-the prompt JSON files and rerun the same ONE `--manifest` batch. Do not switch
-to serial image generation until a readable batch has actually attempted
-generation. If a real batch attempt leaves failed/missing images, retry only
-those failed images serially; do not regenerate successful images.
+If manifest preparation is rejected because prompt files are missing,
+materialize the prompt JSON files and prepare/rerun the same ONE `--manifest`
+batch. Do not switch to serial image generation until a readable batch has
+actually attempted generation. If a real batch attempt leaves failed/missing
+images, retry only those failed images serially; do not regenerate successful
+images.
 
 The items run concurrently (bounded for API rate limits); the script prints one
 `IMAGEGEN_BATCH {...}` summary line with per-image success. A failed item is isolated and never
