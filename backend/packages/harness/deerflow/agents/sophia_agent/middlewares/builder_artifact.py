@@ -50,6 +50,7 @@ from deerflow.agents.sophia_agent.middlewares.slide_quality import (
 )
 from deerflow.agents.sophia_agent.pptx_diagnostics import _merge_builder_pptx_diagnostics
 from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sophia.build_condition import (
     brief_gate_unmet_conditions,
     iteration_available,
@@ -832,10 +833,13 @@ def _image_generation_outcome_from_state(state: dict[str, Any]) -> dict[str, Any
         return None
     diagnostics = _pptx_diagnostics(state)
     attempted = int(diagnostics.get("image_generation_attempt_count", 0) or 0)
+    startup_attempted = int(diagnostics.get("image_generation_startup_attempt_count", 0) or 0)
     succeeded = int(diagnostics.get("image_generation_success_count", 0) or 0)
     skip_reason = diagnostics.get("image_generation_skip_reason")
     if not skip_reason and succeeded == 0:
-        if attempted == 0 and int(diagnostics.get("manifest_authoring_failure_count", 0) or 0) > 0:
+        if attempted == 0 and startup_attempted > 0:
+            skip_reason = diagnostics.get("image_generation_startup_error_class") or "startup_failed"
+        elif attempted == 0 and int(diagnostics.get("manifest_authoring_failure_count", 0) or 0) > 0:
             skip_reason = diagnostics.get("primary_image_batch_error_class") or "manifest_authoring_failed"
         elif attempted == 0:
             skip_reason = "model_skipped"
@@ -1273,6 +1277,8 @@ def _image_generation_script_exists_from_command(command: str | None) -> bool | 
 
 def _classify_image_batch_startup_error(text: str, fallback: str) -> str:
     lowered = (text or "").lower()
+    if "unsafe absolute paths in command" in lowered or "use paths under /mnt/user-data" in lowered:
+        return "sandbox_path_rejected"
     if (
         ("can't open file" in lowered or "no such file or directory" in lowered)
         and "image-generation/scripts/generate.py" in lowered
@@ -1582,6 +1588,7 @@ def _image_generation_manifest_result_delta(
     authoring_failure = error_class in _MANIFEST_AUTHORING_ERRORS
     summary_present = bool(batch_summary.get("summary_present"))
     generation_attempted = requested > 0 and summary_present and not authoring_failure
+    startup_failure = not summary_present or error_class in {"batch_summary_missing", "invalid_batch_summary", "sandbox_path_rejected"}
     unresolved_outputs = _unresolved_manifest_output_paths(state, expected_items)
     delta: dict[str, Any] = {
         "image_generation_manifest_seen": True,
@@ -1599,8 +1606,9 @@ def _image_generation_manifest_result_delta(
         delta["image_generation_manifest_expected_items"] = expected_items
         delta["image_generation_manifest_unresolved_outputs"] = unresolved_outputs
         delta["image_generation_manifest_failed_outputs"] = unresolved_outputs if generation_attempted else []
-    if not summary_present or error_class in {"batch_summary_missing", "invalid_batch_summary"}:
+    if startup_failure:
         delta["batch_summary_missing_count"] = 1
+        delta["image_generation_startup_attempt_count"] = 1
     if authoring_failure:
         delta["manifest_authoring_failure_count"] = 1
     if batch_summary.get("error_class_histogram"):
@@ -1997,12 +2005,10 @@ def _nested_trace_env_for_request(request: ToolCallRequest) -> dict[str, str]:
         env["SOPHIA_PARENT_DOTTED_ORDER"] = dotted_order
     if thread_id:
         env["SOPHIA_THREAD_ID"] = thread_id
-    outputs_path = thread_data.get("outputs_path")
-    if isinstance(outputs_path, str) and outputs_path.strip():
-        env["SOPHIA_OUTPUTS_HOST_PATH"] = outputs_path.strip()
-    workspace_path = thread_data.get("workspace_path")
-    if isinstance(workspace_path, str) and workspace_path.strip():
-        env["SOPHIA_WORKSPACE_HOST_PATH"] = workspace_path.strip()
+    if isinstance(thread_data.get("outputs_path"), str) and str(thread_data.get("outputs_path")).strip():
+        env["SOPHIA_OUTPUTS_HOST_PATH"] = f"{VIRTUAL_PATH_PREFIX}/outputs"
+    if isinstance(thread_data.get("workspace_path"), str) and str(thread_data.get("workspace_path")).strip():
+        env["SOPHIA_WORKSPACE_HOST_PATH"] = f"{VIRTUAL_PATH_PREFIX}/workspace"
     return env
 
 
@@ -3357,6 +3363,7 @@ def _apply_image_generation_metadata(artifact: dict[str, Any], state: dict[str, 
         "primary_image_batch_error_class",
         "serial_repair_count",
         "manifest_authoring_failure_count",
+        "image_generation_startup_attempt_count",
         "image_generation_startup_error_class",
         "image_generation_exit_code",
         "image_generation_raw_error_excerpt",
@@ -4129,6 +4136,8 @@ def _pptx_fallback_generation_attempt_satisfied(state: dict[str, Any]) -> bool:
 
 def _image_generation_invoked_seen(state: dict[str, Any]) -> bool:
     if _pptx_diagnostic_count(state, "image_generation_attempt_count") > 0:
+        return True
+    if _pptx_diagnostic_count(state, "image_generation_startup_attempt_count") > 0:
         return True
     summaries = state.get("builder_tool_turn_summaries") or []
     return any(
@@ -5308,8 +5317,9 @@ def _image_generation_segment_status(
 def _image_generation_metadata_from_state(state: dict[str, Any]) -> tuple[str | None, str | None]:
     diagnostics = _pptx_diagnostics(state)
     attempts = int(diagnostics.get("image_generation_attempt_count", 0) or 0)
+    startup_attempts = int(diagnostics.get("image_generation_startup_attempt_count", 0) or 0)
     manifest_authoring_failures = int(diagnostics.get("manifest_authoring_failure_count", 0) or 0)
-    if attempts <= 0 and manifest_authoring_failures <= 0:
+    if attempts <= 0 and startup_attempts <= 0 and manifest_authoring_failures <= 0:
         return None, None
     successes = int(diagnostics.get("image_generation_success_count", 0) or 0)
     visual_counts = _pptx_visual_completeness_counts(state)
@@ -5324,7 +5334,11 @@ def _image_generation_metadata_from_state(state: dict[str, Any]) -> tuple[str | 
         ):
             return "success_after_repair", None
         return "success", None
-    reason = diagnostics.get("primary_image_batch_error_class") or diagnostics.get("image_generation_error_class")
+    reason = (
+        diagnostics.get("image_generation_startup_error_class")
+        or diagnostics.get("primary_image_batch_error_class")
+        or diagnostics.get("image_generation_error_class")
+    )
     return "failed", str(reason) if reason else "api_error"
 
 
@@ -10493,9 +10507,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             bytes_total += batch_bytes
             error_class = error_class or batch_error_class
 
-        # attempt_count tracks IMAGES (manifest item counts + one per single
-        # call) so the per-build cap and the cost breaker bound generated images.
-        attempt_count = max(1, _image_generation_images_in_command(command, state))
+        # attempt_count tracks provider image attempts, not control-plane
+        # startup failures. A missing manifest summary before any structured
+        # batch attempt did not reach the provider and should not consume the
+        # image budget/cost breaker.
+        startup_only_failure = (
+            bool(manifest_delta.get("image_generation_startup_attempt_count"))
+            and not bool(manifest_delta.get("image_generation_manifest_generation_attempted"))
+            and not single_segments
+            and not successful_paths
+        )
+        attempt_count = 0 if startup_only_failure else max(1, _image_generation_images_in_command(command, state))
         delta: dict[str, Any] = {
             **preflight_delta,
             "image_generation_attempt_count": attempt_count,
@@ -11203,6 +11225,28 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
         return None
 
+    @staticmethod
+    def _terminal_pptx_startup_failure_reason(state: dict[str, Any]) -> str | None:
+        if not _requested_pptx_artifact(state) or _pptx_explicit_text_only_requested(state):
+            return None
+        diagnostics = _pptx_diagnostics(state)
+        if not diagnostics.get("image_generation_manifest_seen"):
+            return None
+        if int(diagnostics.get("image_generation_manifest_requested_count", 0) or 0) <= 0:
+            return None
+        if bool(diagnostics.get("image_generation_manifest_generation_attempted")):
+            return None
+        if int(diagnostics.get("image_generation_success_count", 0) or 0) > 0:
+            return None
+        if int(diagnostics.get("batch_summary_missing_count", 0) or 0) < 2:
+            return None
+        reason = (
+            diagnostics.get("image_generation_startup_error_class")
+            or diagnostics.get("primary_image_batch_error_class")
+            or diagnostics.get("image_generation_error_class")
+        )
+        return str(reason or "batch_summary_missing")
+
     def _terminal_pptx_failure_fallback(
         self,
         args: dict[str, Any],
@@ -11234,6 +11278,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             fallback,
             state,
             fallback_reason="pptx_generation_not_completed",
+        )
+        diagnostics = _pptx_diagnostics(state)
+        _trace_pptx_compile_decision(
+            state=state,
+            decision="terminal_fail",
+            reason=reason,
+            outputs={
+                "primary_image_batch_status": diagnostics.get("primary_image_batch_status"),
+                "primary_image_batch_error_class": diagnostics.get("primary_image_batch_error_class"),
+                "image_generation_startup_error_class": diagnostics.get("image_generation_startup_error_class"),
+                "image_generation_command_hash": diagnostics.get("image_generation_command_hash"),
+                "image_generation_command_basename": diagnostics.get("image_generation_command_basename"),
+                **_pptx_visual_completeness_counts(state),
+            },
         )
         self._attach_terminal_failure_diagnostics(
             state,
@@ -11288,6 +11346,46 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     ToolMessage(
                         content=json.dumps(fallback, default=str),
                         tool_call_id=str(tool_call_id or ""),
+                        name="emit_builder_artifact",
+                    )
+                ],
+                "builder_result": fallback,
+                "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
+                "builder_non_artifact_turns": 0,
+                "builder_task_started_at_ms": 0,
+                "builder_consecutive_empty_emit_rejections": 0,
+                "builder_last_missing_emit_path": None,
+                "builder_consecutive_missing_emit_path_rejections": 0,
+                **_terminal_halt_fields(request.state, "pptx_image_generation_failed"),
+            },
+            goto="end",
+        )
+
+    def _terminal_pptx_startup_failure_emit_command(
+        self,
+        request: ToolCallRequest,
+        args: dict[str, Any],
+    ) -> Command | None:
+        reason = self._terminal_pptx_startup_failure_reason(request.state)
+        if reason is None:
+            return None
+        fallback = self._terminal_pptx_failure_fallback(
+            args,
+            request.state,
+            request.runtime,
+            reason=reason,
+            steps_completed=int(request.state.get("builder_non_artifact_turns", 0) or 0) + 1,
+        )
+        logger.warning(
+            "BuilderArtifact: terminal PPTX startup failure reason=%s",
+            reason,
+        )
+        return Command(
+            update={
+                "messages": [
+                    ToolMessage(
+                        content=json.dumps(fallback, default=str),
+                        tool_call_id=str(request.tool_call.get("id", "") or ""),
                         name="emit_builder_artifact",
                     )
                 ],
@@ -11385,6 +11483,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             request.tool_call["args"] = recovered_args
             return handler(request)
 
+        terminal_startup_failure = self._terminal_pptx_startup_failure_emit_command(request, args)
+        if terminal_startup_failure is not None:
+            return terminal_startup_failure
+
         tool_call_id = request.tool_call.get("id", "")
         logger.warning(
             "BuilderArtifact: emit rejected in wrap_tool_call — "
@@ -11410,10 +11512,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _image_generation_terminal_rejection(
         *,
         attempts: int,
+        startup_attempts: int = 0,
         successes: int,
         error_class: object,
     ) -> str | None:
-        if attempts < 1 or successes != 0 or error_class not in _IMAGE_GENERATION_TERMINAL_ERRORS:
+        no_prior_failure = attempts < 1 and startup_attempts < 1
+        if no_prior_failure or successes != 0 or error_class not in _IMAGE_GENERATION_TERMINAL_ERRORS:
             return None
         return (
             f"Error: image generation is unavailable in this environment ({error_class}). "
@@ -11458,11 +11562,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         billable_in_command: int,
     ) -> tuple[str | None, int, int, object]:
         attempts = _pptx_diagnostic_count(state, "image_generation_attempt_count")
+        startup_attempts = _pptx_diagnostic_count(state, "image_generation_startup_attempt_count")
         successes = _pptx_diagnostic_count(state, "image_generation_success_count")
         diagnostics = _pptx_diagnostics(state)
         error_class = diagnostics.get("image_generation_error_class")
         rejection = BuilderArtifactMiddleware._image_generation_terminal_rejection(
             attempts=attempts,
+            startup_attempts=startup_attempts,
             successes=successes,
             error_class=error_class,
         ) or BuilderArtifactMiddleware._image_generation_budget_rejection(
@@ -12116,6 +12222,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             request.tool_call["args"] = recovered_args
             return await handler(request)
 
+        terminal_startup_failure = self._terminal_pptx_startup_failure_emit_command(request, args)
+        if terminal_startup_failure is not None:
+            return terminal_startup_failure
+
         tool_call_id = request.tool_call.get("id", "")
         logger.warning(
             "BuilderArtifact: emit rejected in awrap_tool_call — "
@@ -12754,6 +12864,41 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "builder_last_missing_emit_path": None,
                     "builder_consecutive_missing_emit_path_rejections": 0,
                     **_pptx_slide_count_repair_attempt_update(state),
+                }
+
+            terminal_startup_reason = self._terminal_pptx_startup_failure_reason(state)
+            if terminal_startup_reason is not None:
+                history = self._append_turn_summary(
+                    state,
+                    {
+                        "turn": int(state.get("builder_non_artifact_turns", 0) or 0) + 1,
+                        "tool_names": [],
+                        "has_emit_builder_artifact": False,
+                        "ended_with_plain_text": True,
+                        "terminal_pptx_startup_failure": True,
+                    },
+                )
+                fallback = self._terminal_pptx_failure_fallback(
+                    {"artifact_title": "PPTX deck generation failed"},
+                    state,
+                    runtime,
+                    reason=terminal_startup_reason,
+                    steps_completed=int(state.get("builder_non_artifact_turns", 0) or 0) + 1,
+                )
+                return {
+                    "builder_result": fallback,
+                    "builder_non_artifact_turns": 0,
+                    "builder_last_tool_names": [],
+                    "builder_tool_turn_summaries": history,
+                    "builder_skill_reads": state.get("builder_skill_reads"),
+                    "builder_visual_force_count": state.get("builder_visual_force_count", 0),
+                    "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
+                    "builder_task_started_at_ms": 0,
+                    "builder_consecutive_empty_emit_rejections": 0,
+                    "builder_last_missing_emit_path": None,
+                    "builder_consecutive_missing_emit_path_rejections": 0,
+                    **_terminal_halt_fields(state, "pptx_image_generation_failed"),
+                    "jump_to": "end",
                 }
 
             # AI message with NO tool calls -- agent ending with plain text, create fallback

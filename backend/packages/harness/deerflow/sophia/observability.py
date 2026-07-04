@@ -781,6 +781,15 @@ def _add_pptx_terminal_metadata(metadata: dict[str, Any], diagnostics: dict[str,
         "compile_forced_at_turn",
         "pptx_terminal_ready_at_turn",
         "time_to_first_valid_artifact_ms",
+        "primary_image_batch_status",
+        "primary_image_batch_error_class",
+        "image_generation_startup_attempt_count",
+        "image_generation_startup_error_class",
+        "image_generation_exit_code",
+        "expected_generated_visual_count",
+        "successful_generated_visual_count",
+        "referenced_visual_count",
+        "missing_expected_visual_count",
     ):
         _merge_safe_metadata(metadata, key, diagnostics.get(key))
 

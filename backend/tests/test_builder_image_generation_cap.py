@@ -22,6 +22,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
     _image_generation_images_in_command,
     _image_generation_invocations_in_command,
+    _maybe_attach_image_trace_env,
     _parse_image_batch_summary,
 )
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
@@ -29,6 +30,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_task import (
     _is_pdf_image_generation_target,
     _is_pptx_image_generation_target,
 )
+from deerflow.sandbox.tools import replace_virtual_paths_in_command, validate_local_bash_command_paths
 
 _SCRIPT = "/mnt/skills/public/image-generation/scripts/generate.py"
 _MANIFEST_SCHEMA = "sophia-pptx-image-manifest/v1"
@@ -87,6 +89,36 @@ def test_invocation_count_handles_chained_commands():
 
 def test_invocation_count_zero_for_unrelated_commands():
     assert _image_generation_invocations_in_command("ls /mnt/user-data/outputs") == 0
+
+
+def test_image_trace_env_uses_virtual_roots_before_sandbox_rewrite() -> None:
+    thread_data = {
+        "outputs_path": "/var/lib/deerflow/threads/t1/user-data/outputs",
+        "workspace_path": "/var/lib/deerflow/threads/t1/user-data/workspace",
+        "uploads_path": "/var/lib/deerflow/threads/t1/user-data/uploads",
+    }
+    request = SimpleNamespace(
+        tool_call={
+            "id": "tc-bash",
+            "name": "bash",
+            "args": {
+                "command": f"python {_SCRIPT} --manifest /mnt/user-data/outputs/assets/slide-visuals.manifest.json"
+            },
+        },
+        state={"thread_data": thread_data, "run_id": "run-1", "thread_id": "thread-1"},
+        runtime=_runtime(),
+    )
+
+    _maybe_attach_image_trace_env(request)
+
+    command = request.tool_call["args"]["command"]
+    assert "SOPHIA_OUTPUTS_HOST_PATH=/mnt/user-data/outputs" in command
+    assert "SOPHIA_WORKSPACE_HOST_PATH=/mnt/user-data/workspace" in command
+    assert "/var/lib/deerflow" not in command
+    validate_local_bash_command_paths(command, thread_data)
+    resolved = replace_virtual_paths_in_command(command, thread_data)
+    assert "SOPHIA_OUTPUTS_HOST_PATH=/var/lib/deerflow/threads/t1/user-data/outputs" in resolved
+    assert "SOPHIA_WORKSPACE_HOST_PATH=/var/lib/deerflow/threads/t1/user-data/workspace" in resolved
 
 
 # ---- hard cap ---------------------------------------------------------------
@@ -884,7 +916,8 @@ def test_manifest_batch_terminal_failure_updates_image_error_class(tmp_path) -> 
         state=state,
     )
 
-    assert delta["image_generation_attempt_count"] == 3
+    assert delta["image_generation_attempt_count"] == 0
+    assert delta["image_generation_startup_attempt_count"] == 1
     assert delta["image_generation_success_count"] == 0
     assert delta["image_generation_error_class"] == "missing_api_key"
 
@@ -914,7 +947,8 @@ def test_manifest_batch_missing_summary_does_not_unlock_serial_repair(tmp_path) 
         state=state,
     )
 
-    assert delta["image_generation_attempt_count"] == 3
+    assert delta["image_generation_attempt_count"] == 0
+    assert delta["image_generation_startup_attempt_count"] == 1
     assert delta["primary_image_batch_error_class"] == "batch_summary_missing"
     assert delta["batch_summary_missing_count"] == 1
     assert delta["image_generation_manifest_generation_attempted"] is False
@@ -952,9 +986,39 @@ def test_manifest_batch_missing_summary_classifies_startup_error(tmp_path) -> No
 
     assert delta["primary_image_batch_error_class"] == "image_script_not_found"
     assert delta["image_generation_startup_error_class"] == "image_script_not_found"
+    assert delta["image_generation_attempt_count"] == 0
+    assert delta["image_generation_startup_attempt_count"] == 1
     assert delta["batch_summary_missing_count"] == 1
     assert delta["image_generation_manifest_generation_attempted"] is False
     assert "can't open file" in delta["image_generation_raw_error_excerpt"]
+
+
+def test_manifest_batch_missing_summary_classifies_sandbox_path_rejection(tmp_path) -> None:
+    manifest = tmp_path / "m.json"
+    (tmp_path / "p0.json").write_text('{"prompt":"x"}', encoding="utf-8")
+    manifest.write_text(
+        json.dumps({"items": [{"prompt_file": "p0.json", "output_file": "/mnt/user-data/outputs/o0.png"}]}),
+        encoding="utf-8",
+    )
+    state = _state_with_image_diagnostics(image_generation_attempt_count=0)
+    state["thread_data"] = {"outputs_path": str(tmp_path)}
+    command = f"python {_SCRIPT} --manifest /mnt/user-data/outputs/m.json"
+    text = (
+        "Error: Unsafe absolute paths in command: "
+        "/var/lib/deerflow/threads/t1/user-data/outputs. Use paths under /mnt/user-data"
+    )
+
+    delta = BuilderArtifactMiddleware._image_generation_bash_delta(
+        command=command,
+        text=text,
+        state=state,
+    )
+
+    assert delta["primary_image_batch_error_class"] == "sandbox_path_rejected"
+    assert delta["image_generation_startup_error_class"] == "sandbox_path_rejected"
+    assert delta["image_generation_attempt_count"] == 0
+    assert delta["image_generation_startup_attempt_count"] == 1
+    assert delta["batch_summary_missing_count"] == 1
 
 
 def test_second_missing_batch_summary_fails_clearly_without_serial_repair() -> None:
@@ -1024,6 +1088,57 @@ def test_null_pptx_emit_is_terminal_error_after_image_failure(monkeypatch) -> No
     assert artifact["status"] == "error"
     assert artifact["image_generation_status"] == "failed"
     assert artifact["image_generation_startup_error_class"] == "image_script_not_found"
+    assert result.update["builder_graph_halted"] is True
+
+
+def test_missing_pptx_emit_after_terminal_startup_failure_ends_with_error(monkeypatch) -> None:
+    state = _state_with_image_diagnostics(
+        image_generation_manifest_seen=True,
+        image_generation_manifest_requested_count=6,
+        image_generation_manifest_generation_attempted=False,
+        image_generation_attempt_count=0,
+        image_generation_startup_attempt_count=2,
+        image_generation_success_count=0,
+        primary_image_batch_status="failed",
+        primary_image_batch_error_class="sandbox_path_rejected",
+        image_generation_error_class="sandbox_path_rejected",
+        image_generation_startup_error_class="sandbox_path_rejected",
+        batch_summary_missing_count=2,
+        expected_generated_visual_count=6,
+        successful_generated_visual_count=0,
+        missing_expected_visual_count=6,
+    )
+    request = SimpleNamespace(
+        tool_call={
+            "id": "tc-emit",
+            "name": "emit_builder_artifact",
+            "args": {"artifact_path": "/mnt/user-data/outputs/deck.pptx", "artifact_title": "Deck"},
+        },
+        state=state,
+        runtime=_runtime(),
+    )
+    monkeypatch.setattr(
+        BuilderArtifactMiddleware,
+        "_upload_fallback_and_fire",
+        staticmethod(lambda **_kwargs: None),
+    )
+
+    result = BuilderArtifactMiddleware()._terminal_pptx_startup_failure_emit_command(
+        request,
+        request.tool_call["args"],
+    )
+
+    assert isinstance(result, Command)
+    assert result.goto == "end"
+    artifact = result.update["builder_result"]
+    assert artifact["artifact_path"] is None
+    assert artifact["status"] == "error"
+    assert artifact["artifact_type"] == "presentation"
+    assert artifact["image_generation_status"] == "failed"
+    assert artifact["image_generation_reason"] == "sandbox_path_rejected"
+    assert artifact["image_generation_startup_attempt_count"] == 2
+    assert artifact["image_generation_startup_error_class"] == "sandbox_path_rejected"
+    assert artifact["primary_image_batch_status"] == "failed"
     assert result.update["builder_graph_halted"] is True
 
 

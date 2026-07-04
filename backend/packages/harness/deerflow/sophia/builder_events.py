@@ -783,6 +783,7 @@ def _artifact_completion_fields(
         "image_generation_startup_error_class": artifact.get("image_generation_startup_error_class"),
         "image_generation_exit_code": artifact.get("image_generation_exit_code"),
         "image_generation_raw_error_excerpt": artifact.get("image_generation_raw_error_excerpt"),
+        "image_generation_startup_attempt_count": artifact.get("image_generation_startup_attempt_count"),
         "serial_repair_count": artifact.get("serial_repair_count"),
         "manifest_authoring_failure_count": artifact.get("manifest_authoring_failure_count"),
         "presentation_route": artifact.get("presentation_route"),
