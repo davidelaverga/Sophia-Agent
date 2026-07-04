@@ -524,6 +524,7 @@ def test_list_artifacts_filters_supabase_visual_support_assets(tmp_path, monkeyp
 
 def test_supabase_support_filter_keeps_root_preview_pdfs_discoverable() -> None:
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("deck.preview.pdf") is False
+    assert artifacts_router._is_supabase_thread_list_support_artifact_path("decks/foo.preview.pdf") is False
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("outputs/deck.preview.pdf") is True
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("visuals/x.preview.pdf") is True
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("assets/x.preview.pdf") is True
@@ -568,6 +569,44 @@ def test_list_artifacts_keeps_supabase_deck_preview_pdf_for_canvas_lookup(tmp_pa
     assert [item.path for item in response.artifacts] == [
         "mnt/user-data/outputs/deck.preview.pdf",
         "mnt/user-data/outputs/deck.pptx",
+    ]
+
+
+def test_list_artifacts_keeps_nested_supabase_deck_preview_pdf(tmp_path, monkeypatch) -> None:
+    missing_outputs = tmp_path / "missing" / "outputs"
+    supabase_items = [
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename="decks/foo.pptx",
+            size_bytes=1234,
+            modified_at="2026-05-26T22:46:50Z",
+            content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        ),
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename="decks/foo.preview.pdf",
+            size_bytes=4321,
+            modified_at="2026-05-26T22:46:51Z",
+            content_type="application/pdf",
+        ),
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename="assets/foo.preview.pdf",
+            size_bytes=100,
+            modified_at="2026-05-26T22:46:52Z",
+            content_type="application/pdf",
+        ),
+    ]
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: missing_outputs)
+    monkeypatch.setattr(
+        artifacts_router.supabase_artifact_store,
+        "list_artifacts",
+        lambda *, thread_id: supabase_items,
+    )
+
+    response = asyncio.run(artifacts_router.list_artifacts("thread-1"))
+
+    assert [item.path for item in response.artifacts] == [
+        "mnt/user-data/outputs/decks/foo.preview.pdf",
+        "mnt/user-data/outputs/decks/foo.pptx",
     ]
 
 

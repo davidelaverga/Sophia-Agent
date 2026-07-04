@@ -713,12 +713,6 @@ def _image_generation_enabled(
     return False
 
 
-def _is_pptx_image_generation_target(artifact_target_ext: str, task_type: str) -> bool:
-    if artifact_target_ext:
-        return artifact_target_ext == ".pptx"
-    return task_type in {"presentation", "slides", "slide_deck", "deck"}
-
-
 _REPORT_IMAGE_GENERATION_TASK_TYPES = {
     "document",
     "report",
@@ -728,12 +722,25 @@ _REPORT_IMAGE_GENERATION_TASK_TYPES = {
     "data_analysis",
     "pdf",
 }
+_PRESENTATION_TASK_TYPES = frozenset({"presentation", "slides", "slide_deck", "deck"})
+
+
+def _is_presentation_task_type(task_type: str) -> bool:
+    return str(task_type or "").strip().lower() in _PRESENTATION_TASK_TYPES
+
+
+def _is_pptx_image_generation_target(artifact_target_ext: str, task_type: str) -> bool:
+    if artifact_target_ext:
+        return artifact_target_ext == ".pptx" or (
+            artifact_target_ext == ".pdf" and _is_presentation_task_type(task_type)
+        )
+    return _is_presentation_task_type(task_type)
 
 
 def _is_pdf_image_generation_target(artifact_target_ext: str, task_type: str) -> bool:
     """PDF reports get conceptual imagery on by default (bounded by the PDF cap)."""
     if artifact_target_ext:
-        return artifact_target_ext == ".pdf"
+        return artifact_target_ext == ".pdf" and not _is_presentation_task_type(task_type)
     return task_type in _REPORT_IMAGE_GENERATION_TASK_TYPES
 
 
@@ -752,7 +759,14 @@ def _polished_deck_images_requested(delegation_context: dict[str, Any]) -> bool:
     return any(marker in combined for marker in _POLISHED_DECK_IMAGE_MARKERS)
 
 
-def _critical_emit_guidance(artifact_target_ext: str) -> str:
+def _critical_emit_guidance(artifact_target_ext: str, task_type: str = "") -> str:
+    if artifact_target_ext == ".pdf" and _is_presentation_task_type(task_type):
+        return (
+            "for this PDF slide-deck delivery target, emit the best verified slide "
+            "deliverable from the deck workflow. Do NOT call report-only PDF tools "
+            "that are not available in this run, and do NOT emit generator scripts "
+            "as the user-facing artifact.\n"
+        )
     if artifact_target_ext == ".pdf":
         return (
             "for this PDF target, emit the valid .pdf if it exists. A .md/.html "
@@ -819,7 +833,7 @@ def _visual_composition_directives() -> str | None:
     return text or None
 
 
-def _terminal_artifact_format_line(artifact_target_ext: str) -> str:
+def _terminal_artifact_format_line(artifact_target_ext: str, task_type: str = "") -> str:
     """Return the format-specific terminal handoff line for the target ext.
 
     Keeps the per-extension branching out of
@@ -840,6 +854,19 @@ def _terminal_artifact_format_line(artifact_target_ext: str) -> str:
             "- This is a Markdown target: write a real .md file. Call "
             "emit_builder_artifact with artifact_type=\"document\".\n"
         )
+    if artifact_target_ext == ".pdf" and _is_presentation_task_type(task_type):
+        return (
+            "- This is a PDF slide-deck delivery target: use the deck workflow, not "
+            "the report renderer. Write one 1920x1080 HTML file per slide under "
+            "`/mnt/user-data/outputs/slides/`, prepare one generated visual prompt "
+            "per slide with `prepare_pptx_image_manifest`, run the returned image "
+            "manifest, and compile the slides with `build_deck_from_slides`. Do NOT "
+            "use the report-only PDF renderer; that tool is not available for this "
+            "presentation run. Emit only after the deck workflow has produced a "
+            "verified slide deliverable/export under `/mnt/user-data/outputs/`; if "
+            "that cannot be produced, emit with artifact_path=null and an honest "
+            "companion_summary.\n"
+        )
     if artifact_target_ext == ".pdf":
         return (
             "- This is a PDF target: author ONE self-contained HTML file with inline "
@@ -854,7 +881,11 @@ def _terminal_artifact_format_line(artifact_target_ext: str) -> str:
     return ""
 
 
-def _terminal_artifact_handoff_section(artifact_target_path: str, artifact_target_ext: str) -> str:
+def _terminal_artifact_handoff_section(
+    artifact_target_path: str,
+    artifact_target_ext: str,
+    task_type: str = "",
+) -> str:
     """Build the ``<terminal_artifact_handoff>`` block.
 
     Emitted only when the task carries an explicit
@@ -883,7 +914,7 @@ def _terminal_artifact_handoff_section(artifact_target_path: str, artifact_targe
         f"- Use the exact target path `{safe_target}` for artifact_path unless you have "
         "written exactly one stronger verified deliverable candidate under "
         "/mnt/user-data/outputs/.\n"
-        + _terminal_artifact_format_line(artifact_target_ext)
+        + _terminal_artifact_format_line(artifact_target_ext, task_type)
         + "- If you genuinely cannot create the artifact, do NOT pretend success and do NOT "
         "end with plain text: emit_builder_artifact with a specific, safe fallback_reason "
         "(or accept the force-stop fallback) so the failure is reported honestly.\n"
@@ -1014,8 +1045,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                     companion_artifact=companion_artifact,
                     artifact_target_path=artifact_target_path,
                 )
-        if artifact_target_ext == ".pptx" or (
-            not artifact_target_ext and task_type in {"presentation", "slides", "slide_deck", "deck"}
+        is_presentation_task = _is_presentation_task_type(task_type)
+        is_pdf_presentation_target = artifact_target_ext == ".pdf" and is_presentation_task
+        if artifact_target_ext == ".pptx" or is_pdf_presentation_target or (
+            not artifact_target_ext and is_presentation_task
         ):
             value = state.get("builder_pptx_requested_slide_count")
             if isinstance(value, int):
@@ -1138,7 +1171,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             # emit_builder_artifact (never a plain-text ending). This is the
             # prompt-side fix for builds that "completed without a deliverable".
             sections.append(
-                _terminal_artifact_handoff_section(artifact_target_path, artifact_target_ext)
+                _terminal_artifact_handoff_section(
+                    artifact_target_path,
+                    artifact_target_ext,
+                    task_type,
+                )
             )
 
         if page_target_section := _pdf_page_target_section(page_target_updates):
@@ -1195,8 +1232,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             # hallmark + visual-design surface when visuals are requested OR
             # the target is HTML (Phase 4c: hallmark is the HTML design system).
             include_visual_design=_visuals_requested(delegation_context) or is_html_target,
-            include_pdf_report=artifact_target_ext == ".pdf",
-            include_research_skills=artifact_target_ext == ".pdf"
+            include_pdf_report=artifact_target_ext == ".pdf" and not is_pdf_presentation_target,
+            include_research_skills=(artifact_target_ext == ".pdf" and not is_pdf_presentation_target)
             or task_type in {"research", "document", "visual_report"},
         )
         # Artifact Visual System Phase 5a: the always-injected visual director
@@ -1398,7 +1435,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                     "write_file, bash_tool, or any other tool on this turn. "
                     "Ship what you have NOW, even if partial. "
                     "Use artifact_path pointing to the best file that exists on disk; "
-                    + _critical_emit_guidance(artifact_target_ext)
+                    + _critical_emit_guidance(artifact_target_ext, task_type)
                     + "Do NOT emit with artifact_path=null. If you cannot decide, pick the "
                     + _critical_pick_guidance(artifact_target_ext)
                     + "from the list below.\n"

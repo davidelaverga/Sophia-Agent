@@ -381,7 +381,10 @@ def _is_supabase_thread_list_support_artifact_path(relative_path: str) -> bool:
     """
     normalized = relative_path.strip().lstrip("/").replace("\\", "/")
     parts = [part for part in normalized.split("/") if part]
-    if len(parts) == 1 and parts[0].lower().endswith(".preview.pdf"):
+    if not parts:
+        return False
+    support_roots = {"visuals", "assets", "slides", "sources", "source_artifact", ".builder", "outputs"}
+    if parts[-1].lower().endswith(".preview.pdf") and (len(parts) == 1 or parts[0] not in support_roots):
         return False
     return _is_builder_support_artifact_path(normalized)
 
