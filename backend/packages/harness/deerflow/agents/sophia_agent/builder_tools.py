@@ -34,10 +34,13 @@ def _normalized_target_ext(artifact_target_ext: str | None = None) -> str:
 
 
 def _presentation_toolset_required(task_type: str | None, artifact_target_ext: str | None = None) -> bool:
+    normalized_task_type = _normalized_task_type(task_type)
     target_ext = _normalized_target_ext(artifact_target_ext)
     if target_ext:
-        return target_ext in {".ppt", ".pptx"}
-    return _normalized_task_type(task_type) in _PRESENTATION_TASK_TYPES
+        return target_ext in {".ppt", ".pptx"} or (
+            target_ext == ".pdf" and normalized_task_type in _PRESENTATION_TASK_TYPES
+        )
+    return normalized_task_type in _PRESENTATION_TASK_TYPES
 
 
 def build_builder_tools_for_task_type(

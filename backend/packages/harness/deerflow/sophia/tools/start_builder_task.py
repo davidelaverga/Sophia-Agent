@@ -365,7 +365,11 @@ _STATUS_CONTEXT_AFTER_MATCH_RE = re.compile(
     re.IGNORECASE,
 )
 _OUTPUT_FILENAME_CONTEXT_BEFORE_RE = re.compile(
+    r"(?:"
     r"(?:\bas\b|\bto\b|\binto\b|\bin\b)\s+"
+    r"|"
+    r"\b(?:build|create|draft|export|generate|make|prepare|produce|render|save|write)\s+"
+    r")"
     r"(?:an?\s+)?(?:file\s+)?(?:named\s+|called\s+)?$",
     re.IGNORECASE,
 )

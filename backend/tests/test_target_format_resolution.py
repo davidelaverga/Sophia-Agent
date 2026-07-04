@@ -610,6 +610,22 @@ def test_source_filename_veto_preserves_true_text_data_output_names():
         assert resolution.final_ext == expected, (text, resolution.final_ext, resolution.rule)
 
 
+def test_source_filename_veto_preserves_direct_created_output_names():
+    cases = {
+        "Create report.csv": "csv",
+        "Create data.xlsx": "xlsx",
+        "Write notes.md": "md",
+        "Generate payload.json": "json",
+    }
+    for text, expected in cases.items():
+        resolution = _resolve_target_format(
+            current_user_text=text,
+            description=None,
+            task_type="document",
+        )
+        assert resolution.final_ext == expected, (text, resolution.final_ext, resolution.rule)
+
+
 # ---- bare web-deliverable nouns (prod 2026-06-12, evening window) -----------------
 
 
