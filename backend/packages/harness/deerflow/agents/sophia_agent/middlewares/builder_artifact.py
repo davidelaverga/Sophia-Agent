@@ -572,7 +572,7 @@ def _pptx_slide_visual_reference_count(state: dict[str, Any]) -> int:
             source = slide.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        matches = re.findall(r"<img\b[^>]*\bsrc=[\"']\.\./assets/([^\"']+)[\"']", source, flags=re.IGNORECASE)
+        matches = re.findall(r"<img\b[^>]*\bsrc\s*=\s*[\"']\.\./assets/([^\"']+)[\"']", source, flags=re.IGNORECASE)
         for raw_ref in matches:
             ref = raw_ref.strip().replace("\\", "/")
             pure = PurePosixPath(ref)
@@ -4402,7 +4402,7 @@ def _visual_asset_paths(state: dict[str, Any]) -> list[str]:
 
 
 _MARKDOWN_IMAGE_REF_RE = re.compile(r"!\[[^\]]*]\(([^)\s]+)(?:\s+['\"][^'\"]*['\"])?\)")
-_HTML_IMAGE_SRC_RE = re.compile(r"<img\b[^>]*\bsrc=['\"]([^'\"]+)['\"]", re.IGNORECASE)
+_HTML_IMAGE_SRC_RE = re.compile(r"<img\b[^>]*\bsrc\s*=\s*['\"]([^'\"]+)['\"]", re.IGNORECASE)
 
 
 def _virtual_output_path_from_host(path: Path, state: dict[str, Any]) -> str | None:

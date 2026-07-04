@@ -351,6 +351,39 @@ def test_deck_compile_missing_visuals_ignores_inflated_expected_count(tmp_path):
     assert cmd.update["builder_pptx_diagnostics"]["missing_expected_visual_count"] == 6
 
 
+def test_deck_compile_accepts_spaced_slide_visual_src_attributes(tmp_path):
+    outputs_dir = tmp_path / "outputs"
+    slides = outputs_dir / "slides"
+    assets = outputs_dir / "assets"
+    slides.mkdir(parents=True)
+    assets.mkdir(parents=True)
+    for index in range(1, 4):
+        (assets / f"{index:02d}.png").write_bytes(b"png")
+        (slides / f"{index:02d}.html").write_text(
+            f"<html><body><img alt='' src = \"../assets/{index:02d}.png\"></body></html>",
+            encoding="utf-8",
+        )
+    request = SimpleNamespace(
+        tool_call={
+            "name": "build_deck_from_slides",
+            "id": "tc",
+            "args": {"output_path": f"{_OUTPUTS}deck.pptx"},
+        },
+        state={
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": f"{_OUTPUTS}deck.pptx",
+            "builder_pptx_requested_slide_count": 3,
+            "delegation_context": {"task_type": "presentation"},
+            "builder_pptx_diagnostics": {
+                "image_generation_manifest_requested_count": 3,
+                "image_generation_success_count": 3,
+            },
+        },
+    )
+
+    assert BuilderArtifactMiddleware._deck_compile_visuals_rejection(request) is None
+
+
 def test_deck_builder_result_records_pptx_diagnostics(tmp_path):
     outputs_dir = tmp_path / "outputs"
     outputs_dir.mkdir()
