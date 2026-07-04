@@ -373,7 +373,13 @@ _PRESENTATION_FORMAT_WORD_RE = re.compile(
     r"\b(?:pptx|power\s*point|slide\s+deck|\d+\s*[- ]?\s*slides?|slides?|deck|presentation)\b",
     re.IGNORECASE,
 )
-_SOURCE_VETO_RULES = frozenset({"explicit_presentation_deck"})
+_SOURCE_VETO_RULES = frozenset(
+    {
+        "explicit_presentation_deck",
+        "explicit_spreadsheet",
+        "explicit_word_document",
+    }
+)
 _NEGATION_LOOKBACK_CHARS = 32
 _STATUS_LOOKAHEAD_CHARS = 48
 
@@ -423,6 +429,22 @@ def _presentation_match_is_source_pptx_filename(text: str, match: re.Match[str])
     return not _OUTPUT_FILENAME_CONTEXT_BEFORE_RE.search(prefix)
 
 
+def _match_is_source_office_filename(text: str, match: re.Match[str]) -> bool:
+    group = match.group(0).lower()
+    if group not in {"docx", "xlsx"} or match.start() <= 0 or text[match.start() - 1] != ".":
+        return False
+
+    dot_start = match.start() - 1
+    stem_start = dot_start
+    while stem_start > 0 and re.match(r"[\w./~@%+=,:;()\\-]", text[stem_start - 1]):
+        stem_start -= 1
+    if stem_start == dot_start:
+        return False
+
+    prefix = text[max(0, stem_start - 80) : stem_start]
+    return not _OUTPUT_FILENAME_CONTEXT_BEFORE_RE.search(prefix)
+
+
 def _first_affirmative_match(
     pattern: re.Pattern[str], text: str, *, source_veto: bool = False
 ) -> re.Match[str] | None:
@@ -434,6 +456,8 @@ def _first_affirmative_match(
         if source_veto and _presentation_format_word_negated_inside(match):
             continue
         if source_veto and _presentation_match_is_source_pptx_filename(text, match):
+            continue
+        if source_veto and _match_is_source_office_filename(text, match):
             continue
         if source_veto and _SOURCE_CONTEXT_BEFORE_MATCH_RE.search(prefix):
             continue

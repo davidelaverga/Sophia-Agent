@@ -546,6 +546,38 @@ def test_source_pdf_filename_does_not_beat_later_slide_deck_request():
     assert resolution.rule == "explicit_presentation_deck"
 
 
+def test_source_office_filename_does_not_beat_later_explicit_deliverable():
+    cases = {
+        "Use budget.xlsx to write a markdown summary": "md",
+        "Use outline.docx to create an HTML page": "html",
+        "Convert planning/workbook.xlsx into a CSV file": "csv",
+        "Use docs/outline.docx to draft a report": "pdf",
+    }
+    for text, expected in cases.items():
+        resolution = _resolve_target_format(
+            current_user_text=text,
+            description=None,
+            task_type="document",
+        )
+        assert resolution.final_ext == expected, (text, resolution.final_ext, resolution.rule)
+
+
+def test_source_office_filename_veto_preserves_true_office_outputs():
+    cases = {
+        "Use budget.xlsx to create a spreadsheet": "xlsx",
+        "Use outline.docx to create a Word document": "docx",
+        "Export the notes to a file named summary.docx": "docx",
+        "Export the table to a file named budget.xlsx": "xlsx",
+    }
+    for text, expected in cases.items():
+        resolution = _resolve_target_format(
+            current_user_text=text,
+            description=None,
+            task_type="document",
+        )
+        assert resolution.final_ext == expected, (text, resolution.final_ext, resolution.rule)
+
+
 # ---- bare web-deliverable nouns (prod 2026-06-12, evening window) -----------------
 
 
