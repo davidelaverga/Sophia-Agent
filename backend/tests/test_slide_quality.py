@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from deerflow.agents.sophia_agent.middlewares.slide_quality import (
     GraderConfig,
+    QualityGap,
     SlideQualityInspector,
     SlideSignals,
     chrome_check,
@@ -12,7 +13,6 @@ from deerflow.agents.sophia_agent.middlewares.slide_quality import (
     overflow_check,
     visual_contract_check,
     visual_style_check,
-    QualityGap,
 )
 
 _CLEAN_SLIDE = (
@@ -124,6 +124,17 @@ def test_visual_contract_check_flags_generated_text_and_banned_style():
 def test_visual_contract_check_ignores_negated_banned_style():
     signals = SlideSignals(prompt_sources=[("ok.prompt.json", '{"prompt":"professional visual, no chalkboard style"}')])
     assert visual_contract_check(signals) == []
+
+
+def test_visual_contract_check_ignores_negated_generated_text_phrases():
+    prompts = (
+        '{"prompt":"professional technical visual, avoid rendered text"}',
+        '{"prompt":"professional technical visual with no text inside the image"}',
+        '{"prompt":"professional technical visual without large labels"}',
+    )
+    for index, prompt in enumerate(prompts, start=1):
+        signals = SlideSignals(prompt_sources=[(f"{index}.prompt.json", prompt)])
+        assert visual_contract_check(signals) == []
 
 
 def test_visual_style_check_flags_neon_tiny_text_and_card_overload():

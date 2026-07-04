@@ -272,6 +272,13 @@ def test_slide_count_target_captures_bare_slide_requests() -> None:
     assert _slide_count_target("create a report about the 5 slides I saw") is None
 
 
+def test_slide_count_target_captures_conversion_transition_context() -> None:
+    assert _slide_count_target("convert this report into a 5-slide deck") == 5
+    assert _slide_count_target("turn the notes into a 7 slide presentation") == 7
+    assert _slide_count_target("summarize this memo as a 4-slide deck") == 4
+    assert _slide_count_target("summarize the attached 28-slide deck as a concise presentation") is None
+
+
 def test_slide_qc_fails_visible_prompt_scaffolding(tmp_path: Path, monkeypatch) -> None:
     script = Path(__file__).parents[2] / "skills/public/image-generation/scripts/slide_qc.py"
     spec = importlib.util.spec_from_file_location("slide_qc_under_test", script)

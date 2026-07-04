@@ -411,6 +411,10 @@ _SLIDE_TARGET_OUTPUT_VERB_BEFORE_RE = re.compile(
     r"\b(?:build|create|make|generate|produce|write|render|draft|prepare|deliver)\b(?:\s+\w+){0,6}\s*$",
     re.IGNORECASE,
 )
+_SLIDE_TARGET_OUTPUT_TRANSITION_BEFORE_RE = re.compile(
+    r"\b(?:to|into|as)\s+(?:a|an|the)?\s*$",
+    re.IGNORECASE,
+)
 _SLIDE_TARGET_OUTPUT_NOUN_AFTER_RE = re.compile(
     r"^\s*(?:(?:technical|concise|detailed|short|long|final|pptx)\s+){0,6}"
     r"(?:presentation|deck|slideshow|slides?|pptx)\b",
@@ -497,7 +501,10 @@ def _slide_target_is_output_context(text: str, match: re.Match[str]) -> bool:
         _SLIDE_TARGET_OUTPUT_BEFORE_RE.search(before)
         or _SLIDE_TARGET_BUILD_VERB_ADJACENT_RE.search(before)
         or (
-            _SLIDE_TARGET_OUTPUT_VERB_BEFORE_RE.search(before)
+            (
+                _SLIDE_TARGET_OUTPUT_VERB_BEFORE_RE.search(before)
+                or _SLIDE_TARGET_OUTPUT_TRANSITION_BEFORE_RE.search(before)
+            )
             and _SLIDE_TARGET_OUTPUT_NOUN_AFTER_RE.search(after)
         )
     )

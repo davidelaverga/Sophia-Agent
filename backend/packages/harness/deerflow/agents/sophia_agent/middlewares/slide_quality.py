@@ -209,13 +209,21 @@ def visual_contract_check(signals: SlideSignals) -> list[QualityGap]:
     gaps: list[QualityGap] = []
     for name, source in signals.prompt_sources:
         reasons: list[str] = []
-        if _GENERATED_TEXT_RE.search(source):
+        text_match = next(
+            (
+                match
+                for match in _GENERATED_TEXT_RE.finditer(source)
+                if not _NEGATED_STYLE_RE.search(source[max(0, match.start() - 32) : match.start()])
+            ),
+            None,
+        )
+        if text_match is not None:
             reasons.append("asks the image model to render text/labels/formulas")
         aesthetic_match = next(
             (
                 match
                 for match in _BANNED_AESTHETIC_RE.finditer(source)
-                if not _NEGATED_STYLE_RE.search(source[max(0, match.start() - 32): match.start()])
+                if not _NEGATED_STYLE_RE.search(source[max(0, match.start() - 32) : match.start()])
             ),
             None,
         )
