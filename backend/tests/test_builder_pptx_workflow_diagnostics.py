@@ -556,6 +556,9 @@ def test_pptx_diagnostic_merge_keeps_latest_absolute_deck_counts() -> None:
             "pptx_generator_picture_count": 4,
             "pptx_plan_slide_count": 5,
             "pptx_plan_image_ref_count": 4,
+            "image_generation_manifest_requested_count": 5,
+            "image_generation_manifest_success_count": 3,
+            "image_generation_manifest_failed_count": 2,
         },
         {
             "pptx_generator_attempt_count": 1,
@@ -565,6 +568,9 @@ def test_pptx_diagnostic_merge_keeps_latest_absolute_deck_counts() -> None:
             "pptx_generator_picture_count": 4,
             "pptx_plan_slide_count": 5,
             "pptx_plan_image_ref_count": 4,
+            "image_generation_manifest_requested_count": 5,
+            "image_generation_manifest_success_count": 5,
+            "image_generation_manifest_failed_count": 0,
         },
     )
 
@@ -575,6 +581,9 @@ def test_pptx_diagnostic_merge_keeps_latest_absolute_deck_counts() -> None:
     assert merged["pptx_generator_picture_count"] == 4
     assert merged["pptx_plan_slide_count"] == 5
     assert merged["pptx_plan_image_ref_count"] == 4
+    assert merged["image_generation_manifest_requested_count"] == 5
+    assert merged["image_generation_manifest_success_count"] == 5
+    assert merged["image_generation_manifest_failed_count"] == 0
 
 
 def test_pptx_generation_bash_result_records_title_presence_diagnostics(tmp_path: Path) -> None:

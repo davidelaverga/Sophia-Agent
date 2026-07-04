@@ -9,10 +9,12 @@ from __future__ import annotations
 
 from typing import Any
 
-
 PPTX_DIAGNOSTIC_LATEST_COUNT_KEYS = frozenset(
     {
         "expected_generated_visual_count",
+        "image_generation_manifest_failed_count",
+        "image_generation_manifest_requested_count",
+        "image_generation_manifest_success_count",
         "missing_expected_visual_count",
         "pptx_deck_missing_image_count",
         "pptx_deck_visual_quality_gap_count",
