@@ -26,6 +26,11 @@ _STYLE_TOPIC_SCOPE_RE = re.compile(
     r"document|pdf|report|reports|paper|memo|brief|article|write[- ]?up)\b",
     re.IGNORECASE,
 )
+_STYLE_TOPIC_AFTER_STYLE_RE = re.compile(
+    r"\b(?:aesthetic|brand|color|colour|layout|palette|style|theme|visuals?)\s+"
+    r"(?:for|about|on)\s+(.{1,80})$",
+    re.IGNORECASE,
+)
 _TASK_TOKEN_STOPWORDS = frozenset({
     "about",
     "aesthetic",
@@ -107,6 +112,8 @@ def _style_topic_terms(snippet: str) -> set[str]:
     terms: set[str] = set()
     for match in _STYLE_TOPIC_SCOPE_RE.finditer(snippet):
         terms.update(builder_task_terms(match.group(1)))
+    for match in _STYLE_TOPIC_AFTER_STYLE_RE.finditer(snippet):
+        terms.update(builder_task_terms(match.group(1)))
     return terms
 
 
@@ -132,8 +139,11 @@ def should_exclude_builder_memory(
     task_terms = builder_task_terms(query)
     if task_terms and any(term in lowered for term in task_terms):
         return False
+    topic_terms = _style_topic_terms(normalized)
     if current_modality and current_modality in snippet_modalities:
-        return bool(_style_topic_terms(normalized))
+        return bool(topic_terms)
+    if not snippet_modalities:
+        return bool(topic_terms)
     return True
 
 

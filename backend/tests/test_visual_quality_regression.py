@@ -257,6 +257,37 @@ def test_builder_memory_filter_caps_and_removes_cross_modality_style_memories() 
     ]
 
 
+def test_builder_memory_filter_keeps_modality_neutral_style_preferences() -> None:
+    assert filter_builder_memory_snippets(
+        [
+            "User prefers minimalist aesthetic.",
+            "User likes dark visual style.",
+            "Mention policy gradient baselines when relevant.",
+        ],
+        query="Create a presentation on Kubernetes orchestration.",
+        task_type="presentation",
+        limit=5,
+    ) == [
+        "User prefers minimalist aesthetic.",
+        "User likes dark visual style.",
+        "Mention policy gradient baselines when relevant.",
+    ]
+
+
+def test_builder_memory_filter_removes_stale_topic_scoped_neutral_style() -> None:
+    assert filter_builder_memory_snippets(
+        [
+            "User prefers dark visual style for fintech launches.",
+            "User prefers minimalist aesthetic.",
+        ],
+        query="Create a presentation on Kubernetes orchestration.",
+        task_type="presentation",
+        limit=5,
+    ) == [
+        "User prefers minimalist aesthetic.",
+    ]
+
+
 def test_slide_count_target_is_parsed_from_output_context_only() -> None:
     assert _slide_count_target("Create a 6-slide technical presentation on LangGraph.") == 6
     assert _slide_count_target("Summarize the attached 28-slide deck as a concise presentation.") is None
