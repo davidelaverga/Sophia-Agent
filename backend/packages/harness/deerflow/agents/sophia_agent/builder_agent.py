@@ -28,7 +28,10 @@ from deerflow.agents.sophia_agent.builder_middlewares import (
     log_builder_tracing_startup_status,
     wrap_builder_agent_for_observability,
 )
-from deerflow.agents.sophia_agent.builder_tools import build_builder_tools_for_task_type
+from deerflow.agents.sophia_agent.builder_tools import (
+    assert_deck_tool_contract,
+    build_builder_tools_for_task_type,
+)
 from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.agents.sophia_agent.vision_gate import supports_vision
@@ -176,6 +179,28 @@ def _create_builder_agent(
         vision_enabled=vision_enabled,
         artifact_target_ext=artifact_target_ext,
     )
+    deck_tool_contract = assert_deck_tool_contract(
+        tools,
+        task_type=task_type,
+        artifact_target_ext=artifact_target_ext,
+    )
+    if deck_tool_contract:
+        log_payload = {
+            key: deck_tool_contract.get(key)
+            for key in (
+                "route",
+                "deck_build_service_enabled",
+                "deck_build_service_flag",
+                "legacy_reason",
+                "task_type",
+                "artifact_target_ext",
+                "tool_names",
+            )
+        }
+        if deck_tool_contract.get("legacy_reason") == "deck_build_service_disabled":
+            logger.warning("Sophia fresh PPTX deck route resolved to legacy mode: %s", log_payload)
+        else:
+            logger.info("Sophia fresh PPTX deck route resolved: %s", log_payload)
 
     # D7 / C2 recursion guard (Phase-3 Stage 1 spec):
     # Builder must NEVER spawn AsyncSubAgents (no `start_async_task`) and

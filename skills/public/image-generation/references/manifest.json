@@ -1,6 +1,6 @@
 {
   "version": 2,
-  "default_style": "excalidraw_hand_drawn",
+  "default_style": "clean_flat_vector",
   "deck_rule": "choose one visual_style per deck; vary diagram_type within that style",
   "styles": {
     "clean_flat_vector": {

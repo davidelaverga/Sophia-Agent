@@ -206,14 +206,21 @@ class DeckBuildService:
                 prompt_path = f"{_PROMPTS}/slide-{slide.index:02d}.json"
                 host = _host_path(prompt_path, runtime)
                 host.parent.mkdir(parents=True, exist_ok=True)
+                style = {
+                    "register": deck.register,
+                    "visual_style": "clean_flat_vector",
+                    "aesthetic": "restrained_professional_technical",
+                }
+                style.update(deck.style_profile or {})
                 payload = {
                     "prompt": slide.visual_prompt,
-                    "style": deck.style_profile or {"register": deck.register},
+                    "style": style,
                     "composition": _composition_for_layout(slide.layout_kind),
                     "constraints": [
                         "No slide title, no narrative paragraph, no footer, no page chrome.",
                         "Avoid large readable text inside the image.",
                         "Use restrained professional technical aesthetic unless the user requested another register.",
+                        "Use clean flat vector composition and avoid unrequested stylized or playful modes.",
                     ],
                     "technical": {"aspect_ratio": "16:9", "quality": "high", "slide_visual": True},
                 }

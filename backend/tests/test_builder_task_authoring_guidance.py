@@ -240,7 +240,7 @@ class TestBuilderWorkflowCards:
         assert "then render the real .pdf" not in briefing
 
     def test_pptx_guidance_uses_legacy_tools_when_deck_service_disabled(self, monkeypatch) -> None:
-        monkeypatch.delenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", raising=False)
+        monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "false")
         state = _make_state("presentation")
         state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
         state["delegation_context"]["task"] = "Make a 6-slide technical presentation."
@@ -253,8 +253,8 @@ class TestBuilderWorkflowCards:
         assert "prepare_pptx_image_manifest" in briefing
         assert "build_deck_from_slides" in briefing
 
-    def test_pptx_guidance_uses_deck_service_when_enabled(self, monkeypatch) -> None:
-        monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "true")
+    def test_pptx_guidance_uses_deck_service_by_default(self, monkeypatch) -> None:
+        monkeypatch.delenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", raising=False)
         state = _make_state("presentation")
         state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
         state["delegation_context"]["task"] = "Make a 6-slide technical presentation."

@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+import pytest
 from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
@@ -35,6 +36,11 @@ from deerflow.sandbox.tools import replace_virtual_paths_in_command, validate_lo
 _SCRIPT = "/mnt/skills/public/image-generation/scripts/generate.py"
 _MANIFEST_SCHEMA = "sophia-pptx-image-manifest/v1"
 _MANIFEST_AUTHOR = "prepare_pptx_image_manifest"
+
+
+@pytest.fixture(autouse=True)
+def _legacy_deck_mode_for_legacy_batch_tests(monkeypatch):
+    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "false")
 
 
 def _runtime():
@@ -316,6 +322,31 @@ def test_deck_loop_breaker_fires_at_friction_cap_without_degraded_compile():
     assert "artifact_path=null" in content
     assert "do not compile a partial placeholder deck" in content
     assert result.update["builder_pptx_diagnostics"]["deck_floor_escape_emitted"] is True
+
+
+def test_deck_loop_breaker_terminal_fails_when_required_visuals_are_zero(monkeypatch):
+    monkeypatch.setattr(BuilderArtifactMiddleware, "_upload_fallback_and_fire", lambda *args, **kwargs: None)
+    state = _state_with_image_diagnostics(
+        expected_generated_visual_count=4,
+        successful_generated_visual_count=0,
+        referenced_visual_count=0,
+        missing_expected_visual_count=4,
+        image_generation_success_count=0,
+        image_generation_manifest_requested_count=4,
+        deck_batch_rejection_count=_DECK_FLOOR_ESCAPE_FRICTION_CAP,
+    )
+
+    result = BuilderArtifactMiddleware()._image_generation_block_command(
+        _bash_request(_deck_single_slide_command(), state)
+    )
+
+    assert isinstance(result, Command)
+    assert result.goto == "end"
+    assert result.update["builder_result"]["artifact_path"] is None
+    assert result.update["builder_result"]["failure_code"] == "deck_batch_loop_break"
+    diagnostics = result.update["builder_pptx_diagnostics"]
+    assert diagnostics["deck_batch_terminal_failure"] is True
+    assert diagnostics["image_generation_status"] == "failed"
 
 
 def test_deck_loop_breaker_fires_on_mixed_manifest_and_batch_friction():
@@ -1271,6 +1302,7 @@ def test_terminal_provider_batch_error_does_not_unlock_serial_repair() -> None:
 def test_pptx_route_selected_span_emits_once(monkeypatch) -> None:
     from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
 
+    monkeypatch.delenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", raising=False)
     spans = []
     monkeypatch.setattr(ba, "_safe_langsmith_span", lambda name, **kwargs: spans.append({"name": name, **kwargs}))
     state = _state_with_image_diagnostics()
@@ -1279,5 +1311,8 @@ def test_pptx_route_selected_span_emits_once(monkeypatch) -> None:
 
     assert update["builder_pptx_route_trace_emitted"] is True
     span = next(item for item in spans if item["name"] == "Sophia PPTX Route Selected")
-    assert span["outputs"]["presentation_route"] == "html_slide_to_pptx_raster"
+    assert span["outputs"]["presentation_route"] == "deck_ir_html_raster"
+    assert span["outputs"]["deck_route"] == "deck_build_service"
+    assert span["outputs"]["deck_build_service_enabled"] is True
+    assert span["outputs"]["model_facing_deck_tools"] == ["prepare_deck_build"]
     assert span["outputs"]["visuals_required"] is True

@@ -43,7 +43,10 @@ from deerflow.agents.sophia_agent.middlewares.builder_task import (
     BuilderTaskMiddleware,
     _image_generation_enabled,
 )
-from deerflow.agents.sophia_agent.builder_tools import deck_build_service_enabled
+from deerflow.agents.sophia_agent.builder_tools import (
+    deck_build_service_enabled,
+    deck_build_service_flag_value,
+)
 from deerflow.agents.sophia_agent.middlewares.slide_quality import (
     SlideQualityInspector,
     SlideSignals,
@@ -647,7 +650,7 @@ def _pptx_valid_output_already_terminal(state: dict[str, Any]) -> bool:
 
 def _pptx_visual_completeness_diagnostics_update(state: dict[str, Any]) -> dict[str, Any]:
     return {
-        "presentation_route": "html_slide_to_pptx_raster",
+        "presentation_route": "deck_ir_html_raster" if deck_build_service_enabled() else "html_slide_to_pptx_raster",
         **_pptx_visual_completeness_counts(state),
     }
 
@@ -2078,24 +2081,56 @@ def _trace_pptx_route_selected(state: dict[str, Any]) -> None:
     if not _requested_pptx_artifact(state):
         return
     visual_counts = _pptx_visual_completeness_counts(state)
+    deck_service_enabled = deck_build_service_enabled()
+    deck_route = "deck_build_service" if deck_service_enabled else "legacy_html_slide_to_pptx"
+    presentation_route = "deck_ir_html_raster" if deck_service_enabled else "html_slide_to_pptx_raster"
+    model_facing_deck_tools = (
+        ["prepare_deck_build"]
+        if deck_service_enabled
+        else ["prepare_pptx_image_manifest", "build_deck_from_slides"]
+    )
+    delegation = state.get("delegation_context")
+    task_type = delegation.get("task_type") if isinstance(delegation, dict) else None
     _safe_langsmith_span(
         "Sophia PPTX Route Selected",
         inputs={
             "requested_artifact_ext": _requested_artifact_ext(state),
+            "task_type": task_type,
             "target_slide_count": _pptx_latch_target_slide_count(state),
             "explicit_text_only": _pptx_explicit_text_only_requested(state),
+            "deck_build_service_flag": deck_build_service_flag_value(),
         },
         outputs={
-            "presentation_route": "html_slide_to_pptx_raster",
+            "presentation_route": presentation_route,
+            "deck_route": deck_route,
+            "deck_build_service_enabled": deck_service_enabled,
+            "model_facing_deck_tools": model_facing_deck_tools,
             "visuals_required": _pptx_generated_visuals_required(state),
             "expected_generated_visual_count": visual_counts["expected_generated_visual_count"],
         },
         metadata={
             "sophia_component": "builder_pptx_route",
-            "pptx_route": "html_slide_to_pptx_raster",
+            "pptx_route": deck_route,
         },
         tags=["pptx", "route"],
     )
+    if not deck_service_enabled:
+        _safe_langsmith_span(
+            "Sophia PPTX Legacy Mode Warning",
+            inputs={
+                "requested_artifact_ext": _requested_artifact_ext(state),
+                "deck_build_service_flag": deck_build_service_flag_value(),
+            },
+            outputs={
+                "presentation_route": presentation_route,
+                "warning": "legacy_deck_mode_enabled",
+            },
+            metadata={
+                "sophia_component": "builder_pptx_route",
+                "pptx_route": deck_route,
+            },
+            tags=["pptx", "route", "legacy"],
+        )
 
 
 def _manifest_shape_summary_for_trace(state: dict[str, Any] | None, manifest_path: str | None) -> dict[str, Any]:
@@ -11467,6 +11502,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if not _requested_pptx_artifact(state) or _pptx_explicit_text_only_requested(state):
             return None
         diagnostics = _pptx_diagnostics(state)
+        if bool(diagnostics.get("deck_batch_terminal_failure")):
+            return str(diagnostics.get("primary_image_batch_error_class") or "deck_batch_loop_break")
         if not diagnostics.get("image_generation_manifest_seen"):
             return None
         if int(diagnostics.get("image_generation_manifest_requested_count", 0) or 0) <= 0:
@@ -12140,6 +12177,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         """
         if _requested_artifact_ext(state) != "pptx":
             return None
+        if deck_build_service_enabled():
+            return None
         diagnostics = _pptx_diagnostics(state)
         already = bool(diagnostics.get("deck_floor_escape_emitted"))
         friction = _pptx_diagnostic_count(state, "manifest_rejection_count") + _pptx_diagnostic_count(
@@ -12158,6 +12197,51 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             reason="image_gen_friction_cap_reached",
             outputs={"friction": friction},
         )
+        counts = _pptx_visual_completeness_counts(state)
+        expected = int(counts.get("expected_generated_visual_count", 0) or 0)
+        successful = int(counts.get("successful_generated_visual_count", 0) or 0)
+        if _pptx_generated_visuals_required(state) and expected > 0 and successful == 0:
+            args = request.tool_call.get("args")
+            fallback = self._terminal_pptx_failure_fallback(
+                args if isinstance(args, dict) else {},
+                state,
+                request.runtime,
+                reason="deck_batch_loop_break",
+                steps_completed=int(state.get("builder_non_artifact_turns", 0) or 0) + 1,
+            )
+            logger.warning(
+                "BuilderArtifact: terminal PPTX legacy batch loop break expected=%d successful=%d",
+                expected,
+                successful,
+            )
+            return Command(
+                update={
+                    "messages": [
+                        ToolMessage(
+                            content=json.dumps(fallback, default=str),
+                            tool_call_id=str(request.tool_call.get("id", "") or ""),
+                            name="emit_builder_artifact",
+                        )
+                    ],
+                    "builder_result": fallback,
+                    "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
+                    "builder_pptx_diagnostics": {
+                        **counts,
+                        "deck_floor_escape_emitted": True,
+                        "deck_batch_terminal_failure": True,
+                        "primary_image_batch_status": "failed",
+                        "primary_image_batch_error_class": "deck_batch_loop_break",
+                        "image_generation_status": "failed",
+                    },
+                    "builder_non_artifact_turns": 0,
+                    "builder_task_started_at_ms": 0,
+                    "builder_consecutive_empty_emit_rejections": 0,
+                    "builder_last_missing_emit_path": None,
+                    "builder_consecutive_missing_emit_path_rejections": 0,
+                    **_terminal_halt_fields(state, "pptx_image_generation_failed"),
+                },
+                goto="end",
+            )
         return Command(
             update={
                 "messages": [

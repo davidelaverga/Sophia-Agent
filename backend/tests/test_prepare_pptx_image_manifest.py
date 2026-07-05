@@ -30,8 +30,20 @@ def _call(**kwargs) -> dict:
     return json.loads(manifest_tool.prepare_pptx_image_manifest.func(**kwargs))
 
 
-def test_presentation_toolset_offers_manifest_preparer() -> None:
+def test_presentation_toolset_hides_manifest_preparer_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", raising=False)
+
     names = [getattr(tool, "name", "") for tool in build_builder_tools_for_task_type("presentation", vision_enabled=False)]
+    assert "prepare_deck_build" in names
+    assert "prepare_pptx_image_manifest" not in names
+    assert "build_deck_from_slides" not in names
+
+
+def test_presentation_toolset_offers_manifest_preparer_when_legacy_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "0")
+
+    names = [getattr(tool, "name", "") for tool in build_builder_tools_for_task_type("presentation", vision_enabled=False)]
+    assert "prepare_deck_build" not in names
     assert "prepare_pptx_image_manifest" in names
     assert "build_deck_from_slides" in names
 

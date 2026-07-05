@@ -178,12 +178,9 @@ def test_brand_tokens_resolve_the_georgia_conflict() -> None:
     assert "graphviz" in tokens
 
 
-# Deck steering must use the restored HTML-slide path (build_deck_from_slides)
-# and must not reintroduce image-forward compiler guidance (2026-06-29). These
-# tokens are POSITIVE image-forward instructions that must never appear in a deck
-# correction; `build_deck_from_slides` legitimately mentions `generate.py
-# --plan-file` only inside a "do NOT run …" prohibition, so that phrase is not
-# banned here — these tokens are.
+# Deck steering must use the DeckBuildService path by default and must not
+# reintroduce image-forward compiler guidance. These tokens are POSITIVE
+# image-forward instructions that must never appear in a deck correction.
 _IMAGE_FORWARD_DECK_TOKENS = (
     "pure image-forward",
     "full-slide image",
@@ -237,12 +234,12 @@ def _render_deck_corrections() -> dict[str, str]:
     return {k: v for k, v in messages.items() if isinstance(v, str) and v}
 
 
-def test_deck_corrections_use_html_slide_flow_not_image_forward() -> None:
+def test_deck_corrections_use_deck_build_service_not_image_forward() -> None:
     rendered = _render_deck_corrections()
     canonical = rendered["compile_latch_ready"].lower()
-    assert "build_deck_from_slides" in canonical
-    assert "/mnt/user-data/outputs/slides/" in canonical
-    assert "../assets/" in canonical
+    assert "prepare_deck_build" in canonical
+    assert "build_deck_from_slides" not in canonical
+    assert "/mnt/user-data/outputs/slides/" not in canonical
     for name, message in rendered.items():
         low = message.lower()
         for token in _IMAGE_FORWARD_DECK_TOKENS:
@@ -262,7 +259,7 @@ def test_retired_deck_correction_functions_are_deleted() -> None:
     assert not hasattr(ba.BuilderArtifactMiddleware, "_maybe_inject_pptx_plan_correction")
 
 
-def test_pptx_emit_rejection_messages_use_html_slide_flow(monkeypatch) -> None:
+def test_pptx_emit_rejection_messages_use_deck_build_service(monkeypatch) -> None:
     from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
 
     out = "/mnt/user-data/outputs/"
@@ -274,8 +271,8 @@ def test_pptx_emit_rejection_messages_use_html_slide_flow(monkeypatch) -> None:
     monkeypatch.setattr(ba, "_requested_artifact_ext", lambda _s: "pptx")
     visual_presence = ba.BuilderArtifactMiddleware._visual_presence_rejection_message({}, state)
     assert visual_presence, "visual-presence rejection should render for a pptx with unembedded assets"
-    assert "build_deck_from_slides" in visual_presence
-    assert "../assets/" in visual_presence
+    assert "prepare_deck_build" in visual_presence
+    assert "build_deck_from_slides" not in visual_presence
     for token in _IMAGE_FORWARD_DECK_TOKENS:
         assert token not in visual_presence.lower(), f"image-forward token {token!r} in visual-presence rejection"
 
@@ -283,6 +280,7 @@ def test_pptx_emit_rejection_messages_use_html_slide_flow(monkeypatch) -> None:
     monkeypatch.setattr(ba, "_visuals_requested", lambda _s: False)  # opens the hero guard
     hero = ba.BuilderArtifactMiddleware._hero_rejection_message({}, state)
     assert hero, "hero rejection should render when the hero gate blocks"
-    assert "build_deck_from_slides" in hero
+    assert "prepare_deck_build" in hero
+    assert "build_deck_from_slides" not in hero
     for token in _IMAGE_FORWARD_DECK_TOKENS:
         assert token not in hero.lower(), f"image-forward token {token!r} in hero rejection"

@@ -8,7 +8,11 @@ from types import SimpleNamespace
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
-from deerflow.agents.sophia_agent.builder_tools import build_builder_tools_for_task_type
+from deerflow.agents.sophia_agent.builder_tools import (
+    assert_deck_tool_contract,
+    build_builder_tools_for_task_type,
+    deck_build_service_enabled,
+)
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 from deerflow.sandbox.tools import replace_virtual_path
 from deerflow.sophia.deck_build import service as deck_service
@@ -124,7 +128,13 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert result.referenced_visual_count == 3
     assert compiler_calls == [{"output_path": f"{_OUTPUTS}deck.pptx", "title": "Technical Deck", "slides_dir": f"{_OUTPUTS}slides"}]
     outputs = tmp_path / "outputs"
-    assert len(list((outputs / "assets" / "prompts").glob("slide-*.json"))) == 3
+    prompt_files = sorted((outputs / "assets" / "prompts").glob("slide-*.json"))
+    assert len(prompt_files) == 3
+    prompt_payload = json.loads(prompt_files[0].read_text(encoding="utf-8"))
+    assert prompt_payload["style"]["visual_style"] == "clean_flat_vector"
+    assert prompt_payload["style"]["aesthetic"] == "restrained_professional_technical"
+    assert "clean flat vector" in prompt_payload["constraints"][-1]
+    assert "handwritten" not in json.dumps(prompt_payload).lower()
     manifest = json.loads((outputs / "assets" / "slide-visuals.manifest.json").read_text(encoding="utf-8"))
     assert manifest["manifest_author"] == "DeckBuildService"
     assert len(manifest["items"]) == 3
@@ -451,14 +461,30 @@ def test_prepare_deck_build_tool_schema_excludes_runtime() -> None:
     assert {"deck_title", "slides", "output_path", "register", "visual_policy"}.issubset(properties)
 
 
-def test_presentation_toolset_uses_prepare_deck_build_when_enabled(monkeypatch) -> None:
-    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "true")
+def test_presentation_toolset_uses_prepare_deck_build_by_default(monkeypatch) -> None:
+    monkeypatch.delenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", raising=False)
 
     names = [getattr(tool, "name", "") for tool in build_builder_tools_for_task_type("presentation", vision_enabled=False)]
 
+    assert deck_build_service_enabled() is True
     assert "prepare_deck_build" in names
     assert "prepare_pptx_image_manifest" not in names
     assert "build_deck_from_slides" not in names
+
+
+def test_presentation_toolset_uses_legacy_only_when_explicitly_disabled(monkeypatch) -> None:
+    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "false")
+
+    tools = build_builder_tools_for_task_type("presentation", vision_enabled=False)
+    names = [getattr(tool, "name", "") for tool in tools]
+    contract = assert_deck_tool_contract(tools, task_type="presentation", artifact_target_ext=".pptx")
+
+    assert deck_build_service_enabled() is False
+    assert contract is not None
+    assert contract["route"] == "legacy_html_slide_to_pptx"
+    assert "prepare_deck_build" not in names
+    assert "prepare_pptx_image_manifest" in names
+    assert "build_deck_from_slides" in names
 
 
 def test_prepare_deck_build_failure_is_terminal_command(tmp_path: Path, monkeypatch) -> None:

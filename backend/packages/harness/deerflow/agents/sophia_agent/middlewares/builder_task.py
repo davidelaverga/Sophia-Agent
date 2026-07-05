@@ -35,7 +35,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_budget import (
     force_emit_wall_clock_fraction,
     max_non_artifact_turns,
 )
-from deerflow.agents.sophia_agent.builder_tools import deck_build_service_enabled
+from deerflow.agents.sophia_agent.builder_tools import deck_route_for_task
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.state import _merge_builder_non_artifact_turns
 from deerflow.agents.sophia_agent.utils import log_middleware
@@ -858,7 +858,7 @@ def _terminal_artifact_format_line(artifact_target_ext: str, task_type: str = ""
             "emit_builder_artifact with artifact_type=\"document\".\n"
         )
     if artifact_target_ext == ".pdf" and _is_presentation_task_type(task_type):
-        if deck_build_service_enabled():
+        if deck_route_for_task(task_type, artifact_target_ext) == "deck_build_service":
             return (
                 "- This is a PDF slide-deck delivery target: use the deck workflow, not "
                 "the report renderer. Call prepare_deck_build with the full slide intent "
@@ -1261,7 +1261,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             artifact_target_ext=artifact_target_ext,
             task_type=task_type,
         )
-        deck_service_enabled = deck_build_service_enabled()
+        deck_service_enabled = deck_route_for_task(task_type, artifact_target_ext) == "deck_build_service"
         is_html_target = artifact_target_ext in {".html", ".htm"}
         skills_block = self._build_skills_inventory_block(
             include_image_generation=image_generation_enabled,
