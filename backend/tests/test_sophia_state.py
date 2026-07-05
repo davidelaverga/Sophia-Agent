@@ -5,6 +5,7 @@ from typing import get_type_hints
 
 from deerflow.agents.sophia_agent.state import (
     SophiaState,
+    _merge_builder_non_artifact_turns,
     _merge_builder_pptx_diagnostics,
     _merge_builder_write_diagnostics,
 )
@@ -68,6 +69,15 @@ def test_builder_write_diagnostics_merges_deliverable_paths():
         "/mnt/user-data/outputs/report.html",
         "/mnt/user-data/outputs/deck.md",
     ]
+
+
+def test_builder_non_artifact_turns_merge_reset_wins_same_step_writes():
+    assert _merge_builder_non_artifact_turns(5, 0) == 0
+    assert _merge_builder_non_artifact_turns(5, 6) == 6
+    assert _merge_builder_non_artifact_turns(None, 1) == 1
+    # When a stale absolute increment races with a reset from the same graph
+    # step, the reducer sees current=0/update>1 and preserves the reset.
+    assert _merge_builder_non_artifact_turns(0, 6) == 0
 
 
 def test_builder_pptx_diagnostics_merges_qc_lists_and_latest_deck_counts():

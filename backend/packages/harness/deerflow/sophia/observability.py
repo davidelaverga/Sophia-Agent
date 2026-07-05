@@ -874,7 +874,7 @@ def _base_builder_metadata(
     qc_invocations: int,
     image_forward: bool,
 ) -> dict[str, Any]:
-    return {
+    payload = {
         "slide_count": slide_count,
         "image_count": image_count,
         "image_forward": image_forward,
@@ -884,6 +884,12 @@ def _base_builder_metadata(
         "qc_pass_count": _as_int(diagnostics.get("qc_pass_count")),
         "qc_failure_count": _as_int(diagnostics.get("qc_failure_count")),
     }
+    deck_route = diagnostics.get("deck_route") or ("deck_ir_html_raster" if diagnostics.get("deck_build_id") else None)
+    if deck_route:
+        payload["deck_route"] = deck_route
+    if diagnostics.get("generated_visuals_complete") is not None:
+        payload["generated_visuals_complete"] = diagnostics.get("generated_visuals_complete")
+    return payload
 
 
 def _safe_lifecycle_markers(markers: Any) -> dict[str, Any]:
@@ -924,12 +930,39 @@ def _add_artifact_detail_metadata(
     if slide_hashes:
         metadata["accepted_slide_image_hashes"] = slide_hashes
     _add_quality_metadata(metadata, artifact, diagnostics)
+    _add_deck_build_metadata(metadata, artifact, diagnostics)
     _add_terminal_gate_metadata(
         metadata,
         state=state,
         artifact=artifact,
         diagnostics=diagnostics,
     )
+
+
+def _add_deck_build_metadata(
+    metadata: dict[str, Any],
+    artifact: dict[str, Any],
+    diagnostics: dict[str, Any],
+) -> None:
+    for key, source in {
+        "deck_build_id": diagnostics.get("deck_build_id") or artifact.get("deck_build_id"),
+        "deck_schema_version": diagnostics.get("deck_schema_version") or artifact.get("deck_schema_version"),
+        "deck_status": diagnostics.get("deck_status") or artifact.get("deck_status"),
+        "deck_register": diagnostics.get("deck_register") or artifact.get("deck_register"),
+        "deck_visual_policy": diagnostics.get("deck_visual_policy") or artifact.get("deck_visual_policy"),
+        "deck_failure_code": diagnostics.get("deck_failure_code") or artifact.get("deck_failure_code") or artifact.get("failure_code"),
+        "deck_template_renderer_version": diagnostics.get("deck_template_renderer_version") or artifact.get("deck_template_renderer_version"),
+        "deck_quality_status": diagnostics.get("deck_quality_status") or artifact.get("deck_quality_status"),
+    }.items():
+        _merge_safe_metadata(metadata, key, source)
+    for key, source in {
+        "deck_expected_visual_count": diagnostics.get("expected_generated_visual_count") or artifact.get("expected_generated_visual_count"),
+        "deck_successful_visual_count": diagnostics.get("successful_generated_visual_count") or artifact.get("successful_generated_visual_count"),
+        "deck_missing_visual_count": diagnostics.get("missing_expected_visual_count") or artifact.get("missing_expected_visual_count"),
+    }.items():
+        value = _as_int(source)
+        if value:
+            metadata[key] = value
 
 
 def _builder_observability_tags(

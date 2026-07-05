@@ -43,12 +43,14 @@ from deerflow.agents.sophia_agent.middlewares.builder_task import (
     BuilderTaskMiddleware,
     _image_generation_enabled,
 )
+from deerflow.agents.sophia_agent.builder_tools import deck_build_service_enabled
 from deerflow.agents.sophia_agent.middlewares.slide_quality import (
     SlideQualityInspector,
     SlideSignals,
     format_slide_quality_feedback,
 )
 from deerflow.agents.sophia_agent.pptx_diagnostics import _merge_builder_pptx_diagnostics
+from deerflow.agents.sophia_agent.state import _merge_builder_non_artifact_turns
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.config.paths import VIRTUAL_PATH_PREFIX
 from deerflow.sophia.build_condition import (
@@ -210,6 +212,7 @@ _PDF_CREATION_TOOL_NAMES = frozenset(
 )
 _DECK_BUILD_TOOL_NAME = "build_deck_from_slides"
 _PPTX_IMAGE_MANIFEST_TOOL_NAME = "prepare_pptx_image_manifest"
+_PREPARE_DECK_BUILD_TOOL_NAME = "prepare_deck_build"
 _BUILDER_WRITE_TOOL_NAMES = {"write_file", "write_file_tool"}
 _BUILDER_EDIT_TOOL_NAMES = {"write_file", "write_file_tool", "str_replace", "str_replace_tool"}
 _BUILDER_RESEARCH_TOOL_NAMES = {"builder_web_search", "builder_web_fetch"}
@@ -3373,6 +3376,17 @@ def _apply_image_generation_metadata(artifact: dict[str, Any], state: dict[str, 
         "referenced_visual_count",
         "missing_expected_visual_count",
         "pptx_deck_visual_quality_gap_count",
+        "deck_route",
+        "deck_build_id",
+        "deck_schema_version",
+        "deck_status",
+        "deck_register",
+        "deck_visual_policy",
+        "deck_quality_status",
+        "deck_failure_code",
+        "deck_template_renderer_version",
+        "generated_visuals_complete",
+        "deck_build_path",
     ):
         value = (
             _pptx_visual_completeness_diagnostics_update(state).get(key)
@@ -6117,6 +6131,17 @@ def _log_pptx_skill_correction(
 
 def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
     """The single source of truth for HTML-slide deck steering."""
+    if deck_build_service_enabled():
+        target = state.get("builder_artifact_target_path") or f"{_OUTPUTS_VIRTUAL_PREFIX}deck.pptx"
+        return (
+            "[Sophia/deck build latch]\n"
+            "This is a fresh PPTX deck build. Stop authoring lower-level deck files or compiler "
+            "commands. Call `prepare_deck_build` exactly once with the complete slide intent list "
+            f"and output_path='{target}'. The harness will write prompt files, run generated visuals, "
+            "render slide templates, compile the PPTX, evaluate quality, and return either the "
+            "deliverable path or a terminal failure. If it succeeds, emit the returned PPTX; if it "
+            "fails, emit artifact_path=null with the returned failure code and summary."
+        )
     target_count = _pptx_latch_target_slide_count(state)
     slide_html_count = _pptx_slide_html_count(state)
     target = state.get("builder_artifact_target_path") or f"{_OUTPUTS_VIRTUAL_PREFIX}deck.pptx"
@@ -6219,7 +6244,7 @@ def _wrote_before_research(
 
 class BuilderArtifactState(AgentState):
     builder_result: NotRequired[dict | None]
-    builder_non_artifact_turns: NotRequired[int]
+    builder_non_artifact_turns: NotRequired[Annotated[int, _merge_builder_non_artifact_turns]]
     builder_last_tool_names: NotRequired[list[str]]
     builder_tool_turn_summaries: NotRequired[list[dict]]
     builder_skill_reads: NotRequired[dict[str, bool]]
@@ -8328,6 +8353,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if not deck_problems:
             return ""
         listing = "\n".join(f"- {problem}" for problem in deck_problems[:8])
+        if deck_build_service_enabled():
+            return (
+                "Error: emit_builder_artifact rejected — the PPTX deck failed Sophia "
+                "structural validation:\n"
+                f"{listing}\n\n"
+                "For fresh decks, call `prepare_deck_build` with corrected slide intent and "
+                "emit only its returned PPTX or its clean null-artifact failure. Do not repair "
+                "through lower-level deck files or compiler commands."
+            )
         return (
             "Error: emit_builder_artifact rejected — the PPTX deck failed Sophia "
             "structural validation:\n"
@@ -8357,12 +8391,22 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 )
                 subject = "cover"
             else:
-                wiring = (
-                    "save it as /mnt/user-data/outputs/assets/slide-01.png, embed it in your first "
-                    "slide's HTML by the relative path ../assets/slide-01.png, then call "
-                    "build_deck_from_slides"
-                )
+                if deck_build_service_enabled():
+                    wiring = "call prepare_deck_build with a complete visual_prompt for every slide"
+                else:
+                    wiring = (
+                        "save it as /mnt/user-data/outputs/assets/slide-01.png, embed it in your first "
+                        "slide's HTML by the relative path ../assets/slide-01.png, then call "
+                        "build_deck_from_slides"
+                    )
                 subject = "hero"
+            if requested_ext == "pptx" and deck_build_service_enabled():
+                return (
+                    "Error: emit_builder_artifact rejected — generated imagery is ON for "
+                    f"this build but no generated {subject} image succeeded. Do this now: "
+                    f"{wiring}. If DeckBuildService cannot produce the required visuals, emit "
+                    "artifact_path=null with its returned failure code and summary."
+                )
             return (
                 "Error: emit_builder_artifact rejected — generated imagery is ON for "
                 f"this build but no generated {subject} image succeeded. Do this now: "
@@ -8405,9 +8449,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 requested_ext = _requested_artifact_ext(state)
                 if requested_ext == "pptx":
                     embed_hint = (
-                        "Embed each generated PNG in its slide HTML under "
-                        "`/mnt/user-data/outputs/slides/` by a relative `../assets/<file>` path, "
-                        "then call `build_deck_from_slides` to rebuild the deck."
+                        "For fresh decks, rebuild through `prepare_deck_build` so the harness "
+                        "renders the slide templates and references the generated visuals."
+                        if deck_build_service_enabled()
+                        else (
+                            "Embed each generated PNG in its slide HTML under "
+                            "`/mnt/user-data/outputs/slides/` by a relative `../assets/<file>` path, "
+                            "then call `build_deck_from_slides` to rebuild the deck."
+                        )
                     )
                 elif requested_ext == "pdf":
                     embed_hint = (
@@ -9793,11 +9842,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         "Image generation has failed "
                         f"{attempts} times with no usable output "
                         f"(last error: {diagnostics.get('image_generation_error_class') or 'unknown'}). "
-                        "Stop calling the image-generation script in this build and do NOT keep "
-                        "retrying images or switch to python-pptx. Your slide HTML under "
-                        "`/mnt/user-data/outputs/slides/` may still be useful source material, but "
-                        "do not compile a partial placeholder deck. Stop cleanly with artifact_path=null "
-                        "and explain that required slide imagery could not be generated."
+                        + (
+                            "Stop manually retrying lower-level image or deck tools. For fresh PPTX "
+                            "decks, use `prepare_deck_build` once with corrected slide intent; if it "
+                            "returns failure, stop cleanly with artifact_path=null and its failure metadata."
+                            if deck_build_service_enabled()
+                            else (
+                                "Stop calling the image-generation script in this build and do NOT keep "
+                                "retrying images or switch to python-pptx. Your slide HTML under "
+                                "`/mnt/user-data/outputs/slides/` may still be useful source material, but "
+                                "do not compile a partial placeholder deck. Stop cleanly with artifact_path=null "
+                                "and explain that required slide imagery could not be generated."
+                            )
+                        )
                     )
                 )
             ],
@@ -10588,13 +10645,25 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         artifact_path = args.get("artifact_path")
         if _artifact_ext_from_path(artifact_path) != "pptx":
             return args
+        updated = dict(args)
+        artifact_files = [
+            entry
+            for entry in (updated.get("artifact_files") or [])
+            if isinstance(entry, dict)
+        ]
+        deck_build_path = _pptx_diagnostics(state).get("deck_build_path")
+        if isinstance(deck_build_path, str) and deck_build_path.strip():
+            deck_build_name = PurePosixPath(deck_build_path).name
+            if not any(entry.get("path") == deck_build_path for entry in artifact_files):
+                artifact_files.append({"path": deck_build_path, "role": "internal", "name": deck_build_name})
+        if artifact_files:
+            updated["artifact_files"] = _artifact_file_entries({**updated, "artifact_files": artifact_files})
         host_file = _local_output_file_for_artifact(state, artifact_path)
         if host_file is None or not host_file.is_file():
-            return args
+            return updated
         preview = maybe_render_pptx_preview(host_file)
         if preview is None:
-            return args
-        updated = dict(args)
+            return updated
         updated["artifact_preview_filename"] = preview.name
         preview_virtual = str(PurePosixPath(str(artifact_path)).parent / preview.name)
         supporting = [
@@ -10866,6 +10935,172 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "expected_generated_visual_count": expected_count,
             "successful_generated_visual_count": 0,
         }
+
+    @staticmethod
+    def _prepare_deck_build_result_delta(
+        request: ToolCallRequest,
+        result: ToolMessage,
+    ) -> dict[str, Any] | None:
+        payload = BuilderArtifactMiddleware._deck_builder_result_payload(result)
+        if payload is None:
+            return None
+        success = payload.get("success") is True
+        pptx_path = payload.get("pptx_path") if isinstance(payload.get("pptx_path"), str) else None
+        exists, bytes_count, status_reason = _virtual_output_status(request.state or {}, pptx_path)
+        if success and not exists:
+            success = False
+        slide_count = int(payload.get("slide_count") or 0)
+        expected = int(payload.get("expected_visual_count") or 0)
+        successful = int(payload.get("successful_visual_count") or 0)
+        referenced = int(payload.get("referenced_visual_count") or successful or 0)
+        missing = int(payload.get("missing_visual_count") or max(0, expected - min(successful, referenced)))
+        quality_status = str(payload.get("quality_status") or ("passed" if success else "failed"))
+        failure_code = payload.get("failure_code") or (None if success else status_reason or "deck_build_failed")
+        delta: dict[str, Any] = {
+            "presentation_route": "deck_ir_html_raster",
+            "deck_route": "deck_ir_html_raster",
+            "deck_build_id": payload.get("build_id"),
+            "deck_schema_version": "sophia-deck-build/v1",
+            "deck_status": "evaluated" if success else "failed_terminal",
+            "deck_quality_status": quality_status,
+            "deck_failure_code": failure_code,
+            "deck_template_renderer_version": "deck_build_templates_v1",
+            "expected_generated_visual_count": expected,
+            "successful_generated_visual_count": successful,
+            "referenced_visual_count": referenced,
+            "missing_expected_visual_count": missing,
+            "generated_visuals_complete": expected == successful == referenced and missing == 0,
+            "image_generation_status": "success" if success else "failed",
+            "primary_image_batch_status": "success" if success else "failed",
+            "primary_image_batch_error_class": failure_code,
+            "pptx_plan_slide_count": slide_count,
+            "pptx_generator_slide_count": slide_count if success else 0,
+            "pptx_generator_picture_count": slide_count if success else 0,
+            "pptx_generator_attempt_count": 1 if success else 0,
+            "pptx_generator_success_count": 1 if success else 0,
+            "pptx_generator_bytes_total": bytes_count if success else 0,
+            "pptx_generator_error_class": None if success else failure_code,
+        }
+        if pptx_path and success:
+            delta["pptx_output_paths"] = [pptx_path]
+            if _pptx_diagnostics(request.state or {}).get("time_to_first_valid_artifact_ms") is None:
+                elapsed = _elapsed_since_builder_start_ms(request.state or {})
+                if elapsed is not None:
+                    delta["time_to_first_valid_artifact_ms"] = elapsed
+        if payload.get("quality_warning"):
+            delta["pptx_deck_quality_warning"] = payload.get("quality_warning")
+        deck_build_path = payload.get("deck_build_path")
+        if isinstance(deck_build_path, str) and deck_build_path.strip():
+            delta["deck_build_path"] = deck_build_path
+        return delta
+
+    def _prepare_deck_build_result_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+    ) -> ToolMessage | Command:
+        if not isinstance(result, ToolMessage):
+            return result
+        payload = self._deck_builder_result_payload(result)
+        delta = self._prepare_deck_build_result_delta(request, result)
+        if delta is None or payload is None:
+            return result
+        if payload.get("success") is not True:
+            fallback = self._prepare_deck_build_failure_fallback(request, payload, delta)
+            return Command(
+                update={
+                    "messages": [result],
+                    "builder_pptx_diagnostics": delta,
+                    "builder_result": fallback,
+                    "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
+                    "builder_non_artifact_turns": 0,
+                    "builder_task_started_at_ms": 0,
+                    **_terminal_halt_fields(request.state or {}, "deck_build_service_failed"),
+                },
+                goto="end",
+            )
+        return Command(
+            update={
+                "messages": [result],
+                "builder_pptx_diagnostics": delta,
+                "builder_pptx_compile_latch_pending": False,
+                "builder_pptx_compile_repair_pending": False,
+            }
+        )
+
+    def _prepare_deck_build_failure_fallback(
+        self,
+        request: ToolCallRequest,
+        payload: dict[str, Any],
+        delta: dict[str, Any],
+    ) -> dict[str, Any]:
+        state = request.state or {}
+        failure_code = str(payload.get("failure_code") or "deck_build_failed")
+        failure_summary = str(payload.get("failure_summary") or "DeckBuildService failed before a deliverable was available.")
+        fallback = {
+            "artifact_path": None,
+            "artifact_type": "presentation",
+            "artifact_title": state.get("builder_artifact_target_title") or payload.get("deck_title") or "PPTX deck generation failed",
+            "steps_completed": int(state.get("builder_non_artifact_turns", 0) or 0) + 1,
+            "decisions_made": [],
+            "companion_summary": failure_summary,
+            "companion_tone_hint": "Direct and apologetic — the deck build failed before a quality PPTX was available.",
+            "user_next_action": "Retry after correcting the deck input or production image-generation issue named in the failure metadata.",
+            "confidence": 0.0,
+            "status": "error",
+            "error_reason": failure_code,
+            "artifact_acceptance_status": "failed",
+            "failure_code": failure_code,
+            "failure_summary": failure_summary,
+            "deck_build_id": payload.get("build_id"),
+            "deck_build_path": payload.get("deck_build_path"),
+            "deck_quality_status": payload.get("quality_status") or "failed",
+            "image_generation_status": delta.get("image_generation_status"),
+            "primary_image_batch_status": delta.get("primary_image_batch_status"),
+            "primary_image_batch_error_class": delta.get("primary_image_batch_error_class"),
+            "expected_generated_visual_count": delta.get("expected_generated_visual_count"),
+            "successful_generated_visual_count": delta.get("successful_generated_visual_count"),
+            "referenced_visual_count": delta.get("referenced_visual_count"),
+            "missing_expected_visual_count": delta.get("missing_expected_visual_count"),
+        }
+        deck_build_path = payload.get("deck_build_path")
+        if isinstance(deck_build_path, str) and deck_build_path.strip():
+            fallback["artifact_files"] = [
+                {
+                    "path": deck_build_path,
+                    "role": "internal",
+                    "name": PurePosixPath(deck_build_path).name,
+                }
+            ]
+        fallback = _apply_artifact_request_metadata(
+            fallback,
+            state,
+            fallback_reason="deck_build_service_failed",
+        )
+        self._attach_terminal_failure_diagnostics(
+            state,
+            request.runtime,
+            fallback,
+            failure_stage="deck_build_service",
+            failure_code=failure_code,
+            failure_reason=failure_summary,
+            retryable=bool(payload.get("retryable")),
+            emit_attempted=True,
+            emit_tool_call_seen=False,
+        )
+        _trace_pptx_terminal_outcome(
+            state=state,
+            artifact=fallback,
+            status="error",
+            failure_code=failure_code,
+        )
+        self._upload_fallback_and_fire(
+            state=state,
+            runtime=request.runtime,
+            fallback=fallback,
+            status="failed",
+        )
+        return fallback
 
     @staticmethod
     def _deck_builder_output_path(request: ToolCallRequest, payload: dict[str, Any]) -> str | None:
@@ -11184,6 +11419,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._edit_result_command(request, result)
         if tool_name in _PDF_CREATION_TOOL_NAMES and isinstance(result, ToolMessage):
             return self._pdf_result_command(request, result)
+        if tool_name == _PREPARE_DECK_BUILD_TOOL_NAME:
+            return self._prepare_deck_build_result_command(request, result)
         if tool_name == _DECK_BUILD_TOOL_NAME:
             return self._deck_builder_result_command(request, result)
         if tool_name == _PPTX_IMAGE_MANIFEST_TOOL_NAME and isinstance(result, ToolMessage):
@@ -11421,6 +11658,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if visual_design_block is not None:
             return visual_design_block
         if request.tool_call.get("name") != "emit_builder_artifact":
+            deck_service_block = self._deck_build_service_legacy_tool_rejection(request)
+            if deck_service_block is not None:
+                return deck_service_block
             deck_block = self._deck_improvisation_rejection(request)
             if deck_block is not None:
                 return deck_block
@@ -11595,6 +11835,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         diagnostics = _pptx_diagnostics(state)
         if _pptx_explicit_text_only_requested(state):
             return None
+        if deck_build_service_enabled():
+            return (
+                "[Sophia/deck-build] Fresh PPTX deck visuals are generated internally by "
+                "`prepare_deck_build`. Do not call image-generation scripts directly. Submit "
+                "the complete slide intent list through prepare_deck_build; the harness owns "
+                "prompt files, manifest creation, image generation, slide rendering, and compile."
+            )
         billable = [
             segment
             for segment in _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS)
@@ -11681,6 +11928,53 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
 
     @staticmethod
+    def _deck_build_service_legacy_tool_rejection(request: ToolCallRequest) -> Command | None:
+        if not deck_build_service_enabled():
+            return None
+        state = request.state or {}
+        if not _requested_pptx_artifact(state):
+            return None
+        name = str(request.tool_call.get("name") or "")
+        args = request.tool_call.get("args")
+        if not isinstance(args, dict):
+            return None
+        blocked = name in {_PPTX_IMAGE_MANIFEST_TOOL_NAME, _DECK_BUILD_TOOL_NAME}
+        command = str(args.get("command") or "")
+        path = str(args.get("path") or args.get("file_path") or "")
+        if name in {"bash", "bash_tool"} and (
+            "image-generation/scripts/generate.py" in command
+            or "ppt-generation/scripts/generate.py" in command
+            or "compile_pptx" in command
+        ):
+            blocked = True
+        if name in {"write_file", "write_file_tool", "str_replace", "str_replace_tool"} and (
+            "/mnt/user-data/outputs/slides/" in path
+            or "/mnt/user-data/outputs/assets/prompts/" in path
+        ):
+            blocked = True
+        if not blocked:
+            return None
+        return Command(
+            update={
+                "messages": [
+                    _error_tool_message(
+                        content=(
+                            "[Sophia/deck-build] Fresh PPTX decks are built through "
+                            "`prepare_deck_build`. Do not call image-generation scripts, "
+                            "prepare_pptx_image_manifest, build_deck_from_slides, python-pptx, "
+                            "or pptxgenjs directly. Submit slide intent through prepare_deck_build; "
+                            "the harness owns visual generation, slide rendering, compilation, "
+                            "evaluation, and terminal failure."
+                        ),
+                        tool_call_id=request.tool_call.get("id", ""),
+                        name=name,
+                    )
+                ],
+            },
+            goto="model",
+        )
+
+    @staticmethod
     def _deck_improvisation_haystack(name: str, args: dict[str, Any]) -> str | None:
         if name in {"bash", "bash_tool"}:
             return str(args.get("command") or "").lower()
@@ -11709,7 +12003,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         remain blocked.
         """
         state = request.state or {}
-        if not _requested_pptx_artifact(state):
+        if _requested_artifact_ext(state) != "pptx":
             return None
         name = str(request.tool_call.get("name") or "")
         args = request.tool_call.get("args")
@@ -11729,18 +12023,27 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if not any(sig in haystack for sig in signals):
             return None
         logger.warning("[BuilderDeck] phase=improvisation_blocked tool=%s", name)
+        if deck_build_service_enabled():
+            content = (
+                "[Sophia/deck-build] Fresh PPTX decks are built through `prepare_deck_build`. "
+                "Do not write custom deck compiler code or invoke deck compilers directly. "
+                "Submit slide intent through prepare_deck_build; the harness owns visual "
+                "generation, slide rendering, compilation, evaluation, and terminal failure."
+            )
+        else:
+            content = (
+                "[Sophia/deck-build] Do not write custom python-pptx/pptxgenjs code or "
+                "invoke deck compilers directly. Author one self-contained 1920x1080 HTML "
+                "file per slide under `/mnt/user-data/outputs/slides/` (real DOM title + "
+                "narrative + one embedded `../assets/<file>` visual), then call "
+                "`build_deck_from_slides(output_path, title)` — it renders each slide and "
+                "compiles the .pptx for you."
+            )
         return Command(
             update={
                 "messages": [
                     _error_tool_message(
-                        content=(
-                            "[Sophia/deck-build] Do not write custom python-pptx/pptxgenjs code or "
-                            "invoke deck compilers directly. Author one self-contained 1920x1080 HTML "
-                            "file per slide under `/mnt/user-data/outputs/slides/` (real DOM title + "
-                            "narrative + one embedded `../assets/<file>` visual), then call "
-                            "`build_deck_from_slides(output_path, title)` — it renders each slide and "
-                            "compiles the .pptx for you."
-                        ),
+                        content=content,
                         tool_call_id=request.tool_call.get("id", ""),
                         name=name,
                     ),
@@ -11754,6 +12057,23 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if request.tool_call.get("name") != _DECK_BUILD_TOOL_NAME:
             return None
         state = request.state or {}
+        if deck_build_service_enabled() and _requested_pptx_artifact(state):
+            return Command(
+                update={
+                    "messages": [
+                        _error_tool_message(
+                            content=(
+                                "[Sophia/deck-build] Fresh PPTX decks are compiled internally by "
+                                "`prepare_deck_build`; do not call build_deck_from_slides directly. "
+                                "Submit corrected slide intent through prepare_deck_build."
+                            ),
+                            tool_call_id=request.tool_call.get("id", ""),
+                            name=_DECK_BUILD_TOOL_NAME,
+                        )
+                    ],
+                },
+                goto="model",
+            )
         if not _pptx_generated_visuals_required(state) or _pptx_generated_visuals_complete(state):
             return None
         diagnostics = _pptx_diagnostics(state)

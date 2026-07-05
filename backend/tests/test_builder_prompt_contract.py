@@ -27,10 +27,9 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
 
     assert "Finish with `emit_builder_artifact`" in contract
     assert "requested primary artifact" in contract
-    # HTML-slide decks (restored 2026-06-29): author slides/*.html + build_deck_from_slides.
-    assert "Presentations are HTML-slide decks" in contract
-    assert "build_deck_from_slides" in contract
-    assert "../assets/<file>" in contract
+    assert "Fresh presentations are built through `prepare_deck_build`" in contract
+    assert "slide intent" in contract
+    assert "one generated visual-only asset per slide" in contract
     assert "pure image-forward" not in contract
     assert "deck_plan.json" not in contract
     # PDF reports are authored as HTML and rendered via render_html_to_pdf; the
@@ -45,9 +44,9 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
 def test_visual_composition_routes_pptx_and_pdf_to_separate_pipelines() -> None:
     directives = _sophia_prompt("visual_composition.md")
 
-    assert "Presentations (`.pptx`) are HTML-slide decks" in directives
-    assert "build_deck_from_slides" in directives
-    assert "../assets/<file>" in directives
+    assert "Presentations (`.pptx`) are DeckBuildService decks" in directives
+    assert "prepare_deck_build" in directives
+    assert "one 16:9 visual-only asset per slide" in directives
     assert "pure image-forward" not in directives
     assert "deck_plan.json" not in directives
     # PDF reports are authored as one self-contained HTML file with inline <svg>
@@ -61,19 +60,16 @@ def test_visual_composition_routes_pptx_and_pdf_to_separate_pipelines() -> None:
     assert "generate_report_chart" not in directives
 
 
-def test_ppt_generation_skill_authors_html_slide_decks() -> None:
+def test_ppt_generation_skill_routes_fresh_decks_to_deck_build_service() -> None:
     text = _skill("ppt-generation")
 
-    assert "build_deck_from_slides" in text
-    assert "prepare_pptx_image_manifest" in text
-    assert "do not hand-write the" in text.lower()
-    assert "slides/" in text
-    assert "../assets/" in text
-    assert "--slide-visual" in text
-    assert "prepare_pptx_image_manifest" in text
+    assert "prepare_deck_build" in text
+    assert "DeckBuildService" in text
+    assert "slide intent" in text
+    assert "visual_prompt" in text
     lowered = text.lower()
-    assert "hand-write the" in lowered and "batch manifest" in lowered
-    assert "VISUAL-ONLY" in text or "visual area only" in text.lower()
+    assert "do not write prompt json files" in lowered
+    assert "do not hand-write slide html" in lowered
     assert "python-pptx" in text  # appears only as a prohibition
     assert "pptxgenjs" in text
     # image-forward residue absent
@@ -83,19 +79,18 @@ def test_ppt_generation_skill_authors_html_slide_decks() -> None:
     assert "Every slide is a single 16:9 image" not in text
     assert "generate_visual_asset" not in text
     assert "generate_report_chart" not in text
-    assert text.count('<div class="visual"><img src="../assets/01-cover.png" alt="..."></div>') == 1
+    assert "do not call `build_deck_from_slides`" in text
 
 
 def test_ppt_generation_skill_requires_opaque_edges() -> None:
     # White-space guarantee for the HTML path: the slide must be opaque to all
     # four edges, without forcing a dark aesthetic.
     text = _skill("ppt-generation")
-    assert "html, body { margin: 0; padding: 0; background: #f7f9fc; }" in text
     lowered = text.lower()
-    assert "opaque to all four edges" in lowered
-    assert "light or\n  dark" in lowered
+    assert "opaque to all edges" in lowered
+    assert "light or dark" in lowered
     assert "opaque dark to all four edges" not in lowered
-    assert "never baked into the image" in lowered
+    assert "no image-baked title" in lowered
 
 
 def test_pdf_report_skill_uses_html_and_inline_svg() -> None:

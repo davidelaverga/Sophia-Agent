@@ -98,6 +98,28 @@ def _union_string_list(
     return list(seen)
 
 
+def _merge_builder_non_artifact_turns(current: int | None, update: int | None) -> int:
+    """Merge builder turn counters safely across concurrent graph writes.
+
+    Most writers emit an absolute counter value, while successful artifact/tool
+    paths emit ``0`` to reset the budget. A plain LAST_VALUE channel crashes when
+    two middleware branches write the key in one LangGraph step. Reset must win
+    over stale absolute increments, but the normal first increment from 0 -> 1
+    must still work.
+    """
+    if update is None:
+        return int(current or 0)
+    update_int = int(update or 0)
+    if current is None:
+        return update_int
+    current_int = int(current or 0)
+    if update_int == 0:
+        return 0
+    if current_int == 0 and update_int > 1:
+        return 0
+    return max(current_int, update_int)
+
+
 def _merge_search_sources(
     current: list[dict] | None, update: list[dict] | None
 ) -> list[dict]:
@@ -276,7 +298,7 @@ class SophiaState(AgentState):
     last_builder_artifact: NotRequired[dict | None]
     delegation_context: NotRequired[dict | None]
     async_tasks: Annotated[NotRequired[dict[str, dict]], merge_async_tasks]
-    builder_non_artifact_turns: NotRequired[int]
+    builder_non_artifact_turns: NotRequired[Annotated[int, _merge_builder_non_artifact_turns]]
     builder_last_tool_names: NotRequired[list[str]]
     builder_tool_turn_summaries: NotRequired[list[dict]]
     builder_update_epoch: NotRequired[int]

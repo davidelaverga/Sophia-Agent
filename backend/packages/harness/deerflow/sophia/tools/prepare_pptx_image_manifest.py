@@ -109,14 +109,18 @@ def _manifest_shape_summary(data: object) -> dict[str, Any]:
     return {"top_level_type": type(data).__name__}
 
 
-def _error_payload(error_type: str, error: str, *, prompt_files: list[str], manifest_path: str) -> str:
-    outputs = {
+def _error_payload_dict(error_type: str, error: str, *, prompt_files: list[str], manifest_path: str) -> dict[str, Any]:
+    return {
         "success": False,
         "error_type": error_type,
         "error": error,
         "manifest_path": manifest_path,
         "prompt_count": len(prompt_files),
     }
+
+
+def _error_payload(error_type: str, error: str, *, prompt_files: list[str], manifest_path: str) -> str:
+    outputs = _error_payload_dict(error_type, error, prompt_files=prompt_files, manifest_path=manifest_path)
     _trace_manifest_tool(
         "Sophia PPTX Image Manifest Rejected",
         inputs={
@@ -131,38 +135,31 @@ def _error_payload(error_type: str, error: str, *, prompt_files: list[str], mani
     return _result(**outputs)
 
 
-@tool("prepare_pptx_image_manifest", parse_docstring=True)
-def prepare_pptx_image_manifest(
-    runtime: ToolRuntime,
+def create_pptx_image_manifest_core(
+    *,
+    thread_data: dict[str, Any] | None,
     prompt_files: list[str],
     manifest_path: str = _DEFAULT_MANIFEST_PATH,
-) -> str:
-    """Create the deterministic PPTX slide-visual image manifest.
-
-    Args:
-        prompt_files: Ordered list of one readable prompt JSON file per slide.
-            The first prompt is slide 1, the second prompt is slide 2, and so on.
-            Prompt files may live under /mnt/user-data/workspace/ or
-            /mnt/user-data/outputs/.
-        manifest_path: Optional /mnt/user-data/outputs/... path for the manifest
-            JSON. Defaults to /mnt/user-data/outputs/assets/slide-visuals.manifest.json.
-    """
+    manifest_author: str = "prepare_pptx_image_manifest",
+    trace: bool = True,
+) -> dict[str, Any]:
+    """Create the deterministic PPTX slide-visual image manifest."""
     if not isinstance(prompt_files, list) or not prompt_files:
-        return _error_payload(
+        return _error_payload_dict(
             "invalid_input",
             "prompt_files must be a non-empty ordered list.",
             prompt_files=[],
             manifest_path=manifest_path,
         )
     if len(prompt_files) > _MAX_PROMPT_FILES:
-        return _error_payload(
+        return _error_payload_dict(
             "invalid_input",
             f"prompt_files may contain at most {_MAX_PROMPT_FILES} slide prompts.",
             prompt_files=prompt_files,
             manifest_path=manifest_path,
         )
     if len(set(prompt_files)) != len(prompt_files):
-        return _error_payload(
+        return _error_payload_dict(
             "duplicate_prompt_file",
             "prompt_files must not contain duplicates.",
             prompt_files=prompt_files,
@@ -170,18 +167,17 @@ def prepare_pptx_image_manifest(
         )
     manifest_error = _ensure_relative_to_outputs("manifest_path", manifest_path)
     if manifest_error is not None:
-        return _error_payload(
+        return _error_payload_dict(
             "invalid_manifest_path",
             manifest_error,
             prompt_files=prompt_files,
             manifest_path=manifest_path,
         )
 
-    thread_data = get_thread_data(runtime)
     sanitized_prompts: list[dict[str, Any]] = []
     for index, prompt_file in enumerate(prompt_files, start=1):
         if not isinstance(prompt_file, str):
-            return _error_payload(
+            return _error_payload_dict(
                 "invalid_prompt_file",
                 f"prompt_files[{index - 1}] must be a string.",
                 prompt_files=prompt_files,
@@ -189,7 +185,7 @@ def prepare_pptx_image_manifest(
             )
         prompt_error = _virtual_path_error(f"prompt_files[{index - 1}]", prompt_file, allow_workspace=True)
         if prompt_error is not None:
-            return _error_payload(
+            return _error_payload_dict(
                 "invalid_prompt_file",
                 prompt_error,
                 prompt_files=prompt_files,
@@ -197,7 +193,7 @@ def prepare_pptx_image_manifest(
             )
         prompt_host = _host_path_for_virtual(prompt_file, thread_data)
         if not prompt_host.is_file():
-            return _error_payload(
+            return _error_payload_dict(
                 "manifest_prompt_missing",
                 f"Prompt file is not readable: {_safe_basename(prompt_file)}",
                 prompt_files=prompt_files,
@@ -230,7 +226,7 @@ def prepare_pptx_image_manifest(
     ]
     payload = {
         "schema_version": _MANIFEST_SCHEMA_VERSION,
-        "manifest_author": "prepare_pptx_image_manifest",
+        "manifest_author": manifest_author,
         "items": items,
     }
     manifest_host.write_text(json.dumps(payload, indent=2), encoding="utf-8")
@@ -250,52 +246,79 @@ def prepare_pptx_image_manifest(
         "success": True,
         "manifest_path": manifest_path,
         "schema_version": _MANIFEST_SCHEMA_VERSION,
-        "manifest_author": "prepare_pptx_image_manifest",
+        "manifest_author": manifest_author,
         "expected_count": len(items),
         "items": output_items,
     }
-    _trace_manifest_tool(
-        "Sophia PPTX Visual Prompt Files Prepared",
-        inputs={
-            "prompt_count": len(prompt_files),
-            "prompt_basenames": [prompt["prompt_basename"] for prompt in sanitized_prompts],
-        },
-        outputs={
-            "prompt_count": len(prompt_files),
-            "prompts": [
-                {
-                    "slide_index": prompt["slide_index"],
-                    "prompt_file": prompt["prompt_basename"],
-                    "prompt_hash": prompt["prompt_hash"],
-                    "prompt_chars": prompt["prompt_chars"],
-                    "lint_status": "not_run",
-                }
-                for prompt in sanitized_prompts
-            ],
-        },
-        tags=["prompt_files"],
-    )
-    _trace_manifest_tool(
-        "Sophia PPTX Image Manifest Prepared",
-        inputs={
-            "schema_version": _MANIFEST_SCHEMA_VERSION,
-            "manifest_author": "prepare_pptx_image_manifest",
-            "manifest_file": _safe_basename(manifest_path),
-            "expected_slide_count": len(items),
-            "requested_item_count": len(items),
-        },
-        outputs={
-            "success": True,
-            "manifest_path": manifest_path,
-            "shape": _manifest_shape_summary(payload),
-            "prompt_readable_count": len(items),
-            "output_basenames": [_safe_basename(item["output_file"]) for item in items],
-        },
-        metadata={
-            "pptx_manifest_schema_version": _MANIFEST_SCHEMA_VERSION,
-            "pptx_manifest_author": "prepare_pptx_image_manifest",
-            "pptx_manifest_item_count": len(items),
-        },
-        tags=["manifest_prepared"],
+    if trace:
+        _trace_manifest_tool(
+            "Sophia PPTX Visual Prompt Files Prepared",
+            inputs={
+                "prompt_count": len(prompt_files),
+                "prompt_basenames": [prompt["prompt_basename"] for prompt in sanitized_prompts],
+            },
+            outputs={
+                "prompt_count": len(prompt_files),
+                "prompts": [
+                    {
+                        "slide_index": prompt["slide_index"],
+                        "prompt_file": prompt["prompt_basename"],
+                        "prompt_hash": prompt["prompt_hash"],
+                        "prompt_chars": prompt["prompt_chars"],
+                        "lint_status": "not_run",
+                    }
+                    for prompt in sanitized_prompts
+                ],
+            },
+            tags=["prompt_files"],
+        )
+        _trace_manifest_tool(
+            "Sophia PPTX Image Manifest Prepared",
+            inputs={
+                "schema_version": _MANIFEST_SCHEMA_VERSION,
+                "manifest_author": manifest_author,
+                "manifest_file": _safe_basename(manifest_path),
+                "expected_slide_count": len(items),
+                "requested_item_count": len(items),
+            },
+            outputs={
+                "success": True,
+                "manifest_path": manifest_path,
+                "shape": _manifest_shape_summary(payload),
+                "prompt_readable_count": len(items),
+                "output_basenames": [_safe_basename(item["output_file"]) for item in items],
+            },
+            metadata={
+                "pptx_manifest_schema_version": _MANIFEST_SCHEMA_VERSION,
+                "pptx_manifest_author": manifest_author,
+                "pptx_manifest_item_count": len(items),
+            },
+            tags=["manifest_prepared"],
+        )
+    return result
+
+
+@tool("prepare_pptx_image_manifest", parse_docstring=True)
+def prepare_pptx_image_manifest(
+    runtime: ToolRuntime,
+    prompt_files: list[str],
+    manifest_path: str = _DEFAULT_MANIFEST_PATH,
+) -> str:
+    """Create the deterministic PPTX slide-visual image manifest.
+
+    Args:
+        prompt_files: Ordered list of one readable prompt JSON file per slide.
+            The first prompt is slide 1, the second prompt is slide 2, and so on.
+            Prompt files may live under /mnt/user-data/workspace/ or
+            /mnt/user-data/outputs/.
+        manifest_path: Optional /mnt/user-data/outputs/... path for the manifest
+            JSON. Defaults to /mnt/user-data/outputs/assets/slide-visuals.manifest.json.
+    """
+    result = create_pptx_image_manifest_core(
+        thread_data=get_thread_data(runtime),
+        prompt_files=prompt_files,
+        manifest_path=manifest_path,
+        manifest_author="prepare_pptx_image_manifest",
+        trace=True,
     )
     return _result(**result)

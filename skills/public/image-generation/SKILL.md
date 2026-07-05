@@ -119,66 +119,19 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
   --aspect-ratio 16:9
 ```
 
-## Two modes
+## Deck Generation
 
-1. **Slide visual assets (`--slide-visual`)** — for `.pptx` slides, this skill renders the
-   image that goes inside the `ppt-generation` HTML skeleton's `.visual` region. Do NOT bake
-   the slide title, bottom narrative, footer, page chrome, diagram labels, formulas, axis
-   labels, or paragraph text into this PNG; those are real HTML text in `slides/*.html`.
-   Use `--slide-visual` (quality=high, 16:9) for the visual substance only: diagrams,
-   architecture maps, comparison panels, scenes, charts, or conceptual illustrations.
-   Default to a restrained professional technical aesthetic. Do not use chalkboard,
-   handwritten, whiteboard, sketch, playful, or classroom styling unless the user explicitly
-   requested that look.
-   Pass the first slide as `--reference-images` to later slides for consistency; the script
-   automatically sends those referenced slides through the `gpt-image-2` edit path.
+For `.pptx` decks, do not call this script directly. Deck visuals are generated
+by `prepare_deck_build`, which writes prompt files, prepares the manifest, runs
+the batch, and records per-slide results.
 
-2. **Illustrations (default)** — standalone images, heroes, section art, and concept
-   illustrations. Describe only the subject; NO text, labels, charts, or diagrams in the image.
+Use this skill directly only for standalone image artifacts or non-deck
+conceptual images.
 
-### Batch generation (decks) — generate in parallel, not one per turn
+## Standalone Illustrations
 
-For multi-image decks, do NOT call the script once per slide across turns (that serializes
-~2 min/image). Instead:
-
-1. Write one prompt JSON file per slide, including the hero/cover, then call
-   `prepare_pptx_image_manifest(prompt_files=[...])`. The harness writes the
-   canonical manifest and output filenames. Then call the script once with the
-   returned `manifest_path`. Use the same restrained professional technical
-   style instructions across prompt files so the deck stays consistent:
-
-```json
-["/mnt/user-data/workspace/slide-01.json",
- "/mnt/user-data/workspace/slide-02.json"]
-```
-```text
-prepare_pptx_image_manifest(prompt_files=[...])
-```
-```bash
-python /mnt/skills/public/image-generation/scripts/generate.py \
-  --manifest /mnt/user-data/outputs/assets/slide-visuals.manifest.json
-```
-
-**Do not hand-write the batch manifest JSON.** The manifest must be prepared by
-`prepare_pptx_image_manifest`, then run in a separate bash call. The harness
-reads the manifest from disk at dispatch to count images against the budget.
-
-Deck slide assets live under `/mnt/user-data/outputs/assets/`; the slide HTML
-references them by a relative `../assets/<file>` path (see the `ppt-generation`
-skill). The slide title and narrative are real HTML text — never baked into the
-image. Keep generated slide visuals mostly text-free; place meaningful labels,
-annotations, formulas, and chart text in slide HTML over or beside the visual.
-
-If manifest preparation is rejected because prompt files are missing,
-materialize the prompt JSON files and prepare/rerun the same ONE `--manifest`
-batch. Do not switch to serial image generation until a readable batch has
-actually attempted generation. If a real batch attempt leaves failed/missing
-images, retry only those failed images serially; do not regenerate successful
-images.
-
-The items run concurrently (bounded for API rate limits); the script prints one
-`IMAGEGEN_BATCH {...}` summary line with per-image success. A failed item is isolated and never
-aborts the batch.
+Standalone images, heroes, section art, and concept illustrations should
+describe only the subject. Avoid text, labels, charts, or diagrams in the image.
 
 For PDF reports, do NOT use this image skill for data charts or structural diagrams. The PDF
 workflow authors those figures as inline static `<svg>` inside one self-contained HTML file and
@@ -205,7 +158,8 @@ the generated bitmap by default.
 
 Before accepting a presentation slide visual, check hierarchy, specificity, restraint, and
 variety. Reject purple/pink generic hero slides, single-font template looks, and stock-deck
-styling even if the image was generated successfully.
+styling, plus chalkboard/whiteboard/handwritten/sketch styles unless the user explicitly requested them,
+even if the image was generated successfully.
 
 ## Common Scenarios
 

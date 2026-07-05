@@ -10,14 +10,12 @@ medium. Do not mix workflows just because another tool is available.
 
 ## Medium Routing
 
-- Presentations (`.pptx`) are HTML-slide decks. For normal decks, generate one
-  16:9 visual-only asset per slide into `/mnt/user-data/outputs/assets/` through
-  a single manifest batch that includes the cover/hero, then place that asset
-  inside the `ppt-generation` HTML skeleton's `.visual` region via a relative
-  `../assets/<file>` reference. Slide titles and visible narrative are real HTML
-  text in `slides/*.html`, never baked into the image. Only explicit text-only/no-
-  visual deck requests may omit slide images. Convert with `build_deck_from_slides`;
-  never hand-write PPTX layouts or compiler scripts.
+- Presentations (`.pptx`) are DeckBuildService decks. For normal decks, the
+  builder submits slide intent through `prepare_deck_build`; the harness
+  generates one 16:9 visual-only asset per slide, renders safe HTML slide
+  templates with real DOM title/narrative, compiles with the internal deck
+  compiler, and evaluates the result. Only explicit text-only/no-visual deck
+  requests may omit generated visuals.
 - PDF reports are authored as ONE self-contained HTML file and rendered with
   `render_html_to_pdf`. Draw BOTH data evidence (bar / line / column for
   quantitative, comparative, ranking, composition, trend) AND structural
@@ -35,22 +33,17 @@ medium. Do not mix workflows just because another tool is available.
 
 ## Presentation Invariants
 
-- A requested `.pptx` deck is authored as one self-contained 1920×1080 HTML
-  file per slide, converted with `build_deck_from_slides`. Honor explicit
-  no-image deck requests by authoring clean text-only slides.
+- Do not tell the model to author `slides/*.html`, prompt JSON files, image
+  manifests, or compiler commands for fresh decks.
 - Every slide must be opaque to all four edges — set an opaque background on
   `html, body` and on the slide wrapper. A white band/gutter at any edge is a
   defect (the render fills uncovered regions with the deck background, not white).
-- Each generated slide image is the visual-area asset only. Do not include a
-  title region, footer, narrative text, or slide chrome in the image; the title
-  and narrative are real HTML text in the slide.
-- Keep visible HTML slide text sparse and explicit. Essential labels inside the
-  generated visual asset must be specified in the prompt as exact text.
+- Generated slide images are visual-area assets only; title and narrative are DOM text.
+- Normal decks do not compile when required generated visuals are unavailable.
+- Keep visible slide text sparse and explicit.
 - Add concise speaker notes for narrative context, but never rely on notes as
   the only visible explanation for content slides.
-- If the manifest batch fails or is partial, repair only failed/missing images
-  serially. Do not ship placeholder or no-image decks when generated visuals
-  were required, and do not switch to a hand-written deck compiler.
+- Do not ship placeholder or no-image decks when generated visuals were required.
 
 ## PDF Report Invariants
 

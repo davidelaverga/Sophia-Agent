@@ -25,7 +25,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from typing import Any, NotRequired, override
+from typing import Annotated, Any, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -36,6 +36,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_budget import (
     max_non_artifact_turns,
 )
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
+from deerflow.agents.sophia_agent.state import _merge_builder_non_artifact_turns
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.sophia.builder_memory_filter import filter_builder_memory_snippets
 
@@ -857,15 +858,11 @@ def _terminal_artifact_format_line(artifact_target_ext: str, task_type: str = ""
     if artifact_target_ext == ".pdf" and _is_presentation_task_type(task_type):
         return (
             "- This is a PDF slide-deck delivery target: use the deck workflow, not "
-            "the report renderer. Write one 1920x1080 HTML file per slide under "
-            "`/mnt/user-data/outputs/slides/`, prepare one generated visual prompt "
-            "per slide with `prepare_pptx_image_manifest`, run the returned image "
-            "manifest, and compile the slides with `build_deck_from_slides`. Do NOT "
-            "use the report-only PDF renderer; that tool is not available for this "
-            "presentation run. Emit only after the deck workflow has produced a "
-            "verified slide deliverable/export under `/mnt/user-data/outputs/`; if "
-            "that cannot be produced, emit with artifact_path=null and an honest "
-            "companion_summary.\n"
+            "the report renderer. Call prepare_deck_build with the full slide intent "
+            "list and canonical output path. Do NOT author slides/*.html, prompt JSON "
+            "files, image manifests, or compiler commands yourself. Emit only the "
+            "deck artifact returned by prepare_deck_build; if it returns failure, "
+            "emit with artifact_path=null and its failure_code/failure_summary.\n"
         )
     if artifact_target_ext == ".pdf":
         return (
@@ -951,7 +948,7 @@ def _builder_workflow_sections(
 class BuilderTaskState(AgentState):
     system_prompt_blocks: NotRequired[list[str]]
     delegation_context: NotRequired[dict | None]
-    builder_non_artifact_turns: NotRequired[int]
+    builder_non_artifact_turns: NotRequired[Annotated[int, _merge_builder_non_artifact_turns]]
     builder_last_tool_names: NotRequired[list[str]]
     builder_artifact_target_path: NotRequired[str]
     builder_pdf_requested_page_count: NotRequired[int]
@@ -1271,8 +1268,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "Never call `pip install` via bash_tool; it wastes your turn budget.\n"
                 "Important: these libraries do NOT replace target workflow cards. For PDF, author "
                 "HTML with inline <svg> and render via render_html_to_pdf instead of reportlab/fpdf "
-                "scripts. For PPTX, author one self-contained HTML file per slide and compile by calling "
-                "`build_deck_from_slides`; NEVER write custom python-pptx/pptxgenjs scripts.\n"
+                "scripts. For PPTX, submit slide intent through prepare_deck_build; NEVER write "
+                "custom python-pptx/pptxgenjs scripts or lower-level deck files yourself.\n"
             "</preinstalled_libraries>"
         )
 
@@ -1301,23 +1298,16 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 "costs 90+ seconds of LLM output, so re-writing the same file twice burns the budget.\n"
             )
         pptx_visual_guidance = (
-            "Decks are HTML-slide builds. Generate each slide's VISUAL-ONLY image into "
-            "/mnt/user-data/outputs/assets/ (no title/narrative/diagram labels/formulas/axis labels/chrome "
-            "baked in — those are real HTML text): draft the slide plan, write one prompt JSON file per "
-            "slide, call `prepare_pptx_image_manifest(prompt_files=[...])`, then run the returned "
-            "`manifest_path` with `image-generation/scripts/generate.py --manifest <path>` ONCE. "
-            "Do not hand-write the batch manifest JSON. Use consistent shared style instructions "
-            "across all prompt JSON files. If manifest preparation is rejected because prompt files are "
-            "missing, materialize those prompt JSON files and prepare/rerun the batch; "
-            "only use serial repair for images that failed after a readable batch actually attempted generation. "
-            "Only an explicitly plain text-only/no-visual deck may omit slide images. Then author one self-contained 1920×1080 HTML file per slide under "
-            "/mnt/user-data/outputs/slides/ (real DOM title + concise narrative, the visual embedded by a "
-            "relative ../assets/<file> path, opaque background to all four edges, light or dark according to the "
-            "request), and call "
-            "`build_deck_from_slides(output_path=\"/mnt/user-data/outputs/<deck>.pptx\", title=\"...\")` "
-            "ONCE to compile and emit the .pptx. Default to restrained professional technical visuals; do not "
-            "use chalkboard, handwritten, whiteboard, sketch, or playful styles unless explicitly requested. "
-            "NEVER write python-pptx/pptxgenjs or run a compiler script — the build system converts your slide HTML to PPTX."
+            "Decks are built by prepare_deck_build. Submit slide intent only: title, narrative, "
+            "role, layout_kind, visual_prompt, and optional speaker_notes for each slide. The "
+            "harness writes prompt files, prepares and runs the image batch, renders safe slide "
+            "HTML templates, compiles the PPTX, evaluates it, and returns a structured result. "
+            "Do NOT call prepare_pptx_image_manifest, image-generation/scripts/generate.py, "
+            "build_deck_from_slides, python-pptx, or pptxgenjs directly. Normal decks require "
+            "one generated visual-only asset per slide; only an explicitly plain text-only/no-visual "
+            "request may set visual_policy='text_only'. Default to restrained professional technical "
+            "visuals; do not use chalkboard, handwritten, whiteboard, sketch, cyberpunk, neon, or "
+            "playful styles unless explicitly requested."
             if image_generation_enabled
             else "Image generation is not listed for this non-PPTX run. Use the medium-specific local figure workflow."
         )
@@ -1372,10 +1362,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "as inline static `<svg>` (bar/line/column for quantitative data; box-and-arrow flow / comparison / "
             "mind-map for structure); NO remote `generate_chart`, NO client-side JS. Vary the figure family to "
             "fit each figure's content; never route every figure to the same kind.\n"
-                "    * **PPTX / presentation**: follow the ppt-generation skill. The deck is one self-contained "
-                "HTML file per slide (real DOM title + narrative, at most one visual-only image by a relative "
-                "../assets/<file> path), compiled by calling build_deck_from_slides once. NEVER write custom "
-                f"python-pptx/pptxgenjs code. {pptx_visual_guidance}\n"
+                "    * **PPTX / presentation**: follow the ppt-generation skill. For fresh decks, call "
+                "prepare_deck_build once with the complete slide intent list; emit the returned PPTX "
+                "or a clean null-artifact failure. Never write lower-level deck files/tools yourself. "
+                f"{pptx_visual_guidance}\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"
             "    * **Standalone chart / image**: use the image-generation skill, or author the chart as a "
