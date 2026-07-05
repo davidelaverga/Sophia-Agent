@@ -380,6 +380,7 @@ _PRESENTATION_FORMAT_WORD_RE = re.compile(
 _SOURCE_VETO_RULES = frozenset(
     {
         "explicit_csv_deliverable",
+        "explicit_pdf_deliverable",
         "explicit_html_deliverable",
         "explicit_json_deliverable",
         "explicit_markdown_deliverable",
@@ -388,7 +389,7 @@ _SOURCE_VETO_RULES = frozenset(
         "explicit_word_document",
     }
 )
-_SOURCE_FILENAME_EXTENSIONS = frozenset({"csv", "docx", "html", "htm", "json", "md", "pptx", "xlsx"})
+_SOURCE_FILENAME_EXTENSIONS = frozenset({"csv", "docx", "html", "htm", "json", "md", "pdf", "pptx", "xlsx"})
 _BARE_WEB_OUTPUT_WORD_RE = re.compile(
     r"\b(?:web\s*page|website|web\s+site|landing\s+page|web\s+app(?:lication)?|single[- ]page\s+(?:app|site))\b",
     re.IGNORECASE,
@@ -600,7 +601,7 @@ def _requested_output_extension_match_with_vetoes(
         return None, None, vetoed
     if _PDF_DECK_DELIVERY_RE.search(text) and _pattern_affirmative_match(_PDF_DECK_DELIVERY_RE, text):
         return "pdf", "explicit_pdf_deck_deliverable", vetoed
-    pdf_match = _first_affirmative_match(_PDF_OUTPUT_RE, text)
+    pdf_match = _first_affirmative_match(_PDF_OUTPUT_RE, text, source_veto=True)
     pptx_match = _first_affirmative_match(_PPTX_OUTPUT_RE, text, source_veto=True)
     if (
         pdf_match is not None

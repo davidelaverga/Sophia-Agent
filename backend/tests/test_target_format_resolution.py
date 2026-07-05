@@ -546,6 +546,21 @@ def test_source_pdf_filename_does_not_beat_later_slide_deck_request():
     assert resolution.rule == "explicit_presentation_deck"
 
 
+def test_source_pdf_filename_does_not_beat_later_explicit_deliverable():
+    cases = {
+        "Use report.pdf to create a CSV file": "csv",
+        "Use report.pdf to create an HTML page": "html",
+        "Convert docs/report.pdf into a JSON file": "json",
+    }
+    for text, expected in cases.items():
+        resolution = _resolve_target_format(
+            current_user_text=text,
+            description=None,
+            task_type="document",
+        )
+        assert resolution.final_ext == expected, (text, resolution.final_ext, resolution.rule)
+
+
 def test_source_office_filename_does_not_beat_later_explicit_deliverable():
     cases = {
         "Use budget.xlsx to write a markdown summary": "md",
@@ -613,6 +628,7 @@ def test_source_filename_veto_preserves_true_text_data_output_names():
 def test_source_filename_veto_preserves_direct_created_output_names():
     cases = {
         "Create report.csv": "csv",
+        "Create report.pdf": "pdf",
         "Create data.xlsx": "xlsx",
         "Write notes.md": "md",
         "Generate payload.json": "json",
