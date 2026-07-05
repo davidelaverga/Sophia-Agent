@@ -222,7 +222,8 @@ class TestBuilderWorkflowCards:
         assert "pdf-report" in briefing  # directives §5 name the report skill
         assert '<builder_workflow_card name="visuals"' not in briefing
 
-    def test_pdf_targeted_presentation_keeps_deck_guidance(self) -> None:
+    def test_pdf_targeted_presentation_keeps_deck_guidance(self, monkeypatch) -> None:
+        monkeypatch.delenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", raising=False)
         state = _make_state("presentation")
         state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/deck.pdf"
         state["delegation_context"]["task"] = "Make a 10-slide deck in PDF format for the roadmap review."
@@ -234,5 +235,33 @@ class TestBuilderWorkflowCards:
         assert "Requested PPTX length: exactly 10 total slides" in briefing
         assert "PDF slide-deck delivery target" in briefing
         assert "build_deck_from_slides" in briefing
+        assert "Call prepare_deck_build" not in briefing
         assert "This is a PDF target: author ONE self-contained HTML file" not in briefing
         assert "then render the real .pdf" not in briefing
+
+    def test_pptx_guidance_uses_legacy_tools_when_deck_service_disabled(self, monkeypatch) -> None:
+        monkeypatch.delenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", raising=False)
+        state = _make_state("presentation")
+        state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
+        state["delegation_context"]["task"] = "Make a 6-slide technical presentation."
+
+        result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
+        briefing = _briefing(result)
+
+        assert "Decks are built by prepare_deck_build" not in briefing
+        assert "For fresh decks, use the exposed ppt-generation workflow tools" in briefing
+        assert "prepare_pptx_image_manifest" in briefing
+        assert "build_deck_from_slides" in briefing
+
+    def test_pptx_guidance_uses_deck_service_when_enabled(self, monkeypatch) -> None:
+        monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "true")
+        state = _make_state("presentation")
+        state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
+        state["delegation_context"]["task"] = "Make a 6-slide technical presentation."
+
+        result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
+        briefing = _briefing(result)
+
+        assert "Decks are built by prepare_deck_build" in briefing
+        assert "For fresh decks, call prepare_deck_build once" in briefing
+        assert "Do NOT call prepare_pptx_image_manifest" in briefing
