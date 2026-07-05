@@ -265,3 +265,15 @@ class TestBuilderWorkflowCards:
         assert "Decks are built by prepare_deck_build" in briefing
         assert "For fresh decks, call prepare_deck_build once" in briefing
         assert "Do NOT call prepare_pptx_image_manifest" in briefing
+
+    def test_pptx_slide_target_clamps_to_supported_limit(self) -> None:
+        state = _make_state("presentation")
+        state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
+        state["delegation_context"]["task"] = "Create a 50-slide technical presentation."
+
+        result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
+        briefing = _briefing(result)
+
+        assert "Requested PPTX length: exactly 30 total slides" in briefing
+        assert "exactly 50 total slides" not in briefing
+        assert result["builder_pptx_requested_slide_count"] == 30

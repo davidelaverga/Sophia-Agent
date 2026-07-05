@@ -439,6 +439,7 @@ _SLIDE_TARGET_BUILD_VERB_ADJACENT_RE = re.compile(
     r"(?:\s+(?:a|an|the|me|us|some))?\s*$",
     re.IGNORECASE,
 )
+_MAX_SUPPORTED_PPTX_SLIDES = 30
 
 
 def _valid_page_count(value: str) -> int | None:
@@ -504,7 +505,7 @@ def _valid_slide_count(value: str) -> int | None:
         count = int(value)
     except (TypeError, ValueError):
         return None
-    return count if 1 <= count <= 80 else None
+    return min(count, _MAX_SUPPORTED_PPTX_SLIDES) if count >= 1 else None
 
 
 def _slide_target_is_output_context(text: str, match: re.Match[str]) -> bool:
