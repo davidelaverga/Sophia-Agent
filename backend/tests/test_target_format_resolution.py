@@ -561,6 +561,31 @@ def test_source_pdf_filename_does_not_beat_later_explicit_deliverable():
         assert resolution.final_ext == expected, (text, resolution.final_ext, resolution.rule)
 
 
+def test_topical_pdf_mention_does_not_beat_explicit_non_pdf_deliverable():
+    cases = {
+        "Create a CSV about PDF reports": "csv",
+        "Create an HTML page about PDF reports": "html",
+        "Generate JSON concerning PDF exports": "json",
+    }
+    for text, expected in cases.items():
+        resolution = _resolve_target_format(
+            current_user_text=text,
+            description=None,
+            task_type="document",
+        )
+        assert resolution.final_ext == expected, (text, resolution.final_ext, resolution.rule)
+
+
+def test_topical_pdf_veto_preserves_generic_report_default():
+    resolution = _resolve_target_format(
+        current_user_text="Write a report about PDF exports",
+        description=None,
+        task_type="document",
+    )
+
+    assert resolution.final_ext == "pdf"
+
+
 def test_source_office_filename_does_not_beat_later_explicit_deliverable():
     cases = {
         "Use budget.xlsx to write a markdown summary": "md",

@@ -399,6 +399,11 @@ _SOURCE_WEB_CONTEXT_BEFORE_RE = re.compile(
     r"(?:(?:the|this|that|my|our|their|a|an|attached|provided|source|existing|current)\s+){0,4}$",
     re.IGNORECASE,
 )
+_TOPICAL_PDF_CONTEXT_BEFORE_RE = re.compile(
+    r"\b(?:about|on|regarding|concerning|covering|related\s+to)\s+"
+    r"(?:(?:the|this|that|a|an)\s+)?$",
+    re.IGNORECASE,
+)
 _NEGATION_LOOKBACK_CHARS = 32
 _STATUS_LOOKAHEAD_CHARS = 48
 
@@ -475,6 +480,13 @@ def _match_is_source_web_mention(text: str, match: re.Match[str]) -> bool:
     return bool(_SOURCE_WEB_CONTEXT_BEFORE_RE.search(prefix))
 
 
+def _match_is_topical_pdf_mention(text: str, match: re.Match[str]) -> bool:
+    if "pdf" not in match.group(0).lower():
+        return False
+    prefix = text[max(0, match.start() - 100) : match.start()]
+    return bool(_TOPICAL_PDF_CONTEXT_BEFORE_RE.search(prefix))
+
+
 def _first_affirmative_match(
     pattern: re.Pattern[str], text: str, *, source_veto: bool = False
 ) -> re.Match[str] | None:
@@ -490,6 +502,8 @@ def _first_affirmative_match(
         if source_veto and _match_is_source_filename_extension(text, match):
             continue
         if source_veto and _match_is_source_web_mention(text, match):
+            continue
+        if source_veto and _match_is_topical_pdf_mention(text, match):
             continue
         if source_veto and _SOURCE_CONTEXT_BEFORE_MATCH_RE.search(prefix):
             continue
