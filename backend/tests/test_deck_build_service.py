@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -10,6 +11,7 @@ from langgraph.types import Command
 from deerflow.agents.sophia_agent.builder_tools import build_builder_tools_for_task_type
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 from deerflow.sandbox.tools import replace_virtual_path
+from deerflow.sophia.deck_build import service as deck_service
 from deerflow.sophia.deck_build.service import DeckBuildService
 from deerflow.sophia.deck_build.storage import load_deck_build
 from deerflow.sophia.tools.prepare_deck_build import prepare_deck_build
@@ -183,6 +185,55 @@ def test_deck_build_service_missing_batch_summary_fails_without_compile(tmp_path
     assert result.failure_code == "deck_visual_batch_startup_failed"
     assert compiler_calls == []
     assert not (tmp_path / "outputs" / "slides").exists()
+
+
+def test_deck_image_batch_timeout_scales_by_manifest_count_and_concurrency(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    manifest_host = tmp_path / "outputs" / "assets" / "slide-visuals.manifest.json"
+    manifest_host.parent.mkdir(parents=True)
+    manifest_host.write_text(
+        json.dumps({"items": [{"output_file": f"{_OUTPUTS}assets/slide-{index:02d}.png"} for index in range(1, 31)]}),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv("SOPHIA_IMAGE_GEN_TIMEOUT", "240")
+    monkeypatch.setenv("SOPHIA_IMAGE_GEN_CONCURRENCY", "2")
+    monkeypatch.delenv("SOPHIA_DECK_IMAGE_BATCH_TIMEOUT", raising=False)
+
+    timeout = deck_service._deck_image_batch_timeout_seconds(f"{_OUTPUTS}assets/slide-visuals.manifest.json", runtime)
+
+    assert timeout == 3630
+
+
+def test_deck_image_batch_timeout_override_wins(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    monkeypatch.setenv("SOPHIA_DECK_IMAGE_BATCH_TIMEOUT", "999")
+
+    timeout = deck_service._deck_image_batch_timeout_seconds(f"{_OUTPUTS}missing.manifest.json", runtime)
+
+    assert timeout == 999
+
+
+def test_deck_image_batch_subprocess_timeout_is_structured(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    script = tmp_path / "generate.py"
+    script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    manifest_host = tmp_path / "outputs" / "assets" / "slide-visuals.manifest.json"
+    manifest_host.parent.mkdir(parents=True)
+    manifest_host.write_text(json.dumps({"items": [{"output_file": f"{_OUTPUTS}assets/slide-01.png"}]}), encoding="utf-8")
+    monkeypatch.setattr(deck_service, "_image_script_path", lambda: script)
+
+    def timeout_run(*_args, **_kwargs):
+        raise subprocess.TimeoutExpired(cmd=["python"], timeout=10, output="partial stdout", stderr="provider hung")
+
+    monkeypatch.setattr(deck_service.subprocess, "run", timeout_run)
+
+    result = DeckBuildService()._run_image_batch_subprocess(f"{_OUTPUTS}assets/slide-visuals.manifest.json", runtime)
+
+    assert result["summary_present"] is False
+    assert result["complete"] is False
+    assert result["exit_code"] == 124
+    assert result["error_class"] == "timeout"
+    assert "timed out" in result["raw_error_excerpt"]
 
 
 def test_deck_build_service_incomplete_visuals_fail_before_compile(tmp_path: Path) -> None:

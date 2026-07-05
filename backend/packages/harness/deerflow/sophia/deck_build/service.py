@@ -548,15 +548,30 @@ class DeckBuildService:
         if thread_data.get("workspace_path"):
             env["SOPHIA_WORKSPACE_HOST_PATH"] = str(thread_data["workspace_path"])
         env.update(_current_image_trace_env(runtime))
-        timeout = int(os.getenv("SOPHIA_IMAGE_GEN_TIMEOUT", "240") or "240")
-        completed = subprocess.run(  # noqa: S603
-            [sys.executable, str(script), "--manifest", manifest_path],
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=timeout,
-            env=env,
-        )
+        timeout = _deck_image_batch_timeout_seconds(manifest_path, runtime)
+        try:
+            completed = subprocess.run(  # noqa: S603
+                [sys.executable, str(script), "--manifest", manifest_path],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=env,
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = _timeout_stream_text(getattr(exc, "stdout", None) or getattr(exc, "output", None))
+            stderr = _timeout_stream_text(getattr(exc, "stderr", None))
+            return {
+                "summary_present": False,
+                "complete": False,
+                "exit_code": 124,
+                "error_class": "timeout",
+                "raw_error_excerpt": safe_excerpt(
+                    f"image batch subprocess timed out after {timeout}s; "
+                    f"stdout_chars={len(stdout)} stderr_chars={len(stderr)} "
+                    f"{(stderr or stdout).strip()}"
+                ),
+            }
         summary = _parse_batch_summary(completed.stdout)
         if summary is None:
             return {
@@ -657,6 +672,43 @@ def _current_image_trace_env(runtime: ToolRuntime) -> dict[str, str]:
     if thread_id:
         env["SOPHIA_THREAD_ID"] = str(thread_id)
     return env
+
+
+def _int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+    return value if value > 0 else default
+
+
+def _manifest_item_count_for_timeout(manifest_path: str, runtime: ToolRuntime) -> int:
+    try:
+        host_path = _host_path(manifest_path, runtime)
+        payload = json.loads(host_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return 0
+    items = payload.get("items") if isinstance(payload, dict) else None
+    return len(items) if isinstance(items, list) else 0
+
+
+def _deck_image_batch_timeout_seconds(manifest_path: str, runtime: ToolRuntime) -> int:
+    override = os.getenv("SOPHIA_DECK_IMAGE_BATCH_TIMEOUT")
+    if override and override.strip():
+        return _int_env("SOPHIA_DECK_IMAGE_BATCH_TIMEOUT", 1800)
+    per_image_timeout = _int_env("SOPHIA_IMAGE_GEN_TIMEOUT", 240)
+    concurrency = _int_env("SOPHIA_IMAGE_GEN_CONCURRENCY", 2)
+    item_count = max(1, _manifest_item_count_for_timeout(manifest_path, runtime))
+    waves = max(1, (item_count + concurrency - 1) // concurrency)
+    return max(per_image_timeout + 30, waves * per_image_timeout + 30)
+
+
+def _timeout_stream_text(value: object) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bytes):
+        return value.decode("utf-8", errors="replace")
+    return str(value)
 
 
 def _now() -> str:
