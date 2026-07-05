@@ -8,6 +8,7 @@ from deerflow.sophia.deck_build.models import DeckBuild, DeckEvaluation, DeckQua
 
 _OUTPUTS_PREFIX = "/mnt/user-data/outputs/"
 _HARD_CHECKS = {"overflow", "chrome", "visual_contract"}
+_NEGATED_RULE_RE = re.compile(r"(?:\bno\b|\bnot\b|\bwithout\b|\bavoid\b|\bnever\b|\bdo\s+not\b)\W*$", re.I)
 
 
 class DesignRule:
@@ -136,7 +137,11 @@ def _design_rule_issues(signals: SlideSignals) -> list[DeckQualityIssue]:
     sources = [*signals.slide_sources, *signals.prompt_sources]
     for selector, source in sources:
         for rule in DESIGN_RULES:
-            if not rule.pattern.search(source):
+            match = rule.pattern.search(source)
+            if not match:
+                continue
+            prefix = source[max(0, match.start() - 32) : match.start()]
+            if _NEGATED_RULE_RE.search(prefix):
                 continue
             issues.append(
                 DeckQualityIssue(

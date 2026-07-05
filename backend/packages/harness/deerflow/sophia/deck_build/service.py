@@ -32,6 +32,7 @@ _MANIFEST = f"{_ASSETS}/slide-visuals.manifest.json"
 _SCHEMA = "sophia-deck-build/v1"
 _BANNED_STYLE_RE = re.compile(r"\b(chalkboard|blackboard|whiteboard|handwritten|sketch|cyberpunk|neon)\b", re.I)
 _BANNED_TEXT_RE = re.compile(r"THE TEXT READS|title reads|large readable text|paragraph text|axis labels?|formula", re.I)
+_NEGATED_BANNED_TERM_RE = re.compile(r"(?:\bno\b|\bnot\b|\bwithout\b|\bavoid\b|\bnever\b|\bdo\s+not\b)\W*$", re.I)
 _TEXT_ONLY_REQUEST_RE = re.compile(
     r"\b(?:plain\s+text[-\s]?only|text[-\s]?only|no[-\s]?image|no\s+images?"
     r"|no\s+visuals?|without\s+(?:images?|visuals?)|with\s+no\s+(?:images?|visuals?))\b",
@@ -167,7 +168,7 @@ class DeckBuildService:
             if visual_policy == "required":
                 if not visual_prompt:
                     raise DeckBuildFailure("invalid_deck_ir", f"Slide {index} requires a visual_prompt.", retryable=True)
-                if _BANNED_TEXT_RE.search(visual_prompt) or _BANNED_STYLE_RE.search(visual_prompt):
+                if _contains_unnegated_match(_BANNED_TEXT_RE, visual_prompt) or _contains_unnegated_match(_BANNED_STYLE_RE, visual_prompt):
                     raise DeckBuildFailure(
                         "invalid_deck_ir",
                         f"Slide {index} visual_prompt requests image-baked text or an unrequested style.",
@@ -619,6 +620,15 @@ def _compile_with_build_deck_from_slides(
     except (TypeError, ValueError):
         return {"success": False, "error_type": "deck_compile_failed", "error": "Compiler returned non-JSON output."}
     return payload if isinstance(payload, dict) else {"success": False, "error_type": "deck_compile_failed", "error": "Compiler returned invalid output."}
+
+
+def _contains_unnegated_match(pattern: re.Pattern[str], value: str) -> bool:
+    for match in pattern.finditer(value):
+        prefix = value[max(0, match.start() - 32) : match.start()]
+        if _NEGATED_BANNED_TERM_RE.search(prefix):
+            continue
+        return True
+    return False
 
 
 def _clear_slide_html_directory(slides_dir: Path) -> None:

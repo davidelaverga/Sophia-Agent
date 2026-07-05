@@ -255,6 +255,50 @@ def test_deck_build_service_invalid_required_visual_prompt_fails_before_batch(tm
     assert not (tmp_path / "outputs" / "deck.pptx").exists()
 
 
+def test_deck_build_service_allows_negated_visual_prompt_guardrails(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        deck_compiler=_fake_compiler([]),
+    )
+    slides = _slides()
+    slides[0]["visual_prompt"] = "Professional system visual, no axis labels, without formulas, not neon."
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=slides,
+        output_path=f"{_OUTPUTS}deck.pptx",
+    )
+
+    assert result.success is True
+
+
+def test_deck_build_service_rejects_positive_banned_visual_prompt_terms(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    batch_called = False
+
+    def batch_runner(_manifest_path, _runtime):
+        nonlocal batch_called
+        batch_called = True
+        return {}
+
+    service = DeckBuildService(image_batch_runner=batch_runner, deck_compiler=_fake_compiler([]))
+    slides = _slides()
+    slides[0]["visual_prompt"] = "Neon system diagram with axis labels and formula callouts."
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=slides,
+        output_path=f"{_OUTPUTS}deck.pptx",
+    )
+
+    assert result.success is False
+    assert result.failure_code == "invalid_deck_ir"
+    assert batch_called is False
+
+
 def test_deck_build_service_missing_batch_summary_fails_without_compile(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     compiler_calls: list[dict] = []
