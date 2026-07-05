@@ -487,6 +487,44 @@ def test_presentation_toolset_uses_legacy_only_when_explicitly_disabled(monkeypa
     assert "build_deck_from_slides" in names
 
 
+def test_pdf_slide_deck_uses_legacy_route_even_when_deck_service_default_enabled(monkeypatch) -> None:
+    monkeypatch.delenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", raising=False)
+
+    tools = build_builder_tools_for_task_type(
+        "presentation",
+        vision_enabled=False,
+        artifact_target_ext=".pdf",
+    )
+    names = [getattr(tool, "name", "") for tool in tools]
+    contract = assert_deck_tool_contract(tools, task_type="presentation", artifact_target_ext=".pdf")
+
+    assert contract is not None
+    assert contract["route"] == "legacy_html_slide_to_pptx"
+    assert contract["legacy_reason"] == "non_pptx_presentation_target"
+    assert "prepare_deck_build" not in names
+    assert "prepare_pptx_image_manifest" in names
+    assert "build_deck_from_slides" in names
+
+
+def test_pdf_slide_deck_legacy_tools_are_not_rejected_by_deck_service_guard(monkeypatch) -> None:
+    monkeypatch.delenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", raising=False)
+    state = {
+        "builder_artifact_target_path": f"{_OUTPUTS}deck.pdf",
+        "delegation_context": {"task_type": "presentation"},
+    }
+    request = SimpleNamespace(
+        tool_call={
+            "id": "tc-manifest",
+            "name": "prepare_pptx_image_manifest",
+            "args": {"prompt_files": [f"{_OUTPUTS}assets/prompts/slide-01.json"]},
+        },
+        state=state,
+        runtime=SimpleNamespace(context={}, config={}),
+    )
+
+    assert BuilderArtifactMiddleware._deck_build_service_legacy_tool_rejection(request) is None
+
+
 def test_prepare_deck_build_failure_is_terminal_command(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "true")
     runtime = _runtime(tmp_path / "outputs")
