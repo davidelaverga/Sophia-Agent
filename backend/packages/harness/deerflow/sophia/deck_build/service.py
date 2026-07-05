@@ -417,6 +417,7 @@ class DeckBuildService:
             if not result.get("success"):
                 raise DeckBuildFailure(str(result.get("error_type") or "deck_compile_failed"), str(result.get("error") or "PPTX compile failed."), retryable=False)
             deck.pptx_path = result.get("pptx_path")
+            deck.compile_overflow_slides = [entry for entry in (result.get("overflow_slides") or []) if isinstance(entry, dict)]
             deck.status = "compiled"
 
     def _evaluate(self, deck: DeckBuild, runtime: ToolRuntime) -> None:

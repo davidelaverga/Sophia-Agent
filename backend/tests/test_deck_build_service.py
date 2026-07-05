@@ -139,6 +139,58 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert loaded.slides[0].selector == "slide:1"
 
 
+def test_deck_build_service_nested_output_path_evaluates_against_outputs_root(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        deck_compiler=_fake_compiler([]),
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Nested Technical Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}decks/foo.pptx",
+    )
+
+    assert result.success is True
+    assert result.pptx_path == f"{_OUTPUTS}decks/foo.pptx"
+    assert (tmp_path / "outputs" / "slides" / "01-cover.html").is_file()
+    assert (tmp_path / "outputs" / "decks" / "foo.pptx").is_file()
+
+
+def test_deck_build_service_compiler_overflow_fails_quality_gate(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+
+    def overflow_compiler(tool_runtime, output_path: str, _title: str, _slides_dir: str) -> dict:
+        host = Path(replace_virtual_path(output_path, tool_runtime.state["thread_data"]))
+        host.parent.mkdir(parents=True, exist_ok=True)
+        host.write_bytes(b"fake pptx")
+        return {
+            "success": True,
+            "pptx_path": output_path,
+            "size_bytes": host.stat().st_size,
+            "engine": "fake",
+            "overflow_slides": [{"slide": 2, "overflow_px": 48}],
+        }
+
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        deck_compiler=overflow_compiler,
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Overflow Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+    )
+
+    assert result.success is False
+    assert result.failure_code == "deck_quality_failed"
+    assert "overflows" in (result.failure_summary or "")
+
+
 def test_deck_build_service_invalid_required_visual_prompt_fails_before_batch(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     batch_called = False

@@ -83,6 +83,7 @@ class DeckBuild:
     missing_visual_count: int = 0
     pptx_path: str | None = None
     preview_pdf_path: str | None = None
+    compile_overflow_slides: list[dict[str, Any]] = field(default_factory=list)
     quality_warning: str | None = None
     failure_code: str | None = None
     failure_summary: str | None = None

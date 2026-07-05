@@ -38,7 +38,7 @@ class DeckEvaluator:
     def evaluate(self, deck: DeckBuild, *, output_host_path: Path | None = None) -> DeckEvaluation:
         hard: list[DeckQualityIssue] = []
         soft: list[DeckQualityIssue] = []
-        outputs_root = output_host_path.parent if output_host_path is not None else None
+        outputs_root = _outputs_root_for_deck(deck, output_host_path)
 
         if deck.requested_slide_count != len(deck.slides):
             hard.append(self._issue("slide_count_mismatch", "deck", "slide_count", "slide count mismatch"))
@@ -112,7 +112,23 @@ def _signals_from_deck(deck: DeckBuild, outputs_root: Path | None) -> SlideSigna
         prompt_path = _host_for_outputs_path(slide.visual_prompt_path, outputs_root)
         if prompt_path is not None and prompt_path.is_file():
             prompt_sources.append((slide.selector, prompt_path.read_text(encoding="utf-8", errors="replace")))
-    return SlideSignals(slide_sources=slide_sources, prompt_sources=prompt_sources, overflow_slides=[])
+    return SlideSignals(slide_sources=slide_sources, prompt_sources=prompt_sources, overflow_slides=deck.compile_overflow_slides)
+
+
+def _outputs_root_for_deck(deck: DeckBuild, output_host_path: Path | None) -> Path | None:
+    if output_host_path is None:
+        return None
+    virtual_output = deck.output_path
+    if not virtual_output.startswith(_OUTPUTS_PREFIX):
+        return output_host_path.parent
+    relative = virtual_output[len(_OUTPUTS_PREFIX) :].lstrip("/")
+    if not relative or ".." in Path(relative).parts:
+        return output_host_path.parent
+    parents_to_root = len(Path(relative).parts) - 1
+    root = output_host_path
+    for _ in range(parents_to_root + 1):
+        root = root.parent
+    return root
 
 
 def _design_rule_issues(signals: SlideSignals) -> list[DeckQualityIssue]:
