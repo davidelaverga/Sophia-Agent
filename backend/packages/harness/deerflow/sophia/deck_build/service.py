@@ -645,7 +645,7 @@ def _explicit_text_only_requested(runtime: ToolRuntime) -> bool:
     for source in (state, state.get("delegation_context"), state.get("builder_task"), state.get("artifact_request")):
         if not isinstance(source, dict):
             continue
-        for key in ("user_request", "request", "prompt", "title", "description", "artifact_title", "task_title"):
+        for key in ("user_request", "request", "prompt", "task", "task_brief", "title", "description", "artifact_title", "task_title"):
             value = source.get(key)
             if isinstance(value, str):
                 haystack_parts.append(value)

@@ -336,6 +336,31 @@ def test_deck_build_service_text_only_requires_explicit_request_and_compiles_wit
     assert not (tmp_path / "outputs" / "assets" / "prompts").exists()
 
 
+def test_deck_build_service_text_only_accepts_delegated_task_brief(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs", user_request="")
+    runtime.state["delegation_context"] = {"task": "Build a plain text-only deck with no images for the review."}
+    compiler_calls: list[dict] = []
+    service = DeckBuildService(
+        image_batch_runner=lambda _manifest_path, _runtime: (_ for _ in ()).throw(AssertionError("no image batch")),
+        deck_compiler=_fake_compiler(compiler_calls),
+    )
+    slides = _slides()
+    for slide in slides:
+        slide["visual_prompt"] = ""
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Text Deck",
+        slides=slides,
+        output_path=f"{_OUTPUTS}deck.pptx",
+        visual_policy="text_only",
+    )
+
+    assert result.success is True
+    assert compiler_calls
+    assert not (tmp_path / "outputs" / "assets" / "prompts").exists()
+
+
 def test_prepare_deck_build_tool_schema_excludes_runtime() -> None:
     schema = prepare_deck_build.tool_call_schema.model_json_schema()
 
