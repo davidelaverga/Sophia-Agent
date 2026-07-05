@@ -139,6 +139,44 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert loaded.slides[0].selector == "slide:1"
 
 
+def test_deck_build_service_clears_stale_slide_html_before_compile(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    slides_dir = tmp_path / "outputs" / "slides"
+    slides_dir.mkdir(parents=True)
+    (slides_dir / "99-stale.html").write_text("<html>stale</html>", encoding="utf-8")
+    compiled_slide_names: list[list[str]] = []
+
+    def compile_deck(tool_runtime, output_path: str, _title: str, rendered_slides_dir: str) -> dict:
+        host_slides = Path(replace_virtual_path(rendered_slides_dir, tool_runtime.state["thread_data"]))
+        compiled_slide_names.append(sorted(path.name for path in host_slides.glob("*.html")))
+        host = Path(replace_virtual_path(output_path, tool_runtime.state["thread_data"]))
+        host.parent.mkdir(parents=True, exist_ok=True)
+        host.write_bytes(b"fake pptx")
+        return {
+            "success": True,
+            "pptx_path": output_path,
+            "size_bytes": host.stat().st_size,
+            "engine": "fake",
+            "overflow_slides": [],
+        }
+
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        deck_compiler=compile_deck,
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+    )
+
+    assert result.success is True
+    assert "99-stale.html" not in compiled_slide_names[0]
+    assert compiled_slide_names[0] == ["01-cover.html", "02-architecture.html", "03-closing.html"]
+
+
 def test_deck_build_service_nested_output_path_evaluates_against_outputs_root(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     service = DeckBuildService(

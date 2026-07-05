@@ -27,6 +27,7 @@ from deerflow.sophia.tools.render_markdown_to_pdf import _ensure_relative_to_out
 _OUTPUTS = "/mnt/user-data/outputs/"
 _ASSETS = f"{_OUTPUTS}assets"
 _PROMPTS = f"{_ASSETS}/prompts"
+_SLIDES = f"{_OUTPUTS}slides"
 _MANIFEST = f"{_ASSETS}/slide-visuals.manifest.json"
 _SCHEMA = "sophia-deck-build/v1"
 _BANNED_STYLE_RE = re.compile(r"\b(chalkboard|blackboard|whiteboard|handwritten|sketch|cyberpunk|neon)\b", re.I)
@@ -370,6 +371,7 @@ class DeckBuildService:
             run_type="tool",
             inputs={"slide_count": len(deck.slides), "template_names": [slide.layout_kind for slide in deck.slides]},
         ) as run:
+            _clear_slide_html_directory(_host_path(_SLIDES, runtime))
             for slide in deck.slides:
                 virtual = slide_html_virtual_path(slide)
                 host = _host_path(virtual, runtime)
@@ -402,7 +404,7 @@ class DeckBuildService:
                 runtime,
                 deck.output_path,
                 deck.deck_title,
-                "/mnt/user-data/outputs/slides",
+                _SLIDES,
             )
             finish_span(
                 run,
@@ -617,6 +619,14 @@ def _compile_with_build_deck_from_slides(
     except (TypeError, ValueError):
         return {"success": False, "error_type": "deck_compile_failed", "error": "Compiler returned non-JSON output."}
     return payload if isinstance(payload, dict) else {"success": False, "error_type": "deck_compile_failed", "error": "Compiler returned invalid output."}
+
+
+def _clear_slide_html_directory(slides_dir: Path) -> None:
+    if not slides_dir.exists():
+        return
+    for path in slides_dir.glob("*.html"):
+        if path.is_file():
+            path.unlink()
 
 
 def _requested_slide_count_from_state(runtime: ToolRuntime) -> int:
