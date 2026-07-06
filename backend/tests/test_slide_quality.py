@@ -131,10 +131,28 @@ def test_visual_contract_check_ignores_negated_generated_text_phrases():
         '{"prompt":"professional technical visual, avoid rendered text"}',
         '{"prompt":"professional technical visual with no text inside the image"}',
         '{"prompt":"professional technical visual without large labels"}',
+        '{"prompt":"professional technical visual without large readable text labels"}',
     )
     for index, prompt in enumerate(prompts, start=1):
         signals = SlideSignals(prompt_sources=[(f"{index}.prompt.json", prompt)])
         assert visual_contract_check(signals) == []
+
+
+def test_visual_contract_check_requires_negation_to_anchor_to_banned_term():
+    signals = SlideSignals(
+        prompt_sources=[
+            (
+                "bad.prompt.json",
+                '{"prompt":"No slide title, but use large readable text labels inside the image"}',
+            )
+        ]
+    )
+
+    gaps = visual_contract_check(signals)
+
+    assert len(gaps) == 1
+    assert gaps[0].check == "visual_contract"
+    assert "render text" in gaps[0].detail
 
 
 def test_visual_style_check_flags_neon_tiny_text_and_card_overload():

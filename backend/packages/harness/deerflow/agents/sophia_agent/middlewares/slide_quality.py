@@ -67,14 +67,15 @@ _TAG_RE = re.compile(r"<[^>]+>")
 _GRID_COLUMNS_RE = re.compile(r"grid-template-columns\s*:\s*([^;}\"']+)", re.IGNORECASE)
 _REPEAT_RE = re.compile(r"repeat\(\s*(\d+)", re.IGNORECASE)
 _GENERATED_TEXT_RE = re.compile(
-    r"\b(the\s+text\s+reads|large\s+labels?|label\s+copy|render(?:ed)?\s+text|text\s+inside\s+the\s+image)\b",
+    r"\b(the\s+text\s+reads|large\s+labels?|large\s+readable\s+text(?:\s+labels?)?|label\s+copy|"
+    r"render(?:ed)?\s+text|text\s+inside\s+the\s+image)\b",
     re.IGNORECASE,
 )
 _BANNED_AESTHETIC_RE = re.compile(
     r"\b(chalkboard|blackboard|whiteboard|hand[-\s]?written|hand[-\s]?drawn|sketch|sketched|marker[-\s]?like)\b",
     re.IGNORECASE,
 )
-_NEGATED_STYLE_RE = re.compile(r"(?:\bno\b|\bavoid\b|\bwithout\b|\bnever\b|\bdo\s+not\b)", re.IGNORECASE)
+_NEGATED_BANNED_TERM_RE = re.compile(r"(?:\bno\b|\bavoid\b|\bwithout\b|\bnever\b|\bdo\s+not\b)\W*$", re.IGNORECASE)
 _UNREQUESTED_STYLE_RE = re.compile(
     r"\b(cyberpunk|neon|matrix|hacker|terminal\s+green|glowing\s+grid|chalkboard|blackboard|whiteboard|"
     r"hand[-\s]?written|hand[-\s]?drawn|sketch|sketched)\b",
@@ -213,7 +214,7 @@ def visual_contract_check(signals: SlideSignals) -> list[QualityGap]:
             (
                 match
                 for match in _GENERATED_TEXT_RE.finditer(source)
-                if not _NEGATED_STYLE_RE.search(source[max(0, match.start() - 32) : match.start()])
+                if not _match_is_negated(source, match)
             ),
             None,
         )
@@ -223,7 +224,7 @@ def visual_contract_check(signals: SlideSignals) -> list[QualityGap]:
             (
                 match
                 for match in _BANNED_AESTHETIC_RE.finditer(source)
-                if not _NEGATED_STYLE_RE.search(source[max(0, match.start() - 32) : match.start()])
+                if not _match_is_negated(source, match)
             ),
             None,
         )
@@ -243,6 +244,11 @@ def visual_contract_check(signals: SlideSignals) -> list[QualityGap]:
     return gaps
 
 
+def _match_is_negated(source: str, match: re.Match[str]) -> bool:
+    prefix = source[max(0, match.start() - 32) : match.start()]
+    return bool(_NEGATED_BANNED_TERM_RE.search(prefix))
+
+
 def visual_style_check(signals: SlideSignals) -> list[QualityGap]:
     """Flag narrow source patterns behind unrequested bad deck aesthetics."""
     gaps: list[QualityGap] = []
@@ -252,7 +258,7 @@ def visual_style_check(signals: SlideSignals) -> list[QualityGap]:
             (
                 match
                 for match in _UNREQUESTED_STYLE_RE.finditer(html)
-                if not _NEGATED_STYLE_RE.search(html[max(0, match.start() - 32): match.start()])
+                if not _match_is_negated(html, match)
             ),
             None,
         )
