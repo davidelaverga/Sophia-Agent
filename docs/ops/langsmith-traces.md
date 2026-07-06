@@ -8,14 +8,14 @@ Required runtime configuration:
 LANGSMITH_TRACING=false
 SOPHIA_BUILDER_LANGSMITH_TRACING=true
 LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
+LANGSMITH_WORKSPACE_ID=<workspace-id>
 LANGSMITH_PROJECT=Sophia
 LANGSMITH_API_KEY=<runtime-key>
 ```
 
-Optional, useful when the key can see multiple workspaces/projects:
+Optional, useful when exporting by project UUID:
 
 ```bash
-LANGSMITH_WORKSPACE_ID=<workspace-id>
 LANGSMITH_PROJECT_UUID=<project-uuid>
 ```
 
@@ -31,6 +31,7 @@ Local helper fallback:
 
 ```bash
 LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com \
+LANGSMITH_WORKSPACE_ID=<workspace-id> \
 LANGSMITH_PROJECT=Sophia \
 LANGSMITH_API_KEY=<read-only-key> \
 langsmith-fetch traces --include-metadata --include-feedback

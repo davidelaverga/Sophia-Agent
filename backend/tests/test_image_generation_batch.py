@@ -243,12 +243,53 @@ def test_batch_virtual_paths_write_host_files_but_echo_virtual_paths(tmp_path, m
     assert (assets / "slide-02.png").is_file()
 
 
+def test_manifest_mode_emits_safe_per_item_progress_before_final_summary(tmp_path, monkeypatch, capsys) -> None:
+    module = _load_script_module()
+    prompts = []
+    items = []
+    for index in range(1, 3):
+        prompt = tmp_path / f"slide-{index:02d}.json"
+        prompt.write_text('{"prompt":"professional slide visual"}', encoding="utf-8")
+        output = tmp_path / f"slide-{index:02d}.png"
+        prompts.append(prompt)
+        items.append({"prompt_file": str(prompt), "output_file": str(output), "slide_visual": True})
+    manifest_path = tmp_path / "manifest.json"
+    manifest_path.write_text(json.dumps({"items": items, "concurrency": 2}), encoding="utf-8")
+
+    def _fake_generate(prompt_file, _refs, output_file, _aspect_ratio, **_kwargs):
+        assert Path(prompt_file) in prompts
+        Path(output_file).write_bytes(b"\x89PNG fake")
+        return "IMAGEGEN_OK fake"
+
+    monkeypatch.setattr(module, "generate_image", _fake_generate)
+
+    assert module._run_batch(str(manifest_path)) == 0
+    lines = capsys.readouterr().out.splitlines()
+    progress = [
+        json.loads(line.removeprefix("IMAGEGEN_BATCH_ITEM "))
+        for line in lines
+        if line.startswith("IMAGEGEN_BATCH_ITEM ")
+    ]
+    final = [
+        json.loads(line.removeprefix("IMAGEGEN_BATCH "))
+        for line in lines
+        if line.startswith("IMAGEGEN_BATCH ")
+    ]
+
+    assert len(progress) == 2
+    assert len(final) == 1
+    assert all(item["success"] is True for item in progress)
+    assert all("prompt_hash" in item for item in progress)
+    assert "professional slide visual" not in json.dumps(progress)
+    assert final[0]["complete"] is True
+
+
 # ---- per-call timeout (kills the ~10-min hang) ------------------------------
 
 
 def test_timeout_default_is_120s(monkeypatch) -> None:
     # 2026-06-27 fix-forward: default 600s -> 120s (calls finish in <~2min; the
-    # client now retries transient 429/5xx within this bound).
+    # client now retries transient 429/5xx once within this bound).
     module = _load_script_module()
     monkeypatch.delenv("SOPHIA_IMAGE_GEN_TIMEOUT", raising=False)
     assert module._image_gen_timeout_seconds() == 120.0
@@ -270,12 +311,12 @@ def test_timeout_falls_back_to_default_on_garbage(monkeypatch) -> None:
 def test_max_retries_default_and_override(monkeypatch) -> None:
     module = _load_script_module()
     monkeypatch.delenv("SOPHIA_IMAGE_GEN_MAX_RETRIES", raising=False)
-    assert module._image_gen_max_retries() == 3
+    assert module._image_gen_max_retries() == 1
     monkeypatch.setenv("SOPHIA_IMAGE_GEN_MAX_RETRIES", "5")
     assert module._image_gen_max_retries() == 5
     for bad in ("bogus", "", "-2"):
         monkeypatch.setenv("SOPHIA_IMAGE_GEN_MAX_RETRIES", bad)
-        assert module._image_gen_max_retries() == 3
+        assert module._image_gen_max_retries() == 1
 
 
 def test_openai_client_passes_timeout_and_retries(monkeypatch) -> None:
@@ -297,6 +338,6 @@ def test_openai_client_passes_timeout_and_retries(monkeypatch) -> None:
     module._openai_client_from_env()
 
     assert captured["timeout"] == 75.0
-    # max_retries=3 so the SDK recovers transient 429/5xx (the yield fix).
-    assert captured["max_retries"] == 3
+    # max_retries=1 preserves one transient recovery without stretching parent batch timeouts.
+    assert captured["max_retries"] == 1
     assert captured["api_key"] == "sk-test"

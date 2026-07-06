@@ -312,9 +312,16 @@ def test_deck_build_service_rejects_positive_banned_visual_prompt_terms(tmp_path
 def test_deck_build_service_missing_batch_summary_fails_without_compile(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     compiler_calls: list[dict] = []
+    single_called = False
+
+    def single_runner(_slide, _runtime, _attempt_no):
+        nonlocal single_called
+        single_called = True
+        return {"success": False, "error_class": "should_not_run"}
 
     service = DeckBuildService(
         image_batch_runner=lambda _manifest_path, _runtime: {"summary_present": False, "complete": False},
+        image_single_runner=single_runner,
         deck_compiler=_fake_compiler(compiler_calls),
     )
 
@@ -327,8 +334,105 @@ def test_deck_build_service_missing_batch_summary_fails_without_compile(tmp_path
 
     assert result.success is False
     assert result.failure_code == "deck_visual_batch_startup_failed"
+    assert single_called is False
     assert compiler_calls == []
     assert not (tmp_path / "outputs" / "slides").exists()
+
+
+def test_deck_build_service_salvages_partial_timeout_and_repairs_missing_visual(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    compiler_calls: list[dict] = []
+    repaired: list[int] = []
+
+    def timeout_batch(manifest_path: str, tool_runtime) -> dict:
+        manifest_host = Path(replace_virtual_path(manifest_path, tool_runtime.state["thread_data"]))
+        manifest = json.loads(manifest_host.read_text(encoding="utf-8"))
+        progress = []
+        for index, item in enumerate(manifest["items"], start=1):
+            if index == 1:
+                continue
+            output_file = item["output_file"]
+            host = Path(replace_virtual_path(output_file, tool_runtime.state["thread_data"]))
+            host.parent.mkdir(parents=True, exist_ok=True)
+            host.write_bytes(b"png")
+            progress.append({"item_index": index, "output_file": output_file, "success": True, "bytes": 3})
+        return {
+            "summary_present": False,
+            "complete": False,
+            "exit_code": 124,
+            "error_class": "timeout",
+            "items": progress,
+        }
+
+    def single_runner(slide, tool_runtime, attempt_no: int) -> dict:
+        assert attempt_no == 1
+        repaired.append(slide.index)
+        host = Path(replace_virtual_path(slide.visual_asset_path, tool_runtime.state["thread_data"]))
+        host.parent.mkdir(parents=True, exist_ok=True)
+        host.write_bytes(b"png")
+        return {"success": True, "bytes": 3}
+
+    service = DeckBuildService(
+        image_batch_runner=timeout_batch,
+        image_single_runner=single_runner,
+        deck_compiler=_fake_compiler(compiler_calls),
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+    )
+
+    assert result.success is True
+    assert repaired == [1]
+    assert result.successful_visual_count == 3
+    assert result.image_generation_status == "success_after_repair"
+    assert result.primary_image_batch_status == "repaired"
+    assert result.serial_repair_count == 1
+    assert result.batch_timeout_count == 1
+    assert result.partial_batch_salvaged is True
+    assert compiler_calls
+
+
+def test_deck_build_service_timeout_with_zero_outputs_repairs_all_visuals(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    repaired: list[int] = []
+
+    def single_runner(slide, tool_runtime, attempt_no: int) -> dict:
+        assert attempt_no == 1
+        repaired.append(slide.index)
+        host = Path(replace_virtual_path(slide.visual_asset_path, tool_runtime.state["thread_data"]))
+        host.parent.mkdir(parents=True, exist_ok=True)
+        host.write_bytes(b"png")
+        return {"success": True, "bytes": 3}
+
+    service = DeckBuildService(
+        image_batch_runner=lambda _manifest_path, _runtime: {
+            "summary_present": False,
+            "complete": False,
+            "exit_code": 124,
+            "error_class": "timeout",
+            "items": [],
+        },
+        image_single_runner=single_runner,
+        deck_compiler=_fake_compiler([]),
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+    )
+
+    assert result.success is True
+    assert repaired == [1, 2, 3]
+    assert result.successful_visual_count == 3
+    assert result.image_generation_status == "success_after_repair"
+    assert result.serial_repair_count == 3
+    assert result.partial_batch_salvaged is False
 
 
 def test_deck_image_batch_timeout_scales_by_manifest_count_and_concurrency(tmp_path: Path, monkeypatch) -> None:
@@ -340,12 +444,13 @@ def test_deck_image_batch_timeout_scales_by_manifest_count_and_concurrency(tmp_p
         encoding="utf-8",
     )
     monkeypatch.setenv("SOPHIA_IMAGE_GEN_TIMEOUT", "240")
+    monkeypatch.delenv("SOPHIA_IMAGE_GEN_MAX_RETRIES", raising=False)
     monkeypatch.setenv("SOPHIA_IMAGE_GEN_CONCURRENCY", "2")
     monkeypatch.delenv("SOPHIA_DECK_IMAGE_BATCH_TIMEOUT", raising=False)
 
     timeout = deck_service._deck_image_batch_timeout_seconds(f"{_OUTPUTS}assets/slide-visuals.manifest.json", runtime)
 
-    assert timeout == 3630
+    assert timeout == 7260
 
 
 def test_deck_image_batch_timeout_override_wins(tmp_path: Path, monkeypatch) -> None:
@@ -383,8 +488,15 @@ def test_deck_image_batch_subprocess_timeout_is_structured(tmp_path: Path, monke
 def test_deck_build_service_incomplete_visuals_fail_before_compile(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     compiler_calls: list[dict] = []
+    repair_attempts: list[tuple[int, int]] = []
+
+    def single_runner(slide, _runtime, attempt_no: int) -> dict:
+        repair_attempts.append((slide.index, attempt_no))
+        return {"success": False, "error_class": "timeout"}
+
     service = DeckBuildService(
         image_batch_runner=_fake_batch(runtime, create_outputs=False, complete=False),
+        image_single_runner=single_runner,
         deck_compiler=_fake_compiler(compiler_calls),
     )
 
@@ -399,7 +511,55 @@ def test_deck_build_service_incomplete_visuals_fail_before_compile(tmp_path: Pat
     assert result.failure_code == "deck_visuals_incomplete"
     assert result.successful_visual_count == 0
     assert result.missing_visual_count == 3
+    assert result.serial_repair_count == 6
+    assert repair_attempts == [(1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2)]
     assert compiler_calls == []
+
+
+def test_deck_build_service_terminal_provider_error_does_not_unlock_serial_repair(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    single_called = False
+
+    def single_runner(_slide, _runtime, _attempt_no):
+        nonlocal single_called
+        single_called = True
+        return {"success": False, "error_class": "should_not_run"}
+
+    def auth_batch(manifest_path: str, tool_runtime) -> dict:
+        manifest_host = Path(replace_virtual_path(manifest_path, tool_runtime.state["thread_data"]))
+        manifest = json.loads(manifest_host.read_text(encoding="utf-8"))
+        return {
+            "summary_present": True,
+            "complete": False,
+            "requested": len(manifest["items"]),
+            "images_generated": 0,
+            "failed": len(manifest["items"]),
+            "items": [
+                {"output_file": item["output_file"], "success": False, "error_class": "auth_invalid"}
+                for item in manifest["items"]
+            ],
+            "error_class_histogram": {"auth_invalid": len(manifest["items"])},
+        }
+
+    service = DeckBuildService(
+        image_batch_runner=auth_batch,
+        image_single_runner=single_runner,
+        deck_compiler=_fake_compiler([]),
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+    )
+
+    assert result.success is False
+    assert result.failure_code == "deck_visuals_incomplete"
+    assert result.image_generation_status == "failed"
+    assert result.image_generation_reason == "auth_invalid"
+    assert result.serial_repair_count == 0
+    assert single_called is False
 
 
 def test_deck_build_service_text_only_requires_explicit_request_and_compiles_without_visuals(tmp_path: Path) -> None:

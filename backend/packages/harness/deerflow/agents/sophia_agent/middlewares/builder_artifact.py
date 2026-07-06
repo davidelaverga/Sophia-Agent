@@ -10999,6 +10999,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         missing = int(payload.get("missing_visual_count") or max(0, expected - min(successful, referenced)))
         quality_status = str(payload.get("quality_status") or ("passed" if success else "failed"))
         failure_code = payload.get("failure_code") or (None if success else status_reason or "deck_build_failed")
+        image_generation_status = str(payload.get("image_generation_status") or ("success" if success else "failed"))
+        primary_image_batch_status = str(payload.get("primary_image_batch_status") or ("success" if success else "failed"))
+        primary_image_batch_error_class = payload.get("primary_image_batch_error_class") or (None if success else failure_code)
         delta: dict[str, Any] = {
             "presentation_route": "deck_ir_html_raster",
             "deck_route": "deck_ir_html_raster",
@@ -11013,9 +11016,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "referenced_visual_count": referenced,
             "missing_expected_visual_count": missing,
             "generated_visuals_complete": expected == successful == referenced and missing == 0,
-            "image_generation_status": "success" if success else "failed",
-            "primary_image_batch_status": "success" if success else "failed",
-            "primary_image_batch_error_class": failure_code,
+            "image_generation_status": image_generation_status,
+            "image_generation_reason": payload.get("image_generation_reason"),
+            "primary_image_batch_status": primary_image_batch_status,
+            "primary_image_batch_error_class": primary_image_batch_error_class,
+            "serial_repair_count": int(payload.get("serial_repair_count") or 0),
+            "batch_timeout_count": int(payload.get("batch_timeout_count") or 0),
+            "partial_batch_salvaged": bool(payload.get("partial_batch_salvaged")),
             "pptx_plan_slide_count": slide_count,
             "pptx_generator_slide_count": slide_count if success else 0,
             "pptx_generator_picture_count": slide_count if success else 0,
@@ -11099,8 +11106,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "deck_build_path": payload.get("deck_build_path"),
             "deck_quality_status": payload.get("quality_status") or "failed",
             "image_generation_status": delta.get("image_generation_status"),
+            "image_generation_reason": delta.get("image_generation_reason"),
             "primary_image_batch_status": delta.get("primary_image_batch_status"),
             "primary_image_batch_error_class": delta.get("primary_image_batch_error_class"),
+            "serial_repair_count": delta.get("serial_repair_count"),
+            "batch_timeout_count": delta.get("batch_timeout_count"),
+            "partial_batch_salvaged": delta.get("partial_batch_salvaged"),
             "expected_generated_visual_count": delta.get("expected_generated_visual_count"),
             "successful_generated_visual_count": delta.get("successful_generated_visual_count"),
             "referenced_visual_count": delta.get("referenced_visual_count"),

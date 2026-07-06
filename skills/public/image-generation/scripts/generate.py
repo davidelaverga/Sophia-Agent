@@ -726,7 +726,7 @@ def _image_gen_timeout_seconds() -> float:
 def _image_gen_max_retries() -> int:
     """SDK retry budget for transient 429/5xx/connection errors.
 
-    Default 3 (overridable via SOPHIA_IMAGE_GEN_MAX_RETRIES). The OpenAI SDK
+    Default 1 (overridable via SOPHIA_IMAGE_GEN_MAX_RETRIES). The OpenAI SDK
     retries only transient classes (rate-limit / server / connection) with
     exponential backoff and leaves user errors (bad request, content policy,
     org-not-verified) alone. This is the yield fix: the prod batch saw 2/20
@@ -738,8 +738,8 @@ def _image_gen_max_retries() -> int:
     try:
         value = int(raw)
     except ValueError:
-        return 3
-    return value if value >= 0 else 3
+        return 1
+    return value if value >= 0 else 1
 
 
 def _openai_client_from_env() -> object:
@@ -1177,7 +1177,7 @@ def _run_batch(manifest_path: str) -> int:
     style instructions across prompt files and optional ``reference_images``.
     """
     import json as _json
-    from concurrent.futures import ThreadPoolExecutor
+    from concurrent.futures import ThreadPoolExecutor, as_completed
 
     batch_run: Any | None = None
 
@@ -1188,6 +1188,31 @@ def _run_batch(manifest_path: str) -> int:
         _finish_trace(batch_run, outputs=payload)
         _flush_langsmith_traces()
         return 0 if payload.get("complete") else 1
+
+    def _progress_payload(item: dict, index: int, result: dict) -> dict[str, Any]:
+        payload: dict[str, Any] = {
+            "item_index": int(result.get("item_index") or index),
+            "prompt_file": _safe_basename(item.get("prompt_file")),
+            "prompt_hash": _safe_prompt_hash(
+                item.get("prompt_file"),
+                slide_visual=bool(item.get("slide_visual")),
+                base_dir=manifest_dir,
+            ),
+            "output_file": str(result.get("output_file") or item.get("output_file") or ""),
+            "output_basename": _safe_basename(result.get("output_file") or item.get("output_file")),
+            "success": bool(result.get("success")),
+            "duration_ms": result.get("duration_ms"),
+            "bytes": result.get("bytes"),
+            "error_class": result.get("error_class"),
+            "exit_code": result.get("exit_code"),
+        }
+        raw_error = result.get("raw_error_excerpt")
+        if raw_error:
+            payload["raw_error_excerpt"] = str(raw_error)[:_RAW_ERROR_MAX]
+        return {key: value for key, value in payload.items() if value not in (None, "")}
+
+    def _emit_item_progress(item: dict, index: int, result: dict) -> None:
+        print(f"IMAGEGEN_BATCH_ITEM {_json.dumps(_progress_payload(item, index, result))}", flush=True)
 
     resolved_manifest_path = _resolve_sophia_path(manifest_path)
     manifest_dir = Path(resolved_manifest_path).parent
@@ -1358,7 +1383,27 @@ def _run_batch(manifest_path: str) -> int:
         batch_run = run
         try:
             with ThreadPoolExecutor(max_workers=concurrency) as pool:
-                results = list(pool.map(_one, enumerate(items, start=1)))
+                future_to_item = {
+                    pool.submit(_one, (index, item)): (index, item)
+                    for index, item in enumerate(items, start=1)
+                }
+                results_by_index: dict[int, dict] = {}
+                for future in as_completed(future_to_item):
+                    index, item = future_to_item[future]
+                    try:
+                        result = future.result()
+                    except Exception as exc:  # noqa: BLE001 - preserve batch contract.
+                        result = {
+                            "item_index": index,
+                            "output_file": str(item.get("output_file") or ""),
+                            "success": False,
+                            "error": f"{type(exc).__name__}: {exc}",
+                            "error_class": _classify_exception(exc),
+                            "raw_error_excerpt": _extract_raw_error(exc),
+                        }
+                    results_by_index[index] = result
+                    _emit_item_progress(item, index, result)
+                results = [results_by_index[index] for index in range(1, len(items) + 1) if index in results_by_index]
         except Exception as exc:  # noqa: BLE001 - still emit the batch contract on executor-level failure.
             return _summary(
                 {

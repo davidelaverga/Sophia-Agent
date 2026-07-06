@@ -38,9 +38,33 @@ _TEXT_ONLY_REQUEST_RE = re.compile(
     r"|no\s+visuals?|without\s+(?:images?|visuals?)|with\s+no\s+(?:images?|visuals?))\b",
     re.I,
 )
+_SERIAL_REPAIR_MAX_ATTEMPTS = 2
+_NON_REPAIRABLE_IMAGE_ERROR_CLASSES = {
+    "auth_invalid",
+    "content_blocked",
+    "egress_blocked",
+    "file_not_found",
+    "image_script_not_found",
+    "import_error",
+    "invalid_reference_image",
+    "invalid_size",
+    "manifest_empty",
+    "manifest_prompt_missing",
+    "manifest_unreadable",
+    "missing_api_key",
+    "missing_prompt_or_output",
+    "org_not_verified",
+    "permission_denied",
+    "process_exit",
+    "python_not_found",
+    "quota_exceeded",
+    "sandbox_path_rejected",
+    "shell_error",
+}
 
 
 DeckCompiler = Callable[[ToolRuntime, str, str, str], dict[str, Any]]
+ImageSingleRunner = Callable[[DeckSlideSpec, ToolRuntime, int], dict[str, Any]]
 
 
 class DeckBuildService:
@@ -48,10 +72,12 @@ class DeckBuildService:
         self,
         *,
         image_batch_runner: Callable[[str, ToolRuntime], dict[str, Any]] | None = None,
+        image_single_runner: ImageSingleRunner | None = None,
         deck_compiler: DeckCompiler | None = None,
         evaluator: DeckEvaluator | None = None,
     ) -> None:
         self._image_batch_runner = image_batch_runner or self._run_image_batch_subprocess
+        self._image_single_runner = image_single_runner or self._run_image_single_subprocess
         self._deck_compiler = deck_compiler or _compile_with_build_deck_from_slides
         self._evaluator = evaluator or DeckEvaluator()
 
@@ -112,11 +138,14 @@ class DeckBuildService:
                 self._prepare_manifest(deck, runtime)
                 summary = self._run_visual_batch(deck, runtime)
                 self._apply_batch_summary(deck, runtime, summary)
+                self._repair_visuals_after_batch(deck, runtime, summary)
                 self._verify_visuals(deck, runtime)
             else:
                 for slide in deck.slides:
                     slide.visual_required = False
                     slide.visual_status = "skipped"
+                deck.image_generation_status = "skipped"
+                deck.primary_image_batch_status = "skipped"
             self._render_slide_html(deck, runtime)
             self._compile_pptx(deck, runtime)
             self._evaluate(deck, runtime)
@@ -128,6 +157,9 @@ class DeckBuildService:
             deck.status = "failed_terminal"
             deck.failure_code = exc.code
             deck.failure_summary = exc.summary
+            if deck.visual_policy == "required" and deck.slides:
+                self._refresh_visual_counts(deck, runtime)
+            _finalize_image_generation_status(deck, success=False)
             deck.updated_at = _now()
             deck_path = save_deck_build(deck, runtime)
             self._trace_terminal(deck, runtime, success=False, deck_path=deck_path, retryable=exc.retryable)
@@ -265,6 +297,7 @@ class DeckBuildService:
                 raise DeckBuildFailure(str(result.get("error_type") or "invalid_deck_ir"), str(result.get("error") or "manifest failed"), retryable=True)
             for slide, item in zip(deck.slides, result.get("items", []), strict=True):
                 slide.visual_asset_path = item.get("output_path")
+            self._clear_expected_visual_outputs(deck, runtime)
 
     def _run_visual_batch(self, deck: DeckBuild, runtime: ToolRuntime) -> dict[str, Any]:
         deck.status = "visual_batch_running"
@@ -280,21 +313,136 @@ class DeckBuildService:
             inputs={
                 "requested": deck.expected_visual_count,
                 "concurrency": os.getenv("SOPHIA_IMAGE_GEN_CONCURRENCY", "2"),
-                "sdk_timeout_seconds": os.getenv("SOPHIA_IMAGE_GEN_TIMEOUT", "240"),
+                "sdk_timeout_seconds": os.getenv("SOPHIA_IMAGE_GEN_TIMEOUT", "120"),
                 "sdk_max_retries": os.getenv("SOPHIA_IMAGE_GEN_MAX_RETRIES", "1"),
                 "manifest_file": basename(_MANIFEST),
             },
         ) as run:
             summary = self._image_batch_runner(_MANIFEST, runtime)
             summary.setdefault("duration_ms", int((time.perf_counter() - started) * 1000))
-            finish_span(run, _safe_batch_summary(summary))
             if not summary.get("summary_present", True):
+                summary = self._reconcile_missing_batch_summary(deck, runtime, summary)
+            self._record_primary_batch_state(deck, summary)
+            finish_span(run, _safe_batch_summary(summary))
+            if not summary.get("summary_present", True) and not summary.get("batch_attempted"):
                 raise DeckBuildFailure("deck_visual_batch_startup_failed", "Image batch did not emit IMAGEGEN_BATCH.", retryable=False)
             if not summary.get("complete"):
                 if summary.get("requested") is None:
                     summary["requested"] = deck.expected_visual_count
                 return summary
             return summary
+
+    def _clear_expected_visual_outputs(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
+        for slide in deck.slides:
+            if not slide.visual_asset_path:
+                continue
+            try:
+                host = _host_path(slide.visual_asset_path, runtime)
+                if host.is_file():
+                    host.unlink()
+            except OSError:
+                continue
+
+    def _record_primary_batch_state(self, deck: DeckBuild, summary: dict[str, Any]) -> None:
+        error_class = summary.get("error_class")
+        if not error_class:
+            histogram = summary.get("error_class_histogram")
+            if isinstance(histogram, dict) and histogram:
+                error_class = next(iter(histogram))
+        if error_class:
+            deck.primary_image_batch_error_class = str(error_class)
+            deck.image_generation_reason = str(error_class)
+        if str(error_class or "") == "timeout":
+            deck.batch_timeout_count += 1
+        if summary.get("complete"):
+            deck.primary_image_batch_status = "success"
+        elif summary.get("batch_attempted") or summary.get("summary_present", True):
+            deck.primary_image_batch_status = "partial" if int(summary.get("images_generated") or 0) > 0 else "failed"
+        else:
+            deck.primary_image_batch_status = "failed"
+        if summary.get("partial_batch_salvaged"):
+            deck.partial_batch_salvaged = True
+
+    def _reconcile_missing_batch_summary(
+        self,
+        deck: DeckBuild,
+        runtime: ToolRuntime,
+        summary: dict[str, Any],
+    ) -> dict[str, Any]:
+        progress_items = summary.get("items") if isinstance(summary.get("items"), list) else []
+        error_class = str(summary.get("error_class") or "batch_summary_missing")
+        batch_attempted = error_class == "timeout" or bool(progress_items)
+        if not batch_attempted:
+            return {**summary, "batch_attempted": False}
+        progress_by_output = {
+            str(item.get("output_file")): item
+            for item in progress_items
+            if isinstance(item, dict) and item.get("output_file")
+        }
+        items: list[dict[str, Any]] = []
+        succeeded = 0
+        histogram: dict[str, int] = {}
+        with deck_span(
+            "deck.image_batch.timeout_reconcile",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            inputs={
+                "summary_error_class": error_class,
+                "progress_item_count": len(progress_items),
+                "expected_visual_count": deck.expected_visual_count,
+            },
+        ) as run:
+            for slide in deck.slides:
+                output_file = str(slide.visual_asset_path or "")
+                progress = progress_by_output.get(output_file, {})
+                output_bytes = _file_size(_host_path(output_file, runtime)) if output_file else None
+                exists = bool(output_bytes and output_bytes > 0)
+                success = exists or (bool(progress.get("success")) and exists)
+                item_error_class = None if success else str(progress.get("error_class") or error_class or "timeout")
+                if success:
+                    succeeded += 1
+                else:
+                    histogram[item_error_class or "unknown"] = histogram.get(item_error_class or "unknown", 0) + 1
+                item = {
+                    "item_index": slide.index,
+                    "output_file": output_file,
+                    "success": success,
+                    "bytes": output_bytes or 0,
+                    "duration_ms": progress.get("duration_ms"),
+                    "error_class": item_error_class,
+                }
+                raw_error = progress.get("raw_error_excerpt") or summary.get("raw_error_excerpt")
+                if raw_error and not success:
+                    item["raw_error_excerpt"] = safe_excerpt(raw_error)
+                items.append({key: value for key, value in item.items() if value not in (None, "")})
+            reconciled = {
+                **summary,
+                "summary_present": False,
+                "batch_attempted": True,
+                "requested": deck.expected_visual_count,
+                "images_generated": succeeded,
+                "failed": max(0, deck.expected_visual_count - succeeded),
+                "complete": succeeded == deck.expected_visual_count,
+                "items": items,
+                "error_class": error_class,
+                "error_class_histogram": histogram,
+                "partial_batch_salvaged": succeeded > 0,
+            }
+            finish_span(
+                run,
+                {
+                    "batch_attempted": True,
+                    "partial_batch_salvaged": succeeded > 0,
+                    "successful_visual_count": succeeded,
+                    "missing_visual_count": max(0, deck.expected_visual_count - succeeded),
+                    "error_class": error_class,
+                },
+            )
+            return reconciled
 
     def _apply_batch_summary(self, deck: DeckBuild, runtime: ToolRuntime, summary: dict[str, Any]) -> None:
         items = summary.get("items") if isinstance(summary.get("items"), list) else []
@@ -332,17 +480,122 @@ class DeckBuildService:
                     },
                 )
 
-    def _verify_visuals(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
+    def _repair_visuals_after_batch(self, deck: DeckBuild, runtime: ToolRuntime, summary: dict[str, Any]) -> None:
+        missing = self._slides_needing_repair(deck, runtime)
+        if not missing:
+            return
+        if not _batch_summary_allows_serial_repair(summary):
+            deck.image_generation_reason = _primary_error_class(summary) or deck.image_generation_reason
+            return
+        attempts = 0
+        repaired = 0
+        stopped_error_class: str | None = None
+        with deck_span(
+            "deck.image_repair.run",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            inputs={
+                "missing_visual_count": len(missing),
+                "max_attempts_per_visual": _SERIAL_REPAIR_MAX_ATTEMPTS,
+                "batch_error_class": _primary_error_class(summary),
+            },
+        ) as run:
+            for slide in missing:
+                for attempt_no in range(1, _SERIAL_REPAIR_MAX_ATTEMPTS + 1):
+                    attempts += 1
+                    result = self._image_single_runner(slide, runtime, attempt_no)
+                    result_error_class = str(result.get("error_class") or "")
+                    output_exists = bool(slide.visual_asset_path and (_file_size(_host_path(slide.visual_asset_path, runtime)) or 0) > 0)
+                    success = bool(result.get("success")) and output_exists
+                    deck.serial_repair_count += 1
+                    with deck_span(
+                        "deck.image_repair.item",
+                        runtime=runtime,
+                        build_id=deck.build_id,
+                        visual_policy=deck.visual_policy,
+                        status=deck.status,
+                        slide_count=len(deck.slides),
+                        run_type="tool",
+                        inputs={
+                            "mode": "serial_repair",
+                            "repair_attempt_no": attempt_no,
+                            "item_index": slide.index,
+                            "selector": slide.selector,
+                            "prompt_file": basename(slide.visual_prompt_path),
+                            "prompt_hash": _file_hash(_host_path(slide.visual_prompt_path or "", runtime)),
+                            "output_file": basename(slide.visual_asset_path),
+                            "allowed_manifest_output": True,
+                        },
+                    ) as item_run:
+                        finish_span(
+                            item_run,
+                            {
+                                "success": success,
+                                "error_class": None if success else result_error_class or "image_generation_failed",
+                                "exit_code": result.get("exit_code"),
+                                "duration_ms": result.get("duration_ms"),
+                                "output_bytes": (
+                                    _file_size(_host_path(slide.visual_asset_path, runtime))
+                                    if slide.visual_asset_path
+                                    else None
+                                ),
+                                "raw_error_excerpt": safe_excerpt(result.get("raw_error_excerpt")),
+                            },
+                        )
+                    if success:
+                        slide.visual_status = "generated"
+                        slide.visual_error_class = None
+                        repaired += 1
+                        break
+                    slide.visual_status = "failed"
+                    slide.visual_error_class = result_error_class or "image_generation_failed"
+                    deck.image_generation_reason = slide.visual_error_class
+                    if slide.visual_error_class in _NON_REPAIRABLE_IMAGE_ERROR_CLASSES:
+                        stopped_error_class = slide.visual_error_class
+                        break
+                if stopped_error_class:
+                    break
+            successful, remaining_missing = self._refresh_visual_counts(deck, runtime)
+            if attempts and remaining_missing == 0:
+                deck.primary_image_batch_status = "repaired"
+            finish_span(
+                run,
+                {
+                    "attempt_count": attempts,
+                    "repaired_visual_count": repaired,
+                    "successful_visual_count": successful,
+                    "remaining_missing_visual_count": remaining_missing,
+                    "stopped_error_class": stopped_error_class,
+                },
+            )
+
+    def _slides_needing_repair(self, deck: DeckBuild, runtime: ToolRuntime) -> list[DeckSlideSpec]:
+        slides: list[DeckSlideSpec] = []
+        for slide in deck.slides:
+            output_exists = bool(slide.visual_asset_path and (_file_size(_host_path(slide.visual_asset_path, runtime)) or 0) > 0)
+            if slide.visual_status != "generated" or not output_exists:
+                slides.append(slide)
+        return slides
+
+    def _refresh_visual_counts(self, deck: DeckBuild, runtime: ToolRuntime) -> tuple[int, int]:
         successful = 0
         missing = 0
         for slide in deck.slides:
-            exists = bool(slide.visual_asset_path and _host_path(slide.visual_asset_path, runtime).is_file())
+            exists = bool(slide.visual_asset_path and (_file_size(_host_path(slide.visual_asset_path, runtime)) or 0) > 0)
             if slide.visual_status == "generated" and exists:
                 successful += 1
             else:
                 missing += 1
         deck.successful_visual_count = successful
         deck.missing_visual_count = missing
+        return successful, missing
+
+    def _verify_visuals(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
+        successful, missing = self._refresh_visual_counts(deck, runtime)
         with deck_span(
             "deck.visuals.verify",
             runtime=runtime,
@@ -479,6 +732,13 @@ class DeckBuildService:
                     "retryable": retryable,
                     "artifact_path": deck.pptx_path if success else None,
                     "deck_build_path": deck_path,
+                    "image_generation_status": deck.image_generation_status,
+                    "image_generation_reason": deck.image_generation_reason,
+                    "primary_image_batch_status": deck.primary_image_batch_status,
+                    "primary_image_batch_error_class": deck.primary_image_batch_error_class,
+                    "serial_repair_count": deck.serial_repair_count,
+                    "batch_timeout_count": deck.batch_timeout_count,
+                    "partial_batch_salvaged": deck.partial_batch_salvaged,
                 },
             )
 
@@ -505,10 +765,18 @@ class DeckBuildService:
                     "referenced_visual_count": deck.referenced_visual_count,
                     "missing_visual_count": deck.missing_visual_count,
                     "quality_warning": deck.quality_warning,
+                    "image_generation_status": deck.image_generation_status,
+                    "image_generation_reason": deck.image_generation_reason,
+                    "primary_image_batch_status": deck.primary_image_batch_status,
+                    "primary_image_batch_error_class": deck.primary_image_batch_error_class,
+                    "serial_repair_count": deck.serial_repair_count,
+                    "batch_timeout_count": deck.batch_timeout_count,
+                    "partial_batch_salvaged": deck.partial_batch_salvaged,
                 },
             )
 
     def _success_result(self, deck: DeckBuild, deck_path: str, runtime: ToolRuntime) -> DeckBuildResult:
+        _finalize_image_generation_status(deck, success=True)
         self._trace_terminal(deck, runtime, success=True, deck_path=deck_path, retryable=False)
         self._trace_emit_decision(deck, runtime, success=True, retryable=False)
         return DeckBuildResult(
@@ -524,6 +792,13 @@ class DeckBuildService:
             quality_status="warning" if deck.quality_warning else "passed",
             quality_warning=deck.quality_warning,
             warnings=[deck.quality_warning] if deck.quality_warning else [],
+            image_generation_status=deck.image_generation_status,
+            image_generation_reason=deck.image_generation_reason,
+            primary_image_batch_status=deck.primary_image_batch_status,
+            primary_image_batch_error_class=deck.primary_image_batch_error_class,
+            serial_repair_count=deck.serial_repair_count,
+            batch_timeout_count=deck.batch_timeout_count,
+            partial_batch_salvaged=deck.partial_batch_salvaged,
         )
 
     def _failure_result(
@@ -546,19 +821,20 @@ class DeckBuildService:
             failure_code=exc.code,
             failure_summary=exc.summary,
             retryable=exc.retryable,
+            image_generation_status=deck.image_generation_status,
+            image_generation_reason=deck.image_generation_reason,
+            primary_image_batch_status=deck.primary_image_batch_status,
+            primary_image_batch_error_class=deck.primary_image_batch_error_class,
+            serial_repair_count=deck.serial_repair_count,
+            batch_timeout_count=deck.batch_timeout_count,
+            partial_batch_salvaged=deck.partial_batch_salvaged,
         )
 
     def _run_image_batch_subprocess(self, manifest_path: str, runtime: ToolRuntime) -> dict[str, Any]:
         script = _image_script_path()
         if script is None:
             return {"summary_present": False, "complete": False, "error_class": "image_script_not_found", "raw_error_excerpt": "image generation script not found"}
-        env = os.environ.copy()
-        thread_data = get_thread_data(runtime) or {}
-        if thread_data.get("outputs_path"):
-            env["SOPHIA_OUTPUTS_HOST_PATH"] = str(thread_data["outputs_path"])
-        if thread_data.get("workspace_path"):
-            env["SOPHIA_WORKSPACE_HOST_PATH"] = str(thread_data["workspace_path"])
-        env.update(_current_image_trace_env(runtime))
+        env = _image_subprocess_env(runtime)
         timeout = _deck_image_batch_timeout_seconds(manifest_path, runtime)
         try:
             completed = subprocess.run(  # noqa: S603
@@ -577,6 +853,7 @@ class DeckBuildService:
                 "complete": False,
                 "exit_code": 124,
                 "error_class": "timeout",
+                "items": _parse_batch_item_progress(stdout),
                 "raw_error_excerpt": safe_excerpt(
                     f"image batch subprocess timed out after {timeout}s; "
                     f"stdout_chars={len(stdout)} stderr_chars={len(stderr)} "
@@ -590,11 +867,64 @@ class DeckBuildService:
                 "complete": False,
                 "exit_code": completed.returncode,
                 "error_class": "batch_summary_missing",
+                "items": _parse_batch_item_progress(completed.stdout),
                 "raw_error_excerpt": safe_excerpt((completed.stderr or completed.stdout or "").strip()),
             }
         summary["summary_present"] = True
         summary["exit_code"] = completed.returncode
         return summary
+
+    def _run_image_single_subprocess(self, slide: DeckSlideSpec, runtime: ToolRuntime, attempt_no: int) -> dict[str, Any]:
+        script = _image_script_path()
+        if script is None:
+            return {"success": False, "error_class": "image_script_not_found", "raw_error_excerpt": "image generation script not found"}
+        if not slide.visual_prompt_path or not slide.visual_asset_path:
+            return {"success": False, "error_class": "missing_prompt_or_output"}
+        started = time.perf_counter()
+        timeout = _image_single_timeout_seconds()
+        try:
+            completed = subprocess.run(  # noqa: S603
+                [
+                    sys.executable,
+                    str(script),
+                    "--prompt-file",
+                    slide.visual_prompt_path,
+                    "--output-file",
+                    slide.visual_asset_path,
+                    "--aspect-ratio",
+                    "16:9",
+                    "--slide-visual",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                env=_image_subprocess_env(runtime),
+            )
+        except subprocess.TimeoutExpired as exc:
+            stdout = _timeout_stream_text(getattr(exc, "stdout", None) or getattr(exc, "output", None))
+            stderr = _timeout_stream_text(getattr(exc, "stderr", None))
+            return {
+                "success": False,
+                "exit_code": 124,
+                "error_class": "timeout",
+                "duration_ms": int((time.perf_counter() - started) * 1000),
+                "raw_error_excerpt": safe_excerpt(
+                    f"serial image repair attempt {attempt_no} timed out after {timeout}s; "
+                    f"stdout_chars={len(stdout)} stderr_chars={len(stderr)} "
+                    f"{(stderr or stdout).strip()}"
+                ),
+            }
+        output_bytes = _file_size(_host_path(slide.visual_asset_path, runtime))
+        success = completed.returncode == 0 and bool(output_bytes and output_bytes > 0)
+        return {
+            "success": success,
+            "exit_code": completed.returncode,
+            "error_class": None if success else _image_generation_error_class_from_output(completed.stderr, completed.stdout, completed.returncode),
+            "duration_ms": int((time.perf_counter() - started) * 1000),
+            "bytes": output_bytes or 0,
+            "raw_error_excerpt": safe_excerpt((completed.stderr or completed.stdout or "").strip()),
+        }
 
 
 class DeckBuildFailure(Exception):
@@ -679,6 +1009,33 @@ def _explicit_text_only_requested(runtime: ToolRuntime) -> bool:
     return bool(_TEXT_ONLY_REQUEST_RE.search("\n".join(haystack_parts)))
 
 
+def _finalize_image_generation_status(deck: DeckBuild, *, success: bool) -> None:
+    if deck.visual_policy != "required":
+        deck.image_generation_status = deck.image_generation_status or "skipped"
+        deck.primary_image_batch_status = deck.primary_image_batch_status or "skipped"
+        return
+    if success:
+        deck.image_generation_status = "success_after_repair" if deck.serial_repair_count > 0 else "success"
+        deck.image_generation_reason = None
+        if deck.serial_repair_count > 0:
+            deck.primary_image_batch_status = "repaired"
+        else:
+            deck.primary_image_batch_status = deck.primary_image_batch_status or "success"
+        return
+    if deck.successful_visual_count > 0:
+        deck.image_generation_status = "partial"
+    else:
+        deck.image_generation_status = "failed"
+    deck.image_generation_reason = (
+        deck.image_generation_reason
+        or deck.primary_image_batch_error_class
+        or deck.failure_code
+        or "image_generation_failed"
+    )
+    deck.primary_image_batch_status = deck.primary_image_batch_status or "failed"
+    deck.primary_image_batch_error_class = deck.primary_image_batch_error_class or deck.image_generation_reason
+
+
 def _current_image_trace_env(runtime: ToolRuntime) -> dict[str, str]:
     env: dict[str, str] = {}
     try:
@@ -702,12 +1059,31 @@ def _current_image_trace_env(runtime: ToolRuntime) -> dict[str, str]:
     return env
 
 
+def _image_subprocess_env(runtime: ToolRuntime) -> dict[str, str]:
+    env = os.environ.copy()
+    thread_data = get_thread_data(runtime) or {}
+    if thread_data.get("outputs_path"):
+        env["SOPHIA_OUTPUTS_HOST_PATH"] = str(thread_data["outputs_path"])
+    if thread_data.get("workspace_path"):
+        env["SOPHIA_WORKSPACE_HOST_PATH"] = str(thread_data["workspace_path"])
+    env.update(_current_image_trace_env(runtime))
+    return env
+
+
 def _int_env(name: str, default: int) -> int:
     try:
         value = int(os.getenv(name, "") or default)
     except (TypeError, ValueError):
         return default
     return value if value > 0 else default
+
+
+def _nonnegative_int_env(name: str, default: int) -> int:
+    try:
+        value = int(os.getenv(name, "") or default)
+    except (TypeError, ValueError):
+        return default
+    return value if value >= 0 else default
 
 
 def _manifest_item_count_for_timeout(manifest_path: str, runtime: ToolRuntime) -> int:
@@ -724,11 +1100,18 @@ def _deck_image_batch_timeout_seconds(manifest_path: str, runtime: ToolRuntime) 
     override = os.getenv("SOPHIA_DECK_IMAGE_BATCH_TIMEOUT")
     if override and override.strip():
         return _int_env("SOPHIA_DECK_IMAGE_BATCH_TIMEOUT", 1800)
-    per_image_timeout = _int_env("SOPHIA_IMAGE_GEN_TIMEOUT", 240)
+    per_image_timeout = _int_env("SOPHIA_IMAGE_GEN_TIMEOUT", 120)
+    max_retries = _nonnegative_int_env("SOPHIA_IMAGE_GEN_MAX_RETRIES", 1)
     concurrency = _int_env("SOPHIA_IMAGE_GEN_CONCURRENCY", 2)
     item_count = max(1, _manifest_item_count_for_timeout(manifest_path, runtime))
     waves = max(1, (item_count + concurrency - 1) // concurrency)
-    return max(per_image_timeout + 30, waves * per_image_timeout + 30)
+    return max(_image_single_timeout_seconds(), waves * per_image_timeout * (max_retries + 1) + 60)
+
+
+def _image_single_timeout_seconds() -> int:
+    per_image_timeout = _int_env("SOPHIA_IMAGE_GEN_TIMEOUT", 120)
+    max_retries = _nonnegative_int_env("SOPHIA_IMAGE_GEN_MAX_RETRIES", 1)
+    return per_image_timeout * (max_retries + 1) + 30
 
 
 def _timeout_stream_text(value: object) -> str:
@@ -784,10 +1167,86 @@ def _parse_batch_summary(stdout: str) -> dict[str, Any] | None:
     return None
 
 
+def _parse_batch_item_progress(stdout: str) -> list[dict[str, Any]]:
+    items: list[dict[str, Any]] = []
+    for line in stdout.splitlines():
+        if not line.startswith("IMAGEGEN_BATCH_ITEM "):
+            continue
+        try:
+            payload = json.loads(line.removeprefix("IMAGEGEN_BATCH_ITEM ").strip())
+        except ValueError:
+            continue
+        if isinstance(payload, dict):
+            if "raw_error_excerpt" in payload:
+                payload["raw_error_excerpt"] = safe_excerpt(payload["raw_error_excerpt"])
+            items.append(payload)
+    return items
+
+
+def _image_generation_error_class_from_output(stderr: str, stdout: str, returncode: int) -> str:
+    text = f"{stderr}\n{stdout}"
+    match = re.search(r"IMAGEGEN_FAIL\s+reason=([A-Za-z0-9_:-]+)", text)
+    if match:
+        return match.group(1)
+    if returncode == 2:
+        return "process_exit"
+    if "timed out" in text.lower() or "timeout" in text.lower():
+        return "timeout"
+    if "no bytes" in text.lower() or "empty output" in text.lower():
+        return "empty_output"
+    return "api_error"
+
+
+def _summary_error_classes(summary: dict[str, Any]) -> set[str]:
+    classes: set[str] = set()
+    error_class = summary.get("error_class")
+    if error_class:
+        classes.add(str(error_class))
+    histogram = summary.get("error_class_histogram")
+    if isinstance(histogram, dict):
+        classes.update(str(key) for key in histogram if key)
+    items = summary.get("items")
+    if isinstance(items, list):
+        for item in items:
+            if isinstance(item, dict) and item.get("error_class"):
+                classes.add(str(item.get("error_class")))
+    return classes
+
+
+def _primary_error_class(summary: dict[str, Any]) -> str | None:
+    classes = _summary_error_classes(summary)
+    if classes:
+        return sorted(classes)[0]
+    return None
+
+
+def _batch_summary_allows_serial_repair(summary: dict[str, Any]) -> bool:
+    if summary.get("complete"):
+        return False
+    classes = _summary_error_classes(summary)
+    if classes.intersection(_NON_REPAIRABLE_IMAGE_ERROR_CLASSES):
+        return False
+    if summary.get("summary_present", True):
+        return bool(int(summary.get("requested") or 0) > int(summary.get("images_generated") or 0))
+    return bool(summary.get("batch_attempted"))
+
+
 def _safe_batch_summary(summary: dict[str, Any]) -> dict[str, Any]:
     payload = dict(summary)
     if "raw_error_excerpt" in payload:
         payload["raw_error_excerpt"] = safe_excerpt(payload["raw_error_excerpt"])
+    items = payload.get("items")
+    if isinstance(items, list):
+        safe_items: list[Any] = []
+        for item in items:
+            if not isinstance(item, dict):
+                safe_items.append(item)
+                continue
+            safe_item = dict(item)
+            if "raw_error_excerpt" in safe_item:
+                safe_item["raw_error_excerpt"] = safe_excerpt(safe_item["raw_error_excerpt"])
+            safe_items.append(safe_item)
+        payload["items"] = safe_items
     return payload
 
 

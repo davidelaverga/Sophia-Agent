@@ -87,6 +87,13 @@ class DeckBuild:
     quality_warning: str | None = None
     failure_code: str | None = None
     failure_summary: str | None = None
+    image_generation_status: str | None = None
+    image_generation_reason: str | None = None
+    primary_image_batch_status: str | None = None
+    primary_image_batch_error_class: str | None = None
+    serial_repair_count: int = 0
+    batch_timeout_count: int = 0
+    partial_batch_salvaged: bool = False
     langsmith_trace_ids: list[str] = field(default_factory=list)
     created_at: str = ""
     updated_at: str = ""
@@ -145,6 +152,13 @@ class DeckBuildResult:
     failure_code: str | None = None
     failure_summary: str | None = None
     retryable: bool = False
+    image_generation_status: str | None = None
+    image_generation_reason: str | None = None
+    primary_image_batch_status: str | None = None
+    primary_image_batch_error_class: str | None = None
+    serial_repair_count: int = 0
+    batch_timeout_count: int = 0
+    partial_batch_salvaged: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
