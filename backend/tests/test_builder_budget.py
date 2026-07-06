@@ -65,7 +65,7 @@ def _capture_webhook(monkeypatch) -> list[dict]:
 
 
 def test_pricing_does_not_double_count_cache_tokens():
-    price = _price_for("claude-sonnet-4-6")  # {"in": 3.0, "out": 15.0}
+    price = _price_for("claude-sonnet-5")  # {"in": 3.0, "out": 15.0}
     # All input is cache_read → uncached input is 0; only the 10% surcharge.
     totals = {"input": 1_000_000, "output": 0, "cache_read": 1_000_000, "cache_creation": 0}
     assert _estimate_cost_usd(totals, price) == pytest.approx(0.30)
@@ -75,7 +75,7 @@ def test_pricing_does_not_double_count_cache_tokens():
 
 
 def test_price_for_unknown_model_falls_back_to_sonnet():
-    assert _price_for("some-future-model") == _price_for("claude-sonnet-4-6")
+    assert _price_for("some-future-model") == _price_for("claude-sonnet-5")
     assert _price_for(None) == {"in": 3.0, "out": 15.0}
 
 
@@ -95,7 +95,7 @@ def test_under_cap_is_noop(monkeypatch):
     calls = _capture_webhook(monkeypatch)
     mw = BuilderBudgetMiddleware()
     state = {
-        "builder_budget": {"max_cost_usd": 5.0, "max_total_tokens": 2_000_000, "cost_model_key": "claude-sonnet-4-6"},
+        "builder_budget": {"max_cost_usd": 5.0, "max_total_tokens": 2_000_000, "cost_model_key": "claude-sonnet-5"},
         "messages": [_ai(input_tokens=1000, output_tokens=100)],
     }
     assert mw.after_model(state, _runtime()) is None
@@ -112,7 +112,7 @@ def test_token_cap_trips_fires_timed_out_and_strips_tool_calls(monkeypatch):
         tool_calls=[{"name": "write_file", "args": {}, "id": "x", "type": "tool_call"}],
     )
     state = {
-        "builder_budget": {"max_cost_usd": 0.0, "max_total_tokens": 1000, "cost_model_key": "claude-sonnet-4-6"},
+        "builder_budget": {"max_cost_usd": 0.0, "max_total_tokens": 1000, "cost_model_key": "claude-sonnet-5"},
         "messages": [last],
     }
     out = mw.after_model(state, _runtime())
@@ -134,7 +134,7 @@ def test_cost_cap_trips(monkeypatch):
     mw = BuilderBudgetMiddleware()
     # 2M output * $15/M = $30 >> $5 cap; token cap disabled.
     state = {
-        "builder_budget": {"max_cost_usd": 5.0, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-4-6"},
+        "builder_budget": {"max_cost_usd": 5.0, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-5"},
         "messages": [_ai(output_tokens=2_000_000)],
     }
     out = mw.after_model(state, _runtime())
@@ -187,7 +187,7 @@ def test_image_generation_cost_counts_toward_cost_cap(monkeypatch):
     # Token cost alone is tiny (~$0.0045); 10 tracked image calls add $0.70
     # and push the total over a $0.50 cap.
     state = {
-        "builder_budget": {"max_cost_usd": 0.5, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-4-6"},
+        "builder_budget": {"max_cost_usd": 0.5, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-5"},
         "messages": [_ai(input_tokens=1000, output_tokens=100)],
         "builder_pptx_diagnostics": {"image_generation_attempt_count": 10},
     }
@@ -202,7 +202,7 @@ def test_image_generation_cost_under_cap_is_noop(monkeypatch):
     calls = _capture_webhook(monkeypatch)
     mw = BuilderBudgetMiddleware()
     state = {
-        "builder_budget": {"max_cost_usd": 5.0, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-4-6"},
+        "builder_budget": {"max_cost_usd": 5.0, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-5"},
         "messages": [_ai(input_tokens=1000, output_tokens=100)],
         "builder_pptx_diagnostics": {"image_generation_attempt_count": 3},
     }

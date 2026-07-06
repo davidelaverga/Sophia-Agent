@@ -27,13 +27,13 @@ Resolution order:
    the provider model string (builder's ``_resolve_builder_model_name``
    returns ``model_cfg.model``, not ``model_cfg.name``). An alias-style
    config entry like
-   ``- name: claude-sonnet\n    model: claude-sonnet-4-6`` must surface
+   ``- name: claude-sonnet\n    model: claude-sonnet-5`` must surface
    its explicit ``supports_vision`` override regardless of which of the
    two strings the agent factory happens to pass. Codex P2 on PR #132.
 
 2. ``_DEFAULT_VISION_MODELS`` fallback — applied when the model isn't
    in config OR when it's in config but ``supports_vision`` is omitted.
-   The Sophia default models (Sonnet 4.6 and Haiku 4.5) both support
+   The Sophia default models (Sonnet 5 and Haiku 4.5) both support
    vision natively; falling back here lets the agents boot correctly
    without requiring a ``config.production.yaml`` edit. Add new
    vision-capable Sophia models to this set as they're introduced.
@@ -61,6 +61,9 @@ logger = logging.getLogger(__name__)
 # here; the gate then enables the tool + middleware automatically.
 _DEFAULT_VISION_MODELS: frozenset[str] = frozenset(
     {
+        "claude-sonnet-5",
+        # Keep the previous production default vision-enabled while queued
+        # jobs and stale configs drain.
         "claude-sonnet-4-6",
         "claude-haiku-4-5-20251001",
     }

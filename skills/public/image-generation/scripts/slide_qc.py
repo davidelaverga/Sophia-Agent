@@ -26,7 +26,7 @@ try:  # Pillow is present in the builder image-gen runtime; tests monkeypatch wh
 except Exception:  # pragma: no cover - dependency availability varies.
     Image = None  # type: ignore[assignment]
 
-_DEFAULT_QC_MODEL = "claude-sonnet-4-6"
+_DEFAULT_QC_MODEL = "claude-sonnet-5"
 
 _REVIEWER_PROMPT = """You are a strict slide QC reviewer. You are shown one rendered presentation slide and the
 spec it must satisfy. Reply with JSON only: {"pass": true|false, "reasons": ["..."]}.

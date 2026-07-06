@@ -56,6 +56,9 @@ logger = logging.getLogger(__name__)
 # writes (5m TTL) at 125%. Add MiniMax/DeepSeek/Gemini here if they ever
 # become builder models (see spec §5).
 _MODEL_PRICES: dict[str, dict[str, float]] = {
+    "claude-sonnet-5": {"in": 3.0, "out": 15.0},
+    # Legacy alias while old queued jobs and config overrides drain. Keep the
+    # breaker conservative until pricing is explicitly revised.
     "claude-sonnet-4-6": {"in": 3.0, "out": 15.0},
     "claude-haiku-4-5": {"in": 1.0, "out": 5.0},
 }
@@ -82,7 +85,7 @@ DEFAULT_BUILDER_BUDGET: dict[str, Any] = {
     "soft_warn_at_turn": 18,
     "force_emit_wall_clock_fraction": 0.70,
     "repair_reserve_usd": 0.25,
-    "cost_model_key": "claude-sonnet-4-6",
+    "cost_model_key": "claude-sonnet-5",
     "budget_stop_message": USER_BUDGET_TIMEOUT_MESSAGE,
 }
 

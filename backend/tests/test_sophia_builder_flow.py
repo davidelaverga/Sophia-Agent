@@ -130,7 +130,7 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     monkeypatch.setattr(
         builder_module,
         "get_app_config",
-        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
+        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-5")]),
     )
 
     def _capture_builder(**kwargs):
@@ -225,7 +225,7 @@ def test_presentation_builder_toolset_removes_excalidraw_diagram(monkeypatch) ->
     monkeypatch.setattr(
         builder_module,
         "get_app_config",
-        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
+        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-5")]),
     )
 
     def _capture_builder(**kwargs):
@@ -250,7 +250,7 @@ def test_report_builder_toolset_uses_render_html_to_pdf(monkeypatch) -> None:
     monkeypatch.setattr(
         builder_module,
         "get_app_config",
-        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
+        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-5")]),
     )
     captured = {}
 
@@ -282,7 +282,7 @@ def test_pdf_presentation_delivery_keeps_deck_toolset(monkeypatch) -> None:
     monkeypatch.setattr(
         builder_module,
         "get_app_config",
-        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
+        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-5")]),
     )
     captured = {}
 
@@ -330,7 +330,7 @@ def test_builder_agent_anthropic_timeout_and_retries(monkeypatch) -> None:
     monkeypatch.setattr(
         builder_module,
         "get_app_config",
-        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
+        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-5")]),
     )
     monkeypatch.setattr(builder_module, "create_agent", lambda **kwargs: MagicMock())
 
@@ -360,7 +360,7 @@ def test_builder_factory_returns_langgraph_compatible_graph(monkeypatch) -> None
     monkeypatch.setattr(
         builder_module,
         "get_app_config",
-        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-4-6")]),
+        lambda: SimpleNamespace(models=[SimpleNamespace(model="claude-sonnet-5")]),
     )
     monkeypatch.delenv("SOPHIA_BUILDER_MODEL", raising=False)
     monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
@@ -377,7 +377,7 @@ def test_builder_factory_returns_langgraph_compatible_graph(monkeypatch) -> None
     assert len(builder_agent.config["callbacks"]) == 1
     assert "sophia_builder" in builder_agent.config["tags"]
     assert builder_agent.config["metadata"]["sophia_component"] == "builder"
-    assert builder_agent.config["metadata"]["builder_model_name"] == "claude-sonnet-4-6"
+    assert builder_agent.config["metadata"]["builder_model_name"] == "claude-sonnet-5"
     assert builder_agent.config["metadata"]["builder_model_source"] == "config-sonnet"
 
 

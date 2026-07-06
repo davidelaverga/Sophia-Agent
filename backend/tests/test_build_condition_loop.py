@@ -109,7 +109,7 @@ def test_iteration_available_respects_counter(monkeypatch):
 
 def test_budget_pre_grant_denies_when_ceiling_close():
     state = {
-        "builder_budget": {"max_cost_usd": 0.10, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-4-6"},
+        "builder_budget": {"max_cost_usd": 0.10, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-5"},
         "messages": [],
         "builder_pptx_diagnostics": {"image_generation_attempt_count": 2},  # $0.14 image spend
     }
@@ -118,7 +118,7 @@ def test_budget_pre_grant_denies_when_ceiling_close():
 
 def test_budget_pre_grant_allows_with_headroom():
     state = {
-        "builder_budget": {"max_cost_usd": 5.0, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-4-6"},
+        "builder_budget": {"max_cost_usd": 5.0, "max_total_tokens": 0, "cost_model_key": "claude-sonnet-5"},
         "messages": [],
     }
     assert budget_allows_iteration(state) is True

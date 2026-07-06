@@ -26,9 +26,9 @@ from deerflow.config.model_config import ModelConfig
 
 
 def test_default_sonnet_falls_back_to_true(monkeypatch) -> None:
-    """Sonnet 4.6 is in the fallback set — gate True even without config."""
+    """Sonnet 5 is in the fallback set — gate True even without config."""
     monkeypatch.setattr(
-        vision_gate, "_DEFAULT_VISION_MODELS", frozenset({"claude-sonnet-4-6"})
+        vision_gate, "_DEFAULT_VISION_MODELS", frozenset({"claude-sonnet-5"})
     )
 
     class _NoConfig:
@@ -40,7 +40,7 @@ def test_default_sonnet_falls_back_to_true(monkeypatch) -> None:
         lambda: _NoConfig(),
     )
 
-    assert vision_gate.supports_vision("claude-sonnet-4-6") is True
+    assert vision_gate.supports_vision("claude-sonnet-5") is True
 
 
 def test_default_haiku_falls_back_to_true(monkeypatch) -> None:
@@ -68,19 +68,19 @@ def test_explicit_false_in_config_overrides_fallback(monkeypatch) -> None:
     """Operator-configured supports_vision=False wins over the fallback set."""
     # Use a real ModelConfig so model_fields_set reflects the explicit set.
     cfg_with_disabled = ModelConfig(
-        name="claude-sonnet-4-6",
+        name="claude-sonnet-5",
         use="langchain_anthropic:ChatAnthropic",
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         supports_vision=False,
     )
     app = SimpleNamespace(
-        get_model_config=lambda name: cfg_with_disabled if name == "claude-sonnet-4-6" else None,
+        get_model_config=lambda name: cfg_with_disabled if name == "claude-sonnet-5" else None,
     )
     monkeypatch.setattr(
         "deerflow.config.app_config.get_app_config",
         lambda: app,
     )
-    assert vision_gate.supports_vision("claude-sonnet-4-6") is False
+    assert vision_gate.supports_vision("claude-sonnet-5") is False
 
 
 def test_explicit_true_in_config_for_unknown_model_enables_vision(monkeypatch) -> None:
@@ -153,7 +153,7 @@ def test_app_config_failure_falls_through_to_default(monkeypatch) -> None:
         "deerflow.config.app_config.get_app_config",
         _raise,
     )
-    assert vision_gate.supports_vision("claude-sonnet-4-6") is True
+    assert vision_gate.supports_vision("claude-sonnet-5") is True
     assert vision_gate.supports_vision("gpt-4-unknown") is False
 
 
@@ -204,15 +204,15 @@ def test_alias_entry_explicit_false_disables_default_model(monkeypatch) -> None:
     aliased_disable = ModelConfig(
         name="claude-sonnet-aliased",
         use="langchain_anthropic:ChatAnthropic",
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         supports_vision=False,
     )
     _patch_app_config_models(monkeypatch, [aliased_disable])
 
     # Without the alias lookup, this would return True via the default
-    # set (claude-sonnet-4-6 is in _DEFAULT_VISION_MODELS), masking the
+    # set (claude-sonnet-5 is in _DEFAULT_VISION_MODELS), masking the
     # operator's explicit disable.
-    assert vision_gate.supports_vision("claude-sonnet-4-6") is False, (
+    assert vision_gate.supports_vision("claude-sonnet-5") is False, (
         "Operator's explicit supports_vision=false on an aliased entry "
         "must beat the default set — otherwise the fallback silently "
         "overrides operator intent."
@@ -223,21 +223,21 @@ def test_name_match_wins_over_alias_match(monkeypatch) -> None:
     """If two entries match (one by name, one by .model), the name match
     wins. That's the explicit address; the .model match is the fallback."""
     by_name_entry = ModelConfig(
-        name="claude-sonnet-4-6",
+        name="claude-sonnet-5",
         use="langchain_anthropic:ChatAnthropic",
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         supports_vision=True,
     )
     by_model_entry = ModelConfig(
         name="aliased-sonnet",
         use="langchain_anthropic:ChatAnthropic",
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         supports_vision=False,
     )
     # Order shouldn't matter — name match must win regardless.
     _patch_app_config_models(monkeypatch, [by_model_entry, by_name_entry])
 
-    assert vision_gate.supports_vision("claude-sonnet-4-6") is True
+    assert vision_gate.supports_vision("claude-sonnet-5") is True
 
 
 def test_alias_entry_omitting_supports_vision_falls_through(monkeypatch) -> None:
@@ -247,12 +247,12 @@ def test_alias_entry_omitting_supports_vision_falls_through(monkeypatch) -> None
     aliased_omitted = ModelConfig(
         name="claude-sonnet-aliased",
         use="langchain_anthropic:ChatAnthropic",
-        model="claude-sonnet-4-6",
+        model="claude-sonnet-5",
         # supports_vision omitted on purpose
     )
     _patch_app_config_models(monkeypatch, [aliased_omitted])
 
-    assert vision_gate.supports_vision("claude-sonnet-4-6") is True, (
+    assert vision_gate.supports_vision("claude-sonnet-5") is True, (
         "Alias entry omitted supports_vision (defaulted to False). The "
         "gate must treat that as 'not configured' and fall through to "
         "the default set, just like it does for the name-match path."

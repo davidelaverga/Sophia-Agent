@@ -269,7 +269,7 @@ Companion asks all clarifying questions first, then calls `start_builder_task(de
 
 ### Vision & attachments (PR #132)
 
-The companion and builder can both see images and read documents in-process via the upstream `view_image` stack, gated on `vision_gate.supports_vision(model_name)` (default-on for Sonnet 4.6 + Haiku 4.5). Companion narrow tools `view_user_image(image_filename)` / `read_user_document(document_filename)` are thread-scoped (bare filename, current thread's `uploads/` + `outputs/` only). Web users attach via the Next.js AttachmentBar → `POST /api/threads/{id}/uploads` (auth + thread-ownership gated). Full implementation details + the production-hardening wave (cross-service Supabase bridge, keyspace separation, idempotent delete, base64 accumulation guards, the live-FileList silent-attach fix) live in **`backend/CLAUDE.md` → "Sophia Vision Port (PR #132)"**.
+The companion and builder can both see images and read documents in-process via the upstream `view_image` stack, gated on `vision_gate.supports_vision(model_name)` (default-on for Sonnet 5 + Haiku 4.5). Companion narrow tools `view_user_image(image_filename)` / `read_user_document(document_filename)` are thread-scoped (bare filename, current thread's `uploads/` + `outputs/` only). Web users attach via the Next.js AttachmentBar → `POST /api/threads/{id}/uploads` (auth + thread-ownership gated). Full implementation details + the production-hardening wave (cross-service Supabase bridge, keyspace separation, idempotent delete, base64 accumulation guards, the live-FileList silent-attach fix) live in **`backend/CLAUDE.md` → "Sophia Vision Port (PR #132)"**.
 
 **Deployment fact that is load-bearing:** on Render, `sophia-gateway` and `sophia-langgraph` are **separate web services with separate ephemeral disks** (no shared/persistent disk). Uploads land on the gateway disk but the companion read tools run in langgraph — so every upload is **mirrored to Supabase Storage** under `{thread_id}/uploads/{name}` and the read tools download from the mirror on a local miss. Any change to upload/read/delete paths must keep the gateway mirror and the langgraph fallback in sync, and **both services must redeploy together**.
 
@@ -380,7 +380,7 @@ config = {"configurable": {
 4.6% of Claude Haiku's 200k context. No compression needed at normal operation.
 Models:
 - Companion: `claude-haiku-4-5-20251001`
-- Builder: `claude-sonnet-4-6`
+- Builder: `claude-sonnet-5`
 - Offline pipeline (all steps): `claude-haiku-4-5-20251001`
 ---
 ## Offline Pipeline — 7 Steps

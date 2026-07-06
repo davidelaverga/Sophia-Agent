@@ -38,7 +38,7 @@ from deerflow.agents.sophia_agent.vision_gate import supports_vision
 from deerflow.config.app_config import get_app_config
 
 logger = logging.getLogger(__name__)
-DEFAULT_BUILDER_MODEL = "claude-sonnet-4-6"
+DEFAULT_BUILDER_MODEL = "claude-sonnet-5"
 
 log_builder_tracing_startup_status()
 
@@ -122,7 +122,7 @@ def _create_builder_agent(
         # HTML document cannot fit one write_file call — the tool-call JSON
         # truncates at the cap (budget logs showed out += exactly 8192 across
         # four attempts), args go missing, and the build dies after the
-        # 4-strike arg-error stop. Sonnet 4.6 supports 64k out; only actual
+        # 4-strike arg-error stop. Sonnet 5 supports large outputs; only actual
         # usage is billed and the budget circuit-breaker caps runaways. The
         # truncation-specific correction in BuilderArtifactMiddleware is the
         # belt to this suspender.

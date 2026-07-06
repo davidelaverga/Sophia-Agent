@@ -46,7 +46,7 @@ def test_builder_includes_view_image_tool_and_middleware_when_vision_enabled(mon
     captured: dict = {}
     monkeypatch.setattr(builder_module, "create_agent", _capture_create_agent(captured))
 
-    builder_module._create_builder_agent(user_id="user_123", model_name="claude-sonnet-4-6")
+    builder_module._create_builder_agent(user_id="user_123", model_name="claude-sonnet-5")
 
     tool_names = [getattr(t, "name", None) for t in captured["tools"]]
     middleware_names = [type(mw).__name__ for mw in captured["middleware"]]

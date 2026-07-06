@@ -80,7 +80,7 @@ PYTHONPATH=. uv run pytest tests/test_sophia_builder_flow.py -v
 
 The companion and builder can both see images in-process — same `viewed_images` state channel that DeerFlow's lead_agent uses upstream, wrapped in narrow thread-scoped tools so the companion can't address other threads' filesystems.
 
-**Capability gate**: `deerflow.agents.sophia_agent.vision_gate.supports_vision(model_name)` returns True for `claude-sonnet-4-6` and `claude-haiku-4-5-20251001` by default; operators can override per-model via `app_config.models[*].supports_vision`. Vision tools, middlewares, and uploaded-image briefing are all gated on this signal — a vision-off run never advertises a tool it can't call.
+**Capability gate**: `deerflow.agents.sophia_agent.vision_gate.supports_vision(model_name)` returns True for `claude-sonnet-5` and `claude-haiku-4-5-20251001` by default; operators can override per-model via `app_config.models[*].supports_vision`. Vision tools, middlewares, and uploaded-image briefing are all gated on this signal — a vision-off run never advertises a tool it can't call.
 
 **Companion tools** (in `packages/harness/deerflow/sophia/tools/`):
 
