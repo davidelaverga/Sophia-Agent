@@ -1407,7 +1407,7 @@ def _empty_image_batch_summary(text: str, fallback: str, *, command: str | None 
 def _image_batch_payload_from_text(text: str) -> tuple[dict[str, Any] | None, str]:
     for line in reversed((text or "").splitlines()):
         stripped = line.strip()
-        if not stripped.startswith("IMAGEGEN_BATCH"):
+        if not (stripped == "IMAGEGEN_BATCH" or stripped.startswith("IMAGEGEN_BATCH ")):
             continue
         payload_str = stripped[len("IMAGEGEN_BATCH"):].strip()
         try:

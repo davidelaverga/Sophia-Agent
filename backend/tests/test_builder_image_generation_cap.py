@@ -908,6 +908,29 @@ def test_parse_image_batch_summary_returns_successful_paths() -> None:
     assert summary["successful_paths"] == ["a.png", "c.png"]
 
 
+def test_parse_image_batch_summary_ignores_item_progress_lines() -> None:
+    text = (
+        'IMAGEGEN_BATCH {"images_generated": 1, "requested": 1, "items": ['
+        '{"output_file": "a.png", "success": true}]}\n'
+        'IMAGEGEN_BATCH_ITEM {"output_file": "a.png", "success": true}'
+    )
+
+    summary = _parse_image_batch_summary(text)
+
+    assert summary["summary_present"] is True
+    assert summary["requested"] == 1
+    assert summary["successful_paths"] == ["a.png"]
+
+
+def test_parse_image_batch_summary_missing_when_only_item_progress_exists() -> None:
+    text = 'IMAGEGEN_BATCH_ITEM {"output_file": "a.png", "success": true}'
+
+    summary = _parse_image_batch_summary(text)
+
+    assert summary["summary_present"] is False
+    assert summary["error_class"] == "batch_summary_missing"
+
+
 def test_single_image_failure_emits_structured_span(tmp_path, monkeypatch) -> None:
     from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
 
