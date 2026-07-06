@@ -36,6 +36,15 @@ def test_fresh_deck_prompt_surfaces_route_to_prepare_deck_build() -> None:
     assert "layout_kind" in text
 
 
+def test_ppt_skill_allows_legacy_route_only_when_prepare_deck_build_absent() -> None:
+    text = (PROJECT_ROOT / "skills" / "public" / "ppt-generation" / "SKILL.md").read_text(encoding="utf-8")
+
+    assert "does not expose\n`prepare_deck_build`" in text
+    assert "does expose `prepare_pptx_image_manifest` plus\n`build_deck_from_slides`" in text
+    assert "Do not mix this route with\n`prepare_deck_build`" in text
+    assert "When `prepare_deck_build` is exposed" in text
+
+
 def test_fresh_deck_prompt_surfaces_do_not_teach_old_workflow() -> None:
     text = _surface_text().lower()
 
