@@ -11075,7 +11075,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         delta = self._prepare_deck_build_result_delta(request, result)
         if delta is None or payload is None:
             return result
-        if payload.get("success") is not True:
+        if delta.get("deck_status") == "failed_terminal":
             fallback = self._prepare_deck_build_failure_fallback(request, payload, delta)
             return Command(
                 update={
@@ -11105,7 +11105,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         delta: dict[str, Any],
     ) -> dict[str, Any]:
         state = request.state or {}
-        failure_code = str(payload.get("failure_code") or "deck_build_failed")
+        failure_code = str(payload.get("failure_code") or delta.get("deck_failure_code") or "deck_build_failed")
         failure_summary = str(payload.get("failure_summary") or "DeckBuildService failed before a deliverable was available.")
         fallback = {
             "artifact_path": None,

@@ -148,6 +148,8 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert build["deck_route"] == "deck_ir_html_raster"
     assert build["deck_compile_mode"] == "html_screenshot_fallback"
     assert build["native_editability_score"] == 0.0
+    assert build["image_generation_status"] == "success"
+    assert build["primary_image_batch_status"] == "success"
     assert "Professional technical visual metaphor" in build["slides"][0]["visual_prompt"]
     loaded = load_deck_build(result.deck_build_path, runtime)
     assert loaded is not None
@@ -772,3 +774,38 @@ def test_prepare_deck_build_failure_is_terminal_command(tmp_path: Path, monkeypa
     diagnostics = command.update["builder_pptx_diagnostics"]
     assert diagnostics["deck_build_id"] == "deck-1"
     assert diagnostics["missing_expected_visual_count"] == 3
+
+
+def test_prepare_deck_build_missing_success_output_is_terminal_command(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "true")
+    runtime = _runtime(tmp_path / "outputs")
+    request = SimpleNamespace(
+        tool_call={"id": "tc-deck", "name": "prepare_deck_build", "args": {}},
+        state=runtime.state,
+        runtime=runtime,
+    )
+    payload = {
+        "success": True,
+        "build_id": "deck-1",
+        "deck_build_path": f"{_OUTPUTS}deck_build/build.json",
+        "pptx_path": f"{_OUTPUTS}missing-deck.pptx",
+        "slide_count": 3,
+        "expected_visual_count": 3,
+        "successful_visual_count": 3,
+        "referenced_visual_count": 3,
+        "missing_visual_count": 0,
+        "quality_status": "passed",
+    }
+    result = ToolMessage(content=json.dumps(payload), tool_call_id="tc-deck", name="prepare_deck_build")
+    monkeypatch.setattr(BuilderArtifactMiddleware, "_upload_fallback_and_fire", lambda *args, **kwargs: None)
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_result_command(request, result)
+
+    assert isinstance(command, Command)
+    assert command.goto == "end"
+    assert command.update["builder_result"]["artifact_path"] is None
+    assert command.update["builder_result"]["failure_code"] == "missing_output"
+    diagnostics = command.update["builder_pptx_diagnostics"]
+    assert diagnostics["deck_status"] == "failed_terminal"
+    assert diagnostics["deck_failure_code"] == "missing_output"
+    assert diagnostics["pptx_generator_success_count"] == 0

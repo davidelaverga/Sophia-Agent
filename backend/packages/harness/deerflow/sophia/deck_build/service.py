@@ -196,6 +196,7 @@ class DeckBuildService:
             self._compile_pptx(deck, runtime)
             self._evaluate(deck, runtime)
             deck.status = "evaluated"
+            _finalize_image_generation_status(deck, success=True)
             deck.updated_at = _now()
             deck_path = save_deck_build(deck, runtime)
             return self._success_result(deck, deck_path, runtime)
