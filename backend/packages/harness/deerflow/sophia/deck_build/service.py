@@ -62,6 +62,17 @@ _TEXT_ONLY_REQUEST_RE = re.compile(
     r"|no\s+visuals?|without\s+(?:images?|visuals?)|with\s+no\s+(?:images?|visuals?))\b",
     re.I,
 )
+_REQUEST_CONTEXT_TEXT_KEYS = (
+    "user_request",
+    "request",
+    "prompt",
+    "task",
+    "task_brief",
+    "title",
+    "description",
+    "artifact_title",
+    "task_title",
+)
 _SERIAL_REPAIR_MAX_ATTEMPTS = 2
 _NON_REPAIRABLE_IMAGE_ERROR_CLASSES = {
     "auth_invalid",
@@ -145,7 +156,12 @@ class DeckBuildService:
         )
         try:
             self._validate_inputs(deck, slides, output_path, runtime)
-            deck.slides = self._build_slide_specs(slides, visual_policy=visual_policy)
+            deck.slides = self._build_slide_specs(
+                slides,
+                visual_policy=visual_policy,
+                runtime=runtime,
+                style_profile=deck.style_profile,
+            )
             with deck_span(
                 "deck.ir.validate",
                 runtime=runtime,
@@ -217,7 +233,14 @@ class DeckBuildService:
                 retryable=True,
             )
 
-    def _build_slide_specs(self, slides: list[dict[str, Any]], *, visual_policy: str) -> list[DeckSlideSpec]:
+    def _build_slide_specs(
+        self,
+        slides: list[dict[str, Any]],
+        *,
+        visual_policy: str,
+        runtime: ToolRuntime,
+        style_profile: dict[str, Any],
+    ) -> list[DeckSlideSpec]:
         specs: list[DeckSlideSpec] = []
         for index, raw in enumerate(slides, start=1):
             title = _clean_text(raw.get("title"))
@@ -230,7 +253,8 @@ class DeckBuildService:
             if visual_policy == "required":
                 if not visual_prompt:
                     raise DeckBuildFailure("invalid_deck_ir", f"Slide {index} requires a visual_prompt.", retryable=True)
-                if _contains_unnegated_match(_BANNED_TEXT_RE, visual_prompt) or _contains_unnegated_match(_BANNED_STYLE_RE, visual_prompt):
+                unrequested_style_terms = _unrequested_banned_style_terms(visual_prompt, runtime, style_profile)
+                if _contains_unnegated_match(_BANNED_TEXT_RE, visual_prompt) or unrequested_style_terms:
                     raise DeckBuildFailure(
                         "invalid_deck_ir",
                         f"Slide {index} visual_prompt requests image-baked text or an unrequested style.",
@@ -880,7 +904,11 @@ class DeckBuildService:
             slide_count=len(deck.slides),
             inputs={},
         ) as run:
-            evaluation = self._evaluator.evaluate(deck, output_host_path=output_host)
+            evaluation = self._evaluator.evaluate(
+                deck,
+                output_host_path=output_host,
+                allowed_style_terms=_requested_banned_style_terms(runtime, deck.style_profile),
+            )
             finish_span(
                 run,
                 {
@@ -1310,12 +1338,72 @@ def _compile_with_build_deck_from_slides(
 
 
 def _contains_unnegated_match(pattern: re.Pattern[str], value: str) -> bool:
+    return bool(_unnegated_matches(pattern, value))
+
+
+def _unnegated_matches(pattern: re.Pattern[str], value: str) -> set[str]:
+    matches: set[str] = set()
     for match in pattern.finditer(value):
         prefix = value[max(0, match.start() - 32) : match.start()]
         if _NEGATED_BANNED_TERM_RE.search(prefix):
             continue
-        return True
-    return False
+        matches.add(match.group(0).lower())
+    return matches
+
+
+def _unrequested_banned_style_terms(value: str, runtime: ToolRuntime, style_profile: dict[str, Any]) -> set[str]:
+    style_terms = _unnegated_matches(_BANNED_STYLE_RE, value)
+    if not style_terms:
+        return set()
+    requested_style_terms = _requested_banned_style_terms(runtime, style_profile)
+    return style_terms - requested_style_terms
+
+
+def _requested_banned_style_terms(runtime: ToolRuntime, style_profile: dict[str, Any]) -> set[str]:
+    requested_style_text = _normalize_style_text(
+        "\n".join(
+            [
+                _request_context_text(runtime),
+                "\n".join(_string_values(style_profile)),
+            ]
+        )
+    )
+    return _unnegated_matches(_BANNED_STYLE_RE, requested_style_text)
+
+
+def _normalize_style_text(value: str) -> str:
+    return re.sub(r"[_-]+", " ", value.lower())
+
+
+def _request_context_text(runtime: ToolRuntime) -> str:
+    state = getattr(runtime, "state", None)
+    if not isinstance(state, dict):
+        return ""
+    haystack_parts: list[str] = []
+    for source in (state, state.get("delegation_context"), state.get("builder_task"), state.get("artifact_request")):
+        if not isinstance(source, dict):
+            continue
+        for key in _REQUEST_CONTEXT_TEXT_KEYS:
+            value = source.get(key)
+            if isinstance(value, str):
+                haystack_parts.append(value)
+    return "\n".join(haystack_parts)
+
+
+def _string_values(value: Any) -> list[str]:
+    if isinstance(value, str):
+        return [value]
+    if isinstance(value, dict):
+        values: list[str] = []
+        for item in value.values():
+            values.extend(_string_values(item))
+        return values
+    if isinstance(value, (list, tuple, set)):
+        values = []
+        for item in value:
+            values.extend(_string_values(item))
+        return values
+    return []
 
 
 def _clear_slide_html_directory(slides_dir: Path) -> None:
@@ -1345,18 +1433,7 @@ def _requested_slide_count_from_state(runtime: ToolRuntime) -> int:
 
 
 def _explicit_text_only_requested(runtime: ToolRuntime) -> bool:
-    state = getattr(runtime, "state", None)
-    if not isinstance(state, dict):
-        return False
-    haystack_parts: list[str] = []
-    for source in (state, state.get("delegation_context"), state.get("builder_task"), state.get("artifact_request")):
-        if not isinstance(source, dict):
-            continue
-        for key in ("user_request", "request", "prompt", "task", "task_brief", "title", "description", "artifact_title", "task_title"):
-            value = source.get(key)
-            if isinstance(value, str):
-                haystack_parts.append(value)
-    return bool(_TEXT_ONLY_REQUEST_RE.search("\n".join(haystack_parts)))
+    return bool(_TEXT_ONLY_REQUEST_RE.search(_request_context_text(runtime)))
 
 
 def _finalize_image_generation_status(deck: DeckBuild, *, success: bool) -> None:

@@ -9,6 +9,7 @@ from deerflow.sophia.deck_build.models import DeckBuild, DeckEvaluation, DeckQua
 _OUTPUTS_PREFIX = "/mnt/user-data/outputs/"
 _HARD_CHECKS = {"overflow", "chrome", "visual_contract"}
 _NEGATED_RULE_RE = re.compile(r"(?:\bno\b|\bnot\b|\bwithout\b|\bavoid\b|\bnever\b|\bdo\s+not\b)\W*$", re.I)
+_STYLE_RULES_WITH_EXPLICIT_ALLOW = {"deck_neon_cyber_default", "deck_chalkboard_unrequested"}
 
 
 class DesignRule:
@@ -36,7 +37,13 @@ class DeckEvaluator:
     def __init__(self, inspector: SlideQualityInspector | None = None) -> None:
         self._inspector = inspector or SlideQualityInspector()
 
-    def evaluate(self, deck: DeckBuild, *, output_host_path: Path | None = None) -> DeckEvaluation:
+    def evaluate(
+        self,
+        deck: DeckBuild,
+        *,
+        output_host_path: Path | None = None,
+        allowed_style_terms: set[str] | None = None,
+    ) -> DeckEvaluation:
         hard: list[DeckQualityIssue] = []
         soft: list[DeckQualityIssue] = []
         outputs_root = _outputs_root_for_deck(deck, output_host_path)
@@ -59,14 +66,15 @@ class DeckEvaluator:
         if output_host_path is not None and not output_host_path.is_file():
             hard.append(self._issue("missing_pptx", "deck", "compile", "PPTX file missing after compile"))
 
-        signals = _signals_from_deck(deck, outputs_root)
+        allowed_styles = allowed_style_terms or set()
+        signals = _signals_from_deck(deck, outputs_root, allowed_style_terms=allowed_styles)
         for gap in self._inspector.inspect(signals):
             issue = self._issue(f"slide_{gap.check}", gap.slide, gap.check, gap.detail)
             if gap.check in _HARD_CHECKS:
                 hard.append(issue)
             else:
                 soft.append(issue)
-        for issue in _design_rule_issues(signals):
+        for issue in _design_rule_issues(signals, allowed_style_terms=allowed_styles):
             if issue.severity == "hard":
                 hard.append(issue)
             else:
@@ -103,7 +111,7 @@ def _host_for_outputs_path(virtual_path: str | None, outputs_root: Path | None) 
     return outputs_root / relative
 
 
-def _signals_from_deck(deck: DeckBuild, outputs_root: Path | None) -> SlideSignals:
+def _signals_from_deck(deck: DeckBuild, outputs_root: Path | None, *, allowed_style_terms: set[str]) -> SlideSignals:
     slide_sources: list[tuple[str, str]] = []
     prompt_sources: list[tuple[str, str]] = []
     for slide in deck.slides:
@@ -113,7 +121,12 @@ def _signals_from_deck(deck: DeckBuild, outputs_root: Path | None) -> SlideSigna
         prompt_path = _host_for_outputs_path(slide.visual_prompt_path, outputs_root)
         if prompt_path is not None and prompt_path.is_file():
             prompt_sources.append((slide.selector, prompt_path.read_text(encoding="utf-8", errors="replace")))
-    return SlideSignals(slide_sources=slide_sources, prompt_sources=prompt_sources, overflow_slides=deck.compile_overflow_slides)
+    return SlideSignals(
+        slide_sources=slide_sources,
+        prompt_sources=prompt_sources,
+        overflow_slides=deck.compile_overflow_slides,
+        allowed_style_terms=allowed_style_terms,
+    )
 
 
 def _outputs_root_for_deck(deck: DeckBuild, output_host_path: Path | None) -> Path | None:
@@ -132,16 +145,24 @@ def _outputs_root_for_deck(deck: DeckBuild, output_host_path: Path | None) -> Pa
     return root
 
 
-def _design_rule_issues(signals: SlideSignals) -> list[DeckQualityIssue]:
+def _design_rule_issues(signals: SlideSignals, *, allowed_style_terms: set[str]) -> list[DeckQualityIssue]:
     issues: list[DeckQualityIssue] = []
+    allowed_styles = {_normalize_style_term(term) for term in allowed_style_terms}
     sources = [*signals.slide_sources, *signals.prompt_sources]
     for selector, source in sources:
         for rule in DESIGN_RULES:
-            match = rule.pattern.search(source)
-            if not match:
-                continue
-            prefix = source[max(0, match.start() - 32) : match.start()]
-            if _NEGATED_RULE_RE.search(prefix):
+            allowed_match = False
+            unallowed_match = False
+            for match in rule.pattern.finditer(source):
+                prefix = source[max(0, match.start() - 32) : match.start()]
+                if _NEGATED_RULE_RE.search(prefix):
+                    continue
+                if rule.id in _STYLE_RULES_WITH_EXPLICIT_ALLOW and _normalize_style_term(match.group(0)) in allowed_styles:
+                    allowed_match = True
+                    continue
+                unallowed_match = True
+                break
+            if not unallowed_match:
                 continue
             issues.append(
                 DeckQualityIssue(
@@ -150,7 +171,15 @@ def _design_rule_issues(signals: SlideSignals) -> list[DeckQualityIssue]:
                     selector=selector,
                     check=rule.check,
                     detail=rule.detail,
-                    repair_hint="Use restrained professional technical styling and simpler slide structure.",
+                    repair_hint=(
+                        "Use the explicitly requested style consistently."
+                        if allowed_match
+                        else "Use restrained professional technical styling and simpler slide structure."
+                    ),
                 )
             )
     return issues
+
+
+def _normalize_style_term(value: str) -> str:
+    return re.sub(r"[_-]+", " ", value.lower())

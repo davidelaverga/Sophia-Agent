@@ -290,6 +290,48 @@ def test_deck_build_service_allows_negated_visual_prompt_guardrails(tmp_path: Pa
     assert result.success is True
 
 
+def test_deck_build_service_allows_explicitly_requested_visual_style(tmp_path: Path) -> None:
+    runtime = _runtime(
+        tmp_path / "outputs",
+        user_request="Make a neon cyberpunk pitch deck about resilient infrastructure.",
+    )
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        deck_compiler=_fake_compiler([]),
+    )
+    slides = _slides()
+    slides[0]["visual_prompt"] = "Neon cyberpunk infrastructure command center with cinematic lighting."
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=slides,
+        output_path=f"{_OUTPUTS}deck.pptx",
+    )
+
+    assert result.success is True
+
+
+def test_deck_build_service_allows_style_profile_visual_style(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        deck_compiler=_fake_compiler([]),
+    )
+    slides = _slides()
+    slides[0]["visual_prompt"] = "Handwritten sketch of the system rollout with marker-like strokes."
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=slides,
+        output_path=f"{_OUTPUTS}deck.pptx",
+        style_profile={"visual_style": "handwritten_sketch"},
+    )
+
+    assert result.success is True
+
+
 def test_deck_build_service_rejects_positive_banned_visual_prompt_terms(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     batch_called = False
@@ -301,7 +343,7 @@ def test_deck_build_service_rejects_positive_banned_visual_prompt_terms(tmp_path
 
     service = DeckBuildService(image_batch_runner=batch_runner, deck_compiler=_fake_compiler([]))
     slides = _slides()
-    slides[0]["visual_prompt"] = "Neon system diagram with axis labels and formula callouts."
+    slides[0]["visual_prompt"] = "Neon cyberpunk system diagram with dramatic lighting."
 
     result = service.prepare_and_build(
         runtime=runtime,

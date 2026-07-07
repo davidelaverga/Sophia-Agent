@@ -126,6 +126,14 @@ def test_visual_contract_check_ignores_negated_banned_style():
     assert visual_contract_check(signals) == []
 
 
+def test_visual_contract_check_allows_explicit_style_terms():
+    signals = SlideSignals(
+        prompt_sources=[("ok.prompt.json", '{"prompt":"hand-written sketch system diagram with marker-like strokes"}')],
+        allowed_style_terms={"handwritten", "sketch"},
+    )
+    assert visual_contract_check(signals) == []
+
+
 def test_visual_contract_check_ignores_negated_generated_text_phrases():
     prompts = (
         '{"prompt":"professional technical visual, avoid rendered text"}',
@@ -168,6 +176,14 @@ def test_visual_style_check_flags_neon_tiny_text_and_card_overload():
     assert "neon" in gaps[0].detail
     assert "font-size" in gaps[0].detail
     assert "card-style" in gaps[0].detail
+
+
+def test_visual_style_check_allows_explicit_style_terms_but_keeps_layout_gaps():
+    html = "<html><body><section class='neon cyberpunk'><style>.tiny{font-size:12px}</style></section></body></html>"
+    gaps = visual_style_check(SlideSignals(slide_sources=[("ok.html", html)], allowed_style_terms={"neon", "cyberpunk"}))
+    assert len(gaps) == 1
+    assert "neon" not in gaps[0].detail
+    assert "font-size" in gaps[0].detail
 
 
 def test_enabled_grader_uses_mocked_judge():

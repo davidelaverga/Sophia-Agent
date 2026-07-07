@@ -98,6 +98,7 @@ class SlideSignals:
     slide_sources: list[tuple[str, str]] = field(default_factory=list)
     prompt_sources: list[tuple[str, str]] = field(default_factory=list)
     overflow_slides: list[dict] = field(default_factory=list)
+    allowed_style_terms: set[str] = field(default_factory=set)
 
 
 @dataclass(frozen=True)
@@ -225,6 +226,7 @@ def visual_contract_check(signals: SlideSignals) -> list[QualityGap]:
                 match
                 for match in _BANNED_AESTHETIC_RE.finditer(source)
                 if not _match_is_negated(source, match)
+                and not _style_term_is_allowed(match.group(1), signals.allowed_style_terms)
             ),
             None,
         )
@@ -259,6 +261,7 @@ def visual_style_check(signals: SlideSignals) -> list[QualityGap]:
                 match
                 for match in _UNREQUESTED_STYLE_RE.finditer(html)
                 if not _match_is_negated(html, match)
+                and not _style_term_is_allowed(match.group(1), signals.allowed_style_terms)
             ),
             None,
         )
@@ -281,6 +284,23 @@ def visual_style_check(signals: SlideSignals) -> list[QualityGap]:
                 )
             )
     return gaps
+
+
+def _style_term_is_allowed(value: str, allowed_style_terms: set[str]) -> bool:
+    if not allowed_style_terms:
+        return False
+    allowed = {_canonical_style_term(term) for term in allowed_style_terms}
+    return _canonical_style_term(value) in allowed
+
+
+def _canonical_style_term(value: str) -> str:
+    normalized = re.sub(r"[_-]+", " ", value.lower()).strip()
+    compacted = normalized.replace(" ", "")
+    if compacted in {"handwritten", "handdrawn", "markerlike"}:
+        return "handwritten"
+    if compacted == "sketched":
+        return "sketch"
+    return normalized
 
 
 DEFAULT_CHECKS: tuple[QualityCheck, ...] = (
