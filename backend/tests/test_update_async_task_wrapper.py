@@ -31,6 +31,7 @@ from langgraph.types import Command
 from deerflow.sophia.tools.start_builder_task import _has_active_builder_task
 from deerflow.sophia.tools.update_async_task_wrapper import (
     _file_target_directive_block,
+    make_list_async_tasks_wrapper,
     make_update_async_task_wrapper,
 )
 
@@ -68,6 +69,71 @@ def _make_native_tool(
     async def native_coroutine(*, task_id, message, runtime):
         async_calls.append({"task_id": task_id, "message": message, "runtime": runtime})
         return f"native-async({task_id})"
+
+    native = SimpleNamespace(
+        name=name,
+        description=description,
+        func=native_func,
+        coroutine=native_coroutine,
+        args_schema=args_schema,
+    )
+    return native, sync_calls, async_calls
+
+
+def _make_native_list_tool(
+    name: str = "list_async_tasks",
+    description: str = "native list desc",
+    args_schema=None,
+):
+    if args_schema is None:
+        try:
+            from deepagents.middleware.async_subagents import ListAsyncTasksSchema
+            args_schema = ListAsyncTasksSchema
+        except ImportError:
+            args_schema = None
+
+    sync_calls: list[dict] = []
+    async_calls: list[dict] = []
+
+    def native_func(*, runtime, status_filter=None):
+        task = next(iter(runtime.state["async_tasks"].values()))
+        for field in (
+            "task_id",
+            "agent_name",
+            "thread_id",
+            "run_id",
+            "status",
+            "created_at",
+            "last_checked_at",
+            "last_updated_at",
+        ):
+            task[field]
+        sync_calls.append({
+            "runtime": runtime,
+            "status_filter": status_filter,
+            "task": dict(task),
+        })
+        return f"native-list-sync({status_filter})"
+
+    async def native_coroutine(*, runtime, status_filter=None):
+        task = next(iter(runtime.state["async_tasks"].values()))
+        for field in (
+            "task_id",
+            "agent_name",
+            "thread_id",
+            "run_id",
+            "status",
+            "created_at",
+            "last_checked_at",
+            "last_updated_at",
+        ):
+            task[field]
+        async_calls.append({
+            "runtime": runtime,
+            "status_filter": status_filter,
+            "task": dict(task),
+        })
+        return f"native-list-async({status_filter})"
 
     native = SimpleNamespace(
         name=name,
@@ -1201,6 +1267,101 @@ def test_wrapper_model_facing_args_exclude_runtime():
     assert "runtime" not in model_args
     assert "task_id" in model_args
     assert "message" in model_args
+
+
+# ---- list_async_tasks stale-state normalization ---------------------------
+
+
+def test_list_wrapper_backfills_missing_created_at_and_delegates_sync():
+    native, sync_calls, _ = _make_native_list_tool()
+    wrapped = make_list_async_tasks_wrapper(native)
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "thread_id": "thread-1",
+                "run_id": "run-1",
+                "status": "running",
+            }
+        }
+    )
+
+    response = wrapped.func(runtime=runtime, status_filter="running")
+
+    assert response == "native-list-sync(running)"
+    assert sync_calls[0]["status_filter"] == "running"
+    task = sync_calls[0]["task"]
+    assert task["created_at"]
+    assert task["last_checked_at"] == task["created_at"]
+    assert task["last_updated_at"] == task["created_at"]
+    assert runtime.state["async_tasks"]["task-1"]["created_at"] == task["created_at"]
+
+
+def test_list_wrapper_backfills_missing_update_timestamps_from_created_at():
+    native, sync_calls, _ = _make_native_list_tool()
+    wrapped = make_list_async_tasks_wrapper(native)
+    runtime = _runtime(
+        {
+            "task-1": {
+                "task_id": "task-1",
+                "agent_name": "sophia_builder",
+                "thread_id": "thread-1",
+                "run_id": "run-1",
+                "status": "success",
+                "created_at": "2026-07-07T14:04:06Z",
+            }
+        }
+    )
+
+    wrapped.func(runtime=runtime, status_filter=None)
+
+    task = sync_calls[0]["task"]
+    assert task["created_at"] == "2026-07-07T14:04:06Z"
+    assert task["last_checked_at"] == "2026-07-07T14:04:06Z"
+    assert task["last_updated_at"] == "2026-07-07T14:04:06Z"
+
+
+def test_list_wrapper_model_facing_args_exclude_runtime():
+    native, _, _ = _make_native_list_tool()
+    wrapped = make_list_async_tasks_wrapper(native)
+
+    assert "runtime" in wrapped._injected_args_keys
+    assert "runtime" not in set(wrapped.args.keys())
+    assert "status_filter" in set(wrapped.args.keys())
+
+
+def test_list_wrapper_rejects_wrong_native_tool_name():
+    native, _, _ = _make_native_list_tool(name="check_async_task")
+    with pytest.raises(ValueError, match="Expected native tool"):
+        make_list_async_tasks_wrapper(native)
+
+
+def test_list_wrapper_async_path_normalizes_and_preserves_status_filter():
+    native, _, async_calls = _make_native_list_tool()
+    wrapped = make_list_async_tasks_wrapper(native)
+    runtime = _runtime(
+        {
+            "legacy-key": {
+                "agent_name": "sophia_builder",
+                "thread_id": "thread-1",
+                "run_id": "run-1",
+                "status": "running",
+                "last_updated_at": "2026-07-07T14:04:06Z",
+            }
+        }
+    )
+
+    response = asyncio.run(wrapped.coroutine(runtime=runtime, status_filter="all"))
+
+    assert response == "native-list-async(all)"
+    assert async_calls[0]["status_filter"] == "all"
+    task = async_calls[0]["task"]
+    assert task["task_id"] == "thread-1"
+    assert task["created_at"] == "2026-07-07T14:04:06Z"
+    assert task["last_checked_at"] == "2026-07-07T14:04:06Z"
+    assert task["last_updated_at"] == "2026-07-07T14:04:06Z"
+    assert "thread-1" in runtime.state["async_tasks"]
 
 
 # ---- terminal-target rejection --------------------------------------------

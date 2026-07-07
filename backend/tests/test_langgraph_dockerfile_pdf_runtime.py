@@ -44,6 +44,9 @@ def test_langgraph_dockerfile_installs_pdf_runtime() -> None:
     assert "pptxgenjs" in contents
     assert "COPY third_party/hands_on_deck ./third_party/hands_on_deck" in contents
     assert "third_party/hands_on_deck/skills/hands-on-deck/scripts/deck.py --help" in contents
+    assert "python -m playwright install chromium" in contents
+    assert "third_party/hands_on_deck/skills/hands-on-deck/scripts/html2patch.py --help" in contents
+    assert "from playwright.sync_api import sync_playwright" in contents
     # The mermaid→excalidraw diagram stack was retired (graphviz port); the
     # Node verify block no longer resolves excalidraw or tests compile_diagram.
     assert "@excalidraw/excalidraw" not in contents

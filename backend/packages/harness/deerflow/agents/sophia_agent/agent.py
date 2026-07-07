@@ -20,6 +20,7 @@ from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
 from langchain_core.runnables import RunnableConfig
 
+from deerflow.agents.middlewares.anthropic_content_block_sanitizer import AnthropicContentBlockSanitizerMiddleware
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.thread_data_middleware import ThreadDataMiddleware
 from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
@@ -167,10 +168,11 @@ def _build_async_subagent_middleware() -> AsyncSubAgentMiddleware:
     etc.), the wrapper returns a directive ToolMessage redirecting to
     ``start_builder_task`` rather than letting deepagents create a new run
     on a just-finished thread (which would loop on dangling tool calls).
-    The remaining three lifecycle tools (``check_async_task``,
-    ``cancel_async_task``, ``list_async_tasks``) remain native.
+    ``list_async_tasks`` is also wrapped to normalize stale async task records
+    before delegating to the native deepagents formatter.
     """
     from deerflow.sophia.tools.update_async_task_wrapper import (
+        make_list_async_tasks_wrapper,
         make_update_async_task_wrapper,
     )
 
@@ -195,13 +197,18 @@ def _build_async_subagent_middleware() -> AsyncSubAgentMiddleware:
     native_update = next(
         (t for t in middleware.tools if t.name == "update_async_task"), None
     )
+    native_list = next(
+        (t for t in middleware.tools if t.name == "list_async_tasks"), None
+    )
     middleware.tools = [
         t
         for t in middleware.tools
-        if t.name not in ("start_async_task", "update_async_task")
+        if t.name not in ("start_async_task", "update_async_task", "list_async_tasks")
     ]
     if native_update is not None:
         middleware.tools.append(make_update_async_task_wrapper(native_update))
+    if native_list is not None:
+        middleware.tools.append(make_list_async_tasks_wrapper(native_list))
     return middleware
 
 
@@ -466,6 +473,7 @@ def make_sophia_agent(config: RunnableConfig):
             DanglingToolCallMiddleware(),
             LoopDetectionMiddleware(),
             SafetyFinishReasonMiddleware(),
+            AnthropicContentBlockSanitizerMiddleware(),
             # Prompt caching AFTER assembly + dangling-tool patching — adds
             # cache_control to the assembled system message and keys the
             # cache off the patched messages. Turn 2+ reads from cache →

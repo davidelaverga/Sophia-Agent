@@ -6628,8 +6628,18 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if additional_kwargs.get("deerflow_error_fallback") is not True:
             return None
         reason = str(additional_kwargs.get("error_reason") or "generic").strip().lower()
-        if reason not in {"auth", "busy", "generic", "quota", "transient"}:
+        if reason not in {"auth", "busy", "generic", "malformed_request", "quota", "transient"}:
             reason = "generic"
+        if reason == "malformed_request":
+            return {
+                "failure_stage": "model_provider",
+                "failure_code": "primary_provider_malformed_request",
+                "failure_reason": (
+                    "Internal model request payload was malformed before the builder produced an artifact."
+                ),
+                "provider_error_reason": reason,
+                "retryable": False,
+            }
         retryable = reason in {"busy", "transient"}
         return {
             "failure_stage": "model_provider",

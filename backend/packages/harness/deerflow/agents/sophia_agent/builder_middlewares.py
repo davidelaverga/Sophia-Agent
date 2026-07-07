@@ -36,6 +36,7 @@ from __future__ import annotations
 from langchain.agents.middleware import AgentMiddleware
 from langchain_anthropic.middleware.prompt_caching import AnthropicPromptCachingMiddleware
 
+from deerflow.agents.middlewares.anthropic_content_block_sanitizer import AnthropicContentBlockSanitizerMiddleware
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.sophia_agent.builder_chain_support import (
@@ -117,6 +118,8 @@ def build_builder_middleware_chain(
     11. ``DanglingToolCallMiddleware`` — patches dangling AIMessage
         tool_use blocks. MUST sit AFTER PromptAssembly so the patched
         message list reaches the model.
+    12. ``AnthropicContentBlockSanitizerMiddleware`` — strips provider-private
+        thinking blocks that cannot be replayed as historical assistant content.
     """
     middlewares = build_subagent_runtime_middlewares(lazy_init=True)
     chain_tail: list[AgentMiddleware] = [
@@ -173,6 +176,7 @@ def build_builder_middleware_chain(
         [
             PromptAssemblyMiddleware(),
             DanglingToolCallMiddleware(),
+            AnthropicContentBlockSanitizerMiddleware(),
             # Phase 2 — prompt caching. MUST be last (innermost) so it keys off
             # the message list AFTER DanglingToolCall repairs dangling tool_use/
             # tool_result pairs, mirroring the companion's ordering in agent.py.

@@ -20,6 +20,10 @@ _RETRIABLE_STATUS_CODES = {408, 409, 425, 429, 500, 502, 503, 504}
 _QUOTA_PATTERNS = ("insufficient_quota", "quota", "billing", "credit", "payment")
 _AUTH_PATTERNS = ("authentication", "unauthorized", "invalid api key", "invalid_api_key", "forbidden")
 _BUSY_PATTERNS = ("server busy", "temporarily unavailable", "try again", "overloaded", "rate limit")
+_MALFORMED_REQUEST_PATTERNS = (
+    "thinking.thinking",
+    "messages.",
+)
 
 
 class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
@@ -59,6 +63,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return False, "quota"
         if any(pattern in detail for pattern in _AUTH_PATTERNS):
             return False, "auth"
+        if (
+            "thinking.thinking" in detail
+            or ("field required" in detail and any(pattern in detail for pattern in _MALFORMED_REQUEST_PATTERNS))
+        ):
+            return False, "malformed_request"
         if status in _RETRIABLE_STATUS_CODES:
             return True, "transient"
         if any(pattern in detail for pattern in _BUSY_PATTERNS):
@@ -82,6 +91,11 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             )
         elif reason in {"busy", "transient"}:
             content = "The configured model provider is temporarily unavailable. Please wait a moment and continue."
+        elif reason == "malformed_request":
+            content = (
+                "The model request payload was malformed before the provider could run it. "
+                "Please retry after the internal message-history issue is fixed."
+            )
         else:
             content = f"LLM request failed: {cls._detail(exc)}"
         return AIMessage(

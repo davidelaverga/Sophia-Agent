@@ -108,6 +108,7 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "DanglingToolCallMiddleware" in companion_types
     assert "PromptAssemblyMiddleware" in companion_types
     assert "AnthropicPromptCachingMiddleware" in companion_types
+    assert "AnthropicContentBlockSanitizerMiddleware" in companion_types
     assert "LoopDetectionMiddleware" in companion_types
     assert "SafetyFinishReasonMiddleware" in companion_types
     assert "LLMErrorHandlingMiddleware" in companion_types
@@ -115,6 +116,10 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
         companion_types.index("PromptAssemblyMiddleware")
         < companion_types.index("DanglingToolCallMiddleware")
         < companion_types.index("AnthropicPromptCachingMiddleware")
+    )
+    assert (
+        companion_types.index("AnthropicContentBlockSanitizerMiddleware") + 1
+        == companion_types.index("AnthropicPromptCachingMiddleware")
     )
     # LLMErrorHandling must wrap OUTSIDE the provider fallback (earlier in the
     # list = outermost wrap_model_call). Inside, it converts Anthropic
@@ -157,6 +162,11 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
     assert "LoopDetectionMiddleware" in builder_types
     assert "TodoMiddleware" in builder_types
     assert "BuilderResearchPolicyMiddleware" in builder_types
+    assert "AnthropicContentBlockSanitizerMiddleware" in builder_types
+    assert (
+        builder_types.index("AnthropicContentBlockSanitizerMiddleware") + 1
+        == builder_types.index("AnthropicPromptCachingMiddleware")
+    )
     assert "builder_web_search" in builder_tool_names
     assert "builder_web_fetch" in builder_tool_names
     # emit_builder_artifact is the structured "I'm done" signal — the

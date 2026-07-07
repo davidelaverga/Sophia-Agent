@@ -130,6 +130,77 @@ def _updated_task_entry(
     return task
 
 
+def _first_nonempty(*values: Any) -> Any:
+    for value in values:
+        if value is None:
+            continue
+        if isinstance(value, str) and not value.strip():
+            continue
+        return value
+    return None
+
+
+def _normalize_list_task_entry(key: Any, value: Any, now: str) -> tuple[dict[str, Any], bool]:
+    """Return a deepagents-list-safe task dict.
+
+    Native ``list_async_tasks`` indexes these fields directly. Older Sophia
+    task records can be missing timestamps, so normalize at the lifecycle-tool
+    boundary instead of crashing the companion turn.
+    """
+    source = dict(value) if isinstance(value, dict) else {}
+    fallback_id = str(_first_nonempty(key, source.get("thread_id"), source.get("run_id"), "unknown-task"))
+    task_id = str(_first_nonempty(source.get("task_id"), source.get("thread_id"), fallback_id))
+    timestamp = str(
+        _first_nonempty(
+            source.get("created_at"),
+            source.get("last_updated_at"),
+            source.get("last_checked_at"),
+            now,
+        )
+    )
+    normalized = dict(source)
+    normalized.update({
+        "task_id": task_id,
+        "agent_name": str(_first_nonempty(source.get("agent_name"), "sophia_builder")),
+        "thread_id": str(_first_nonempty(source.get("thread_id"), task_id)),
+        "run_id": str(_first_nonempty(source.get("run_id"), task_id)),
+        "status": str(_first_nonempty(source.get("status"), "running")),
+        "created_at": str(_first_nonempty(source.get("created_at"), timestamp)),
+        "last_checked_at": str(_first_nonempty(source.get("last_checked_at"), timestamp)),
+        "last_updated_at": str(_first_nonempty(source.get("last_updated_at"), timestamp)),
+    })
+    changed = normalized != value or task_id != key
+    return normalized, changed
+
+
+def _normalize_async_tasks_for_list(tasks: Any) -> tuple[dict[str, dict[str, Any]] | None, int]:
+    if not isinstance(tasks, dict) or not tasks:
+        return None, 0
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    normalized_tasks: dict[str, dict[str, Any]] = {}
+    changed_count = 0
+    for key, value in tasks.items():
+        normalized, changed = _normalize_list_task_entry(key, value, now)
+        normalized_tasks[normalized["task_id"]] = normalized
+        if changed:
+            changed_count += 1
+    return normalized_tasks, changed_count
+
+
+def _normalize_runtime_async_tasks_for_list(runtime: ToolRuntime | None) -> None:
+    state = getattr(runtime, "state", None) if runtime is not None else None
+    if not isinstance(state, dict):
+        return
+    normalized_tasks, changed_count = _normalize_async_tasks_for_list(state.get("async_tasks"))
+    if normalized_tasks is None or changed_count == 0:
+        return
+    state["async_tasks"] = normalized_tasks
+    logger.info(
+        "[Builder] list_async_tasks normalized stale task records: count=%s",
+        changed_count,
+    )
+
+
 def _update_task_command(
     tracked: dict[str, Any],
     run_id: str,
@@ -168,6 +239,56 @@ def _update_run_config(
                 if isinstance(value, str) and value:
                     configurable[key] = value
     return {"configurable": configurable}
+
+
+def make_list_async_tasks_wrapper(native_tool: StructuredTool) -> StructuredTool:
+    """Build a stale-state-tolerant wrapper around native ``list_async_tasks``."""
+    if native_tool is None:
+        raise ValueError(
+            "make_list_async_tasks_wrapper requires the native "
+            "list_async_tasks StructuredTool — pass the instance from "
+            "AsyncSubAgentMiddleware.tools before filtering it out."
+        )
+    if native_tool.name != "list_async_tasks":
+        raise ValueError(
+            f"Expected native tool named 'list_async_tasks', got "
+            f"{native_tool.name!r}."
+        )
+
+    native_func = native_tool.func
+    native_coroutine = native_tool.coroutine
+
+    def list_async_tasks(
+        runtime: ToolRuntime,
+        status_filter: str | None = None,
+    ):
+        if native_func is None:
+            raise ToolException(
+                "Native list_async_tasks sync func is unavailable; call this "
+                "tool from the async path or upgrade deepagents."
+            )
+        _normalize_runtime_async_tasks_for_list(runtime)
+        return native_func(runtime=runtime, status_filter=status_filter)
+
+    async def alist_async_tasks(
+        runtime: ToolRuntime,
+        status_filter: str | None = None,
+    ):
+        if native_coroutine is None:
+            raise ToolException(
+                "Native list_async_tasks coroutine is unavailable."
+            )
+        _normalize_runtime_async_tasks_for_list(runtime)
+        return await native_coroutine(runtime=runtime, status_filter=status_filter)
+
+    return StructuredTool.from_function(
+        name=native_tool.name,
+        func=list_async_tasks,
+        coroutine=alist_async_tasks,
+        description=native_tool.description,
+        infer_schema=False,
+        args_schema=native_tool.args_schema,
+    )
 
 
 def _dispatch_update_with_url_state_sync(
