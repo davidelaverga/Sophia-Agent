@@ -729,9 +729,9 @@ def test_timed_out_status_passes_through():
 # ---------- dedup + dispatch -------------------------------------------------
 
 
-def test_fire_webhook_dedups_by_task_id():
-    """Two firings for the same task_id must result in exactly one POST."""
-    runtime = _make_runtime(builder_thread_id="dedup-1")
+def test_fire_webhook_dedups_by_task_id_and_run_id():
+    """Two firings for the same task_id/run_id must result in one POST."""
+    runtime = _make_runtime(builder_thread_id="dedup-1", builder_run_id="run-1")
     state = _make_state()
 
     with patch.object(builder_events, "_signed_artifact_url", return_value="https://supabase.test/x.md"), \
@@ -748,6 +748,48 @@ def test_fire_webhook_dedups_by_task_id():
     # Daemon thread is started for the first; the dedup contract is the
     # load-bearing assertion. We don't join the daemon thread because
     # _post_webhook is patched and never actually fires.
+
+
+def test_fire_webhook_allows_new_run_on_same_task_id():
+    """A revised builder run must not be blocked by the stale run's claim."""
+    state = _make_state()
+    first_runtime = _make_runtime(builder_thread_id="dedup-1", builder_run_id="run-old")
+    second_runtime = _make_runtime(builder_thread_id="dedup-1", builder_run_id="run-new")
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value="https://supabase.test/x.md"), \
+         patch.object(builder_events, "_post_webhook"):
+        first = builder_events.fire_completion_webhook_from_artifact(
+            state=state,
+            runtime=first_runtime,
+            artifact=_success_artifact(),
+            status="completed",
+        )
+        second = builder_events.fire_completion_webhook_from_artifact(
+            state=state,
+            runtime=second_runtime,
+            artifact=_success_artifact(),
+            status="completed",
+        )
+
+    assert first is True
+    assert second is True
+
+
+def test_fire_webhook_legacy_without_run_id_still_dedups_by_task_id():
+    runtime = _make_runtime(builder_thread_id="dedup-legacy", builder_run_id=None)
+    state = _make_state()
+
+    with patch.object(builder_events, "_signed_artifact_url", return_value="https://supabase.test/x.md"), \
+         patch.object(builder_events, "_post_webhook"):
+        first = builder_events.fire_completion_webhook_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+        second = builder_events.fire_completion_webhook_from_artifact(
+            state=state, runtime=runtime, artifact=_success_artifact(), status="completed"
+        )
+
+    assert first is True
+    assert second is False
 
 
 def test_fire_webhook_returns_false_without_thread_id():

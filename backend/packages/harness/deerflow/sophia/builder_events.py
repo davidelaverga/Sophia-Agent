@@ -10,9 +10,10 @@ webhook keeps the contract explicit and testable — a single POST per
 terminal task transition. Failures are logged and never block the
 builder's own completion path.
 
-The webhook fires *exactly once* per task_id even if
+The webhook fires *exactly once* per task_id/run_id even if
 ``BuilderArtifactMiddleware.after_model`` is exercised multiple times
-during cleanup. Dedup is process-local; if the LangGraph process
+during cleanup. Legacy callers without a run_id still dedup by task_id.
+Dedup is process-local; if the LangGraph process
 restarts mid-run, the gateway worker can recover the last event from
 its 5-minute TTL cache (see ``app/gateway/workers/builder_events.py``).
 
@@ -59,21 +60,28 @@ _INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
 )
 
 
-# Process-local LRU cache of task_ids that have already had their completion
-# webhook posted. Prevents duplicates from heartbeat persists, lock-protected
-# writebacks, and the outer-exception handler all firing for the same task.
+# Process-local LRU cache of task_id/run_id pairs that have already had
+# their completion webhook posted. Prevents duplicates from heartbeat
+# persists, lock-protected writebacks, and the outer-exception handler all
+# firing for the same run.
 #
 # Bounded with an LRU eviction policy so a long-running LangGraph process
-# doesn't accumulate every historical task_id forever. The cap is generous
+# doesn't accumulate every historical task_id/run_id forever. The cap is generous
 # enough that no real session collides with itself: at peak Sophia rates
 # (~1 task per minute), 10k entries cover a week of continuous work.
 _EMITTED_CACHE_MAX = 10_000
-_emitted_task_ids: OrderedDict[str, None] = OrderedDict()
+_EmitDedupeKey = tuple[str, str | None]
+_emitted_task_ids: OrderedDict[_EmitDedupeKey, None] = OrderedDict()
 _emitted_lock = threading.Lock()
 
 
-def _try_mark_emitted(task_id: str) -> bool:
-    """Atomically claim the right to emit for ``task_id``.
+def _emit_dedupe_key(task_id: str, run_id: str | None) -> _EmitDedupeKey:
+    """Return the terminal dedupe key, preserving legacy no-run behavior."""
+    return (task_id, run_id or None)
+
+
+def _try_mark_emitted(task_id: str, run_id: str | None = None) -> bool:
+    """Atomically claim the right to emit for ``task_id``/``run_id``.
 
     Returns ``True`` when the caller wins the race (and is responsible for
     firing the webhook), ``False`` when another caller already claimed it.
@@ -81,27 +89,29 @@ def _try_mark_emitted(task_id: str) -> bool:
     call :func:`_release_emit_claim` to allow a future retry — otherwise
     a payload-build failure would permanently silence the task.
     """
+    key = _emit_dedupe_key(task_id, run_id)
     with _emitted_lock:
-        if task_id in _emitted_task_ids:
-            # Touch for LRU recency so a hot task_id stays warm.
-            _emitted_task_ids.move_to_end(task_id)
+        if key in _emitted_task_ids:
+            # Touch for LRU recency so a hot task/run stays warm.
+            _emitted_task_ids.move_to_end(key)
             return False
-        _emitted_task_ids[task_id] = None
+        _emitted_task_ids[key] = None
         if len(_emitted_task_ids) > _EMITTED_CACHE_MAX:
             # Evict the oldest entry (FIFO end of the OrderedDict).
             _emitted_task_ids.popitem(last=False)
         return True
 
 
-def _release_emit_claim(task_id: str) -> None:
+def _release_emit_claim(task_id: str, run_id: str | None = None) -> None:
     """Roll back a successful :func:`_try_mark_emitted` claim.
 
     Called when payload construction fails after the claim is recorded so
-    that a subsequent terminal write for the same task_id (e.g. a retry
-    after the malformed-state condition is fixed) can still go through.
+    that a subsequent terminal write for the same task_id/run_id (e.g. a
+    retry after the malformed-state condition is fixed) can still go through.
     """
+    key = _emit_dedupe_key(task_id, run_id)
     with _emitted_lock:
-        _emitted_task_ids.pop(task_id, None)
+        _emitted_task_ids.pop(key, None)
 
 
 def _gateway_url() -> str:
@@ -1002,10 +1012,13 @@ def fire_completion_webhook_from_artifact(
         )
         return False
 
-    if not _try_mark_emitted(task_id):
+    builder_run_id = _resolve_runtime_run_id(runtime)
+
+    if not _try_mark_emitted(task_id, builder_run_id):
         logger.info(
-            "[Builder] fire_completion_webhook: already emitted for task_id=%s; skipping",
+            "[Builder] fire_completion_webhook: already emitted for task_id=%s run_id=%s; skipping",
             task_id,
+            builder_run_id,
         )
         return False
 
@@ -1018,10 +1031,11 @@ def fire_completion_webhook_from_artifact(
             error_message=error_message,
         )
     except Exception:
-        _release_emit_claim(task_id)
+        _release_emit_claim(task_id, builder_run_id)
         logger.warning(
-            "Failed to build native-dispatch builder-events payload for task_id=%s",
+            "Failed to build native-dispatch builder-events payload for task_id=%s run_id=%s",
             task_id,
+            builder_run_id,
             exc_info=True,
         )
         return False
@@ -1032,9 +1046,10 @@ def fire_completion_webhook_from_artifact(
     # whether the gateway saw the matching POST.
     logger.info(
         "[Builder] fire_completion_webhook: dispatching task_id=%s "
-        "parent_thread_id=%s status=%s artifact_path=%r artifact_filename=%r "
+        "run_id=%s parent_thread_id=%s status=%s artifact_path=%r artifact_filename=%r "
         "artifact_url_present=%s image_generation_status=%s image_generation_reason=%s",
         task_id,
+        payload.get("run_id"),
         payload.get("thread_id"),
         payload.get("status"),
         payload.get("artifact_path"),
