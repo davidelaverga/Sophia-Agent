@@ -147,6 +147,45 @@ export function stageUsesMarkdownArtifactPreview(
   return isMarkdownArtifactFile(stagePrimaryFile)
 }
 
+function getBuilderLibraryFileSiblings(
+  file: BuilderArtifactLibraryItemV1,
+  stageBuilderArtifact: BuilderArtifactV1 | null,
+) {
+  const artifactFiles = getBuilderArtifactFiles(stageBuilderArtifact)
+  return artifactFiles.some((artifactFile) => artifactFile.path === file.path)
+    ? artifactFiles
+    : [file]
+}
+
+function getBuilderLibraryFileRole(
+  file: BuilderArtifactLibraryItemV1,
+  stageBuilderArtifact: BuilderArtifactV1 | null,
+) {
+  return classifyBuilderArtifactFileRole(file, getBuilderLibraryFileSiblings(file, stageBuilderArtifact))
+}
+
+function isSessionArtifactSibling(candidate: ArtifactRecord, artifact: ArtifactRecord): boolean {
+  if (candidate.artifactId === artifact.artifactId) {
+    return true
+  }
+  if (candidate.logicalArtifactId && candidate.logicalArtifactId === artifact.logicalArtifactId) {
+    return true
+  }
+  if (candidate.stableArtifactIdentity && candidate.stableArtifactIdentity === artifact.stableArtifactIdentity) {
+    return true
+  }
+  return false
+}
+
+function getSessionArtifactRole(artifact: ArtifactRecord, artifacts: ArtifactRecord[]) {
+  return classifyBuilderArtifactFileRole(
+    { path: artifact.localPath },
+    artifacts
+      .filter((candidate) => isSessionArtifactSibling(candidate, artifact))
+      .map((sibling) => ({ path: sibling.localPath })),
+  )
+}
+
 function BuilderArtifactLibraryList({
   builderArtifactLibrary,
   stageBuilderArtifact,
@@ -159,7 +198,7 @@ function BuilderArtifactLibraryList({
   onSelectedBuilderArtifactPathChange?: (path: string | null) => void
 }) {
   const visibleFiles = builderArtifactLibrary.filter(
-    (file) => classifyBuilderArtifactFileRole(file, builderArtifactLibrary) === 'primary',
+    (file) => getBuilderLibraryFileRole(file, stageBuilderArtifact) === 'primary',
   )
   return (
     <div className="flex flex-col items-center gap-2">
@@ -167,7 +206,7 @@ function BuilderArtifactLibraryList({
         <BuilderArtifactLibraryRow
           key={file.path}
           file={file}
-          roleLabel={formatBuilderArtifactFileRoleLabel(classifyBuilderArtifactFileRole(file, builderArtifactLibrary))}
+          roleLabel={formatBuilderArtifactFileRoleLabel(getBuilderLibraryFileRole(file, stageBuilderArtifact))}
           isSelected={stageBuilderArtifact?.artifactPath === file.path}
           threadId={threadId}
           onSelectedBuilderArtifactPathChange={onSelectedBuilderArtifactPathChange}
@@ -223,10 +262,7 @@ function SessionArtifactTray({
   onSelectedBuilderArtifactPathChange?: (path: string | null) => void
 }) {
   const artifacts = getSessionArtifactRows(sessionArtifactIndex).filter(
-    (artifact, _index, allArtifacts) => classifyBuilderArtifactFileRole(
-      { path: artifact.localPath },
-      allArtifacts.map((sibling) => ({ path: sibling.localPath })),
-    ) === 'primary',
+    (artifact, _index, allArtifacts) => getSessionArtifactRole(artifact, allArtifacts) === 'primary',
   )
   if (artifacts.length === 0) {
     return null
@@ -287,10 +323,7 @@ function SessionArtifactTrayRow({
     preferArtifactId,
   })
   const versionLabel = getSessionArtifactVersionLabel(artifact, artifacts)
-  const roleLabel = formatBuilderArtifactFileRoleLabel(classifyBuilderArtifactFileRole(
-    { path: artifact.localPath },
-    artifacts.map((sibling) => ({ path: sibling.localPath })),
-  ))
+  const roleLabel = formatBuilderArtifactFileRoleLabel(getSessionArtifactRole(artifact, artifacts))
   const meta = [
     roleLabel,
     formatRendererKindLabel(artifact.rendererKind),

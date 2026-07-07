@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from "vitest"
 
 import { PresenceArtifactSecondarySurfaces } from "../../../app/components/session/PresenceArtifactSecondarySurfaces"
 import type { ArtifactRecord, ArtifactSessionIndex } from "../../../app/lib/session-artifact-index"
+import type { BuilderArtifactLibraryItemV1, BuilderArtifactV1 } from "../../../app/types/builder-artifact"
 
 const baseRecord: ArtifactRecord = {
   artifactId: "artifact-pdf",
@@ -39,17 +40,21 @@ const baseRecord: ArtifactRecord = {
 }
 
 function renderTray({
-  index,
+  index = null,
+  builderArtifactLibrary = [],
+  stageBuilderArtifact = null,
   onSessionArtifactOpen = vi.fn(),
 }: {
-  index: ArtifactSessionIndex
+  index?: ArtifactSessionIndex | null
+  builderArtifactLibrary?: BuilderArtifactLibraryItemV1[]
+  stageBuilderArtifact?: BuilderArtifactV1 | null
   onSessionArtifactOpen?: (artifact: ArtifactRecord) => void
 }) {
   render(
     <PresenceArtifactSecondarySurfaces
       artifacts={null}
-      builderArtifactLibrary={[]}
-      stageBuilderArtifact={null}
+      builderArtifactLibrary={builderArtifactLibrary}
+      stageBuilderArtifact={stageBuilderArtifact}
       sessionArtifactIndex={index}
       showSecondaryArtifactSurfaces
       showDomArtifactCoReview={false}
@@ -181,6 +186,77 @@ describe("PresenceArtifactSecondarySurfaces artifact tray", () => {
 
     expect(screen.getByText("Deck")).toBeInTheDocument()
     expect(screen.queryByText("deck.preview.pdf")).not.toBeInTheDocument()
+  })
+
+  it("keeps standalone same-stem markdown deliverables visible in the session tray", () => {
+    const markdownRecord: ArtifactRecord = {
+      ...baseRecord,
+      artifactId: "artifact-markdown",
+      stableArtifactIdentity: "stable-markdown",
+      logicalArtifactId: "logical-markdown",
+      versionId: "logical-markdown::v1",
+      title: "Markdown Report",
+      artifactType: "document",
+      rendererKind: "markdown",
+      mimeType: "text/markdown",
+      localPath: "mnt/user-data/outputs/first.md",
+      createdAt: "2026-06-07T12:05:00.000Z",
+      updatedAt: "2026-06-07T12:05:00.000Z",
+    }
+
+    renderTray({
+      index: {
+        userId: "user-1",
+        threadId: "thread-1",
+        sessionId: "session-1",
+        artifacts: [baseRecord, markdownRecord],
+        activeArtifactId: null,
+        recentlyOpenedArtifactIds: [],
+      },
+    })
+
+    expect(screen.getByText("First PDF")).toBeInTheDocument()
+    expect(screen.getByText("Markdown Report")).toBeInTheDocument()
+  })
+
+  it("keeps standalone same-stem markdown deliverables visible in the builder library", () => {
+    renderTray({
+      builderArtifactLibrary: [
+        {
+          path: "mnt/user-data/outputs/report.pdf",
+          name: "report.pdf",
+          mimeType: "application/pdf",
+        },
+        {
+          path: "mnt/user-data/outputs/report.md",
+          name: "report.md",
+          mimeType: "text/markdown",
+        },
+      ],
+    })
+
+    expect(screen.getByText("report.pdf")).toBeInTheDocument()
+    expect(screen.getByText("report.md")).toBeInTheDocument()
+  })
+
+  it("hides explicit render-source suffix files in the builder library", () => {
+    renderTray({
+      builderArtifactLibrary: [
+        {
+          path: "mnt/user-data/outputs/report.pdf",
+          name: "report.pdf",
+          mimeType: "application/pdf",
+        },
+        {
+          path: "mnt/user-data/outputs/report.pdf.md",
+          name: "report.pdf.md",
+          mimeType: "text/markdown",
+        },
+      ],
+    })
+
+    expect(screen.getByText("report.pdf")).toBeInTheDocument()
+    expect(screen.queryByText("report.pdf.md")).not.toBeInTheDocument()
   })
 
   it("shows a safe unavailable state for missing artifacts", () => {
