@@ -24,8 +24,10 @@ def render_slide_html(slide: DeckSlideSpec, deck: DeckBuild) -> str:
     narrative = html.escape(slide.narrative)
     visual = ""
     visual_class = "visual"
+    visual_state_class = "no_visual"
     if deck.visual_policy == "required":
         visual = f'<div class="{visual_class}"><img src="../assets/slide-{slide.index:02d}.png" alt=""></div>'
+        visual_state_class = "has_visual"
     layout_class = html.escape(slide.layout_kind or "single_visual_focus")
     register_class = html.escape(deck.register or "professional_technical")
     return f"""<!doctype html>
@@ -47,13 +49,13 @@ html, body {{ margin: 0; padding: 0; width: 1920px; height: 1080px; background: 
 .text_left_visual_right .visual {{ top: 220px; left: 820px; right: 80px; bottom: 150px; }}
 .text_left_visual_right .narrative {{ left: 80px; right: 1180px; top: 250px; bottom: auto; font-size: 34px; }}
 .cover_hero .visual {{ inset: 0; opacity: 0.92; }}
-.cover_hero .title {{ top: 650px; color: #ffffff; text-shadow: 0 8px 22px rgba(0,0,0,.35); }}
-.cover_hero .narrative {{ color: #eef4fb; text-shadow: 0 5px 18px rgba(0,0,0,.35); }}
+.cover_hero.has_visual .title {{ top: 650px; color: #ffffff; text-shadow: 0 8px 22px rgba(0,0,0,.35); }}
+.cover_hero.has_visual .narrative {{ color: #eef4fb; text-shadow: 0 5px 18px rgba(0,0,0,.35); }}
 .comparison_two_column .visual, .timeline_flow .visual, .single_visual_focus .visual {{ object-fit: cover; }}
 </style>
 </head>
 <body>
-  <main class="slide {layout_class} {register_class}">
+  <main class="slide {layout_class} {register_class} {visual_state_class}">
     {visual}
     <div class="title">{title}</div>
     <div class="narrative">{narrative}</div>

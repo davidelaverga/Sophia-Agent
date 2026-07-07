@@ -592,6 +592,11 @@ def test_deck_build_service_text_only_requires_explicit_request_and_compiles_wit
     assert result.successful_visual_count == 0
     assert compiler_calls
     assert not (tmp_path / "outputs" / "assets" / "prompts").exists()
+    cover_html = (tmp_path / "outputs" / "slides" / "01-cover.html").read_text(encoding="utf-8")
+    assert 'class="slide cover_hero professional_technical no_visual"' in cover_html
+    assert '<div class="visual">' not in cover_html
+    assert ".cover_hero.has_visual .title" in cover_html
+    assert ".cover_hero .title { top: 650px; color: #ffffff;" not in cover_html
 
 
 def test_deck_build_service_text_only_accepts_delegated_task_brief(tmp_path: Path) -> None:
