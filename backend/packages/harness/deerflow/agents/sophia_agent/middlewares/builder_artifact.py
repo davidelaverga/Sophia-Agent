@@ -11002,9 +11002,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         image_generation_status = str(payload.get("image_generation_status") or ("success" if success else "failed"))
         primary_image_batch_status = str(payload.get("primary_image_batch_status") or ("success" if success else "failed"))
         primary_image_batch_error_class = payload.get("primary_image_batch_error_class") or (None if success else failure_code)
+        deck_route = str(payload.get("deck_route") or "deck_ir_html_raster")
+        deck_compile_mode = str(payload.get("deck_compile_mode") or "html_screenshot_fallback")
         delta: dict[str, Any] = {
-            "presentation_route": "deck_ir_html_raster",
-            "deck_route": "deck_ir_html_raster",
+            "presentation_route": deck_route,
+            "deck_route": deck_route,
+            "deck_compile_mode": deck_compile_mode,
             "deck_build_id": payload.get("build_id"),
             "deck_schema_version": "sophia-deck-build/v1",
             "deck_status": "evaluated" if success else "failed_terminal",
@@ -11031,6 +11034,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "pptx_generator_bytes_total": bytes_count if success else 0,
             "pptx_generator_error_class": None if success else failure_code,
         }
+        native_editability_score = payload.get("native_editability_score")
+        if isinstance(native_editability_score, (int, float)) and not isinstance(native_editability_score, bool):
+            delta["native_editability_score"] = native_editability_score
         if pptx_path and success:
             delta["pptx_output_paths"] = [pptx_path]
             if _pptx_diagnostics(request.state or {}).get("time_to_first_valid_artifact_ms") is None:

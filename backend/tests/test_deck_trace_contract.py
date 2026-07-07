@@ -1,0 +1,267 @@
+from __future__ import annotations
+
+import contextlib
+import importlib.util
+import json
+import sys
+from pathlib import Path
+from types import ModuleType, SimpleNamespace
+from typing import Any
+
+from deerflow.sandbox.tools import replace_virtual_path
+from deerflow.sophia.deck_build import service as deck_service
+from deerflow.sophia.deck_build.service import DeckBuildService
+from deerflow.sophia.deck_build.tracing import (
+    DEFAULT_ARTIFACT_TARGET_EXT,
+    DEFAULT_DECK_COMPILE_MODE,
+    DEFAULT_DECK_ROUTE,
+    base_metadata,
+    deck_span,
+    finish_span,
+    stable_hash,
+)
+
+_OUTPUTS = "/mnt/user-data/outputs/"
+
+
+def _runtime(outputs: Path) -> SimpleNamespace:
+    outputs.mkdir(parents=True, exist_ok=True)
+    workspace = outputs.parent / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    return SimpleNamespace(
+        state={
+            "thread_id": "builder-thread",
+            "parent_thread_id": "companion-thread",
+            "user_id": "user-raw",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "builder_pptx_requested_slide_count": 3,
+            "delegation_context": {"request": "Build a visual 3 slide deck"},
+            "thread_data": {
+                "outputs_path": str(outputs),
+                "workspace_path": str(workspace),
+            },
+        },
+        context={"thread_id": "builder-thread"},
+        config={},
+    )
+
+
+def _slides() -> list[dict[str, str]]:
+    return [
+        {
+            "title": f"Slide {index} System Story",
+            "narrative": "A concise technical narrative explains the point with calm professional framing.",
+            "role": role,
+            "layout_kind": layout,
+            "visual_prompt": f"Professional technical visual metaphor for slide {index}",
+        }
+        for index, (role, layout) in enumerate(
+            [
+                ("cover", "cover_hero"),
+                ("architecture", "single_visual_focus"),
+                ("closing", "closing_summary"),
+            ],
+            start=1,
+        )
+    ]
+
+
+def _fake_compiler(runtime: SimpleNamespace, output_path: str, _title: str, _slides_dir: str) -> dict[str, Any]:
+    host = Path(replace_virtual_path(output_path, runtime.state["thread_data"]))
+    host.parent.mkdir(parents=True, exist_ok=True)
+    host.write_bytes(b"fake pptx")
+    return {
+        "success": True,
+        "pptx_path": output_path,
+        "size_bytes": host.stat().st_size,
+        "engine": "fake",
+        "overflow_slides": [],
+    }
+
+
+def _fake_batch(manifest_path: str, runtime: SimpleNamespace) -> dict[str, Any]:
+    manifest_host = Path(replace_virtual_path(manifest_path, runtime.state["thread_data"]))
+    manifest = json.loads(manifest_host.read_text(encoding="utf-8"))
+    items: list[dict[str, Any]] = []
+    for item in manifest["items"]:
+        output_file = item["output_file"]
+        host = Path(replace_virtual_path(output_file, runtime.state["thread_data"]))
+        host.parent.mkdir(parents=True, exist_ok=True)
+        host.write_bytes(b"png")
+        items.append({"output_file": output_file, "success": True, "error_class": None})
+    return {
+        "summary_present": True,
+        "complete": True,
+        "requested": len(items),
+        "images_generated": len(items),
+        "failed": 0,
+        "items": items,
+        "error_class_histogram": {},
+    }
+
+
+def test_base_metadata_uses_d0_contract_and_safe_identity(tmp_path: Path) -> None:
+    metadata = base_metadata(
+        runtime=_runtime(tmp_path / "outputs"),
+        build_id="deck-123",
+        visual_policy="required",
+        status="planned",
+        slide_count=3,
+    )
+
+    assert metadata["sophia_schema"] == "deck_trace_v2"
+    assert metadata["thread_id"] == "builder-thread"
+    assert metadata["session_id"] == "companion-thread"
+    assert metadata["user_id_hash"] == stable_hash("user-raw")
+    assert metadata["task_id"] == "task-1"
+    assert metadata["run_id"] == "run-1"
+    assert metadata["build_id"] == "deck-123"
+    assert metadata["deck_route"] == DEFAULT_DECK_ROUTE
+    assert metadata["deck_compile_mode"] == DEFAULT_DECK_COMPILE_MODE
+    assert metadata["artifact_target_ext"] == DEFAULT_ARTIFACT_TARGET_EXT
+    assert metadata["deck_build_id"] == "deck-123"
+    assert "user-raw" not in json.dumps(metadata)
+
+
+def test_deck_span_attaches_d0_metadata_to_explicit_child(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, Any] = {}
+
+    class FakeRun:
+        def end(self, outputs: dict[str, Any]) -> None:
+            captured["outputs"] = outputs
+
+    class FakeManager:
+        def __enter__(self) -> FakeRun:
+            return FakeRun()
+
+        def __exit__(self, *_exc: object) -> None:
+            captured["closed"] = True
+
+    fake_langsmith = ModuleType("langsmith")
+
+    def fake_trace(name: str, **kwargs: Any) -> FakeManager:
+        captured["name"] = name
+        captured.update(kwargs)
+        return FakeManager()
+
+    fake_langsmith.trace = fake_trace  # type: ignore[attr-defined]
+    fake_run_helpers = ModuleType("langsmith.run_helpers")
+    fake_run_helpers.get_current_run_tree = lambda: SimpleNamespace(dotted_order="parent-order")  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "langsmith", fake_langsmith)
+    monkeypatch.setitem(sys.modules, "langsmith.run_helpers", fake_run_helpers)
+
+    with deck_span(
+        "deck.test.child",
+        runtime=_runtime(tmp_path / "outputs"),
+        build_id="deck-123",
+        visual_policy="required",
+        status="planned",
+        slide_count=3,
+    ) as run:
+        finish_span(run, {"ok": True})
+
+    metadata = captured["metadata"]
+    assert captured["name"] == "deck.test.child"
+    assert captured["parent"] == "parent-order"
+    assert metadata["thread_id"] == "builder-thread"
+    assert metadata["session_id"] == "companion-thread"
+    assert metadata["build_id"] == "deck-123"
+    assert metadata["deck_route"] == DEFAULT_DECK_ROUTE
+    assert metadata["deck_compile_mode"] == DEFAULT_DECK_COMPILE_MODE
+    assert captured["outputs"] == {"ok": True}
+
+
+def test_current_image_trace_env_projects_deck_context_without_raw_user_id(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state["current_deck_build_id"] = "deck-123"
+
+    env = deck_service._current_image_trace_env(runtime)
+
+    assert env["SOPHIA_THREAD_ID"] == "builder-thread"
+    assert env["SOPHIA_SESSION_ID"] == "companion-thread"
+    assert env["SOPHIA_TASK_ID"] == "task-1"
+    assert env["SOPHIA_RUN_ID"] == "run-1"
+    assert env["SOPHIA_USER_ID_HASH"] == stable_hash("user-raw")
+    assert env["SOPHIA_BUILD_ID"] == "deck-123"
+    assert env["SOPHIA_DECK_BUILD_ID"] == "deck-123"
+    assert env["SOPHIA_DECK_ROUTE"] == DEFAULT_DECK_ROUTE
+    assert env["SOPHIA_DECK_COMPILE_MODE"] == DEFAULT_DECK_COMPILE_MODE
+    assert env["SOPHIA_ARTIFACT_TARGET_EXT"] == DEFAULT_ARTIFACT_TARGET_EXT
+    assert "user-raw" not in env.values()
+
+
+def test_image_generation_script_maps_deck_trace_env_metadata(monkeypatch) -> None:
+    script_path = (
+        Path(__file__).resolve().parents[2]
+        / "skills"
+        / "public"
+        / "image-generation"
+        / "scripts"
+        / "generate.py"
+    )
+    spec = importlib.util.spec_from_file_location("image_generation_trace_contract_test", script_path)
+    assert spec is not None
+    assert spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    monkeypatch.setenv("SOPHIA_THREAD_ID", "builder-thread")
+    monkeypatch.setenv("SOPHIA_SESSION_ID", "companion-thread")
+    monkeypatch.setenv("SOPHIA_BUILD_ID", "deck-123")
+    monkeypatch.setenv("SOPHIA_DECK_ROUTE", DEFAULT_DECK_ROUTE)
+    monkeypatch.setenv("SOPHIA_DECK_COMPILE_MODE", DEFAULT_DECK_COMPILE_MODE)
+    monkeypatch.setenv("SOPHIA_ARTIFACT_TARGET_EXT", DEFAULT_ARTIFACT_TARGET_EXT)
+
+    metadata = module._langsmith_parent_metadata()
+
+    assert metadata["thread_id"] == "builder-thread"
+    assert metadata["session_id"] == "companion-thread"
+    assert metadata["build_id"] == "deck-123"
+    assert metadata["deck_route"] == DEFAULT_DECK_ROUTE
+    assert metadata["deck_compile_mode"] == DEFAULT_DECK_COMPILE_MODE
+    assert metadata["artifact_target_ext"] == DEFAULT_ARTIFACT_TARGET_EXT
+
+
+def test_deck_service_uses_manifest_span_for_prompt_hashes_not_prompt_write_span(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    spans: list[dict[str, Any]] = []
+
+    @contextlib.contextmanager
+    def capture_span(name: str, **kwargs: Any):
+        record: dict[str, Any] = {"name": name, "inputs": kwargs.get("inputs") or {}, "outputs": None}
+        spans.append(record)
+
+        class CapturedRun:
+            def end(self, outputs: dict[str, Any]) -> None:
+                record["outputs"] = outputs
+
+        yield CapturedRun()
+
+    monkeypatch.setattr(deck_service, "deck_span", capture_span)
+    runtime = _runtime(tmp_path / "outputs")
+    result = DeckBuildService(
+        image_batch_runner=_fake_batch,
+        deck_compiler=_fake_compiler,
+    ).prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+    )
+
+    assert result.success is True
+    assert result.deck_route == DEFAULT_DECK_ROUTE
+    assert result.deck_compile_mode == DEFAULT_DECK_COMPILE_MODE
+    assert result.native_editability_score == 0.0
+    build = json.loads((tmp_path / "outputs" / "deck_build" / "build.json").read_text(encoding="utf-8"))
+    assert build["deck_route"] == DEFAULT_DECK_ROUTE
+    assert build["deck_compile_mode"] == DEFAULT_DECK_COMPILE_MODE
+    span_names = [span["name"] for span in spans]
+    assert "deck.prompt_files.write" not in span_names
+    manifest_output = next(span["outputs"] for span in spans if span["name"] == "deck.image_manifest.prepare")
+    assert manifest_output["prompt_count"] == 3
+    assert len(manifest_output["prompt_hashes"]) == 3
+    assert manifest_output["prompt_basenames"] == ["slide-01.json", "slide-02.json", "slide-03.json"]
+    assert "prompts" not in manifest_output

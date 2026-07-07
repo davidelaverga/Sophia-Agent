@@ -325,6 +325,15 @@ def _langsmith_parent_metadata() -> dict[str, str]:
         ("SOPHIA_PARENT_RUN_ID", "parent_run_id"),
         ("SOPHIA_PARENT_DOTTED_ORDER", "parent_dotted_order"),
         ("SOPHIA_THREAD_ID", "thread_id"),
+        ("SOPHIA_SESSION_ID", "session_id"),
+        ("SOPHIA_TASK_ID", "task_id"),
+        ("SOPHIA_RUN_ID", "run_id"),
+        ("SOPHIA_USER_ID_HASH", "user_id_hash"),
+        ("SOPHIA_BUILD_ID", "build_id"),
+        ("SOPHIA_DECK_BUILD_ID", "deck_build_id"),
+        ("SOPHIA_DECK_ROUTE", "deck_route"),
+        ("SOPHIA_DECK_COMPILE_MODE", "deck_compile_mode"),
+        ("SOPHIA_ARTIFACT_TARGET_EXT", "artifact_target_ext"),
     ):
         value = _env_value(env_name)
         if value:

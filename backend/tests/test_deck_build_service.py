@@ -123,6 +123,9 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
 
     assert result.success is True
     assert result.pptx_path == f"{_OUTPUTS}deck.pptx"
+    assert result.deck_route == "deck_ir_html_raster"
+    assert result.deck_compile_mode == "html_screenshot_fallback"
+    assert result.native_editability_score == 0.0
     assert result.expected_visual_count == 3
     assert result.successful_visual_count == 3
     assert result.referenced_visual_count == 3
@@ -142,6 +145,9 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     build = json.loads((outputs / "deck_build" / "build.json").read_text(encoding="utf-8"))
     assert build["schema_version"] == "sophia-deck-build/v1"
     assert build["status"] == "evaluated"
+    assert build["deck_route"] == "deck_ir_html_raster"
+    assert build["deck_compile_mode"] == "html_screenshot_fallback"
+    assert build["native_editability_score"] == 0.0
     assert "Professional technical visual metaphor" in build["slides"][0]["visual_prompt"]
     loaded = load_deck_build(result.deck_build_path, runtime)
     assert loaded is not None

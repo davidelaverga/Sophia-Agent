@@ -78,6 +78,9 @@ class DeckBuild:
     output_path: str
     slides: list[DeckSlideSpec]
     expected_visual_count: int
+    deck_route: str = "deck_ir_html_raster"
+    deck_compile_mode: str = "html_screenshot_fallback"
+    native_editability_score: float | None = 0.0
     successful_visual_count: int = 0
     referenced_visual_count: int = 0
     missing_visual_count: int = 0
@@ -141,6 +144,9 @@ class DeckBuildResult:
     build_id: str
     deck_build_path: str
     pptx_path: str | None = None
+    deck_route: str = "deck_ir_html_raster"
+    deck_compile_mode: str = "html_screenshot_fallback"
+    native_editability_score: float | None = 0.0
     slide_count: int = 0
     expected_visual_count: int = 0
     successful_visual_count: int = 0

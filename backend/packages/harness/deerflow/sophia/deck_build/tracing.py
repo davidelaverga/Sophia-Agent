@@ -9,6 +9,10 @@ from typing import Any
 
 from deerflow.sandbox.tools import get_thread_data
 
+DEFAULT_DECK_ROUTE = "deck_ir_html_raster"
+DEFAULT_DECK_COMPILE_MODE = "html_screenshot_fallback"
+DEFAULT_ARTIFACT_TARGET_EXT = ".pptx"
+
 
 def stable_hash(value: object) -> str | None:
     if value is None:
@@ -34,26 +38,58 @@ def safe_excerpt(value: object, limit: int = 600) -> str | None:
     return text
 
 
-def base_metadata(*, runtime: Any, build_id: str, visual_policy: str, status: str, slide_count: int) -> dict[str, Any]:
-    state = getattr(runtime, "state", None) or {}
-    thread_data = get_thread_data(runtime) or {}
+def _compact_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     return {
-        "sophia_schema": "deck_build_trace_v1",
-        "thread_id": state.get("thread_id") or thread_data.get("thread_id"),
-        "session_id": state.get("parent_thread_id") or state.get("companion_session_id"),
-        "parent_thread_id": state.get("parent_thread_id"),
-        "task_id": state.get("task_id"),
-        "run_id": state.get("run_id"),
-        "user_id_hash": stable_hash(state.get("user_id")),
-        "render_git_commit": os.getenv("RENDER_GIT_COMMIT"),
-        "artifact_target_ext": ".pptx",
-        "artifact_type": "presentation",
-        "deck_build_id": build_id,
-        "deck_schema_version": "sophia-deck-build/v1",
-        "deck_visual_policy": visual_policy,
-        "deck_requested_slide_count": slide_count,
-        "deck_status": status,
+        key: value
+        for key, value in payload.items()
+        if value is not None and value != "" and value != [] and value != {}
     }
+
+
+def base_metadata(
+    *,
+    runtime: Any,
+    build_id: str,
+    visual_policy: str,
+    status: str,
+    slide_count: int,
+    deck_route: str | None = None,
+    deck_compile_mode: str | None = None,
+    artifact_target_ext: str | None = None,
+) -> dict[str, Any]:
+    raw_state = getattr(runtime, "state", None)
+    state = raw_state if isinstance(raw_state, dict) else {}
+    thread_data = get_thread_data(runtime) or {}
+    thread_id = state.get("thread_id") or thread_data.get("thread_id")
+    session_id = state.get("session_id") or state.get("parent_thread_id") or state.get("companion_session_id")
+    task_id = state.get("task_id") or state.get("builder_task_id")
+    run_id = state.get("run_id") or state.get("builder_run_id")
+    return _compact_metadata(
+        {
+            "sophia_schema": "deck_trace_v2",
+            "thread_id": thread_id,
+            "session_id": session_id,
+            "user_id_hash": stable_hash(state.get("user_id")),
+            "task_id": task_id,
+            "run_id": run_id,
+            "build_id": build_id,
+            "deck_route": deck_route or DEFAULT_DECK_ROUTE,
+            "deck_compile_mode": deck_compile_mode or DEFAULT_DECK_COMPILE_MODE,
+            "artifact_target_ext": artifact_target_ext or DEFAULT_ARTIFACT_TARGET_EXT,
+            "artifact_type": "presentation",
+            "builder_thread_id": thread_id,
+            "builder_task_id": task_id,
+            "builder_run_id": run_id,
+            "parent_thread_id": state.get("parent_thread_id"),
+            # Compatibility keys kept while downstream dashboards migrate to deck_trace_v2.
+            "deck_build_id": build_id,
+            "deck_schema_version": "sophia-deck-build/v1",
+            "deck_visual_policy": visual_policy,
+            "deck_requested_slide_count": slide_count,
+            "deck_status": status,
+            "render_git_commit": os.getenv("RENDER_GIT_COMMIT"),
+        }
+    )
 
 
 @contextlib.contextmanager
@@ -69,6 +105,9 @@ def deck_span(
     inputs: dict[str, Any] | None = None,
     metadata: dict[str, Any] | None = None,
     tags: list[str] | None = None,
+    deck_route: str | None = None,
+    deck_compile_mode: str | None = None,
+    artifact_target_ext: str | None = None,
 ):
     try:
         from langsmith import trace
@@ -86,6 +125,9 @@ def deck_span(
             visual_policy=visual_policy,
             status=status,
             slide_count=slide_count,
+            deck_route=deck_route,
+            deck_compile_mode=deck_compile_mode,
+            artifact_target_ext=artifact_target_ext,
         ),
         **(metadata or {}),
     }

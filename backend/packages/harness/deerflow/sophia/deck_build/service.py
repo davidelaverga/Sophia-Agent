@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 import hashlib
 import json
 import os
@@ -8,9 +9,10 @@ import subprocess  # noqa: S404 - fixed Python script path with sanitized args.
 import sys
 import time
 import uuid
+from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from langchain.tools import ToolRuntime
 
@@ -19,7 +21,16 @@ from deerflow.sophia.deck_build.evaluator import DeckEvaluator
 from deerflow.sophia.deck_build.models import DeckBuild, DeckBuildResult, DeckSlideSpec
 from deerflow.sophia.deck_build.storage import save_deck_build
 from deerflow.sophia.deck_build.templates import slide_html_virtual_path, write_slide_html
-from deerflow.sophia.deck_build.tracing import basename, deck_span, finish_span, safe_excerpt
+from deerflow.sophia.deck_build.tracing import (
+    DEFAULT_ARTIFACT_TARGET_EXT,
+    DEFAULT_DECK_COMPILE_MODE,
+    DEFAULT_DECK_ROUTE,
+    basename,
+    deck_span,
+    finish_span,
+    safe_excerpt,
+    stable_hash,
+)
 from deerflow.sophia.tools.build_deck_from_slides import build_deck_from_slides
 from deerflow.sophia.tools.prepare_pptx_image_manifest import create_pptx_image_manifest_core
 from deerflow.sophia.tools.render_markdown_to_pdf import _ensure_relative_to_outputs
@@ -111,6 +122,9 @@ class DeckBuildService:
             output_path=output_path,
             slides=[],
             expected_visual_count=len(slides) if visual_policy == "required" else 0,
+            deck_route=DEFAULT_DECK_ROUTE,
+            deck_compile_mode=DEFAULT_DECK_COMPILE_MODE,
+            native_editability_score=0.0,
             created_at=now,
             updated_at=now,
         )
@@ -136,9 +150,10 @@ class DeckBuildService:
             if visual_policy == "required":
                 self._write_prompt_files(deck, runtime)
                 self._prepare_manifest(deck, runtime)
-                summary = self._run_visual_batch(deck, runtime)
-                self._apply_batch_summary(deck, runtime, summary)
-                self._repair_visuals_after_batch(deck, runtime, summary)
+                with _deck_trace_runtime_context(runtime, deck):
+                    summary = self._run_visual_batch(deck, runtime)
+                    self._apply_batch_summary(deck, runtime, summary)
+                    self._repair_visuals_after_batch(deck, runtime, summary)
                 self._verify_visuals(deck, runtime)
             else:
                 for slide in deck.slides:
@@ -222,47 +237,31 @@ class DeckBuildService:
         return specs
 
     def _write_prompt_files(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
-        with deck_span(
-            "deck.prompt_files.write",
-            runtime=runtime,
-            build_id=deck.build_id,
-            visual_policy=deck.visual_policy,
-            status=deck.status,
-            slide_count=len(deck.slides),
-            run_type="tool",
-            inputs={"slide_count": len(deck.slides), "output_dir": "assets/prompts"},
-        ) as run:
-            basenames: list[str] = []
-            hashes: list[str] = []
-            for slide in deck.slides:
-                prompt_path = f"{_PROMPTS}/slide-{slide.index:02d}.json"
-                host = _host_path(prompt_path, runtime)
-                host.parent.mkdir(parents=True, exist_ok=True)
-                style = {
-                    "register": deck.register,
-                    "visual_style": "clean_flat_vector",
-                    "aesthetic": "restrained_professional_technical",
-                }
-                style.update(deck.style_profile or {})
-                payload = {
-                    "prompt": slide.visual_prompt,
-                    "style": style,
-                    "composition": _composition_for_layout(slide.layout_kind),
-                    "constraints": [
-                        "No slide title, no narrative paragraph, no footer, no page chrome.",
-                        "Avoid large readable text inside the image.",
-                        "Use restrained professional technical aesthetic unless the user requested another register.",
-                        "Use clean flat vector composition and avoid unrequested stylized or playful modes.",
-                    ],
-                    "technical": {"aspect_ratio": "16:9", "quality": "high", "slide_visual": True},
-                }
-                encoded = json.dumps(payload, indent=2)
-                host.write_text(encoded, encoding="utf-8")
-                slide.visual_prompt_path = prompt_path
-                basenames.append(host.name)
-                hashes.append(hashlib.sha256(encoded.encode("utf-8")).hexdigest()[:16])
-            deck.status = "visual_specs_ready"
-            finish_span(run, {"prompt_count": len(basenames), "prompt_basenames": basenames, "prompt_hashes": hashes})
+        for slide in deck.slides:
+            prompt_path = f"{_PROMPTS}/slide-{slide.index:02d}.json"
+            host = _host_path(prompt_path, runtime)
+            host.parent.mkdir(parents=True, exist_ok=True)
+            style = {
+                "register": deck.register,
+                "visual_style": "clean_flat_vector",
+                "aesthetic": "restrained_professional_technical",
+            }
+            style.update(deck.style_profile or {})
+            payload = {
+                "prompt": slide.visual_prompt,
+                "style": style,
+                "composition": _composition_for_layout(slide.layout_kind),
+                "constraints": [
+                    "No slide title, no narrative paragraph, no footer, no page chrome.",
+                    "Avoid large readable text inside the image.",
+                    "Use restrained professional technical aesthetic unless the user requested another register.",
+                    "Use clean flat vector composition and avoid unrequested stylized or playful modes.",
+                ],
+                "technical": {"aspect_ratio": "16:9", "quality": "high", "slide_visual": True},
+            }
+            host.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+            slide.visual_prompt_path = prompt_path
+        deck.status = "visual_specs_ready"
 
     def _prepare_manifest(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
         prompt_files = [slide.visual_prompt_path or "" for slide in deck.slides]
@@ -283,13 +282,19 @@ class DeckBuildService:
                 manifest_author="DeckBuildService",
                 trace=False,
             )
+            raw_items = result.get("items") if isinstance(result.get("items"), list) else []
+            items = [item for item in raw_items if isinstance(item, dict)]
             finish_span(
                 run,
                 {
                     "success": bool(result.get("success")),
                     "manifest_author": "DeckBuildService",
                     "item_count": result.get("expected_count", 0),
-                    "output_basenames": [basename(item.get("output_path")) for item in result.get("items", [])],
+                    "prompt_count": len(prompt_files),
+                    "prompt_basenames": [basename(item.get("prompt_file")) for item in items],
+                    "prompt_hashes": [item.get("prompt_hash") for item in items if item.get("prompt_hash")],
+                    "prompt_chars_total": sum(int(item.get("prompt_chars") or 0) for item in items),
+                    "output_basenames": [basename(item.get("output_path")) for item in items],
                     "schema_version": result.get("schema_version"),
                 },
             )
@@ -671,7 +676,10 @@ class DeckBuildService:
                 run,
                 {
                     "success": bool(result.get("success")),
-                    "pptx_path": result.get("pptx_path"),
+                    "deck_route": deck.deck_route,
+                    "deck_compile_mode": deck.deck_compile_mode,
+                    "artifact_target_ext": DEFAULT_ARTIFACT_TARGET_EXT,
+                    "pptx_file": basename(result.get("pptx_path")),
                     "size_bytes": result.get("size_bytes"),
                     "engine": result.get("engine"),
                     "overflow_slide_count": len(result.get("overflow_slides") or []),
@@ -730,8 +738,11 @@ class DeckBuildService:
                     "status": "success" if success else "failed",
                     "failure_code": deck.failure_code,
                     "retryable": retryable,
-                    "artifact_path": deck.pptx_path if success else None,
-                    "deck_build_path": deck_path,
+                    "artifact_file": basename(deck.pptx_path) if success else None,
+                    "deck_build_file": basename(deck_path),
+                    "deck_route": deck.deck_route,
+                    "deck_compile_mode": deck.deck_compile_mode,
+                    "native_editability_score": deck.native_editability_score,
                     "image_generation_status": deck.image_generation_status,
                     "image_generation_reason": deck.image_generation_reason,
                     "primary_image_batch_status": deck.primary_image_batch_status,
@@ -756,7 +767,10 @@ class DeckBuildService:
                 run,
                 {
                     "emit_allowed": success,
-                    "artifact_path": deck.pptx_path if success else None,
+                    "artifact_file": basename(deck.pptx_path) if success else None,
+                    "deck_route": deck.deck_route,
+                    "deck_compile_mode": deck.deck_compile_mode,
+                    "native_editability_score": deck.native_editability_score,
                     "failure_code": deck.failure_code,
                     "failure_summary": safe_excerpt(deck.failure_summary),
                     "retryable": retryable,
@@ -784,6 +798,9 @@ class DeckBuildService:
             build_id=deck.build_id,
             deck_build_path=deck_path,
             pptx_path=deck.pptx_path,
+            deck_route=deck.deck_route,
+            deck_compile_mode=deck.deck_compile_mode,
+            native_editability_score=deck.native_editability_score,
             slide_count=len(deck.slides),
             expected_visual_count=deck.expected_visual_count,
             successful_visual_count=deck.successful_visual_count,
@@ -805,7 +822,7 @@ class DeckBuildService:
         self,
         deck: DeckBuild,
         deck_path: str,
-        exc: "DeckBuildFailure",
+        exc: DeckBuildFailure,
         runtime: ToolRuntime,
     ) -> DeckBuildResult:
         self._trace_emit_decision(deck, runtime, success=False, retryable=exc.retryable)
@@ -813,6 +830,9 @@ class DeckBuildService:
             success=False,
             build_id=deck.build_id,
             deck_build_path=deck_path,
+            deck_route=deck.deck_route,
+            deck_compile_mode=deck.deck_compile_mode,
+            native_editability_score=deck.native_editability_score,
             slide_count=len(deck.slides),
             expected_visual_count=deck.expected_visual_count,
             successful_visual_count=deck.successful_visual_count,
@@ -940,6 +960,31 @@ def _state_value(runtime: Any, key: str) -> Any:
     return state.get(key) if isinstance(state, dict) else None
 
 
+@contextlib.contextmanager
+def _deck_trace_runtime_context(runtime: ToolRuntime, deck: DeckBuild) -> Iterator[None]:
+    state = getattr(runtime, "state", None)
+    if not isinstance(state, dict):
+        yield
+        return
+    sentinel = object()
+    patch = {
+        "current_deck_build_id": deck.build_id,
+        "current_deck_route": deck.deck_route,
+        "current_deck_compile_mode": deck.deck_compile_mode,
+        "current_deck_artifact_target_ext": DEFAULT_ARTIFACT_TARGET_EXT,
+    }
+    previous = {key: state.get(key, sentinel) for key in patch}
+    state.update(patch)
+    try:
+        yield
+    finally:
+        for key, old_value in previous.items():
+            if old_value is sentinel:
+                state.pop(key, None)
+            else:
+                state[key] = old_value
+
+
 def _compile_with_build_deck_from_slides(
     runtime: ToolRuntime,
     output_path: str,
@@ -1056,6 +1101,41 @@ def _current_image_trace_env(runtime: ToolRuntime) -> dict[str, str]:
     thread_id = _state_value(runtime, "thread_id")
     if thread_id:
         env["SOPHIA_THREAD_ID"] = str(thread_id)
+    session_id = (
+        _state_value(runtime, "session_id")
+        or _state_value(runtime, "parent_thread_id")
+        or _state_value(runtime, "companion_session_id")
+    )
+    if session_id:
+        env["SOPHIA_SESSION_ID"] = str(session_id)
+    task_id = _state_value(runtime, "task_id") or _state_value(runtime, "builder_task_id")
+    if task_id:
+        env["SOPHIA_TASK_ID"] = str(task_id)
+    run_id = _state_value(runtime, "run_id") or _state_value(runtime, "builder_run_id")
+    if run_id:
+        env["SOPHIA_RUN_ID"] = str(run_id)
+    user_id_hash = stable_hash(_state_value(runtime, "user_id"))
+    if user_id_hash:
+        env["SOPHIA_USER_ID_HASH"] = user_id_hash
+    build_id = _state_value(runtime, "current_deck_build_id") or _state_value(runtime, "deck_build_id")
+    if build_id:
+        env["SOPHIA_BUILD_ID"] = str(build_id)
+        env["SOPHIA_DECK_BUILD_ID"] = str(build_id)
+    env["SOPHIA_DECK_ROUTE"] = str(
+        _state_value(runtime, "current_deck_route")
+        or _state_value(runtime, "deck_route")
+        or DEFAULT_DECK_ROUTE
+    )
+    env["SOPHIA_DECK_COMPILE_MODE"] = str(
+        _state_value(runtime, "current_deck_compile_mode")
+        or _state_value(runtime, "deck_compile_mode")
+        or DEFAULT_DECK_COMPILE_MODE
+    )
+    env["SOPHIA_ARTIFACT_TARGET_EXT"] = str(
+        _state_value(runtime, "current_deck_artifact_target_ext")
+        or _state_value(runtime, "artifact_target_ext")
+        or DEFAULT_ARTIFACT_TARGET_EXT
+    )
     return env
 
 
@@ -1245,6 +1325,9 @@ def _safe_batch_summary(summary: dict[str, Any]) -> dict[str, Any]:
             safe_item = dict(item)
             if "raw_error_excerpt" in safe_item:
                 safe_item["raw_error_excerpt"] = safe_excerpt(safe_item["raw_error_excerpt"])
+            for path_key in ("output_file", "output_path", "prompt_file"):
+                if path_key in safe_item:
+                    safe_item[path_key] = basename(safe_item[path_key])
             safe_items.append(safe_item)
         payload["items"] = safe_items
     return payload

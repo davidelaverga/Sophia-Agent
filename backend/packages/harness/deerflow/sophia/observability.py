@@ -887,6 +887,12 @@ def _base_builder_metadata(
     deck_route = diagnostics.get("deck_route") or ("deck_ir_html_raster" if diagnostics.get("deck_build_id") else None)
     if deck_route:
         payload["deck_route"] = deck_route
+    deck_compile_mode = diagnostics.get("deck_compile_mode")
+    if deck_compile_mode:
+        payload["deck_compile_mode"] = deck_compile_mode
+    native_editability_score = diagnostics.get("native_editability_score")
+    if isinstance(native_editability_score, (int, float)) and not isinstance(native_editability_score, bool):
+        payload["native_editability_score"] = native_editability_score
     if diagnostics.get("generated_visuals_complete") is not None:
         payload["generated_visuals_complete"] = diagnostics.get("generated_visuals_complete")
     return payload
@@ -944,15 +950,21 @@ def _add_deck_build_metadata(
     artifact: dict[str, Any],
     diagnostics: dict[str, Any],
 ) -> None:
+    native_editability_score = diagnostics.get("native_editability_score")
+    if native_editability_score is None:
+        native_editability_score = artifact.get("native_editability_score")
     for key, source in {
         "deck_build_id": diagnostics.get("deck_build_id") or artifact.get("deck_build_id"),
         "deck_schema_version": diagnostics.get("deck_schema_version") or artifact.get("deck_schema_version"),
         "deck_status": diagnostics.get("deck_status") or artifact.get("deck_status"),
         "deck_register": diagnostics.get("deck_register") or artifact.get("deck_register"),
         "deck_visual_policy": diagnostics.get("deck_visual_policy") or artifact.get("deck_visual_policy"),
+        "deck_route": diagnostics.get("deck_route") or artifact.get("deck_route"),
+        "deck_compile_mode": diagnostics.get("deck_compile_mode") or artifact.get("deck_compile_mode"),
         "deck_failure_code": diagnostics.get("deck_failure_code") or artifact.get("deck_failure_code") or artifact.get("failure_code"),
         "deck_template_renderer_version": diagnostics.get("deck_template_renderer_version") or artifact.get("deck_template_renderer_version"),
         "deck_quality_status": diagnostics.get("deck_quality_status") or artifact.get("deck_quality_status"),
+        "native_editability_score": native_editability_score,
     }.items():
         _merge_safe_metadata(metadata, key, source)
     for key, source in {
