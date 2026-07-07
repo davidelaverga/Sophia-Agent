@@ -229,6 +229,55 @@ async def test_internal_post_persists_terminal_builder_state(
 
 
 @pytest.mark.anyio
+async def test_internal_post_preserves_image_startup_diagnostics(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    monkeypatch,
+):
+    captured: dict = {}
+    fake_threads = MagicMock()
+
+    async def _update_state(thread_id: str, values: dict):
+        captured["thread_id"] = thread_id
+        captured["values"] = values
+
+    fake_threads.update_state = AsyncMock(side_effect=_update_state)
+    fake_client = MagicMock()
+    fake_client.threads = fake_threads
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    diagnostic_fields = {
+        "image_generation_startup_error_class": "image_script_not_found",
+        "image_generation_exit_code": 127,
+        "image_generation_raw_error_excerpt": "hands-on-deck/generate_images.py not found",
+        "image_generation_startup_attempt_count": 1,
+    }
+
+    async with client:
+        response = await client.post(
+            "/internal/builder-events",
+            json={
+                "thread_id": "parent-thread",
+                "task_id": "builder-task",
+                "run_id": "run-1",
+                "status": "success",
+                "agent_name": "sophia_builder",
+                "artifact_path": "mnt/user-data/outputs/deck.pptx",
+                **diagnostic_fields,
+            },
+        )
+        last_response = await client.get("/api/threads/parent-thread/builder-events/last")
+
+    assert response.status_code == 202
+    task_update = captured["values"]["async_tasks"]["builder-task"]
+    for key, value in diagnostic_fields.items():
+        assert task_update[key] == value
+        assert task_update["builder_result"][key] == value
+        assert captured["values"]["last_builder_artifact"][key] == value
+        assert last_response.json()[key] == value
+
+
+@pytest.mark.anyio
 async def test_internal_post_hydrates_missing_run_id_from_parent_task(
     app: FastAPI,
     client: httpx.AsyncClient,

@@ -62,6 +62,10 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "image_generation_outcome",
     "primary_image_batch_status",
     "primary_image_batch_error_class",
+    "image_generation_startup_error_class",
+    "image_generation_exit_code",
+    "image_generation_raw_error_excerpt",
+    "image_generation_startup_attempt_count",
     "serial_repair_count",
     "manifest_authoring_failure_count",
     "presentation_route",
@@ -123,6 +127,10 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "image_generation_outcome",
         "primary_image_batch_status",
         "primary_image_batch_error_class",
+        "image_generation_startup_error_class",
+        "image_generation_exit_code",
+        "image_generation_raw_error_excerpt",
+        "image_generation_startup_attempt_count",
         "serial_repair_count",
         "manifest_authoring_failure_count",
         "presentation_route",
@@ -344,6 +352,10 @@ class BuilderCompletionEvent(BaseModel):
     image_generation_reason: str | None = None
     primary_image_batch_status: str | None = None
     primary_image_batch_error_class: str | None = None
+    image_generation_startup_error_class: str | None = None
+    image_generation_exit_code: int | None = None
+    image_generation_raw_error_excerpt: str | None = None
+    image_generation_startup_attempt_count: int | None = None
     serial_repair_count: int | None = None
     manifest_authoring_failure_count: int | None = None
     presentation_route: str | None = None
