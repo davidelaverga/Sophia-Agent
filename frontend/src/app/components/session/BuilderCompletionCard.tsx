@@ -170,6 +170,31 @@ function primaryArtifactFile(event: BuilderCompletionEventV1): BuilderCompletion
     ?? null;
 }
 
+function previewArtifactFile(event: BuilderCompletionEventV1): BuilderCompletionArtifactFileV1 | null {
+  const files = event.artifact_files;
+  if (!Array.isArray(files) || files.length === 0) {
+    return null;
+  }
+  const previewFilename = filenameFromArtifactPath(event.artifact_preview_filename)?.toLowerCase() ?? '';
+  return files.find((file) => file?.role === 'preview' && file?.path)
+    ?? files.find((file) => previewFilename && file?.path && filenameFromArtifactPath(file.path)?.toLowerCase() === previewFilename)
+    ?? files.find((file) => file?.path && filenameFromArtifactPath(file.path)?.toLowerCase().endsWith('.preview.pdf'))
+    ?? null;
+}
+
+function previewPathFromFilename(previewFilename: string | null | undefined, primaryArtifactPath: string | null): string | null {
+  const filename = filenameFromArtifactPath(previewFilename);
+  if (!filename || !primaryArtifactPath) {
+    return null;
+  }
+  const cleanPrimary = primaryArtifactPath.split('?')[0]?.split('#')[0] ?? '';
+  const lastSlash = cleanPrimary.lastIndexOf('/');
+  if (lastSlash < 0) {
+    return filename;
+  }
+  return `${cleanPrimary.slice(0, lastSlash + 1)}${filename}`;
+}
+
 function isFallbackCompletion(event: BuilderCompletionEventV1): boolean {
   return event.status === 'success' && event.artifact_is_fallback === true;
 }
@@ -224,12 +249,19 @@ export function BuilderCompletionCard({
   // what artifact_path resolved to (prod 019f0b8a: one deck delivered both a
   // .pdf and a .pptx). Falls back to artifact_path when no files array.
   const primaryFile = useMemo(() => primaryArtifactFile(event), [event]);
+  const previewFile = useMemo(() => previewArtifactFile(event), [event]);
   const primaryArtifactPath = useMemo(() => {
     if (primaryFile?.path) {
       return primaryFile.path;
     }
     return event.artifact_path ?? null;
   }, [event.artifact_path, primaryFile]);
+  const previewArtifactPath = useMemo(() => {
+    if (previewFile?.path) {
+      return previewFile.path;
+    }
+    return previewPathFromFilename(event.artifact_preview_filename, primaryArtifactPath);
+  }, [event.artifact_preview_filename, previewFile, primaryArtifactPath]);
   const primaryArtifactFilename = useMemo(
     () => primaryFile?.name || filenameFromArtifactPath(primaryArtifactPath) || event.artifact_filename || null,
     [event.artifact_filename, primaryArtifactPath, primaryFile],
@@ -241,6 +273,10 @@ export function BuilderCompletionCard({
   const artifactProxyDownloadHref = useMemo(
     () => buildThreadArtifactHref(event.thread_id, primaryArtifactPath, { download: true }),
     [primaryArtifactPath, event.thread_id],
+  );
+  const previewArtifactHref = useMemo(
+    () => buildThreadArtifactHref(event.thread_id, previewArtifactPath),
+    [event.thread_id, previewArtifactPath],
   );
   const fallbackLabel = isFallbackCompletion(event) ? fallbackArtifactLabel(event).toLowerCase() : null;
   const showMissingActionHint = shouldShowMissingActionHint({
@@ -355,9 +391,11 @@ export function BuilderCompletionCard({
           meta={meta}
           compact={compact}
           primaryArtifactPath={primaryArtifactPath}
+          previewArtifactPath={previewArtifactPath}
           primaryArtifactFilename={primaryArtifactFilename}
           artifactProxyHref={artifactProxyHref}
           artifactProxyDownloadHref={artifactProxyDownloadHref}
+          previewArtifactHref={previewArtifactHref}
           onOpen={onOpen}
           onDownload={onDownload}
           onRetry={onRetry}
@@ -385,9 +423,11 @@ function BuilderCompletionActions({
   meta,
   compact,
   primaryArtifactPath,
+  previewArtifactPath,
   primaryArtifactFilename,
   artifactProxyHref,
   artifactProxyDownloadHref,
+  previewArtifactHref,
   onOpen,
   onDownload,
   onRetry,
@@ -396,9 +436,11 @@ function BuilderCompletionActions({
   meta: StatusMeta;
   compact: boolean;
   primaryArtifactPath: string | null;
+  previewArtifactPath: string | null;
   primaryArtifactFilename: string | null;
   artifactProxyHref: string | null;
   artifactProxyDownloadHref: string | null;
+  previewArtifactHref: string | null;
   onOpen?: (event: BuilderCompletionEventV1) => void;
   onDownload?: (event: BuilderCompletionEventV1) => void;
   onRetry?: (event: BuilderCompletionEventV1) => void;
@@ -406,14 +448,16 @@ function BuilderCompletionActions({
   const openHref = artifactProxyHref || event.artifact_url || null;
   const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
   const downloadFirst = isDownloadFirstArtifact(event, primaryArtifactPath);
+  const resolvedPreviewPath = previewArtifactPath || (downloadFirst ? null : primaryArtifactPath);
+  const resolvedPreviewHref = previewArtifactPath ? previewArtifactHref : (downloadFirst ? null : artifactProxyHref);
   const previewEvent = useMemo(
-    () => (primaryArtifactPath && event.artifact_path !== primaryArtifactPath ? { ...event, artifact_path: primaryArtifactPath } : event),
-    [event, primaryArtifactPath],
+    () => (resolvedPreviewPath && event.artifact_path !== resolvedPreviewPath ? { ...event, artifact_path: resolvedPreviewPath } : event),
+    [event, resolvedPreviewPath],
   );
 
   return (
     <>
-      <PreviewAction event={previewEvent} href={artifactProxyHref} downloadFirst={downloadFirst} meta={meta} compact={compact} onOpen={onOpen} />
+      <PreviewAction event={previewEvent} href={resolvedPreviewHref} meta={meta} compact={compact} onOpen={onOpen} />
       <OpenAction event={event} href={openHref} downloadFirst={downloadFirst} meta={meta} compact={compact} />
       <DownloadAction event={event} href={downloadHref} filename={primaryArtifactFilename} meta={meta} compact={compact} onDownload={onDownload} />
       <RetryAction event={event} meta={meta} compact={compact} onRetry={onRetry} />
@@ -424,19 +468,17 @@ function BuilderCompletionActions({
 function PreviewAction({
   event,
   href,
-  downloadFirst,
   meta,
   compact,
   onOpen,
 }: {
   event: BuilderCompletionEventV1;
   href: string | null;
-  downloadFirst: boolean;
   meta: StatusMeta;
   compact: boolean;
   onOpen?: (event: BuilderCompletionEventV1) => void;
 }) {
-  if (event.status !== 'success' || !href || downloadFirst || !onOpen) {
+  if (event.status !== 'success' || !href || !onOpen) {
     return null;
   }
   const handlePreview: MouseEventHandler<HTMLButtonElement> = (e) => {
