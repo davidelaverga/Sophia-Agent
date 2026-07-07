@@ -406,10 +406,14 @@ function BuilderCompletionActions({
   const openHref = artifactProxyHref || event.artifact_url || null;
   const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
   const downloadFirst = isDownloadFirstArtifact(event, primaryArtifactPath);
+  const previewEvent = useMemo(
+    () => (primaryArtifactPath && event.artifact_path !== primaryArtifactPath ? { ...event, artifact_path: primaryArtifactPath } : event),
+    [event, primaryArtifactPath],
+  );
 
   return (
     <>
-      <PreviewAction event={event} href={artifactProxyHref} downloadFirst={downloadFirst} meta={meta} compact={compact} onOpen={onOpen} />
+      <PreviewAction event={previewEvent} href={artifactProxyHref} downloadFirst={downloadFirst} meta={meta} compact={compact} onOpen={onOpen} />
       <OpenAction event={event} href={openHref} downloadFirst={downloadFirst} meta={meta} compact={compact} />
       <DownloadAction event={event} href={downloadHref} filename={primaryArtifactFilename} meta={meta} compact={compact} onDownload={onDownload} />
       <RetryAction event={event} meta={meta} compact={compact} onRetry={onRetry} />

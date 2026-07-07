@@ -63,6 +63,28 @@ describe("BuilderCompletionCard — success variant", () => {
     expect(onOpen).toHaveBeenCalledWith(SUCCESS_EVENT)
   })
 
+  it("passes the resolved primary artifact path to the canvas preview callback", () => {
+    const onOpen = vi.fn()
+    const event: BuilderCompletionEventV1 = {
+      ...SUCCESS_EVENT,
+      artifact_path: "mnt/user-data/outputs/stale.html",
+      artifact_url: undefined,
+      artifact_filename: "stale.html",
+      artifact_files: [
+        { path: "mnt/user-data/outputs/final.html", role: "primary", name: "final.html" },
+        { path: "mnt/user-data/outputs/final.preview.pdf", role: "preview", name: "final.preview.pdf" },
+      ],
+    }
+
+    render(<BuilderCompletionCard event={event} onOpen={onOpen} />)
+
+    fireEvent.click(screen.getByRole("button", { name: /view in canvas/i }))
+    expect(onOpen).toHaveBeenCalledWith({
+      ...event,
+      artifact_path: "mnt/user-data/outputs/final.html",
+    })
+  })
+
   it("keeps Open in new tab as a secondary same-origin action", () => {
     render(<BuilderCompletionCard event={SUCCESS_EVENT} onOpen={vi.fn()} />)
     const link = screen.getByRole("link", { name: /open artifact in new tab/i })
