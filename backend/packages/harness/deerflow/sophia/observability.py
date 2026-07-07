@@ -893,6 +893,10 @@ def _base_builder_metadata(
     native_editability_score = diagnostics.get("native_editability_score")
     if isinstance(native_editability_score, (int, float)) and not isinstance(native_editability_score, bool):
         payload["native_editability_score"] = native_editability_score
+    for key in ("native_text_shape_count", "picture_shape_count", "full_slide_picture_count"):
+        value = diagnostics.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            payload[key] = value
     if diagnostics.get("generated_visuals_complete") is not None:
         payload["generated_visuals_complete"] = diagnostics.get("generated_visuals_complete")
     return payload
@@ -953,6 +957,15 @@ def _add_deck_build_metadata(
     native_editability_score = diagnostics.get("native_editability_score")
     if native_editability_score is None:
         native_editability_score = artifact.get("native_editability_score")
+    native_text_shape_count = diagnostics.get("native_text_shape_count")
+    if native_text_shape_count is None:
+        native_text_shape_count = artifact.get("native_text_shape_count")
+    picture_shape_count = diagnostics.get("picture_shape_count")
+    if picture_shape_count is None:
+        picture_shape_count = artifact.get("picture_shape_count")
+    full_slide_picture_count = diagnostics.get("full_slide_picture_count")
+    if full_slide_picture_count is None:
+        full_slide_picture_count = artifact.get("full_slide_picture_count")
     for key, source in {
         "deck_build_id": diagnostics.get("deck_build_id") or artifact.get("deck_build_id"),
         "deck_schema_version": diagnostics.get("deck_schema_version") or artifact.get("deck_schema_version"),
@@ -965,6 +978,9 @@ def _add_deck_build_metadata(
         "deck_template_renderer_version": diagnostics.get("deck_template_renderer_version") or artifact.get("deck_template_renderer_version"),
         "deck_quality_status": diagnostics.get("deck_quality_status") or artifact.get("deck_quality_status"),
         "native_editability_score": native_editability_score,
+        "native_text_shape_count": native_text_shape_count,
+        "picture_shape_count": picture_shape_count,
+        "full_slide_picture_count": full_slide_picture_count,
     }.items():
         _merge_safe_metadata(metadata, key, source)
     for key, source in {

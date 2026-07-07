@@ -11037,6 +11037,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         native_editability_score = payload.get("native_editability_score")
         if isinstance(native_editability_score, (int, float)) and not isinstance(native_editability_score, bool):
             delta["native_editability_score"] = native_editability_score
+        for key in ("native_text_shape_count", "picture_shape_count", "full_slide_picture_count"):
+            value = payload.get(key)
+            if isinstance(value, int) and not isinstance(value, bool):
+                delta[key] = value
         if pptx_path and success:
             delta["pptx_output_paths"] = [pptx_path]
             if _pptx_diagnostics(request.state or {}).get("time_to_first_valid_artifact_ms") is None:

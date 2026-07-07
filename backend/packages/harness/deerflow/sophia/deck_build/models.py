@@ -81,6 +81,10 @@ class DeckBuild:
     deck_route: str = "deck_ir_html_raster"
     deck_compile_mode: str = "html_screenshot_fallback"
     native_editability_score: float | None = 0.0
+    native_text_shape_count: int = 0
+    picture_shape_count: int = 0
+    full_slide_picture_count: int = 0
+    native_shape_inventory: dict[str, Any] = field(default_factory=dict)
     successful_visual_count: int = 0
     referenced_visual_count: int = 0
     missing_visual_count: int = 0
@@ -147,6 +151,9 @@ class DeckBuildResult:
     deck_route: str = "deck_ir_html_raster"
     deck_compile_mode: str = "html_screenshot_fallback"
     native_editability_score: float | None = 0.0
+    native_text_shape_count: int = 0
+    picture_shape_count: int = 0
+    full_slide_picture_count: int = 0
     slide_count: int = 0
     expected_visual_count: int = 0
     successful_visual_count: int = 0

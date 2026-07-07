@@ -25,11 +25,20 @@ from deerflow.sophia.deck_build.tracing import (
     DEFAULT_ARTIFACT_TARGET_EXT,
     DEFAULT_DECK_COMPILE_MODE,
     DEFAULT_DECK_ROUTE,
+    NATIVE_DECK_COMPILE_MODE,
     basename,
     deck_span,
     finish_span,
     safe_excerpt,
     stable_hash,
+)
+from deerflow.sophia.deck_native import DeckNativeService
+from deerflow.sophia.deck_native.errors import DeckNativePathError
+from deerflow.sophia.deck_native.models import (
+    NativeDeckInspectResult,
+    NativeDeckLintFixResult,
+    NativeDeckPatchResult,
+    NativeDeckRenderResult,
 )
 from deerflow.sophia.tools.build_deck_from_slides import build_deck_from_slides
 from deerflow.sophia.tools.prepare_pptx_image_manifest import create_pptx_image_manifest_core
@@ -40,6 +49,10 @@ _ASSETS = f"{_OUTPUTS}assets"
 _PROMPTS = f"{_ASSETS}/prompts"
 _SLIDES = f"{_OUTPUTS}slides"
 _MANIFEST = f"{_ASSETS}/slide-visuals.manifest.json"
+_NATIVE = f"{_OUTPUTS}deck_native"
+_NATIVE_BASE = f"{_NATIVE}/base.pptx"
+_NATIVE_PATCH = f"{_NATIVE}/deck.patch.json"
+_NATIVE_RENDER_DIR = f"{_NATIVE}/rendered"
 _SCHEMA = "sophia-deck-build/v1"
 _BANNED_STYLE_RE = re.compile(r"\b(chalkboard|blackboard|whiteboard|handwritten|sketch|cyberpunk|neon)\b", re.I)
 _BANNED_TEXT_RE = re.compile(r"THE TEXT READS|title reads|large readable text|paragraph text|axis labels?|formula", re.I)
@@ -85,11 +98,13 @@ class DeckBuildService:
         image_batch_runner: Callable[[str, ToolRuntime], dict[str, Any]] | None = None,
         image_single_runner: ImageSingleRunner | None = None,
         deck_compiler: DeckCompiler | None = None,
+        native_service: DeckNativeService | None = None,
         evaluator: DeckEvaluator | None = None,
     ) -> None:
         self._image_batch_runner = image_batch_runner or self._run_image_batch_subprocess
         self._image_single_runner = image_single_runner or self._run_image_single_subprocess
         self._deck_compiler = deck_compiler or _compile_with_build_deck_from_slides
+        self._native_service = native_service or DeckNativeService()
         self._evaluator = evaluator or DeckEvaluator()
 
     def prepare_and_build(
@@ -656,6 +671,27 @@ class DeckBuildService:
             )
 
     def _compile_pptx(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
+        if _native_service_enabled():
+            try:
+                self._compile_native_pptx(deck, runtime)
+                return
+            except DeckNativePathError as exc:
+                if not _screenshot_fallback_allowed():
+                    raise DeckBuildFailure("deck_native_startup_failed", safe_excerpt(exc) or "Native deck service startup failed.", retryable=False) from exc
+                deck.quality_warning = _merge_warning(deck.quality_warning, "screenshot_deck_fallback")
+            except DeckBuildFailure as exc:
+                if not _native_failure_allows_screenshot_fallback(exc):
+                    raise
+                deck.quality_warning = _merge_warning(deck.quality_warning, "screenshot_deck_fallback")
+        self._compile_screenshot_pptx(deck, runtime)
+
+    def _compile_screenshot_pptx(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
+        deck.deck_compile_mode = DEFAULT_DECK_COMPILE_MODE
+        deck.native_editability_score = 0.0
+        deck.native_text_shape_count = 0
+        deck.picture_shape_count = 0
+        deck.full_slide_picture_count = 0
+        deck.quality_warning = _merge_warning(deck.quality_warning, "screenshot_deck_fallback")
         with deck_span(
             "deck.pptx.compile",
             runtime=runtime,
@@ -691,6 +727,148 @@ class DeckBuildService:
             deck.compile_overflow_slides = [entry for entry in (result.get("overflow_slides") or []) if isinstance(entry, dict)]
             deck.status = "compiled"
 
+    def _compile_native_pptx(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
+        deck.deck_compile_mode = NATIVE_DECK_COMPILE_MODE
+        base_host = _host_path(_NATIVE_BASE, runtime)
+        patch_host = _host_path(_NATIVE_PATCH, runtime)
+        output_host = _host_path(deck.output_path, runtime)
+        render_host = _host_path(_NATIVE_RENDER_DIR, runtime)
+        html_hosts = [_host_path(slide.html_source_path or "", runtime) for slide in deck.slides]
+        _write_native_base_deck(base_host)
+        with deck_span(
+            "deck.native.html2patch",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            deck_compile_mode=deck.deck_compile_mode,
+            inputs={"html_count": len(html_hosts), "base_file": basename(str(base_host)), "patch_file": basename(str(patch_host))},
+        ) as run:
+            html2patch = self._native_service.html_to_patch(
+                html_paths=[str(path) for path in html_hosts],
+                base_deck_path=str(base_host),
+                output_patch_path=str(patch_host),
+            )
+            finish_span(run, _native_patch_span_outputs(html2patch))
+        if not html2patch.success:
+            code = "deck_native_startup_failed" if _native_startup_error(html2patch.errors) else "deck_native_html2patch_failed"
+            raise DeckBuildFailure(code, _native_error_summary(html2patch.errors, "Native html2patch failed."), retryable=False)
+        with deck_span(
+            "deck.native.patch_apply",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            deck_compile_mode=deck.deck_compile_mode,
+            inputs={"patch_file": basename(html2patch.patch_path), "output_file": basename(deck.output_path), "fix": True},
+        ) as run:
+            applied = self._native_service.apply_patch(
+                base_deck_path=str(base_host),
+                patch_path=str(patch_host),
+                output_path=str(output_host),
+                fix=True,
+            )
+            finish_span(run, _native_patch_span_outputs(applied))
+        if not applied.success:
+            raise DeckBuildFailure("deck_native_patch_apply_failed", _native_error_summary(applied.errors, "Native patch apply failed."), retryable=False)
+        with deck_span(
+            "deck.native.inspect",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            deck_compile_mode=deck.deck_compile_mode,
+            inputs={"pptx_file": basename(deck.output_path)},
+        ) as run:
+            inspected = self._native_service.inspect(str(output_host))
+            finish_span(run, _native_inspect_span_outputs(inspected))
+        if not inspected.success:
+            raise DeckBuildFailure("deck_native_inspect_failed", _native_error_summary(inspected.errors, "Native inspect failed."), retryable=False)
+        self._record_native_inspect(deck, inspected)
+        if (deck.native_editability_score or 0.0) < 0.60:
+            raise DeckBuildFailure(
+                "deck_native_editability_failed",
+                f"Native editability score {deck.native_editability_score:.2f} is below the 0.60 D1 gate.",
+                retryable=False,
+            )
+        touched_slides = [slide.index - 1 for slide in deck.slides]
+        with deck_span(
+            "deck.native.lint_fix",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            deck_compile_mode=deck.deck_compile_mode,
+            inputs={"touched_slide_count": len(touched_slides)},
+        ) as run:
+            lint_fix = self._native_service.lint_fix(pptx_path=str(output_host), touched_slides=touched_slides)
+            finish_span(run, _native_lint_fix_span_outputs(lint_fix))
+        if not lint_fix.success:
+            raise DeckBuildFailure("deck_native_lint_fix_failed", _native_error_summary(lint_fix.errors, "Native lint/fix failed."), retryable=False)
+        if lint_fix.residue_count:
+            deck.quality_warning = _merge_warning(deck.quality_warning, "native_lint_residue")
+        for slide in deck.slides:
+            slide.gate_results["native_editability_score"] = deck.native_editability_score
+            slide.gate_results["lint_residue_count"] = lint_fix.residue_count
+        with deck_span(
+            "deck.native.render",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            deck_compile_mode=deck.deck_compile_mode,
+            inputs={"pptx_file": basename(deck.output_path), "slide_count": len(touched_slides)},
+        ) as run:
+            rendered = self._native_service.render(pptx_path=str(output_host), output_dir=str(render_host), slides=touched_slides)
+            finish_span(run, _native_render_span_outputs(rendered))
+        if not rendered.success:
+            raise DeckBuildFailure("deck_native_render_failed", _native_error_summary(rendered.errors, "Native render failed."), retryable=False)
+        with deck_span(
+            "deck.native.diff",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            deck_compile_mode=deck.deck_compile_mode,
+            inputs={"before_file": basename(str(base_host)), "after_file": basename(deck.output_path)},
+        ) as run:
+            diff = self._native_service.diff(before_path=str(base_host), after_path=str(output_host))
+            finish_span(run, {"success": bool(diff.get("success")), "changed": bool(diff.get("changed")), "error_count": len(diff.get("errors") or [])})
+        if not diff.get("success"):
+            deck.quality_warning = _merge_warning(deck.quality_warning, "native_diff_unavailable")
+        deck.pptx_path = deck.output_path
+        deck.compile_overflow_slides = []
+        deck.status = "compiled"
+
+    def _record_native_inspect(self, deck: DeckBuild, inspected: NativeDeckInspectResult) -> None:
+        deck.native_editability_score = inspected.native_editability_score
+        deck.native_text_shape_count = inspected.native_text_shape_count
+        deck.picture_shape_count = inspected.picture_shape_count
+        deck.full_slide_picture_count = inspected.full_slide_picture_count
+        inventory = _load_native_shape_inventory(inspected.shape_inventory_path)
+        deck.native_shape_inventory = inventory
+        for slide in deck.slides:
+            slide_inventory = inventory.get(slide.selector) if isinstance(inventory, dict) else None
+            if isinstance(slide_inventory, dict):
+                slide.gate_results["native_shape_inventory"] = {
+                    "native_slide_index": slide_inventory.get("native_slide_index"),
+                    "title": slide_inventory.get("title"),
+                    "body": slide_inventory.get("body"),
+                    "visual": slide_inventory.get("visual"),
+                }
+
     def _evaluate(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
         output_host = _host_path(deck.output_path, runtime)
         with deck_span(
@@ -719,7 +897,7 @@ class DeckBuildService:
                 "; ".join(issue.detail for issue in evaluation.hard_failures[:3]) or "Deck quality gate failed.",
                 retryable=False,
             )
-        deck.quality_warning = evaluation.quality_warning
+        deck.quality_warning = _merge_warning(deck.quality_warning, evaluation.quality_warning)
 
     def _trace_terminal(self, deck: DeckBuild, runtime: ToolRuntime, *, success: bool, deck_path: str, retryable: bool) -> None:
         with deck_span(
@@ -801,6 +979,9 @@ class DeckBuildService:
             deck_route=deck.deck_route,
             deck_compile_mode=deck.deck_compile_mode,
             native_editability_score=deck.native_editability_score,
+            native_text_shape_count=deck.native_text_shape_count,
+            picture_shape_count=deck.picture_shape_count,
+            full_slide_picture_count=deck.full_slide_picture_count,
             slide_count=len(deck.slides),
             expected_visual_count=deck.expected_visual_count,
             successful_visual_count=deck.successful_visual_count,
@@ -833,6 +1014,9 @@ class DeckBuildService:
             deck_route=deck.deck_route,
             deck_compile_mode=deck.deck_compile_mode,
             native_editability_score=deck.native_editability_score,
+            native_text_shape_count=deck.native_text_shape_count,
+            picture_shape_count=deck.picture_shape_count,
+            full_slide_picture_count=deck.full_slide_picture_count,
             slide_count=len(deck.slides),
             expected_visual_count=deck.expected_visual_count,
             successful_visual_count=deck.successful_visual_count,
@@ -958,6 +1142,127 @@ class DeckBuildFailure(Exception):
 def _state_value(runtime: Any, key: str) -> Any:
     state = getattr(runtime, "state", None)
     return state.get(key) if isinstance(state, dict) else None
+
+
+def _truthy_env(name: str) -> bool:
+    return (os.getenv(name, "") or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _native_service_enabled() -> bool:
+    return _truthy_env("SOPHIA_DECK_NATIVE_SERVICE_ENABLED")
+
+
+def _screenshot_fallback_allowed() -> bool:
+    return _truthy_env("SOPHIA_DECK_ALLOW_SCREENSHOT_FALLBACK")
+
+
+def _native_failure_allows_screenshot_fallback(exc: DeckBuildFailure) -> bool:
+    return exc.code == "deck_native_startup_failed" and _screenshot_fallback_allowed()
+
+
+def _native_startup_error(errors: list[str]) -> bool:
+    text = "\n".join(errors).lower()
+    return any(
+        marker in text
+        for marker in (
+            "playwright is required",
+            "hands-on-deck script not found",
+            "no module named",
+            "python-pptx is required",
+            "chromium",
+            "browser",
+        )
+    )
+
+
+def _native_error_summary(errors: list[str], fallback: str) -> str:
+    if not errors:
+        return fallback
+    return safe_excerpt(errors[0], limit=600) or fallback
+
+
+def _merge_warning(*warnings: str | None) -> str | None:
+    parts: list[str] = []
+    for warning in warnings:
+        if not warning:
+            continue
+        for part in str(warning).split(";"):
+            clean = part.strip()
+            if clean and clean not in parts:
+                parts.append(clean)
+    return "; ".join(parts) if parts else None
+
+
+def _write_native_base_deck(path: Path) -> None:
+    from pptx import Presentation
+    from pptx.util import Inches
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    presentation.save(path)
+
+
+def _native_patch_span_outputs(result: NativeDeckPatchResult) -> dict[str, Any]:
+    return {
+        "success": result.success,
+        "patch_file": basename(result.patch_path),
+        "output_file": basename(result.output_pptx_path),
+        "patch_op_count": result.patch_op_count,
+        "validation_error_count": result.validation_error_count,
+        "error_count": len(result.errors),
+        "error_excerpt": safe_excerpt(result.errors[0]) if result.errors else None,
+    }
+
+
+def _native_inspect_span_outputs(result: NativeDeckInspectResult) -> dict[str, Any]:
+    return {
+        "success": result.success,
+        "slide_count": result.slide_count,
+        "shape_count": result.shape_count,
+        "native_text_shape_count": result.native_text_shape_count,
+        "picture_shape_count": result.picture_shape_count,
+        "full_slide_picture_count": result.full_slide_picture_count,
+        "native_editability_score": result.native_editability_score,
+        "shape_inventory_file": basename(result.shape_inventory_path),
+        "raw_json_file": basename(result.raw_json_path),
+        "error_count": len(result.errors),
+        "error_excerpt": safe_excerpt(result.errors[0]) if result.errors else None,
+    }
+
+
+def _native_lint_fix_span_outputs(result: NativeDeckLintFixResult) -> dict[str, Any]:
+    return {
+        "success": result.success,
+        "lint_issue_count_before": result.lint_issue_count_before,
+        "fix_applied_count": result.fix_applied_count,
+        "residue_count": result.residue_count,
+        "touched_slide_count": result.touched_slide_count,
+        "error_count": len(result.errors),
+        "error_excerpt": safe_excerpt(result.errors[0]) if result.errors else None,
+    }
+
+
+def _native_render_span_outputs(result: NativeDeckRenderResult) -> dict[str, Any]:
+    return {
+        "success": result.success,
+        "render_dir": basename(result.render_dir),
+        "rendered_slide_count": result.rendered_slide_count,
+        "error_count": len(result.errors),
+        "error_excerpt": safe_excerpt(result.errors[0]) if result.errors else None,
+    }
+
+
+def _load_native_shape_inventory(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    slides = payload.get("slides") if isinstance(payload, dict) else None
+    return slides if isinstance(slides, dict) else {}
 
 
 @contextlib.contextmanager

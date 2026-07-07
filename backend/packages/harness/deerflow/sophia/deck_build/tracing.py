@@ -11,6 +11,7 @@ from deerflow.sandbox.tools import get_thread_data
 
 DEFAULT_DECK_ROUTE = "deck_ir_html_raster"
 DEFAULT_DECK_COMPILE_MODE = "html_screenshot_fallback"
+NATIVE_DECK_COMPILE_MODE = "native_html2patch"
 DEFAULT_ARTIFACT_TARGET_EXT = ".pptx"
 
 

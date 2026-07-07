@@ -1,0 +1,178 @@
+from __future__ import annotations
+
+import json
+from pathlib import Path
+from types import SimpleNamespace
+from typing import Any
+
+from deerflow.agents.sophia_agent.builder_tools import (
+    assert_deck_tool_contract,
+    build_builder_tools_for_task_type,
+)
+from deerflow.sophia.deck_build.service import DeckBuildService
+from deerflow.sophia.deck_build.tracing import NATIVE_DECK_COMPILE_MODE
+from deerflow.sophia.deck_native import DeckNativeService
+from deerflow.sophia.deck_native.models import NativeDeckPatchResult
+
+_OUTPUTS = "/mnt/user-data/outputs/"
+
+
+def _runtime(outputs: Path) -> SimpleNamespace:
+    outputs.mkdir(parents=True, exist_ok=True)
+    workspace = outputs.parent / "workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    return SimpleNamespace(
+        state={
+            "thread_id": "builder-thread",
+            "parent_thread_id": "companion-thread",
+            "user_id": "user-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "builder_pptx_requested_slide_count": 2,
+            "delegation_context": {"request": "Build a plain text-only 2 slide deck with no visuals."},
+            "thread_data": {
+                "outputs_path": str(outputs),
+                "workspace_path": str(workspace),
+            },
+        },
+        context={"thread_id": "builder-thread"},
+        config={},
+    )
+
+
+def _slides() -> list[dict[str, str]]:
+    return [
+        {
+            "title": "Native Deck Substrate",
+            "narrative": "The deck compile step emits editable PowerPoint text shapes.",
+            "role": "cover",
+            "layout_kind": "cover_hero",
+            "visual_prompt": "",
+        },
+        {
+            "title": "Shape Inventory",
+            "narrative": "Each slide records native title and body shape ids for later co-review.",
+            "role": "architecture",
+            "layout_kind": "single_visual_focus",
+            "visual_prompt": "",
+        },
+    ]
+
+
+class PatchWritingNativeService:
+    def __init__(self) -> None:
+        self._real = DeckNativeService()
+
+    def html_to_patch(self, *, html_paths: list[str], base_deck_path: str, output_patch_path: str) -> NativeDeckPatchResult:
+        ops: list[dict[str, Any]] = []
+        for index, _html in enumerate(html_paths):
+            ops.extend(
+                [
+                    {"op": "add-slide", "layout": "Blank"},
+                    {
+                        "op": "add-shape",
+                        "slide": index,
+                        "kind": "textbox",
+                        "at": [0.8, 0.7],
+                        "size": [12.5, 0.8],
+                        "text": [f"Native title {index + 1}"],
+                        "name": f"title-{index + 1}",
+                    },
+                    {
+                        "op": "add-shape",
+                        "slide": index,
+                        "kind": "textbox",
+                        "at": [0.8, 1.9],
+                        "size": [10.5, 0.7],
+                        "text": [f"Native body {index + 1}"],
+                        "name": f"body-{index + 1}",
+                    },
+                ]
+            )
+        patch_path = Path(output_patch_path)
+        patch_path.parent.mkdir(parents=True, exist_ok=True)
+        patch_path.write_text(json.dumps({"ops": ops}), encoding="utf-8")
+        return NativeDeckPatchResult(True, None, str(patch_path), len(ops), 0, [])
+
+    def apply_patch(self, **kwargs: Any):
+        return self._real.apply_patch(**kwargs)
+
+    def inspect(self, *args: Any, **kwargs: Any):
+        return self._real.inspect(*args, **kwargs)
+
+    def lint_fix(self, **kwargs: Any):
+        return self._real.lint_fix(**kwargs)
+
+    def render(self, *, pptx_path: str, output_dir: str, slides: list[int] | None = None):
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        for slide in slides or [0]:
+            (Path(output_dir) / f"slide-{slide}.jpg").write_bytes(b"fake jpg")
+        from deerflow.sophia.deck_native.models import NativeDeckRenderResult
+
+        return NativeDeckRenderResult(True, output_dir, len(slides or [0]), [])
+
+    def diff(self, **_kwargs: Any) -> dict[str, Any]:
+        return {"success": True, "changed": True, "errors": []}
+
+
+class FailingNativeService(PatchWritingNativeService):
+    def html_to_patch(self, *, html_paths: list[str], base_deck_path: str, output_patch_path: str) -> NativeDeckPatchResult:
+        return NativeDeckPatchResult(False, None, None, 0, 1, ["body is 1.00x1.00in but the slide is 20.00x11.25in"])
+
+
+def test_deck_build_service_native_route_builds_editable_deck(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SOPHIA_DECK_NATIVE_SERVICE_ENABLED", "true")
+    monkeypatch.delenv("SOPHIA_DECK_ALLOW_SCREENSHOT_FALLBACK", raising=False)
+    runtime = _runtime(tmp_path / "outputs")
+
+    result = DeckBuildService(native_service=PatchWritingNativeService()).prepare_and_build(
+        runtime=runtime,
+        deck_title="Native Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}native.pptx",
+        visual_policy="text_only",
+    )
+
+    assert result.success is True
+    assert result.deck_compile_mode == NATIVE_DECK_COMPILE_MODE
+    assert result.native_editability_score >= 0.60
+    assert result.native_text_shape_count >= 4
+    assert result.full_slide_picture_count == 0
+    assert result.quality_warning is None
+    assert (tmp_path / "outputs" / "native.pptx").is_file()
+    build = json.loads((tmp_path / "outputs" / "deck_build" / "build.json").read_text(encoding="utf-8"))
+    assert build["deck_compile_mode"] == NATIVE_DECK_COMPILE_MODE
+    assert build["native_shape_inventory"]["slide:1"]["title"].startswith("s")
+    assert build["slides"][0]["gate_results"]["native_shape_inventory"]["title"].startswith("s")
+
+
+def test_deck_build_service_native_failure_does_not_screenshot_fallback(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SOPHIA_DECK_NATIVE_SERVICE_ENABLED", "true")
+    monkeypatch.delenv("SOPHIA_DECK_ALLOW_SCREENSHOT_FALLBACK", raising=False)
+    runtime = _runtime(tmp_path / "outputs")
+
+    result = DeckBuildService(native_service=FailingNativeService()).prepare_and_build(
+        runtime=runtime,
+        deck_title="Native Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}native.pptx",
+        visual_policy="text_only",
+    )
+
+    assert result.success is False
+    assert result.failure_code == "deck_native_html2patch_failed"
+    assert result.deck_compile_mode == NATIVE_DECK_COMPILE_MODE
+    assert result.pptx_path is None
+    assert not (tmp_path / "outputs" / "native.pptx").exists()
+
+
+def test_prepare_deck_build_remains_only_model_facing_fresh_deck_tool(monkeypatch) -> None:
+    monkeypatch.delenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", raising=False)
+    tools = build_builder_tools_for_task_type("presentation", vision_enabled=True, artifact_target_ext=".pptx")
+
+    snapshot = assert_deck_tool_contract(tools, task_type="presentation", artifact_target_ext=".pptx")
+
+    assert snapshot is not None
+    assert snapshot["prepare_deck_build_exposed"] is True
+    assert snapshot["lower_level_deck_tools_exposed"] == []
+    assert all(getattr(tool, "name", "") not in {"deck.py", "html2patch.py"} for tool in tools)
