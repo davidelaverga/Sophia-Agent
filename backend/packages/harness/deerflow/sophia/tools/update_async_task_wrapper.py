@@ -50,6 +50,7 @@ from langchain_core.tools import StructuredTool
 from langchain_core.tools.base import ToolException
 from langgraph.types import Command
 
+from deerflow.agents.sophia_agent.builder_tools import deck_route_for_task
 from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.tools.start_builder_task import _TERMINAL_TASK_STATUSES
 
@@ -691,6 +692,10 @@ def _target_uses_text_writer(target_path: str, task_type: str | None) -> bool:
     return task_type not in _BINARY_OUTPUT_TASK_TYPES
 
 
+def _target_uses_deck_build_service(target_path: str, task_type: str | None) -> bool:
+    return deck_route_for_task(task_type, _target_extension(target_path)) == "deck_build_service"
+
+
 def _file_target_directive_block(target_path: str, task_type: str | None) -> str:
     """Build the "Concrete file target" + HARD rules block, branched by the
     concrete target extension. Binary deliverables (.pptx/.pdf) cannot be
@@ -702,6 +707,30 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
     """
     target_ext = _target_extension(target_path)
     if target_ext == "pptx":
+        if _target_uses_deck_build_service(target_path, task_type):
+            return (
+                f"Concrete file target: `{target_path}`. This is a PPTX slide-deck "
+                "update routed through DeckBuildService. The exposed presentation "
+                "tool for this run is `prepare_deck_build`; submit revised slide "
+                "intent and let the harness own visual generation, slide rendering, "
+                "and PPTX compilation.\n"
+                "\n"
+                "HARD rules:\n"
+                "  - Call `prepare_deck_build` with the complete updated deck intent: "
+                "deck title, audience/context, slide list, per-slide narrative/text, "
+                "and `output_path` set to the requested `.pptx` path under "
+                "`/mnt/user-data/outputs/`.\n"
+                "  - Normal decks require a concrete `visual_prompt` for every slide; "
+                "use a text-only/no-image policy only when the user explicitly requested "
+                "a plain text-only/no-visual deck.\n"
+                "  - Do NOT call `prepare_pptx_image_manifest`, "
+                "`/mnt/skills/public/image-generation/scripts/generate.py`, "
+                "`build_deck_from_slides`, python-pptx, pptxgenjs, or `write_file` "
+                "to author the PPTX binary on this route.\n"
+                "  - Emit only the valid `.pptx` returned by `prepare_deck_build`. "
+                "If DeckBuildService returns failure, report that failure honestly "
+                "instead of emitting a source, no-image, or partial deck."
+            )
         return (
             f"Concrete file target: `{target_path}`. This is a PPTX slide-deck "
             "update. The deliverable must come from the ppt-generation HTML-slide "

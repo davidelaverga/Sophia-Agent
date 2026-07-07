@@ -449,9 +449,10 @@ def test_directive_visual_report_pdf_uses_html_renderer(binary_task_type):
     assert "/mnt/user-data/outputs/" in augmented
 
 
-def test_directive_pptx_target_requires_presentation_skill_workflow():
+def test_directive_pptx_target_uses_deck_build_service_by_default(monkeypatch):
     from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
 
+    monkeypatch.delenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", raising=False)
     augmented = _augment_update_message(
         message="add a section on X",
         tracked={"task_id": "t1", "task_type": "presentation"},
@@ -459,6 +460,32 @@ def test_directive_pptx_target_requires_presentation_skill_workflow():
     )
 
     assert "PPTX slide-deck update" in augmented
+    assert "routed through DeckBuildService" in augmented
+    assert "prepare_deck_build" in augmented
+    assert "/mnt/user-data/outputs/deck_plan.json" not in augmented
+    assert "/mnt/skills/public/ppt-generation/SKILL.md" not in augmented
+    assert "/mnt/skills/public/ppt-generation/scripts/generate.py" not in augmented
+    assert "`prepare_pptx_image_manifest`" in augmented
+    assert "`build_deck_from_slides`" in augmented
+    assert "Do NOT call `prepare_pptx_image_manifest`" in augmented
+    assert "Do NOT call `write_file` to author the PPTX binary" not in augmented
+    assert "python-pptx/write_file loops" not in augmented
+    assert "plain text-only/no-visual deck" in augmented
+    assert "Emit only the valid `.pptx` returned by `prepare_deck_build`" in augmented
+
+
+def test_directive_pptx_target_uses_legacy_workflow_when_deck_service_disabled(monkeypatch):
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "false")
+    augmented = _augment_update_message(
+        message="add a section on X",
+        tracked={"task_id": "t1", "task_type": "presentation"},
+        delegation_context={"task": "build the deck", "task_type": "presentation"},
+    )
+
+    assert "PPTX slide-deck update" in augmented
+    assert "routed through DeckBuildService" not in augmented
     assert "/mnt/skills/public/ppt-generation/SKILL.md" in augmented
     assert "/mnt/skills/public/image-generation/scripts/generate.py" in augmented
     assert "/mnt/user-data/outputs/assets/" in augmented
