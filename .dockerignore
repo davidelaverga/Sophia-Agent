@@ -75,6 +75,16 @@ backend/.coverage
 !config.example.yaml
 !skills/
 !skills/public/
+!skills/public/chart-visualization/
+!skills/public/chart-visualization/**
+!skills/public/image-generation/
+!skills/public/image-generation/**
+!skills/public/pdf-report/
+!skills/public/pdf-report/**
+!skills/public/ppt-generation/
+!skills/public/ppt-generation/**
 !skills/public/sophia/
 !skills/public/sophia/**
 !voice/
+skills/public/**/__pycache__/
+skills/public/**/*.py[cod]

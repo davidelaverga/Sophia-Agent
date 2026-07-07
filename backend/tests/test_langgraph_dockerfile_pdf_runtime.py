@@ -54,6 +54,24 @@ def test_langgraph_dockerfile_installs_pdf_runtime() -> None:
     assert "SOPHIA_PPTXGENJS=1" in contents
 
 
+def test_docker_context_includes_builder_skill_runtime_assets() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    dockerignore = (repo_root / ".dockerignore").read_text(encoding="utf-8")
+
+    for skill_dir in (
+        "chart-visualization",
+        "image-generation",
+        "pdf-report",
+        "ppt-generation",
+        "sophia",
+    ):
+        assert f"!skills/public/{skill_dir}/" in dockerignore
+        assert f"!skills/public/{skill_dir}/**" in dockerignore
+
+    assert "skills/public/**/__pycache__/" in dockerignore
+    assert "skills/public/**/*.py[cod]" in dockerignore
+
+
 def test_compose_langgraph_uses_artifact_runtime_image() -> None:
     repo_root = Path(__file__).resolve().parents[2]
 
