@@ -31,11 +31,11 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
+from deerflow.agents.sophia_agent.builder_tools import deck_route_for_task
 from deerflow.agents.sophia_agent.middlewares.builder_budget import (
     force_emit_wall_clock_fraction,
     max_non_artifact_turns,
 )
-from deerflow.agents.sophia_agent.builder_tools import deck_route_for_task
 from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.state import _merge_builder_non_artifact_turns
 from deerflow.agents.sophia_agent.utils import log_middleware
@@ -702,13 +702,13 @@ def _image_generation_enabled(
     """
     if artifact_target_ext in _IMAGE_OUTPUT_EXTENSIONS:
         return True
-    if _is_pptx_image_generation_target(artifact_target_ext, task_type):
-        return True
     task = str(delegation_context.get("task") or "").lower()
     description = str(delegation_context.get("description") or "").lower()
     combined = f"{task}\n{description}"
     if _image_generation_explicitly_opted_out(combined):
         return False
+    if _is_pptx_image_generation_target(artifact_target_ext, task_type):
+        return True
     if _is_pdf_image_generation_target(artifact_target_ext, task_type):
         return True
     if any(marker in combined for marker in _EXPLICIT_IMAGE_GENERATION_MARKERS):

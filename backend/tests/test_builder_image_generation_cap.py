@@ -727,18 +727,19 @@ def test_explicit_image_request_enables_generation():
     ) is True
 
 
-def test_plain_text_only_deck_marker_keeps_pptx_image_forward_pipeline():
+def test_plain_text_only_deck_marker_disables_pptx_image_generation():
     assert _image_generation_enabled(
         {"task": "Build a plain text-only deck about our roadmap"},
         artifact_target_ext=".pptx",
         task_type="presentation",
-    ) is True
+    ) is False
 
 
-def test_no_image_phrasing_keeps_pptx_image_forward_pipeline():
+def test_no_image_phrasing_disables_pptx_image_generation():
     for task in (
         "Build a no-image deck about our roadmap",
         "Build a no image deck about our roadmap",
+        "Build a no images deck about our roadmap",
         "Build a deck without images about our roadmap",
         "Build a deck with no visuals about our roadmap",
     ):
@@ -746,7 +747,7 @@ def test_no_image_phrasing_keeps_pptx_image_forward_pipeline():
             {"task": task},
             artifact_target_ext=".pptx",
             task_type="presentation",
-        ) is True
+        ) is False
 
 
 def test_bare_plain_style_does_not_disable_requested_deck_images():
