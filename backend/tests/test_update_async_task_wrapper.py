@@ -660,6 +660,32 @@ def test_directive_visual_report_pdf_target_uses_html_renderer_guidance():
     assert "author a generator script" not in augmented
 
 
+def test_directive_pdf_presentation_target_uses_deck_tools():
+    from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
+
+    augmented = _augment_update_message(
+        message="add a closing slide",
+        tracked={
+            "task_id": "t1",
+            "task_type": "presentation",
+            "artifact_target_path": "/mnt/user-data/outputs/roadmap.pdf",
+        },
+        delegation_context={
+            "task": "Create a presentation in PDF format for the board.",
+            "task_type": "presentation",
+            "artifact_target_path": "/mnt/user-data/outputs/roadmap.pdf",
+        },
+    )
+
+    assert "PDF slide-deck delivery update" in augmented
+    assert "prepare_pptx_image_manifest" in augmented
+    assert "build_deck_from_slides" in augmented
+    assert "render_html_to_pdf" in augmented
+    assert "Do NOT call `render_html_to_pdf`" in augmented
+    assert "PDF report/document update" not in augmented
+    assert "Repair the HTML source" not in augmented
+
+
 def test_update_filename_resolver_preserves_explicit_pptx_over_incidental_pdf():
     from deerflow.sophia.tools.update_async_task_wrapper import _suggest_artifact_filename
 
@@ -985,6 +1011,17 @@ def test_pdf_target_directive_routes_updates_through_html_renderer():
     assert "HTML source" in block
     assert "Do NOT create reportlab, weasyprint, chart-visualization" in block
     assert "author a generator script" not in block
+
+
+def test_pdf_presentation_target_directive_routes_updates_through_deck_tools():
+    block = _file_target_directive_block("/mnt/user-data/outputs/deck.pdf", "presentation")
+
+    assert "PDF slide-deck delivery update" in block
+    assert "prepare_pptx_image_manifest" in block
+    assert "build_deck_from_slides" in block
+    assert "Do NOT call `render_html_to_pdf`" in block
+    assert "PDF report/document update" not in block
+    assert "HTML source" not in block
 
 
 def test_wrapper_persists_update_urls_in_replacement_run_input():

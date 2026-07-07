@@ -817,6 +817,10 @@ def _target_uses_deck_build_service(target_path: str, task_type: str | None) -> 
     return deck_route_for_task(task_type, _target_extension(target_path)) == "deck_build_service"
 
 
+def _target_deck_route(target_path: str, task_type: str | None) -> str | None:
+    return deck_route_for_task(task_type, _target_extension(target_path))
+
+
 def _file_target_directive_block(target_path: str, task_type: str | None) -> str:
     """Build the "Concrete file target" + HARD rules block, branched by the
     concrete target extension. Binary deliverables (.pptx/.pdf) cannot be
@@ -882,6 +886,50 @@ def _file_target_directive_block(target_path: str, task_type: str | None) -> str
             "of emitting a source, no-image, or partial deck."
         )
     if target_ext == "pdf":
+        deck_route = _target_deck_route(target_path, task_type)
+        if deck_route == "deck_build_service":
+            return (
+                f"Concrete file target: `{target_path}`. This is a PDF slide-deck "
+                "delivery update routed through DeckBuildService. Use the deck workflow, "
+                "not the report renderer; the exposed presentation tool for this run is "
+                "`prepare_deck_build`.\n"
+                "\n"
+                "HARD rules:\n"
+                "  - Call `prepare_deck_build` with the complete updated slide intent and "
+                f"the canonical output path `{target_path}` under `/mnt/user-data/outputs/`.\n"
+                "  - Do NOT call `render_html_to_pdf`, reportlab, weasyprint, "
+                "chart-visualization, python-pptx, or `write_file` to author the binary.\n"
+                "  - Emit only the deck artifact returned by `prepare_deck_build`, or "
+                "emit a clean null-artifact failure if DeckBuildService cannot produce "
+                "the requested delivery."
+            )
+        if deck_route == "legacy_html_slide_to_pptx":
+            return (
+                f"Concrete file target: `{target_path}`. This is a PDF slide-deck "
+                "delivery update. Use the exposed presentation deck tools, not the "
+                "PDF report renderer.\n"
+                "\n"
+                "HARD rules:\n"
+                "  - Read `/mnt/skills/public/ppt-generation/SKILL.md` if needed, "
+                "then create one generated visual asset per slide, including the cover, "
+                "unless the user explicitly requested a plain text-only/no-visual deck.\n"
+                "  - Prepare one prompt JSON file per slide, call "
+                "`prepare_pptx_image_manifest(prompt_files=[...])`, then run the returned "
+                "manifest path with `/mnt/skills/public/image-generation/scripts/generate.py "
+                "--manifest <path>` into `/mnt/user-data/outputs/assets/`; if the readable "
+                "batch fails or is partial, repair only the failed or missing images serially "
+                "with the same prompt and output paths.\n"
+                "  - Write one 1920x1080 HTML file per slide under "
+                "`/mnt/user-data/outputs/slides/`; each normal slide must reference its "
+                "generated asset via a relative `../assets/<file>` path and carry text "
+                "as DOM text rather than baked into the generated visual.\n"
+                "  - Compile with `build_deck_from_slides` only after all expected "
+                "generated visuals exist and are referenced.\n"
+                "  - Do NOT call `render_html_to_pdf`, reportlab, weasyprint, or "
+                "chart-visualization for this slide-deck update.\n"
+                "  - Emit the verified deck artifact, or emit a clean null-artifact "
+                "failure if the deck workflow cannot produce the requested delivery."
+            )
         return (
             f"Concrete file target: `{target_path}`. This is a PDF report/document "
             "update. Repair the HTML source under `/mnt/user-data/outputs/`, then "
