@@ -60,9 +60,10 @@ be generated locally under `/mnt/user-data/outputs/`.
 - PDF: prefer visible inline static SVG figures in the HTML source before
   rendering; local SVG/PNG assets are acceptable when they are under outputs.
   Do not rely on browser-only scripts.
-- PPTX: use `prepare_deck_build` with complete slide intent. Generated slide
-  images carry visual evidence only; titles and narratives remain harness-rendered
-  slide text.
+- PPTX: use `prepare_deck_build` with complete slide intent. DeckBuildService
+  owns native PowerPoint compilation, inspection, validation, and terminal
+  failure. Generated slide images carry visual evidence only; titles and
+  narratives remain harness-rendered slide text.
 
 ## Done Criteria
 

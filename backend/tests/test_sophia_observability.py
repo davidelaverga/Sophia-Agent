@@ -90,6 +90,64 @@ def test_builder_completion_adds_metadata_tags_and_qc_feedback(monkeypatch) -> N
     assert feedback_client.feedback[1]["comment"] == '["garbled title"]'
 
 
+def test_builder_observability_preserves_zero_native_deck_metrics() -> None:
+    state = {
+        "builder_pptx_diagnostics": {
+            "deck_route": "deck_ir_html_raster",
+            "deck_compile_mode": "not_compiled",
+            "native_required": True,
+            "legacy_screenshot_debug": False,
+            "native_editability_score": 0.0,
+            "native_text_shape_count": 0,
+            "picture_shape_count": 0,
+            "full_slide_picture_count": 0,
+            "expected_generated_visual_count": 0,
+            "successful_generated_visual_count": 0,
+            "missing_expected_visual_count": 0,
+        }
+    }
+    artifact = {
+        "artifact_type": "presentation",
+        "artifact_ext": "pptx",
+        "artifact_path": None,
+    }
+
+    metadata, tags, feedback = observability.builder_observability_payload(state, artifact)
+
+    assert metadata["deck_compile_mode"] == "not_compiled"
+    assert metadata["native_required"] is True
+    assert metadata["legacy_screenshot_debug"] is False
+    assert metadata["native_editability_score"] == 0.0
+    assert metadata["native_text_shape_count"] == 0
+    assert metadata["picture_shape_count"] == 0
+    assert metadata["full_slide_picture_count"] == 0
+    assert metadata["deck_expected_visual_count"] == 0
+    assert metadata["deck_successful_visual_count"] == 0
+    assert metadata["deck_missing_visual_count"] == 0
+    assert "deck_screenshot_forbidden" not in tags
+    assert feedback == []
+
+
+def test_builder_observability_tags_forbidden_screenshot_mode() -> None:
+    state = {
+        "builder_pptx_diagnostics": {
+            "deck_route": "deck_ir_html_raster",
+            "deck_compile_mode": "html_screenshot_fallback",
+        }
+    }
+    artifact = {
+        "artifact_type": "presentation",
+        "artifact_ext": "pptx",
+        "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+    }
+
+    metadata, tags, _feedback = observability.builder_observability_payload(state, artifact)
+
+    assert metadata["deck_compile_mode"] == "html_screenshot_fallback"
+    assert metadata["deck_forbidden_compile_mode"] is True
+    assert "deck_screenshot_forbidden" in tags
+
+
 def test_builder_completion_keeps_skipped_qc_feedback_neutral(monkeypatch) -> None:
     run_tree = _FakeRunTree()
     feedback_client = _FakeFeedbackClient()

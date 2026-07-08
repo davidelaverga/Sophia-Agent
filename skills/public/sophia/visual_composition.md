@@ -10,12 +10,12 @@ medium. Do not mix workflows just because another tool is available.
 
 ## Medium Routing
 
-- Presentations (`.pptx`) are DeckBuildService decks. For normal decks, the
-  builder submits slide intent through `prepare_deck_build`; the harness
-  generates one 16:9 visual-only asset per slide, renders safe HTML slide
-  templates with real DOM title/narrative, compiles with the internal deck
-  compiler, and evaluates the result. Only explicit text-only/no-visual deck
-  requests may omit generated visuals.
+- Presentations (`.pptx`) are native DeckBuildService decks. The builder
+  submits structured slide intent through `prepare_deck_build`; DeckBuildService
+  owns generated assets, native PowerPoint compilation, inspection, validation,
+  and terminal failure. Screenshot-backed PPTX decks are not acceptable
+  production output. If native deck generation fails, emit `artifact_path=null`
+  with the returned failure code and summary.
 - PDF reports are authored as ONE self-contained HTML file and rendered with
   `render_html_to_pdf`. Draw BOTH data evidence (bar / line / column for
   quantitative, comparative, ranking, composition, trend) AND structural
@@ -38,7 +38,7 @@ medium. Do not mix workflows just because another tool is available.
 - Every slide must be opaque to all four edges — set an opaque background on
   `html, body` and on the slide wrapper. A white band/gutter at any edge is a
   defect (the render fills uncovered regions with the deck background, not white).
-- Generated slide images are visual-area assets only; title and narrative are DOM text.
+- Generated slide images, when used, are visual-area assets only; title and narrative remain real deck text.
 - Normal decks do not compile when required generated visuals are unavailable.
 - Keep visible slide text sparse and explicit.
 - Add concise speaker notes for narrative context, but never rely on notes as

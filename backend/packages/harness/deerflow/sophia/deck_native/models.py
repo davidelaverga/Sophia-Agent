@@ -5,6 +5,18 @@ from typing import Any
 
 
 @dataclass
+class NativeDeckPreflight:
+    success: bool
+    scripts_dir_exists: bool
+    deck_py_exists: bool
+    html2patch_py_exists: bool
+    errors: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class NativeDeckInspectResult:
     success: bool
     slide_count: int

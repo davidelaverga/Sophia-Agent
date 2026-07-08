@@ -12,6 +12,7 @@ from deerflow.sophia.deck_native.models import (
     NativeDeckInspectResult,
     NativeDeckLintFixResult,
     NativeDeckPatchResult,
+    NativeDeckPreflight,
     NativeDeckRenderResult,
 )
 from deerflow.sophia.deck_native.paths import hands_on_deck_scripts_dir
@@ -27,6 +28,25 @@ class DeckNativeService:
         self._scripts_dir = scripts_dir or hands_on_deck_scripts_dir()
         self._deck_cli = self._scripts_dir / "deck.py"
         self._html2patch_cli = self._scripts_dir / "html2patch.py"
+
+    def preflight(self) -> NativeDeckPreflight:
+        scripts_dir_exists = self._scripts_dir.is_dir()
+        deck_py_exists = self._deck_cli.is_file()
+        html2patch_py_exists = self._html2patch_cli.is_file()
+        errors: list[str] = []
+        if not scripts_dir_exists:
+            errors.append("hands-on-deck scripts directory not found")
+        if not deck_py_exists:
+            errors.append("hands-on-deck script not found: deck.py")
+        if not html2patch_py_exists:
+            errors.append("hands-on-deck script not found: html2patch.py")
+        return NativeDeckPreflight(
+            success=scripts_dir_exists and deck_py_exists and html2patch_py_exists,
+            scripts_dir_exists=scripts_dir_exists,
+            deck_py_exists=deck_py_exists,
+            html2patch_py_exists=html2patch_py_exists,
+            errors=errors,
+        )
 
     def inspect(self, pptx_path: str, *, slide: int | None = None) -> NativeDeckInspectResult:
         pptx = _path_arg(pptx_path, "pptx_path", suffix=".pptx", must_exist=True)

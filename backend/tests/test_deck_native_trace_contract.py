@@ -7,11 +7,12 @@ from typing import Any
 
 from deerflow.sophia.deck_build import service as deck_service
 from deerflow.sophia.deck_build.service import DeckBuildService
-from deerflow.sophia.deck_build.tracing import NATIVE_DECK_COMPILE_MODE
+from deerflow.sophia.deck_build.tracing import DEFAULT_DECK_COMPILE_MODE, NATIVE_DECK_COMPILE_MODE
 from deerflow.sophia.deck_native.models import (
     NativeDeckInspectResult,
     NativeDeckLintFixResult,
     NativeDeckPatchResult,
+    NativeDeckPreflight,
     NativeDeckRenderResult,
 )
 
@@ -42,6 +43,15 @@ def _runtime(outputs: Path) -> SimpleNamespace:
 
 
 class TraceNativeService:
+    def preflight(self) -> NativeDeckPreflight:
+        return NativeDeckPreflight(
+            success=True,
+            scripts_dir_exists=True,
+            deck_py_exists=True,
+            html2patch_py_exists=True,
+            errors=[],
+        )
+
     def html_to_patch(self, *, html_paths: list[str], base_deck_path: str, output_patch_path: str) -> NativeDeckPatchResult:
         Path(output_patch_path).parent.mkdir(parents=True, exist_ok=True)
         Path(output_patch_path).write_text('{"ops":[]}', encoding="utf-8")
@@ -78,7 +88,6 @@ class TraceNativeService:
 
 
 def test_deck_native_spans_are_aggregated_and_mark_native_compile_mode(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SOPHIA_DECK_NATIVE_SERVICE_ENABLED", "true")
     spans: list[dict[str, Any]] = []
 
     @contextlib.contextmanager
@@ -114,6 +123,7 @@ def test_deck_native_spans_are_aggregated_and_mark_native_compile_mode(tmp_path:
     native_names = [span["name"] for span in native_spans]
     assert result.success is True
     assert native_names == [
+        "deck.native.requirement",
         "deck.native.html2patch",
         "deck.native.patch_apply",
         "deck.native.inspect",
@@ -121,7 +131,12 @@ def test_deck_native_spans_are_aggregated_and_mark_native_compile_mode(tmp_path:
         "deck.native.render",
         "deck.native.diff",
     ]
-    assert all(span["kwargs"]["deck_compile_mode"] == NATIVE_DECK_COMPILE_MODE for span in native_spans)
+    requirement_span = next(span for span in native_spans if span["name"] == "deck.native.requirement")
+    assert requirement_span["kwargs"]["deck_compile_mode"] == DEFAULT_DECK_COMPILE_MODE
+    assert requirement_span["outputs"]["preflight_success"] is True
+    assert requirement_span["outputs"]["deck_py_exists"] is True
+    compile_spans = [span for span in native_spans if span["name"] != "deck.native.requirement"]
+    assert all(span["kwargs"]["deck_compile_mode"] == NATIVE_DECK_COMPILE_MODE for span in compile_spans)
     inspect_output = next(span["outputs"] for span in native_spans if span["name"] == "deck.native.inspect")
     assert inspect_output["native_editability_score"] == 0.9
     assert "deck.prompt_files.write" not in [span["name"] for span in spans]

@@ -27,6 +27,7 @@ _OUTPUTS = "/mnt/user-data/outputs/"
 @pytest.fixture(autouse=True)
 def _legacy_deck_mode_for_legacy_compiler_tests(monkeypatch):
     monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "false")
+    monkeypatch.setenv("SOPHIA_DECK_LEGACY_SCREENSHOT_DEBUG", "true")
 
 
 def _runtime() -> SimpleNamespace:

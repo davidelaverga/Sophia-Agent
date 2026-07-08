@@ -1,14 +1,19 @@
 ---
 name: ppt-generation
-description: Use this skill whenever the builder must create a PowerPoint deck or presentation (.pptx). By default, fresh Sophia decks are built through prepare_deck_build: the builder submits slide intent, and the harness owns prompt files, image generation, slide rendering, PPTX compilation, evaluation, and terminal failure. If prepare_deck_build is not exposed, follow the route-specific legacy tools that are exposed instead.
+description: Use this skill whenever the builder must create a PowerPoint deck or presentation (.pptx). By default, fresh Sophia decks are built through prepare_deck_build: the builder submits slide intent, and the harness owns generated assets, native PowerPoint compilation, inspection, validation, and terminal failure. If prepare_deck_build is not exposed, follow the explicit non-production diagnostic legacy tools that are exposed instead.
 ---
 
 # Sophia Deck Skill — PPTX
 
+Legacy note: fresh Sophia PPTX deck builds must use `prepare_deck_build`.
+Screenshot-backed PPTX is not an acceptable fallback for fresh decks. The
+legacy lower-level route below is only for explicit non-production diagnostics
+when `prepare_deck_build` is not exposed.
+
 Fresh decks are DeckBuildService builds by default. You provide slide intent only; the
-harness creates prompt files, prepares and runs the image batch, renders safe
-slide HTML templates, compiles the PPTX, evaluates it, and returns either the
-`.pptx` path or a clean failure.
+harness owns generated assets, native PowerPoint compilation, inspection,
+validation, and terminal failure. It returns either the `.pptx` path or a clean
+failure.
 
 ## Building A Deck
 
@@ -23,19 +28,17 @@ slide HTML templates, compiles the PPTX, evaluates it, and returns either the
 2. Call `prepare_deck_build(...)` exactly once with the complete slide list and the requested output path.
 
 3. The harness will:
-   - write prompt JSON files,
-   - prepare the image batch manifest,
-   - run image generation,
-   - render slide HTML from safe templates,
-   - compile the PPTX,
-   - evaluate hard/soft gates,
+   - prepare any needed generated assets,
+   - compile through the native PowerPoint substrate,
+   - inspect native editability,
+   - validate hard/soft gates,
    - return the `.pptx` path or a clean failure.
 
 4. Emit the returned `.pptx` with `emit_builder_artifact(artifact_type="presentation")`. If `prepare_deck_build` returns failure, emit `artifact_path=null` with its `failure_code` and `failure_summary`; do not loop on lower-level deck tools.
 
 ## Legacy Emergency Route
 
-Use this section only when the current tool list does not expose
+Use this section only in explicit non-production diagnostics when the current tool list does not expose
 `prepare_deck_build` and does expose `prepare_pptx_image_manifest` plus
 `build_deck_from_slides`. In that explicit legacy route, follow the active
 tool schemas and builder briefing for the lower-level deck workflow: create the
@@ -47,7 +50,8 @@ compile with `build_deck_from_slides`. Do not mix this route with
 ## Hard Rules
 
 - When `prepare_deck_build` is exposed, do not write prompt JSON files, do not hand-write slide HTML, do not call `prepare_pptx_image_manifest`, do not run `image-generation/scripts/generate.py`, do not call `build_deck_from_slides`, and do not write python-pptx/pptxgenjs or any custom deck compiler. Those are internal harness steps behind `prepare_deck_build`.
-- Normal decks require generated visuals: one visual-only asset per slide. Only an explicitly plain text-only/no-visual request may set `visual_policy="text_only"`.
+- Screenshot-backed PPTX is a failed build, not a fallback. If native deck generation fails, emit `artifact_path=null` with the returned failure code and summary.
+- Normal decks may use generated visual-only assets as DeckBuildService decides. Only an explicitly plain text-only/no-visual request may set `visual_policy="text_only"`.
 - Generated slide images are visual-area assets only. Do not bake slide title, narrative, footers, formulas, axis labels, paragraph text, page chrome, or large readable labels into images.
 - Default aesthetic is restrained professional technical unless the user asks otherwise. Do not use chalkboard, handwritten, whiteboard, sketch, cyberpunk, neon, classroom, or playful styles unless explicitly requested.
 - Harness-rendered slide templates must be opaque to all edges and may be light or dark according to the request; no image-baked title or narrative.
@@ -58,6 +62,6 @@ compile with `build_deck_from_slides`. Do not mix this route with
 
 - Exactly one `prepare_deck_build` call for a fresh deck.
 - Expected slide count and `.pptx` output path under `/mnt/user-data/outputs/`.
-- Normal decks have one generated visual per slide or fail honestly.
+- DeckBuildService owns visual asset policy and native deck validation.
 - Text-only/no-visual decks are used only when explicitly requested.
 - Emit promptly once the tool returns a valid `.pptx`.

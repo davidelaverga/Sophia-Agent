@@ -41,6 +41,7 @@ def test_presentation_toolset_hides_manifest_preparer_by_default(monkeypatch) ->
 
 def test_presentation_toolset_offers_manifest_preparer_when_legacy_disabled(monkeypatch) -> None:
     monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "0")
+    monkeypatch.setenv("SOPHIA_DECK_LEGACY_SCREENSHOT_DEBUG", "true")
 
     names = [getattr(tool, "name", "") for tool in build_builder_tools_for_task_type("presentation", vision_enabled=False)]
     assert "prepare_deck_build" not in names

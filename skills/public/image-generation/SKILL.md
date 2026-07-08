@@ -122,8 +122,9 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 ## Deck Generation
 
 For `.pptx` decks, do not call this script directly. Deck visuals are generated
-by `prepare_deck_build`, which writes prompt files, prepares the manifest, runs
-the batch, and records per-slide results.
+only when DeckBuildService's asset policy requests them through
+`prepare_deck_build`. DeckBuildService owns native PowerPoint compilation,
+inspection, validation, and terminal failure.
 
 Use this skill directly only for standalone image artifacts or non-deck
 conceptual images.

@@ -69,6 +69,17 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "serial_repair_count",
     "manifest_authoring_failure_count",
     "presentation_route",
+    "deck_route",
+    "deck_compile_mode",
+    "native_required",
+    "legacy_screenshot_debug",
+    "native_editability_score",
+    "native_text_shape_count",
+    "picture_shape_count",
+    "full_slide_picture_count",
+    "deck_quality_status",
+    "failure_code",
+    "deck_failure_code",
     "expected_generated_visual_count",
     "successful_generated_visual_count",
     "referenced_visual_count",
@@ -134,6 +145,17 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "serial_repair_count",
         "manifest_authoring_failure_count",
         "presentation_route",
+        "deck_route",
+        "deck_compile_mode",
+        "native_required",
+        "legacy_screenshot_debug",
+        "native_editability_score",
+        "native_text_shape_count",
+        "picture_shape_count",
+        "full_slide_picture_count",
+        "deck_quality_status",
+        "failure_code",
+        "deck_failure_code",
         "expected_generated_visual_count",
         "successful_generated_visual_count",
         "referenced_visual_count",
@@ -359,6 +381,17 @@ class BuilderCompletionEvent(BaseModel):
     serial_repair_count: int | None = None
     manifest_authoring_failure_count: int | None = None
     presentation_route: str | None = None
+    deck_route: str | None = None
+    deck_compile_mode: str | None = None
+    native_required: bool | None = None
+    legacy_screenshot_debug: bool | None = None
+    native_editability_score: float | None = None
+    native_text_shape_count: int | None = None
+    picture_shape_count: int | None = None
+    full_slide_picture_count: int | None = None
+    deck_quality_status: str | None = None
+    failure_code: str | None = None
+    deck_failure_code: str | None = None
     expected_generated_visual_count: int | None = None
     successful_generated_visual_count: int | None = None
     referenced_visual_count: int | None = None

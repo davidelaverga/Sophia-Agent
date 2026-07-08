@@ -890,6 +890,8 @@ def _base_builder_metadata(
     deck_compile_mode = diagnostics.get("deck_compile_mode")
     if deck_compile_mode:
         payload["deck_compile_mode"] = deck_compile_mode
+    if deck_compile_mode in {"html_screenshot_fallback", "html_screenshot_debug"}:
+        payload["deck_forbidden_compile_mode"] = True
     native_editability_score = diagnostics.get("native_editability_score")
     if isinstance(native_editability_score, (int, float)) and not isinstance(native_editability_score, bool):
         payload["native_editability_score"] = native_editability_score
@@ -967,16 +969,18 @@ def _add_deck_build_metadata(
     if full_slide_picture_count is None:
         full_slide_picture_count = artifact.get("full_slide_picture_count")
     for key, source in {
-        "deck_build_id": diagnostics.get("deck_build_id") or artifact.get("deck_build_id"),
-        "deck_schema_version": diagnostics.get("deck_schema_version") or artifact.get("deck_schema_version"),
-        "deck_status": diagnostics.get("deck_status") or artifact.get("deck_status"),
-        "deck_register": diagnostics.get("deck_register") or artifact.get("deck_register"),
-        "deck_visual_policy": diagnostics.get("deck_visual_policy") or artifact.get("deck_visual_policy"),
-        "deck_route": diagnostics.get("deck_route") or artifact.get("deck_route"),
-        "deck_compile_mode": diagnostics.get("deck_compile_mode") or artifact.get("deck_compile_mode"),
-        "deck_failure_code": diagnostics.get("deck_failure_code") or artifact.get("deck_failure_code") or artifact.get("failure_code"),
-        "deck_template_renderer_version": diagnostics.get("deck_template_renderer_version") or artifact.get("deck_template_renderer_version"),
-        "deck_quality_status": diagnostics.get("deck_quality_status") or artifact.get("deck_quality_status"),
+        "deck_build_id": _first_present(diagnostics.get("deck_build_id"), artifact.get("deck_build_id")),
+        "deck_schema_version": _first_present(diagnostics.get("deck_schema_version"), artifact.get("deck_schema_version")),
+        "deck_status": _first_present(diagnostics.get("deck_status"), artifact.get("deck_status")),
+        "deck_register": _first_present(diagnostics.get("deck_register"), artifact.get("deck_register")),
+        "deck_visual_policy": _first_present(diagnostics.get("deck_visual_policy"), artifact.get("deck_visual_policy")),
+        "deck_route": _first_present(diagnostics.get("deck_route"), artifact.get("deck_route")),
+        "deck_compile_mode": _first_present(diagnostics.get("deck_compile_mode"), artifact.get("deck_compile_mode")),
+        "deck_failure_code": _first_present(diagnostics.get("deck_failure_code"), artifact.get("deck_failure_code"), artifact.get("failure_code")),
+        "deck_template_renderer_version": _first_present(diagnostics.get("deck_template_renderer_version"), artifact.get("deck_template_renderer_version")),
+        "deck_quality_status": _first_present(diagnostics.get("deck_quality_status"), artifact.get("deck_quality_status")),
+        "native_required": _first_present(diagnostics.get("native_required"), artifact.get("native_required")),
+        "legacy_screenshot_debug": _first_present(diagnostics.get("legacy_screenshot_debug"), artifact.get("legacy_screenshot_debug")),
         "native_editability_score": native_editability_score,
         "native_text_shape_count": native_text_shape_count,
         "picture_shape_count": picture_shape_count,
@@ -984,13 +988,20 @@ def _add_deck_build_metadata(
     }.items():
         _merge_safe_metadata(metadata, key, source)
     for key, source in {
-        "deck_expected_visual_count": diagnostics.get("expected_generated_visual_count") or artifact.get("expected_generated_visual_count"),
-        "deck_successful_visual_count": diagnostics.get("successful_generated_visual_count") or artifact.get("successful_generated_visual_count"),
-        "deck_missing_visual_count": diagnostics.get("missing_expected_visual_count") or artifact.get("missing_expected_visual_count"),
+        "deck_expected_visual_count": _first_present(diagnostics.get("expected_generated_visual_count"), artifact.get("expected_generated_visual_count")),
+        "deck_successful_visual_count": _first_present(diagnostics.get("successful_generated_visual_count"), artifact.get("successful_generated_visual_count")),
+        "deck_missing_visual_count": _first_present(diagnostics.get("missing_expected_visual_count"), artifact.get("missing_expected_visual_count")),
     }.items():
         value = _as_int(source)
-        if value:
+        if source is not None:
             metadata[key] = value
+
+
+def _first_present(*values: Any) -> Any:
+    for value in values:
+        if value is not None:
+            return value
+    return None
 
 
 def _builder_observability_tags(
@@ -1005,6 +1016,13 @@ def _builder_observability_tags(
         f"artifact:{artifact_ext}" if artifact_ext else "artifact:unknown",
         "image_forward" if image_forward else "mixed_or_fallback",
         "qc_ran" if qc_invocations > 0 else None,
+        "deck_screenshot_forbidden"
+        if (
+            _as_dict(state.get("builder_pptx_diagnostics")).get("deck_compile_mode")
+            or artifact.get("deck_compile_mode")
+        )
+        in {"html_screenshot_fallback", "html_screenshot_debug"}
+        else None,
         *_builder_gate_tags(
             state=state,
             artifact=artifact,

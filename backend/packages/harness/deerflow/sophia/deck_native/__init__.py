@@ -4,6 +4,7 @@ from deerflow.sophia.deck_native.models import (
     NativeDeckInspectResult,
     NativeDeckLintFixResult,
     NativeDeckPatchResult,
+    NativeDeckPreflight,
     NativeDeckRenderResult,
 )
 from deerflow.sophia.deck_native.service import DeckNativeService
@@ -13,5 +14,6 @@ __all__ = [
     "NativeDeckInspectResult",
     "NativeDeckLintFixResult",
     "NativeDeckPatchResult",
+    "NativeDeckPreflight",
     "NativeDeckRenderResult",
 ]

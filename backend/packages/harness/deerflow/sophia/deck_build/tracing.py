@@ -10,8 +10,18 @@ from typing import Any
 from deerflow.sandbox.tools import get_thread_data
 
 DEFAULT_DECK_ROUTE = "deck_ir_html_raster"
-DEFAULT_DECK_COMPILE_MODE = "html_screenshot_fallback"
+NOT_COMPILED_DECK_COMPILE_MODE = "not_compiled"
+HTML_SCREENSHOT_FALLBACK_COMPILE_MODE = "html_screenshot_fallback"
+HTML_SCREENSHOT_DEBUG_COMPILE_MODE = "html_screenshot_debug"
+DEFAULT_DECK_COMPILE_MODE = NOT_COMPILED_DECK_COMPILE_MODE
 NATIVE_DECK_COMPILE_MODE = "native_html2patch"
+NATIVE_UNAVAILABLE_DECK_COMPILE_MODE = "native_unavailable"
+FORBIDDEN_SCREENSHOT_COMPILE_MODES = frozenset(
+    {
+        HTML_SCREENSHOT_FALLBACK_COMPILE_MODE,
+        HTML_SCREENSHOT_DEBUG_COMPILE_MODE,
+    }
+)
 DEFAULT_ARTIFACT_TARGET_EXT = ".pptx"
 
 

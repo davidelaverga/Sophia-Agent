@@ -28,12 +28,16 @@ def _surface_text() -> str:
 
 def test_fresh_deck_prompt_surfaces_route_to_prepare_deck_build() -> None:
     text = _surface_text()
+    lower_text = text.lower()
 
     assert "prepare_deck_build" in text
     assert "DeckBuildService" in text
+    assert "native PowerPoint" in text
     assert "slide intent" in text
     assert "visual_policy" in text
     assert "layout_kind" in text
+    assert "artifact_path=null" in text
+    assert "screenshot-backed pptx is a failed build" in lower_text
 
 
 def test_ppt_skill_allows_legacy_route_only_when_prepare_deck_build_absent() -> None:
@@ -53,9 +57,12 @@ def test_fresh_deck_prompt_surfaces_do_not_teach_old_workflow() -> None:
         "then call prepare_pptx_image_manifest",
         "run generate.py --manifest",
         "run the returned manifest_path",
+        "one self-contained 1920x1080 html file per slide",
         "author one self-contained html file per slide",
         "call build_deck_from_slides(",
         "then call build_deck_from_slides",
+        "screenshot fallback",
+        "screenshot-backed pptx fallback",
         "write one prompt json file per slide",
     ]
     for phrase in forbidden:

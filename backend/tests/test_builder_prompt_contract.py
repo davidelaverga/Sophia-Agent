@@ -29,7 +29,9 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
     assert "requested primary artifact" in contract
     assert "Fresh presentations are built through `prepare_deck_build`" in contract
     assert "slide intent" in contract
-    assert "one generated visual-only asset per slide" in contract
+    assert "generated visual-only assets as DeckBuildService decides" in contract
+    assert "native PowerPoint" in contract
+    assert "artifact_path=null" in contract
     assert "pure image-forward" not in contract
     assert "deck_plan.json" not in contract
     # PDF reports are authored as HTML and rendered via render_html_to_pdf; the
@@ -44,9 +46,10 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
 def test_visual_composition_routes_pptx_and_pdf_to_separate_pipelines() -> None:
     directives = _sophia_prompt("visual_composition.md")
 
-    assert "Presentations (`.pptx`) are DeckBuildService decks" in directives
+    assert "Presentations (`.pptx`) are native DeckBuildService decks" in directives
     assert "prepare_deck_build" in directives
-    assert "one 16:9 visual-only asset per slide" in directives
+    assert "native PowerPoint" in directives
+    assert "Generated slide images, when used, are visual-area assets only" in directives
     assert "pure image-forward" not in directives
     assert "deck_plan.json" not in directives
     # PDF reports are authored as one self-contained HTML file with inline <svg>
@@ -152,8 +155,6 @@ def test_forbidden_double_path_prompt_tokens_are_absent() -> None:
         "generate_visual_asset",
         "generate_report_chart",
         "title_strategy",
-        "native",
-        "fallback",
         # "text-only" is intentionally NOT forbidden: HTML-slide decks support
         # plain no-image slides ("clean text-only slides"), and PDF reports
         # describe non-text-only figures — both legitimate (2026-06-29).

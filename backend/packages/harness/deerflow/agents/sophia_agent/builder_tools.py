@@ -34,21 +34,37 @@ _PPTX_LEGACY_DECK_TOOLS = {
 
 def deck_build_service_enabled() -> bool:
     raw_value = os.getenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED")
+    if _production_runtime_env():
+        return True
     if raw_value is None or not raw_value.strip():
         return True
-    return raw_value.strip().lower() not in _FALSEY_VALUES
+    if raw_value.strip().lower() not in _FALSEY_VALUES:
+        return True
+    return not _legacy_screenshot_debug_enabled()
 
 
 def deck_build_service_flag_value() -> str:
     raw_value = os.getenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED")
+    if _production_runtime_env():
+        return "production_forced_on"
     if raw_value is None or not raw_value.strip():
         return "unset_default_on"
     normalized = raw_value.strip().lower()
     if normalized in _FALSEY_VALUES:
-        return normalized
+        return "legacy_screenshot_debug_enabled" if _legacy_screenshot_debug_enabled() else f"{normalized}_ignored_without_debug"
     if normalized in _TRUTHY_VALUES:
         return normalized
     return "custom_default_on"
+
+
+def _legacy_screenshot_debug_enabled() -> bool:
+    return (os.getenv("SOPHIA_DECK_LEGACY_SCREENSHOT_DEBUG", "") or "").strip().lower() in _TRUTHY_VALUES
+
+
+def _production_runtime_env() -> bool:
+    if any(os.getenv(name) for name in ("RENDER", "RENDER_SERVICE_ID", "RENDER_SERVICE_NAME")):
+        return True
+    return (os.getenv("SOPHIA_ENV") or os.getenv("SOPHIA_RUNTIME_ENV") or os.getenv("APP_ENV") or os.getenv("ENV") or os.getenv("ENVIRONMENT") or "").strip().lower() == "production"
 
 
 def _normalized_task_type(task_type: str | None) -> str:
@@ -166,9 +182,9 @@ def build_builder_tools_for_task_type(
         if _deck_build_service_target(task_type, artifact_target_ext) and deck_build_service_enabled():
             tools.insert(insert_at, prepare_deck_build)
         else:
-            # Emergency legacy route: model-facing HTML-slide path. P-1 keeps
-            # this only behind the disabled feature flag while the harness-owned
-            # DeckBuildService rolls out.
+            # Explicit non-production diagnostic route: model-facing HTML-slide
+            # path remains available only behind the disabled service flag plus
+            # the legacy screenshot debug flag.
             tools.insert(insert_at, prepare_pptx_image_manifest)
             insert_at = tools.index(emit_builder_artifact)
             tools.insert(insert_at, build_deck_from_slides)

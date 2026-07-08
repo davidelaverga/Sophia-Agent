@@ -5,14 +5,21 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pytest
+
 from deerflow.agents.sophia_agent.builder_tools import (
     assert_deck_tool_contract,
     build_builder_tools_for_task_type,
 )
-from deerflow.sophia.deck_build.service import DeckBuildService
-from deerflow.sophia.deck_build.tracing import NATIVE_DECK_COMPILE_MODE
+from deerflow.sophia.deck_build.models import DeckBuild
+from deerflow.sophia.deck_build.service import DeckBuildFailure, DeckBuildService
+from deerflow.sophia.deck_build.tracing import (
+    HTML_SCREENSHOT_FALLBACK_COMPILE_MODE,
+    NATIVE_DECK_COMPILE_MODE,
+    NATIVE_UNAVAILABLE_DECK_COMPILE_MODE,
+)
 from deerflow.sophia.deck_native import DeckNativeService
-from deerflow.sophia.deck_native.models import NativeDeckPatchResult
+from deerflow.sophia.deck_native.models import NativeDeckPatchResult, NativeDeckPreflight
 
 _OUTPUTS = "/mnt/user-data/outputs/"
 
@@ -120,9 +127,21 @@ class FailingNativeService(PatchWritingNativeService):
         return NativeDeckPatchResult(False, None, None, 0, 1, ["body is 1.00x1.00in but the slide is 20.00x11.25in"])
 
 
-def test_deck_build_service_native_route_builds_editable_deck(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SOPHIA_DECK_NATIVE_SERVICE_ENABLED", "true")
-    monkeypatch.delenv("SOPHIA_DECK_ALLOW_SCREENSHOT_FALLBACK", raising=False)
+class MissingNativeService(PatchWritingNativeService):
+    def preflight(self) -> NativeDeckPreflight:
+        return NativeDeckPreflight(
+            success=False,
+            scripts_dir_exists=True,
+            deck_py_exists=False,
+            html2patch_py_exists=False,
+            errors=[
+                "hands-on-deck script not found: deck.py",
+                "hands-on-deck script not found: html2patch.py",
+            ],
+        )
+
+
+def test_deck_build_service_native_route_builds_editable_deck(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
 
     result = DeckBuildService(native_service=PatchWritingNativeService()).prepare_and_build(
@@ -146,9 +165,7 @@ def test_deck_build_service_native_route_builds_editable_deck(tmp_path: Path, mo
     assert build["slides"][0]["gate_results"]["native_shape_inventory"]["title"].startswith("s")
 
 
-def test_deck_build_service_native_failure_does_not_screenshot_fallback(tmp_path: Path, monkeypatch) -> None:
-    monkeypatch.setenv("SOPHIA_DECK_NATIVE_SERVICE_ENABLED", "true")
-    monkeypatch.delenv("SOPHIA_DECK_ALLOW_SCREENSHOT_FALLBACK", raising=False)
+def test_deck_build_service_native_failure_does_not_screenshot_fallback(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
 
     result = DeckBuildService(native_service=FailingNativeService()).prepare_and_build(
@@ -164,6 +181,76 @@ def test_deck_build_service_native_failure_does_not_screenshot_fallback(tmp_path
     assert result.deck_compile_mode == NATIVE_DECK_COMPILE_MODE
     assert result.pptx_path is None
     assert not (tmp_path / "outputs" / "native.pptx").exists()
+
+
+def test_native_preflight_failure_returns_unavailable_without_pptx(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+
+    result = DeckBuildService(native_service=MissingNativeService()).prepare_and_build(
+        runtime=runtime,
+        deck_title="Native Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}native.pptx",
+        visual_policy="text_only",
+    )
+
+    assert result.success is False
+    assert result.failure_code == "deck_native_unavailable"
+    assert result.deck_compile_mode == NATIVE_UNAVAILABLE_DECK_COMPILE_MODE
+    assert result.pptx_path is None
+    assert "deck.py" in (result.failure_summary or "")
+    assert not (tmp_path / "outputs" / "native.pptx").exists()
+
+
+def test_screenshot_debug_does_not_override_production_native_failure(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SOPHIA_DECK_LEGACY_SCREENSHOT_DEBUG", "true")
+    monkeypatch.setenv("RENDER", "true")
+    runtime = _runtime(tmp_path / "outputs")
+
+    result = DeckBuildService(native_service=MissingNativeService()).prepare_and_build(
+        runtime=runtime,
+        deck_title="Native Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}native.pptx",
+        visual_policy="text_only",
+    )
+
+    assert result.success is False
+    assert result.failure_code == "deck_native_unavailable"
+    assert result.pptx_path is None
+    assert not (tmp_path / "outputs" / "native.pptx").exists()
+
+
+def test_screenshot_compile_mode_cannot_success(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    deck = DeckBuild(
+        build_id="deck-test",
+        schema_version="sophia-deck-build/v1",
+        user_id="user-1",
+        thread_id="builder-thread",
+        parent_thread_id="parent-thread",
+        run_id="run-1",
+        task_id="task-1",
+        requested_slide_count=1,
+        status="compiled",
+        register="professional_technical",
+        visual_policy="text_only",
+        style_profile={},
+        deck_title="Forbidden",
+        output_path=f"{_OUTPUTS}forbidden.pptx",
+        slides=[],
+        expected_visual_count=0,
+        deck_compile_mode=HTML_SCREENSHOT_FALLBACK_COMPILE_MODE,
+        native_editability_score=0.0,
+        native_text_shape_count=0,
+        full_slide_picture_count=1,
+        pptx_path=f"{_OUTPUTS}forbidden.pptx",
+    )
+
+    with pytest.raises(DeckBuildFailure) as exc_info:
+        DeckBuildService()._success_result(deck, f"{_OUTPUTS}deck_build/build.json", runtime)
+
+    assert exc_info.value.code == "deck_screenshot_compile_forbidden"
 
 
 def test_prepare_deck_build_remains_only_model_facing_fresh_deck_tool(monkeypatch) -> None:

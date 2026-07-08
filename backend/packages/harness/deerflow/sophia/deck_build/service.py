@@ -25,7 +25,10 @@ from deerflow.sophia.deck_build.tracing import (
     DEFAULT_ARTIFACT_TARGET_EXT,
     DEFAULT_DECK_COMPILE_MODE,
     DEFAULT_DECK_ROUTE,
+    FORBIDDEN_SCREENSHOT_COMPILE_MODES,
+    HTML_SCREENSHOT_DEBUG_COMPILE_MODE,
     NATIVE_DECK_COMPILE_MODE,
+    NATIVE_UNAVAILABLE_DECK_COMPILE_MODE,
     basename,
     deck_span,
     finish_span,
@@ -38,6 +41,7 @@ from deerflow.sophia.deck_native.models import (
     NativeDeckInspectResult,
     NativeDeckLintFixResult,
     NativeDeckPatchResult,
+    NativeDeckPreflight,
     NativeDeckRenderResult,
 )
 from deerflow.sophia.tools.build_deck_from_slides import build_deck_from_slides
@@ -150,6 +154,8 @@ class DeckBuildService:
             expected_visual_count=len(slides) if visual_policy == "required" else 0,
             deck_route=DEFAULT_DECK_ROUTE,
             deck_compile_mode=DEFAULT_DECK_COMPILE_MODE,
+            native_required=True,
+            legacy_screenshot_debug=False,
             native_editability_score=0.0,
             created_at=now,
             updated_at=now,
@@ -696,27 +702,62 @@ class DeckBuildService:
             )
 
     def _compile_pptx(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
-        if _native_service_enabled():
-            try:
-                self._compile_native_pptx(deck, runtime)
-                return
-            except DeckNativePathError as exc:
-                if not _screenshot_fallback_allowed():
-                    raise DeckBuildFailure("deck_native_startup_failed", safe_excerpt(exc) or "Native deck service startup failed.", retryable=False) from exc
-                deck.quality_warning = _merge_warning(deck.quality_warning, "screenshot_deck_fallback")
-            except DeckBuildFailure as exc:
-                if not _native_failure_allows_screenshot_fallback(exc):
-                    raise
-                deck.quality_warning = _merge_warning(deck.quality_warning, "screenshot_deck_fallback")
-        self._compile_screenshot_pptx(deck, runtime)
+        preflight = self._trace_native_requirement(deck, runtime)
+        if not preflight.success:
+            deck.deck_compile_mode = NATIVE_UNAVAILABLE_DECK_COMPILE_MODE
+            raise DeckBuildFailure(
+                "deck_native_unavailable",
+                _native_error_summary(preflight.errors, "Native deck service is unavailable."),
+                retryable=False,
+            )
+        try:
+            self._compile_native_pptx(deck, runtime)
+        except DeckNativePathError as exc:
+            deck.deck_compile_mode = NATIVE_UNAVAILABLE_DECK_COMPILE_MODE
+            raise DeckBuildFailure(
+                "deck_native_unavailable",
+                safe_excerpt(exc) or "Native deck service is unavailable.",
+                retryable=False,
+            ) from exc
 
-    def _compile_screenshot_pptx(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
-        deck.deck_compile_mode = DEFAULT_DECK_COMPILE_MODE
+    def _trace_native_requirement(self, deck: DeckBuild, runtime: ToolRuntime):
+        deck.native_required = True
+        deck.legacy_screenshot_debug = _legacy_screenshot_debug_allowed(runtime)
+        preflight = _native_preflight(self._native_service)
+        with deck_span(
+            "deck.native.requirement",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            deck_compile_mode=deck.deck_compile_mode,
+            inputs={},
+        ) as run:
+            finish_span(
+                run,
+                {
+                    "native_required": True,
+                    "legacy_screenshot_debug_allowed": deck.legacy_screenshot_debug,
+                    "preflight_success": preflight.success,
+                    "scripts_dir_exists": preflight.scripts_dir_exists,
+                    "deck_py_exists": preflight.deck_py_exists,
+                    "html2patch_py_exists": preflight.html2patch_py_exists,
+                    "error_count": len(preflight.errors),
+                    "deck_compile_mode_before": deck.deck_compile_mode,
+                },
+            )
+        return preflight
+
+    def _compile_screenshot_debug_pptx(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
+        deck.deck_compile_mode = HTML_SCREENSHOT_DEBUG_COMPILE_MODE
+        deck.legacy_screenshot_debug = True
         deck.native_editability_score = 0.0
         deck.native_text_shape_count = 0
         deck.picture_shape_count = 0
-        deck.full_slide_picture_count = 0
-        deck.quality_warning = _merge_warning(deck.quality_warning, "screenshot_deck_fallback")
+        deck.full_slide_picture_count = len(deck.slides)
+        deck.quality_warning = _merge_warning(deck.quality_warning, "screenshot_deck_debug_only")
         with deck_span(
             "deck.pptx.compile",
             runtime=runtime,
@@ -949,7 +990,14 @@ class DeckBuildService:
                     "deck_build_file": basename(deck_path),
                     "deck_route": deck.deck_route,
                     "deck_compile_mode": deck.deck_compile_mode,
+                    "native_required": deck.native_required,
+                    "legacy_screenshot_debug": deck.legacy_screenshot_debug,
                     "native_editability_score": deck.native_editability_score,
+                    "native_text_shape_count": deck.native_text_shape_count,
+                    "picture_shape_count": deck.picture_shape_count,
+                    "full_slide_picture_count": deck.full_slide_picture_count,
+                    "quality_warning": deck.quality_warning,
+                    "failure_summary": safe_excerpt(deck.failure_summary),
                     "image_generation_status": deck.image_generation_status,
                     "image_generation_reason": deck.image_generation_reason,
                     "primary_image_batch_status": deck.primary_image_batch_status,
@@ -977,7 +1025,12 @@ class DeckBuildService:
                     "artifact_file": basename(deck.pptx_path) if success else None,
                     "deck_route": deck.deck_route,
                     "deck_compile_mode": deck.deck_compile_mode,
+                    "native_required": deck.native_required,
+                    "legacy_screenshot_debug": deck.legacy_screenshot_debug,
                     "native_editability_score": deck.native_editability_score,
+                    "native_text_shape_count": deck.native_text_shape_count,
+                    "picture_shape_count": deck.picture_shape_count,
+                    "full_slide_picture_count": deck.full_slide_picture_count,
                     "failure_code": deck.failure_code,
                     "failure_summary": safe_excerpt(deck.failure_summary),
                     "retryable": retryable,
@@ -997,6 +1050,7 @@ class DeckBuildService:
             )
 
     def _success_result(self, deck: DeckBuild, deck_path: str, runtime: ToolRuntime) -> DeckBuildResult:
+        self._assert_deck_success_allowed(deck)
         _finalize_image_generation_status(deck, success=True)
         self._trace_terminal(deck, runtime, success=True, deck_path=deck_path, retryable=False)
         self._trace_emit_decision(deck, runtime, success=True, retryable=False)
@@ -1007,6 +1061,8 @@ class DeckBuildService:
             pptx_path=deck.pptx_path,
             deck_route=deck.deck_route,
             deck_compile_mode=deck.deck_compile_mode,
+            native_required=deck.native_required,
+            legacy_screenshot_debug=deck.legacy_screenshot_debug,
             native_editability_score=deck.native_editability_score,
             native_text_shape_count=deck.native_text_shape_count,
             picture_shape_count=deck.picture_shape_count,
@@ -1028,6 +1084,44 @@ class DeckBuildService:
             partial_batch_salvaged=deck.partial_batch_salvaged,
         )
 
+    def _assert_deck_success_allowed(self, deck: DeckBuild) -> None:
+        if deck.deck_compile_mode in FORBIDDEN_SCREENSHOT_COMPILE_MODES:
+            raise DeckBuildFailure(
+                "deck_screenshot_compile_forbidden",
+                "Screenshot-backed PPTX is not an allowed fresh-deck output.",
+                retryable=False,
+            )
+        if deck.deck_compile_mode != NATIVE_DECK_COMPILE_MODE:
+            raise DeckBuildFailure(
+                "deck_native_compile_required",
+                "Fresh PPTX decks must compile through the native PowerPoint substrate.",
+                retryable=False,
+            )
+        if (deck.native_editability_score or 0.0) < 0.60:
+            raise DeckBuildFailure(
+                "deck_native_editability_failed",
+                f"Native editability score {deck.native_editability_score or 0.0:.2f} is below the required threshold.",
+                retryable=False,
+            )
+        if deck.native_text_shape_count <= 0:
+            raise DeckBuildFailure(
+                "deck_native_text_missing",
+                "Native deck output contains no editable text shapes.",
+                retryable=False,
+            )
+        if deck.full_slide_picture_count > 0:
+            raise DeckBuildFailure(
+                "deck_native_full_slide_picture_forbidden",
+                "Native deck output contains full-slide screenshot pictures.",
+                retryable=False,
+            )
+        if deck.quality_warning and "screenshot_deck" in deck.quality_warning:
+            raise DeckBuildFailure(
+                "deck_screenshot_compile_forbidden",
+                "Screenshot-backed PPTX is not an allowed fresh-deck output.",
+                retryable=False,
+            )
+
     def _failure_result(
         self,
         deck: DeckBuild,
@@ -1042,6 +1136,8 @@ class DeckBuildService:
             deck_build_path=deck_path,
             deck_route=deck.deck_route,
             deck_compile_mode=deck.deck_compile_mode,
+            native_required=deck.native_required,
+            legacy_screenshot_debug=deck.legacy_screenshot_debug,
             native_editability_score=deck.native_editability_score,
             native_text_shape_count=deck.native_text_shape_count,
             picture_shape_count=deck.picture_shape_count,
@@ -1177,16 +1273,43 @@ def _truthy_env(name: str) -> bool:
     return (os.getenv(name, "") or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
-def _native_service_enabled() -> bool:
-    return _truthy_env("SOPHIA_DECK_NATIVE_SERVICE_ENABLED")
+def _native_preflight(native_service: Any) -> NativeDeckPreflight:
+    preflight = getattr(native_service, "preflight", None)
+    if callable(preflight):
+        result = preflight()
+        if isinstance(result, NativeDeckPreflight):
+            return result
+        if isinstance(result, dict):
+            return NativeDeckPreflight(
+                success=bool(result.get("success")),
+                scripts_dir_exists=bool(result.get("scripts_dir_exists")),
+                deck_py_exists=bool(result.get("deck_py_exists")),
+                html2patch_py_exists=bool(result.get("html2patch_py_exists")),
+                errors=[str(item) for item in result.get("errors", []) if item],
+            )
+    return NativeDeckPreflight(
+        success=True,
+        scripts_dir_exists=True,
+        deck_py_exists=True,
+        html2patch_py_exists=True,
+        errors=[],
+    )
 
 
-def _screenshot_fallback_allowed() -> bool:
-    return _truthy_env("SOPHIA_DECK_ALLOW_SCREENSHOT_FALLBACK")
+def _legacy_screenshot_debug_allowed(runtime: ToolRuntime) -> bool:
+    if not _truthy_env("SOPHIA_DECK_LEGACY_SCREENSHOT_DEBUG"):
+        return False
+    return not _is_production_runtime(runtime)
 
 
-def _native_failure_allows_screenshot_fallback(exc: DeckBuildFailure) -> bool:
-    return exc.code == "deck_native_startup_failed" and _screenshot_fallback_allowed()
+def _is_production_runtime(runtime: ToolRuntime) -> bool:
+    if any(os.getenv(name) for name in ("RENDER", "RENDER_SERVICE_ID", "RENDER_SERVICE_NAME")):
+        return True
+    for key in ("SOPHIA_ENV", "SOPHIA_RUNTIME_ENV", "APP_ENV", "ENV", "ENVIRONMENT"):
+        if (os.getenv(key, "") or "").strip().lower() == "production":
+            return True
+    value = _state_value(runtime, "environment") or _state_value(runtime, "runtime_env")
+    return str(value or "").strip().lower() == "production"
 
 
 def _native_startup_error(errors: list[str]) -> bool:

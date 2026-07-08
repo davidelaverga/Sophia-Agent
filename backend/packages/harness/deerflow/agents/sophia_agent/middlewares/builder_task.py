@@ -862,14 +862,16 @@ def _terminal_artifact_format_line(artifact_target_ext: str, task_type: str = ""
             return (
                 "- This is a PDF slide-deck delivery target: use the deck workflow, not "
                 "the report renderer. Call prepare_deck_build with the full slide intent "
-                "list and canonical output path. Do NOT author slides/*.html, prompt JSON "
+                "list and canonical output path. DeckBuildService owns native PowerPoint "
+                "compilation, inspection, and validation. Do NOT author slides/*.html, prompt JSON "
                 "files, image manifests, or compiler commands yourself. Emit only the "
-                "deck artifact returned by prepare_deck_build; if it returns failure, "
+                "deck artifact returned by prepare_deck_build; if it returns native failure, "
                 "emit with artifact_path=null and its failure_code/failure_summary.\n"
             )
         return (
-            "- This is a PDF slide-deck delivery target: use the deck workflow, not "
-            "the report renderer. Use the exposed presentation tools: prepare_pptx_image_manifest "
+            "- This is a PDF slide-deck delivery target on an explicit non-production "
+            "legacy/debug deck route: use the deck workflow, not the report renderer. "
+            "Use the exposed diagnostic presentation tools: prepare_pptx_image_manifest "
             "for slide visuals and build_deck_from_slides for compilation. Do NOT call "
             "render_html_to_pdf for slide decks. Emit the verified deck artifact or a clean "
             "null-artifact failure if the deck workflow cannot produce the requested delivery.\n"
@@ -895,17 +897,18 @@ def _pptx_visual_guidance(*, deck_service_enabled: bool, image_generation_enable
         return (
             "Decks are built by prepare_deck_build. Submit slide intent only: title, narrative, "
             "role, layout_kind, visual_prompt, and optional speaker_notes for each slide. The "
-            "harness writes prompt files, prepares and runs the image batch, renders safe slide "
-            "HTML templates, compiles the PPTX, evaluates it, and returns a structured result. "
+            "harness owns generated assets, native PowerPoint compilation, inspection, validation, "
+            "and terminal failure. Screenshot-backed PPTX is not an acceptable fallback; if native "
+            "deck generation fails, prepare_deck_build returns failure and you emit artifact_path=null. "
             "Do NOT call prepare_pptx_image_manifest, image-generation/scripts/generate.py, "
-            "build_deck_from_slides, python-pptx, or pptxgenjs directly. Normal decks require "
-            "one generated visual-only asset per slide; only an explicitly plain text-only/no-visual "
+            "build_deck_from_slides, python-pptx, or pptxgenjs directly. Normal decks may use "
+            "generated visual assets as DeckBuildService decides; only an explicitly plain text-only/no-visual "
             "request may set visual_policy='text_only'. Default to restrained professional technical "
             "visuals; do not use chalkboard, handwritten, whiteboard, sketch, cyberpunk, neon, or "
             "playful styles unless explicitly requested."
         )
     return (
-        "Decks use the legacy HTML-slide workflow in this run. Use prepare_pptx_image_manifest "
+        "Decks use the explicit local legacy/debug HTML-slide workflow in this run. Use prepare_pptx_image_manifest "
         "to create the deterministic slide visual manifest, generate the required slide visuals, "
         "author slides/*.html that reference the generated ../assets/slide-XX.png images, and "
         "compile with build_deck_from_slides. Normal decks require one generated visual-only "
@@ -1298,7 +1301,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "For PPTX, submit slide intent through prepare_deck_build; NEVER write "
             "custom python-pptx/pptxgenjs scripts or lower-level deck files yourself."
             if deck_service_enabled
-            else "For PPTX, use the exposed ppt-generation workflow tools "
+            else "For PPTX, this is an explicit non-production legacy/debug route; use the exposed ppt-generation workflow tools "
             "prepare_pptx_image_manifest and build_deck_from_slides; NEVER write "
             "custom python-pptx/pptxgenjs scripts."
         )
@@ -1349,10 +1352,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         )
         pptx_delivery_line = (
             "For fresh decks, call prepare_deck_build once with the complete slide intent list; "
-            "emit the returned PPTX or a clean null-artifact failure. Never write lower-level "
+            "emit the returned native PPTX or a clean null-artifact failure if native generation "
+            "fails. Screenshot-backed PPTX is not an acceptable fallback. Never write lower-level "
             "deck files/tools yourself."
             if deck_service_enabled
-            else "For fresh decks, use the exposed ppt-generation workflow tools: prepare slide "
+            else "For fresh decks in this explicit non-production legacy/debug route, use the exposed ppt-generation workflow tools: prepare slide "
             "visuals with prepare_pptx_image_manifest, build the slide HTML, then compile with "
             "build_deck_from_slides. Never write custom python-pptx/pptxgenjs code."
         )

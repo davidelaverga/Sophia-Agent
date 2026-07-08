@@ -33,19 +33,22 @@ This file is for the Sophia builder only.
 
 - Fresh presentations are built through `prepare_deck_build`. Provide complete
   slide intent: title, narrative, role, layout_kind, visual_prompt, and
-  speaker_notes. The harness owns prompt files, image batch manifest, image
-  generation, slide HTML rendering, PPTX compilation, and evaluation.
+  speaker_notes. DeckBuildService owns generated assets, native PowerPoint
+  compilation, inspection, validation, and terminal failure.
 - Do not call `prepare_pptx_image_manifest`, `image-generation/scripts/generate.py`,
   or `build_deck_from_slides` directly for a fresh deck. Do not hand-write
   `slides/*.html`. Do not write python-pptx/pptxgenjs or any custom deck compiler.
-- Normal decks require one generated visual-only asset per slide. Only explicit
-  text-only/no-visual deck requests may omit images.
+- Screenshot-backed PPTX is a failed build, not a fallback. If
+  `prepare_deck_build` returns a native deck failure, stop and emit
+  `artifact_path=null` with the returned failure code and summary.
+- Normal decks may use generated visual-only assets as DeckBuildService decides.
+  Only explicit text-only/no-visual deck requests may omit images.
 - Do not bake slide title, bottom narrative, footers, formulas, axis labels,
   paragraph text, or page chrome into generated images. Titles and narratives
   remain real slide text in the harness-rendered template.
 - If `prepare_deck_build` returns success, emit the returned `.pptx`. If it
   returns failure, emit `artifact_path=null` with the returned failure code and
-  summary. Do not loop on the same failing action.
+  summary. Do not loop on the same failing action or try a legacy screenshot deck.
 
 ## PDF Report Rules
 

@@ -113,7 +113,7 @@ class TestVisualCapabilityPrompt:
         briefing = _briefing(result)
         assert "<missing_capability>" not in briefing
 
-    def test_plain_presentation_prompt_keeps_html_slide_contract(self) -> None:
+    def test_plain_presentation_prompt_uses_deck_service_text_only_contract(self) -> None:
         state = _make_state("presentation")
         state["delegation_context"]["task"] = "Build a plain text-only deck about the roadmap with no images"
 
@@ -121,12 +121,12 @@ class TestVisualCapabilityPrompt:
 
         briefing = _briefing(result)
         skill_names = _available_skills_section(briefing)
-        assert "image-generation" in skill_names
+        assert "ppt-generation" in skill_names
         assert "Image generation is disabled for this run" not in briefing
         assert "do not run the image-generation script" not in briefing
-        # HTML-slide contract (2026-06-29): author slides/*.html + build_deck_from_slides.
-        assert "build_deck_from_slides" in briefing
-        assert "slides/" in briefing
+        assert "Presentations (`.pptx`) are native DeckBuildService decks" in briefing
+        assert "prepare_deck_build" in briefing
+        assert "build_deck_from_slides" not in briefing
         assert "pure image-forward" not in briefing
         assert "deck_plan.json" not in briefing
 

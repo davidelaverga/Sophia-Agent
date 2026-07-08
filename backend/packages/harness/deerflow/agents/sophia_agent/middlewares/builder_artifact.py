@@ -3404,6 +3404,7 @@ def _apply_image_generation_metadata(artifact: dict[str, Any], state: dict[str, 
     if outcome is not None:
         artifact["image_generation_outcome"] = outcome
     diagnostics = _pptx_diagnostics(state)
+    visual_completeness = _pptx_visual_completeness_diagnostics_update(state)
     for key in (
         "primary_image_batch_status",
         "primary_image_batch_error_class",
@@ -3420,6 +3421,13 @@ def _apply_image_generation_metadata(artifact: dict[str, Any], state: dict[str, 
         "missing_expected_visual_count",
         "pptx_deck_visual_quality_gap_count",
         "deck_route",
+        "deck_compile_mode",
+        "native_required",
+        "legacy_screenshot_debug",
+        "native_editability_score",
+        "native_text_shape_count",
+        "picture_shape_count",
+        "full_slide_picture_count",
         "deck_build_id",
         "deck_schema_version",
         "deck_status",
@@ -3431,19 +3439,16 @@ def _apply_image_generation_metadata(artifact: dict[str, Any], state: dict[str, 
         "generated_visuals_complete",
         "deck_build_path",
     ):
-        value = (
-            _pptx_visual_completeness_diagnostics_update(state).get(key)
-            if key
-            in {
-                "presentation_route",
-                "expected_generated_visual_count",
-                "successful_generated_visual_count",
-                "referenced_visual_count",
-                "missing_expected_visual_count",
-            }
-            else diagnostics.get(key)
-        )
-        if value not in (None, "", 0):
+        value = diagnostics.get(key)
+        if value is None and key in {
+            "presentation_route",
+            "expected_generated_visual_count",
+            "successful_generated_visual_count",
+            "referenced_visual_count",
+            "missing_expected_visual_count",
+        }:
+            value = visual_completeness.get(key)
+        if value is not None and value != "":
             artifact["visual_quality_gap_count" if key == "pptx_deck_visual_quality_gap_count" else key] = value
 
 
@@ -5028,6 +5033,10 @@ def _apply_pptx_deck_quality_metadata(
         logger.warning("[BuilderArtifact] phase=pptx_visual_quality_warning")
         return updated
     if warning != "visuals_partial" or missing_count <= 0:
+        if warning and not artifact.get("quality_warning"):
+            updated = dict(artifact)
+            updated["quality_warning"] = warning
+            return updated
         return artifact
 
     updated = dict(artifact)
@@ -6173,15 +6182,15 @@ def _log_pptx_skill_correction(
 
 
 def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
-    """The single source of truth for HTML-slide deck steering."""
+    """The single source of truth for PPTX deck steering."""
     if _deck_build_service_route_active(state):
         target = state.get("builder_artifact_target_path") or f"{_OUTPUTS_VIRTUAL_PREFIX}deck.pptx"
         return (
             "[Sophia/deck build latch]\n"
             "This is a fresh PPTX deck build. Stop authoring lower-level deck files or compiler "
             "commands. Call `prepare_deck_build` exactly once with the complete slide intent list "
-            f"and output_path='{target}'. The harness will write prompt files, run generated visuals, "
-            "render slide templates, compile the PPTX, evaluate quality, and return either the "
+            f"and output_path='{target}'. DeckBuildService owns generated assets, native PowerPoint "
+            "compilation, inspection, validation, and terminal failure. It will return either the "
             "deliverable path or a terminal failure. If it succeeds, emit the returned PPTX; if it "
             "fails, emit artifact_path=null with the returned failure code and summary."
         )
@@ -6201,7 +6210,9 @@ def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
     return (
         "[Sophia/deck compile latch]\n"
         + opener
-        + "Author one self-contained 1920x1080 HTML file per slide under "
+        + "This is an explicit non-production legacy/debug PPTX route because "
+        "`prepare_deck_build` is unavailable and lower-level diagnostic tools are exposed. "
+        "Author one self-contained 1920x1080 HTML file per slide under "
         "`/mnt/user-data/outputs/slides/` — real DOM title + concise narrative text, plus one "
         "generated VISUAL-ONLY image embedded by a relative `../assets/<file>` path. Text lives in "
         "the HTML and is never baked into the image. Write one prompt JSON file per slide, call "
@@ -6253,9 +6264,11 @@ def _visual_design_skill_message() -> str:
         "is available:\n"
         "`read_file(description='read visual design skill', "
         "path='/mnt/skills/public/visual-design/SKILL.md')`.\n"
-        "For PPTX decks, author one self-contained 1920x1080 HTML file per slide under "
-        "`/mnt/user-data/outputs/slides/` (real DOM title + narrative + one embedded "
-        "`../assets/<file>` visual), then call `build_deck_from_slides`. For PDF reports, draw both charts AND structural diagrams "
+        "For PPTX decks, call `prepare_deck_build` with structured slide intent; do not "
+        "author slide HTML manually and do not call `build_deck_from_slides`. "
+        "DeckBuildService owns native PowerPoint composition, compilation, inspection, "
+        "and validation. If native deck generation fails, emit artifact_path=null with "
+        "the returned failure code and summary. For PDF reports, draw both charts AND structural diagrams "
         "as inline static `<svg>` directly in the report HTML (bar / line / column for "
         "data; box-and-arrow flow / comparison / mind-map for structure) — NO remote "
         "`generate_chart`, NO client-side JS — then render via render_html_to_pdf."
@@ -11005,19 +11018,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         slide_count = int(payload.get("slide_count") or 0)
         expected = int(payload.get("expected_visual_count") or 0)
         successful = int(payload.get("successful_visual_count") or 0)
-        referenced = int(payload.get("referenced_visual_count") or successful or 0)
-        missing = int(payload.get("missing_visual_count") or max(0, expected - min(successful, referenced)))
+        referenced = int(payload.get("referenced_visual_count") if payload.get("referenced_visual_count") is not None else successful or 0)
+        missing = int(payload.get("missing_visual_count") if payload.get("missing_visual_count") is not None else max(0, expected - min(successful, referenced)))
         quality_status = str(payload.get("quality_status") or ("passed" if success else "failed"))
         failure_code = payload.get("failure_code") or (None if success else status_reason or "deck_build_failed")
         image_generation_status = str(payload.get("image_generation_status") or ("success" if success else "failed"))
         primary_image_batch_status = str(payload.get("primary_image_batch_status") or ("success" if success else "failed"))
         primary_image_batch_error_class = payload.get("primary_image_batch_error_class") or (None if success else failure_code)
         deck_route = str(payload.get("deck_route") or "deck_ir_html_raster")
-        deck_compile_mode = str(payload.get("deck_compile_mode") or "html_screenshot_fallback")
+        deck_compile_mode = str(payload.get("deck_compile_mode") or "not_compiled")
         delta: dict[str, Any] = {
             "presentation_route": deck_route,
             "deck_route": deck_route,
             "deck_compile_mode": deck_compile_mode,
+            "native_required": bool(payload.get("native_required", True)),
+            "legacy_screenshot_debug": bool(payload.get("legacy_screenshot_debug", False)),
             "deck_build_id": payload.get("build_id"),
             "deck_schema_version": "sophia-deck-build/v1",
             "deck_status": "evaluated" if success else "failed_terminal",
@@ -11124,7 +11139,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "failure_summary": failure_summary,
             "deck_build_id": payload.get("build_id"),
             "deck_build_path": payload.get("deck_build_path"),
+            "deck_route": delta.get("deck_route") or payload.get("deck_route"),
+            "deck_compile_mode": delta.get("deck_compile_mode") or payload.get("deck_compile_mode"),
+            "native_required": delta.get("native_required"),
+            "legacy_screenshot_debug": delta.get("legacy_screenshot_debug"),
+            "native_editability_score": delta.get("native_editability_score"),
+            "native_text_shape_count": delta.get("native_text_shape_count"),
+            "picture_shape_count": delta.get("picture_shape_count"),
+            "full_slide_picture_count": delta.get("full_slide_picture_count"),
             "deck_quality_status": payload.get("quality_status") or "failed",
+            "quality_warning": payload.get("quality_warning"),
             "image_generation_status": delta.get("image_generation_status"),
             "image_generation_reason": delta.get("image_generation_reason"),
             "primary_image_batch_status": delta.get("primary_image_batch_status"),
@@ -11916,7 +11940,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "[Sophia/deck-build] Fresh PPTX deck visuals are generated internally by "
                 "`prepare_deck_build`. Do not call image-generation scripts directly. Submit "
                 "the complete slide intent list through prepare_deck_build; the harness owns "
-                "prompt files, manifest creation, image generation, slide rendering, and compile."
+                "asset preparation, native PowerPoint compilation, inspection, and validation."
             )
         billable = [
             segment
@@ -12037,8 +12061,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "`prepare_deck_build`. Do not call image-generation scripts, "
                             "prepare_pptx_image_manifest, build_deck_from_slides, python-pptx, "
                             "or pptxgenjs directly. Submit slide intent through prepare_deck_build; "
-                            "the harness owns visual generation, slide rendering, compilation, "
-                            "evaluation, and terminal failure."
+                            "DeckBuildService owns native PowerPoint compilation, inspection, "
+                            "validation, and terminal failure. Screenshot-backed PPTX is not an "
+                            "acceptable fallback."
                         ),
                         tool_call_id=request.tool_call.get("id", ""),
                         name=name,
@@ -12071,10 +12096,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _deck_improvisation_rejection(request: ToolCallRequest) -> Command | None:
         """Block custom model-run deck compilation for `.pptx` targets.
 
-        The sanctioned deck compile is the ``build_deck_from_slides`` tool
-        (HTML-slide path: author ``slides/*.html``, the harness renders + wraps
-        to .pptx). Custom python-pptx/pptxgenjs and direct JS compiler scripts
-        remain blocked.
+        Fresh decks compile through ``prepare_deck_build``. The lower-level
+        ``build_deck_from_slides`` path is only an explicit non-production
+        legacy/debug diagnostic route when those tools are exposed. Custom
+        python-pptx/pptxgenjs and direct JS compiler scripts remain blocked.
         """
         state = request.state or {}
         if _requested_artifact_ext(state) != "pptx":
@@ -12101,14 +12126,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             content = (
                 "[Sophia/deck-build] Fresh PPTX decks are built through `prepare_deck_build`. "
                 "Do not write custom deck compiler code or invoke deck compilers directly. "
-                "Submit slide intent through prepare_deck_build; the harness owns visual "
-                "generation, slide rendering, compilation, evaluation, and terminal failure."
+                "Submit slide intent through prepare_deck_build; DeckBuildService owns native "
+                "PowerPoint compilation, inspection, validation, and terminal failure. "
+                "Screenshot-backed PPTX is not an acceptable fallback."
             )
         else:
             content = (
                 "[Sophia/deck-build] Do not write custom python-pptx/pptxgenjs code or "
-                "invoke deck compilers directly. Author one self-contained 1920x1080 HTML "
-                "file per slide under `/mnt/user-data/outputs/slides/` (real DOM title + "
+                "invoke deck compilers directly. This is an explicit non-production "
+                "legacy/debug route: author one self-contained 1920x1080 HTML file per "
+                "slide under `/mnt/user-data/outputs/slides/` (real DOM title + "
                 "narrative + one embedded `../assets/<file>` visual), then call "
                 "`build_deck_from_slides(output_path, title)` — it renders each slide and "
                 "compiles the .pptx for you."

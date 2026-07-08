@@ -241,6 +241,7 @@ class TestBuilderWorkflowCards:
 
     def test_pptx_guidance_uses_legacy_tools_when_deck_service_disabled(self, monkeypatch) -> None:
         monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "false")
+        monkeypatch.setenv("SOPHIA_DECK_LEGACY_SCREENSHOT_DEBUG", "true")
         state = _make_state("presentation")
         state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
         state["delegation_context"]["task"] = "Make a 6-slide technical presentation."
@@ -249,7 +250,7 @@ class TestBuilderWorkflowCards:
         briefing = _briefing(result)
 
         assert "Decks are built by prepare_deck_build" not in briefing
-        assert "For fresh decks, use the exposed ppt-generation workflow tools" in briefing
+        assert "explicit non-production legacy/debug route" in briefing
         assert "prepare_pptx_image_manifest" in briefing
         assert "build_deck_from_slides" in briefing
 

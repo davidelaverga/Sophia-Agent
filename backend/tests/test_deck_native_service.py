@@ -13,6 +13,18 @@ from pptx.util import Inches
 from deerflow.sophia.deck_native import DeckNativeService
 
 
+def test_deck_native_preflight_reports_missing_scripts(tmp_path: Path) -> None:
+    service = DeckNativeService(scripts_dir=tmp_path / "missing-scripts")
+
+    result = service.preflight()
+
+    assert result.success is False
+    assert result.scripts_dir_exists is False
+    assert result.deck_py_exists is False
+    assert result.html2patch_py_exists is False
+    assert "deck.py" in "\n".join(result.errors)
+
+
 def _wide_base_deck(path: Path) -> None:
     presentation = Presentation()
     presentation.slide_width = Inches(20)

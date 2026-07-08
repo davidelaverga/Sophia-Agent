@@ -18,6 +18,14 @@ from deerflow.sandbox.tools import replace_virtual_path
 from deerflow.sophia.deck_build import service as deck_service
 from deerflow.sophia.deck_build.service import DeckBuildService
 from deerflow.sophia.deck_build.storage import load_deck_build
+from deerflow.sophia.deck_build.tracing import NATIVE_DECK_COMPILE_MODE
+from deerflow.sophia.deck_native.models import (
+    NativeDeckInspectResult,
+    NativeDeckLintFixResult,
+    NativeDeckPatchResult,
+    NativeDeckPreflight,
+    NativeDeckRenderResult,
+)
 from deerflow.sophia.tools.prepare_deck_build import prepare_deck_build
 
 _OUTPUTS = "/mnt/user-data/outputs/"
@@ -106,12 +114,71 @@ def _fake_batch(runtime: SimpleNamespace, *, create_outputs: bool = True, comple
     return run_batch
 
 
+class _FakeNativeService:
+    def __init__(self, calls: list[dict] | None = None, *, full_slide_picture_count: int = 0) -> None:
+        self.calls = calls if calls is not None else []
+        self.full_slide_picture_count = full_slide_picture_count
+        self.slide_count = 0
+
+    def preflight(self) -> NativeDeckPreflight:
+        return NativeDeckPreflight(True, True, True, True, [])
+
+    def html_to_patch(self, *, html_paths: list[str], base_deck_path: str, output_patch_path: str) -> NativeDeckPatchResult:
+        self.slide_count = len(html_paths)
+        self.calls.append(
+            {
+                "stage": "html_to_patch",
+                "html_basenames": [Path(path).name for path in html_paths],
+                "base_file": Path(base_deck_path).name,
+                "patch_file": Path(output_patch_path).name,
+            }
+        )
+        patch = Path(output_patch_path)
+        patch.parent.mkdir(parents=True, exist_ok=True)
+        patch.write_text(json.dumps({"ops": []}), encoding="utf-8")
+        return NativeDeckPatchResult(True, None, str(patch), 0, 0, [])
+
+    def apply_patch(self, *, base_deck_path: str, patch_path: str, output_path: str, fix: bool = True) -> NativeDeckPatchResult:
+        self.calls.append({"stage": "apply_patch", "output_path": output_path, "fix": fix})
+        output = Path(output_path)
+        output.parent.mkdir(parents=True, exist_ok=True)
+        output.write_bytes(b"fake native pptx")
+        return NativeDeckPatchResult(True, str(output), patch_path, 0, 0, [])
+
+    def inspect(self, _pptx_path: str) -> NativeDeckInspectResult:
+        native_text_shapes = max(1, self.slide_count) * 2
+        return NativeDeckInspectResult(
+            True,
+            slide_count=self.slide_count,
+            shape_count=native_text_shapes + self.full_slide_picture_count,
+            native_text_shape_count=native_text_shapes,
+            picture_shape_count=self.full_slide_picture_count,
+            full_slide_picture_count=self.full_slide_picture_count,
+            native_editability_score=0.9,
+            shape_inventory_path=None,
+            raw_json_path=None,
+            errors=[],
+        )
+
+    def lint_fix(self, *, pptx_path: str, touched_slides: list[int] | None = None) -> NativeDeckLintFixResult:
+        return NativeDeckLintFixResult(True, 0, 0, 0, len(touched_slides or []), [], [])
+
+    def render(self, *, pptx_path: str, output_dir: str, slides: list[int] | None = None) -> NativeDeckRenderResult:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        for slide in slides or []:
+            (Path(output_dir) / f"slide-{slide}.jpg").write_bytes(b"jpg")
+        return NativeDeckRenderResult(True, output_dir, len(slides or []), [])
+
+    def diff(self, *, before_path: str, after_path: str) -> dict:
+        return {"success": True, "changed": True, "errors": []}
+
+
 def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_json(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
-    compiler_calls: list[dict] = []
+    native_calls: list[dict] = []
     service = DeckBuildService(
         image_batch_runner=_fake_batch(runtime),
-        deck_compiler=_fake_compiler(compiler_calls),
+        native_service=_FakeNativeService(native_calls),
     )
 
     result = service.prepare_and_build(
@@ -124,12 +191,14 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert result.success is True
     assert result.pptx_path == f"{_OUTPUTS}deck.pptx"
     assert result.deck_route == "deck_ir_html_raster"
-    assert result.deck_compile_mode == "html_screenshot_fallback"
-    assert result.native_editability_score == 0.0
+    assert result.deck_compile_mode == NATIVE_DECK_COMPILE_MODE
+    assert result.native_editability_score == 0.9
+    assert result.native_text_shape_count >= 6
+    assert result.full_slide_picture_count == 0
     assert result.expected_visual_count == 3
     assert result.successful_visual_count == 3
     assert result.referenced_visual_count == 3
-    assert compiler_calls == [{"output_path": f"{_OUTPUTS}deck.pptx", "title": "Technical Deck", "slides_dir": f"{_OUTPUTS}slides"}]
+    assert native_calls[0]["html_basenames"] == ["01-cover.html", "02-architecture.html", "03-closing.html"]
     outputs = tmp_path / "outputs"
     prompt_files = sorted((outputs / "assets" / "prompts").glob("slide-*.json"))
     assert len(prompt_files) == 3
@@ -146,8 +215,8 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert build["schema_version"] == "sophia-deck-build/v1"
     assert build["status"] == "evaluated"
     assert build["deck_route"] == "deck_ir_html_raster"
-    assert build["deck_compile_mode"] == "html_screenshot_fallback"
-    assert build["native_editability_score"] == 0.0
+    assert build["deck_compile_mode"] == NATIVE_DECK_COMPILE_MODE
+    assert build["native_editability_score"] == 0.9
     assert build["image_generation_status"] == "success"
     assert build["primary_image_batch_status"] == "success"
     assert "Professional technical visual metaphor" in build["slides"][0]["visual_prompt"]
@@ -162,25 +231,11 @@ def test_deck_build_service_clears_stale_slide_html_before_compile(tmp_path: Pat
     slides_dir = tmp_path / "outputs" / "slides"
     slides_dir.mkdir(parents=True)
     (slides_dir / "99-stale.html").write_text("<html>stale</html>", encoding="utf-8")
-    compiled_slide_names: list[list[str]] = []
-
-    def compile_deck(tool_runtime, output_path: str, _title: str, rendered_slides_dir: str) -> dict:
-        host_slides = Path(replace_virtual_path(rendered_slides_dir, tool_runtime.state["thread_data"]))
-        compiled_slide_names.append(sorted(path.name for path in host_slides.glob("*.html")))
-        host = Path(replace_virtual_path(output_path, tool_runtime.state["thread_data"]))
-        host.parent.mkdir(parents=True, exist_ok=True)
-        host.write_bytes(b"fake pptx")
-        return {
-            "success": True,
-            "pptx_path": output_path,
-            "size_bytes": host.stat().st_size,
-            "engine": "fake",
-            "overflow_slides": [],
-        }
+    native_calls: list[dict] = []
 
     service = DeckBuildService(
         image_batch_runner=_fake_batch(runtime),
-        deck_compiler=compile_deck,
+        native_service=_FakeNativeService(native_calls),
     )
 
     result = service.prepare_and_build(
@@ -191,15 +246,15 @@ def test_deck_build_service_clears_stale_slide_html_before_compile(tmp_path: Pat
     )
 
     assert result.success is True
-    assert "99-stale.html" not in compiled_slide_names[0]
-    assert compiled_slide_names[0] == ["01-cover.html", "02-architecture.html", "03-closing.html"]
+    assert "99-stale.html" not in native_calls[0]["html_basenames"]
+    assert native_calls[0]["html_basenames"] == ["01-cover.html", "02-architecture.html", "03-closing.html"]
 
 
 def test_deck_build_service_nested_output_path_evaluates_against_outputs_root(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     service = DeckBuildService(
         image_batch_runner=_fake_batch(runtime),
-        deck_compiler=_fake_compiler([]),
+        native_service=_FakeNativeService(),
     )
 
     result = service.prepare_and_build(
@@ -215,24 +270,11 @@ def test_deck_build_service_nested_output_path_evaluates_against_outputs_root(tm
     assert (tmp_path / "outputs" / "decks" / "foo.pptx").is_file()
 
 
-def test_deck_build_service_compiler_overflow_fails_quality_gate(tmp_path: Path) -> None:
+def test_deck_build_service_full_slide_picture_fails_native_success_gate(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
-
-    def overflow_compiler(tool_runtime, output_path: str, _title: str, _slides_dir: str) -> dict:
-        host = Path(replace_virtual_path(output_path, tool_runtime.state["thread_data"]))
-        host.parent.mkdir(parents=True, exist_ok=True)
-        host.write_bytes(b"fake pptx")
-        return {
-            "success": True,
-            "pptx_path": output_path,
-            "size_bytes": host.stat().st_size,
-            "engine": "fake",
-            "overflow_slides": [{"slide": 2, "overflow_px": 48}],
-        }
-
     service = DeckBuildService(
         image_batch_runner=_fake_batch(runtime),
-        deck_compiler=overflow_compiler,
+        native_service=_FakeNativeService(full_slide_picture_count=1),
     )
 
     result = service.prepare_and_build(
@@ -243,8 +285,8 @@ def test_deck_build_service_compiler_overflow_fails_quality_gate(tmp_path: Path)
     )
 
     assert result.success is False
-    assert result.failure_code == "deck_quality_failed"
-    assert "overflows" in (result.failure_summary or "")
+    assert result.failure_code == "deck_native_full_slide_picture_forbidden"
+    assert "full-slide screenshot" in (result.failure_summary or "")
 
 
 def test_deck_build_service_invalid_required_visual_prompt_fails_before_batch(tmp_path: Path) -> None:
@@ -256,7 +298,7 @@ def test_deck_build_service_invalid_required_visual_prompt_fails_before_batch(tm
         batch_called = True
         return {}
 
-    service = DeckBuildService(image_batch_runner=batch_runner, deck_compiler=_fake_compiler([]))
+    service = DeckBuildService(image_batch_runner=batch_runner, native_service=_FakeNativeService())
     slides = _slides()
     slides[1]["visual_prompt"] = ""
 
@@ -277,7 +319,7 @@ def test_deck_build_service_allows_negated_visual_prompt_guardrails(tmp_path: Pa
     runtime = _runtime(tmp_path / "outputs")
     service = DeckBuildService(
         image_batch_runner=_fake_batch(runtime),
-        deck_compiler=_fake_compiler([]),
+        native_service=_FakeNativeService(),
     )
     slides = _slides()
     slides[0]["visual_prompt"] = "Professional system visual, no axis labels, without formulas, not neon."
@@ -299,7 +341,7 @@ def test_deck_build_service_allows_explicitly_requested_visual_style(tmp_path: P
     )
     service = DeckBuildService(
         image_batch_runner=_fake_batch(runtime),
-        deck_compiler=_fake_compiler([]),
+        native_service=_FakeNativeService(),
     )
     slides = _slides()
     slides[0]["visual_prompt"] = "Neon cyberpunk infrastructure command center with cinematic lighting."
@@ -318,7 +360,7 @@ def test_deck_build_service_allows_style_profile_visual_style(tmp_path: Path) ->
     runtime = _runtime(tmp_path / "outputs")
     service = DeckBuildService(
         image_batch_runner=_fake_batch(runtime),
-        deck_compiler=_fake_compiler([]),
+        native_service=_FakeNativeService(),
     )
     slides = _slides()
     slides[0]["visual_prompt"] = "Handwritten sketch of the system rollout with marker-like strokes."
@@ -343,7 +385,7 @@ def test_deck_build_service_rejects_positive_banned_visual_prompt_terms(tmp_path
         batch_called = True
         return {}
 
-    service = DeckBuildService(image_batch_runner=batch_runner, deck_compiler=_fake_compiler([]))
+    service = DeckBuildService(image_batch_runner=batch_runner, native_service=_FakeNativeService())
     slides = _slides()
     slides[0]["visual_prompt"] = "Neon cyberpunk system diagram with dramatic lighting."
 
@@ -361,7 +403,7 @@ def test_deck_build_service_rejects_positive_banned_visual_prompt_terms(tmp_path
 
 def test_deck_build_service_missing_batch_summary_fails_without_compile(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
-    compiler_calls: list[dict] = []
+    native_calls: list[dict] = []
     single_called = False
 
     def single_runner(_slide, _runtime, _attempt_no):
@@ -372,7 +414,7 @@ def test_deck_build_service_missing_batch_summary_fails_without_compile(tmp_path
     service = DeckBuildService(
         image_batch_runner=lambda _manifest_path, _runtime: {"summary_present": False, "complete": False},
         image_single_runner=single_runner,
-        deck_compiler=_fake_compiler(compiler_calls),
+        native_service=_FakeNativeService(native_calls),
     )
 
     result = service.prepare_and_build(
@@ -385,13 +427,13 @@ def test_deck_build_service_missing_batch_summary_fails_without_compile(tmp_path
     assert result.success is False
     assert result.failure_code == "deck_visual_batch_startup_failed"
     assert single_called is False
-    assert compiler_calls == []
+    assert native_calls == []
     assert not (tmp_path / "outputs" / "slides").exists()
 
 
 def test_deck_build_service_salvages_partial_timeout_and_repairs_missing_visual(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
-    compiler_calls: list[dict] = []
+    native_calls: list[dict] = []
     repaired: list[int] = []
 
     def timeout_batch(manifest_path: str, tool_runtime) -> dict:
@@ -425,7 +467,7 @@ def test_deck_build_service_salvages_partial_timeout_and_repairs_missing_visual(
     service = DeckBuildService(
         image_batch_runner=timeout_batch,
         image_single_runner=single_runner,
-        deck_compiler=_fake_compiler(compiler_calls),
+        native_service=_FakeNativeService(native_calls),
     )
 
     result = service.prepare_and_build(
@@ -443,7 +485,7 @@ def test_deck_build_service_salvages_partial_timeout_and_repairs_missing_visual(
     assert result.serial_repair_count == 1
     assert result.batch_timeout_count == 1
     assert result.partial_batch_salvaged is True
-    assert compiler_calls
+    assert native_calls
 
 
 def test_deck_build_service_timeout_with_zero_outputs_repairs_all_visuals(tmp_path: Path) -> None:
@@ -467,7 +509,7 @@ def test_deck_build_service_timeout_with_zero_outputs_repairs_all_visuals(tmp_pa
             "items": [],
         },
         image_single_runner=single_runner,
-        deck_compiler=_fake_compiler([]),
+        native_service=_FakeNativeService(),
     )
 
     result = service.prepare_and_build(
@@ -537,7 +579,7 @@ def test_deck_image_batch_subprocess_timeout_is_structured(tmp_path: Path, monke
 
 def test_deck_build_service_incomplete_visuals_fail_before_compile(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
-    compiler_calls: list[dict] = []
+    native_calls: list[dict] = []
     repair_attempts: list[tuple[int, int]] = []
 
     def single_runner(slide, _runtime, attempt_no: int) -> dict:
@@ -547,7 +589,7 @@ def test_deck_build_service_incomplete_visuals_fail_before_compile(tmp_path: Pat
     service = DeckBuildService(
         image_batch_runner=_fake_batch(runtime, create_outputs=False, complete=False),
         image_single_runner=single_runner,
-        deck_compiler=_fake_compiler(compiler_calls),
+        native_service=_FakeNativeService(native_calls),
     )
 
     result = service.prepare_and_build(
@@ -563,7 +605,7 @@ def test_deck_build_service_incomplete_visuals_fail_before_compile(tmp_path: Pat
     assert result.missing_visual_count == 3
     assert result.serial_repair_count == 6
     assert repair_attempts == [(1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2)]
-    assert compiler_calls == []
+    assert native_calls == []
 
 
 def test_deck_build_service_terminal_provider_error_does_not_unlock_serial_repair(tmp_path: Path) -> None:
@@ -594,7 +636,7 @@ def test_deck_build_service_terminal_provider_error_does_not_unlock_serial_repai
     service = DeckBuildService(
         image_batch_runner=auth_batch,
         image_single_runner=single_runner,
-        deck_compiler=_fake_compiler([]),
+        native_service=_FakeNativeService(),
     )
 
     result = service.prepare_and_build(
@@ -614,10 +656,10 @@ def test_deck_build_service_terminal_provider_error_does_not_unlock_serial_repai
 
 def test_deck_build_service_text_only_requires_explicit_request_and_compiles_without_visuals(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs", user_request="Please build a plain text-only 3 slide deck with no visuals.")
-    compiler_calls: list[dict] = []
+    native_calls: list[dict] = []
     service = DeckBuildService(
         image_batch_runner=lambda _manifest_path, _runtime: (_ for _ in ()).throw(AssertionError("no image batch")),
-        deck_compiler=_fake_compiler(compiler_calls),
+        native_service=_FakeNativeService(native_calls),
     )
     slides = _slides()
     for slide in slides:
@@ -634,7 +676,7 @@ def test_deck_build_service_text_only_requires_explicit_request_and_compiles_wit
     assert result.success is True
     assert result.expected_visual_count == 0
     assert result.successful_visual_count == 0
-    assert compiler_calls
+    assert native_calls
     assert not (tmp_path / "outputs" / "assets" / "prompts").exists()
     cover_html = (tmp_path / "outputs" / "slides" / "01-cover.html").read_text(encoding="utf-8")
     assert 'class="slide cover_hero professional_technical no_visual"' in cover_html
@@ -646,10 +688,10 @@ def test_deck_build_service_text_only_requires_explicit_request_and_compiles_wit
 def test_deck_build_service_text_only_accepts_delegated_task_brief(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs", user_request="")
     runtime.state["delegation_context"] = {"task": "Build a plain text-only deck with no images for the review."}
-    compiler_calls: list[dict] = []
+    native_calls: list[dict] = []
     service = DeckBuildService(
         image_batch_runner=lambda _manifest_path, _runtime: (_ for _ in ()).throw(AssertionError("no image batch")),
-        deck_compiler=_fake_compiler(compiler_calls),
+        native_service=_FakeNativeService(native_calls),
     )
     slides = _slides()
     for slide in slides:
@@ -664,7 +706,7 @@ def test_deck_build_service_text_only_accepts_delegated_task_brief(tmp_path: Pat
     )
 
     assert result.success is True
-    assert compiler_calls
+    assert native_calls
     assert not (tmp_path / "outputs" / "assets" / "prompts").exists()
 
 
@@ -689,6 +731,7 @@ def test_presentation_toolset_uses_prepare_deck_build_by_default(monkeypatch) ->
 
 def test_presentation_toolset_uses_legacy_only_when_explicitly_disabled(monkeypatch) -> None:
     monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "false")
+    monkeypatch.setenv("SOPHIA_DECK_LEGACY_SCREENSHOT_DEBUG", "true")
 
     tools = build_builder_tools_for_task_type("presentation", vision_enabled=False)
     names = [getattr(tool, "name", "") for tool in tools]
@@ -700,6 +743,29 @@ def test_presentation_toolset_uses_legacy_only_when_explicitly_disabled(monkeypa
     assert "prepare_deck_build" not in names
     assert "prepare_pptx_image_manifest" in names
     assert "build_deck_from_slides" in names
+
+
+def test_presentation_toolset_ignores_disabled_flag_without_debug(monkeypatch) -> None:
+    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "false")
+    monkeypatch.delenv("SOPHIA_DECK_LEGACY_SCREENSHOT_DEBUG", raising=False)
+
+    names = [getattr(tool, "name", "") for tool in build_builder_tools_for_task_type("presentation", vision_enabled=False)]
+
+    assert deck_build_service_enabled() is True
+    assert "prepare_deck_build" in names
+    assert "build_deck_from_slides" not in names
+
+
+def test_presentation_toolset_forces_deck_service_in_production(monkeypatch) -> None:
+    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "false")
+    monkeypatch.setenv("SOPHIA_DECK_LEGACY_SCREENSHOT_DEBUG", "true")
+    monkeypatch.setenv("RENDER", "true")
+
+    names = [getattr(tool, "name", "") for tool in build_builder_tools_for_task_type("presentation", vision_enabled=False)]
+
+    assert deck_build_service_enabled() is True
+    assert "prepare_deck_build" in names
+    assert "build_deck_from_slides" not in names
 
 
 def test_pdf_slide_deck_uses_legacy_route_even_when_deck_service_default_enabled(monkeypatch) -> None:

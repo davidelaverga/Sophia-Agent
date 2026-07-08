@@ -15,10 +15,18 @@ from deerflow.sophia.deck_build.tracing import (
     DEFAULT_ARTIFACT_TARGET_EXT,
     DEFAULT_DECK_COMPILE_MODE,
     DEFAULT_DECK_ROUTE,
+    NATIVE_DECK_COMPILE_MODE,
     base_metadata,
     deck_span,
     finish_span,
     stable_hash,
+)
+from deerflow.sophia.deck_native.models import (
+    NativeDeckInspectResult,
+    NativeDeckLintFixResult,
+    NativeDeckPatchResult,
+    NativeDeckPreflight,
+    NativeDeckRenderResult,
 )
 
 _OUTPUTS = "/mnt/user-data/outputs/"
@@ -99,6 +107,51 @@ def _fake_batch(manifest_path: str, runtime: SimpleNamespace) -> dict[str, Any]:
         "items": items,
         "error_class_histogram": {},
     }
+
+
+class _FakeNativeService:
+    def preflight(self) -> NativeDeckPreflight:
+        return NativeDeckPreflight(
+            success=True,
+            scripts_dir_exists=True,
+            deck_py_exists=True,
+            html2patch_py_exists=True,
+            errors=[],
+        )
+
+    def html_to_patch(self, *, html_paths: list[str], base_deck_path: str, output_patch_path: str) -> NativeDeckPatchResult:
+        Path(output_patch_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_patch_path).write_text('{"ops":[]}', encoding="utf-8")
+        return NativeDeckPatchResult(True, None, output_patch_path, 0, 0, [])
+
+    def apply_patch(self, *, base_deck_path: str, patch_path: str, output_path: str, fix: bool = True) -> NativeDeckPatchResult:
+        Path(output_path).parent.mkdir(parents=True, exist_ok=True)
+        Path(output_path).write_bytes(b"fake native pptx")
+        return NativeDeckPatchResult(True, output_path, patch_path, 0, 0, [])
+
+    def inspect(self, _pptx_path: str) -> NativeDeckInspectResult:
+        return NativeDeckInspectResult(
+            True,
+            slide_count=3,
+            shape_count=6,
+            native_text_shape_count=6,
+            picture_shape_count=0,
+            full_slide_picture_count=0,
+            native_editability_score=0.9,
+            shape_inventory_path=None,
+            raw_json_path=None,
+            errors=[],
+        )
+
+    def lint_fix(self, *, pptx_path: str, touched_slides: list[int] | None = None) -> NativeDeckLintFixResult:
+        return NativeDeckLintFixResult(True, 0, 0, 0, len(touched_slides or []), [], [])
+
+    def render(self, *, pptx_path: str, output_dir: str, slides: list[int] | None = None) -> NativeDeckRenderResult:
+        Path(output_dir).mkdir(parents=True, exist_ok=True)
+        return NativeDeckRenderResult(True, output_dir, len(slides or []), [])
+
+    def diff(self, *, before_path: str, after_path: str) -> dict[str, Any]:
+        return {"success": True, "changed": True, "errors": []}
 
 
 def test_base_metadata_uses_d0_contract_and_safe_identity(tmp_path: Path) -> None:
@@ -243,7 +296,7 @@ def test_deck_service_uses_manifest_span_for_prompt_hashes_not_prompt_write_span
     runtime = _runtime(tmp_path / "outputs")
     result = DeckBuildService(
         image_batch_runner=_fake_batch,
-        deck_compiler=_fake_compiler,
+        native_service=_FakeNativeService(),
     ).prepare_and_build(
         runtime=runtime,
         deck_title="Technical Deck",
@@ -253,11 +306,13 @@ def test_deck_service_uses_manifest_span_for_prompt_hashes_not_prompt_write_span
 
     assert result.success is True
     assert result.deck_route == DEFAULT_DECK_ROUTE
-    assert result.deck_compile_mode == DEFAULT_DECK_COMPILE_MODE
-    assert result.native_editability_score == 0.0
+    assert result.deck_compile_mode == NATIVE_DECK_COMPILE_MODE
+    assert result.native_editability_score == 0.9
+    assert result.native_text_shape_count == 6
+    assert result.full_slide_picture_count == 0
     build = json.loads((tmp_path / "outputs" / "deck_build" / "build.json").read_text(encoding="utf-8"))
     assert build["deck_route"] == DEFAULT_DECK_ROUTE
-    assert build["deck_compile_mode"] == DEFAULT_DECK_COMPILE_MODE
+    assert build["deck_compile_mode"] == NATIVE_DECK_COMPILE_MODE
     span_names = [span["name"] for span in spans]
     assert "deck.prompt_files.write" not in span_names
     manifest_output = next(span["outputs"] for span in spans if span["name"] == "deck.image_manifest.prepare")
