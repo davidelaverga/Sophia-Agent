@@ -50,8 +50,11 @@ class DeckNativeService:
 
     def inspect(self, pptx_path: str, *, slide: int | None = None) -> NativeDeckInspectResult:
         pptx = _path_arg(pptx_path, "pptx_path", suffix=".pptx", must_exist=True)
-        raw_json_path = _derived_path(pptx, f".slide-{slide}.inspect.json" if slide is not None else ".inspect.json")
-        inventory_path = _derived_path(pptx, f".slide-{slide}.shape-inventory.json" if slide is not None else ".shape-inventory.json")
+        raw_json_path = _support_sidecar_path(pptx, f".slide-{slide}.inspect.json" if slide is not None else ".inspect.json")
+        inventory_path = _support_sidecar_path(
+            pptx,
+            f".slide-{slide}.shape-inventory.json" if slide is not None else ".shape-inventory.json",
+        )
         command = [self._python, str(self._deck_cli), str(pptx), "inspect", "-o", str(raw_json_path)]
         if slide is not None:
             command.extend(["--slide", str(slide)])
@@ -313,8 +316,10 @@ def _path_arg(
     return path
 
 
-def _derived_path(pptx: Path, suffix: str) -> Path:
-    return pptx.with_name(f"{pptx.stem}{suffix}")
+def _support_sidecar_path(pptx: Path, suffix: str) -> Path:
+    support_dir = pptx.parent / ".builder" / "deck_native" / "inspect"
+    support_dir.mkdir(parents=True, exist_ok=True)
+    return support_dir / f"{pptx.stem}{suffix}"
 
 
 def _errors(completed: subprocess.CompletedProcess[str]) -> list[str]:

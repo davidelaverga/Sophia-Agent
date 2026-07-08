@@ -164,6 +164,12 @@ def test_deck_build_service_native_route_builds_editable_deck(tmp_path: Path) ->
     assert result.full_slide_picture_count == 0
     assert result.quality_warning is None
     assert (tmp_path / "outputs" / "native.pptx").is_file()
+    assert (tmp_path / "outputs" / ".builder" / "deck_native" / "base.pptx").is_file()
+    assert (tmp_path / "outputs" / ".builder" / "deck_native" / "deck.patch.json").is_file()
+    assert (tmp_path / "outputs" / ".builder" / "deck_native" / "rendered").is_dir()
+    assert not (tmp_path / "outputs" / "deck_native").exists()
+    assert not (tmp_path / "outputs" / "native.inspect.json").exists()
+    assert not (tmp_path / "outputs" / "native.shape-inventory.json").exists()
     build = json.loads((tmp_path / "outputs" / "deck_build" / "build.json").read_text(encoding="utf-8"))
     assert build["deck_compile_mode"] == NATIVE_DECK_COMPILE_MODE
     assert build["native_shape_inventory"]["slide:1"]["title"].startswith("s")

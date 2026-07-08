@@ -77,6 +77,10 @@ def test_deck_native_apply_inspect_render_and_diff(tmp_path: Path) -> None:
     assert inspected.native_text_shape_count > 0
     assert inspected.full_slide_picture_count == 0
     assert inspected.native_editability_score >= 0.60
+    assert Path(inspected.raw_json_path or "").parent == output.parent / ".builder" / "deck_native" / "inspect"
+    assert Path(inspected.shape_inventory_path or "").parent == output.parent / ".builder" / "deck_native" / "inspect"
+    assert not output.with_name("out.inspect.json").exists()
+    assert not output.with_name("out.shape-inventory.json").exists()
     assert rendered.success is True
     assert rendered.rendered_slide_count == 1
     assert diff["success"] is True
