@@ -360,7 +360,7 @@ def _is_builder_support_artifact_path(relative_path: str) -> bool:
     parts = [part for part in normalized.split("/") if part]
     if not parts:
         return False
-    if parts[0] in {"visuals", "assets", "slides", "sources", "source_artifact", ".builder"}:
+    if parts[0] in {"visuals", "assets", "slides", "sources", "source_artifact", "deck_build", ".builder"}:
         return True
     name = parts[-1].lower()
     return (
@@ -383,7 +383,7 @@ def _is_supabase_thread_list_support_artifact_path(relative_path: str) -> bool:
     parts = [part for part in normalized.split("/") if part]
     if not parts:
         return False
-    support_roots = {"visuals", "assets", "slides", "sources", "source_artifact", ".builder", "outputs"}
+    support_roots = {"visuals", "assets", "slides", "sources", "source_artifact", "deck_build", ".builder", "outputs"}
     if parts[-1].lower().endswith(".preview.pdf") and (len(parts) == 1 or parts[0] not in support_roots):
         return False
     return _is_builder_support_artifact_path(normalized)

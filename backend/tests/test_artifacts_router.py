@@ -419,21 +419,25 @@ def test_list_artifacts_returns_output_files_sorted_by_modified_time(tmp_path, m
     visuals_dir = outputs_dir / "visuals"
     assets_dir = outputs_dir / "assets"
     slides_dir = outputs_dir / "slides"
+    deck_build_dir = outputs_dir / "deck_build"
     nested_dir.mkdir(parents=True)
     visuals_dir.mkdir(parents=True)
     assets_dir.mkdir(parents=True)
     slides_dir.mkdir(parents=True)
+    deck_build_dir.mkdir(parents=True)
 
     older_file = outputs_dir / "first.md"
     newer_file = nested_dir / "second.txt"
     support_file = visuals_dir / "chart.png"
     asset_file = assets_dir / "slide-1.png"
     slide_source_file = slides_dir / "slide-1.html"
+    deck_build_state_file = deck_build_dir / "build.json"
     older_file.write_text("first", encoding="utf-8")
     newer_file.write_text("second", encoding="utf-8")
     support_file.write_bytes(b"png")
     asset_file.write_bytes(b"png")
     slide_source_file.write_text("<html></html>", encoding="utf-8")
+    deck_build_state_file.write_text('{"internal": true}', encoding="utf-8")
     os.utime(older_file, (1_700_000_000, 1_700_000_000))
     os.utime(newer_file, (1_700_000_100, 1_700_000_100))
 
@@ -454,6 +458,7 @@ def test_list_artifacts_returns_output_files_sorted_by_modified_time(tmp_path, m
     assert all("visuals/" not in item.path for item in response.artifacts)
     assert all("assets/" not in item.path for item in response.artifacts)
     assert all("slides/" not in item.path for item in response.artifacts)
+    assert all("deck_build/" not in item.path for item in response.artifacts)
 
 
 def test_list_artifacts_includes_supabase_objects_when_local_outputs_are_missing(tmp_path, monkeypatch) -> None:
@@ -530,6 +535,7 @@ def test_supabase_support_filter_keeps_root_preview_pdfs_discoverable() -> None:
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("assets/x.preview.pdf") is True
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("slides/x.preview.pdf") is True
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("sources/x.preview.pdf") is True
+    assert artifacts_router._is_supabase_thread_list_support_artifact_path("deck_build/build.json") is True
     assert artifacts_router._is_supabase_thread_list_support_artifact_path(".builder/x.preview.pdf") is True
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("source_artifact/x.preview.pdf") is True
 
