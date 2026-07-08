@@ -64,6 +64,28 @@ def test_terminal_task_update_preserves_url_only_deliverable():
     assert routes._should_persist_last_builder_artifact(payload) is True
 
 
+def test_terminal_task_update_preserves_builder_failure_diagnostics():
+    diagnostics = {
+        "schema": "builder_failure_diagnostics_v1",
+        "failure_code": "builder_completed_without_deliverable",
+        "failure_stage": "artifact_emit",
+        "supabase_mirror_result": "failed",
+    }
+    payload = {
+        "thread_id": "parent-thread",
+        "task_id": "builder-task",
+        "run_id": "run-1",
+        "status": "error",
+        "failure_code": "builder_completed_without_deliverable",
+        "builder_failure_diagnostics": diagnostics,
+    }
+
+    update = routes._terminal_async_task_update(payload)
+
+    assert update["builder_failure_diagnostics"] == diagnostics
+    assert update["builder_result"]["builder_failure_diagnostics"] == diagnostics
+
+
 @pytest.mark.anyio
 async def test_publish_fans_out_to_thread_subscribers():
     worker = BuilderEventsWorker()

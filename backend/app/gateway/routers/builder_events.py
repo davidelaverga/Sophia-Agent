@@ -94,6 +94,7 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "visuals_missing",
     "budget_stop_reason",
     "error_message",
+    "builder_failure_diagnostics",
     "trace_id",
 )
 _artifact_registry = ArtifactRegistry()
@@ -175,6 +176,7 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "summary",
         "user_next_action",
         "error_message",
+        "builder_failure_diagnostics",
         "completed_at",
         "source",
     )
