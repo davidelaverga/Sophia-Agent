@@ -7,7 +7,7 @@ from deerflow.sophia.deck_native.models import (
     NativeDeckPreflight,
     NativeDeckRenderResult,
 )
-from deerflow.sophia.deck_native.service import DeckNativeService
+from deerflow.sophia.deck_native.service import DeckNativeService, native_mechanical_report
 
 __all__ = [
     "DeckNativeService",
@@ -16,4 +16,5 @@ __all__ = [
     "NativeDeckPatchResult",
     "NativeDeckPreflight",
     "NativeDeckRenderResult",
+    "native_mechanical_report",
 ]

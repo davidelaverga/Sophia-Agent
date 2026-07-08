@@ -11,7 +11,7 @@ from deerflow.agents.sophia_agent.builder_tools import (
     assert_deck_tool_contract,
     build_builder_tools_for_task_type,
 )
-from deerflow.sophia.deck_build.models import DeckBuild
+from deerflow.sophia.deck_build.models import DeckBuild, DeckSlideSpec
 from deerflow.sophia.deck_build.service import DeckBuildFailure, DeckBuildService
 from deerflow.sophia.deck_build.tracing import (
     HTML_SCREENSHOT_FALLBACK_COMPILE_MODE,
@@ -127,6 +127,11 @@ class FailingNativeService(PatchWritingNativeService):
         return NativeDeckPatchResult(False, None, None, 0, 1, ["body is 1.00x1.00in but the slide is 20.00x11.25in"])
 
 
+class PatchValidationFailingNativeService(PatchWritingNativeService):
+    def apply_patch(self, **_kwargs: Any) -> NativeDeckPatchResult:
+        return NativeDeckPatchResult(False, None, "deck.patch.json", 3, 1, ["1 validation error: slide index out of range"])
+
+
 class MissingNativeService(PatchWritingNativeService):
     def preflight(self) -> NativeDeckPreflight:
         return NativeDeckPreflight(
@@ -179,6 +184,23 @@ def test_deck_build_service_native_failure_does_not_screenshot_fallback(tmp_path
     assert result.success is False
     assert result.failure_code == "deck_native_html2patch_failed"
     assert result.deck_compile_mode == NATIVE_DECK_COMPILE_MODE
+    assert result.pptx_path is None
+    assert not (tmp_path / "outputs" / "native.pptx").exists()
+
+
+def test_native_patch_validation_failure_is_specific(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+
+    result = DeckBuildService(native_service=PatchValidationFailingNativeService()).prepare_and_build(
+        runtime=runtime,
+        deck_title="Native Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}native.pptx",
+        visual_policy="text_only",
+    )
+
+    assert result.success is False
+    assert result.failure_code == "deck_native_patch_validation_failed"
     assert result.pptx_path is None
     assert not (tmp_path / "outputs" / "native.pptx").exists()
 
@@ -251,6 +273,48 @@ def test_screenshot_compile_mode_cannot_success(tmp_path: Path) -> None:
         DeckBuildService()._success_result(deck, f"{_OUTPUTS}deck_build/build.json", runtime)
 
     assert exc_info.value.code == "deck_screenshot_compile_forbidden"
+
+
+def test_screenshot_substrate_cannot_success(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    deck = DeckBuild(
+        build_id="deck-test",
+        schema_version="sophia-deck-build/v1",
+        user_id="user-1",
+        thread_id="builder-thread",
+        parent_thread_id="parent-thread",
+        run_id="run-1",
+        task_id="task-1",
+        requested_slide_count=1,
+        status="compiled",
+        register="professional_technical",
+        visual_policy="text_only",
+        style_profile={},
+        deck_title="Forbidden",
+        output_path=f"{_OUTPUTS}forbidden.pptx",
+        slides=[
+            DeckSlideSpec(
+                selector="slide:1",
+                index=1,
+                role="cover",
+                layout_kind="cover_hero",
+                title="Screenshot",
+                narrative="Screenshot-only substrate.",
+            )
+        ],
+        expected_visual_count=0,
+        deck_compile_mode=NATIVE_DECK_COMPILE_MODE,
+        native_editability_score=0.9,
+        native_text_shape_count=0,
+        picture_shape_count=1,
+        full_slide_picture_count=1,
+        pptx_path=f"{_OUTPUTS}forbidden.pptx",
+    )
+
+    with pytest.raises(DeckBuildFailure) as exc_info:
+        DeckBuildService()._success_result(deck, f"{_OUTPUTS}deck_build/build.json", runtime)
+
+    assert exc_info.value.code == "deck_screenshot_substrate_forbidden"
 
 
 def test_prepare_deck_build_remains_only_model_facing_fresh_deck_tool(monkeypatch) -> None:

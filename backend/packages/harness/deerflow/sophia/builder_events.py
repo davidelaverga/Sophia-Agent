@@ -805,6 +805,7 @@ def _artifact_completion_fields(
         "native_text_shape_count": artifact.get("native_text_shape_count"),
         "picture_shape_count": artifact.get("picture_shape_count"),
         "full_slide_picture_count": artifact.get("full_slide_picture_count"),
+        "native_mechanical_report": artifact.get("native_mechanical_report"),
         "deck_quality_status": artifact.get("deck_quality_status"),
         "failure_code": artifact.get("failure_code"),
         "deck_failure_code": artifact.get("deck_failure_code") or artifact.get("failure_code"),

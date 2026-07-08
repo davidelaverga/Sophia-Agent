@@ -10,7 +10,7 @@ from PIL import Image
 from pptx import Presentation
 from pptx.util import Inches
 
-from deerflow.sophia.deck_native import DeckNativeService
+from deerflow.sophia.deck_native import DeckNativeService, native_mechanical_report
 
 
 def test_deck_native_preflight_reports_missing_scripts(tmp_path: Path) -> None:
@@ -128,6 +128,70 @@ def test_deck_native_lint_fix_reports_residue(tmp_path: Path) -> None:
     assert fixed.success is True
     assert fixed.residue_count == 1
     assert fixed.residue[0]["shape"].startswith("s")
+    assert fixed.residue_kinds
+
+
+def test_deck_native_inspect_marks_full_slide_picture_inventory(tmp_path: Path) -> None:
+    base = tmp_path / "base.pptx"
+    patch = tmp_path / "full-slide-picture.patch.json"
+    output = tmp_path / "full-slide-picture.pptx"
+    image = tmp_path / "background.png"
+    _wide_base_deck(base)
+    Image.new("RGB", (1920, 1080), "blue").save(image)
+    patch.write_text(
+        json.dumps(
+            {
+                "ops": [
+                    {"op": "add-slide", "layout": "Blank"},
+                    {"op": "add-picture", "slide": 0, "image": str(image), "at": [0, 0], "size": [20, 11.25]},
+                ]
+            }
+        ),
+        encoding="utf-8",
+    )
+    service = DeckNativeService()
+
+    applied = service.apply_patch(base_deck_path=str(base), patch_path=str(patch), output_path=str(output), fix=False)
+    inspected = service.inspect(str(output))
+
+    assert applied.success is True
+    assert inspected.success is True
+    assert inspected.full_slide_picture_count == 1
+    inventory = json.loads(Path(inspected.shape_inventory_path or "").read_text(encoding="utf-8"))
+    slide = inventory["slides"]["slide:1"]
+    assert slide["full_slide_picture_count"] == 1
+    assert slide["shapes"][0]["full_slide"] is True
+
+
+def test_native_mechanical_report_is_compact() -> None:
+    from deerflow.sophia.deck_native.models import (
+        NativeDeckInspectResult,
+        NativeDeckLintFixResult,
+        NativeDeckRenderResult,
+    )
+
+    report = native_mechanical_report(
+        inspect=NativeDeckInspectResult(True, 2, 5, 4, 1, 1, 0.9, "inventory.json", "raw.json", []),
+        lint_fix=NativeDeckLintFixResult(True, 1, 1, 0, 2, [], []),
+        render=NativeDeckRenderResult(True, "rendered", 2, []),
+        diff={"success": True, "changed": True, "diff_text": "x" * 2000},
+    )
+
+    assert report == {
+        "inspect_success": True,
+        "native_editability_score": 0.9,
+        "native_text_shape_count": 4,
+        "picture_shape_count": 1,
+        "full_slide_picture_count": 1,
+        "lint_fix_success": True,
+        "lint_issue_count_before": 1,
+        "lint_fix_applied_count": 1,
+        "lint_residue_count": 0,
+        "render_success": True,
+        "rendered_slide_count": 2,
+        "diff_success": True,
+        "diff_changed": True,
+    }
 
 
 def test_deck_native_html_to_patch_compiles_when_playwright_available(tmp_path: Path) -> None:

@@ -87,6 +87,7 @@ class DeckBuild:
     picture_shape_count: int = 0
     full_slide_picture_count: int = 0
     native_shape_inventory: dict[str, Any] = field(default_factory=dict)
+    native_mechanical_report: dict[str, Any] = field(default_factory=dict)
     successful_visual_count: int = 0
     referenced_visual_count: int = 0
     missing_visual_count: int = 0
@@ -176,6 +177,8 @@ class DeckBuildResult:
     serial_repair_count: int = 0
     batch_timeout_count: int = 0
     partial_batch_salvaged: bool = False
+    native_mechanical_report: dict[str, Any] = field(default_factory=dict)
+    repair_instruction: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

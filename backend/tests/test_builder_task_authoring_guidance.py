@@ -265,6 +265,7 @@ class TestBuilderWorkflowCards:
 
         assert "Decks are built by prepare_deck_build" in briefing
         assert "For fresh decks, call prepare_deck_build once" in briefing
+        assert "one repair retry when retryable=true" in briefing
         assert "Do NOT call prepare_pptx_image_manifest" in briefing
 
     def test_pptx_slide_target_clamps_to_supported_limit(self) -> None:

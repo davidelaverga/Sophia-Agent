@@ -31,6 +31,10 @@ from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
 
+from deerflow.agents.sophia_agent.builder_tools import (
+    deck_build_service_flag_value,
+    deck_route_for_task,
+)
 from deerflow.agents.sophia_agent.middlewares.builder_budget import (
     USER_BUDGET_TIMEOUT_MESSAGE,
     budget_allows_iteration,
@@ -42,10 +46,6 @@ from deerflow.agents.sophia_agent.middlewares.builder_budget import (
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
     BuilderTaskMiddleware,
     _image_generation_enabled,
-)
-from deerflow.agents.sophia_agent.builder_tools import (
-    deck_build_service_flag_value,
-    deck_route_for_task,
 )
 from deerflow.agents.sophia_agent.middlewares.slide_quality import (
     SlideQualityInspector,
@@ -76,6 +76,7 @@ from deerflow.sophia.builder_provider_fallback import (
     normalize_tool_choice_for_model,
 )
 from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
+from deerflow.sophia.deck_build.ir_repair import deck_ir_repair_instruction_from_failure
 from deerflow.sophia.observability import annotate_builder_completion
 from deerflow.sophia.pptx_preview import maybe_render_pptx_preview
 from deerflow.sophia.storage import supabase_artifact_store
@@ -2213,17 +2214,38 @@ def _trace_pptx_terminal_outcome(
     if not _requested_pptx_artifact(state):
         return
     visual_counts = _pptx_visual_completeness_counts(state)
+    for key in (
+        "expected_generated_visual_count",
+        "successful_generated_visual_count",
+        "referenced_visual_count",
+        "missing_expected_visual_count",
+    ):
+        value = artifact.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            visual_counts[key] = value
     image_status, image_reason = _image_generation_metadata_from_state(state)
+    artifact_image_status = artifact.get("image_generation_status")
+    artifact_image_reason = artifact.get("image_generation_reason")
+    if isinstance(artifact_image_status, str) and artifact_image_status:
+        image_status = artifact_image_status
+    if isinstance(artifact_image_reason, str) and artifact_image_reason:
+        image_reason = artifact_image_reason
     _safe_langsmith_span(
         "Sophia PPTX Terminal Outcome",
         inputs={
-            "presentation_route": "html_slide_to_pptx_raster",
+            "presentation_route": artifact.get("presentation_route") or artifact.get("deck_route") or "html_slide_to_pptx_raster",
             "target_slide_count": _pptx_latch_target_slide_count(state),
         },
         outputs={
             "status": status,
             "artifact_path_present": bool(artifact.get("artifact_path")),
             "failure_code": failure_code,
+            "deck_route": artifact.get("deck_route"),
+            "deck_compile_mode": artifact.get("deck_compile_mode"),
+            "native_editability_score": artifact.get("native_editability_score"),
+            "native_text_shape_count": artifact.get("native_text_shape_count"),
+            "picture_shape_count": artifact.get("picture_shape_count"),
+            "full_slide_picture_count": artifact.get("full_slide_picture_count"),
             "image_generation_status": image_status,
             "image_generation_reason": image_reason,
             "quality_warning": artifact.get("quality_warning"),
@@ -3428,6 +3450,7 @@ def _apply_image_generation_metadata(artifact: dict[str, Any], state: dict[str, 
         "native_text_shape_count",
         "picture_shape_count",
         "full_slide_picture_count",
+        "native_mechanical_report",
         "deck_build_id",
         "deck_schema_version",
         "deck_status",
@@ -6188,11 +6211,13 @@ def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
         return (
             "[Sophia/deck build latch]\n"
             "This is a fresh PPTX deck build. Stop authoring lower-level deck files or compiler "
-            "commands. Call `prepare_deck_build` exactly once with the complete slide intent list "
+            "commands. Call `prepare_deck_build` with the complete slide intent list "
             f"and output_path='{target}'. DeckBuildService owns generated assets, native PowerPoint "
             "compilation, inspection, validation, and terminal failure. It will return either the "
-            "deliverable path or a terminal failure. If it succeeds, emit the returned PPTX; if it "
-            "fails, emit artifact_path=null with the returned failure code and summary."
+            "deliverable path or a terminal failure. Keep every narrative <= 280 characters. If it "
+            "returns retryable=true, repair the exact Deck IR field and call prepare_deck_build one "
+            "more time. If it succeeds, emit the returned PPTX; if it fails terminally, emit "
+            "artifact_path=null with the returned failure code and summary."
         )
     target_count = _pptx_latch_target_slide_count(state)
     slide_html_count = _pptx_slide_html_count(state)
@@ -6363,6 +6388,8 @@ class BuilderArtifactState(AgentState):
     builder_pptx_slide_count_repair_requested: NotRequired[dict[str, int]]
     builder_pptx_compile_latch_pending: NotRequired[bool]
     builder_pptx_compile_repair_pending: NotRequired[bool]
+    builder_deck_ir_repair_attempt_count: NotRequired[int]
+    builder_last_deck_ir_failure: NotRequired[dict | None]
     builder_pptx_route_trace_emitted: NotRequired[bool]
     builder_visual_design_correction_emitted: NotRequired[bool]
     builder_visual_asset_correction_emitted: NotRequired[bool]
@@ -11074,10 +11101,89 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     delta["time_to_first_valid_artifact_ms"] = elapsed
         if payload.get("quality_warning"):
             delta["pptx_deck_quality_warning"] = payload.get("quality_warning")
+        native_mechanical = payload.get("native_mechanical_report")
+        if isinstance(native_mechanical, dict):
+            delta["native_mechanical_report"] = native_mechanical
         deck_build_path = payload.get("deck_build_path")
         if isinstance(deck_build_path, str) and deck_build_path.strip():
             delta["deck_build_path"] = deck_build_path
         return delta
+
+    @staticmethod
+    def _prepare_deck_build_ir_retry_command(
+        request: ToolCallRequest,
+        result: ToolMessage,
+        payload: dict[str, Any],
+        delta: dict[str, Any],
+    ) -> Command | None:
+        failure_code = str(payload.get("failure_code") or delta.get("deck_failure_code") or "")
+        retryable = bool(payload.get("retryable"))
+        if failure_code != "invalid_deck_ir" or not retryable:
+            return None
+        state = request.state or {}
+        attempt_count = int(state.get("builder_deck_ir_repair_attempt_count", 0) or 0)
+        instruction = deck_ir_repair_instruction_from_failure(
+            failure_code=failure_code,
+            failure_summary=str(payload.get("failure_summary") or ""),
+            retryable=retryable,
+            attempt_count=attempt_count,
+        )
+        _safe_langsmith_span(
+            "deck.ir.repair_instruction",
+            inputs={
+                "failure_code": failure_code,
+                "retryable": retryable,
+                "attempt_count": attempt_count,
+            },
+            outputs={
+                "should_retry": instruction.should_retry,
+                "max_retry_count": instruction.max_retry_count,
+                "field": (
+                    instruction.validation_error.field
+                    if instruction.validation_error is not None
+                    else None
+                ),
+                "slide_index": (
+                    instruction.validation_error.slide_index
+                    if instruction.validation_error is not None
+                    else None
+                ),
+            },
+            metadata={"sophia_component": "deck_ir_repair"},
+            tags=["pptx", "deck_ir", "repair"],
+        )
+        if not instruction.should_retry:
+            return None
+        message = instruction.repair_message
+        repair_payload = payload.get("repair_instruction")
+        if isinstance(repair_payload, dict) and isinstance(repair_payload.get("repair_message"), str):
+            message = repair_payload["repair_message"]
+        _safe_langsmith_span(
+            "deck.ir.retry",
+            inputs={"failure_code": failure_code, "attempt_count": attempt_count},
+            outputs={"next_attempt_count": attempt_count + 1},
+            metadata={"sophia_component": "deck_ir_repair"},
+            tags=["pptx", "deck_ir", "retry"],
+        )
+        return Command(
+            update={
+                "messages": [
+                    result,
+                    HumanMessage(content=f"[Sophia/PPTX Deck IR repair]\n{message}"),
+                ],
+                "builder_pptx_diagnostics": delta,
+                "builder_deck_ir_repair_attempt_count": attempt_count + 1,
+                "builder_last_deck_ir_failure": {
+                    "failure_code": failure_code,
+                    "failure_summary": payload.get("failure_summary"),
+                    "retryable": retryable,
+                    "attempt_count": attempt_count,
+                },
+                "builder_pptx_compile_latch_pending": False,
+                "builder_pptx_compile_repair_pending": False,
+            },
+            goto="model",
+        )
 
     def _prepare_deck_build_result_command(
         self,
@@ -11091,6 +11197,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if delta is None or payload is None:
             return result
         if delta.get("deck_status") == "failed_terminal":
+            retry_command = self._prepare_deck_build_ir_retry_command(request, result, payload, delta)
+            if retry_command is not None:
+                return retry_command
             fallback = self._prepare_deck_build_failure_fallback(request, payload, delta)
             return Command(
                 update={
@@ -11147,6 +11256,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "native_text_shape_count": delta.get("native_text_shape_count"),
             "picture_shape_count": delta.get("picture_shape_count"),
             "full_slide_picture_count": delta.get("full_slide_picture_count"),
+            "native_mechanical_report": delta.get("native_mechanical_report"),
             "deck_quality_status": payload.get("quality_status") or "failed",
             "quality_warning": payload.get("quality_warning"),
             "image_generation_status": delta.get("image_generation_status"),

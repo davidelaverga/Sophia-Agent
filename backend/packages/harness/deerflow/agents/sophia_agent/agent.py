@@ -168,10 +168,12 @@ def _build_async_subagent_middleware() -> AsyncSubAgentMiddleware:
     etc.), the wrapper returns a directive ToolMessage redirecting to
     ``start_builder_task`` rather than letting deepagents create a new run
     on a just-finished thread (which would loop on dangling tool calls).
-    ``list_async_tasks`` is also wrapped to normalize stale async task records
-    before delegating to the native deepagents formatter.
+    ``check_async_task`` and ``list_async_tasks`` are also wrapped to
+    normalize stale async task records before delegating to the native
+    deepagents formatter.
     """
     from deerflow.sophia.tools.update_async_task_wrapper import (
+        make_check_async_task_wrapper,
         make_list_async_tasks_wrapper,
         make_update_async_task_wrapper,
     )
@@ -197,14 +199,19 @@ def _build_async_subagent_middleware() -> AsyncSubAgentMiddleware:
     native_update = next(
         (t for t in middleware.tools if t.name == "update_async_task"), None
     )
+    native_check = next(
+        (t for t in middleware.tools if t.name == "check_async_task"), None
+    )
     native_list = next(
         (t for t in middleware.tools if t.name == "list_async_tasks"), None
     )
     middleware.tools = [
         t
         for t in middleware.tools
-        if t.name not in ("start_async_task", "update_async_task", "list_async_tasks")
+        if t.name not in ("start_async_task", "check_async_task", "update_async_task", "list_async_tasks")
     ]
+    if native_check is not None:
+        middleware.tools.append(make_check_async_task_wrapper(native_check))
     if native_update is not None:
         middleware.tools.append(make_update_async_task_wrapper(native_update))
     if native_list is not None:

@@ -130,6 +130,8 @@ def test_deck_native_spans_are_aggregated_and_mark_native_compile_mode(tmp_path:
         "deck.native.lint_fix",
         "deck.native.render",
         "deck.native.diff",
+        "deck.native.mechanical_report",
+        "deck.native.substrate_classify",
     ]
     requirement_span = next(span for span in native_spans if span["name"] == "deck.native.requirement")
     assert requirement_span["kwargs"]["deck_compile_mode"] == DEFAULT_DECK_COMPILE_MODE
@@ -139,4 +141,8 @@ def test_deck_native_spans_are_aggregated_and_mark_native_compile_mode(tmp_path:
     assert all(span["kwargs"]["deck_compile_mode"] == NATIVE_DECK_COMPILE_MODE for span in compile_spans)
     inspect_output = next(span["outputs"] for span in native_spans if span["name"] == "deck.native.inspect")
     assert inspect_output["native_editability_score"] == 0.9
+    report_output = next(span["outputs"] for span in native_spans if span["name"] == "deck.native.mechanical_report")
+    assert report_output["inspect_success"] is True
+    substrate_output = next(span["outputs"] for span in native_spans if span["name"] == "deck.native.substrate_classify")
+    assert substrate_output["passed"] is True
     assert "deck.prompt_files.write" not in [span["name"] for span in spans]

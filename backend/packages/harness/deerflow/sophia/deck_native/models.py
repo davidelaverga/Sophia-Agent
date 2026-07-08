@@ -66,6 +66,8 @@ class NativeDeckLintFixResult:
     touched_slide_count: int
     residue: list[dict[str, Any]] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    issue_kinds: dict[str, int] = field(default_factory=dict)
+    residue_kinds: dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

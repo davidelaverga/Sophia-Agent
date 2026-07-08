@@ -13,6 +13,7 @@ from deerflow.agents.sophia_agent.builder_tools import (
     build_builder_tools_for_task_type,
     deck_build_service_enabled,
 )
+from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 from deerflow.sandbox.tools import replace_virtual_path
 from deerflow.sophia.deck_build import service as deck_service
@@ -270,7 +271,7 @@ def test_deck_build_service_nested_output_path_evaluates_against_outputs_root(tm
     assert (tmp_path / "outputs" / "decks" / "foo.pptx").is_file()
 
 
-def test_deck_build_service_full_slide_picture_fails_native_success_gate(tmp_path: Path) -> None:
+def test_deck_build_service_full_slide_picture_in_native_deck_warns(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     service = DeckBuildService(
         image_batch_runner=_fake_batch(runtime),
@@ -284,9 +285,9 @@ def test_deck_build_service_full_slide_picture_fails_native_success_gate(tmp_pat
         output_path=f"{_OUTPUTS}deck.pptx",
     )
 
-    assert result.success is False
-    assert result.failure_code == "deck_native_full_slide_picture_forbidden"
-    assert "full-slide screenshot" in (result.failure_summary or "")
+    assert result.success is True
+    assert result.full_slide_picture_count == 1
+    assert result.quality_warning == "native_full_bleed_picture_present"
 
 
 def test_deck_build_service_invalid_required_visual_prompt_fails_before_batch(tmp_path: Path) -> None:
@@ -840,6 +841,121 @@ def test_prepare_deck_build_failure_is_terminal_command(tmp_path: Path, monkeypa
     diagnostics = command.update["builder_pptx_diagnostics"]
     assert diagnostics["deck_build_id"] == "deck-1"
     assert diagnostics["missing_expected_visual_count"] == 3
+
+
+def test_prepare_deck_build_retryable_ir_failure_returns_to_model(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "true")
+    runtime = _runtime(tmp_path / "outputs")
+    request = SimpleNamespace(
+        tool_call={"id": "tc-deck", "name": "prepare_deck_build", "args": {}},
+        state=runtime.state,
+        runtime=runtime,
+    )
+    payload = {
+        "success": False,
+        "build_id": "deck-1",
+        "deck_build_path": f"{_OUTPUTS}deck_build/build.json",
+        "failure_code": "invalid_deck_ir",
+        "failure_summary": "Slide 2 narrative is required and must be <= 280 chars.",
+        "retryable": True,
+        "slide_count": 0,
+        "expected_visual_count": 0,
+        "successful_visual_count": 0,
+        "referenced_visual_count": 0,
+        "missing_visual_count": 0,
+        "quality_status": "failed",
+    }
+    result = ToolMessage(content=json.dumps(payload), tool_call_id="tc-deck", name="prepare_deck_build")
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_result_command(request, result)
+
+    assert isinstance(command, Command)
+    assert command.goto == "model"
+    assert command.update["builder_deck_ir_repair_attempt_count"] == 1
+    assert command.update["builder_last_deck_ir_failure"]["failure_code"] == "invalid_deck_ir"
+    assert "prepare_deck_build exactly once more" in command.update["messages"][1].content
+
+
+def test_prepare_deck_build_retryable_ir_second_failure_is_terminal(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "true")
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state["builder_deck_ir_repair_attempt_count"] = 1
+    request = SimpleNamespace(
+        tool_call={"id": "tc-deck", "name": "prepare_deck_build", "args": {}},
+        state=runtime.state,
+        runtime=runtime,
+    )
+    payload = {
+        "success": False,
+        "build_id": "deck-1",
+        "deck_build_path": f"{_OUTPUTS}deck_build/build.json",
+        "failure_code": "invalid_deck_ir",
+        "failure_summary": "Slide 2 narrative is required and must be <= 280 chars.",
+        "retryable": True,
+        "slide_count": 0,
+        "expected_visual_count": 0,
+        "successful_visual_count": 0,
+        "referenced_visual_count": 0,
+        "missing_visual_count": 0,
+        "quality_status": "failed",
+    }
+    result = ToolMessage(content=json.dumps(payload), tool_call_id="tc-deck", name="prepare_deck_build")
+    monkeypatch.setattr(BuilderArtifactMiddleware, "_upload_fallback_and_fire", lambda *args, **kwargs: None)
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_result_command(request, result)
+
+    assert isinstance(command, Command)
+    assert command.goto == "end"
+    assert command.update["builder_result"]["failure_code"] == "invalid_deck_ir"
+
+
+def test_pptx_terminal_outcome_prefers_deck_failure_payload_counts(monkeypatch) -> None:
+    captured: dict[str, dict] = {}
+
+    def capture_span(name: str, **kwargs):
+        captured["name"] = name
+        captured.update(kwargs)
+
+    monkeypatch.setattr(builder_artifact_module, "_safe_langsmith_span", capture_span)
+    state = {
+        "builder_artifact_target_path": f"{_OUTPUTS}deck.pptx",
+        "builder_pptx_requested_slide_count": 6,
+        "builder_pptx_diagnostics": {
+            "expected_generated_visual_count": 6,
+            "successful_generated_visual_count": 0,
+            "referenced_visual_count": 0,
+            "missing_expected_visual_count": 6,
+            "image_generation_status": "failed",
+        },
+    }
+    artifact = {
+        "artifact_path": None,
+        "deck_route": "deck_ir_html_raster",
+        "deck_compile_mode": "native_html2patch",
+        "native_editability_score": 1.0,
+        "native_text_shape_count": 12,
+        "picture_shape_count": 6,
+        "full_slide_picture_count": 1,
+        "image_generation_status": "partial",
+        "successful_generated_visual_count": 6,
+        "referenced_visual_count": 6,
+        "missing_expected_visual_count": 0,
+        "quality_warning": "native_full_bleed_picture_present",
+    }
+
+    builder_artifact_module._trace_pptx_terminal_outcome(
+        state=state,
+        artifact=artifact,
+        status="error",
+        failure_code="deck_native_full_slide_picture_forbidden",
+    )
+
+    outputs = captured["outputs"]
+    assert outputs["image_generation_status"] == "partial"
+    assert outputs["successful_generated_visual_count"] == 6
+    assert outputs["referenced_visual_count"] == 6
+    assert outputs["missing_expected_visual_count"] == 0
+    assert outputs["native_editability_score"] == 1.0
 
 
 def test_prepare_deck_build_missing_success_output_is_terminal_command(tmp_path: Path, monkeypatch) -> None:

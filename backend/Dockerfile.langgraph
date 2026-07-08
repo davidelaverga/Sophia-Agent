@@ -50,7 +50,7 @@ RUN cd /app/backend \
     && test -f ../third_party/hands_on_deck/skills/hands-on-deck/scripts/deck.py \
     && uv run python ../third_party/hands_on_deck/skills/hands-on-deck/scripts/deck.py --help >/dev/null \
     && uv run python ../third_party/hands_on_deck/skills/hands-on-deck/scripts/html2patch.py --help >/dev/null \
-    && uv run python -c "from playwright.sync_api import sync_playwright; sync_playwright().start().stop()"
+    && uv run python -c "import lxml; from playwright.sync_api import sync_playwright; sync_playwright().start().stop()"
 
 # Diagrams moved to graphviz (the `dot` binary, installed above) — the
 # Node compile_diagram.mjs + its excalidraw/mermaid-to-excalidraw/jsdom/

@@ -2,7 +2,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
 SURFACES = [
     PROJECT_ROOT / "skills" / "public" / "ppt-generation" / "SKILL.md",
@@ -36,8 +35,11 @@ def test_fresh_deck_prompt_surfaces_route_to_prepare_deck_build() -> None:
     assert "slide intent" in text
     assert "visual_policy" in text
     assert "layout_kind" in text
+    assert "<= 280" in text
+    assert "retryable=true" in text
     assert "artifact_path=null" in text
     assert "screenshot-backed pptx is a failed build" in lower_text
+    assert "picture is never itself the whole slide" in lower_text or "not itself a complete slide" in lower_text
 
 
 def test_ppt_skill_allows_legacy_route_only_when_prepare_deck_build_absent() -> None:
@@ -64,6 +66,7 @@ def test_fresh_deck_prompt_surfaces_do_not_teach_old_workflow() -> None:
         "screenshot fallback",
         "screenshot-backed pptx fallback",
         "write one prompt json file per slide",
+        "one generated image per slide",
     ]
     for phrase in forbidden:
         assert phrase not in text

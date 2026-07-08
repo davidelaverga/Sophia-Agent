@@ -201,6 +201,20 @@ def _normalize_runtime_async_tasks_for_list(runtime: ToolRuntime | None) -> None
     )
 
 
+def _normalize_runtime_async_tasks_for_check(runtime: ToolRuntime | None) -> None:
+    state = getattr(runtime, "state", None) if runtime is not None else None
+    if not isinstance(state, dict):
+        return
+    normalized_tasks, changed_count = _normalize_async_tasks_for_list(state.get("async_tasks"))
+    if normalized_tasks is None or changed_count == 0:
+        return
+    state["async_tasks"] = normalized_tasks
+    logger.info(
+        "[Builder] check_async_task normalized stale task records: count=%s",
+        changed_count,
+    )
+
+
 def _update_task_command(
     tracked: dict[str, Any],
     run_id: str,
@@ -285,6 +299,56 @@ def make_list_async_tasks_wrapper(native_tool: StructuredTool) -> StructuredTool
         name=native_tool.name,
         func=list_async_tasks,
         coroutine=alist_async_tasks,
+        description=native_tool.description,
+        infer_schema=False,
+        args_schema=native_tool.args_schema,
+    )
+
+
+def make_check_async_task_wrapper(native_tool: StructuredTool) -> StructuredTool:
+    """Build a stale-state-tolerant wrapper around native ``check_async_task``."""
+    if native_tool is None:
+        raise ValueError(
+            "make_check_async_task_wrapper requires the native "
+            "check_async_task StructuredTool — pass the instance from "
+            "AsyncSubAgentMiddleware.tools before filtering it out."
+        )
+    if native_tool.name != "check_async_task":
+        raise ValueError(
+            f"Expected native tool named 'check_async_task', got "
+            f"{native_tool.name!r}."
+        )
+
+    native_func = native_tool.func
+    native_coroutine = native_tool.coroutine
+
+    def check_async_task(
+        task_id: str,
+        runtime: ToolRuntime,
+    ):
+        if native_func is None:
+            raise ToolException(
+                "Native check_async_task sync func is unavailable; call this "
+                "tool from the async path or upgrade deepagents."
+            )
+        _normalize_runtime_async_tasks_for_check(runtime)
+        return native_func(task_id=task_id, runtime=runtime)
+
+    async def acheck_async_task(
+        task_id: str,
+        runtime: ToolRuntime,
+    ):
+        if native_coroutine is None:
+            raise ToolException(
+                "Native check_async_task coroutine is unavailable."
+            )
+        _normalize_runtime_async_tasks_for_check(runtime)
+        return await native_coroutine(task_id=task_id, runtime=runtime)
+
+    return StructuredTool.from_function(
+        name=native_tool.name,
+        func=check_async_task,
+        coroutine=acheck_async_task,
         description=native_tool.description,
         infer_schema=False,
         args_schema=native_tool.args_schema,

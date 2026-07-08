@@ -39,6 +39,9 @@ medium. Do not mix workflows just because another tool is available.
   `html, body` and on the slide wrapper. A white band/gutter at any edge is a
   defect (the render fills uncovered regions with the deck background, not white).
 - Generated slide images, when used, are visual-area assets only; title and narrative remain real deck text.
+- A full-bleed generated picture may be used as an asset/background inside a
+  native deck, but a full-slide picture with no native title/body text is a
+  failed screenshot substrate.
 - Normal decks do not compile when required generated visuals are unavailable.
 - Keep visible slide text sparse and explicit.
 - Add concise speaker notes for narrative context, but never rely on notes as

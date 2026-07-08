@@ -33,7 +33,8 @@ This file is for the Sophia builder only.
 
 - Fresh presentations are built through `prepare_deck_build`. Provide complete
   slide intent: title, narrative, role, layout_kind, visual_prompt, and
-  speaker_notes. DeckBuildService owns generated assets, native PowerPoint
+  speaker_notes. Keep every narrative concise and <= 280 characters.
+  DeckBuildService owns generated assets, native PowerPoint
   compilation, inspection, validation, and terminal failure.
 - Do not call `prepare_pptx_image_manifest`, `image-generation/scripts/generate.py`,
   or `build_deck_from_slides` directly for a fresh deck. Do not hand-write
@@ -42,13 +43,17 @@ This file is for the Sophia builder only.
   `prepare_deck_build` returns a native deck failure, stop and emit
   `artifact_path=null` with the returned failure code and summary.
 - Normal decks may use generated visual-only assets as DeckBuildService decides.
-  Only explicit text-only/no-visual deck requests may omit images.
+  A full-bleed picture may be an asset/background inside a native deck with
+  native text, but it is not itself a complete slide. Only explicit
+  text-only/no-visual deck requests may omit images.
 - Do not bake slide title, bottom narrative, footers, formulas, axis labels,
   paragraph text, or page chrome into generated images. Titles and narratives
   remain real slide text in the harness-rendered template.
 - If `prepare_deck_build` returns success, emit the returned `.pptx`. If it
-  returns failure, emit `artifact_path=null` with the returned failure code and
-  summary. Do not loop on the same failing action or try a legacy screenshot deck.
+  returns `retryable=true`, repair the exact Deck IR field and retry
+  `prepare_deck_build` once. If it returns terminal failure, emit
+  `artifact_path=null` with the returned failure code and summary. Do not loop
+  on the same failing action or try a legacy screenshot deck.
 
 ## PDF Report Rules
 
@@ -79,5 +84,5 @@ This file is for the Sophia builder only.
   `artifact_path=null` and a clear explanation.
 - Never silently present a source file, preview, or wrong extension as success.
 - A `prepare_deck_build` terminal failure is authoritative. Do not retry
-  manually through lower-level tools unless the failure says it is retryable and
-  asks for corrected slide intent.
+  manually through lower-level tools. Retry `prepare_deck_build` only once when
+  the failure says it is retryable and asks for corrected slide intent.

@@ -7,6 +7,7 @@ from typing import Any
 
 from langchain.tools import ToolRuntime, tool
 
+from deerflow.sophia.deck_build.ir_repair import deck_ir_repair_instruction_from_failure
 from deerflow.sophia.deck_build.service import DeckBuildService
 
 
@@ -41,4 +42,16 @@ def prepare_deck_build(
         visual_policy=visual_policy,
         style_profile=style_profile,
     )
-    return json.dumps(result.to_dict())
+    payload = result.to_dict()
+    if payload.get("repair_instruction") is None:
+        payload.pop("repair_instruction", None)
+    if result.success is False and result.retryable:
+        instruction = deck_ir_repair_instruction_from_failure(
+            failure_code=result.failure_code or "",
+            failure_summary=result.failure_summary or "",
+            retryable=result.retryable,
+            attempt_count=0,
+        )
+        if instruction.should_retry:
+            payload["repair_instruction"] = instruction.to_dict()
+    return json.dumps(payload)

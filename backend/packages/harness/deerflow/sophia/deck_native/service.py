@@ -218,14 +218,17 @@ class DeckNativeService:
         fixed = payload.get("fixed") if isinstance(payload.get("fixed"), list) else []
         residue = payload.get("residue") if isinstance(payload.get("residue"), list) else []
         remaining = payload.get("remaining_issue_shapes") if isinstance(payload.get("remaining_issue_shapes"), list) else []
+        residue_items = [item for item in residue if isinstance(item, dict)]
         return NativeDeckLintFixResult(
             success=True,
             lint_issue_count_before=len(fixed) + len(residue) + len(remaining),
             fix_applied_count=len(fixed),
             residue_count=len(residue),
             touched_slide_count=len(touched),
-            residue=[item for item in residue if isinstance(item, dict)],
+            residue=residue_items,
             errors=[],
+            issue_kinds=_kind_counts(fixed, "action"),
+            residue_kinds=_kind_counts(residue_items, "issue"),
         )
 
     def render(
@@ -340,6 +343,30 @@ def _patch_op_count(patch_path: Path) -> int:
     return len(ops) if isinstance(ops, list) else 0
 
 
+def native_mechanical_report(
+    *,
+    inspect: NativeDeckInspectResult,
+    lint_fix: NativeDeckLintFixResult,
+    render: NativeDeckRenderResult,
+    diff: dict[str, Any],
+) -> dict[str, Any]:
+    return {
+        "inspect_success": inspect.success,
+        "native_editability_score": inspect.native_editability_score,
+        "native_text_shape_count": inspect.native_text_shape_count,
+        "picture_shape_count": inspect.picture_shape_count,
+        "full_slide_picture_count": inspect.full_slide_picture_count,
+        "lint_fix_success": lint_fix.success,
+        "lint_issue_count_before": lint_fix.lint_issue_count_before,
+        "lint_fix_applied_count": lint_fix.fix_applied_count,
+        "lint_residue_count": lint_fix.residue_count,
+        "render_success": render.success,
+        "rendered_slide_count": render.rendered_slide_count,
+        "diff_success": bool(diff.get("success")),
+        "diff_changed": bool(diff.get("changed")),
+    }
+
+
 def _inspect_stats_and_inventory(payload: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
     slide_size = payload.get("slide_size") if isinstance(payload.get("slide_size"), list) else [0, 0]
     slide_w = float(slide_size[0] or 0)
@@ -357,6 +384,7 @@ def _inspect_stats_and_inventory(payload: dict[str, Any]) -> tuple[dict[str, Any
         text_shapes: list[tuple[str, dict[str, Any]]] = []
         pictures: list[tuple[str, dict[str, Any]]] = []
         compact_shapes: list[dict[str, Any]] = []
+        full_slide_pictures = 0
         for shape_id, shape in shapes.items():
             if not isinstance(shape, dict):
                 continue
@@ -364,14 +392,17 @@ def _inspect_stats_and_inventory(payload: dict[str, Any]) -> tuple[dict[str, Any
             shape_type = str(shape.get("type") or "")
             is_text = _is_native_text_shape(shape)
             is_picture = shape_type == "PICTURE"
+            is_full_slide_picture = False
             if is_text:
                 native_text_shape_count += 1
                 text_shapes.append((shape_id, shape))
             if is_picture:
                 picture_shape_count += 1
                 pictures.append((shape_id, shape))
-                if _is_full_slide_picture(shape, slide_w=slide_w, slide_h=slide_h):
+                is_full_slide_picture = _is_full_slide_picture(shape, slide_w=slide_w, slide_h=slide_h)
+                if is_full_slide_picture:
                     full_slide_picture_count += 1
+                    full_slide_pictures += 1
             compact_shapes.append(
                 {
                     "id": shape_id,
@@ -380,6 +411,7 @@ def _inspect_stats_and_inventory(payload: dict[str, Any]) -> tuple[dict[str, Any
                     "pos": shape.get("pos"),
                     "size": shape.get("size"),
                     "text_preview": _text_preview(shape),
+                    "full_slide": is_full_slide_picture if is_picture else False,
                 }
             )
         text_shapes.sort(key=lambda item: _shape_top(item[1]))
@@ -388,6 +420,7 @@ def _inspect_stats_and_inventory(payload: dict[str, Any]) -> tuple[dict[str, Any
         inventory["slides"][f"slide:{slide_index + 1}"] = {
             "native_slide_index": slide_index,
             "shape_count": len(shapes),
+            "full_slide_picture_count": full_slide_pictures,
             "title": text_shapes[0][0] if text_shapes else None,
             "body": text_shapes[1][0] if len(text_shapes) > 1 else None,
             "visual": pictures[0][0] if pictures else None,
@@ -449,3 +482,16 @@ def _shape_top(shape: dict[str, Any]) -> float:
 def _shape_area(shape: dict[str, Any]) -> float:
     size = shape.get("size") if isinstance(shape.get("size"), list) else [0, 0]
     return float(size[0] or 0) * float(size[1] or 0)
+
+
+def _kind_counts(items: list[Any], key: str) -> dict[str, int]:
+    counts: dict[str, int] = {}
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        value = item.get(key)
+        if not isinstance(value, str) or not value.strip():
+            continue
+        normalized = value.strip().split(":", 1)[0][:80]
+        counts[normalized] = counts.get(normalized, 0) + 1
+    return counts

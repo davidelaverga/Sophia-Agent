@@ -35,7 +35,7 @@ from deerflow.sophia.deck_build.tracing import (
     safe_excerpt,
     stable_hash,
 )
-from deerflow.sophia.deck_native import DeckNativeService
+from deerflow.sophia.deck_native import DeckNativeService, native_mechanical_report
 from deerflow.sophia.deck_native.errors import DeckNativePathError
 from deerflow.sophia.deck_native.models import (
     NativeDeckInspectResult,
@@ -44,6 +44,7 @@ from deerflow.sophia.deck_native.models import (
     NativeDeckPreflight,
     NativeDeckRenderResult,
 )
+from deerflow.sophia.deck_native.policy import classify_native_deck_substrate
 from deerflow.sophia.tools.build_deck_from_slides import build_deck_from_slides
 from deerflow.sophia.tools.prepare_pptx_image_manifest import create_pptx_image_manifest_core
 from deerflow.sophia.tools.render_markdown_to_pdf import _ensure_relative_to_outputs
@@ -203,9 +204,10 @@ class DeckBuildService:
             self._evaluate(deck, runtime)
             deck.status = "evaluated"
             _finalize_image_generation_status(deck, success=True)
+            self._assert_deck_success_allowed(deck, runtime)
             deck.updated_at = _now()
             deck_path = save_deck_build(deck, runtime)
-            return self._success_result(deck, deck_path, runtime)
+            return self._success_result(deck, deck_path, runtime, success_allowed_checked=True)
         except DeckBuildFailure as exc:
             deck.status = "failed_terminal"
             deck.failure_code = exc.code
@@ -840,7 +842,8 @@ class DeckBuildService:
             )
             finish_span(run, _native_patch_span_outputs(applied))
         if not applied.success:
-            raise DeckBuildFailure("deck_native_patch_apply_failed", _native_error_summary(applied.errors, "Native patch apply failed."), retryable=False)
+            code = "deck_native_patch_validation_failed" if applied.validation_error_count else "deck_native_patch_apply_failed"
+            raise DeckBuildFailure(code, _native_error_summary(applied.errors, "Native patch apply failed."), retryable=False)
         with deck_span(
             "deck.native.inspect",
             runtime=runtime,
@@ -914,6 +917,24 @@ class DeckBuildService:
             finish_span(run, {"success": bool(diff.get("success")), "changed": bool(diff.get("changed")), "error_count": len(diff.get("errors") or [])})
         if not diff.get("success"):
             deck.quality_warning = _merge_warning(deck.quality_warning, "native_diff_unavailable")
+        deck.native_mechanical_report = native_mechanical_report(
+            inspect=inspected,
+            lint_fix=lint_fix,
+            render=rendered,
+            diff=diff,
+        )
+        with deck_span(
+            "deck.native.mechanical_report",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            deck_compile_mode=deck.deck_compile_mode,
+            inputs={},
+        ) as run:
+            finish_span(run, deck.native_mechanical_report)
         deck.pptx_path = deck.output_path
         deck.compile_overflow_slides = []
         deck.status = "compiled"
@@ -1005,6 +1026,7 @@ class DeckBuildService:
                     "serial_repair_count": deck.serial_repair_count,
                     "batch_timeout_count": deck.batch_timeout_count,
                     "partial_batch_salvaged": deck.partial_batch_salvaged,
+                    "native_mechanical_report": deck.native_mechanical_report,
                 },
             )
 
@@ -1046,11 +1068,20 @@ class DeckBuildService:
                     "serial_repair_count": deck.serial_repair_count,
                     "batch_timeout_count": deck.batch_timeout_count,
                     "partial_batch_salvaged": deck.partial_batch_salvaged,
+                    "native_mechanical_report": deck.native_mechanical_report,
                 },
             )
 
-    def _success_result(self, deck: DeckBuild, deck_path: str, runtime: ToolRuntime) -> DeckBuildResult:
-        self._assert_deck_success_allowed(deck)
+    def _success_result(
+        self,
+        deck: DeckBuild,
+        deck_path: str,
+        runtime: ToolRuntime,
+        *,
+        success_allowed_checked: bool = False,
+    ) -> DeckBuildResult:
+        if not success_allowed_checked:
+            self._assert_deck_success_allowed(deck, runtime)
         _finalize_image_generation_status(deck, success=True)
         self._trace_terminal(deck, runtime, success=True, deck_path=deck_path, retryable=False)
         self._trace_emit_decision(deck, runtime, success=True, retryable=False)
@@ -1082,9 +1113,10 @@ class DeckBuildService:
             serial_repair_count=deck.serial_repair_count,
             batch_timeout_count=deck.batch_timeout_count,
             partial_batch_salvaged=deck.partial_batch_salvaged,
+            native_mechanical_report=deck.native_mechanical_report,
         )
 
-    def _assert_deck_success_allowed(self, deck: DeckBuild) -> None:
+    def _assert_deck_success_allowed(self, deck: DeckBuild, runtime: ToolRuntime | None = None) -> None:
         if deck.deck_compile_mode in FORBIDDEN_SCREENSHOT_COMPILE_MODES:
             raise DeckBuildFailure(
                 "deck_screenshot_compile_forbidden",
@@ -1097,22 +1129,50 @@ class DeckBuildService:
                 "Fresh PPTX decks must compile through the native PowerPoint substrate.",
                 retryable=False,
             )
-        if (deck.native_editability_score or 0.0) < 0.60:
+        verdict = classify_native_deck_substrate(
+            slide_count=len(deck.slides),
+            native_editability_score=deck.native_editability_score,
+            native_text_shape_count=deck.native_text_shape_count,
+            picture_shape_count=deck.picture_shape_count,
+            full_slide_picture_count=deck.full_slide_picture_count,
+            native_shape_inventory=deck.native_shape_inventory,
+        )
+        if runtime is not None:
+            with deck_span(
+                "deck.native.substrate_classify",
+                runtime=runtime,
+                build_id=deck.build_id,
+                visual_policy=deck.visual_policy,
+                status=deck.status,
+                slide_count=len(deck.slides),
+                run_type="tool",
+                deck_compile_mode=deck.deck_compile_mode,
+                inputs={
+                    "slide_count": len(deck.slides),
+                    "native_editability_score": deck.native_editability_score,
+                    "native_text_shape_count": deck.native_text_shape_count,
+                    "picture_shape_count": deck.picture_shape_count,
+                    "full_slide_picture_count": deck.full_slide_picture_count,
+                },
+            ) as run:
+                finish_span(
+                    run,
+                    {
+                        "passed": verdict.passed,
+                        "verdict": verdict.verdict,
+                        "hard_failure_code": verdict.hard_failure_code,
+                        "warnings": verdict.warnings,
+                    },
+                )
+        if verdict.warnings:
+            deck.quality_warning = _merge_warning(deck.quality_warning, *verdict.warnings)
+        for slide in deck.slides:
+            slide.gate_results["native_substrate_verdict"] = verdict.verdict
+            slide.gate_results["native_substrate_warnings"] = list(verdict.warnings)
+        if not verdict.passed:
             raise DeckBuildFailure(
-                "deck_native_editability_failed",
-                f"Native editability score {deck.native_editability_score or 0.0:.2f} is below the required threshold.",
-                retryable=False,
-            )
-        if deck.native_text_shape_count <= 0:
-            raise DeckBuildFailure(
-                "deck_native_text_missing",
-                "Native deck output contains no editable text shapes.",
-                retryable=False,
-            )
-        if deck.full_slide_picture_count > 0:
-            raise DeckBuildFailure(
-                "deck_native_full_slide_picture_forbidden",
-                "Native deck output contains full-slide screenshot pictures.",
+                verdict.hard_failure_code or "deck_native_substrate_failed",
+                verdict.hard_failure_summary or "Native deck substrate gate failed.",
                 retryable=False,
             )
         if deck.quality_warning and "screenshot_deck" in deck.quality_warning:
@@ -1157,6 +1217,10 @@ class DeckBuildService:
             serial_repair_count=deck.serial_repair_count,
             batch_timeout_count=deck.batch_timeout_count,
             partial_batch_salvaged=deck.partial_batch_salvaged,
+            quality_status="failed",
+            quality_warning=deck.quality_warning,
+            warnings=[deck.quality_warning] if deck.quality_warning else [],
+            native_mechanical_report=deck.native_mechanical_report,
         )
 
     def _run_image_batch_subprocess(self, manifest_path: str, runtime: ToolRuntime) -> dict[str, Any]:
@@ -1391,6 +1455,8 @@ def _native_lint_fix_span_outputs(result: NativeDeckLintFixResult) -> dict[str, 
         "fix_applied_count": result.fix_applied_count,
         "residue_count": result.residue_count,
         "touched_slide_count": result.touched_slide_count,
+        "issue_kinds": result.issue_kinds,
+        "residue_kinds": result.residue_kinds,
         "error_count": len(result.errors),
         "error_excerpt": safe_excerpt(result.errors[0]) if result.errors else None,
     }
