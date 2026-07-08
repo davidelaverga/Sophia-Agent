@@ -734,9 +734,7 @@ def _is_presentation_task_type(task_type: str) -> bool:
 
 def _is_pptx_image_generation_target(artifact_target_ext: str, task_type: str) -> bool:
     if artifact_target_ext:
-        return artifact_target_ext == ".pptx" or (
-            artifact_target_ext == ".pdf" and _is_presentation_task_type(task_type)
-        )
+        return artifact_target_ext == ".pptx"
     return _is_presentation_task_type(task_type)
 
 
@@ -765,10 +763,9 @@ def _polished_deck_images_requested(delegation_context: dict[str, Any]) -> bool:
 def _critical_emit_guidance(artifact_target_ext: str, task_type: str = "") -> str:
     if artifact_target_ext == ".pdf" and _is_presentation_task_type(task_type):
         return (
-            "for this PDF slide-deck delivery target, emit the best verified slide "
-            "deliverable from the deck workflow. Do NOT call report-only PDF tools "
-            "that are not available in this run, and do NOT emit generator scripts "
-            "as the user-facing artifact.\n"
+            "for this PDF slide-deck delivery target, emit the valid .pdf produced "
+            "by render_html_to_pdf. Do NOT emit a PPTX, PPTX preview PDF, HTML "
+            "source, or generator script as the requested PDF deliverable.\n"
         )
     if artifact_target_ext == ".pdf":
         return (
@@ -858,23 +855,15 @@ def _terminal_artifact_format_line(artifact_target_ext: str, task_type: str = ""
             "emit_builder_artifact with artifact_type=\"document\".\n"
         )
     if artifact_target_ext == ".pdf" and _is_presentation_task_type(task_type):
-        if deck_route_for_task(task_type, artifact_target_ext) == "deck_build_service":
-            return (
-                "- This is a PDF slide-deck delivery target: use the deck workflow, not "
-                "the report renderer. Call prepare_deck_build with the full slide intent "
-                "list and canonical output path. DeckBuildService owns native PowerPoint "
-                "compilation, inspection, and validation. Do NOT author slides/*.html, prompt JSON "
-                "files, image manifests, or compiler commands yourself. Emit only the "
-                "deck artifact returned by prepare_deck_build; if it returns native failure, "
-                "emit with artifact_path=null and its failure_code/failure_summary.\n"
-            )
         return (
-            "- This is a PDF slide-deck delivery target on an explicit non-production "
-            "legacy/debug deck route: use the deck workflow, not the report renderer. "
-            "Use the exposed diagnostic presentation tools: prepare_pptx_image_manifest "
-            "for slide visuals and build_deck_from_slides for compilation. Do NOT call "
-            "render_html_to_pdf for slide decks. Emit the verified deck artifact or a clean "
-            "null-artifact failure if the deck workflow cannot produce the requested delivery.\n"
+            "- This is a PDF slide-deck delivery target: author ONE self-contained "
+            "HTML document with slide-like pages/sections and inline static SVG "
+            "figures where needed, then render the real requested .pdf via "
+            "render_html_to_pdf. Do NOT call prepare_deck_build, "
+            "prepare_pptx_image_manifest, build_deck_from_slides, python-pptx, "
+            "or pptxgenjs for this target; those routes produce PPTX artifacts or "
+            "PPTX preview PDFs, not the requested primary PDF deliverable. Call "
+            "emit_builder_artifact with artifact_type=\"pdf\" and the real .pdf path.\n"
         )
     if artifact_target_ext == ".pdf":
         return (
@@ -1274,7 +1263,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             # hallmark + visual-design surface when visuals are requested OR
             # the target is HTML (Phase 4c: hallmark is the HTML design system).
             include_visual_design=_visuals_requested(delegation_context) or is_html_target,
-            include_pdf_report=artifact_target_ext == ".pdf" and not is_pdf_presentation_target,
+            include_pdf_report=artifact_target_ext == ".pdf",
             include_research_skills=(artifact_target_ext == ".pdf" and not is_pdf_presentation_target)
             or task_type in {"research", "document", "visual_report"},
         )
@@ -1409,13 +1398,14 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "**Use skills and tools that wrap pre-tested generators — do NOT write your own matplotlib / "
             "reportlab / python-pptx code.** Follow the matching <builder_workflow_card> above when one is "
             "present. If no workflow card covers the requested format, use the closest listed skill first.\n"
-            "    * **PDF**: follow the PDF workflow card. Author ONE self-contained HTML file with inline "
+            "    * **PDF**: follow the PDF workflow card. For presentation PDFs, make that HTML a slide-deck "
+            "document with one page/section per slide; for report PDFs, make it a report. Author ONE self-contained HTML file with inline "
             "`<svg>` figures, then call `render_html_to_pdf`. A valid render is terminal-ready; emit immediately "
             "unless Sophia asks for one layout repair. Draw ALL figures — data charts AND structural diagrams — "
             "as inline static `<svg>` (bar/line/column for quantitative data; box-and-arrow flow / comparison / "
             "mind-map for structure); NO remote `generate_chart`, NO client-side JS. Vary the figure family to "
             "fit each figure's content; never route every figure to the same kind.\n"
-                f"    * **PPTX / presentation**: follow the ppt-generation skill. {pptx_delivery_line} "
+                f"    * **PPTX presentation**: follow the ppt-generation skill. {pptx_delivery_line} "
                 f"{pptx_visual_guidance}\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"

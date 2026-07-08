@@ -333,3 +333,14 @@ def test_prepare_deck_build_remains_only_model_facing_fresh_deck_tool(monkeypatc
     assert snapshot["prepare_deck_build_exposed"] is True
     assert snapshot["lower_level_deck_tools_exposed"] == []
     assert all(getattr(tool, "name", "") not in {"deck.py", "html2patch.py"} for tool in tools)
+
+
+def test_pdf_presentation_target_exposes_real_pdf_renderer_not_deck_tools() -> None:
+    tools = build_builder_tools_for_task_type("presentation", vision_enabled=True, artifact_target_ext=".pdf")
+    tool_names = {getattr(tool, "name", "") for tool in tools}
+
+    assert "render_html_to_pdf" in tool_names
+    assert "prepare_deck_build" not in tool_names
+    assert "prepare_pptx_image_manifest" not in tool_names
+    assert "build_deck_from_slides" not in tool_names
+    assert assert_deck_tool_contract(tools, task_type="presentation", artifact_target_ext=".pdf") is None

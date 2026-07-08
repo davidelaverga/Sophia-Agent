@@ -719,7 +719,7 @@ def test_directive_visual_report_pdf_target_uses_html_renderer_guidance():
     assert "author a generator script" not in augmented
 
 
-def test_directive_pdf_presentation_target_uses_deck_tools():
+def test_directive_pdf_presentation_target_uses_html_renderer():
     from deerflow.sophia.tools.update_async_task_wrapper import _augment_update_message
 
     augmented = _augment_update_message(
@@ -737,12 +737,13 @@ def test_directive_pdf_presentation_target_uses_deck_tools():
     )
 
     assert "PDF slide-deck delivery update" in augmented
-    assert "prepare_pptx_image_manifest" in augmented
-    assert "build_deck_from_slides" in augmented
     assert "render_html_to_pdf" in augmented
-    assert "Do NOT call `render_html_to_pdf`" in augmented
+    assert "prepare_deck_build" in augmented
+    assert "build_deck_from_slides" in augmented
+    assert "Do NOT call `prepare_deck_build`" in augmented
+    assert "Do NOT call `render_html_to_pdf`" not in augmented
     assert "PDF report/document update" not in augmented
-    assert "Repair the HTML source" not in augmented
+    assert "Repair the slide-style HTML source" in augmented
 
 
 def test_update_filename_resolver_preserves_explicit_pptx_over_incidental_pdf():
@@ -1072,15 +1073,17 @@ def test_pdf_target_directive_routes_updates_through_html_renderer():
     assert "author a generator script" not in block
 
 
-def test_pdf_presentation_target_directive_routes_updates_through_deck_tools():
+def test_pdf_presentation_target_directive_routes_updates_through_html_renderer():
     block = _file_target_directive_block("/mnt/user-data/outputs/deck.pdf", "presentation")
 
     assert "PDF slide-deck delivery update" in block
-    assert "prepare_pptx_image_manifest" in block
+    assert "render_html_to_pdf" in block
+    assert "prepare_deck_build" in block
     assert "build_deck_from_slides" in block
-    assert "Do NOT call `render_html_to_pdf`" in block
+    assert "Do NOT call `prepare_deck_build`" in block
+    assert "Do NOT call `render_html_to_pdf`" not in block
     assert "PDF report/document update" not in block
-    assert "HTML source" not in block
+    assert "slide-style HTML source" in block
 
 
 def test_wrapper_persists_update_urls_in_replacement_run_input():
