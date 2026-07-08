@@ -410,7 +410,7 @@ _PAGE_SOURCE_ACTION_BEFORE_RE = re.compile(
     r"(?:(?!\s+(?:to|into|as)\b)\s+[\w-]+){0,4}\s*$",
     re.IGNORECASE,
 )
-_SLIDE_COUNT_RE = re.compile(r"(?<!\d)(\d{1,2})\s*(?:-| )?\s*slides?\b", re.IGNORECASE)
+_SLIDE_COUNT_RE = re.compile(r"(?<!\d)(\d+)\s*(?:-| )?\s*slides?\b", re.IGNORECASE)
 _SLIDE_TARGET_OUTPUT_BEFORE_RE = re.compile(
     r"\b(?:presentation|deck|slides?|pptx|slideshow|deliverable|output)\b.{0,80}"
     r"\b(?:exactly|length|target|make|create|generate|produce|render|write|deliver|should|must|needs?)\b",

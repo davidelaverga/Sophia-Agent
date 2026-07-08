@@ -278,3 +278,15 @@ class TestBuilderWorkflowCards:
         assert "Requested PPTX length: exactly 30 total slides" in briefing
         assert "exactly 50 total slides" not in briefing
         assert result["builder_pptx_requested_slide_count"] == 30
+
+    def test_pptx_slide_target_clamps_three_digit_requests(self) -> None:
+        state = _make_state("presentation")
+        state["delegation_context"]["artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
+        state["delegation_context"]["task"] = "Create a 100-slide technical presentation."
+
+        result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
+        briefing = _briefing(result)
+
+        assert "Requested PPTX length: exactly 30 total slides" in briefing
+        assert "exactly 100 total slides" not in briefing
+        assert result["builder_pptx_requested_slide_count"] == 30
