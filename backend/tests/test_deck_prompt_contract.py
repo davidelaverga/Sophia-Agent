@@ -33,7 +33,11 @@ def test_fresh_deck_prompt_surfaces_route_to_prepare_deck_build() -> None:
     assert "DeckBuildService" in text
     assert "native PowerPoint" in text
     assert "slide intent" in text
+    assert "design plan" in lower_text
+    assert "composition" in lower_text
+    assert "asset policy" in lower_text
     assert "visual_policy" in text
+    assert "optional" in lower_text
     assert "layout_kind" in text
     assert "<= 280" in text
     assert "retryable=true" in text
@@ -67,6 +71,8 @@ def test_fresh_deck_prompt_surfaces_do_not_teach_old_workflow() -> None:
         "screenshot-backed pptx fallback",
         "write one prompt json file per slide",
         "one generated image per slide",
+        "visual_prompt: required for normal decks",
+        "generate every slide visual",
     ]
     for phrase in forbidden:
         assert phrase not in text

@@ -3,8 +3,19 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from typing import Any, Literal
 
-DeckVisualPolicy = Literal["required", "text_only"]
+DeckVisualPolicy = Literal["auto", "required", "text_only", "auto_with_images_allowed"]
 DeckRegister = Literal["professional_technical", "executive", "expressive", "reflective", "utility"]
+DeckVisualMode = Literal["native_html", "generated_asset", "hybrid", "text_only"]
+DeckAssetRole = Literal[
+    "none",
+    "hero_background",
+    "section_texture",
+    "inset_illustration",
+    "subject_photo",
+    "conceptual_metaphor",
+    "supporting_texture",
+]
+DeckImageFit = Literal["none", "contain", "cover", "crop_safe_cover", "full_bleed"]
 SlideRole = Literal[
     "cover",
     "problem",
@@ -39,6 +50,92 @@ DeckBuildStatus = Literal[
 
 
 @dataclass
+class DeckColorToken:
+    name: str
+    hex: str
+    role: str
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DeckTypographyPlan:
+    display: str
+    body: str
+    utility: str | None = None
+    display_weight: int = 720
+    body_weight: int = 420
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DeckGridPlan:
+    slide_width_px: int = 1920
+    slide_height_px: int = 1080
+    margin_x_px: int = 120
+    margin_y_px: int = 80
+    title_y_px: int = 82
+    footer_policy: str = "none"
+    eyebrow_policy: str = "only_when_meaningful"
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DeckDesignPlan:
+    source: str
+    subject: str
+    audience: str
+    goal: str
+    style_lane: str
+    palette: list[DeckColorToken]
+    typography: DeckTypographyPlan
+    grid: DeckGridPlan
+    signature: str
+    rhythm: str
+    anti_slop_profile: list[str] = field(default_factory=list)
+    requested_style_terms: list[str] = field(default_factory=list)
+    normalized_from_style_profile: dict[str, Any] = field(default_factory=dict)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DeckAssetPlan:
+    visual_mode: str
+    image_gen_required: bool
+    asset_role: str = "none"
+    fit: str = "none"
+    aspect_ratio: str | None = None
+    allow_full_bleed: bool = False
+    prompt: str | None = None
+    reason: str | None = None
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DeckCompositionSpec:
+    layout_family: str
+    title_slot: dict[str, Any] = field(default_factory=dict)
+    narrative_slot: dict[str, Any] = field(default_factory=dict)
+    visual_slot: dict[str, Any] = field(default_factory=dict)
+    support_slots: list[dict[str, Any]] = field(default_factory=list)
+    max_words: int = 48
+    min_title_px: int = 40
+    min_body_px: int = 18
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class DeckSlideSpec:
     selector: str
     index: int
@@ -46,9 +143,12 @@ class DeckSlideSpec:
     layout_kind: str
     title: str
     narrative: str
+    claim: str | None = None
     visual_prompt: str | None = None
     speaker_notes: str | None = None
     visual_required: bool = True
+    asset_plan: DeckAssetPlan | None = None
+    composition: DeckCompositionSpec | None = None
     visual_prompt_path: str | None = None
     visual_asset_path: str | None = None
     visual_status: str = "pending"
@@ -78,6 +178,14 @@ class DeckBuild:
     output_path: str
     slides: list[DeckSlideSpec]
     expected_visual_count: int
+    design_plan: DeckDesignPlan | dict[str, Any] | None = None
+    design_plan_path: str | None = None
+    asset_policy_path: str | None = None
+    style_warnings: list[str] = field(default_factory=list)
+    generated_asset_count: int = 0
+    native_html_slide_count: int = 0
+    hybrid_slide_count: int = 0
+    text_only_slide_count: int = 0
     deck_route: str = "deck_ir_html_raster"
     deck_compile_mode: str = "not_compiled"
     native_required: bool = True
@@ -164,6 +272,13 @@ class DeckBuildResult:
     successful_visual_count: int = 0
     referenced_visual_count: int = 0
     missing_visual_count: int = 0
+    design_plan_path: str | None = None
+    asset_policy_path: str | None = None
+    style_warnings: list[str] = field(default_factory=list)
+    generated_asset_count: int = 0
+    native_html_slide_count: int = 0
+    hybrid_slide_count: int = 0
+    text_only_slide_count: int = 0
     quality_status: str = "failed"
     quality_warning: str | None = None
     warnings: list[str] = field(default_factory=list)

@@ -6212,8 +6212,8 @@ def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
             "[Sophia/deck build latch]\n"
             "This is a fresh PPTX deck build. Stop authoring lower-level deck files or compiler "
             "commands. Call `prepare_deck_build` with the complete slide intent list "
-            f"and output_path='{target}'. DeckBuildService owns generated assets, native PowerPoint "
-            "compilation, inspection, validation, and terminal failure. It will return either the "
+            f"and output_path='{target}'. DeckBuildService owns design plan, composition, asset policy, "
+            "generated assets, native PowerPoint compilation, inspection, validation, and terminal failure. It will return either the "
             "deliverable path or a terminal failure. Keep every narrative <= 280 characters. If it "
             "returns retryable=true, repair the exact Deck IR field and call prepare_deck_build one "
             "more time. If it succeeds, emit the returned PPTX; if it fails terminally, emit "
@@ -6291,8 +6291,8 @@ def _visual_design_skill_message() -> str:
         "path='/mnt/skills/public/visual-design/SKILL.md')`.\n"
         "For PPTX decks, call `prepare_deck_build` with structured slide intent; do not "
         "author slide HTML manually and do not call `build_deck_from_slides`. "
-        "DeckBuildService owns native PowerPoint composition, compilation, inspection, "
-        "and validation. If native deck generation fails, emit artifact_path=null with "
+        "DeckBuildService owns design plan, composition, asset policy, native PowerPoint "
+        "compilation, inspection, and validation. If native deck generation fails, emit artifact_path=null with "
         "the returned failure code and summary. For PDF reports, draw both charts AND structural diagrams "
         "as inline static `<svg>` directly in the report HTML (bar / line / column for "
         "data; box-and-arrow flow / comparison / mind-map for structure) — NO remote "
@@ -8485,7 +8485,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 subject = "cover"
             else:
                 if _deck_build_service_route_active(state):
-                    wiring = "call prepare_deck_build with a complete visual_prompt for every slide"
+                    wiring = (
+                        "call prepare_deck_build with complete slide intent; include asset-only "
+                        "visual_prompt values only where generated assets are useful"
+                    )
                 else:
                     wiring = (
                         "save it as /mnt/user-data/outputs/assets/slide-01.png, embed it in your first "
@@ -8497,7 +8500,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 return (
                     "Error: emit_builder_artifact rejected — generated imagery is ON for "
                     f"this build but no generated {subject} image succeeded. Do this now: "
-                    f"{wiring}. If DeckBuildService cannot produce the required visuals, emit "
+                    f"{wiring}. If DeckBuildService cannot produce selected generated assets, emit "
                     "artifact_path=null with its returned failure code and summary."
                 )
             return (
@@ -12033,9 +12036,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _deck_batch_directive_rejection(command: str, state: dict[str, Any]) -> str | None:
         """Backstop the deck batch-first image workflow at bash time.
 
-        Normal decks must generate every slide visual, including the cover, in
-        ONE ``--manifest`` batch. Single image-generation calls are allowed only
-        as bounded serial repair after a readable batch made a real generation
+        Legacy/direct image workflows must generate selected deck assets in ONE
+        ``--manifest`` batch. Single image-generation calls are allowed only as
+        bounded serial repair after a readable batch made a real generation
         attempt and left failed/missing images.
 
         Returns the directive text to reject with, or ``None`` to allow.
@@ -12171,8 +12174,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "`prepare_deck_build`. Do not call image-generation scripts, "
                             "prepare_pptx_image_manifest, build_deck_from_slides, python-pptx, "
                             "or pptxgenjs directly. Submit slide intent through prepare_deck_build; "
-                            "DeckBuildService owns native PowerPoint compilation, inspection, "
-                            "validation, and terminal failure. Screenshot-backed PPTX is not an "
+                            "DeckBuildService owns design plan, composition, asset policy, native PowerPoint "
+                            "compilation, inspection, validation, and terminal failure. Screenshot-backed PPTX is not an "
                             "acceptable fallback."
                         ),
                         tool_call_id=request.tool_call.get("id", ""),
@@ -12236,8 +12239,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             content = (
                 "[Sophia/deck-build] Fresh PPTX decks are built through `prepare_deck_build`. "
                 "Do not write custom deck compiler code or invoke deck compilers directly. "
-                "Submit slide intent through prepare_deck_build; DeckBuildService owns native "
-                "PowerPoint compilation, inspection, validation, and terminal failure. "
+                "Submit slide intent through prepare_deck_build; DeckBuildService owns design plan, "
+                "composition, asset policy, native PowerPoint compilation, inspection, validation, and terminal failure. "
                 "Screenshot-backed PPTX is not an acceptable fallback."
             )
         else:

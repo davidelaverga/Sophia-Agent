@@ -885,17 +885,17 @@ def _pptx_visual_guidance(*, deck_service_enabled: bool, image_generation_enable
     if deck_service_enabled:
         return (
             "Decks are built by prepare_deck_build. Submit slide intent only: title, narrative, "
-            "role, layout_kind, visual_prompt, and optional speaker_notes for each slide; every "
-            "narrative must be <= 280 characters. The "
-            "harness owns generated assets, native PowerPoint compilation, inspection, validation, "
-            "and terminal failure. Screenshot-backed PPTX is not an acceptable fallback; if native "
+            "role, layout_kind, optional asset-only visual_prompt, and optional speaker_notes for "
+            "each slide; every narrative must be <= 280 characters. The harness owns design plan, "
+            "composition, asset policy, generated assets, native PowerPoint compilation, inspection, "
+            "validation, and terminal failure. Screenshot-backed PPTX is not an acceptable fallback; if native "
             "deck generation fails, prepare_deck_build returns failure and you emit artifact_path=null. "
             "If prepare_deck_build returns retryable=true, repair the exact Deck IR field and retry once. "
             "Do NOT call prepare_pptx_image_manifest, image-generation/scripts/generate.py, "
             "build_deck_from_slides, python-pptx, or pptxgenjs directly. Normal decks may use "
-            "generated visual assets as DeckBuildService decides; a full-bleed picture may be an asset "
+            "optional generated assets as DeckBuildService asset policy decides; a full-bleed picture may be an asset "
             "inside a native deck but is not itself a complete slide. Only an explicitly plain text-only/no-visual "
-            "request may set visual_policy='text_only'. Default to restrained professional technical "
+            "request should set visual_policy='text_only'. Default to restrained professional technical "
             "visuals; do not use chalkboard, handwritten, whiteboard, sketch, cyberpunk, neon, or "
             "playful styles unless explicitly requested."
         )

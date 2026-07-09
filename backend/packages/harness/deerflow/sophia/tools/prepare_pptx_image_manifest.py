@@ -96,6 +96,38 @@ def _prompt_hash_and_chars(path: Path) -> tuple[str | None, int]:
     return hashlib.sha256(data).hexdigest()[:16], len(data.decode("utf-8", errors="ignore"))
 
 
+def _prompt_manifest_metadata(path: Path, fallback_index: int) -> dict[str, Any]:
+    metadata: dict[str, Any] = {
+        "slide_index": fallback_index,
+        "slide_visual": True,
+        "aspect_ratio": "16:9",
+    }
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return metadata
+    if not isinstance(payload, dict):
+        return metadata
+    technical = payload.get("technical") if isinstance(payload.get("technical"), dict) else {}
+    composition = payload.get("composition") if isinstance(payload.get("composition"), dict) else {}
+    slide_context = composition.get("slide_context") if isinstance(composition.get("slide_context"), dict) else {}
+    raw_index = technical.get("slide_index") or slide_context.get("index") or slide_context.get("slide_index")
+    try:
+        slide_index = int(raw_index)
+    except (TypeError, ValueError):
+        slide_index = fallback_index
+    metadata["slide_index"] = slide_index if slide_index > 0 else fallback_index
+    if technical.get("deck_asset") is True:
+        metadata["deck_asset"] = True
+        metadata["slide_visual"] = bool(technical.get("slide_visual"))
+    elif "slide_visual" in technical:
+        metadata["slide_visual"] = bool(technical.get("slide_visual"))
+    aspect_ratio = technical.get("aspect_ratio")
+    if isinstance(aspect_ratio, str) and aspect_ratio.strip():
+        metadata["aspect_ratio"] = aspect_ratio.strip()
+    return metadata
+
+
 def _manifest_shape_summary(data: object) -> dict[str, Any]:
     if isinstance(data, dict):
         keys = sorted(str(key) for key in data.keys())[:20]
@@ -200,13 +232,17 @@ def create_pptx_image_manifest_core(
                 manifest_path=manifest_path,
             )
         prompt_hash, prompt_chars = _prompt_hash_and_chars(prompt_host)
+        metadata = _prompt_manifest_metadata(prompt_host, index)
         sanitized_prompts.append(
             {
-                "slide_index": index,
+                "slide_index": metadata["slide_index"],
                 "prompt_file": prompt_file,
                 "prompt_basename": _safe_basename(prompt_file),
                 "prompt_hash": prompt_hash,
                 "prompt_chars": prompt_chars,
+                "slide_visual": bool(metadata.get("slide_visual")),
+                "deck_asset": bool(metadata.get("deck_asset")),
+                "aspect_ratio": metadata.get("aspect_ratio") or "16:9",
             }
         )
 
@@ -219,8 +255,9 @@ def create_pptx_image_manifest_core(
             "slide_index": prompt["slide_index"],
             "prompt_file": prompt["prompt_file"],
             "output_file": f"{_ASSETS_VIRTUAL_PREFIX}/slide-{prompt['slide_index']:02d}.png",
-            "slide_visual": True,
-            "aspect_ratio": "16:9",
+            "slide_visual": bool(prompt.get("slide_visual")),
+            "deck_asset": bool(prompt.get("deck_asset")),
+            "aspect_ratio": prompt.get("aspect_ratio") or "16:9",
         }
         for prompt in sanitized_prompts
     ]

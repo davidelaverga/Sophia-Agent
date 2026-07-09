@@ -196,22 +196,32 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert result.native_editability_score == 0.9
     assert result.native_text_shape_count >= 6
     assert result.full_slide_picture_count == 0
-    assert result.expected_visual_count == 3
-    assert result.successful_visual_count == 3
-    assert result.referenced_visual_count == 3
+    assert result.expected_visual_count == 1
+    assert result.successful_visual_count == 1
+    assert result.referenced_visual_count == 1
+    assert result.generated_asset_count == 1
+    assert result.native_html_slide_count == 2
+    assert result.hybrid_slide_count == 1
     assert native_calls[0]["html_basenames"] == ["01-cover.html", "02-architecture.html", "03-closing.html"]
     outputs = tmp_path / "outputs"
     prompt_files = sorted((outputs / "assets" / "prompts").glob("slide-*.json"))
-    assert len(prompt_files) == 3
+    assert len(prompt_files) == 1
     prompt_payload = json.loads(prompt_files[0].read_text(encoding="utf-8"))
-    assert prompt_payload["style"]["visual_style"] == "clean_flat_vector"
-    assert prompt_payload["style"]["aesthetic"] == "restrained_professional_technical"
-    assert "clean flat vector" in prompt_payload["constraints"][-1]
+    assert prompt_payload["style"]["visual_style"] == "asset_only_supporting_visual"
+    assert prompt_payload["technical"]["deck_asset"] is True
+    assert prompt_payload["technical"]["slide_visual"] is False
+    assert prompt_payload["technical"]["slide_index"] == 1
+    assert "supporting asset" in prompt_payload["constraints"][0]
     assert "handwritten" not in json.dumps(prompt_payload).lower()
     manifest = json.loads((outputs / "assets" / "slide-visuals.manifest.json").read_text(encoding="utf-8"))
     assert manifest["manifest_author"] == "DeckBuildService"
-    assert len(manifest["items"]) == 3
+    assert len(manifest["items"]) == 1
+    assert manifest["items"][0]["deck_asset"] is True
+    assert manifest["items"][0]["slide_visual"] is False
     assert len(list((outputs / "slides").glob("*.html"))) == 3
+    html = (outputs / "slides" / "02-architecture.html").read_text(encoding="utf-8")
+    assert "system-diagram" in html
+    assert "<h1>Slide 2 System Story</h1>" in html
     build = json.loads((outputs / "deck_build" / "build.json").read_text(encoding="utf-8"))
     assert build["schema_version"] == "sophia-deck-build/v1"
     assert build["status"] == "evaluated"
@@ -220,6 +230,10 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert build["native_editability_score"] == 0.9
     assert build["image_generation_status"] == "success"
     assert build["primary_image_batch_status"] == "success"
+    assert build["design_plan_path"] == f"{_OUTPUTS}deck_build/design_plan.json"
+    assert build["asset_policy_path"] == f"{_OUTPUTS}deck_build/asset_policy.json"
+    assert build["generated_asset_count"] == 1
+    assert build["native_html_slide_count"] == 2
     assert "Professional technical visual metaphor" in build["slides"][0]["visual_prompt"]
     loaded = load_deck_build(result.deck_build_path, runtime)
     assert loaded is not None
@@ -290,14 +304,14 @@ def test_deck_build_service_full_slide_picture_in_native_deck_warns(tmp_path: Pa
     assert result.quality_warning == "native_full_bleed_picture_present"
 
 
-def test_deck_build_service_invalid_required_visual_prompt_fails_before_batch(tmp_path: Path) -> None:
+def test_deck_build_service_missing_visual_prompt_does_not_fail_normal_native_slide(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     batch_called = False
 
-    def batch_runner(_manifest_path, _runtime):
+    def batch_runner(manifest_path, tool_runtime):
         nonlocal batch_called
         batch_called = True
-        return {}
+        return _fake_batch(runtime)(manifest_path, tool_runtime)
 
     service = DeckBuildService(image_batch_runner=batch_runner, native_service=_FakeNativeService())
     slides = _slides()
@@ -310,10 +324,10 @@ def test_deck_build_service_invalid_required_visual_prompt_fails_before_batch(tm
         output_path=f"{_OUTPUTS}deck.pptx",
     )
 
-    assert result.success is False
-    assert result.failure_code == "invalid_deck_ir"
-    assert batch_called is False
-    assert not (tmp_path / "outputs" / "deck.pptx").exists()
+    assert result.success is True
+    assert result.expected_visual_count == 1
+    assert batch_called is True
+    assert (tmp_path / "outputs" / "deck.pptx").exists()
 
 
 def test_deck_build_service_allows_negated_visual_prompt_guardrails(tmp_path: Path) -> None:
@@ -377,7 +391,7 @@ def test_deck_build_service_allows_style_profile_visual_style(tmp_path: Path) ->
     assert result.success is True
 
 
-def test_deck_build_service_rejects_positive_banned_visual_prompt_terms(tmp_path: Path) -> None:
+def test_deck_build_service_sanitizes_positive_banned_visual_prompt_terms(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     batch_called = False
 
@@ -397,8 +411,9 @@ def test_deck_build_service_rejects_positive_banned_visual_prompt_terms(tmp_path
         output_path=f"{_OUTPUTS}deck.pptx",
     )
 
-    assert result.success is False
-    assert result.failure_code == "invalid_deck_ir"
+    assert result.success is True
+    assert result.expected_visual_count == 0
+    assert result.image_generation_status == "not_required"
     assert batch_called is False
 
 
@@ -480,16 +495,16 @@ def test_deck_build_service_salvages_partial_timeout_and_repairs_missing_visual(
 
     assert result.success is True
     assert repaired == [1]
-    assert result.successful_visual_count == 3
+    assert result.successful_visual_count == 1
     assert result.image_generation_status == "success_after_repair"
     assert result.primary_image_batch_status == "repaired"
     assert result.serial_repair_count == 1
     assert result.batch_timeout_count == 1
-    assert result.partial_batch_salvaged is True
+    assert result.partial_batch_salvaged is False
     assert native_calls
 
 
-def test_deck_build_service_timeout_with_zero_outputs_repairs_all_visuals(tmp_path: Path) -> None:
+def test_deck_build_service_timeout_with_zero_outputs_repairs_selected_assets(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     repaired: list[int] = []
 
@@ -521,10 +536,10 @@ def test_deck_build_service_timeout_with_zero_outputs_repairs_all_visuals(tmp_pa
     )
 
     assert result.success is True
-    assert repaired == [1, 2, 3]
-    assert result.successful_visual_count == 3
+    assert repaired == [1]
+    assert result.successful_visual_count == 1
     assert result.image_generation_status == "success_after_repair"
-    assert result.serial_repair_count == 3
+    assert result.serial_repair_count == 1
     assert result.partial_batch_salvaged is False
 
 
@@ -603,9 +618,9 @@ def test_deck_build_service_incomplete_visuals_fail_before_compile(tmp_path: Pat
     assert result.success is False
     assert result.failure_code == "deck_visuals_incomplete"
     assert result.successful_visual_count == 0
-    assert result.missing_visual_count == 3
-    assert result.serial_repair_count == 6
-    assert repair_attempts == [(1, 1), (1, 2), (2, 1), (2, 2), (3, 1), (3, 2)]
+    assert result.missing_visual_count == 1
+    assert result.serial_repair_count == 2
+    assert repair_attempts == [(1, 1), (1, 2)]
     assert native_calls == []
 
 
@@ -677,13 +692,14 @@ def test_deck_build_service_text_only_requires_explicit_request_and_compiles_wit
     assert result.success is True
     assert result.expected_visual_count == 0
     assert result.successful_visual_count == 0
+    assert result.image_generation_status == "not_required"
     assert native_calls
     assert not (tmp_path / "outputs" / "assets" / "prompts").exists()
     cover_html = (tmp_path / "outputs" / "slides" / "01-cover.html").read_text(encoding="utf-8")
-    assert 'class="slide cover_hero professional_technical no_visual"' in cover_html
-    assert '<div class="visual">' not in cover_html
-    assert ".cover_hero.has_visual .title" in cover_html
-    assert ".cover_hero .title { top: 650px; color: #ffffff;" not in cover_html
+    assert 'class="slide cover_statement professional_technical calm_technical native_only"' in cover_html
+    assert "<img" not in cover_html
+    assert "<h1>Slide 1 System Story</h1>" in cover_html
+    assert '<section class="system-diagram"' not in cover_html
 
 
 def test_deck_build_service_text_only_accepts_delegated_task_brief(tmp_path: Path) -> None:
@@ -769,7 +785,7 @@ def test_presentation_toolset_forces_deck_service_in_production(monkeypatch) -> 
     assert "build_deck_from_slides" not in names
 
 
-def test_pdf_slide_deck_uses_legacy_route_even_when_deck_service_default_enabled(monkeypatch) -> None:
+def test_pdf_slide_deck_uses_pdf_report_route_even_when_deck_service_default_enabled(monkeypatch) -> None:
     monkeypatch.delenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", raising=False)
 
     tools = build_builder_tools_for_task_type(
@@ -780,12 +796,11 @@ def test_pdf_slide_deck_uses_legacy_route_even_when_deck_service_default_enabled
     names = [getattr(tool, "name", "") for tool in tools]
     contract = assert_deck_tool_contract(tools, task_type="presentation", artifact_target_ext=".pdf")
 
-    assert contract is not None
-    assert contract["route"] == "legacy_html_slide_to_pptx"
-    assert contract["legacy_reason"] == "non_pptx_presentation_target"
+    assert contract is None
     assert "prepare_deck_build" not in names
-    assert "prepare_pptx_image_manifest" in names
-    assert "build_deck_from_slides" in names
+    assert "prepare_pptx_image_manifest" not in names
+    assert "build_deck_from_slides" not in names
+    assert "render_html_to_pdf" in names
 
 
 def test_pdf_slide_deck_legacy_tools_are_not_rejected_by_deck_service_guard(monkeypatch) -> None:

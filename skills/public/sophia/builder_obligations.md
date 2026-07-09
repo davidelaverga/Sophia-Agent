@@ -32,20 +32,22 @@ This file is for the Sophia builder only.
 ## Presentation Rules
 
 - Fresh presentations are built through `prepare_deck_build`. Provide complete
-  slide intent: title, narrative, role, layout_kind, visual_prompt, and
-  speaker_notes. Keep every narrative concise and <= 280 characters.
-  DeckBuildService owns generated assets, native PowerPoint
-  compilation, inspection, validation, and terminal failure.
+  slide intent: title, narrative, role, layout_kind, optional asset-only
+  visual_prompt, and speaker_notes. Keep every narrative concise and <= 280
+  characters. DeckBuildService owns design plan, composition, asset policy,
+  generated assets, native PowerPoint compilation, inspection, validation, and
+  terminal failure.
 - Do not call `prepare_pptx_image_manifest`, `image-generation/scripts/generate.py`,
   or `build_deck_from_slides` directly for a fresh deck. Do not hand-write
   `slides/*.html`. Do not write python-pptx/pptxgenjs or any custom deck compiler.
 - Screenshot-backed PPTX is a failed build, not a fallback. If
   `prepare_deck_build` returns a native deck failure, stop and emit
   `artifact_path=null` with the returned failure code and summary.
-- Normal decks may use generated visual-only assets as DeckBuildService decides.
+- Normal decks may use optional generated assets as DeckBuildService asset policy decides.
   A full-bleed picture may be an asset/background inside a native deck with
   native text, but it is not itself a complete slide. Only explicit
-  text-only/no-visual deck requests may omit images.
+  text-only/no-visual deck requests should force `visual_policy="text_only"`;
+  ordinary native slides may require no generated image.
 - Do not bake slide title, bottom narrative, footers, formulas, axis labels,
   paragraph text, or page chrome into generated images. Titles and narratives
   remain real slide text in the harness-rendered template.

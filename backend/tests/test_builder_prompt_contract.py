@@ -29,7 +29,8 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
     assert "requested primary artifact" in contract
     assert "Fresh presentations are built through `prepare_deck_build`" in contract
     assert "slide intent" in contract
-    assert "generated visual-only assets as DeckBuildService decides" in contract
+    assert "optional generated assets as DeckBuildService asset policy decides" in contract
+    assert "design plan, composition, asset policy" in contract
     assert "native PowerPoint" in contract
     assert "artifact_path=null" in contract
     assert "pure image-forward" not in contract
@@ -49,7 +50,7 @@ def test_visual_composition_routes_pptx_and_pdf_to_separate_pipelines() -> None:
     assert "Presentations (`.pptx`) are native DeckBuildService decks" in directives
     assert "prepare_deck_build" in directives
     assert "native PowerPoint" in directives
-    assert "Generated slide images, when used, are visual-area assets only" in directives
+    assert "Generated images, when used, are asset-only support" in directives
     assert "pure image-forward" not in directives
     assert "deck_plan.json" not in directives
     # PDF reports are authored as one self-contained HTML file with inline <svg>
@@ -70,6 +71,8 @@ def test_ppt_generation_skill_routes_fresh_decks_to_deck_build_service() -> None
     assert "DeckBuildService" in text
     assert "slide intent" in text
     assert "visual_prompt" in text
+    assert "optional" in text
+    assert "asset policy" in text
     lowered = text.lower()
     assert "do not write prompt json files" in lowered
     assert "do not hand-write slide html" in lowered
@@ -83,6 +86,8 @@ def test_ppt_generation_skill_routes_fresh_decks_to_deck_build_service() -> None
     assert "generate_visual_asset" not in text
     assert "generate_report_chart" not in text
     assert "do not call `build_deck_from_slides`" in text
+    assert "visual_prompt: required for normal decks" not in text
+    assert "one generated image per slide" not in lowered
 
 
 def test_ppt_generation_skill_requires_opaque_edges() -> None:

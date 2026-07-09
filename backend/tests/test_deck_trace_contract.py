@@ -316,7 +316,7 @@ def test_deck_service_uses_manifest_span_for_prompt_hashes_not_prompt_write_span
     span_names = [span["name"] for span in spans]
     assert "deck.prompt_files.write" not in span_names
     manifest_output = next(span["outputs"] for span in spans if span["name"] == "deck.image_manifest.prepare")
-    assert manifest_output["prompt_count"] == 3
-    assert len(manifest_output["prompt_hashes"]) == 3
-    assert manifest_output["prompt_basenames"] == ["slide-01.json", "slide-02.json", "slide-03.json"]
+    assert manifest_output["prompt_count"] == 1
+    assert len(manifest_output["prompt_hashes"]) == 1
+    assert manifest_output["prompt_basenames"] == ["slide-01.json"]
     assert "prompts" not in manifest_output

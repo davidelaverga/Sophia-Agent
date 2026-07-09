@@ -12,8 +12,9 @@ medium. Do not mix workflows just because another tool is available.
 
 - Presentations (`.pptx`) are native DeckBuildService decks. The builder
   submits structured slide intent through `prepare_deck_build`; DeckBuildService
-  owns generated assets, native PowerPoint compilation, inspection, validation,
-  and terminal failure. Screenshot-backed PPTX decks are not acceptable
+  owns design plan, composition, asset policy, generated assets, native PowerPoint
+  compilation, inspection, validation, and terminal failure.
+  Screenshot-backed PPTX decks are not acceptable
   production output. If native deck generation fails, emit `artifact_path=null`
   with the returned failure code and summary.
 - PDF reports are authored as ONE self-contained HTML file and rendered with
@@ -38,15 +39,15 @@ medium. Do not mix workflows just because another tool is available.
 - Every slide must be opaque to all four edges — set an opaque background on
   `html, body` and on the slide wrapper. A white band/gutter at any edge is a
   defect (the render fills uncovered regions with the deck background, not white).
-- Generated slide images, when used, are visual-area assets only; title and narrative remain real deck text.
+- Generated images, when used, are asset-only support inside the native slide; title and narrative remain real deck text.
 - A full-bleed generated picture may be used as an asset/background inside a
   native deck, but a full-slide picture with no native title/body text is a
   failed screenshot substrate.
-- Normal decks do not compile when required generated visuals are unavailable.
+- Normal decks compile with zero generated images when asset policy selects native HTML composition only; selected generated assets must exist when required.
 - Keep visible slide text sparse and explicit.
 - Add concise speaker notes for narrative context, but never rely on notes as
   the only visible explanation for content slides.
-- Do not ship placeholder or no-image decks when generated visuals were required.
+- Do not ship placeholder assets when generated assets were selected by asset policy.
 
 ## PDF Report Invariants
 
