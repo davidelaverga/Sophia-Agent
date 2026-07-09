@@ -3228,11 +3228,11 @@ def _stamp_format_conflict_metadata(
 
 
 def _requested_pdf_artifact(state: dict[str, Any]) -> bool:
-    return _requested_target_suffix(state) == ".pdf" and not _requested_pdf_slide_artifact(state)
+    return _requested_target_suffix(state) == ".pdf"
 
 
 def _requested_pptx_artifact(state: dict[str, Any]) -> bool:
-    return _requested_target_suffix(state) == ".pptx" or _requested_pdf_slide_artifact(state)
+    return _requested_target_suffix(state) == ".pptx"
 
 
 def _requested_html_artifact(state: dict[str, Any]) -> bool:

@@ -147,6 +147,20 @@ def _phantom_artifact() -> dict:
 # ---------- payload shape ----------------------------------------------------
 
 
+def test_pdf_presentation_target_uses_pdf_artifact_route():
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pdf",
+        "delegation_context": {
+            "task": "Build a technical presentation and deliver it as a PDF.",
+            "task_type": "presentation",
+            "artifact_target_path": "/mnt/user-data/outputs/deck.pdf",
+        },
+    }
+
+    assert builder_artifact_module._requested_pdf_artifact(state) is True
+    assert builder_artifact_module._requested_pptx_artifact(state) is False
+
+
 def test_build_completion_payload_from_artifact_success_shape():
     runtime = _make_runtime(
         builder_thread_id="t-build",
