@@ -551,6 +551,8 @@ def _pptx_request_haystack(state: dict[str, Any]) -> str:
 
 
 def _pptx_generated_visuals_required(state: dict[str, Any]) -> bool:
+    if _deck_build_service_route_active(state):
+        return False
     return (
         _requested_pptx_artifact(state)
         and _builder_image_enrichment_enabled(state)
@@ -659,7 +661,7 @@ def _deck_build_service_route_active(state: dict[str, Any]) -> bool:
 
 def _pptx_visual_completeness_diagnostics_update(state: dict[str, Any]) -> dict[str, Any]:
     return {
-        "presentation_route": "deck_ir_html_raster" if _deck_build_service_route_active(state) else "html_slide_to_pptx_raster",
+        "presentation_route": "deck_creative_html_native" if _deck_build_service_route_active(state) else "html_slide_to_pptx_raster",
         **_pptx_visual_completeness_counts(state),
     }
 
@@ -2092,7 +2094,7 @@ def _trace_pptx_route_selected(state: dict[str, Any]) -> None:
     visual_counts = _pptx_visual_completeness_counts(state)
     deck_service_enabled = _deck_build_service_route_active(state)
     deck_route = "deck_build_service" if deck_service_enabled else "legacy_html_slide_to_pptx"
-    presentation_route = "deck_ir_html_raster" if deck_service_enabled else "html_slide_to_pptx_raster"
+    presentation_route = "deck_creative_html_native" if deck_service_enabled else "html_slide_to_pptx_raster"
     model_facing_deck_tools = (
         ["prepare_deck_build"]
         if deck_service_enabled
@@ -6211,11 +6213,12 @@ def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
         return (
             "[Sophia/deck build latch]\n"
             "This is a fresh PPTX deck build. Stop authoring lower-level deck files or compiler "
-            "commands. Call `prepare_deck_build` with the complete slide intent list "
-            f"and output_path='{target}'. DeckBuildService owns design plan, composition, asset policy, "
-            "generated assets, native PowerPoint compilation, inspection, validation, and terminal failure. It will return either the "
+            "commands. Read /mnt/skills/public/sophia/deck_craft.md, then call `prepare_deck_build` "
+            "with the complete creative_plan and slide html_source list "
+            f"and output_path='{target}'. DeckBuildService owns HTML sanitization, planned generated assets, "
+            "native PowerPoint compilation, inspection, mechanical gates, and terminal failure. It will return either the "
             "deliverable path or a terminal failure. Keep every narrative <= 280 characters. If it "
-            "returns retryable=true, repair the exact Deck IR field and call prepare_deck_build one "
+            "returns retryable=true, repair the exact creative/html/mechanical issue and call prepare_deck_build one "
             "more time. If it succeeds, emit the returned PPTX; if it fails terminally, emit "
             "artifact_path=null with the returned failure code and summary."
         )
@@ -6289,10 +6292,10 @@ def _visual_design_skill_message() -> str:
         "is available:\n"
         "`read_file(description='read visual design skill', "
         "path='/mnt/skills/public/visual-design/SKILL.md')`.\n"
-        "For PPTX decks, call `prepare_deck_build` with structured slide intent; do not "
-        "author slide HTML manually and do not call `build_deck_from_slides`. "
-        "DeckBuildService owns design plan, composition, asset policy, native PowerPoint "
-        "compilation, inspection, and validation. If native deck generation fails, emit artifact_path=null with "
+        "For PPTX decks, read the deck craft guidance and call `prepare_deck_build` with "
+        "creative_plan plus slide html_source; do not write slide files or call `build_deck_from_slides`. "
+        "DeckBuildService owns sanitization, planned assets, native PowerPoint "
+        "compilation, inspection, and mechanical gates. If native deck generation fails, emit artifact_path=null with "
         "the returned failure code and summary. For PDF reports, draw both charts AND structural diagrams "
         "as inline static `<svg>` directly in the report HTML (bar / line / column for "
         "data; box-and-arrow flow / comparison / mind-map for structure) — NO remote "
@@ -6390,6 +6393,8 @@ class BuilderArtifactState(AgentState):
     builder_pptx_compile_repair_pending: NotRequired[bool]
     builder_deck_ir_repair_attempt_count: NotRequired[int]
     builder_last_deck_ir_failure: NotRequired[dict | None]
+    builder_deck_creative_repair_attempt_count: NotRequired[int]
+    builder_last_deck_creative_failure: NotRequired[dict | None]
     builder_pptx_route_trace_emitted: NotRequired[bool]
     builder_visual_design_correction_emitted: NotRequired[bool]
     builder_visual_asset_correction_emitted: NotRequired[bool]
@@ -8451,7 +8456,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "Error: emit_builder_artifact rejected — the PPTX deck failed Sophia "
                 "structural validation:\n"
                 f"{listing}\n\n"
-                "For fresh decks, call `prepare_deck_build` with corrected slide intent and "
+                "For fresh decks, call `prepare_deck_build` with corrected creative_plan and slide html_source and "
                 "emit only its returned PPTX or its clean null-artifact failure. Do not repair "
                 "through lower-level deck files or compiler commands."
             )
@@ -8486,8 +8491,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             else:
                 if _deck_build_service_route_active(state):
                     wiring = (
-                        "call prepare_deck_build with complete slide intent; include asset-only "
-                        "visual_prompt values only where generated assets are useful"
+                        "call prepare_deck_build with a complete creative_plan and slide html_source; "
+                        "declare generated assets only in creative_plan.image_assets"
                     )
                 else:
                     wiring = (
@@ -11055,7 +11060,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         image_generation_status = str(payload.get("image_generation_status") or ("success" if success else "failed"))
         primary_image_batch_status = str(payload.get("primary_image_batch_status") or ("success" if success else "failed"))
         primary_image_batch_error_class = payload.get("primary_image_batch_error_class") or (None if success else failure_code)
-        deck_route = str(payload.get("deck_route") or "deck_ir_html_raster")
+        deck_route = str(payload.get("deck_route") or "deck_creative_html_native")
         deck_compile_mode = str(payload.get("deck_compile_mode") or "not_compiled")
         delta: dict[str, Any] = {
             "presentation_route": deck_route,
@@ -11068,7 +11073,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "deck_status": "evaluated" if success else "failed_terminal",
             "deck_quality_status": quality_status,
             "deck_failure_code": failure_code,
-            "deck_template_renderer_version": "deck_build_templates_v1",
+            "deck_template_renderer_version": "deck_creative_html_native_v1",
             "expected_generated_visual_count": expected,
             "successful_generated_visual_count": successful,
             "referenced_visual_count": referenced,
@@ -11107,13 +11112,22 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         native_mechanical = payload.get("native_mechanical_report")
         if isinstance(native_mechanical, dict):
             delta["native_mechanical_report"] = native_mechanical
+        mechanical_gates = payload.get("mechanical_gate_results")
+        if isinstance(mechanical_gates, dict):
+            delta["mechanical_gate_results"] = mechanical_gates
+        html_validation = payload.get("html_source_validation")
+        if isinstance(html_validation, dict):
+            delta["html_source_validation"] = html_validation
+        creative_plan_path = payload.get("creative_plan_path")
+        if isinstance(creative_plan_path, str) and creative_plan_path.strip():
+            delta["creative_plan_path"] = creative_plan_path
         deck_build_path = payload.get("deck_build_path")
         if isinstance(deck_build_path, str) and deck_build_path.strip():
             delta["deck_build_path"] = deck_build_path
         return delta
 
     @staticmethod
-    def _prepare_deck_build_ir_retry_command(
+    def _prepare_deck_build_retry_command(
         request: ToolCallRequest,
         result: ToolMessage,
         payload: dict[str, Any],
@@ -11121,62 +11135,82 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     ) -> Command | None:
         failure_code = str(payload.get("failure_code") or delta.get("deck_failure_code") or "")
         retryable = bool(payload.get("retryable"))
-        if failure_code != "invalid_deck_ir" or not retryable:
+        retryable_codes = {
+            "invalid_deck_ir",
+            "deck_creative_plan_required",
+            "deck_creative_plan_invalid",
+            "deck_slide_html_missing",
+            "deck_slide_html_invalid",
+            "deck_image_asset_plan_invalid",
+            "deck_mechanical_gate_failed",
+        }
+        if failure_code not in retryable_codes or not retryable:
             return None
         state = request.state or {}
-        attempt_count = int(state.get("builder_deck_ir_repair_attempt_count", 0) or 0)
-        instruction = deck_ir_repair_instruction_from_failure(
-            failure_code=failure_code,
-            failure_summary=str(payload.get("failure_summary") or ""),
-            retryable=retryable,
-            attempt_count=attempt_count,
-        )
+        if failure_code == "invalid_deck_ir":
+            attempt_count = int(state.get("builder_deck_ir_repair_attempt_count", 0) or 0)
+            instruction = deck_ir_repair_instruction_from_failure(
+                failure_code=failure_code,
+                failure_summary=str(payload.get("failure_summary") or ""),
+                retryable=retryable,
+                attempt_count=attempt_count,
+            )
+            should_retry = instruction.should_retry
+            message = instruction.repair_message
+            counter_key = "builder_deck_ir_repair_attempt_count"
+            last_failure_key = "builder_last_deck_ir_failure"
+            component = "deck_ir_repair"
+        else:
+            attempt_count = int(state.get("builder_deck_creative_repair_attempt_count", 0) or 0)
+            should_retry = attempt_count < 1
+            repair_payload = payload.get("repair_instruction")
+            message = ""
+            if isinstance(repair_payload, dict):
+                message = str(
+                    repair_payload.get("repair_message")
+                    or repair_payload.get("message")
+                    or ""
+                )
+            if not message:
+                message = (
+                    "Repair the D2.1 creative deck input and call prepare_deck_build exactly once more. "
+                    "Provide creative_plan and html_source for every slide; keep generated images as planned assets only."
+                )
+            counter_key = "builder_deck_creative_repair_attempt_count"
+            last_failure_key = "builder_last_deck_creative_failure"
+            component = "deck_creative_repair"
         _safe_langsmith_span(
-            "deck.ir.repair_instruction",
+            "deck.prepare.repair_instruction",
             inputs={
                 "failure_code": failure_code,
                 "retryable": retryable,
                 "attempt_count": attempt_count,
             },
             outputs={
-                "should_retry": instruction.should_retry,
-                "max_retry_count": instruction.max_retry_count,
-                "field": (
-                    instruction.validation_error.field
-                    if instruction.validation_error is not None
-                    else None
-                ),
-                "slide_index": (
-                    instruction.validation_error.slide_index
-                    if instruction.validation_error is not None
-                    else None
-                ),
+                "should_retry": should_retry,
+                "max_retry_count": 1,
             },
-            metadata={"sophia_component": "deck_ir_repair"},
-            tags=["pptx", "deck_ir", "repair"],
+            metadata={"sophia_component": component},
+            tags=["pptx", "deck_build", "repair"],
         )
-        if not instruction.should_retry:
+        if not should_retry:
             return None
-        message = instruction.repair_message
-        repair_payload = payload.get("repair_instruction")
-        if isinstance(repair_payload, dict) and isinstance(repair_payload.get("repair_message"), str):
-            message = repair_payload["repair_message"]
         _safe_langsmith_span(
-            "deck.ir.retry",
+            "deck.prepare.retry",
             inputs={"failure_code": failure_code, "attempt_count": attempt_count},
             outputs={"next_attempt_count": attempt_count + 1},
-            metadata={"sophia_component": "deck_ir_repair"},
-            tags=["pptx", "deck_ir", "retry"],
+            metadata={"sophia_component": component},
+            tags=["pptx", "deck_build", "retry"],
         )
         return Command(
             update={
                 "messages": [
                     result,
-                    HumanMessage(content=f"[Sophia/PPTX Deck IR repair]\n{message}"),
+                    HumanMessage(content=f"[Sophia/PPTX D2.1 repair]\n{message}"),
                 ],
                 "builder_pptx_diagnostics": delta,
-                "builder_deck_ir_repair_attempt_count": attempt_count + 1,
-                "builder_last_deck_ir_failure": {
+                counter_key: attempt_count + 1,
+                last_failure_key: {
                     "failure_code": failure_code,
                     "failure_summary": payload.get("failure_summary"),
                     "retryable": retryable,
@@ -11200,7 +11234,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if delta is None or payload is None:
             return result
         if delta.get("deck_status") == "failed_terminal":
-            retry_command = self._prepare_deck_build_ir_retry_command(request, result, payload, delta)
+            retry_command = self._prepare_deck_build_retry_command(request, result, payload, delta)
             if retry_command is not None:
                 return retry_command
             fallback = self._prepare_deck_build_failure_fallback(request, payload, delta)
@@ -11260,6 +11294,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "picture_shape_count": delta.get("picture_shape_count"),
             "full_slide_picture_count": delta.get("full_slide_picture_count"),
             "native_mechanical_report": delta.get("native_mechanical_report"),
+            "mechanical_gate_results": delta.get("mechanical_gate_results"),
+            "html_source_validation": delta.get("html_source_validation"),
+            "creative_plan_path": delta.get("creative_plan_path"),
             "deck_quality_status": payload.get("quality_status") or "failed",
             "quality_warning": payload.get("quality_warning"),
             "image_generation_status": delta.get("image_generation_status"),
@@ -12052,8 +12089,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return (
                 "[Sophia/deck-build] Fresh PPTX deck visuals are generated internally by "
                 "`prepare_deck_build`. Do not call image-generation scripts directly. Submit "
-                "the complete slide intent list through prepare_deck_build; the harness owns "
-                "asset preparation, native PowerPoint compilation, inspection, and validation."
+                "the complete creative_plan and slide html_source list through prepare_deck_build; the harness owns "
+                "asset preparation, native PowerPoint compilation, inspection, and mechanical gates."
             )
         billable = [
             segment
@@ -12173,9 +12210,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "[Sophia/deck-build] Fresh PPTX decks are built through "
                             "`prepare_deck_build`. Do not call image-generation scripts, "
                             "prepare_pptx_image_manifest, build_deck_from_slides, python-pptx, "
-                            "or pptxgenjs directly. Submit slide intent through prepare_deck_build; "
-                            "DeckBuildService owns design plan, composition, asset policy, native PowerPoint "
-                            "compilation, inspection, validation, and terminal failure. Screenshot-backed PPTX is not an "
+                            "or pptxgenjs directly. Submit creative_plan plus slide html_source through prepare_deck_build; "
+                            "DeckBuildService owns sanitization, planned assets, native PowerPoint "
+                            "compilation, inspection, mechanical gates, and terminal failure. Screenshot-backed PPTX is not an "
                             "acceptable fallback."
                         ),
                         tool_call_id=request.tool_call.get("id", ""),
@@ -12239,8 +12276,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             content = (
                 "[Sophia/deck-build] Fresh PPTX decks are built through `prepare_deck_build`. "
                 "Do not write custom deck compiler code or invoke deck compilers directly. "
-                "Submit slide intent through prepare_deck_build; DeckBuildService owns design plan, "
-                "composition, asset policy, native PowerPoint compilation, inspection, validation, and terminal failure. "
+                "Submit creative_plan plus slide html_source through prepare_deck_build; DeckBuildService owns sanitization, "
+                "planned assets, native PowerPoint compilation, inspection, mechanical gates, and terminal failure. "
                 "Screenshot-backed PPTX is not an acceptable fallback."
             )
         else:

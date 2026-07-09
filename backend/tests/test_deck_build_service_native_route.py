@@ -55,6 +55,7 @@ def _slides() -> list[dict[str, str]]:
             "role": "cover",
             "layout_kind": "cover_hero",
             "visual_prompt": "",
+            "html_source": _html("Native Deck Substrate", "The deck compile step emits editable PowerPoint text shapes."),
         },
         {
             "title": "Shape Inventory",
@@ -62,8 +63,71 @@ def _slides() -> list[dict[str, str]]:
             "role": "architecture",
             "layout_kind": "single_visual_focus",
             "visual_prompt": "",
+            "html_source": _html("Shape Inventory", "Each slide records native title and body shape ids for later co-review."),
         },
     ]
+
+
+def _html(title: str, narrative: str) -> str:
+    return f"""<!doctype html><html><head><style>
+html, body {{ margin: 0; padding: 0; width: 1920px; height: 1080px; background: #0A0E14; }}
+body {{ overflow: hidden; color: #EEF4FB; font-family: Aptos, Arial, sans-serif; }}
+.canvas {{ position: relative; width: 1920px; height: 1080px; background: #0A0E14; }}
+h1 {{ position: absolute; left: 120px; top: 110px; width: 1280px; font-size: 64px; }}
+p {{ position: absolute; left: 120px; top: 780px; width: 1240px; font-size: 30px; color: #A7B4C2; }}
+.panel {{ position: absolute; left: 120px; top: 300px; width: 1320px; height: 360px; border: 3px solid #38BDF8; background: #111827; }}
+</style></head><body><main class="canvas"><h1>{title}</h1><div class="panel"></div><p>{narrative}</p></main></body></html>"""
+
+
+def _creative_plan() -> dict[str, Any]:
+    return {
+        "subject": "Native Deck",
+        "audience": "technical stakeholders",
+        "goal": "verify native PowerPoint substrate",
+        "story_arc": "Show native compile, then inspect shape inventory.",
+        "design_plan": {
+            "source": "test",
+            "subject": "Native Deck",
+            "audience": "technical stakeholders",
+            "goal": "verify native PowerPoint substrate",
+            "style_lane": "technical_blueprint",
+            "palette": [
+                {"name": "background", "hex": "#0A0E14", "role": "slide substrate"},
+                {"name": "surface", "hex": "#111827", "role": "panel"},
+                {"name": "ink", "hex": "#EEF4FB", "role": "text"},
+                {"name": "accent", "hex": "#38BDF8", "role": "linework"},
+            ],
+            "typography": {"display": "Aptos Display", "body": "Aptos", "utility": "Aptos"},
+            "grid": {"slide_width_px": 1920, "slide_height_px": 1080},
+            "signature": "dark native substrate",
+            "rhythm": "two native proof slides",
+            "anti_slop_profile": ["native text", "no screenshot substrate"],
+            "requested_style_terms": ["dark_technical"],
+        },
+        "image_strategy": "diagram_native",
+        "image_assets": [],
+        "slide_compositions": [
+            {
+                "selector": "slide:1",
+                "slide_role": "cover",
+                "headline_intent": "Introduce native compile",
+                "layout_name": "native_cover",
+                "composition_rationale": "Dark native statement slide.",
+                "native_elements": ["title", "panel", "narrative"],
+                "image_asset_ids": [],
+            },
+            {
+                "selector": "slide:2",
+                "slide_role": "architecture",
+                "headline_intent": "Show shape inventory",
+                "layout_name": "native_inventory",
+                "composition_rationale": "Native text and panel structure.",
+                "native_elements": ["title", "panel", "narrative"],
+                "image_asset_ids": [],
+            },
+        ],
+        "anti_slop_commitments": ["structural variety", "native text"],
+    }
 
 
 class PatchWritingNativeService:
@@ -155,6 +219,7 @@ def test_deck_build_service_native_route_builds_editable_deck(tmp_path: Path) ->
         slides=_slides(),
         output_path=f"{_OUTPUTS}native.pptx",
         visual_policy="text_only",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is True
@@ -185,6 +250,7 @@ def test_deck_build_service_native_failure_does_not_screenshot_fallback(tmp_path
         slides=_slides(),
         output_path=f"{_OUTPUTS}native.pptx",
         visual_policy="text_only",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is False
@@ -203,6 +269,7 @@ def test_native_patch_validation_failure_is_specific(tmp_path: Path) -> None:
         slides=_slides(),
         output_path=f"{_OUTPUTS}native.pptx",
         visual_policy="text_only",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is False
@@ -220,6 +287,7 @@ def test_native_preflight_failure_returns_unavailable_without_pptx(tmp_path: Pat
         slides=_slides(),
         output_path=f"{_OUTPUTS}native.pptx",
         visual_policy="text_only",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is False
@@ -241,6 +309,7 @@ def test_screenshot_debug_does_not_override_production_native_failure(tmp_path: 
         slides=_slides(),
         output_path=f"{_OUTPUTS}native.pptx",
         visual_policy="text_only",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is False

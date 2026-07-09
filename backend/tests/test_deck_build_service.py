@@ -55,20 +55,115 @@ def _runtime(outputs: Path, *, user_request: str = "Build a visual 3 slide deck"
     )
 
 
-def _slides(count: int = 3) -> list[dict]:
+def _slide_html(index: int, title: str, narrative: str, *, include_asset: bool = False) -> str:
+    asset = (
+        f'<figure class="asset"><img src="../assets/slide-{index:02d}.png" alt="" /></figure>'
+        if include_asset
+        else ""
+    )
+    return f"""<!doctype html>
+<html><head><meta charset="utf-8"><style>
+html, body {{ margin: 0; padding: 0; width: 1920px; height: 1080px; background: #0A0E14; }}
+body {{ overflow: hidden; color: #EEF4FB; font-family: Aptos, Arial, sans-serif; }}
+.canvas {{ position: relative; width: 1920px; height: 1080px; background: #0A0E14; }}
+h1 {{ position: absolute; left: 120px; top: 90px; width: 1250px; margin: 0; font-size: 64px; line-height: 1.05; }}
+.narrative {{ position: absolute; left: 120px; top: 830px; width: 1320px; font-size: 30px; line-height: 1.3; color: #A7B4C2; }}
+.diagram {{ position: absolute; left: 120px; top: 280px; width: 1500px; height: 420px; border: 3px solid #38BDF8; background: #111827; }}
+.node {{ position: absolute; top: 130px; width: 300px; height: 120px; border: 2px solid #38BDF8; }}
+.node.a {{ left: 120px; }} .node.b {{ left: 600px; }} .node.c {{ left: 1080px; }}
+.asset {{ position: absolute; inset: 0; margin: 0; opacity: .28; }}
+.asset img {{ width: 100%; height: 100%; object-fit: cover; }}
+</style></head><body><main class="canvas">
+{asset}
+<h1>{title}</h1>
+<section class="diagram"><div class="node a"></div><div class="node b"></div><div class="node c"></div></section>
+<p class="narrative">{narrative}</p>
+</main></body></html>"""
+
+
+def _slides(count: int = 3, *, include_asset: bool = True) -> list[dict]:
     roles = ["cover", "architecture", "closing"]
     layouts = ["cover_hero", "single_visual_focus", "closing_summary"]
-    return [
-        {
+    slides = []
+    for index in range(1, count + 1):
+        title = f"Slide {index} System Story"
+        narrative = "A concise technical narrative explains the point with calm professional framing."
+        slides.append({
             "title": f"Slide {index} System Story",
-            "narrative": "A concise technical narrative explains the point with calm professional framing.",
+            "narrative": narrative,
             "role": roles[index - 1],
             "layout_kind": layouts[index - 1],
             "visual_prompt": f"Professional technical visual metaphor for slide {index}",
             "speaker_notes": "Optional notes.",
-        }
-        for index in range(1, count + 1)
-    ]
+            "html_source": _slide_html(index, title, narrative, include_asset=include_asset and index == 1),
+        })
+    return slides
+
+
+def _creative_plan(*, include_asset: bool = True) -> dict:
+    image_assets = []
+    if include_asset:
+        image_assets.append(
+            {
+                "asset_id": "cover-texture",
+                "slide_selector": "slide:1",
+                "role": "hero_background",
+                "reason": "Establishes subject atmosphere without carrying semantic text.",
+                "prompt": "Dark technical abstract system texture, no readable text, no labels.",
+                "aspect_ratio": "16:9",
+                "integration": "full_bleed_background",
+                "no_baked_text": True,
+            }
+        )
+    return {
+        "subject": "Technical Deck",
+        "audience": "technical stakeholders",
+        "goal": "explain the system clearly",
+        "story_arc": "Frame the system, explain the architecture, close with synthesis.",
+        "design_plan": {
+            "source": "test",
+            "subject": "Technical Deck",
+            "audience": "technical stakeholders",
+            "goal": "explain the system clearly",
+            "style_lane": "technical_blueprint",
+            "palette": [
+                {"name": "background", "hex": "#0A0E14", "role": "slide substrate"},
+                {"name": "surface", "hex": "#111827", "role": "panel"},
+                {"name": "ink", "hex": "#EEF4FB", "role": "text"},
+                {"name": "muted", "hex": "#A7B4C2", "role": "secondary text"},
+                {"name": "accent", "hex": "#38BDF8", "role": "linework"},
+            ],
+            "typography": {"display": "Aptos Display", "body": "Aptos", "utility": "Aptos"},
+            "grid": {"slide_width_px": 1920, "slide_height_px": 1080},
+            "signature": "dark native technical diagram language",
+            "rhythm": "cover, architecture, synthesis",
+            "anti_slop_profile": ["native text", "structural variety"],
+            "requested_style_terms": ["dark_technical"],
+        },
+        "image_strategy": "hybrid" if include_asset else "diagram_native",
+        "image_assets": image_assets,
+        "slide_compositions": [
+            {
+                "selector": f"slide:{index}",
+                "slide_role": role,
+                "headline_intent": f"Explain slide {index}",
+                "layout_name": layout,
+                "composition_rationale": "Use native structure with clear hierarchy.",
+                "native_elements": ["title", "narrative", "diagram"],
+                "image_asset_ids": ["cover-texture"] if include_asset and index == 1 else [],
+                "risk_notes": [],
+            }
+            for index, (role, layout) in enumerate(
+                [
+                    ("cover", "cover_with_texture"),
+                    ("architecture", "architecture_native_diagram"),
+                    ("closing", "closing_synthesis"),
+                ],
+                start=1,
+            )
+        ],
+        "anti_slop_commitments": ["structural variety across slides", "no screenshot substrate"],
+    }
 
 
 def _fake_compiler(calls: list[dict]):
@@ -187,11 +282,12 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
         deck_title="Technical Deck",
         slides=_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is True
     assert result.pptx_path == f"{_OUTPUTS}deck.pptx"
-    assert result.deck_route == "deck_ir_html_raster"
+    assert result.deck_route == "deck_creative_html_native"
     assert result.deck_compile_mode == NATIVE_DECK_COMPILE_MODE
     assert result.native_editability_score == 0.9
     assert result.native_text_shape_count >= 6
@@ -220,21 +316,22 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert manifest["items"][0]["slide_visual"] is False
     assert len(list((outputs / "slides").glob("*.html"))) == 3
     html = (outputs / "slides" / "02-architecture.html").read_text(encoding="utf-8")
-    assert "system-diagram" in html
+    assert 'class="diagram"' in html
     assert "<h1>Slide 2 System Story</h1>" in html
     build = json.loads((outputs / "deck_build" / "build.json").read_text(encoding="utf-8"))
     assert build["schema_version"] == "sophia-deck-build/v1"
     assert build["status"] == "evaluated"
-    assert build["deck_route"] == "deck_ir_html_raster"
+    assert build["deck_route"] == "deck_creative_html_native"
     assert build["deck_compile_mode"] == NATIVE_DECK_COMPILE_MODE
     assert build["native_editability_score"] == 0.9
     assert build["image_generation_status"] == "success"
     assert build["primary_image_batch_status"] == "success"
     assert build["design_plan_path"] == f"{_OUTPUTS}deck_build/design_plan.json"
+    assert build["creative_plan_path"] == f"{_OUTPUTS}deck_build/creative_plan.json"
     assert build["asset_policy_path"] == f"{_OUTPUTS}deck_build/asset_policy.json"
     assert build["generated_asset_count"] == 1
     assert build["native_html_slide_count"] == 2
-    assert "Professional technical visual metaphor" in build["slides"][0]["visual_prompt"]
+    assert "Dark technical abstract system texture" in build["slides"][0]["visual_prompt"]
     loaded = load_deck_build(result.deck_build_path, runtime)
     assert loaded is not None
     assert loaded.build_id == result.build_id
@@ -258,6 +355,7 @@ def test_deck_build_service_clears_stale_slide_html_before_compile(tmp_path: Pat
         deck_title="Technical Deck",
         slides=_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is True
@@ -277,6 +375,7 @@ def test_deck_build_service_nested_output_path_evaluates_against_outputs_root(tm
         deck_title="Nested Technical Deck",
         slides=_slides(),
         output_path=f"{_OUTPUTS}decks/foo.pptx",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is True
@@ -297,6 +396,7 @@ def test_deck_build_service_full_slide_picture_in_native_deck_warns(tmp_path: Pa
         deck_title="Overflow Deck",
         slides=_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is True
@@ -322,6 +422,7 @@ def test_deck_build_service_missing_visual_prompt_does_not_fail_normal_native_sl
         deck_title="Technical Deck",
         slides=slides,
         output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is True
@@ -344,6 +445,7 @@ def test_deck_build_service_allows_negated_visual_prompt_guardrails(tmp_path: Pa
         deck_title="Technical Deck",
         slides=slides,
         output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is True
@@ -366,6 +468,7 @@ def test_deck_build_service_allows_explicitly_requested_visual_style(tmp_path: P
         deck_title="Technical Deck",
         slides=slides,
         output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is True
@@ -386,6 +489,7 @@ def test_deck_build_service_allows_style_profile_visual_style(tmp_path: Path) ->
         slides=slides,
         output_path=f"{_OUTPUTS}deck.pptx",
         style_profile={"visual_style": "handwritten_sketch"},
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is True
@@ -401,7 +505,7 @@ def test_deck_build_service_sanitizes_positive_banned_visual_prompt_terms(tmp_pa
         return {}
 
     service = DeckBuildService(image_batch_runner=batch_runner, native_service=_FakeNativeService())
-    slides = _slides()
+    slides = _slides(include_asset=False)
     slides[0]["visual_prompt"] = "Neon cyberpunk system diagram with dramatic lighting."
 
     result = service.prepare_and_build(
@@ -409,6 +513,7 @@ def test_deck_build_service_sanitizes_positive_banned_visual_prompt_terms(tmp_pa
         deck_title="Technical Deck",
         slides=slides,
         output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(include_asset=False),
     )
 
     assert result.success is True
@@ -438,13 +543,14 @@ def test_deck_build_service_missing_batch_summary_fails_without_compile(tmp_path
         deck_title="Technical Deck",
         slides=_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is False
     assert result.failure_code == "deck_visual_batch_startup_failed"
     assert single_called is False
     assert native_calls == []
-    assert not (tmp_path / "outputs" / "slides").exists()
+    assert (tmp_path / "outputs" / "slides" / "01-cover.html").exists()
 
 
 def test_deck_build_service_salvages_partial_timeout_and_repairs_missing_visual(tmp_path: Path) -> None:
@@ -491,6 +597,7 @@ def test_deck_build_service_salvages_partial_timeout_and_repairs_missing_visual(
         deck_title="Technical Deck",
         slides=_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is True
@@ -533,6 +640,7 @@ def test_deck_build_service_timeout_with_zero_outputs_repairs_selected_assets(tm
         deck_title="Technical Deck",
         slides=_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is True
@@ -613,6 +721,7 @@ def test_deck_build_service_incomplete_visuals_fail_before_compile(tmp_path: Pat
         deck_title="Technical Deck",
         slides=_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is False
@@ -660,6 +769,7 @@ def test_deck_build_service_terminal_provider_error_does_not_unlock_serial_repai
         deck_title="Technical Deck",
         slides=_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is False
@@ -677,7 +787,7 @@ def test_deck_build_service_text_only_requires_explicit_request_and_compiles_wit
         image_batch_runner=lambda _manifest_path, _runtime: (_ for _ in ()).throw(AssertionError("no image batch")),
         native_service=_FakeNativeService(native_calls),
     )
-    slides = _slides()
+    slides = _slides(include_asset=False)
     for slide in slides:
         slide["visual_prompt"] = ""
 
@@ -687,6 +797,7 @@ def test_deck_build_service_text_only_requires_explicit_request_and_compiles_wit
         slides=slides,
         output_path=f"{_OUTPUTS}deck.pptx",
         visual_policy="text_only",
+        creative_plan=_creative_plan(include_asset=False),
     )
 
     assert result.success is True
@@ -696,10 +807,9 @@ def test_deck_build_service_text_only_requires_explicit_request_and_compiles_wit
     assert native_calls
     assert not (tmp_path / "outputs" / "assets" / "prompts").exists()
     cover_html = (tmp_path / "outputs" / "slides" / "01-cover.html").read_text(encoding="utf-8")
-    assert 'class="slide cover_statement professional_technical calm_technical native_only"' in cover_html
     assert "<img" not in cover_html
     assert "<h1>Slide 1 System Story</h1>" in cover_html
-    assert '<section class="system-diagram"' not in cover_html
+    assert 'class="diagram"' in cover_html
 
 
 def test_deck_build_service_text_only_accepts_delegated_task_brief(tmp_path: Path) -> None:
@@ -710,7 +820,7 @@ def test_deck_build_service_text_only_accepts_delegated_task_brief(tmp_path: Pat
         image_batch_runner=lambda _manifest_path, _runtime: (_ for _ in ()).throw(AssertionError("no image batch")),
         native_service=_FakeNativeService(native_calls),
     )
-    slides = _slides()
+    slides = _slides(include_asset=False)
     for slide in slides:
         slide["visual_prompt"] = ""
 
@@ -720,6 +830,7 @@ def test_deck_build_service_text_only_accepts_delegated_task_brief(tmp_path: Pat
         slides=slides,
         output_path=f"{_OUTPUTS}deck.pptx",
         visual_policy="text_only",
+        creative_plan=_creative_plan(include_asset=False),
     )
 
     assert result.success is True

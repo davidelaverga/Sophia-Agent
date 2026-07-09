@@ -118,6 +118,8 @@ def write_asset_policy(deck: DeckBuild, host_path: Path) -> None:
     payload = {
         "build_id": deck.build_id,
         "visual_policy": deck.visual_policy,
+        "source": "creative_plan" if deck.creative_plan is not None else "asset_policy",
+        "creative_plan_path": deck.creative_plan_path,
         "expected_visual_count": deck.expected_visual_count,
         "generated_asset_count": deck.generated_asset_count,
         "native_html_slide_count": deck.native_html_slide_count,
@@ -129,6 +131,10 @@ def write_asset_policy(deck: DeckBuild, host_path: Path) -> None:
                 "role": slide.role,
                 "layout_kind": slide.layout_kind,
                 "asset_plan": asdict(slide.asset_plan) if slide.asset_plan else None,
+                "composition_plan": asdict(slide.composition_plan)
+                if hasattr(slide.composition_plan, "__dataclass_fields__")
+                else slide.composition_plan,
+                "planned_image_asset_id": slide.gate_results.get("planned_image_asset_id"),
             }
             for slide in deck.slides
         ],

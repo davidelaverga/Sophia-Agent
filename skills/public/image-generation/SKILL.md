@@ -122,9 +122,9 @@ python /mnt/skills/public/image-generation/scripts/generate.py \
 ## Deck Generation
 
 For `.pptx` decks, do not call this script directly. Deck visuals are generated
-only when DeckBuildService's asset policy requests them through
-`prepare_deck_build`. DeckBuildService owns native PowerPoint compilation,
-inspection, validation, and terminal failure.
+only when `creative_plan.image_assets` declares them through
+`prepare_deck_build`. DeckBuildService owns sanitization, native PowerPoint
+compilation, inspection, mechanical gates, and terminal failure.
 Deck images are assets inside native slide composition, not complete slide
 screenshots; do not bake titles, narratives, labels, axes, or annotations into
 deck images.

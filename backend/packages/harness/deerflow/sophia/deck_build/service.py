@@ -20,17 +20,27 @@ from deerflow.sandbox.tools import get_thread_data, replace_virtual_path
 from deerflow.sophia.deck_build.asset_policy import (
     generated_asset_slides,
     normalize_visual_policy,
-    resolve_asset_policies,
     write_asset_policy,
 )
-from deerflow.sophia.deck_build.composition import resolve_compositions
-from deerflow.sophia.deck_build.design_plan import resolve_deck_design_plan, write_design_plan
+from deerflow.sophia.deck_build.creative_plan import (
+    CreativePlanValidationError,
+    normalize_creative_plan,
+    write_creative_plan,
+)
+from deerflow.sophia.deck_build.design_plan import write_design_plan
 from deerflow.sophia.deck_build.evaluator import DeckEvaluator
-from deerflow.sophia.deck_build.html_design_renderer import write_designed_slide_html
+from deerflow.sophia.deck_build.html_sanitizer import (
+    validate_and_sanitize_slide_html,
+    validation_summary,
+)
+from deerflow.sophia.deck_build.image_assets import (
+    apply_creative_asset_plan,
+    planned_asset_ref_basenames,
+)
 from deerflow.sophia.deck_build.image_prompting import deck_asset_prompt_payload
+from deerflow.sophia.deck_build.mechanical_gates import evaluate_mechanical_gates
 from deerflow.sophia.deck_build.models import DeckBuild, DeckBuildResult, DeckSlideSpec
 from deerflow.sophia.deck_build.storage import save_deck_build
-from deerflow.sophia.deck_build.templates import slide_html_virtual_path
 from deerflow.sophia.deck_build.tracing import (
     DEFAULT_ARTIFACT_TARGET_EXT,
     DEFAULT_DECK_COMPILE_MODE,
@@ -55,7 +65,6 @@ from deerflow.sophia.deck_native.models import (
     NativeDeckRenderResult,
 )
 from deerflow.sophia.deck_native.policy import classify_native_deck_substrate
-from deerflow.sophia.tools.build_deck_from_slides import build_deck_from_slides
 from deerflow.sophia.tools.prepare_pptx_image_manifest import create_pptx_image_manifest_core
 from deerflow.sophia.tools.render_markdown_to_pdf import _ensure_relative_to_outputs
 
@@ -65,6 +74,7 @@ _PROMPTS = f"{_ASSETS}/prompts"
 _SLIDES = f"{_OUTPUTS}slides"
 _DECK_BUILD = f"{_OUTPUTS}deck_build"
 _DESIGN_PLAN = f"{_DECK_BUILD}/design_plan.json"
+_CREATIVE_PLAN = f"{_DECK_BUILD}/creative_plan.json"
 _ASSET_POLICY = f"{_DECK_BUILD}/asset_policy.json"
 _MANIFEST = f"{_ASSETS}/slide-visuals.manifest.json"
 _NATIVE = f"{_OUTPUTS}.builder/deck_native"
@@ -147,6 +157,7 @@ class DeckBuildService:
         visual_policy: str = "auto",
         style_profile: dict[str, Any] | None = None,
         design_plan: dict[str, Any] | None = None,
+        creative_plan: dict[str, Any] | None = None,
     ) -> DeckBuildResult:
         build_id = f"deck-{uuid.uuid4().hex[:12]}"
         now = _now()
@@ -201,7 +212,13 @@ class DeckBuildService:
                 },
             ) as run:
                 finish_span(run, {"valid": True, "failure_code": None, "issue_count": 0, "hard_issue_count": 0})
-            self._resolve_design_and_asset_policy(deck, runtime, source_design_plan=design_plan)
+            self._resolve_creative_plan_and_asset_policy(
+                deck,
+                runtime,
+                source_design_plan=design_plan,
+                source_creative_plan=creative_plan,
+            )
+            self._render_slide_html(deck, runtime)
             if deck.expected_visual_count > 0:
                 self._write_prompt_files(deck, runtime)
                 self._prepare_manifest(deck, runtime)
@@ -216,7 +233,6 @@ class DeckBuildService:
                     slide.visual_status = "not_required"
                 deck.image_generation_status = "not_required"
                 deck.primary_image_batch_status = "not_required"
-            self._render_slide_html(deck, runtime)
             self._compile_pptx(deck, runtime)
             self._evaluate(deck, runtime)
             deck.status = "evaluated"
@@ -298,6 +314,7 @@ class DeckBuildService:
                     narrative=narrative,
                     claim=_clean_text(raw.get("claim")) or None,
                     visual_prompt=visual_prompt,
+                    html_source=str(raw.get("html_source") or "").strip() or None,
                     speaker_notes=_clean_text(raw.get("speaker_notes")) or None,
                     visual_required=False,
                     gate_results={
@@ -310,16 +327,17 @@ class DeckBuildService:
             )
         return specs
 
-    def _resolve_design_and_asset_policy(
+    def _resolve_creative_plan_and_asset_policy(
         self,
         deck: DeckBuild,
         runtime: ToolRuntime,
         *,
         source_design_plan: dict[str, Any] | None,
+        source_creative_plan: dict[str, Any] | None,
     ) -> None:
         request_context = _request_context_text(runtime)
         with deck_span(
-            "deck.design_plan.resolve",
+            "deck.creative_plan.validate",
             runtime=runtime,
             build_id=deck.build_id,
             visual_policy=deck.visual_policy,
@@ -330,29 +348,42 @@ class DeckBuildService:
                 "register": deck.register,
                 "style_profile_keys": sorted(str(key) for key in deck.style_profile.keys()),
                 "source_design_plan_present": bool(source_design_plan),
+                "creative_plan_present": bool(source_creative_plan),
             },
         ) as run:
-            deck.design_plan = resolve_deck_design_plan(
-                deck_title=deck.deck_title,
-                slides=[
+            try:
+                creative = normalize_creative_plan(
+                    source_creative_plan,
+                    deck=deck,
+                    request_context=request_context,
+                    source_design_plan=source_design_plan,
+                )
+            except CreativePlanValidationError as exc:
+                finish_span(
+                    run,
                     {
-                        "title": slide.title,
-                        "role": slide.role,
-                        "layout_kind": slide.layout_kind,
-                    }
-                    for slide in deck.slides
-                ],
-                register=deck.register,
-                style_profile=deck.style_profile,
-                design_plan=source_design_plan,
-                request_context=request_context,
-            )
+                        "valid": False,
+                        "failure_code": exc.code,
+                        "failure_summary": safe_excerpt(exc.summary),
+                    },
+                )
+                raise DeckBuildFailure(exc.code, exc.summary, retryable=True) from exc
+            deck.creative_plan = creative
+            deck.design_plan = creative.design_plan
+            creative_path = _host_path(_CREATIVE_PLAN, runtime)
+            write_creative_plan(creative, creative_path)
+            deck.creative_plan_path = _CREATIVE_PLAN
             design_path = _host_path(_DESIGN_PLAN, runtime)
             write_design_plan(deck.design_plan, design_path)
             deck.design_plan_path = _DESIGN_PLAN
             finish_span(
                 run,
                 {
+                    "valid": True,
+                    "creative_plan_file": basename(deck.creative_plan_path),
+                    "image_strategy": creative.image_strategy,
+                    "planned_image_asset_count": len(creative.image_assets),
+                    "slide_composition_count": len(creative.slide_compositions),
                     "style_lane": deck.design_plan.style_lane,
                     "palette": [token.name for token in deck.design_plan.palette],
                     "slide_width_px": deck.design_plan.grid.slide_width_px,
@@ -370,8 +401,18 @@ class DeckBuildService:
             run_type="tool",
             inputs={"slide_count": len(deck.slides)},
         ) as run:
-            resolve_asset_policies(deck, design_plan=deck.design_plan, request_context=request_context)
-            resolve_compositions(deck.slides, deck.design_plan)
+            try:
+                apply_creative_asset_plan(deck, deck.creative_plan)
+            except CreativePlanValidationError as exc:
+                finish_span(
+                    run,
+                    {
+                        "success": False,
+                        "failure_code": exc.code,
+                        "failure_summary": safe_excerpt(exc.summary),
+                    },
+                )
+                raise DeckBuildFailure(exc.code, exc.summary, retryable=True) from exc
             asset_policy_path = _host_path(_ASSET_POLICY, runtime)
             write_asset_policy(deck, asset_policy_path)
             deck.asset_policy_path = _ASSET_POLICY
@@ -380,10 +421,11 @@ class DeckBuildService:
                 for slide in deck.slides
                 if slide.gate_results.get("style_warning")
             ]
-            deck.style_warnings = sorted(set(prompt_warnings))
+            deck.style_warnings = sorted(set([*deck.style_warnings, *prompt_warnings]))
             finish_span(
                 run,
                 {
+                    "success": True,
                     "expected_visual_count": deck.expected_visual_count,
                     "generated_asset_count": deck.generated_asset_count,
                     "native_html_slide_count": deck.native_html_slide_count,
@@ -395,7 +437,7 @@ class DeckBuildService:
                         for slide in deck.slides
                     ],
                     "layout_families": [
-                        slide.composition.layout_family if slide.composition else None
+                        getattr(slide.composition_plan, "layout_name", None)
                         for slide in deck.slides
                     ],
                     "style_warning_count": len(deck.style_warnings),
@@ -785,39 +827,65 @@ class DeckBuildService:
 
     def _render_slide_html(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
         with deck_span(
-            "deck.slide_html.render",
+            "deck.slide_html.validate",
             runtime=runtime,
             build_id=deck.build_id,
             visual_policy=deck.visual_policy,
             status=deck.status,
             slide_count=len(deck.slides),
             run_type="tool",
-            inputs={"slide_count": len(deck.slides), "template_names": [slide.layout_kind for slide in deck.slides]},
+            inputs={
+                "slide_count": len(deck.slides),
+                "planned_asset_count": deck.expected_visual_count,
+                "canvas_width_px": 1920,
+                "canvas_height_px": 1080,
+            },
         ) as run:
             _clear_slide_html_directory(_host_path(_SLIDES, runtime))
+            validations = []
+            allowed_asset_refs = planned_asset_ref_basenames(deck)
             for slide in deck.slides:
-                virtual = slide_html_virtual_path(slide)
+                if not slide.html_source:
+                    summary = f"Slide {slide.index} is missing html_source."
+                    finish_span(run, {"valid": False, "failure_code": "deck_slide_html_missing", "failure_summary": summary})
+                    raise DeckBuildFailure("deck_slide_html_missing", summary, retryable=True)
+                virtual = _slide_html_virtual_path(slide)
                 host = _host_path(virtual, runtime)
-                write_designed_slide_html(slide, deck, host)
+                sanitized, validation = validate_and_sanitize_slide_html(
+                    slide,
+                    allowed_asset_refs=allowed_asset_refs,
+                )
+                validations.append(validation)
+                if not validation.valid:
+                    summary = "; ".join(validation.errors[:3]) or f"Slide {slide.index} html_source is invalid."
+                    deck.html_source_validation = validation_summary(validations)
+                    finish_span(
+                        run,
+                        {
+                            **deck.html_source_validation,
+                            "failure_code": "deck_slide_html_invalid",
+                            "failure_summary": safe_excerpt(summary),
+                        },
+                    )
+                    raise DeckBuildFailure("deck_slide_html_invalid", summary, retryable=True)
+                host.parent.mkdir(parents=True, exist_ok=True)
+                host.write_text(sanitized, encoding="utf-8")
+                slide.html_source = sanitized
                 slide.html_source_path = virtual
                 slide.gate_results["chrome_detected"] = False
-            deck.referenced_visual_count = len(
-                [
-                    slide
-                    for slide in generated_asset_slides(deck)
-                    if slide.visual_asset_path and slide.visual_status == "generated"
-                ]
-            )
+                slide.gate_results["html_source_validation"] = validation.to_dict()
+            deck.html_source_validation = validation_summary(validations)
+            deck.referenced_visual_count = _referenced_planned_asset_count(deck, validations)
             deck.status = "slides_rendered"
             finish_span(
                 run,
                 {
-                    "html_source_count": len(deck.slides),
+                    **deck.html_source_validation,
                     "html_basenames": [basename(slide.html_source_path) for slide in deck.slides],
                     "selectors": [slide.selector for slide in deck.slides],
                     "style_lane": deck.design_plan.style_lane if hasattr(deck.design_plan, "style_lane") else None,
                     "layout_families": [
-                        slide.composition.layout_family if slide.composition else None
+                        getattr(slide.composition_plan, "layout_name", None)
                         for slide in deck.slides
                     ],
                     "generated_asset_count": deck.generated_asset_count,
@@ -1059,6 +1127,30 @@ class DeckBuildService:
             inputs={},
         ) as run:
             finish_span(run, deck.native_mechanical_report)
+        with deck_span(
+            "deck.mechanical_gates.evaluate",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            deck_compile_mode=deck.deck_compile_mode,
+            inputs={
+                "render_dir": basename(str(render_host)),
+                "native_text_shape_count": deck.native_text_shape_count,
+                "native_editability_score": deck.native_editability_score,
+            },
+        ) as run:
+            gate_result = evaluate_mechanical_gates(deck, rendered_dir=render_host)
+            deck.mechanical_gate_results = gate_result.to_dict()
+            finish_span(run, deck.mechanical_gate_results)
+        if not deck.mechanical_gate_results.get("passed"):
+            raise DeckBuildFailure(
+                str(deck.mechanical_gate_results.get("failure_code") or "deck_mechanical_gate_failed"),
+                str(deck.mechanical_gate_results.get("failure_summary") or "Deck mechanical gates failed."),
+                retryable=True,
+            )
         deck.pptx_path = deck.output_path
         deck.compile_overflow_slides = []
         deck.status = "compiled"
@@ -1151,6 +1243,9 @@ class DeckBuildService:
                     "batch_timeout_count": deck.batch_timeout_count,
                     "partial_batch_salvaged": deck.partial_batch_salvaged,
                     "native_mechanical_report": deck.native_mechanical_report,
+                    "mechanical_gate_results": deck.mechanical_gate_results,
+                    "html_source_validation": deck.html_source_validation,
+                    "creative_plan_file": basename(deck.creative_plan_path),
                     "design_plan_file": basename(deck.design_plan_path),
                     "asset_policy_file": basename(deck.asset_policy_path),
                     "style_warnings": deck.style_warnings,
@@ -1200,6 +1295,9 @@ class DeckBuildService:
                     "batch_timeout_count": deck.batch_timeout_count,
                     "partial_batch_salvaged": deck.partial_batch_salvaged,
                     "native_mechanical_report": deck.native_mechanical_report,
+                    "mechanical_gate_results": deck.mechanical_gate_results,
+                    "html_source_validation": deck.html_source_validation,
+                    "creative_plan_file": basename(deck.creative_plan_path),
                     "design_plan_file": basename(deck.design_plan_path),
                     "asset_policy_file": basename(deck.asset_policy_path),
                     "style_warnings": deck.style_warnings,
@@ -1241,8 +1339,11 @@ class DeckBuildService:
             successful_visual_count=deck.successful_visual_count,
             referenced_visual_count=deck.referenced_visual_count,
             missing_visual_count=deck.missing_visual_count,
+            creative_plan_path=deck.creative_plan_path,
             design_plan_path=deck.design_plan_path,
             asset_policy_path=deck.asset_policy_path,
+            html_source_validation=deck.html_source_validation,
+            mechanical_gate_results=deck.mechanical_gate_results,
             style_warnings=deck.style_warnings,
             generated_asset_count=deck.generated_asset_count,
             native_html_slide_count=deck.native_html_slide_count,
@@ -1259,6 +1360,7 @@ class DeckBuildService:
             batch_timeout_count=deck.batch_timeout_count,
             partial_batch_salvaged=deck.partial_batch_salvaged,
             native_mechanical_report=deck.native_mechanical_report,
+            repair_instruction=None,
         )
 
     def _assert_deck_success_allowed(self, deck: DeckBuild, runtime: ToolRuntime | None = None) -> None:
@@ -1352,8 +1454,11 @@ class DeckBuildService:
             successful_visual_count=deck.successful_visual_count,
             referenced_visual_count=deck.referenced_visual_count,
             missing_visual_count=deck.missing_visual_count,
+            creative_plan_path=deck.creative_plan_path,
             design_plan_path=deck.design_plan_path,
             asset_policy_path=deck.asset_policy_path,
+            html_source_validation=deck.html_source_validation,
+            mechanical_gate_results=deck.mechanical_gate_results,
             style_warnings=deck.style_warnings,
             generated_asset_count=deck.generated_asset_count,
             native_html_slide_count=deck.native_html_slide_count,
@@ -1373,6 +1478,7 @@ class DeckBuildService:
             quality_warning=deck.quality_warning,
             warnings=[deck.quality_warning] if deck.quality_warning else [],
             native_mechanical_report=deck.native_mechanical_report,
+            repair_instruction=_repair_instruction_for_failure(exc),
         )
 
     def _run_image_batch_subprocess(self, manifest_path: str, runtime: ToolRuntime) -> dict[str, Any]:
@@ -1635,6 +1741,52 @@ def _load_native_shape_inventory(path: str | None) -> dict[str, Any]:
     return slides if isinstance(slides, dict) else {}
 
 
+def _slide_html_virtual_path(slide: DeckSlideSpec) -> str:
+    role = re.sub(r"[^a-z0-9]+", "-", str(slide.role or "slide").lower()).strip("-") or "slide"
+    return f"{_SLIDES}/{slide.index:02d}-{role}.html"
+
+
+def _referenced_planned_asset_count(deck: DeckBuild, validations: list[Any]) -> int:
+    refs_by_selector = {validation.selector: set(validation.image_refs) for validation in validations}
+    count = 0
+    for slide in generated_asset_slides(deck):
+        expected = f"../assets/slide-{slide.index:02d}.png"
+        if expected in refs_by_selector.get(slide.selector, set()):
+            count += 1
+    return count
+
+
+def _repair_instruction_for_failure(exc: DeckBuildFailure) -> dict[str, Any] | None:
+    if not exc.retryable:
+        return None
+    if exc.code not in {
+        "deck_creative_plan_required",
+        "deck_creative_plan_invalid",
+        "deck_slide_html_missing",
+        "deck_slide_html_invalid",
+        "deck_image_asset_plan_invalid",
+        "deck_mechanical_gate_failed",
+        "invalid_deck_ir",
+    }:
+        return None
+    return {
+        "should_retry": True,
+        "max_retry_count": 1,
+        "failure_scope": "creative_deck_plan" if exc.code.startswith("deck_creative") else "slide_html_or_mechanical_gate",
+        "message": (
+            "Create or repair the subject-derived DeckCreativePlan and every slide.html_source, "
+            "using planned generated images only as assets, then call prepare_deck_build exactly once more."
+        ),
+        "repair_message": (
+            "Repair the D2.1 deck input and call prepare_deck_build exactly once more. "
+            "Include creative_plan with design_plan, image_assets, slide_compositions, and one html_source "
+            "per slide. Keep the slide canvas 1920x1080, use an opaque background, no scripts/external URLs, "
+            "and reference only planned assets as ../assets/slide-XX.png. "
+            f"Previous failure: {exc.code}: {safe_excerpt(exc.summary, limit=400)}"
+        ),
+    }
+
+
 @contextlib.contextmanager
 def _deck_trace_runtime_context(runtime: ToolRuntime, deck: DeckBuild) -> Iterator[None]:
     state = getattr(runtime, "state", None)
@@ -1666,6 +1818,8 @@ def _compile_with_build_deck_from_slides(
     title: str,
     slides_dir: str,
 ) -> dict[str, Any]:
+    from deerflow.sophia.tools.build_deck_from_slides import build_deck_from_slides
+
     raw = build_deck_from_slides.func(
         runtime=runtime,
         output_path=output_path,

@@ -56,23 +56,94 @@ def _runtime(outputs: Path) -> SimpleNamespace:
 
 
 def _slides() -> list[dict[str, str]]:
-    return [
-        {
-            "title": f"Slide {index} System Story",
-            "narrative": "A concise technical narrative explains the point with calm professional framing.",
-            "role": role,
-            "layout_kind": layout,
-            "visual_prompt": f"Professional technical visual metaphor for slide {index}",
-        }
-        for index, (role, layout) in enumerate(
-            [
-                ("cover", "cover_hero"),
-                ("architecture", "single_visual_focus"),
-                ("closing", "closing_summary"),
-            ],
-            start=1,
+    slides = []
+    for index, (role, layout) in enumerate(
+        [
+            ("cover", "cover_hero"),
+            ("architecture", "single_visual_focus"),
+            ("closing", "closing_summary"),
+        ],
+        start=1,
+    ):
+        title = f"Slide {index} System Story"
+        narrative = "A concise technical narrative explains the point with calm professional framing."
+        asset = '<img src="../assets/slide-01.png" alt="" />' if index == 1 else ""
+        slides.append(
+            {
+                "title": title,
+                "narrative": narrative,
+                "role": role,
+                "layout_kind": layout,
+                "visual_prompt": f"Professional technical visual metaphor for slide {index}",
+                "html_source": f"""<!doctype html><html><head><style>
+html, body {{ width: 1920px; height: 1080px; margin: 0; padding: 0; background: #0A0E14; }}
+body {{ overflow: hidden; color: #EEF4FB; font-family: Aptos, Arial, sans-serif; }}
+.canvas {{ position: relative; width: 1920px; height: 1080px; background: #0A0E14; }}
+h1 {{ position: absolute; left: 120px; top: 100px; font-size: 64px; }}
+p {{ position: absolute; left: 120px; top: 820px; width: 1200px; font-size: 30px; color: #A7B4C2; }}
+.panel {{ position: absolute; left: 120px; top: 300px; width: 1380px; height: 400px; border: 3px solid #38BDF8; background: #111827; }}
+img {{ position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; opacity: .25; }}
+</style></head><body><main class="canvas">{asset}<h1>{title}</h1><div class="panel"></div><p>{narrative}</p></main></body></html>""",
+            }
         )
-    ]
+    return slides
+
+
+def _creative_plan() -> dict[str, Any]:
+    return {
+        "subject": "Technical Deck",
+        "audience": "technical stakeholders",
+        "goal": "explain the system clearly",
+        "story_arc": "Cover, architecture, closing synthesis.",
+        "design_plan": {
+            "source": "test",
+            "subject": "Technical Deck",
+            "audience": "technical stakeholders",
+            "goal": "explain the system clearly",
+            "style_lane": "technical_blueprint",
+            "palette": [
+                {"name": "background", "hex": "#0A0E14", "role": "slide substrate"},
+                {"name": "surface", "hex": "#111827", "role": "panel"},
+                {"name": "ink", "hex": "#EEF4FB", "role": "text"},
+                {"name": "accent", "hex": "#38BDF8", "role": "linework"},
+            ],
+            "typography": {"display": "Aptos Display", "body": "Aptos", "utility": "Aptos"},
+            "grid": {"slide_width_px": 1920, "slide_height_px": 1080},
+            "signature": "dark native technical diagram language",
+            "rhythm": "cover, architecture, closing",
+            "anti_slop_profile": ["native text", "structural variety"],
+            "requested_style_terms": ["dark_technical"],
+        },
+        "image_strategy": "hybrid",
+        "image_assets": [
+            {
+                "asset_id": "cover-texture",
+                "slide_selector": "slide:1",
+                "role": "hero_background",
+                "reason": "Atmospheric cover texture.",
+                "prompt": "Dark technical abstract system texture, no readable text.",
+                "aspect_ratio": "16:9",
+                "integration": "full_bleed_background",
+                "no_baked_text": True,
+            }
+        ],
+        "slide_compositions": [
+            {
+                "selector": f"slide:{index}",
+                "slide_role": role,
+                "headline_intent": "Explain the slide point.",
+                "layout_name": layout,
+                "composition_rationale": "Native HTML structure with clear hierarchy.",
+                "native_elements": ["title", "panel", "narrative"],
+                "image_asset_ids": ["cover-texture"] if index == 1 else [],
+            }
+            for index, (role, layout) in enumerate(
+                [("cover", "cover_texture"), ("architecture", "native_diagram"), ("closing", "closing_synthesis")],
+                start=1,
+            )
+        ],
+        "anti_slop_commitments": ["structural variety", "native text"],
+    }
 
 
 def _fake_compiler(runtime: SimpleNamespace, output_path: str, _title: str, _slides_dir: str) -> dict[str, Any]:
@@ -302,6 +373,7 @@ def test_deck_service_uses_manifest_span_for_prompt_hashes_not_prompt_write_span
         deck_title="Technical Deck",
         slides=_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
     )
 
     assert result.success is True

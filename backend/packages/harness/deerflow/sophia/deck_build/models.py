@@ -6,6 +6,21 @@ from typing import Any, Literal
 DeckVisualPolicy = Literal["auto", "required", "text_only", "auto_with_images_allowed"]
 DeckRegister = Literal["professional_technical", "executive", "expressive", "reflective", "utility"]
 DeckVisualMode = Literal["native_html", "generated_asset", "hybrid", "text_only"]
+DeckCreativeStrategy = Literal[
+    "hero_only",
+    "sparse_signature",
+    "image_led",
+    "diagram_native",
+    "hybrid",
+]
+GeneratedAssetIntegration = Literal[
+    "full_bleed_background",
+    "inset_illustration",
+    "masked_panel",
+    "texture_layer",
+    "subject_photo",
+    "none",
+]
 DeckAssetRole = Literal[
     "none",
     "hero_background",
@@ -106,6 +121,52 @@ class DeckDesignPlan:
 
 
 @dataclass
+class DeckImageAssetPlan:
+    asset_id: str
+    slide_selector: str
+    role: str
+    reason: str
+    prompt: str
+    aspect_ratio: str = "16:9"
+    integration: str = "inset_illustration"
+    no_baked_text: bool = True
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DeckSlideCompositionPlan:
+    selector: str
+    slide_role: str
+    headline_intent: str
+    layout_name: str
+    composition_rationale: str
+    native_elements: list[str]
+    image_asset_ids: list[str]
+    risk_notes: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DeckCreativePlan:
+    subject: str
+    audience: str
+    goal: str
+    story_arc: str
+    design_plan: DeckDesignPlan
+    image_strategy: str
+    image_assets: list[DeckImageAssetPlan]
+    slide_compositions: list[DeckSlideCompositionPlan]
+    anti_slop_commitments: list[str] = field(default_factory=list)
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class DeckAssetPlan:
     visual_mode: str
     image_gen_required: bool
@@ -145,10 +206,12 @@ class DeckSlideSpec:
     narrative: str
     claim: str | None = None
     visual_prompt: str | None = None
+    html_source: str | None = None
     speaker_notes: str | None = None
     visual_required: bool = True
     asset_plan: DeckAssetPlan | None = None
     composition: DeckCompositionSpec | None = None
+    composition_plan: DeckSlideCompositionPlan | dict[str, Any] | None = None
     visual_prompt_path: str | None = None
     visual_asset_path: str | None = None
     visual_status: str = "pending"
@@ -179,14 +242,18 @@ class DeckBuild:
     slides: list[DeckSlideSpec]
     expected_visual_count: int
     design_plan: DeckDesignPlan | dict[str, Any] | None = None
+    creative_plan: DeckCreativePlan | dict[str, Any] | None = None
+    creative_plan_path: str | None = None
     design_plan_path: str | None = None
     asset_policy_path: str | None = None
+    html_source_validation: dict[str, Any] = field(default_factory=dict)
+    mechanical_gate_results: dict[str, Any] = field(default_factory=dict)
     style_warnings: list[str] = field(default_factory=list)
     generated_asset_count: int = 0
     native_html_slide_count: int = 0
     hybrid_slide_count: int = 0
     text_only_slide_count: int = 0
-    deck_route: str = "deck_ir_html_raster"
+    deck_route: str = "deck_creative_html_native"
     deck_compile_mode: str = "not_compiled"
     native_required: bool = True
     legacy_screenshot_debug: bool = False
@@ -259,7 +326,7 @@ class DeckBuildResult:
     build_id: str
     deck_build_path: str
     pptx_path: str | None = None
-    deck_route: str = "deck_ir_html_raster"
+    deck_route: str = "deck_creative_html_native"
     deck_compile_mode: str = "not_compiled"
     native_required: bool = True
     legacy_screenshot_debug: bool = False
@@ -272,8 +339,11 @@ class DeckBuildResult:
     successful_visual_count: int = 0
     referenced_visual_count: int = 0
     missing_visual_count: int = 0
+    creative_plan_path: str | None = None
     design_plan_path: str | None = None
     asset_policy_path: str | None = None
+    html_source_validation: dict[str, Any] = field(default_factory=dict)
+    mechanical_gate_results: dict[str, Any] = field(default_factory=dict)
     style_warnings: list[str] = field(default_factory=list)
     generated_asset_count: int = 0
     native_html_slide_count: int = 0

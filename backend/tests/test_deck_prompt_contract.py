@@ -9,6 +9,7 @@ SURFACES = [
     PROJECT_ROOT / "skills" / "public" / "sophia" / "visual_composition.md",
     PROJECT_ROOT / "skills" / "public" / "sophia" / "builder_obligations.md",
     PROJECT_ROOT / "skills" / "public" / "sophia" / "coordination_core.md",
+    PROJECT_ROOT / "skills" / "public" / "sophia" / "deck_craft.md",
     PROJECT_ROOT
     / "backend"
     / "packages"
@@ -30,14 +31,15 @@ def test_fresh_deck_prompt_surfaces_route_to_prepare_deck_build() -> None:
     lower_text = text.lower()
 
     assert "prepare_deck_build" in text
+    assert "deck_craft" in lower_text
+    assert "creative_plan" in text
+    assert "html_source" in text
     assert "DeckBuildService" in text
     assert "native PowerPoint" in text
-    assert "slide intent" in text
-    assert "design plan" in lower_text
-    assert "composition" in lower_text
-    assert "asset policy" in lower_text
+    assert "mechanical gates" in lower_text
+    assert "sanitization" in lower_text or "sanitizes" in lower_text
+    assert "planned assets" in lower_text or "planned generated assets" in lower_text
     assert "visual_policy" in text
-    assert "optional" in lower_text
     assert "layout_kind" in text
     assert "<= 280" in text
     assert "retryable=true" in text
@@ -46,7 +48,7 @@ def test_fresh_deck_prompt_surfaces_route_to_prepare_deck_build() -> None:
     assert "picture is never itself the whole slide" in lower_text or "not itself a complete slide" in lower_text
 
 
-def test_ppt_skill_allows_legacy_route_only_when_prepare_deck_build_absent() -> None:
+def test_ppt_skill_quarantines_legacy_route_only_when_prepare_deck_build_absent() -> None:
     text = (PROJECT_ROOT / "skills" / "public" / "ppt-generation" / "SKILL.md").read_text(encoding="utf-8")
 
     assert "does not expose\n`prepare_deck_build`" in text
@@ -71,8 +73,14 @@ def test_fresh_deck_prompt_surfaces_do_not_teach_old_workflow() -> None:
         "screenshot-backed pptx fallback",
         "write one prompt json file per slide",
         "one generated image per slide",
+        "one generated visual per slide",
         "visual_prompt: required for normal decks",
         "generate every slide visual",
+        "slide intent only",
+        "complete slide intent list",
+        "deck ir repair",
+        "deck_build_templates_v1",
+        "deck_ir_html_raster",
     ]
     for phrase in forbidden:
         assert phrase not in text

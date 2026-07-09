@@ -1,0 +1,65 @@
+from __future__ import annotations
+
+import pytest
+
+from deerflow.sophia.deck_build.creative_plan import CreativePlanValidationError, normalize_creative_plan
+from deerflow.sophia.deck_build.models import DeckBuild
+from deerflow.sophia.deck_build.service import DeckBuildService
+from test_deck_build_service import _creative_plan, _runtime, _slides
+
+
+def _deck(tmp_path) -> DeckBuild:
+    runtime = _runtime(tmp_path / "outputs")
+    service = DeckBuildService()
+    slides = service._build_slide_specs(
+        _slides(),
+        visual_policy="auto",
+        runtime=runtime,
+        style_profile={},
+    )
+    return DeckBuild(
+        build_id="deck-test",
+        schema_version="sophia-deck-build/v1",
+        user_id="user",
+        thread_id="thread",
+        parent_thread_id=None,
+        run_id=None,
+        task_id=None,
+        requested_slide_count=len(slides),
+        status="planned",
+        register="professional_technical",
+        visual_policy="auto",
+        style_profile={},
+        deck_title="Technical Deck",
+        output_path="/mnt/user-data/outputs/deck.pptx",
+        slides=slides,
+        expected_visual_count=0,
+    )
+
+
+def test_missing_creative_plan_is_retryable_validation_error(tmp_path) -> None:
+    with pytest.raises(CreativePlanValidationError) as exc:
+        normalize_creative_plan(None, deck=_deck(tmp_path), request_context="")
+
+    assert exc.value.code == "deck_creative_plan_required"
+
+
+def test_creative_plan_requires_all_slide_compositions(tmp_path) -> None:
+    raw = _creative_plan()
+    raw["slide_compositions"] = raw["slide_compositions"][:2]
+
+    with pytest.raises(CreativePlanValidationError) as exc:
+        normalize_creative_plan(raw, deck=_deck(tmp_path), request_context="")
+
+    assert exc.value.code == "deck_creative_plan_invalid"
+    assert "slide:3" in exc.value.summary
+
+
+def test_creative_plan_forces_native_base_canvas_size(tmp_path) -> None:
+    raw = _creative_plan()
+    raw["design_plan"]["grid"] = {"slide_width_px": 1280, "slide_height_px": 720}
+
+    plan = normalize_creative_plan(raw, deck=_deck(tmp_path), request_context="")
+
+    assert plan.design_plan.grid.slide_width_px == 1920
+    assert plan.design_plan.grid.slide_height_px == 1080

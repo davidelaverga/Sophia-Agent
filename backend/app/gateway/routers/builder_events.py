@@ -78,6 +78,9 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "picture_shape_count",
     "full_slide_picture_count",
     "native_mechanical_report",
+    "mechanical_gate_results",
+    "html_source_validation",
+    "creative_plan_path",
     "deck_quality_status",
     "failure_code",
     "deck_failure_code",
@@ -156,6 +159,9 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "picture_shape_count",
         "full_slide_picture_count",
         "native_mechanical_report",
+        "mechanical_gate_results",
+        "html_source_validation",
+        "creative_plan_path",
         "deck_quality_status",
         "failure_code",
         "deck_failure_code",
@@ -394,6 +400,9 @@ class BuilderCompletionEvent(BaseModel):
     picture_shape_count: int | None = None
     full_slide_picture_count: int | None = None
     native_mechanical_report: dict[str, Any] | None = None
+    mechanical_gate_results: dict[str, Any] | None = None
+    html_source_validation: dict[str, Any] | None = None
+    creative_plan_path: str | None = None
     deck_quality_status: str | None = None
     failure_code: str | None = None
     deck_failure_code: str | None = None

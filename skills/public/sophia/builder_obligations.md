@@ -32,27 +32,29 @@ This file is for the Sophia builder only.
 ## Presentation Rules
 
 - Fresh presentations are built through `prepare_deck_build`. Provide complete
-  slide intent: title, narrative, role, layout_kind, optional asset-only
-  visual_prompt, and speaker_notes. Keep every narrative concise and <= 280
-  characters. DeckBuildService owns design plan, composition, asset policy,
-  generated assets, native PowerPoint compilation, inspection, validation, and
+  D2.1 input: creative_plan plus each slide's title, narrative, role,
+  layout_kind, speaker_notes, and html_source. Keep every narrative concise and
+  <= 280 characters. DeckBuildService owns HTML sanitization, planned generated
+  assets, native PowerPoint compilation, inspection, mechanical gates, and
   terminal failure.
 - Do not call `prepare_pptx_image_manifest`, `image-generation/scripts/generate.py`,
-  or `build_deck_from_slides` directly for a fresh deck. Do not hand-write
-  `slides/*.html`. Do not write python-pptx/pptxgenjs or any custom deck compiler.
+  or `build_deck_from_slides` directly for a fresh deck. Do not write
+  `slides/*.html` files yourself. Put model-authored slide HTML in
+  prepare_deck_build's `html_source` fields. Do not write python-pptx/pptxgenjs
+  or any custom deck compiler.
 - Screenshot-backed PPTX is a failed build, not a fallback. If
   `prepare_deck_build` returns a native deck failure, stop and emit
   `artifact_path=null` with the returned failure code and summary.
-- Normal decks may use optional generated assets as DeckBuildService asset policy decides.
+- Normal decks may use optional generated assets declared in creative_plan.image_assets.
   A full-bleed picture may be an asset/background inside a native deck with
   native text, but it is not itself a complete slide. Only explicit
   text-only/no-visual deck requests should force `visual_policy="text_only"`;
   ordinary native slides may require no generated image.
 - Do not bake slide title, bottom narrative, footers, formulas, axis labels,
   paragraph text, or page chrome into generated images. Titles and narratives
-  remain real slide text in the harness-rendered template.
+  remain real native text in the submitted slide HTML.
 - If `prepare_deck_build` returns success, emit the returned `.pptx`. If it
-  returns `retryable=true`, repair the exact Deck IR field and retry
+  returns `retryable=true`, repair the exact creative/html/mechanical issue and retry
   `prepare_deck_build` once. If it returns terminal failure, emit
   `artifact_path=null` with the returned failure code and summary. Do not loop
   on the same failing action or try a legacy screenshot deck.
@@ -87,4 +89,4 @@ This file is for the Sophia builder only.
 - Never silently present a source file, preview, or wrong extension as success.
 - A `prepare_deck_build` terminal failure is authoritative. Do not retry
   manually through lower-level tools. Retry `prepare_deck_build` only once when
-  the failure says it is retryable and asks for corrected slide intent.
+  the failure says it is retryable and asks for corrected creative/html/mechanical input.

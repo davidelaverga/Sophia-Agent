@@ -833,6 +833,15 @@ def _visual_composition_directives() -> str | None:
     return text or None
 
 
+def _deck_craft_directives() -> str | None:
+    path = SKILLS_PATH / "deck_craft.md"
+    try:
+        return path.read_text(encoding="utf-8").strip() or None
+    except OSError:
+        logger.warning("BuilderTask: deck_craft.md missing/unreadable path=%s", path)
+        return None
+
+
 def _terminal_artifact_format_line(artifact_target_ext: str, task_type: str = "") -> str:
     """Return the format-specific terminal handoff line for the target ext.
 
@@ -884,16 +893,16 @@ def _pptx_visual_guidance(*, deck_service_enabled: bool, image_generation_enable
         return "Image generation is not listed for this non-PPTX run. Use the medium-specific local figure workflow."
     if deck_service_enabled:
         return (
-            "Decks are built by prepare_deck_build. Submit slide intent only: title, narrative, "
-            "role, layout_kind, optional asset-only visual_prompt, and optional speaker_notes for "
-            "each slide; every narrative must be <= 280 characters. The harness owns design plan, "
-            "composition, asset policy, generated assets, native PowerPoint compilation, inspection, "
+            "Decks are built by prepare_deck_build. Read /mnt/skills/public/sophia/deck_craft.md, "
+            "then submit a complete creative_plan plus slide entries with title, narrative, "
+            "role, layout_kind, speaker_notes, and html_source for each slide; every narrative "
+            "must be <= 280 characters. The harness owns HTML sanitization, planned generated assets, native PowerPoint compilation, inspection, "
             "validation, and terminal failure. Screenshot-backed PPTX is not an acceptable fallback; if native "
             "deck generation fails, prepare_deck_build returns failure and you emit artifact_path=null. "
-            "If prepare_deck_build returns retryable=true, repair the exact Deck IR field and retry once. "
+            "If prepare_deck_build returns retryable=true, repair the exact creative/html/mechanical field and retry once. "
             "Do NOT call prepare_pptx_image_manifest, image-generation/scripts/generate.py, "
             "build_deck_from_slides, python-pptx, or pptxgenjs directly. Normal decks may use "
-            "optional generated assets as DeckBuildService asset policy decides; a full-bleed picture may be an asset "
+            "optional generated assets as the creative_plan declares; a full-bleed picture may be an asset "
             "inside a native deck but is not itself a complete slide. Only an explicitly plain text-only/no-visual "
             "request should set visual_policy='text_only'. Default to restrained professional technical "
             "visuals; do not use chalkboard, handwritten, whiteboard, sketch, cyberpunk, neon, or "
@@ -903,8 +912,8 @@ def _pptx_visual_guidance(*, deck_service_enabled: bool, image_generation_enable
         "Decks use the explicit local legacy/debug HTML-slide workflow in this run. Use prepare_pptx_image_manifest "
         "to create the deterministic slide visual manifest, generate the required slide visuals, "
         "author slides/*.html that reference the generated ../assets/slide-XX.png images, and "
-        "compile with build_deck_from_slides. Normal decks require one generated visual-only "
-        "asset per slide; do not ship an HTML-only/no-image deck unless the user explicitly asked "
+        "compile with build_deck_from_slides. Generate only the selected visual-only "
+        "assets the legacy diagnostic plan requires; do not ship an HTML-only/no-image deck unless the user explicitly asked "
         "for plain text-only/no-visual slides. Default to restrained professional technical visuals; "
         "do not use chalkboard, handwritten, whiteboard, sketch, cyberpunk, neon, or playful styles "
         "unless explicitly requested."
@@ -1275,6 +1284,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         directives = _visual_composition_directives()
         if directives:
             sections.append("<visual_composition>\n" + directives + "\n</visual_composition>")
+        if deck_service_enabled and artifact_target_ext == ".pptx":
+            deck_craft = _deck_craft_directives()
+            if deck_craft:
+                sections.append("<deck_craft>\n" + deck_craft + "\n</deck_craft>")
         if skills_block:
             sections.append(skills_block)
 
@@ -1290,8 +1303,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             )
 
         pptx_library_guidance = (
-            "For PPTX, submit slide intent through prepare_deck_build; NEVER write "
-            "custom python-pptx/pptxgenjs scripts or lower-level deck files yourself."
+            "For PPTX, submit creative_plan plus slide html_source through prepare_deck_build; NEVER write "
+            "custom python-pptx/pptxgenjs scripts or lower-level compiler files yourself."
             if deck_service_enabled
             else "For PPTX, this is an explicit non-production legacy/debug route; use the exposed ppt-generation workflow tools "
             "prepare_pptx_image_manifest and build_deck_from_slides; NEVER write "
@@ -1343,7 +1356,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             image_generation_enabled=image_generation_enabled,
         )
         pptx_delivery_line = (
-            "For fresh decks, call prepare_deck_build once with the complete slide intent list "
+            "For fresh decks, call prepare_deck_build once with the complete creative_plan and slide html_source list "
             "(or one repair retry when retryable=true); "
             "emit the returned native PPTX or a clean null-artifact failure if native generation "
             "fails. Screenshot-backed PPTX is not an acceptable fallback. Never write lower-level "

@@ -87,6 +87,66 @@ class TraceNativeService:
         return {"success": True, "changed": True, "errors": []}
 
 
+def _slide() -> dict[str, str]:
+    return {
+        "title": "Trace Deck",
+        "narrative": "Native compile spans are deck-level and compact.",
+        "role": "cover",
+        "layout_kind": "cover_hero",
+        "visual_prompt": "",
+        "html_source": """<!doctype html><html><head><style>
+html, body { margin: 0; padding: 0; width: 1920px; height: 1080px; background: #0A0E14; }
+body { overflow: hidden; color: #EEF4FB; font-family: Aptos, Arial, sans-serif; }
+.canvas { position: relative; width: 1920px; height: 1080px; background: #0A0E14; }
+h1 { position: absolute; left: 120px; top: 120px; font-size: 64px; }
+p { position: absolute; left: 120px; top: 780px; width: 1200px; font-size: 30px; color: #A7B4C2; }
+.panel { position: absolute; left: 120px; top: 320px; width: 1280px; height: 340px; border: 3px solid #38BDF8; background: #111827; }
+</style></head><body><main class="canvas"><h1>Trace Deck</h1><div class="panel"></div><p>Native compile spans are deck-level and compact.</p></main></body></html>""",
+    }
+
+
+def _creative_plan() -> dict[str, Any]:
+    return {
+        "subject": "Trace Deck",
+        "audience": "technical stakeholders",
+        "goal": "verify trace spans",
+        "story_arc": "Single native trace proof slide.",
+        "design_plan": {
+            "source": "test",
+            "subject": "Trace Deck",
+            "audience": "technical stakeholders",
+            "goal": "verify trace spans",
+            "style_lane": "technical_blueprint",
+            "palette": [
+                {"name": "background", "hex": "#0A0E14", "role": "slide substrate"},
+                {"name": "surface", "hex": "#111827", "role": "panel"},
+                {"name": "ink", "hex": "#EEF4FB", "role": "text"},
+                {"name": "accent", "hex": "#38BDF8", "role": "linework"},
+            ],
+            "typography": {"display": "Aptos Display", "body": "Aptos", "utility": "Aptos"},
+            "grid": {"slide_width_px": 1920, "slide_height_px": 1080},
+            "signature": "dark native trace",
+            "rhythm": "single proof slide",
+            "anti_slop_profile": ["native text"],
+            "requested_style_terms": ["dark_technical"],
+        },
+        "image_strategy": "diagram_native",
+        "image_assets": [],
+        "slide_compositions": [
+            {
+                "selector": "slide:1",
+                "slide_role": "cover",
+                "headline_intent": "Verify native tracing",
+                "layout_name": "trace_proof",
+                "composition_rationale": "Simple native proof slide.",
+                "native_elements": ["title", "panel", "narrative"],
+                "image_asset_ids": [],
+            }
+        ],
+        "anti_slop_commitments": ["native text"],
+    }
+
+
 def test_deck_native_spans_are_aggregated_and_mark_native_compile_mode(tmp_path: Path, monkeypatch) -> None:
     spans: list[dict[str, Any]] = []
 
@@ -106,17 +166,10 @@ def test_deck_native_spans_are_aggregated_and_mark_native_compile_mode(tmp_path:
     result = DeckBuildService(native_service=TraceNativeService()).prepare_and_build(
         runtime=_runtime(tmp_path / "outputs"),
         deck_title="Trace Deck",
-        slides=[
-            {
-                "title": "Trace Deck",
-                "narrative": "Native compile spans are deck-level and compact.",
-                "role": "cover",
-                "layout_kind": "cover_hero",
-                "visual_prompt": "",
-            }
-        ],
+        slides=[_slide()],
         output_path=f"{_OUTPUTS}trace.pptx",
         visual_policy="text_only",
+        creative_plan=_creative_plan(),
     )
 
     native_spans = [span for span in spans if span["name"].startswith("deck.native.")]

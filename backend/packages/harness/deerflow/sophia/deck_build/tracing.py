@@ -9,7 +9,7 @@ from typing import Any
 
 from deerflow.sandbox.tools import get_thread_data
 
-DEFAULT_DECK_ROUTE = "deck_ir_html_raster"
+DEFAULT_DECK_ROUTE = "deck_creative_html_native"
 NOT_COMPILED_DECK_COMPILE_MODE = "not_compiled"
 HTML_SCREENSHOT_FALLBACK_COMPILE_MODE = "html_screenshot_fallback"
 HTML_SCREENSHOT_DEBUG_COMPILE_MODE = "html_screenshot_debug"

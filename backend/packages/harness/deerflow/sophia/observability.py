@@ -884,7 +884,7 @@ def _base_builder_metadata(
         "qc_pass_count": _as_int(diagnostics.get("qc_pass_count")),
         "qc_failure_count": _as_int(diagnostics.get("qc_failure_count")),
     }
-    deck_route = diagnostics.get("deck_route") or ("deck_ir_html_raster" if diagnostics.get("deck_build_id") else None)
+    deck_route = diagnostics.get("deck_route") or ("deck_creative_html_native" if diagnostics.get("deck_build_id") else None)
     if deck_route:
         payload["deck_route"] = deck_route
     deck_compile_mode = diagnostics.get("deck_compile_mode")
@@ -979,12 +979,15 @@ def _add_deck_build_metadata(
         "deck_failure_code": _first_present(diagnostics.get("deck_failure_code"), artifact.get("deck_failure_code"), artifact.get("failure_code")),
         "deck_template_renderer_version": _first_present(diagnostics.get("deck_template_renderer_version"), artifact.get("deck_template_renderer_version")),
         "deck_quality_status": _first_present(diagnostics.get("deck_quality_status"), artifact.get("deck_quality_status")),
+        "creative_plan_path": _first_present(diagnostics.get("creative_plan_path"), artifact.get("creative_plan_path")),
         "native_required": _first_present(diagnostics.get("native_required"), artifact.get("native_required")),
         "legacy_screenshot_debug": _first_present(diagnostics.get("legacy_screenshot_debug"), artifact.get("legacy_screenshot_debug")),
         "native_editability_score": native_editability_score,
         "native_text_shape_count": native_text_shape_count,
         "picture_shape_count": picture_shape_count,
         "full_slide_picture_count": full_slide_picture_count,
+        "mechanical_gate_results": _first_present(diagnostics.get("mechanical_gate_results"), artifact.get("mechanical_gate_results")),
+        "html_source_validation": _first_present(diagnostics.get("html_source_validation"), artifact.get("html_source_validation")),
     }.items():
         _merge_safe_metadata(metadata, key, source)
     for key, source in {
