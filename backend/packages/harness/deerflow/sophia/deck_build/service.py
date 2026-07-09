@@ -876,6 +876,24 @@ class DeckBuildService:
                 slide.gate_results["html_source_validation"] = validation.to_dict()
             deck.html_source_validation = validation_summary(validations)
             deck.referenced_visual_count = _referenced_planned_asset_count(deck, validations)
+            if deck.expected_visual_count > deck.referenced_visual_count:
+                missing = deck.expected_visual_count - deck.referenced_visual_count
+                summary = (
+                    f"Deck creative plan declares {deck.expected_visual_count} generated image asset(s), "
+                    f"but slide HTML references only {deck.referenced_visual_count} planned asset(s)."
+                )
+                finish_span(
+                    run,
+                    {
+                        **deck.html_source_validation,
+                        "failure_code": "deck_slide_html_invalid",
+                        "failure_summary": safe_excerpt(summary),
+                        "expected_visual_count": deck.expected_visual_count,
+                        "referenced_visual_count": deck.referenced_visual_count,
+                        "missing_expected_visual_count": missing,
+                    },
+                )
+                raise DeckBuildFailure("deck_slide_html_invalid", summary, retryable=True)
             deck.status = "slides_rendered"
             finish_span(
                 run,

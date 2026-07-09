@@ -67,3 +67,26 @@ def test_prepare_deck_build_writes_model_authored_html_not_template(tmp_path: Pa
     assert "system-diagram" not in html
     assert result.deck_route == "deck_creative_html_native"
     assert result.html_source_validation["valid"] is True
+
+
+def test_prepare_deck_build_requires_declared_assets_in_slide_html(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        native_service=_FakeNativeService(),
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_slides(include_asset=False),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(include_asset=True),
+    )
+
+    assert result.success is False
+    assert result.retryable is True
+    assert result.failure_code == "deck_slide_html_invalid"
+    assert result.expected_visual_count == 1
+    assert result.referenced_visual_count == 0
+    assert result.pptx_path is None

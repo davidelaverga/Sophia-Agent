@@ -54,3 +54,29 @@ def test_rejects_missing_fixed_canvas() -> None:
     assert result.valid is False
     assert "slide canvas must be 1920x1080px" in result.errors
     assert "slide canvas must declare an opaque background" in result.errors
+
+
+def test_canvas_size_uses_slide_canvas_not_first_child_width() -> None:
+    html = """<!doctype html><html><head><style>
+.badge { width: 80px; height: 28px; background: #38BDF8; }
+html, body { width: 1920px; height: 1080px; background: #0A0E14; }
+.canvas { width: 1920px; height: 1080px; background: #0A0E14; }
+</style></head><body><main class="canvas"><span class="badge">A</span><h1>Title</h1></main></body></html>"""
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+    assert result.canvas_width_px == 1920
+    assert result.canvas_height_px == 1080
+
+
+def test_rejects_css_subresource_urls_before_rendering() -> None:
+    html = """<!doctype html><html><head><style>
+html, body { width: 1920px; height: 1080px; background: #0A0E14; }
+.canvas { width: 1920px; height: 1080px; background-image: url(https://example.com/bg.png); }
+</style></head><body><main class="canvas"><h1>Title</h1></main></body></html>"""
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert any("CSS url(...)" in error for error in result.errors)

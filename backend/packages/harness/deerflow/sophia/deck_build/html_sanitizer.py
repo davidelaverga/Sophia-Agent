@@ -20,6 +20,7 @@ _FORBIDDEN_STYLE_RE = re.compile(
 _WARN_STYLE_RE = re.compile(r"(box-shadow\s*:|text-shadow\s*:|letter-spacing\s*:\s*-[^;]+)", re.I)
 _REMOTE_URI_RE = re.compile(r"^(?:https?:)?//|^https?:", re.I)
 _DATA_URI_RE = re.compile(r"^data:", re.I)
+_CSS_URL_RE = re.compile(r"url\(\s*(['\"]?)([^)'\"\s]+)\1\s*\)", re.I)
 
 
 @dataclass
@@ -146,9 +147,7 @@ def _validate_uri(value: str, *, errors: list[str]) -> None:
 
 
 def _validate_canvas(source: str, scanner: _HtmlScanner, validation: HtmlSourceValidation) -> None:
-    haystack = "\n".join(scanner.styles + [scanner.body_attrs.get("style", ""), scanner.main_attrs.get("style", ""), source[:4000]])
-    width = _first_px(haystack, "width")
-    height = _first_px(haystack, "height")
+    width, height = _canvas_size(scanner)
     validation.canvas_width_px = width
     validation.canvas_height_px = height
     if width != SLIDE_WIDTH_PX or height != SLIDE_HEIGHT_PX:
@@ -172,6 +171,7 @@ def _validate_css(styles: list[str], validation: HtmlSourceValidation) -> None:
     css = "\n".join(styles)
     if _FORBIDDEN_STYLE_RE.search(css):
         validation.errors.append("CSS uses unsupported active/external/fragile features")
+    _validate_css_urls(css, validation)
     if _WARN_STYLE_RE.search(css):
         validation.warnings.append("CSS contains fragile decorative effects that may be sanitized")
     if "position: fixed" in css.lower():
@@ -203,3 +203,41 @@ def _first_px(source: str, prop: str) -> int | None:
         return int(match.group(1))
     except ValueError:
         return None
+
+
+def _canvas_size(scanner: _HtmlScanner) -> tuple[int | None, int | None]:
+    candidates = [
+        scanner.main_attrs.get("style", ""),
+        scanner.body_attrs.get("style", ""),
+        *(_selector_rule_body(css, "main") for css in scanner.styles),
+        *(_selector_rule_body(css, ".canvas") for css in scanner.styles),
+        *(_selector_rule_body(css, "body") for css in scanner.styles),
+        *(_selector_rule_body(css, "html, body") for css in scanner.styles),
+        *(_selector_rule_body(css, "html") for css in scanner.styles),
+    ]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        width = _first_px(candidate, "width")
+        height = _first_px(candidate, "height")
+        if width is not None and height is not None:
+            return width, height
+    return None, None
+
+
+def _selector_rule_body(css: str, selector: str) -> str:
+    selector_pattern = re.escape(selector).replace(r"\ ", r"\s*")
+    match = re.search(rf"(^|[}}])\s*{selector_pattern}\s*\{{([^}}]+)\}}", css, re.I | re.S)
+    return match.group(2) if match else ""
+
+
+def _validate_css_urls(css: str, validation: HtmlSourceValidation) -> None:
+    for match in _CSS_URL_RE.finditer(css):
+        uri = match.group(2).strip()
+        if _REMOTE_URI_RE.search(uri) or _DATA_URI_RE.search(uri) or uri.lower().startswith("file:"):
+            validation.errors.append("CSS url(...) subresources are forbidden")
+            return
+        normalized = uri.replace("\\", "/")
+        if normalized.startswith("../assets/"):
+            validation.errors.append("CSS url(...) asset references are forbidden; use planned <img> assets")
+            return
