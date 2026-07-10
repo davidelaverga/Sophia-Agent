@@ -61,6 +61,21 @@ html, body { width: 1920px; height: 1080px; background: #fff; }
     assert any("srcset subresources are forbidden" in error for error in result.errors)
 
 
+def test_rejects_remote_and_file_svg_xlink_subresources() -> None:
+    for uri, expected_error in (
+        ("https://example.com/visual.svg", "remote http"),
+        ("file:///etc/passwd", "file URIs"),
+    ):
+        html = f"""<!doctype html><html><head><style>
+html, body {{ width: 1920px; height: 1080px; background: #fff; }}
+</style></head><body><main><svg><image xlink:href="{uri}" /></svg></main></body></html>"""
+
+        _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+        assert result.valid is False
+        assert any(expected_error in error for error in result.errors)
+
+
 def test_rejects_missing_fixed_canvas() -> None:
     html = "<html><body><main><h1>Title</h1></main></body></html>"
 

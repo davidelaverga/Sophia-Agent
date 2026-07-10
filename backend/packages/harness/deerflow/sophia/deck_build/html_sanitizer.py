@@ -11,7 +11,7 @@ from deerflow.sophia.deck_build.tracing import safe_excerpt
 SLIDE_WIDTH_PX = 1920
 SLIDE_HEIGHT_PX = 1080
 
-_FORBIDDEN_TAGS = {"script", "iframe", "object", "embed"}
+_FORBIDDEN_TAGS = {"script", "iframe", "object", "embed", "base"}
 _FORBIDDEN_STYLE_RE = re.compile(
     r"(@import\b|@font-face\b|filter\s*:|backdrop-filter\s*:|mix-blend-mode\s*:|"
     r"background-blend-mode\s*:|animation\s*:|transition\s*:)",
@@ -20,7 +20,9 @@ _FORBIDDEN_STYLE_RE = re.compile(
 _WARN_STYLE_RE = re.compile(r"(box-shadow\s*:|text-shadow\s*:|letter-spacing\s*:\s*-[^;]+)", re.I)
 _REMOTE_URI_RE = re.compile(r"^(?:https?:)?//|^https?:", re.I)
 _DATA_URI_RE = re.compile(r"^data:", re.I)
+_FILE_URI_RE = re.compile(r"^file:", re.I)
 _CSS_URL_RE = re.compile(r"\burl\s*\(", re.I)
+_URL_ATTRIBUTE_NAMES = {"src", "href", "poster", "background", "data"}
 
 
 @dataclass
@@ -59,14 +61,15 @@ class _HtmlScanner(HTMLParser):
         if clean_tag == "link" and attr_map.get("rel", "").lower() == "stylesheet":
             self.errors.append("external stylesheet links are forbidden")
         for name, value in attr_map.items():
-            if name.startswith("on"):
+            local_name = _attribute_local_name(name)
+            if local_name.startswith("on"):
                 self.errors.append(f"inline event handler {name} is forbidden")
-            self.errors.extend(_subresource_attribute_errors(name))
-            if name in {"src", "href"}:
+            self.errors.extend(_subresource_attribute_errors(local_name))
+            if local_name in _URL_ATTRIBUTE_NAMES:
                 _validate_uri(value, errors=self.errors)
-                if clean_tag == "img" and name == "src":
+                if clean_tag == "img" and local_name == "src":
                     self.image_refs.append(value)
-            if name == "style":
+            if local_name == "style":
                 self.styles.append(value)
         if clean_tag == "body":
             self.body_attrs = attr_map
@@ -145,6 +148,12 @@ def _validate_uri(value: str, *, errors: list[str]) -> None:
         errors.append("remote http(s) URLs are forbidden")
     if _DATA_URI_RE.search(clean):
         errors.append("data URIs are forbidden")
+    if _FILE_URI_RE.search(clean):
+        errors.append("file URIs are forbidden")
+
+
+def _attribute_local_name(name: str) -> str:
+    return name.rsplit(":", 1)[-1]
 
 
 def _subresource_attribute_errors(name: str) -> list[str]:
