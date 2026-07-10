@@ -360,8 +360,8 @@ def _artifact_target_extension(artifact_target_path: object) -> str:
     return Path(artifact_target_path).suffix.lower()
 
 
-_PAGE_RANGE_RE = re.compile(r"(?<!\d)(\d{1,2})\s*(?:-|to)\s*(\d{1,2})\s*pages?\b", re.IGNORECASE)
-_PAGE_COUNT_RE = re.compile(r"(?<!\d)(\d{1,2})\s*(?:-| )?\s*pages?\b", re.IGNORECASE)
+_PAGE_RANGE_RE = re.compile(r"(?<!\d)(\d+)\s*(?:-|to)\s*(\d+)\s*pages?\b", re.IGNORECASE)
+_PAGE_COUNT_RE = re.compile(r"(?<!\d)(\d+)\s*(?:-| )?\s*pages?\b", re.IGNORECASE)
 _PAGE_TARGET_OUTPUT_BEFORE_RE = re.compile(
     r"\b(?:pdf|report|document|summary|brief|article|explainer|deliverable|output)\b.{0,80}"
     r"\b(?:exactly|length|target|make|create|generate|produce|render|write|deliver|should|must|needs?)\b",
@@ -440,6 +440,7 @@ _SLIDE_TARGET_BUILD_VERB_ADJACENT_RE = re.compile(
     re.IGNORECASE,
 )
 _MAX_SUPPORTED_PPTX_SLIDES = 30
+_MAX_SUPPORTED_PDF_PAGES = 60
 
 
 def _valid_page_count(value: str) -> int | None:
@@ -447,7 +448,7 @@ def _valid_page_count(value: str) -> int | None:
         count = int(value)
     except (TypeError, ValueError):
         return None
-    return count if 1 <= count <= 60 else None
+    return min(count, _MAX_SUPPORTED_PDF_PAGES) if count >= 1 else None
 
 
 def _page_target_is_output_context(text: str, match: re.Match[str]) -> bool:

@@ -347,6 +347,24 @@ def test_builder_task_briefing_extracts_pdf_requested_pages() -> None:
     assert "requested_pages=8" in _briefing(result)
 
 
+def test_builder_task_briefing_caps_oversized_pdf_page_target() -> None:
+    result = BuilderTaskMiddleware().before_agent(
+        {
+            "delegation_context": {
+                "task_type": "visual_report",
+                "task": "Create a 100-page technical PDF report on retrieval systems.",
+                "artifact_target_path": "/mnt/user-data/outputs/retrieval-report.pdf",
+                "companion_artifact": {},
+            }
+        },
+        _runtime(),
+    )
+
+    assert result is not None
+    assert result["builder_pdf_requested_page_count"] == 60
+    assert "requested_pages=60" in _briefing(result)
+
+
 def test_pdf_page_target_ignores_source_document_page_mentions() -> None:
     updates = _pdf_page_target_updates(
         {

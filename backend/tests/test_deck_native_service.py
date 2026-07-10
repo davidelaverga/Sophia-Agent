@@ -3,6 +3,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -40,6 +41,30 @@ def test_deck_native_subprocess_honors_expired_parent_deadline(
 
     assert result.returncode == 124
     assert "deck deadline exceeded" in result.stderr
+
+
+def test_deck_native_render_clears_stale_images_before_counting_success(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pptx = tmp_path / "deck.pptx"
+    pptx.touch()
+    render_dir = tmp_path / "rendered"
+    render_dir.mkdir()
+    stale_render = render_dir / "slide-1.jpg"
+    stale_render.write_bytes(b"stale")
+    service = DeckNativeService(scripts_dir=tmp_path)
+    monkeypatch.setattr(
+        service,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess([], 0, stdout="", stderr=""),
+    )
+
+    result = service.render(pptx_path=str(pptx), output_dir=str(render_dir))
+
+    assert stale_render.exists() is False
+    assert result.success is False
+    assert result.rendered_slide_count == 0
 
 
 def _wide_base_deck(path: Path) -> None:

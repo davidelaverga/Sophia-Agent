@@ -80,3 +80,15 @@ html, body { width: 1920px; height: 1080px; background: #0A0E14; }
 
     assert result.valid is False
     assert any("CSS url(...)" in error for error in result.errors)
+
+
+def test_rejects_quoted_css_subresource_urls_with_spaces() -> None:
+    html = """<!doctype html><html><head><style>
+html, body { width: 1920px; height: 1080px; background: #0A0E14; }
+.canvas { width: 1920px; height: 1080px; background-image: url("https://example.com/hero image.png"); }
+</style></head><body><main class="canvas"><h1>Title</h1></main></body></html>"""
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert any("CSS url(...)" in error for error in result.errors)

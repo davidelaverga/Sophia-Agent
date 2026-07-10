@@ -254,6 +254,9 @@ class DeckNativeService:
         pptx = _path_arg(pptx_path, "pptx_path", suffix=".pptx", must_exist=True)
         render_dir = _path_arg(output_dir, "output_dir", create_parent=True)
         render_dir.mkdir(parents=True, exist_ok=True)
+        for stale_render in render_dir.glob("slide-*.jpg"):
+            if stale_render.is_file():
+                stale_render.unlink()
         command = [self._python, str(self._deck_cli), str(pptx), "render", "-o", str(render_dir)]
         valid_slides = [int(slide) for slide in slides or [] if int(slide) >= 0]
         if valid_slides:
