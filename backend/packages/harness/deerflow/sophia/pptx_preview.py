@@ -41,7 +41,11 @@ def soffice_available() -> bool:
     return shutil.which("soffice") is not None
 
 
-def maybe_render_pptx_preview(pptx_path: Path) -> Path | None:
+def maybe_render_pptx_preview(
+    pptx_path: Path,
+    *,
+    timeout_seconds: int | None = None,
+) -> Path | None:
     """Best-effort render of a PDF preview for ``pptx_path``.
 
     Returns the preview path on success, ``None`` on any failure. Never
@@ -62,6 +66,7 @@ def maybe_render_pptx_preview(pptx_path: Path) -> Path | None:
         # LibreOffice writes <stem>.pdf into --outdir; convert in a temp dir
         # and move into place so we never clobber a legitimate <stem>.pdf
         # deliverable in outputs/.
+        timeout = max(1, min(_SOFFICE_TIMEOUT_SECONDS, int(timeout_seconds or _SOFFICE_TIMEOUT_SECONDS)))
         with tempfile.TemporaryDirectory(prefix="pptx-preview-") as tmp_dir:
             completed = subprocess.run(  # noqa: S603 — soffice path from shutil.which
                 [
@@ -76,7 +81,7 @@ def maybe_render_pptx_preview(pptx_path: Path) -> Path | None:
                 ],
                 capture_output=True,
                 text=True,
-                timeout=_SOFFICE_TIMEOUT_SECONDS,
+                timeout=timeout,
                 check=False,
             )
             produced = Path(tmp_dir) / (pptx_path.stem + ".pdf")
@@ -100,8 +105,7 @@ def maybe_render_pptx_preview(pptx_path: Path) -> Path | None:
         return target
     except subprocess.TimeoutExpired:
         logger.warning(
-            "[PptxPreview] conversion timed out after %ss for %s",
-            _SOFFICE_TIMEOUT_SECONDS,
+            "[PptxPreview] conversion timed out for %s",
             pptx_path.name,
         )
         return None

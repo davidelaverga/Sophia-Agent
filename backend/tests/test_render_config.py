@@ -72,3 +72,19 @@ def test_langgraph_enables_builder_openai_fallback_and_gateway_does_not() -> Non
 
     assert "SOPHIA_BUILDER_OPENAI_FALLBACK_ENABLED" not in gateway
     assert "SOPHIA_BUILDER_OPENAI_FALLBACK_MODEL" not in gateway
+
+
+def test_langgraph_declares_presentation_runtime_budget_only() -> None:
+    langgraph = _service_env("sophia-langgraph")
+    gateway = _service_env("sophia-gateway")
+    expected = {
+        "SOPHIA_BUILDER_PRESENTATION_BUDGET_MAX_NON_ARTIFACT_TURNS": "12",
+        "SOPHIA_BUILDER_PRESENTATION_BUDGET_FORCE_EMIT_REMAINING_TURNS": "2",
+        "SOPHIA_BUILDER_PRESENTATION_BUDGET_SOFT_WARN_AT_TURN": "6",
+        "SOPHIA_BUILDER_PRESENTATION_BUDGET_MAX_WALL_CLOCK_SECONDS": "480",
+        "SOPHIA_BUILDER_PRESENTATION_BUDGET_PREPARE_FORCE_AT_TURN": "8",
+        "SOPHIA_BUILDER_PRESENTATION_BUDGET_PREPARE_FORCE_AFTER_SECONDS": "120",
+    }
+    for key, value in expected.items():
+        assert langgraph[key]["value"] == value
+        assert key not in gateway

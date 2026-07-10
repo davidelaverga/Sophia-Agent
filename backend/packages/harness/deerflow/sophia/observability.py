@@ -790,6 +790,13 @@ def _add_pptx_terminal_metadata(metadata: dict[str, Any], diagnostics: dict[str,
         "successful_generated_visual_count",
         "referenced_visual_count",
         "missing_expected_visual_count",
+        "first_prepare_turn",
+        "prepare_call_count",
+        "prepare_result_count",
+        "prepare_retry_executed",
+        "dangling_prepare_call_count",
+        "creative_plan_accepted",
+        "prepare_latch_activated_at_turn",
     ):
         _merge_safe_metadata(metadata, key, diagnostics.get(key))
 
@@ -817,6 +824,14 @@ def _add_artifact_acceptance_metadata(metadata: dict[str, Any], artifact: dict[s
         "actual_pages",
         "page_delta",
         "report_visual_grammar_count",
+        "terminal_status",
+        "terminal_reason",
+        "first_prepare_turn",
+        "prepare_call_count",
+        "prepare_result_count",
+        "prepare_retry_executed",
+        "dangling_prepare_call_count",
+        "creative_plan_accepted",
     ):
         _merge_safe_metadata(metadata, key, artifact.get(key))
 
@@ -1015,8 +1030,17 @@ def _builder_observability_tags(
     image_forward: bool,
     qc_invocations: int,
 ) -> list[str]:
+    terminal_status = str(
+        artifact.get("terminal_status") or artifact.get("status") or ""
+    ).strip()
+    dangling_prepare_calls = _as_int(
+        artifact.get("dangling_prepare_call_count")
+        or _as_dict(state.get("builder_pptx_diagnostics")).get("dangling_prepare_call_count")
+    )
     tags = [
         f"artifact:{artifact_ext}" if artifact_ext else "artifact:unknown",
+        f"builder_terminal:{terminal_status}" if terminal_status else None,
+        "deck_prepare_result_missing" if dangling_prepare_calls > 0 else None,
         "image_forward" if image_forward else "mixed_or_fallback",
         "qc_ran" if qc_invocations > 0 else None,
         "deck_screenshot_forbidden"
@@ -1122,6 +1146,33 @@ def _create_qc_feedback(run_tree: Any, qc_results: list[dict[str, Any]]) -> None
         logger.debug("LangSmith QC feedback creation failed", exc_info=True)
 
 
+def _create_terminal_feedback(run_tree: Any, artifact: dict[str, Any]) -> None:
+    terminal_status = str(
+        artifact.get("terminal_status") or artifact.get("status") or ""
+    ).strip()
+    if terminal_status not in {"completed", "failed", "timed_out"}:
+        return
+    run_id = getattr(run_tree, "id", None)
+    if run_id is None:
+        return
+    terminal_reason = str(artifact.get("terminal_reason") or "unknown")[:256]
+    try:
+        _feedback_client().create_feedback(
+            run_id=run_id,
+            key="builder_terminal_success",
+            score=1.0 if terminal_status == "completed" else 0.0,
+            comment=json.dumps(
+                {
+                    "terminal_status": terminal_status,
+                    "terminal_reason": terminal_reason,
+                },
+                ensure_ascii=False,
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        logger.debug("LangSmith terminal feedback creation failed", exc_info=True)
+
+
 def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any]) -> bool:
     """Attach builder completion metadata/tags/feedback to the active run."""
 
@@ -1137,6 +1188,7 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
     _add_run_metadata(run_tree, metadata)
     _add_run_tags(run_tree, tags)
     _create_qc_feedback(run_tree, qc_results)
+    _create_terminal_feedback(run_tree, artifact)
     logger.info(
         "Sophia builder LangSmith completion annotation attached: run_id=%s project=%s",
         getattr(run_tree, "id", None),

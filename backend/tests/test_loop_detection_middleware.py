@@ -2,7 +2,7 @@
 
 from unittest.mock import MagicMock
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 
 from deerflow.agents.middlewares.loop_detection_middleware import (
     _HARD_STOP_MSG,
@@ -79,10 +79,22 @@ class TestLoopDetection:
         # Third identical call triggers warning
         result = mw._apply(_make_state(tool_calls=call), runtime)
         assert result is not None
-        msgs = result["messages"]
-        assert len(msgs) == 1
-        assert isinstance(msgs[0], SystemMessage)
-        assert "LOOP DETECTED" in msgs[0].content
+        assert result["loop_detection_pending_warning"]
+        assert result["loop_detection_pending_tool_call_ids"] == ["call_ls"]
+        assert "messages" not in result
+
+        pending_state = _make_state(tool_calls=call)
+        pending_state.update(result)
+        assert mw.before_model(pending_state, runtime) is None
+
+        pending_state["messages"].append(
+            ToolMessage(content="ok", tool_call_id="call_ls", name="bash")
+        )
+        injected = mw.before_model(pending_state, runtime)
+        assert injected is not None
+        assert isinstance(injected["messages"][0], SystemMessage)
+        assert "LOOP DETECTED" in injected["messages"][0].content
+        assert injected["loop_detection_pending_warning"] is None
 
     def test_warn_only_injected_once(self):
         """Warning for the same hash should only be injected once per thread."""
@@ -97,7 +109,7 @@ class TestLoopDetection:
         # Third — warning injected
         result = mw._apply(_make_state(tool_calls=call), runtime)
         assert result is not None
-        assert "LOOP DETECTED" in result["messages"][0].content
+        assert "LOOP DETECTED" in result["loop_detection_pending_warning"]
 
         # Fourth — warning already injected, should return None
         result = mw._apply(_make_state(tool_calls=call), runtime)
@@ -120,6 +132,40 @@ class TestLoopDetection:
         assert isinstance(msgs[0], AIMessage)
         assert msgs[0].tool_calls == []
         assert _HARD_STOP_MSG in msgs[0].content
+        assert result["loop_detection_hard_stop"] is True
+        assert result["loop_detection_stop_reason"] == "repeated_tool_calls"
+
+    def test_hard_stop_preserves_anthropic_list_content(self):
+        mw = LoopDetectionMiddleware(warn_threshold=2, hard_limit=2)
+        runtime = _make_runtime()
+        call = [_bash_call("ls")]
+        content = [{"type": "text", "text": "Working"}]
+
+        mw._apply(_make_state(tool_calls=call, content=content), runtime)
+        result = mw._apply(_make_state(tool_calls=call, content=content), runtime)
+
+        assert result is not None
+        message = result["messages"][0]
+        assert message.tool_calls == []
+        assert message.content[0] == content[0]
+        assert message.content[-1] == {"type": "text", "text": _HARD_STOP_MSG}
+
+    def test_pending_warning_ignores_synthetic_dangling_result(self):
+        mw = LoopDetectionMiddleware()
+        state = {
+            "messages": [
+                AIMessage(content="", tool_calls=[_bash_call("ls")]),
+                ToolMessage(
+                    content="[Tool call was interrupted and did not return a result.]",
+                    tool_call_id="call_ls",
+                    name="bash",
+                ),
+            ],
+            "loop_detection_pending_warning": "warn",
+            "loop_detection_pending_tool_call_ids": ["call_ls"],
+        }
+
+        assert mw.before_model(state, _make_runtime()) is None
 
     def test_different_calls_dont_trigger(self):
         mw = LoopDetectionMiddleware(warn_threshold=2)
@@ -188,12 +234,12 @@ class TestLoopDetection:
         # Second call on thread A — triggers warning (2 >= warn_threshold)
         result = mw._apply(_make_state(tool_calls=call), runtime_a)
         assert result is not None
-        assert "LOOP DETECTED" in result["messages"][0].content
+        assert "LOOP DETECTED" in result["loop_detection_pending_warning"]
 
         # Second call on thread B — also triggers (independent tracking)
         result = mw._apply(_make_state(tool_calls=call), runtime_b)
         assert result is not None
-        assert "LOOP DETECTED" in result["messages"][0].content
+        assert "LOOP DETECTED" in result["loop_detection_pending_warning"]
 
     def test_lru_eviction(self):
         """Old threads should be evicted when max_tracked_threads is exceeded."""

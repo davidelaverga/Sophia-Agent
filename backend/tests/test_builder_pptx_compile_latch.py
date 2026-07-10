@@ -2,11 +2,19 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
+
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
     _pptx_compile_ready,
     _pptx_slide_html_ready,
 )
+
+
+@pytest.fixture(autouse=True)
+def _legacy_compile_latch_route(monkeypatch):
+    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "false")
+    monkeypatch.setenv("SOPHIA_DECK_LEGACY_SCREENSHOT_DEBUG", "true")
 
 
 def _write_slide_html(outputs_dir: Path, count: int, *, with_visuals: bool = False) -> None:

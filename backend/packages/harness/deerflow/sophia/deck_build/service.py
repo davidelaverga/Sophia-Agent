@@ -105,6 +105,7 @@ _SERIAL_REPAIR_MAX_ATTEMPTS = 2
 _NON_REPAIRABLE_IMAGE_ERROR_CLASSES = {
     "auth_invalid",
     "content_blocked",
+    "deck_deadline_exceeded",
     "egress_blocked",
     "file_not_found",
     "image_script_not_found",
@@ -189,6 +190,10 @@ class DeckBuildService:
             updated_at=now,
         )
         try:
+            deadline_setter = getattr(self._native_service, "set_deadline_epoch_ms", None)
+            if callable(deadline_setter):
+                deadline_setter(_builder_deadline_epoch_ms(runtime))
+            _assert_deck_deadline(runtime, stage="input_validation")
             self._validate_inputs(deck, slides, output_path, runtime)
             deck.slides = self._build_slide_specs(
                 slides,
@@ -218,10 +223,12 @@ class DeckBuildService:
                 source_design_plan=design_plan,
                 source_creative_plan=creative_plan,
             )
+            _assert_deck_deadline(runtime, stage="slide_html")
             self._render_slide_html(deck, runtime)
             if deck.expected_visual_count > 0:
                 self._write_prompt_files(deck, runtime)
                 self._prepare_manifest(deck, runtime)
+                _assert_deck_deadline(runtime, stage="image_batch", reserve_seconds=90)
                 with _deck_trace_runtime_context(runtime, deck):
                     summary = self._run_visual_batch(deck, runtime)
                     self._apply_batch_summary(deck, runtime, summary)
@@ -233,7 +240,9 @@ class DeckBuildService:
                     slide.visual_status = "not_required"
                 deck.image_generation_status = "not_required"
                 deck.primary_image_batch_status = "not_required"
+            _assert_deck_deadline(runtime, stage="native_compile")
             self._compile_pptx(deck, runtime)
+            _assert_deck_deadline(runtime, stage="deck_evaluation")
             self._evaluate(deck, runtime)
             deck.status = "evaluated"
             _finalize_image_generation_status(deck, success=True)
@@ -527,6 +536,12 @@ class DeckBuildService:
                 summary = self._reconcile_missing_batch_summary(deck, runtime, summary)
             self._record_primary_batch_state(deck, summary)
             finish_span(run, _safe_batch_summary(summary))
+            if str(summary.get("error_class") or "") == "deck_deadline_exceeded":
+                raise DeckBuildFailure(
+                    "deck_deadline_exceeded",
+                    "The shared builder deadline expired during image generation.",
+                    retryable=False,
+                )
             if not summary.get("summary_present", True) and not summary.get("batch_attempted"):
                 raise DeckBuildFailure("deck_visual_batch_startup_failed", "Image batch did not emit IMAGEGEN_BATCH.", retryable=False)
             if not summary.get("complete"):
@@ -710,9 +725,20 @@ class DeckBuildService:
         ) as run:
             for slide in missing:
                 for attempt_no in range(1, _SERIAL_REPAIR_MAX_ATTEMPTS + 1):
+                    _assert_deck_deadline(
+                        runtime,
+                        stage="serial_image_repair",
+                        reserve_seconds=60,
+                    )
                     attempts += 1
                     result = self._image_single_runner(slide, runtime, attempt_no)
                     result_error_class = str(result.get("error_class") or "")
+                    if result_error_class == "deck_deadline_exceeded":
+                        raise DeckBuildFailure(
+                            "deck_deadline_exceeded",
+                            "The shared builder deadline expired during serial image repair.",
+                            retryable=False,
+                        )
                     output_exists = bool(slide.visual_asset_path and (_file_size(_host_path(slide.visual_asset_path, runtime)) or 0) > 0)
                     success = bool(result.get("success")) and output_exists
                     deck.serial_repair_count += 1
@@ -1013,6 +1039,7 @@ class DeckBuildService:
         render_host = _host_path(_NATIVE_RENDER_DIR, runtime)
         html_hosts = [_host_path(slide.html_source_path or "", runtime) for slide in deck.slides]
         _write_native_base_deck(base_host)
+        _assert_deck_deadline(runtime, stage="native_html2patch")
         with deck_span(
             "deck.native.html2patch",
             runtime=runtime,
@@ -1031,8 +1058,11 @@ class DeckBuildService:
             )
             finish_span(run, _native_patch_span_outputs(html2patch))
         if not html2patch.success:
+            if _native_deadline_error(html2patch.errors):
+                raise DeckBuildFailure("deck_deadline_exceeded", _native_error_summary(html2patch.errors, "Deck deadline exceeded."), retryable=False)
             code = "deck_native_startup_failed" if _native_startup_error(html2patch.errors) else "deck_native_html2patch_failed"
             raise DeckBuildFailure(code, _native_error_summary(html2patch.errors, "Native html2patch failed."), retryable=False)
+        _assert_deck_deadline(runtime, stage="native_patch_apply")
         with deck_span(
             "deck.native.patch_apply",
             runtime=runtime,
@@ -1052,8 +1082,11 @@ class DeckBuildService:
             )
             finish_span(run, _native_patch_span_outputs(applied))
         if not applied.success:
+            if _native_deadline_error(applied.errors):
+                raise DeckBuildFailure("deck_deadline_exceeded", _native_error_summary(applied.errors, "Deck deadline exceeded."), retryable=False)
             code = "deck_native_patch_validation_failed" if applied.validation_error_count else "deck_native_patch_apply_failed"
             raise DeckBuildFailure(code, _native_error_summary(applied.errors, "Native patch apply failed."), retryable=False)
+        _assert_deck_deadline(runtime, stage="native_inspect")
         with deck_span(
             "deck.native.inspect",
             runtime=runtime,
@@ -1068,6 +1101,8 @@ class DeckBuildService:
             inspected = self._native_service.inspect(str(output_host))
             finish_span(run, _native_inspect_span_outputs(inspected))
         if not inspected.success:
+            if _native_deadline_error(inspected.errors):
+                raise DeckBuildFailure("deck_deadline_exceeded", _native_error_summary(inspected.errors, "Deck deadline exceeded."), retryable=False)
             raise DeckBuildFailure("deck_native_inspect_failed", _native_error_summary(inspected.errors, "Native inspect failed."), retryable=False)
         self._record_native_inspect(deck, inspected)
         if (deck.native_editability_score or 0.0) < 0.60:
@@ -1077,6 +1112,7 @@ class DeckBuildService:
                 retryable=False,
             )
         touched_slides = [slide.index - 1 for slide in deck.slides]
+        _assert_deck_deadline(runtime, stage="native_lint_fix")
         with deck_span(
             "deck.native.lint_fix",
             runtime=runtime,
@@ -1091,12 +1127,15 @@ class DeckBuildService:
             lint_fix = self._native_service.lint_fix(pptx_path=str(output_host), touched_slides=touched_slides)
             finish_span(run, _native_lint_fix_span_outputs(lint_fix))
         if not lint_fix.success:
+            if _native_deadline_error(lint_fix.errors):
+                raise DeckBuildFailure("deck_deadline_exceeded", _native_error_summary(lint_fix.errors, "Deck deadline exceeded."), retryable=False)
             raise DeckBuildFailure("deck_native_lint_fix_failed", _native_error_summary(lint_fix.errors, "Native lint/fix failed."), retryable=False)
         if lint_fix.residue_count:
             deck.quality_warning = _merge_warning(deck.quality_warning, "native_lint_residue")
         for slide in deck.slides:
             slide.gate_results["native_editability_score"] = deck.native_editability_score
             slide.gate_results["lint_residue_count"] = lint_fix.residue_count
+        _assert_deck_deadline(runtime, stage="native_render")
         with deck_span(
             "deck.native.render",
             runtime=runtime,
@@ -1111,7 +1150,10 @@ class DeckBuildService:
             rendered = self._native_service.render(pptx_path=str(output_host), output_dir=str(render_host), slides=touched_slides)
             finish_span(run, _native_render_span_outputs(rendered))
         if not rendered.success:
+            if _native_deadline_error(rendered.errors):
+                raise DeckBuildFailure("deck_deadline_exceeded", _native_error_summary(rendered.errors, "Deck deadline exceeded."), retryable=False)
             raise DeckBuildFailure("deck_native_render_failed", _native_error_summary(rendered.errors, "Native render failed."), retryable=False)
+        _assert_deck_deadline(runtime, stage="native_diff")
         with deck_span(
             "deck.native.diff",
             runtime=runtime,
@@ -1126,6 +1168,8 @@ class DeckBuildService:
             diff = self._native_service.diff(before_path=str(base_host), after_path=str(output_host))
             finish_span(run, {"success": bool(diff.get("success")), "changed": bool(diff.get("changed")), "error_count": len(diff.get("errors") or [])})
         if not diff.get("success"):
+            if _native_deadline_error([str(item) for item in diff.get("errors") or []]):
+                raise DeckBuildFailure("deck_deadline_exceeded", "The shared builder deadline expired during native diff.", retryable=False)
             deck.quality_warning = _merge_warning(deck.quality_warning, "native_diff_unavailable")
         deck.native_mechanical_report = native_mechanical_report(
             inspect=inspected,
@@ -1517,11 +1561,13 @@ class DeckBuildService:
         except subprocess.TimeoutExpired as exc:
             stdout = _timeout_stream_text(getattr(exc, "stdout", None) or getattr(exc, "output", None))
             stderr = _timeout_stream_text(getattr(exc, "stderr", None))
+            remaining = _remaining_deadline_seconds(runtime)
+            deadline_near = remaining is not None and remaining <= 90
             return {
                 "summary_present": False,
                 "complete": False,
                 "exit_code": 124,
-                "error_class": "timeout",
+                "error_class": "deck_deadline_exceeded" if deadline_near else "timeout",
                 "items": _parse_batch_item_progress(stdout),
                 "raw_error_excerpt": safe_excerpt(
                     f"image batch subprocess timed out after {timeout}s; "
@@ -1550,7 +1596,17 @@ class DeckBuildService:
         if not slide.visual_prompt_path or not slide.visual_asset_path:
             return {"success": False, "error_class": "missing_prompt_or_output"}
         started = time.perf_counter()
-        timeout = _image_single_timeout_seconds()
+        remaining = _remaining_deadline_seconds(runtime, reserve_seconds=60)
+        if remaining is not None and remaining <= 0:
+            return {
+                "success": False,
+                "error_class": "deck_deadline_exceeded",
+                "raw_error_excerpt": "shared builder deadline exhausted before serial repair",
+            }
+        timeout = min(
+            _image_single_timeout_seconds(),
+            max(1, remaining) if remaining is not None else _image_single_timeout_seconds(),
+        )
         aspect_ratio = (slide.asset_plan.aspect_ratio if slide.asset_plan else None) or "16:9"
         try:
             completed = subprocess.run(  # noqa: S603
@@ -1609,6 +1665,51 @@ def _state_value(runtime: Any, key: str) -> Any:
     return state.get(key) if isinstance(state, dict) else None
 
 
+def _builder_deadline_epoch_ms(runtime: Any) -> int | None:
+    raw = _state_value(runtime, "builder_deadline_epoch_ms")
+    if isinstance(raw, (int, float)) and raw > 0:
+        return int(raw)
+    kickoff = _state_value(runtime, "builder_task_kickoff_ms")
+    timeout = _state_value(runtime, "builder_timeout_seconds")
+    if (
+        isinstance(kickoff, (int, float))
+        and kickoff > 0
+        and isinstance(timeout, (int, float))
+        and timeout > 0
+    ):
+        return int(kickoff) + int(timeout) * 1000
+    return None
+
+
+def _remaining_deadline_seconds(
+    runtime: Any,
+    *,
+    reserve_seconds: int = 0,
+) -> int | None:
+    deadline = _builder_deadline_epoch_ms(runtime)
+    if deadline is None:
+        return None
+    return max(
+        0,
+        int((deadline - int(time.time() * 1000)) / 1000) - max(0, reserve_seconds),
+    )
+
+
+def _assert_deck_deadline(
+    runtime: Any,
+    *,
+    stage: str,
+    reserve_seconds: int = 0,
+) -> None:
+    remaining = _remaining_deadline_seconds(runtime, reserve_seconds=reserve_seconds)
+    if remaining is not None and remaining <= 0:
+        raise DeckBuildFailure(
+            "deck_deadline_exceeded",
+            f"The shared builder deadline was exhausted before {stage}.",
+            retryable=False,
+        )
+
+
 def _truthy_env(name: str) -> bool:
     return (os.getenv(name, "") or "").strip().lower() in {"1", "true", "yes", "on"}
 
@@ -1665,6 +1766,10 @@ def _native_startup_error(errors: list[str]) -> bool:
             "browser",
         )
     )
+
+
+def _native_deadline_error(errors: list[str]) -> bool:
+    return "deck deadline exceeded" in "\n".join(errors).lower()
 
 
 def _native_error_summary(errors: list[str], fallback: str) -> str:
@@ -2082,13 +2187,19 @@ def _manifest_item_count_for_timeout(manifest_path: str, runtime: ToolRuntime) -
 def _deck_image_batch_timeout_seconds(manifest_path: str, runtime: ToolRuntime) -> int:
     override = os.getenv("SOPHIA_DECK_IMAGE_BATCH_TIMEOUT")
     if override and override.strip():
-        return _int_env("SOPHIA_DECK_IMAGE_BATCH_TIMEOUT", 1800)
-    per_image_timeout = _int_env("SOPHIA_IMAGE_GEN_TIMEOUT", 120)
-    max_retries = _nonnegative_int_env("SOPHIA_IMAGE_GEN_MAX_RETRIES", 1)
-    concurrency = _int_env("SOPHIA_IMAGE_GEN_CONCURRENCY", 2)
-    item_count = max(1, _manifest_item_count_for_timeout(manifest_path, runtime))
-    waves = max(1, (item_count + concurrency - 1) // concurrency)
-    return max(_image_single_timeout_seconds(), waves * per_image_timeout * (max_retries + 1) + 60)
+        calculated = _int_env("SOPHIA_DECK_IMAGE_BATCH_TIMEOUT", 1800)
+    else:
+        per_image_timeout = _int_env("SOPHIA_IMAGE_GEN_TIMEOUT", 120)
+        max_retries = _nonnegative_int_env("SOPHIA_IMAGE_GEN_MAX_RETRIES", 1)
+        concurrency = _int_env("SOPHIA_IMAGE_GEN_CONCURRENCY", 2)
+        item_count = max(1, _manifest_item_count_for_timeout(manifest_path, runtime))
+        waves = max(1, (item_count + concurrency - 1) // concurrency)
+        calculated = max(
+            _image_single_timeout_seconds(),
+            waves * per_image_timeout * (max_retries + 1) + 60,
+        )
+    remaining = _remaining_deadline_seconds(runtime, reserve_seconds=90)
+    return min(calculated, max(1, remaining)) if remaining is not None else calculated
 
 
 def _image_single_timeout_seconds() -> int:

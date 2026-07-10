@@ -19,6 +19,7 @@ from deerflow.sandbox.tools import replace_virtual_path
 from deerflow.sophia.deck_build import service as deck_service
 from deerflow.sophia.deck_build.service import DeckBuildService
 from deerflow.sophia.deck_build.storage import load_deck_build
+from deerflow.sophia.deck_build.tool_contract import DeckCreativePlanInput
 from deerflow.sophia.deck_build.tracing import NATIVE_DECK_COMPILE_MODE
 from deerflow.sophia.deck_native.models import (
     NativeDeckInspectResult,
@@ -701,6 +702,49 @@ def test_deck_image_batch_subprocess_timeout_is_structured(tmp_path: Path, monke
     assert "timed out" in result["raw_error_excerpt"]
 
 
+def test_deck_image_batch_timeout_is_capped_by_shared_deadline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state["builder_deadline_epoch_ms"] = 111_000
+    monkeypatch.setattr(deck_service.time, "time", lambda: 1.0)
+    manifest_host = tmp_path / "outputs" / "assets" / "slide-visuals.manifest.json"
+    manifest_host.parent.mkdir(parents=True, exist_ok=True)
+    manifest_host.write_text(
+        json.dumps({"items": [{"output_file": f"{_OUTPUTS}assets/slide-01.png"}]}),
+        encoding="utf-8",
+    )
+
+    timeout = deck_service._deck_image_batch_timeout_seconds(
+        f"{_OUTPUTS}assets/slide-visuals.manifest.json",
+        runtime,
+    )
+
+    assert timeout == 20
+
+
+def test_expired_shared_deadline_returns_non_retryable_failure(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state["builder_deadline_epoch_ms"] = 1_000
+    monkeypatch.setattr(deck_service.time, "time", lambda: 2.0)
+
+    result = DeckBuildService().prepare_and_build(
+        runtime=runtime,
+        deck_title="Deadline",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
+    )
+
+    assert result.success is False
+    assert result.failure_code == "deck_deadline_exceeded"
+    assert result.retryable is False
+
+
 def test_deck_build_service_incomplete_visuals_fail_before_compile(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     native_calls: list[dict] = []
@@ -844,6 +888,52 @@ def test_prepare_deck_build_tool_schema_excludes_runtime() -> None:
     properties = schema.get("properties", {})
     assert "runtime" not in properties
     assert {"deck_title", "slides", "output_path", "register", "visual_policy"}.issubset(properties)
+    assert "creative_plan" in schema.get("required", [])
+    composition_schema = schema["$defs"]["DeckSlideCompositionInput"]
+    assert set(composition_schema["required"]) == {
+        "selector",
+        "slide_role",
+        "headline_intent",
+        "layout_name",
+        "composition_rationale",
+        "native_elements",
+        "image_asset_ids",
+    }
+
+
+def test_creative_plan_tool_contract_normalizes_only_direct_aliases() -> None:
+    payload = _creative_plan(include_asset=False)
+    composition = payload["slide_compositions"][0]
+    composition["slide"] = 1
+    composition["role"] = composition.pop("slide_role")
+    composition["layout"] = composition.pop("layout_name")
+    composition.pop("selector")
+
+    parsed = DeckCreativePlanInput.model_validate(payload)
+    normalized = parsed.slide_compositions[0]
+
+    assert normalized.selector == "slide:1"
+    assert normalized.slide_role == "cover"
+    assert normalized.layout_name == "cover_with_texture"
+    assert normalized.headline_intent == "Explain slide 1"
+
+
+def test_creative_plan_validation_reports_indexed_nested_path(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    plan = _creative_plan(include_asset=False)
+    plan["slide_compositions"][0].pop("headline_intent")
+
+    result = DeckBuildService(native_service=_FakeNativeService()).prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_slides(include_asset=False),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=plan,
+    )
+
+    assert result.success is False
+    assert result.failure_code == "deck_creative_plan_invalid"
+    assert result.failure_summary == "creative_plan.slide_compositions[0].headline_intent is required"
 
 
 def test_presentation_toolset_uses_prepare_deck_build_by_default(monkeypatch) -> None:
@@ -969,7 +1059,7 @@ def test_prepare_deck_build_failure_is_terminal_command(tmp_path: Path, monkeypa
     assert diagnostics["missing_expected_visual_count"] == 3
 
 
-def test_prepare_deck_build_retryable_ir_failure_returns_to_model(tmp_path: Path, monkeypatch) -> None:
+def test_prepare_deck_build_retryable_ir_failure_uses_normal_graph_edge(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "true")
     runtime = _runtime(tmp_path / "outputs")
     request = SimpleNamespace(
@@ -996,10 +1086,17 @@ def test_prepare_deck_build_retryable_ir_failure_returns_to_model(tmp_path: Path
     command = BuilderArtifactMiddleware()._prepare_deck_build_result_command(request, result)
 
     assert isinstance(command, Command)
-    assert command.goto == "model"
+    assert not command.goto
     assert command.update["builder_deck_ir_repair_attempt_count"] == 1
     assert command.update["builder_last_deck_ir_failure"]["failure_code"] == "invalid_deck_ir"
-    assert "prepare_deck_build exactly once more" in command.update["messages"][1].content
+    assert command.update["messages"] == [result]
+    assert command.update["builder_deck_prepare_phase"] == "retry_pending"
+    assert "prepare_deck_build exactly once more" in command.update["builder_deck_prepare_repair_message"]
+
+    state = {**runtime.state, **command.update}
+    repair_update = BuilderArtifactMiddleware().before_model(state, runtime)
+    assert repair_update is not None
+    assert "prepare_deck_build exactly once more" in repair_update["messages"][0].content
 
 
 def test_prepare_deck_build_retryable_ir_second_failure_is_terminal(tmp_path: Path, monkeypatch) -> None:

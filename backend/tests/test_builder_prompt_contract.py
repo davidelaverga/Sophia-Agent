@@ -29,7 +29,7 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
     assert "requested primary artifact" in contract
     assert "Fresh presentations are built through `prepare_deck_build`" in contract
     assert "slide intent" in contract
-    assert "optional generated assets as DeckBuildService asset policy decides" in contract
+    assert "optional generated assets declared in creative_plan.image_assets" in contract
     assert "design plan, composition, asset policy" in contract
     assert "native PowerPoint" in contract
     assert "artifact_path=null" in contract
@@ -70,7 +70,7 @@ def test_ppt_generation_skill_routes_fresh_decks_to_deck_build_service() -> None
     assert "prepare_deck_build" in text
     assert "DeckBuildService" in text
     assert "slide intent" in text
-    assert "visual_prompt" in text
+    assert "prompt" in text
     assert "optional" in text
     assert "asset policy" in text
     lowered = text.lower()

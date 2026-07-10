@@ -664,6 +664,45 @@ def test_builder_completion_event_pydantic_accepts_run_id():
     assert legacy.run_id is None
 
 
+def test_completion_payload_preserves_terminal_and_prepare_metadata():
+    from app.gateway.routers.builder_events import BuilderCompletionEvent
+
+    artifact = {
+        "artifact_path": None,
+        "artifact_type": "presentation",
+        "artifact_title": "Deck did not complete",
+        "status": "failed",
+        "terminal_status": "failed",
+        "terminal_reason": "deck_prepare_tool_result_missing",
+        "failure_code": "deck_prepare_tool_result_missing",
+        "first_prepare_turn": 8,
+        "prepare_call_count": 2,
+        "prepare_result_count": 1,
+        "prepare_retry_executed": True,
+        "dangling_prepare_call_count": 1,
+        "creative_plan_accepted": False,
+        "confidence": 0.0,
+    }
+
+    payload = builder_events.build_completion_payload_from_artifact(
+        state=_make_state(task_type="presentation"),
+        runtime=_make_runtime(),
+        artifact=artifact,
+        status="failed",
+    )
+    parsed = BuilderCompletionEvent(**payload)
+
+    assert payload["status"] == "error"
+    assert parsed.terminal_status == "failed"
+    assert parsed.terminal_reason == "deck_prepare_tool_result_missing"
+    assert parsed.first_prepare_turn == 8
+    assert parsed.prepare_call_count == 2
+    assert parsed.prepare_result_count == 1
+    assert parsed.prepare_retry_executed is True
+    assert parsed.dangling_prepare_call_count == 1
+    assert parsed.creative_plan_accepted is False
+
+
 def test_phantom_success_coerces_to_error():
     """No artifact path + low confidence + no signed URL → status=error with retry message."""
     runtime = _make_runtime()

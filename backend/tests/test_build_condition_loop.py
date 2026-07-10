@@ -69,10 +69,14 @@ def test_iteration_cap_invalid_env_uses_default(monkeypatch):
     assert iteration_cap() == 3
 
 
-def test_builder_budget_policy_uses_complex_tier_for_pdf_and_pptx(monkeypatch):
+def test_builder_budget_policy_uses_presentation_tier_for_pptx(monkeypatch):
     monkeypatch.delenv("SOPHIA_BUILDER_MAX_COST_USD", raising=False)
     monkeypatch.delenv("SOPHIA_BUILDER_MAX_TOTAL_TOKENS", raising=False)
-    for prefix in ("SOPHIA_BUILDER_SIMPLE_BUDGET", "SOPHIA_BUILDER_COMPLEX_BUDGET"):
+    for prefix in (
+        "SOPHIA_BUILDER_SIMPLE_BUDGET",
+        "SOPHIA_BUILDER_COMPLEX_BUDGET",
+        "SOPHIA_BUILDER_PRESENTATION_BUDGET",
+    ):
         for key in (
             "MAX_COST_USD",
             "MAX_TOTAL_TOKENS",
@@ -81,6 +85,9 @@ def test_builder_budget_policy_uses_complex_tier_for_pdf_and_pptx(monkeypatch):
             "SOFT_WARN_AT_TURN",
             "FORCE_EMIT_WALL_CLOCK_FRACTION",
             "REPAIR_RESERVE_USD",
+            "MAX_WALL_CLOCK_SECONDS",
+            "PREPARE_FORCE_AT_TURN",
+            "PREPARE_FORCE_AFTER_SECONDS",
         ):
             monkeypatch.delenv(f"{prefix}_{key}", raising=False)
     simple = builder_budget_for_task(task_type="frontend", artifact_ext="html")
@@ -93,8 +100,11 @@ def test_builder_budget_policy_uses_complex_tier_for_pdf_and_pptx(monkeypatch):
     assert pdf["tier"] == "complex_artifact"
     assert pdf["max_cost_usd"] == 12.0
     assert max_non_artifact_turns({"builder_budget": pdf}) == 45
-    assert deck["tier"] == "complex_artifact"
-    assert max_non_artifact_turns({"builder_budget": deck}) == 45
+    assert deck["tier"] == "presentation"
+    assert max_non_artifact_turns({"builder_budget": deck}) == 12
+    assert deck["max_wall_clock_seconds"] == 480
+    assert deck["prepare_force_at_turn"] == 8
+    assert deck["prepare_force_after_seconds"] == 120
 
 
 def test_iteration_available_respects_counter(monkeypatch):
@@ -308,8 +318,9 @@ def test_unmet_conditions_named_at_delivery():
     unmet = _unmet_conditions_from_state(
         {"artifact_path": "/mnt/user-data/outputs/deck.pptx"}, state
     )
-    # Visuals requested? deck brief has no chart markers → only hero unmet.
-    assert "hero_missing" in unmet
+    # Service-owned PPTX planning never succeeded, so visual/hero conditions
+    # are intentionally suppressed instead of reporting an irrelevant gate.
+    assert "hero_missing" not in unmet
 
 
 def test_unmet_conditions_empty_after_success():

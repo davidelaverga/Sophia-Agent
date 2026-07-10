@@ -105,8 +105,9 @@ def test_prepare_pptx_image_manifest_writes_deterministic_schema(tmp_path) -> No
         "slide_index": 1,
         "prompt_file": f"{_WORKSPACE}slide-01.json",
         "output_file": f"{_OUTPUTS}assets/slide-01.png",
-        "slide_visual": True,
-        "aspect_ratio": "16:9",
+            "slide_visual": True,
+            "deck_asset": False,
+            "aspect_ratio": "16:9",
     }
 
 

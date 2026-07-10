@@ -9,6 +9,7 @@ from langchain.tools import ToolRuntime, tool
 
 from deerflow.sophia.deck_build.ir_repair import deck_ir_repair_instruction_from_failure
 from deerflow.sophia.deck_build.service import DeckBuildService
+from deerflow.sophia.deck_build.tool_contract import DeckCreativePlanInput
 
 
 @tool("prepare_deck_build", parse_docstring=True)
@@ -17,11 +18,11 @@ def prepare_deck_build(
     deck_title: str,
     slides: list[dict[str, Any]],
     output_path: str,
+    creative_plan: DeckCreativePlanInput,
     register: str = "professional_technical",
     visual_policy: str = "auto",
     style_profile: dict[str, Any] | None = None,
     design_plan: dict[str, Any] | None = None,
-    creative_plan: dict[str, Any] | None = None,
 ) -> str:
     """Build a fresh native PPTX deck from creative plan plus slide HTML.
 
@@ -37,8 +38,10 @@ def prepare_deck_build(
             plain/no-visual deck requests.
         style_profile: Optional compatibility style hints.
         design_plan: Optional compatibility design hints; prefer creative_plan.
-        creative_plan: Required fresh-deck DeckCreativePlan with design_plan,
-            image_assets, slide_compositions, and anti-slop commitments.
+        creative_plan: Required fresh-deck DeckCreativePlan. Every
+            slide_compositions item requires selector, slide_role,
+            headline_intent, layout_name, composition_rationale,
+            native_elements, and image_asset_ids.
 
     Fresh PPTX rules:
         Call this tool once with the complete creative_plan and all slide
@@ -59,7 +62,7 @@ def prepare_deck_build(
         visual_policy=visual_policy,
         style_profile=style_profile,
         design_plan=design_plan,
-        creative_plan=creative_plan,
+        creative_plan=creative_plan.model_dump(),
     )
     payload = result.to_dict()
     if payload.get("repair_instruction") is None:

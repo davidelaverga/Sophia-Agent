@@ -19,6 +19,7 @@ from deerflow.agents.sophia_agent.middlewares import builder_budget as bb_mod
 from deerflow.agents.sophia_agent.middlewares.builder_budget import (
     USER_BUDGET_COST_MESSAGE,
     USER_BUDGET_TIMEOUT_MESSAGE,
+    USER_BUDGET_WALL_CLOCK_MESSAGE,
     BuilderBudgetMiddleware,
     _estimate_cost_usd,
     _price_for,
@@ -207,4 +208,43 @@ def test_image_generation_cost_under_cap_is_noop(monkeypatch):
         "builder_pptx_diagnostics": {"image_generation_attempt_count": 3},
     }
     assert mw.after_model(state, _runtime()) is None
+    assert calls == []
+
+
+def test_wall_clock_deadline_terminalizes_before_model(monkeypatch):
+    calls = _capture_webhook(monkeypatch)
+    monkeypatch.setattr(bb_mod, "annotate_builder_completion", lambda *_args, **_kwargs: True)
+    monkeypatch.setattr(bb_mod.time, "time", lambda: 2.0)
+    state = {
+        "builder_budget": {
+            "max_cost_usd": 0.0,
+            "max_total_tokens": 0,
+            "max_wall_clock_seconds": 1,
+        },
+        "builder_task_kickoff_ms": 1,
+        "builder_deadline_epoch_ms": 1000,
+        "messages": [_ai(content="still planning")],
+    }
+
+    out = BuilderBudgetMiddleware().before_model(state, _runtime())
+
+    assert out is not None
+    assert out["jump_to"] == "end"
+    assert out["builder_result"]["status"] == "timed_out"
+    assert out["builder_result"]["terminal_reason"] == "wall_clock_limit"
+    assert out["builder_result"]["failure_code"] == "deck_deadline_exceeded"
+    assert out["builder_result"]["companion_summary"] == USER_BUDGET_WALL_CLOCK_MESSAGE
+    assert calls[0]["status"] == "timed_out"
+
+
+def test_wall_clock_guard_preserves_existing_terminal_result(monkeypatch):
+    calls = _capture_webhook(monkeypatch)
+    monkeypatch.setattr(bb_mod.time, "time", lambda: 2.0)
+    state = {
+        "builder_deadline_epoch_ms": 1000,
+        "builder_result": {"status": "completed", "artifact_path": "deck.pptx"},
+        "messages": [],
+    }
+
+    assert BuilderBudgetMiddleware().before_model(state, _runtime()) is None
     assert calls == []

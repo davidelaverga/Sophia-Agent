@@ -10,6 +10,51 @@ Fresh PPTX decks are designed, not templated.
 4. Author native-convertible slide HTML/CSS from that plan.
 5. Call `prepare_deck_build` with the creative plan and all slide HTML sources.
 
+## Creative Plan Contract
+
+Use canonical selectors and provide one composition for every slide. The
+minimum shape is:
+
+```json
+{
+  "subject": "Agent runtime reliability",
+  "audience": "Platform engineers",
+  "goal": "Explain the failure controls",
+  "story_arc": "Failure signal to deterministic recovery",
+  "design_plan": {
+    "source": "creative_plan",
+    "subject": "Agent runtime reliability",
+    "audience": "Platform engineers",
+    "goal": "Explain the failure controls",
+    "style_lane": "runtime_control_plane",
+    "palette": [{"name": "ink", "hex": "#101828", "role": "primary text"}],
+    "typography": {"display": "Aptos Display", "body": "Aptos"},
+    "grid": {},
+    "signature": "control-flow rails",
+    "rhythm": "alternate system views with evidence",
+    "anti_slop_profile": [],
+    "requested_style_terms": []
+  },
+  "image_strategy": "diagram_native",
+  "image_assets": [],
+  "slide_compositions": [{
+    "selector": "slide:1",
+    "slide_role": "cover",
+    "headline_intent": "Frame reliability as a runtime property",
+    "layout_name": "asymmetric_control_plane_cover",
+    "composition_rationale": "A single strong system motif opens the story",
+    "native_elements": ["headline", "system rail", "status marker"],
+    "image_asset_ids": [],
+    "risk_notes": []
+  }],
+  "anti_slop_commitments": ["Vary composition by narrative role"]
+}
+```
+
+The compatibility aliases `slide`, `role`, and `layout` map only to
+`selector`, `slide_role`, and `layout_name`. They do not replace
+`headline_intent` or `composition_rationale`.
+
 ## Image Rules
 
 - Generated images are assets, not complete slides.

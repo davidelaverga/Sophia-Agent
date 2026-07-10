@@ -17,6 +17,7 @@ from deerflow.sophia.deck_build.models import (
     DeckSlideCompositionPlan,
     DeckTypographyPlan,
 )
+from deerflow.sophia.deck_build.tool_contract import normalize_slide_composition_aliases
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}$")
 _ALLOWED_IMAGE_STRATEGIES = {"hero_only", "sparse_signature", "image_led", "diagram_native", "hybrid"}
@@ -58,10 +59,10 @@ def normalize_creative_plan(
     image_assets = _coerce_image_assets(raw.get("image_assets"))
     slide_compositions = _coerce_slide_compositions(raw.get("slide_compositions"))
     plan = DeckCreativePlan(
-        subject=_required_text(raw, "subject", limit=160),
-        audience=_required_text(raw, "audience", limit=160),
-        goal=_required_text(raw, "goal", limit=220),
-        story_arc=_required_text(raw, "story_arc", limit=800),
+        subject=_required_text(raw, "subject", limit=160, path="creative_plan"),
+        audience=_required_text(raw, "audience", limit=160, path="creative_plan"),
+        goal=_required_text(raw, "goal", limit=220, path="creative_plan"),
+        story_arc=_required_text(raw, "story_arc", limit=800, path="creative_plan"),
         design_plan=design_plan,
         image_strategy=_enum_text(raw.get("image_strategy"), _ALLOWED_IMAGE_STRATEGIES, "hybrid"),
         image_assets=image_assets,
@@ -189,13 +190,14 @@ def _coerce_image_assets(raw: Any) -> list[DeckImageAssetPlan]:
         if asset_id in seen:
             raise CreativePlanValidationError("deck_image_asset_plan_invalid", f"Duplicate image asset id: {asset_id}")
         seen.add(asset_id)
-        prompt = _required_text(item, "prompt", limit=1200)
+        path = f"creative_plan.image_assets[{index - 1}]"
+        prompt = _required_text(item, "prompt", limit=1200, path=path)
         assets.append(
             DeckImageAssetPlan(
                 asset_id=asset_id,
-                slide_selector=_required_text(item, "slide_selector", limit=40),
+                slide_selector=_required_text(item, "slide_selector", limit=40, path=path),
                 role=_clean_text(item.get("role"), limit=60) or "inset_illustration",
-                reason=_required_text(item, "reason", limit=240),
+                reason=_required_text(item, "reason", limit=240, path=path),
                 prompt=prompt,
                 aspect_ratio=_clean_text(item.get("aspect_ratio"), limit=20) or "16:9",
                 integration=_enum_text(item.get("integration"), _ALLOWED_INTEGRATIONS, "inset_illustration"),
@@ -210,10 +212,12 @@ def _coerce_slide_compositions(raw: Any) -> list[DeckSlideCompositionPlan]:
         return []
     compositions: list[DeckSlideCompositionPlan] = []
     seen: set[str] = set()
-    for item in raw:
+    for index, source_item in enumerate(raw):
+        item = normalize_slide_composition_aliases(source_item)
         if not isinstance(item, dict):
             continue
-        selector = _required_text(item, "selector", limit=40)
+        path = f"creative_plan.slide_compositions[{index}]"
+        selector = _required_text(item, "selector", limit=40, path=path)
         if selector in seen:
             raise CreativePlanValidationError("deck_creative_plan_invalid", f"Duplicate slide composition selector: {selector}")
         seen.add(selector)
@@ -221,9 +225,9 @@ def _coerce_slide_compositions(raw: Any) -> list[DeckSlideCompositionPlan]:
             DeckSlideCompositionPlan(
                 selector=selector,
                 slide_role=_clean_text(item.get("slide_role"), limit=80) or "content",
-                headline_intent=_required_text(item, "headline_intent", limit=220),
-                layout_name=_required_text(item, "layout_name", limit=100),
-                composition_rationale=_required_text(item, "composition_rationale", limit=300),
+                headline_intent=_required_text(item, "headline_intent", limit=220, path=path),
+                layout_name=_required_text(item, "layout_name", limit=100, path=path),
+                composition_rationale=_required_text(item, "composition_rationale", limit=300, path=path),
                 native_elements=_text_list(item.get("native_elements"), limit=16, item_limit=80),
                 image_asset_ids=[_clean_id(value) for value in _text_list(item.get("image_asset_ids"), limit=8, item_limit=80) if _clean_id(value)],
                 risk_notes=_text_list(item.get("risk_notes"), limit=8, item_limit=140),
@@ -262,10 +266,10 @@ def _validate_slide_links(plan: DeckCreativePlan, deck: DeckBuild) -> None:
             )
 
 
-def _required_text(raw: dict[str, Any], key: str, *, limit: int) -> str:
+def _required_text(raw: dict[str, Any], key: str, *, limit: int, path: str) -> str:
     value = _clean_text(raw.get(key), limit=limit)
     if not value:
-        raise CreativePlanValidationError("deck_creative_plan_invalid", f"creative_plan.{key} is required")
+        raise CreativePlanValidationError("deck_creative_plan_invalid", f"{path}.{key} is required")
     return value
 
 

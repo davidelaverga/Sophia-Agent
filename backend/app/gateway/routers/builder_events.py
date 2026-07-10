@@ -437,6 +437,17 @@ class BuilderCompletionEvent(BaseModel):
     )
     visuals_missing: bool | None = None
     budget_stop_reason: str | None = None
+    terminal_status: str | None = Field(
+        None,
+        description="Internal builder status: completed | failed | timed_out.",
+    )
+    terminal_reason: str | None = None
+    first_prepare_turn: int | None = None
+    prepare_call_count: int | None = None
+    prepare_result_count: int | None = None
+    prepare_retry_executed: bool | None = None
+    dangling_prepare_call_count: int | None = None
+    creative_plan_accepted: bool | None = None
     source_artifact_path: str | None = None
     revision_of_artifact_path: str | None = None
     summary: str | None = None

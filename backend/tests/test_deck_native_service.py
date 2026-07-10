@@ -11,6 +11,7 @@ from pptx import Presentation
 from pptx.util import Inches
 
 from deerflow.sophia.deck_native import DeckNativeService, native_mechanical_report
+from deerflow.sophia.deck_native import service as native_service_module
 
 
 def test_deck_native_preflight_reports_missing_scripts(tmp_path: Path) -> None:
@@ -23,6 +24,22 @@ def test_deck_native_preflight_reports_missing_scripts(tmp_path: Path) -> None:
     assert result.deck_py_exists is False
     assert result.html2patch_py_exists is False
     assert "deck.py" in "\n".join(result.errors)
+
+
+def test_deck_native_subprocess_honors_expired_parent_deadline(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    script = tmp_path / "deck.py"
+    script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    service = DeckNativeService(scripts_dir=tmp_path)
+    service.set_deadline_epoch_ms(1_000)
+    monkeypatch.setattr(native_service_module.time, "time", lambda: 2.0)
+
+    result = service._run(["python", str(script)])
+
+    assert result.returncode == 124
+    assert "deck deadline exceeded" in result.stderr
 
 
 def _wide_base_deck(path: Path) -> None:

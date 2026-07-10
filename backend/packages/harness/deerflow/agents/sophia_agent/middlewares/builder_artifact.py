@@ -36,11 +36,13 @@ from deerflow.agents.sophia_agent.builder_tools import (
     deck_route_for_task,
 )
 from deerflow.agents.sophia_agent.middlewares.builder_budget import (
-    USER_BUDGET_TIMEOUT_MESSAGE,
+    USER_BUDGET_TURN_MESSAGE,
     budget_allows_iteration,
     force_emit_remaining_turns,
     force_emit_wall_clock_fraction,
     max_non_artifact_turns,
+    prepare_force_after_seconds,
+    prepare_force_at_turn,
     soft_warn_at_turn,
 )
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
@@ -508,8 +510,27 @@ def _builder_current_turn_index(state: dict[str, Any]) -> int:
 def _elapsed_since_builder_start_ms(state: dict[str, Any]) -> int | None:
     started = state.get("builder_task_started_at_ms")
     if not isinstance(started, (int, float)) or started <= 0:
+        started = state.get("builder_task_kickoff_ms")
+    if not isinstance(started, (int, float)) or started <= 0:
         return None
     return max(0, int(time.time() * 1000) - int(started))
+
+
+def _remaining_builder_deadline_seconds(state: dict[str, Any]) -> int | None:
+    deadline = state.get("builder_deadline_epoch_ms")
+    if not isinstance(deadline, (int, float)) or deadline <= 0:
+        kickoff = state.get("builder_task_kickoff_ms")
+        timeout = state.get("builder_timeout_seconds")
+        if (
+            isinstance(kickoff, (int, float))
+            and kickoff > 0
+            and isinstance(timeout, (int, float))
+            and timeout > 0
+        ):
+            deadline = int(kickoff) + int(timeout) * 1000
+    if not isinstance(deadline, (int, float)) or deadline <= 0:
+        return None
+    return max(0, int((int(deadline) - int(time.time() * 1000)) / 1000))
 
 
 def _pptx_latch_target_slide_count(state: dict[str, Any]) -> int:
@@ -3499,6 +3520,33 @@ def _apply_artifact_request_metadata(
     artifact_ext = _artifact_ext_from_path(artifact.get("artifact_path"))
     _apply_edit_context_metadata(artifact, state)
     _apply_artifact_format_metadata(artifact, requested_ext, artifact_ext, fallback_reason)
+    raw_status = str(artifact.get("status") or "").strip().lower()
+    if raw_status in {"timed_out", "timeout"} or artifact.get("budget_stop_reason"):
+        terminal_status = "timed_out"
+    elif raw_status in {"failed", "error"} or not artifact.get("artifact_path"):
+        terminal_status = "failed"
+    else:
+        terminal_status = "completed"
+    artifact["status"] = terminal_status
+    artifact["terminal_status"] = terminal_status
+    artifact.setdefault(
+        "terminal_reason",
+        artifact.get("budget_stop_reason")
+        or artifact.get("failure_code")
+        or fallback_reason
+        or ("artifact_emitted" if terminal_status == "completed" else "no_deliverable"),
+    )
+    diagnostics = _pptx_diagnostics(state)
+    for key in (
+        "first_prepare_turn",
+        "prepare_call_count",
+        "prepare_result_count",
+        "prepare_retry_executed",
+        "dangling_prepare_call_count",
+        "creative_plan_accepted",
+    ):
+        if diagnostics.get(key) is not None:
+            artifact.setdefault(key, diagnostics.get(key))
     artifact_entries = _artifact_file_entries(artifact)
     if artifact_entries:
         artifact["artifact_files"] = artifact_entries
@@ -3519,10 +3567,20 @@ def _unmet_conditions_from_state(artifact: dict[str, Any], state: dict[str, Any]
     Whatever the loop could not fix ships NAMED in the payload — never
     silent. Mirrors the gate predicates exactly.
     """
-    unmet = _visual_unmet_conditions(artifact, state)
-    hero_condition = _hero_or_cover_unmet_condition(state)
-    if hero_condition:
-        unmet.append(hero_condition)
+    planning_accepted = bool(
+        artifact.get("creative_plan_accepted")
+        or _pptx_diagnostics(state).get("creative_plan_accepted")
+    )
+    suppress_deck_visual_conditions = (
+        _deck_build_service_route_active(state)
+        and _requested_artifact_ext(state) == "pptx"
+        and not planning_accepted
+    )
+    unmet = [] if suppress_deck_visual_conditions else _visual_unmet_conditions(artifact, state)
+    if not suppress_deck_visual_conditions:
+        hero_condition = _hero_or_cover_unmet_condition(state)
+        if hero_condition:
+            unmet.append(hero_condition)
     # Spec D D-5 honesty stamp: gate-flagged brief gaps the model neither
     # recovered (read_session_context) nor disclosed (brief_assumptions)
     # ship NAMED — observability only, never a rejection.
@@ -6395,6 +6453,14 @@ class BuilderArtifactState(AgentState):
     builder_last_deck_ir_failure: NotRequired[dict | None]
     builder_deck_creative_repair_attempt_count: NotRequired[int]
     builder_last_deck_creative_failure: NotRequired[dict | None]
+    builder_deck_prepare_phase: NotRequired[str]
+    builder_deck_prepare_repair_message: NotRequired[str | None]
+    builder_deck_prepare_repair_prompt_injected: NotRequired[bool]
+    builder_deck_prepare_expected_tool_call_id: NotRequired[str | None]
+    builder_deck_prepare_latch_active: NotRequired[bool]
+    builder_task_kickoff_ms: NotRequired[int]
+    builder_timeout_seconds: NotRequired[int]
+    builder_deadline_epoch_ms: NotRequired[int]
     builder_pptx_route_trace_emitted: NotRequired[bool]
     builder_visual_design_correction_emitted: NotRequired[bool]
     builder_visual_asset_correction_emitted: NotRequired[bool]
@@ -6999,6 +7065,33 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return {"type": "tool", "name": _DECK_BUILD_TOOL_NAME}
 
     @staticmethod
+    def _forced_prepare_deck_build_tool_choice() -> dict[str, Any]:
+        """Anthropic tool_choice payload for the authoritative fresh-deck service."""
+        return {"type": "tool", "name": _PREPARE_DECK_BUILD_TOOL_NAME}
+
+    @staticmethod
+    def _deck_prepare_force_due(state: BuilderArtifactState) -> bool:
+        """Latch the service-owned prepare call by turn or elapsed time."""
+        if not _deck_build_service_route_active(state):
+            return False
+        if state.get("builder_deck_prepare_phase") == "terminal":
+            return False
+        diagnostics = _pptx_diagnostics(state)
+        if int(diagnostics.get("prepare_call_count", 0) or 0) > 0:
+            return False
+        if state.get("builder_deck_prepare_latch_active"):
+            return True
+        turn_due = _builder_current_turn_index(state) >= prepare_force_at_turn(state)
+        elapsed_ms = _elapsed_since_builder_start_ms(state)
+        force_after_ms = prepare_force_after_seconds(state) * 1000
+        clock_due = bool(
+            force_after_ms > 0
+            and elapsed_ms is not None
+            and elapsed_ms >= force_after_ms
+        )
+        return turn_due or clock_due
+
+    @staticmethod
     def _forced_simple_pdf_tool_choice() -> dict[str, Any]:
         """Anthropic tool_choice payload that forces the deterministic PDF writer."""
         return {"type": "tool", "name": _SIMPLE_PDF_TOOL_NAME}
@@ -7073,6 +7166,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 state.get("builder_non_artifact_turns"),
                 "presentation_completion_ready",
             )
+        # Fresh PPTX output is service-owned. The generic completion recovery
+        # must never force write_file or a lower-level compiler for this route.
+        if _deck_build_service_route_active(state):
+            if (
+                state.get("builder_deck_prepare_latch_active")
+                or self._deck_prepare_force_due(state)
+                or self._should_force_emit(state)
+                or self._should_force_emit_by_clock(state, runtime)
+            ):
+                return self._forced_prepare_deck_build_tool_choice()
+            return None
         turn_force = self._should_force_emit(state)
         clock_force = self._should_force_emit_by_clock(state, runtime)
         if not (turn_force or clock_force):
@@ -7643,10 +7747,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return fallback
         updated = dict(fallback)
         updated["budget_stop_reason"] = "turn_limit"
-        updated["companion_summary"] = USER_BUDGET_TIMEOUT_MESSAGE
+        updated["status"] = "timed_out"
+        updated["terminal_status"] = "timed_out"
+        updated["terminal_reason"] = "turn_limit"
+        updated["failure_code"] = "builder_turn_limit_exceeded"
+        updated["companion_summary"] = USER_BUDGET_TURN_MESSAGE
         updated["user_next_action"] = "Tell me if you want me to try again with a narrower scope."
         diagnostics = dict(updated.get("builder_failure_diagnostics") or {})
-        diagnostics["failure_code"] = diagnostics.get("failure_code") or "builder_budget_exceeded"
+        diagnostics["failure_code"] = diagnostics.get("failure_code") or "builder_turn_limit_exceeded"
         diagnostics["budget_stop_reason"] = "turn_limit"
         updated["builder_failure_diagnostics"] = diagnostics
         return updated
@@ -9072,6 +9180,31 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state: BuilderArtifactState,
         runtime: Runtime | None = None,
     ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        if state.get("builder_deck_prepare_phase") == "retry_pending":
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=prepare_deck_build "
+                "(reason=deck_prepare_retry_pending)"
+            )
+            return self._forced_prepare_deck_build_tool_choice(), None
+
+        if self._deck_prepare_force_due(state):
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=prepare_deck_build "
+                "(reason=presentation_prepare_latch turn=%d elapsed_ms=%s)",
+                _builder_current_turn_index(state),
+                _elapsed_since_builder_start_ms(state),
+            )
+            update: dict[str, Any] | None = None
+            if not state.get("builder_deck_prepare_latch_active"):
+                update = {
+                    "builder_deck_prepare_latch_active": True,
+                    "builder_pptx_diagnostics": {
+                        "prepare_forced_count": 1,
+                        "prepare_latch_activated_at_turn": _builder_current_turn_index(state),
+                    },
+                }
+            return self._forced_prepare_deck_build_tool_choice(), update
+
         choice = (
             self._pdf_terminal_tool_choice_for_state(state)
             or self._simple_pdf_tool_choice_for_state(state)
@@ -10030,6 +10163,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         update: dict[str, Any],
     ) -> dict[str, Any] | None:
         for probe in (
+            self._maybe_inject_deck_prepare_retry,
             self._maybe_inject_pdf_render_source_correction,
             self._maybe_inject_pdf_layout_repair,
             self._maybe_inject_pdf_source_write_directive,
@@ -10043,6 +10177,98 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 return update
         return None
 
+    @staticmethod
+    def _maybe_inject_deck_prepare_retry(state: BuilderArtifactState) -> dict[str, Any] | None:
+        if state.get("builder_deck_prepare_phase") != "retry_pending":
+            return None
+        if state.get("builder_deck_prepare_repair_prompt_injected"):
+            return None
+        message = str(state.get("builder_deck_prepare_repair_message") or "").strip()
+        if not message:
+            message = (
+                "Repair the exact prepare_deck_build validation failure and call "
+                "prepare_deck_build exactly once more with the complete creative_plan "
+                "and inline html_source for every slide."
+            )
+        return {
+            "messages": [HumanMessage(content=f"[Sophia/PPTX D2.1 repair]\n{message}")],
+            "builder_deck_prepare_repair_prompt_injected": True,
+        }
+
+    @staticmethod
+    def _real_prepare_result_present(
+        state: BuilderArtifactState,
+        tool_call_id: str,
+    ) -> bool:
+        for message in state.get("messages", []) or []:
+            if not isinstance(message, ToolMessage):
+                continue
+            if str(getattr(message, "tool_call_id", "") or "") != tool_call_id:
+                continue
+            text = BuilderArtifactMiddleware._tool_message_text(message)
+            return "[Tool call was interrupted and did not return a result.]" not in text
+        return False
+
+    def _missing_prepare_result_terminal_update(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime | None,
+    ) -> dict[str, Any] | None:
+        if state.get("builder_deck_prepare_phase") in {"retry_pending", "terminal"}:
+            return None
+        expected_id = str(state.get("builder_deck_prepare_expected_tool_call_id") or "").strip()
+        if not expected_id:
+            return None
+        if expected_id and self._real_prepare_result_present(state, expected_id):
+            return None
+        if runtime is None:
+            return None
+        logger.error(
+            "[BuilderDeck] phase=prepare_result_missing expected_call_id_present=%s "
+            "prepare_calls=%d prepare_results=%d",
+            bool(expected_id),
+            int(_pptx_diagnostics(state).get("prepare_call_count", 0) or 0),
+            int(_pptx_diagnostics(state).get("prepare_result_count", 0) or 0),
+        )
+        delta = {
+            "deck_status": "failed_terminal",
+            "deck_failure_code": "deck_prepare_tool_result_missing",
+            "dangling_prepare_call_count": 1,
+        }
+        terminal_state = {
+            **state,
+            "builder_pptx_diagnostics": _merge_builder_pptx_diagnostics(
+                _pptx_diagnostics(state),
+                delta,
+            ),
+            "builder_deck_prepare_phase": "terminal",
+        }
+        payload = {
+            "success": False,
+            "failure_code": "deck_prepare_tool_result_missing",
+            "failure_summary": (
+                "The bounded prepare_deck_build retry did not return a real tool result."
+            ),
+            "retryable": False,
+        }
+        fallback = self._prepare_deck_build_failure_fallback(
+            state=terminal_state,
+            runtime=runtime,
+            payload=payload,
+            delta=delta,
+        )
+        return {
+            "builder_pptx_diagnostics": delta,
+            "builder_result": fallback,
+            "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
+            "builder_non_artifact_turns": 0,
+            "builder_task_started_at_ms": 0,
+            "builder_deck_prepare_phase": "terminal",
+            "builder_deck_prepare_expected_tool_call_id": None,
+            **_terminal_halt_fields(state, "deck_prepare_tool_result_missing"),
+            "jump_to": "end",
+        }
+
     def _combined_before_model_updates(
         self,
         state: BuilderArtifactState,
@@ -10051,6 +10277,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         """Run all before_model state-update probes (Phase 2E.1 turn-budget
         reset + Phase 2F.3 path-correction injection) and merge their
         returns into a single update dict for the langgraph reducer."""
+        missing_prepare_result = self._missing_prepare_result_terminal_update(state, runtime)
+        if missing_prepare_result is not None:
+            return missing_prepare_result
         update: dict[str, Any] = {}
         if _requested_pptx_artifact(state) and not state.get("builder_pptx_route_trace_emitted"):
             _trace_pptx_route_selected(state)
@@ -10762,7 +10991,21 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         host_file = _local_output_file_for_artifact(state, artifact_path)
         if host_file is None or not host_file.is_file():
             return updated
-        preview = maybe_render_pptx_preview(host_file)
+        remaining = _remaining_builder_deadline_seconds(state)
+        if remaining is not None and remaining <= 5:
+            logger.warning(
+                "[PptxPreview] skipped because builder deadline has %ss remaining",
+                remaining,
+            )
+            return updated
+        preview = (
+            maybe_render_pptx_preview(
+                host_file,
+                timeout_seconds=min(120, remaining - 2),
+            )
+            if remaining is not None
+            else maybe_render_pptx_preview(host_file)
+        )
         if preview is None:
             return updated
         updated["artifact_preview_filename"] = preview.name
@@ -11056,6 +11299,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         referenced = int(payload.get("referenced_visual_count") if payload.get("referenced_visual_count") is not None else successful or 0)
         missing = int(payload.get("missing_visual_count") if payload.get("missing_visual_count") is not None else max(0, expected - min(successful, referenced)))
         quality_status = str(payload.get("quality_status") or ("passed" if success else "failed"))
+        creative_plan_accepted = bool(str(payload.get("creative_plan_path") or "").strip())
+        retry_executed = bool(
+            int((request.state or {}).get("builder_deck_ir_repair_attempt_count", 0) or 0)
+            or int((request.state or {}).get("builder_deck_creative_repair_attempt_count", 0) or 0)
+        )
         failure_code = payload.get("failure_code") or (None if success else status_reason or "deck_build_failed")
         image_generation_status = str(payload.get("image_generation_status") or ("success" if success else "failed"))
         primary_image_batch_status = str(payload.get("primary_image_batch_status") or ("success" if success else "failed"))
@@ -11078,7 +11326,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "successful_generated_visual_count": successful,
             "referenced_visual_count": referenced,
             "missing_expected_visual_count": missing,
-            "generated_visuals_complete": expected == successful == referenced and missing == 0,
+            "creative_plan_accepted": creative_plan_accepted,
+            "generated_visuals_complete": (
+                creative_plan_accepted
+                and expected == successful == referenced
+                and missing == 0
+            ),
+            "prepare_result_count": 1,
+            "prepare_retry_executed": retry_executed,
             "image_generation_status": image_generation_status,
             "image_generation_reason": payload.get("image_generation_reason"),
             "primary_image_batch_status": primary_image_batch_status,
@@ -11204,10 +11459,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         return Command(
             update={
-                "messages": [
-                    result,
-                    HumanMessage(content=f"[Sophia/PPTX D2.1 repair]\n{message}"),
-                ],
+                # Preserve the real tool result and let the normal tools ->
+                # model edge advance the graph. The repair prompt is injected
+                # by before_model after tool-result adjacency is complete.
+                "messages": [result],
                 "builder_pptx_diagnostics": delta,
                 counter_key: attempt_count + 1,
                 last_failure_key: {
@@ -11216,10 +11471,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "retryable": retryable,
                     "attempt_count": attempt_count,
                 },
+                "builder_deck_prepare_phase": "retry_pending",
+                "builder_deck_prepare_repair_message": message,
+                "builder_deck_prepare_repair_prompt_injected": False,
+                "builder_deck_prepare_expected_tool_call_id": None,
                 "builder_pptx_compile_latch_pending": False,
                 "builder_pptx_compile_repair_pending": False,
-            },
-            goto="model",
+            }
         )
 
     def _prepare_deck_build_result_command(
@@ -11237,7 +11495,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             retry_command = self._prepare_deck_build_retry_command(request, result, payload, delta)
             if retry_command is not None:
                 return retry_command
-            fallback = self._prepare_deck_build_failure_fallback(request, payload, delta)
+            fallback = self._prepare_deck_build_failure_fallback(
+                state=request.state or {},
+                runtime=request.runtime,
+                payload=payload,
+                delta=delta,
+            )
             return Command(
                 update={
                     "messages": [result],
@@ -11246,28 +11509,151 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                     "builder_non_artifact_turns": 0,
                     "builder_task_started_at_ms": 0,
+                    "builder_deck_prepare_phase": "terminal",
+                    "builder_deck_prepare_expected_tool_call_id": None,
                     **_terminal_halt_fields(request.state or {}, "deck_build_service_failed"),
                 },
                 goto="end",
             )
+        return self._finalize_prepare_deck_build_success(request, result, payload, delta)
+
+    def _finalize_prepare_deck_build_success(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage,
+        payload: dict[str, Any],
+        delta: dict[str, Any],
+    ) -> Command:
+        state = request.state or {}
+        diagnostics = _merge_builder_pptx_diagnostics(
+            _pptx_diagnostics(state),
+            delta,
+        )
+        final_state = {
+            **state,
+            "builder_pptx_diagnostics": diagnostics,
+            "builder_deck_prepare_phase": "terminal",
+        }
+        args = request.tool_call.get("args") or {}
+        artifact_path = str(payload.get("pptx_path") or args.get("output_path") or "").strip()
+        artifact_title = str(args.get("deck_title") or "PowerPoint presentation").strip()
+        deck_build_path = str(payload.get("deck_build_path") or "").strip()
+        creative_plan_path = str(payload.get("creative_plan_path") or "").strip()
+        artifact_files: list[dict[str, Any]] = [
+            {
+                "path": artifact_path,
+                "role": "primary",
+                "name": PurePosixPath(artifact_path).name,
+            }
+        ]
+        for internal_path in (deck_build_path, creative_plan_path):
+            if internal_path:
+                artifact_files.append(
+                    {
+                        "path": internal_path,
+                        "role": "internal",
+                        "name": PurePosixPath(internal_path).name,
+                    }
+                )
+        artifact: dict[str, Any] = {
+            "artifact_path": artifact_path,
+            "artifact_type": "presentation",
+            "artifact_title": artifact_title,
+            "artifact_files": artifact_files,
+            "steps_completed": int(state.get("builder_non_artifact_turns", 0) or 0) + 1,
+            "decisions_made": [
+                "Used the native creative deck service",
+                "Kept semantic text and diagrams editable",
+                "Applied deterministic mechanical gates before delivery",
+            ],
+            "companion_summary": f"Created the {int(payload.get('slide_count') or 0)}-slide PowerPoint presentation.",
+            "companion_tone_hint": "Confident and concise — the requested native deck is ready.",
+            "user_next_action": "Open the presentation and review the speaker flow.",
+            "confidence": 0.9 if str(payload.get("quality_status") or "") == "passed" else 0.8,
+            "status": "completed",
+            "terminal_reason": "deck_build_succeeded",
+            "artifact_acceptance_status": "passed",
+            "requested_artifact_ext": "pptx",
+            "artifact_ext": "pptx",
+            "artifact_is_fallback": False,
+            "fallback_reason": None,
+            "deck_build_id": payload.get("build_id"),
+            "deck_build_path": deck_build_path or None,
+            "deck_route": delta.get("deck_route"),
+            "deck_compile_mode": delta.get("deck_compile_mode"),
+            "native_required": delta.get("native_required"),
+            "legacy_screenshot_debug": delta.get("legacy_screenshot_debug"),
+            "native_editability_score": delta.get("native_editability_score"),
+            "native_text_shape_count": delta.get("native_text_shape_count"),
+            "picture_shape_count": delta.get("picture_shape_count"),
+            "full_slide_picture_count": delta.get("full_slide_picture_count"),
+            "native_mechanical_report": delta.get("native_mechanical_report"),
+            "mechanical_gate_results": delta.get("mechanical_gate_results"),
+            "html_source_validation": delta.get("html_source_validation"),
+            "creative_plan_path": creative_plan_path or None,
+            "creative_plan_accepted": bool(delta.get("creative_plan_accepted")),
+            "deck_quality_status": payload.get("quality_status") or "passed",
+            "quality_warning": payload.get("quality_warning"),
+            "image_generation_status": delta.get("image_generation_status"),
+            "image_generation_reason": delta.get("image_generation_reason"),
+            "primary_image_batch_status": delta.get("primary_image_batch_status"),
+            "primary_image_batch_error_class": delta.get("primary_image_batch_error_class"),
+            "serial_repair_count": delta.get("serial_repair_count"),
+            "batch_timeout_count": delta.get("batch_timeout_count"),
+            "partial_batch_salvaged": delta.get("partial_batch_salvaged"),
+            "expected_generated_visual_count": delta.get("expected_generated_visual_count"),
+            "successful_generated_visual_count": delta.get("successful_generated_visual_count"),
+            "referenced_visual_count": delta.get("referenced_visual_count"),
+            "missing_expected_visual_count": delta.get("missing_expected_visual_count"),
+        }
+        artifact = _apply_artifact_request_metadata(artifact, final_state)
+        artifact = _apply_visual_missing_quality_metadata(artifact, final_state)
+        artifact = _apply_hero_missing_quality_metadata(artifact, final_state)
+        artifact = _apply_pptx_deck_quality_metadata(artifact, final_state)
+        artifact = self._attach_pptx_canvas_preview(artifact, final_state)
+        _trace_pptx_terminal_outcome(
+            state=final_state,
+            artifact=artifact,
+            status="completed",
+        )
+        self._upload_fallback_and_fire(
+            state=final_state,
+            runtime=request.runtime,
+            fallback=artifact,
+            status="completed",
+        )
         return Command(
             update={
                 "messages": [result],
                 "builder_pptx_diagnostics": delta,
+                "builder_result": artifact,
+                "builder_non_artifact_turns": 0,
+                "builder_task_started_at_ms": 0,
+                "builder_deck_prepare_phase": "terminal",
+                "builder_deck_prepare_expected_tool_call_id": None,
                 "builder_pptx_compile_latch_pending": False,
                 "builder_pptx_compile_repair_pending": False,
-            }
+                **_terminal_halt_fields(state, "deck_build_succeeded"),
+            },
+            goto="end",
         )
 
     def _prepare_deck_build_failure_fallback(
         self,
-        request: ToolCallRequest,
+        *,
+        state: dict[str, Any],
+        runtime: Runtime,
         payload: dict[str, Any],
         delta: dict[str, Any],
     ) -> dict[str, Any]:
-        state = request.state or {}
         failure_code = str(payload.get("failure_code") or delta.get("deck_failure_code") or "deck_build_failed")
         failure_summary = str(payload.get("failure_summary") or "DeckBuildService failed before a deliverable was available.")
+        terminal_status = "timed_out" if failure_code == "deck_deadline_exceeded" else "failed"
+        diagnostics = _merge_builder_pptx_diagnostics(
+            _pptx_diagnostics(state),
+            delta,
+        )
+        terminal_state = {**state, "builder_pptx_diagnostics": diagnostics}
         fallback = {
             "artifact_path": None,
             "artifact_type": "presentation",
@@ -11278,7 +11664,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "companion_tone_hint": "Direct and apologetic — the deck build failed before a quality PPTX was available.",
             "user_next_action": "Retry after correcting the deck input or production image-generation issue named in the failure metadata.",
             "confidence": 0.0,
-            "status": "error",
+            "status": terminal_status,
+            "terminal_status": terminal_status,
+            "terminal_reason": failure_code,
             "error_reason": failure_code,
             "artifact_acceptance_status": "failed",
             "failure_code": failure_code,
@@ -11322,12 +11710,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             ]
         fallback = _apply_artifact_request_metadata(
             fallback,
-            state,
+            terminal_state,
             fallback_reason="deck_build_service_failed",
         )
         self._attach_terminal_failure_diagnostics(
-            state,
-            request.runtime,
+            terminal_state,
+            runtime,
             fallback,
             failure_stage="deck_build_service",
             failure_code=failure_code,
@@ -11337,16 +11725,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             emit_tool_call_seen=False,
         )
         _trace_pptx_terminal_outcome(
-            state=state,
+            state=terminal_state,
             artifact=fallback,
-            status="error",
+            status=terminal_status,
             failure_code=failure_code,
         )
         self._upload_fallback_and_fire(
-            state=state,
-            runtime=request.runtime,
+            state=terminal_state,
+            runtime=runtime,
             fallback=fallback,
-            status="failed",
+            status=terminal_status,
         )
         return fallback
 
@@ -11682,6 +12070,49 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._visual_asset_result_command(result)
         return result
 
+    def _prepare_deck_build_exhausted_command(
+        self,
+        request: ToolCallRequest,
+    ) -> Command | None:
+        if request.tool_call.get("name") != _PREPARE_DECK_BUILD_TOOL_NAME:
+            return None
+        if int(_pptx_diagnostics(request.state or {}).get("prepare_result_count", 0) or 0) < 2:
+            return None
+        payload = {
+            "success": False,
+            "failure_code": "deck_prepare_retry_exhausted",
+            "failure_summary": "prepare_deck_build already used its one bounded repair attempt.",
+            "retryable": False,
+        }
+        delta = {
+            "deck_status": "failed_terminal",
+            "deck_failure_code": payload["failure_code"],
+            "prepare_call_count": 1,
+        }
+        fallback = self._prepare_deck_build_failure_fallback(
+            state=request.state or {},
+            runtime=request.runtime,
+            payload=payload,
+            delta=delta,
+        )
+        result = ToolMessage(
+            content=json.dumps(payload),
+            tool_call_id=str(request.tool_call.get("id") or ""),
+            name=_PREPARE_DECK_BUILD_TOOL_NAME,
+        )
+        return Command(
+            update={
+                "messages": [result],
+                "builder_pptx_diagnostics": delta,
+                "builder_result": fallback,
+                "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
+                "builder_non_artifact_turns": 0,
+                "builder_deck_prepare_phase": "terminal",
+                **_terminal_halt_fields(request.state or {}, "deck_prepare_retry_exhausted"),
+            },
+            goto="end",
+        )
+
     @staticmethod
     def _is_null_artifact_path(value: object) -> bool:
         return value is None or (isinstance(value, str) and value.strip().lower() in {"", "null", "none"})
@@ -11901,6 +12332,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         builder graph) and instead return a ``Command(goto=\"model\")`` with an
         error ToolMessage. This lets the model see the rejection and retry.
         """
+        exhausted = self._prepare_deck_build_exhausted_command(request)
+        if exhausted is not None:
+            return exhausted
+        latch_block = self._deck_prepare_latch_rejection(request)
+        if latch_block is not None:
+            return latch_block
         research_block = self._block_substantive_tool_before_research(request)
         if research_block is not None:
             return research_block
@@ -12217,6 +12654,48 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                         ),
                         tool_call_id=request.tool_call.get("id", ""),
                         name=name,
+                    )
+                ],
+            },
+            goto="model",
+        )
+
+    @staticmethod
+    def _deck_prepare_latch_rejection(request: ToolCallRequest) -> Command | None:
+        """Reject unrelated work once fresh-deck preparation is authoritative."""
+        state = request.state or {}
+        if not state.get("builder_deck_prepare_latch_active"):
+            return None
+        if not _deck_build_service_route_active(state):
+            return None
+        name = str(request.tool_call.get("name") or "")
+        if name in {_PREPARE_DECK_BUILD_TOOL_NAME, "emit_builder_artifact"}:
+            return None
+        args = request.tool_call.get("args")
+        args = args if isinstance(args, dict) else {}
+        if name in {"read_file", "read_file_tool"}:
+            path = str(args.get("file_path") or args.get("path") or "")
+            allowed_paths = (
+                "/mnt/skills/public/sophia/deck_craft.md",
+                "/mnt/skills/public/ppt-generation/SKILL.md",
+            )
+            allowed_prefixes = (
+                "/mnt/user-data/uploads/",
+                "/mnt/user-data/outputs/",
+            )
+            if path in allowed_paths or path.startswith(allowed_prefixes):
+                return None
+        return Command(
+            update={
+                "messages": [
+                    _error_tool_message(
+                        content=(
+                            "[Sophia/deck-build] The prepare latch is active. Call "
+                            "prepare_deck_build now. Todo, write, replace, shell, research, "
+                            "image-generation, and lower-level deck tools are no longer allowed."
+                        ),
+                        tool_call_id=request.tool_call.get("id", ""),
+                        name=name or "unknown",
                     )
                 ],
             },
@@ -12707,7 +13186,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if suffix == ".pdf":
             return host_file
         if suffix == ".pptx":
-            return maybe_render_pptx_preview(host_file)
+            remaining = _remaining_builder_deadline_seconds(state)
+            if remaining is not None and remaining <= 5:
+                return None
+            return (
+                maybe_render_pptx_preview(
+                    host_file,
+                    timeout_seconds=min(120, remaining - 2),
+                )
+                if remaining is not None
+                else maybe_render_pptx_preview(host_file)
+            )
         return None
 
     @classmethod
@@ -12773,6 +13262,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
         """Async variant — same logic as wrap_tool_call."""
+        exhausted = self._prepare_deck_build_exhausted_command(request)
+        if exhausted is not None:
+            return exhausted
+        latch_block = self._deck_prepare_latch_rejection(request)
+        if latch_block is not None:
+            return latch_block
         research_block = self._block_substantive_tool_before_research(request)
         if research_block is not None:
             return research_block
@@ -12780,6 +13275,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if visual_design_block is not None:
             return visual_design_block
         if request.tool_call.get("name") != "emit_builder_artifact":
+            deck_service_block = self._deck_build_service_legacy_tool_rejection(request)
+            if deck_service_block is not None:
+                return deck_service_block
             deck_block = self._deck_improvisation_rejection(request)
             if deck_block is not None:
                 return deck_block
@@ -12865,6 +13363,37 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             goto="model",
         )
 
+    @staticmethod
+    def _prepare_call_after_model_update(
+        state: BuilderArtifactState,
+        tool_calls: list[dict[str, Any]],
+    ) -> dict[str, Any]:
+        calls = [
+            call
+            for call in tool_calls
+            if str(call.get("name") or "") == _PREPARE_DECK_BUILD_TOOL_NAME
+        ]
+        if not calls:
+            return {}
+        diagnostics: dict[str, Any] = {"prepare_call_count": len(calls)}
+        if _pptx_diagnostics(state).get("first_prepare_turn") is None:
+            diagnostics["first_prepare_turn"] = int(
+                state.get("builder_non_artifact_turns", 0) or 0
+            ) + 1
+        call_id = str(calls[-1].get("id") or "").strip()
+        update: dict[str, Any] = {
+            "builder_pptx_diagnostics": diagnostics,
+            "builder_deck_prepare_latch_active": True,
+            "builder_deck_prepare_expected_tool_call_id": call_id or None,
+        }
+        if state.get("builder_deck_prepare_phase") == "retry_pending":
+            update.update(
+                {
+                    "builder_deck_prepare_phase": "retry_call_emitted",
+                }
+            )
+        return update
+
     @hook_config(can_jump_to=["end"])
     @override
     def after_model(self, state: BuilderArtifactState, runtime: Runtime) -> dict | None:
@@ -12899,6 +13428,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 visual_skill_flags = _visual_skill_flags_from_tool_calls(tool_calls)
                 research_diagnostics = self._update_research_diagnostics(state, tool_names)
                 allow_web_research = self._allow_web_research(state)
+                prepare_call_update = self._prepare_call_after_model_update(state, tool_calls)
 
                 if artifact_calls and len(artifact_calls) == len(tool_calls):
                     args = artifact_calls[-1].get("args", {})
@@ -13482,6 +14012,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "builder_last_missing_emit_path": None,
                     "builder_consecutive_missing_emit_path_rejections": 0,
                     **_pptx_slide_count_repair_attempt_update(state),
+                    **prepare_call_update,
                 }
 
             terminal_startup_reason = self._terminal_pptx_startup_failure_reason(state)
@@ -13520,18 +14051,46 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 }
 
             # AI message with NO tool calls -- agent ending with plain text, create fallback
+            message_text = _blocks_to_plaintext(getattr(msg, "content", ""))
+            loop_hard_stop = bool(state.get("loop_detection_hard_stop")) or (
+                "[FORCED STOP]" in message_text
+            )
+            provider_failure = self._model_provider_failure_from_message(msg)
+            failure_code = (
+                "builder_loop_limit_exceeded"
+                if loop_hard_stop
+                else provider_failure["failure_code"]
+                if provider_failure
+                else "builder_completed_without_deliverable"
+            )
+            terminal_reason = (
+                "loop_limit"
+                if loop_hard_stop
+                else "model_provider_unavailable"
+                if provider_failure
+                else "no_deliverable"
+            )
+            companion_summary = (
+                "The builder stopped after repeating the same tool call too many times."
+                if loop_hard_stop
+                else "The build task ended before producing a deliverable."
+            )
             fallback = {
                 "artifact_path": None,
                 "artifact_type": "unknown",
-                "artifact_title": "Build task completed",
+                "artifact_title": "Build task did not complete",
                 "steps_completed": 0,
                 "decisions_made": [],
-                "companion_summary": "The build task was completed.",
-                "companion_tone_hint": "Neutral \u2014 no builder context available.",
-                "user_next_action": None,
-                "confidence": 0.3,
+                "companion_summary": companion_summary,
+                "companion_tone_hint": "Direct and apologetic — no deliverable was produced.",
+                "user_next_action": "Retry with a narrower scope.",
+                "confidence": 0.0,
+                "status": "failed",
+                "terminal_status": "failed",
+                "terminal_reason": terminal_reason,
+                "artifact_acceptance_status": "failed",
+                "failure_code": failure_code,
             }
-            provider_failure = self._model_provider_failure_from_message(msg)
             self._attach_terminal_failure_diagnostics(
                 state,
                 runtime,
@@ -13540,12 +14099,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     provider_failure["failure_stage"] if provider_failure else "generation"
                 ),
                 failure_code=(
-                    provider_failure["failure_code"]
-                    if provider_failure
-                    else "builder_completed_without_deliverable"
+                    failure_code
                 ),
                 failure_reason=(
-                    provider_failure["failure_reason"]
+                    "Repeated tool calls exceeded the builder loop safety limit."
+                    if loop_hard_stop
+                    else provider_failure["failure_reason"]
                     if provider_failure
                     else "Builder finished without producing a deliverable artifact."
                 ),
@@ -13575,8 +14134,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 artifact=fallback,
                 status="failed",
                 error_message=(
-                    "Builder finished without producing a deliverable. "
-                    "Want me to try again?"
+                    companion_summary
                 ),
             )
             return {
@@ -13590,6 +14148,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_consecutive_empty_emit_rejections": 0,
                 "builder_last_missing_emit_path": None,
                 "builder_consecutive_missing_emit_path_rejections": 0,
+                **_terminal_halt_fields(state, terminal_reason),
+                "jump_to": "end",
             }
 
         log_middleware("BuilderArtifact", "no AI message found", _t0)

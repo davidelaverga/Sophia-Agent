@@ -331,6 +331,9 @@ class SophiaState(AgentState):
     # by ``start_builder_task`` and never mutated (frozen, like
     # ``builder_web_budget``'s caps), so a plain field — no reducer needed.
     builder_budget: NotRequired[dict | None]
+    builder_task_kickoff_ms: NotRequired[int]
+    builder_timeout_seconds: NotRequired[int]
+    builder_deadline_epoch_ms: NotRequired[int]
 
     # Planning
     todos: NotRequired[list | None]

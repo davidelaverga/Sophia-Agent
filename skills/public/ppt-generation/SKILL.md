@@ -13,15 +13,17 @@ when `prepare_deck_build` is not exposed.
 Fresh decks are DeckBuildService builds by default. Read
 `/mnt/skills/public/sophia/deck_craft.md`, then provide the creative plan and
 slide HTML sources inside `prepare_deck_build`. The harness owns sanitization,
-planned assets, native PowerPoint compilation, inspection, mechanical gates, and
+planned assets and asset policy, native PowerPoint compilation, inspection, mechanical gates, and
 terminal failure. It returns either the `.pptx` path or a clean failure.
 
 ## Building A Deck
 
 1. Plan the deck as a D2.1 creative build:
+   - write one explicit slide intent for every composition before authoring HTML
    - creative_plan: subject, audience, goal, story_arc, design_plan, image_strategy, image_assets, slide_compositions, anti_slop_commitments
    - generated images are declared only in creative_plan.image_assets
    - each slide composition must vary structure and rhythm where the story calls for it
+   - every slide_compositions item requires `selector`, `slide_role`, `headline_intent`, `layout_name`, `composition_rationale`, `native_elements`, and `image_asset_ids`
 
 2. For each slide provide:
    - title: 4-9 words
@@ -41,7 +43,7 @@ terminal failure. It returns either the `.pptx` path or a clean failure.
    - validate mechanical gates,
    - return the `.pptx` path or a clean failure.
 
-5. Emit the returned `.pptx` with `emit_builder_artifact(artifact_type="presentation")`. If `prepare_deck_build` returns `retryable=true`, repair the exact creative/html/mechanical issue and call `prepare_deck_build` one more time. If it still returns failure, emit `artifact_path=null` with its `failure_code` and `failure_summary`; do not loop on lower-level deck tools.
+5. A valid `.pptx` result is terminalized by the harness immediately. If `prepare_deck_build` returns `retryable=true`, repair the exact creative/html/mechanical issue and call `prepare_deck_build` one more time. A second failure is terminal; do not loop on lower-level deck tools.
 
 ## Legacy Emergency Route
 
@@ -56,7 +58,7 @@ compile with `build_deck_from_slides`. Do not mix this route with
 
 ## Hard Rules
 
-- When `prepare_deck_build` is exposed, do not write prompt JSON files, do not write `slides/*.html` files yourself, do not call `prepare_pptx_image_manifest`, do not run `image-generation/scripts/generate.py`, do not call `build_deck_from_slides`, and do not write python-pptx/pptxgenjs or any custom deck compiler. Those are internal harness steps behind `prepare_deck_build`.
+- When `prepare_deck_build` is exposed, do not write prompt JSON files and do not hand-write slide HTML or `slides/*.html` files. Do not call `prepare_pptx_image_manifest`, do not run `image-generation/scripts/generate.py`, do not call `build_deck_from_slides`, and do not write python-pptx/pptxgenjs or any custom deck compiler. Those are internal harness steps behind `prepare_deck_build`.
 - Screenshot-backed PPTX is a failed build, not a fallback. If native deck generation fails, emit `artifact_path=null` with the returned failure code and summary.
 - Normal decks may use optional generated assets declared in creative_plan.image_assets. Full-bleed pictures are allowed only as assets/backgrounds inside an otherwise native deck with native text; a picture is never itself the whole slide. Only an explicitly plain text-only/no-visual request may set `visual_policy="text_only"`.
 - Generated slide images are visual-area assets only. Do not bake slide title, narrative, footers, formulas, axis labels, paragraph text, page chrome, or large readable labels into images.

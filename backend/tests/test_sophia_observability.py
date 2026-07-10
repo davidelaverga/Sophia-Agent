@@ -247,6 +247,49 @@ def test_builder_completion_is_noop_without_active_run(monkeypatch) -> None:
     assert observability.annotate_builder_completion({}, {"artifact_path": "deck.pptx"}) is False
 
 
+def test_builder_completion_attaches_prepare_terminal_metadata_and_failure_feedback(
+    monkeypatch,
+) -> None:
+    run_tree = _FakeRunTree()
+    feedback_client = _FakeFeedbackClient()
+    monkeypatch.setattr(observability, "_current_run_tree", lambda: run_tree)
+    monkeypatch.setattr(observability, "_feedback_client", lambda: feedback_client)
+    state = {
+        "builder_pptx_diagnostics": {
+            "first_prepare_turn": 8,
+            "prepare_call_count": 2,
+            "prepare_result_count": 1,
+            "prepare_retry_executed": True,
+            "dangling_prepare_call_count": 1,
+            "creative_plan_accepted": False,
+        }
+    }
+    artifact = {
+        "artifact_path": None,
+        "artifact_type": "presentation",
+        "artifact_ext": "pptx",
+        "status": "failed",
+        "terminal_status": "failed",
+        "terminal_reason": "deck_prepare_tool_result_missing",
+        "failure_code": "deck_prepare_tool_result_missing",
+    }
+
+    assert observability.annotate_builder_completion(state, artifact) is True
+
+    assert run_tree.metadata["first_prepare_turn"] == 8
+    assert run_tree.metadata["prepare_call_count"] == 2
+    assert run_tree.metadata["prepare_result_count"] == 1
+    assert run_tree.metadata["prepare_retry_executed"] is True
+    assert run_tree.metadata["dangling_prepare_call_count"] == 1
+    assert run_tree.metadata["creative_plan_accepted"] is False
+    assert run_tree.metadata["terminal_status"] == "failed"
+    assert run_tree.metadata["terminal_reason"] == "deck_prepare_tool_result_missing"
+    assert "builder_terminal:failed" in run_tree.tags
+    assert "deck_prepare_result_missing" in run_tree.tags
+    assert feedback_client.feedback[-1]["key"] == "builder_terminal_success"
+    assert feedback_client.feedback[-1]["score"] == 0.0
+
+
 class _FakeRunnable:
     recursion_limit = 50
 

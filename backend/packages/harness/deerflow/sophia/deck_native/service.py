@@ -4,6 +4,7 @@ import json
 import re
 import subprocess  # noqa: S404 - fixed vendored scripts with sanitized args.
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -28,6 +29,15 @@ class DeckNativeService:
         self._scripts_dir = scripts_dir or hands_on_deck_scripts_dir()
         self._deck_cli = self._scripts_dir / "deck.py"
         self._html2patch_cli = self._scripts_dir / "html2patch.py"
+        self._deadline_epoch_ms: int | None = None
+
+    def set_deadline_epoch_ms(self, deadline_epoch_ms: int | None) -> None:
+        """Apply the parent builder deadline to every native subprocess."""
+        self._deadline_epoch_ms = (
+            int(deadline_epoch_ms)
+            if isinstance(deadline_epoch_ms, (int, float)) and deadline_epoch_ms > 0
+            else None
+        )
 
     def preflight(self) -> NativeDeckPreflight:
         scripts_dir_exists = self._scripts_dir.is_dir()
@@ -271,6 +281,16 @@ class DeckNativeService:
 
     def _run(self, command: list[str], *, timeout: int = _CLI_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
         _ensure_script(command[1])
+        if self._deadline_epoch_ms is not None:
+            remaining = (self._deadline_epoch_ms - int(time.time() * 1000)) / 1000
+            if remaining <= 0:
+                return subprocess.CompletedProcess(
+                    command,
+                    124,
+                    stdout="",
+                    stderr="deck deadline exceeded before native subprocess",
+                )
+            timeout = max(1, min(timeout, int(remaining)))
         try:
             return subprocess.run(  # noqa: S603 - command is a sanitized argv list.
                 command,
@@ -283,7 +303,15 @@ class DeckNativeService:
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout if isinstance(exc.stdout, str) else ""
             stderr = exc.stderr if isinstance(exc.stderr, str) else ""
-            timeout_message = f"hands-on-deck subprocess timed out after {timeout}s"
+            deadline_exhausted = (
+                self._deadline_epoch_ms is not None
+                and int(time.time() * 1000) >= self._deadline_epoch_ms
+            )
+            timeout_message = (
+                "deck deadline exceeded during native subprocess"
+                if deadline_exhausted
+                else f"hands-on-deck subprocess timed out after {timeout}s"
+            )
             return subprocess.CompletedProcess(command, 124, stdout=stdout, stderr=f"{timeout_message}\n{stderr}".strip())
 
 

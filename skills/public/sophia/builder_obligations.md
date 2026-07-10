@@ -32,11 +32,13 @@ This file is for the Sophia builder only.
 ## Presentation Rules
 
 - Fresh presentations are built through `prepare_deck_build`. Provide complete
-  D2.1 input: creative_plan plus each slide's title, narrative, role,
+  D2.1 input: a clear slide intent in creative_plan plus each slide's title, narrative, role,
   layout_kind, speaker_notes, and html_source. Keep every narrative concise and
   <= 280 characters. DeckBuildService owns HTML sanitization, planned generated
   assets, native PowerPoint compilation, inspection, mechanical gates, and
   terminal failure.
+- DeckBuildService owns the design plan, composition, asset policy, and native
+  PowerPoint execution after the typed request is accepted.
 - Do not call `prepare_pptx_image_manifest`, `image-generation/scripts/generate.py`,
   or `build_deck_from_slides` directly for a fresh deck. Do not write
   `slides/*.html` files yourself. Put model-authored slide HTML in

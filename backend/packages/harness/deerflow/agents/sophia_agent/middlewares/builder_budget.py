@@ -39,6 +39,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from typing import Any, NotRequired
 
 from langchain.agents import AgentState
@@ -48,6 +49,7 @@ from langchain_core.messages import AIMessage
 from langgraph.runtime import Runtime
 
 from deerflow.sophia.builder_events import fire_completion_webhook_from_artifact
+from deerflow.sophia.observability import annotate_builder_completion
 
 logger = logging.getLogger(__name__)
 
@@ -71,6 +73,12 @@ USER_BUDGET_TIMEOUT_MESSAGE = (
 )
 USER_BUDGET_COST_MESSAGE = (
     "Sorry, we hit the cost limit for this task. Please let me know if you want to try again."
+)
+USER_BUDGET_WALL_CLOCK_MESSAGE = (
+    "Sorry, the presentation builder reached its 8-minute time limit before a complete deck was ready."
+)
+USER_BUDGET_TURN_MESSAGE = (
+    "Sorry, the builder reached its turn limit before a complete artifact was ready."
 )
 
 # Default per-run caps. ``0`` / ``0.0`` disables a cap. ``start_builder_task``
@@ -97,6 +105,17 @@ COMPLEX_BUILDER_BUDGET: dict[str, Any] = {
     "max_non_artifact_turns": 45,
     "force_emit_remaining_turns": 4,
     "soft_warn_at_turn": 27,
+}
+
+PRESENTATION_BUILDER_BUDGET: dict[str, Any] = {
+    **COMPLEX_BUILDER_BUDGET,
+    "tier": "presentation",
+    "max_non_artifact_turns": 12,
+    "force_emit_remaining_turns": 2,
+    "soft_warn_at_turn": 6,
+    "max_wall_clock_seconds": 480,
+    "prepare_force_at_turn": 8,
+    "prepare_force_after_seconds": 120,
 }
 
 # Flat estimate per gpt-image-2 call (image-generation skill, enrichment-by-
@@ -151,6 +170,21 @@ def _budget_with_env(defaults: dict[str, Any], prefix: str) -> dict[str, Any]:
         float(budget["force_emit_wall_clock_fraction"]),
     )
     budget["repair_reserve_usd"] = _env_float(f"{prefix}_REPAIR_RESERVE_USD", float(budget["repair_reserve_usd"]))
+    if "max_wall_clock_seconds" in budget:
+        budget["max_wall_clock_seconds"] = _env_int(
+            f"{prefix}_MAX_WALL_CLOCK_SECONDS",
+            int(budget["max_wall_clock_seconds"]),
+        )
+    if "prepare_force_at_turn" in budget:
+        budget["prepare_force_at_turn"] = _env_int(
+            f"{prefix}_PREPARE_FORCE_AT_TURN",
+            int(budget["prepare_force_at_turn"]),
+        )
+    if "prepare_force_after_seconds" in budget:
+        budget["prepare_force_after_seconds"] = _env_int(
+            f"{prefix}_PREPARE_FORCE_AFTER_SECONDS",
+            int(budget["prepare_force_after_seconds"]),
+        )
     return budget
 
 
@@ -168,9 +202,17 @@ def builder_budget_for_task(
     """
     ext = str(artifact_ext or "").lower().lstrip(".")
     task = str(task_type or "").lower().strip()
-    complex_task = ext in {"pdf", "pptx", "ppt"} or task in {"presentation", "visual_report"}
-    defaults = COMPLEX_BUILDER_BUDGET if complex_task else DEFAULT_BUILDER_BUDGET
-    prefix = "SOPHIA_BUILDER_COMPLEX_BUDGET" if complex_task else "SOPHIA_BUILDER_SIMPLE_BUDGET"
+    presentation_task = ext in {"pptx", "ppt"}
+    complex_task = ext == "pdf" or task in {"presentation", "visual_report"}
+    if presentation_task:
+        defaults = PRESENTATION_BUILDER_BUDGET
+        prefix = "SOPHIA_BUILDER_PRESENTATION_BUDGET"
+    elif complex_task:
+        defaults = COMPLEX_BUILDER_BUDGET
+        prefix = "SOPHIA_BUILDER_COMPLEX_BUDGET"
+    else:
+        defaults = DEFAULT_BUILDER_BUDGET
+        prefix = "SOPHIA_BUILDER_SIMPLE_BUDGET"
     budget = _budget_with_env(defaults, prefix)
     # Legacy escape hatch: lets operators globally tune without adopting the
     # tiered names immediately.
@@ -224,6 +266,36 @@ def force_emit_wall_clock_fraction(state: dict[str, Any]) -> float:
     return min(max(value, 0.05), 0.95)
 
 
+def max_wall_clock_seconds(state: dict[str, Any]) -> int:
+    budget = state.get("builder_budget")
+    if not isinstance(budget, dict):
+        return 0
+    try:
+        return max(0, int(budget.get("max_wall_clock_seconds", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def prepare_force_at_turn(state: dict[str, Any]) -> int:
+    budget = state.get("builder_budget")
+    if not isinstance(budget, dict):
+        return 8
+    try:
+        return max(1, int(budget.get("prepare_force_at_turn", 8) or 8))
+    except (TypeError, ValueError):
+        return 8
+
+
+def prepare_force_after_seconds(state: dict[str, Any]) -> int:
+    budget = state.get("builder_budget")
+    if not isinstance(budget, dict):
+        return 120
+    try:
+        return max(0, int(budget.get("prepare_force_after_seconds", 120) or 0))
+    except (TypeError, ValueError):
+        return 120
+
+
 def estimate_run_cost_usd(state: dict) -> float:
     """Current estimated spend for this run (tokens + image calls)."""
     totals = _sum_usage(state.get("messages", []) or [])
@@ -257,6 +329,8 @@ def budget_allows_iteration(state: dict) -> bool:
 def _budget_stop_copy(budget_stop_reason: str) -> str:
     if budget_stop_reason == "cost_limit":
         return USER_BUDGET_COST_MESSAGE
+    if budget_stop_reason == "wall_clock_limit":
+        return USER_BUDGET_WALL_CLOCK_MESSAGE
     return USER_BUDGET_TIMEOUT_MESSAGE
 
 
@@ -313,6 +387,12 @@ class BuilderBudgetState(AgentState):
     # graph). ``{"max_cost_usd": float, "max_total_tokens": int,
     # "cost_model_key": str | None}``. Absent → module defaults apply.
     builder_budget: NotRequired[dict | None]
+    builder_task_kickoff_ms: NotRequired[int]
+    builder_timeout_seconds: NotRequired[int]
+    builder_deadline_epoch_ms: NotRequired[int]
+    builder_result: NotRequired[dict | None]
+    builder_graph_halted: NotRequired[bool]
+    builder_terminal_halt_reason: NotRequired[str]
 
 
 class BuilderBudgetMiddleware(AgentMiddleware[BuilderBudgetState]):
@@ -336,7 +416,120 @@ class BuilderBudgetMiddleware(AgentMiddleware[BuilderBudgetState]):
         key = budget.get("cost_model_key")
         return max_cost, max_tokens, (key if isinstance(key, str) else None)
 
+    @staticmethod
+    def _deadline_epoch_ms(state: BuilderBudgetState) -> int:
+        raw_deadline = state.get("builder_deadline_epoch_ms")
+        if isinstance(raw_deadline, (int, float)) and raw_deadline > 0:
+            return int(raw_deadline)
+        timeout_s = max_wall_clock_seconds(state)
+        kickoff_ms = state.get("builder_task_kickoff_ms")
+        if timeout_s > 0 and isinstance(kickoff_ms, (int, float)) and kickoff_ms > 0:
+            return int(kickoff_ms) + timeout_s * 1000
+        return 0
+
+    @classmethod
+    def _wall_clock_exceeded(cls, state: BuilderBudgetState) -> bool:
+        deadline_ms = cls._deadline_epoch_ms(state)
+        return deadline_ms > 0 and int(time.time() * 1000) >= deadline_ms
+
+    @staticmethod
+    def _terminal_artifact(
+        *,
+        budget_stop_reason: str,
+        failure_code: str,
+        detail: str,
+    ) -> dict[str, Any]:
+        return {
+            "artifact_path": None,
+            "artifact_type": "presentation" if budget_stop_reason == "wall_clock_limit" else "unknown",
+            "artifact_title": "Builder task did not complete",
+            "steps_completed": 0,
+            "decisions_made": [],
+            "companion_summary": _budget_stop_copy(budget_stop_reason),
+            "companion_tone_hint": "Direct and apologetic — the build stopped at a hard runtime limit.",
+            "user_next_action": "Retry with a narrower scope or fewer slides.",
+            "confidence": 0.0,
+            "status": "timed_out",
+            "terminal_status": "timed_out",
+            "terminal_reason": budget_stop_reason,
+            "artifact_acceptance_status": "failed",
+            "failure_code": failure_code,
+            "budget_stop_reason": budget_stop_reason,
+            "builder_failure_diagnostics": {
+                "failure_stage": "runtime_budget",
+                "failure_code": failure_code,
+                "failure_reason": detail,
+                "budget_stop_reason": budget_stop_reason,
+                "retryable": False,
+            },
+        }
+
+    def _terminal_update(
+        self,
+        state: BuilderBudgetState,
+        runtime: Runtime,
+        *,
+        budget_stop_reason: str,
+        failure_code: str,
+        detail: str,
+    ) -> dict[str, Any]:
+        artifact = self._terminal_artifact(
+            budget_stop_reason=budget_stop_reason,
+            failure_code=failure_code,
+            detail=detail,
+        )
+        logger.error(
+            "[BuilderBudget] terminal stop reason=%s failure_code=%s detail=%s",
+            budget_stop_reason,
+            failure_code,
+            detail,
+        )
+        try:
+            annotate_builder_completion(state, artifact)
+            fire_completion_webhook_from_artifact(
+                state=state,
+                runtime=runtime,
+                artifact=artifact,
+                status="timed_out",
+                error_message=_budget_error_message(
+                    budget_stop_reason=budget_stop_reason,
+                    detail=detail,
+                ),
+            )
+        except Exception:  # noqa: BLE001 - a circuit breaker must always terminate
+            logger.warning("[BuilderBudget] terminal observability dispatch failed", exc_info=True)
+        update: dict[str, Any] = {
+            "builder_result": artifact,
+            "builder_graph_halted": True,
+            "builder_terminal_halt_reason": budget_stop_reason,
+            "jump_to": "end",
+        }
+        messages = state.get("messages", []) or []
+        if messages and isinstance(messages[-1], AIMessage):
+            last = messages[-1]
+            note = f"\n\n[Builder stopped: {budget_stop_reason}.]"
+            content = last.content
+            if isinstance(content, str):
+                content = content + note
+            elif isinstance(content, list):
+                content = [*content, {"type": "text", "text": note.strip()}]
+            update["messages"] = [
+                last.model_copy(update={"tool_calls": [], "content": content})
+            ]
+        return update
+
     def _apply(self, state: BuilderBudgetState, runtime: Runtime) -> dict | None:
+        if state.get("builder_result") is not None or state.get("builder_graph_halted") is True:
+            return None
+        if self._wall_clock_exceeded(state):
+            deadline_ms = self._deadline_epoch_ms(state)
+            return self._terminal_update(
+                state,
+                runtime,
+                budget_stop_reason="wall_clock_limit",
+                failure_code="deck_deadline_exceeded",
+                detail=f"deadline_epoch_ms={deadline_ms}",
+            )
         max_cost, max_tokens, cost_key = self._resolve_caps(state)
         if max_cost <= 0 and max_tokens <= 0:
             return None  # both caps disabled — no-op
@@ -377,54 +570,21 @@ class BuilderBudgetMiddleware(AgentMiddleware[BuilderBudgetState]):
 
         budget_stop_reason = "cost_limit" if over_cost else "token_limit"
         reason = f"cost=${cost:.2f}>=${max_cost:.2f}" if over_cost else f"tokens={total_tokens}>={max_tokens}"
-        companion_summary = _budget_stop_copy(budget_stop_reason)
-        terminal_error_message = _budget_error_message(
+        return self._terminal_update(
+            state,
+            runtime,
             budget_stop_reason=budget_stop_reason,
+            failure_code="builder_budget_exceeded",
             detail=reason,
         )
-        logger.error(
-            "[BuilderBudget] BUDGET EXCEEDED: %s (est_cost=$%.4f total_tokens=%d) — terminating builder run",
-            reason,
-            cost,
-            total_tokens,
-        )
 
-        # Fire the terminal webhook. status MUST be a native terminal value
-        # ("timed_out"); the spec's "timeout" is rejected by the webhook.
-        # Dedup is one-shot per task: on a turn that also emitted an artifact,
-        # BuilderArtifactMiddleware (which runs FIRST, see module docstring)
-        # already claimed it with "completed", so this no-ops and the
-        # deliverable is preserved.
-        try:
-            fire_completion_webhook_from_artifact(
-                state=state,
-                runtime=runtime,
-                artifact={
-                    "builder_failure_diagnostics": {
-                        "failure_code": "builder_budget_exceeded",
-                        "budget_stop_reason": budget_stop_reason,
-                    },
-                    "budget_stop_reason": budget_stop_reason,
-                    "companion_summary": companion_summary,
-                    "user_next_action": "Tell me if you want me to try again with a narrower scope.",
-                },
-                status="timed_out",
-                error_message=terminal_error_message,
-            )
-        except Exception:  # noqa: BLE001 — the breaker must never itself crash the run
-            logger.warning("[BuilderBudget] completion webhook dispatch failed", exc_info=True)
+    @hook_config(can_jump_to=["end"])
+    def before_model(self, state: BuilderBudgetState, runtime: Runtime) -> dict | None:
+        return self._apply(state, runtime) if self._wall_clock_exceeded(state) else None
 
-        # Deterministic stop: jump_to=end AND strip tool_calls from the last
-        # AIMessage so the loop exits even if jump_to is later overwritten.
-        update: dict[str, Any] = {"jump_to": "end"}
-        if messages and isinstance(messages[-1], AIMessage):
-            last = messages[-1]
-            note = f"\n\n[Builder stopped: run budget exceeded ({reason}).]"
-            # Guard list-shaped content (Anthropic tool_use blocks) — only
-            # append the note to plain-string content to avoid a list+str error.
-            new_content = (last.content + note) if isinstance(last.content, str) else last.content
-            update["messages"] = [last.model_copy(update={"tool_calls": [], "content": new_content})]
-        return update
+    @hook_config(can_jump_to=["end"])
+    async def abefore_model(self, state: BuilderBudgetState, runtime: Runtime) -> dict | None:
+        return self._apply(state, runtime) if self._wall_clock_exceeded(state) else None
 
     @hook_config(can_jump_to=["end"])
     def after_model(self, state: BuilderBudgetState, runtime: Runtime) -> dict | None:

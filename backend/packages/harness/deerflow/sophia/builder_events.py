@@ -838,6 +838,14 @@ def _artifact_completion_fields(
         "quality_warning": artifact.get("quality_warning"),
         "visuals_missing": artifact.get("visuals_missing"),
         "budget_stop_reason": artifact.get("budget_stop_reason"),
+        "terminal_status": artifact.get("terminal_status") or artifact.get("status"),
+        "terminal_reason": artifact.get("terminal_reason"),
+        "first_prepare_turn": artifact.get("first_prepare_turn"),
+        "prepare_call_count": artifact.get("prepare_call_count"),
+        "prepare_result_count": artifact.get("prepare_result_count"),
+        "prepare_retry_executed": artifact.get("prepare_retry_executed"),
+        "dangling_prepare_call_count": artifact.get("dangling_prepare_call_count"),
+        "creative_plan_accepted": artifact.get("creative_plan_accepted"),
     }
 
 

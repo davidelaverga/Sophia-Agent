@@ -41,6 +41,7 @@ _MANIFEST_AUTHOR = "prepare_pptx_image_manifest"
 @pytest.fixture(autouse=True)
 def _legacy_deck_mode_for_legacy_batch_tests(monkeypatch):
     monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "false")
+    monkeypatch.setenv("SOPHIA_DECK_LEGACY_SCREENSHOT_DEBUG", "true")
 
 
 def _runtime():
@@ -683,16 +684,16 @@ def test_presentation_task_enables_image_generation_by_default():
     ) is True
 
 
-def test_pdf_presentation_target_uses_deck_image_generation_path():
+def test_pdf_presentation_target_does_not_use_pptx_image_generation_path():
     assert _is_pptx_image_generation_target("", "presentation") is True
     assert _is_pptx_image_generation_target(".pptx", "document") is True
-    assert _is_pptx_image_generation_target(".pdf", "presentation") is True
+    assert _is_pptx_image_generation_target(".pdf", "presentation") is False
     assert _is_pdf_image_generation_target(".pdf", "presentation") is False
     assert _image_generation_enabled(
         {"task": "Build a presentation and export it as a PDF"},
         artifact_target_ext=".pdf",
         task_type="presentation",
-    ) is True
+    ) is False
 
 
 def test_polished_presentation_task_enables_image_generation():
@@ -1140,7 +1141,7 @@ def test_null_pptx_emit_is_terminal_error_after_image_failure(monkeypatch) -> No
     assert result.goto == "end"
     artifact = result.update["builder_result"]
     assert artifact["artifact_path"] is None
-    assert artifact["status"] == "error"
+    assert artifact["status"] == "failed"
     assert artifact["image_generation_status"] == "failed"
     assert artifact["image_generation_startup_error_class"] == "image_script_not_found"
     assert result.update["builder_graph_halted"] is True
@@ -1187,7 +1188,7 @@ def test_missing_pptx_emit_after_terminal_startup_failure_ends_with_error(monkey
     assert result.goto == "end"
     artifact = result.update["builder_result"]
     assert artifact["artifact_path"] is None
-    assert artifact["status"] == "error"
+    assert artifact["status"] == "failed"
     assert artifact["artifact_type"] == "presentation"
     assert artifact["image_generation_status"] == "failed"
     assert artifact["image_generation_reason"] == "sandbox_path_rejected"
@@ -1335,8 +1336,8 @@ def test_pptx_route_selected_span_emits_once(monkeypatch) -> None:
 
     assert update["builder_pptx_route_trace_emitted"] is True
     span = next(item for item in spans if item["name"] == "Sophia PPTX Route Selected")
-    assert span["outputs"]["presentation_route"] == "deck_ir_html_raster"
+    assert span["outputs"]["presentation_route"] == "deck_creative_html_native"
     assert span["outputs"]["deck_route"] == "deck_build_service"
     assert span["outputs"]["deck_build_service_enabled"] is True
     assert span["outputs"]["model_facing_deck_tools"] == ["prepare_deck_build"]
-    assert span["outputs"]["visuals_required"] is True
+    assert span["outputs"]["visuals_required"] is False

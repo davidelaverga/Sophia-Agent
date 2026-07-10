@@ -146,6 +146,16 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     assert config_payload["configurable"]["graph_id"] == "sophia_builder"
     assert config_payload["configurable"]["task_type"] == "presentation"
     assert config_payload["configurable"]["artifact_target_ext"] == ".pptx"
+    run_input = captured["run_kwargs"]["input"]
+    assert run_input["builder_budget"]["tier"] == "presentation"
+    assert run_input["builder_budget"]["max_non_artifact_turns"] == 12
+    assert run_input["builder_timeout_seconds"] == 480
+    assert run_input["builder_task_kickoff_ms"] > 0
+    assert (
+        run_input["builder_deadline_epoch_ms"]
+        - run_input["builder_task_kickoff_ms"]
+        == 480_000
+    )
 
 
 def test_start_builder_task_dispatches_resolved_pdf_target_ext_for_pdf_deck(monkeypatch):
@@ -173,6 +183,9 @@ def test_start_builder_task_dispatches_resolved_pdf_target_ext_for_pdf_deck(monk
     assert config_payload["configurable"]["task_type"] == "presentation"
     assert config_payload["configurable"]["artifact_target_ext"] == ".pdf"
     assert run_input["builder_artifact_target_path"].endswith(".pdf")
+    assert run_input["builder_budget"]["tier"] == "complex_artifact"
+    assert run_input["builder_timeout_seconds"] == 0
+    assert run_input["builder_deadline_epoch_ms"] == 0
 
 
 def test_edit_source_resolves_last_builder_artifact():

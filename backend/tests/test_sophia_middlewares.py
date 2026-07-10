@@ -2743,10 +2743,41 @@ class TestBuilderArtifactMiddleware:
         state = {"messages": [msg]}
         result = mw.after_model(state, _make_runtime())
         assert result is not None
-        assert result["builder_result"]["confidence"] == 0.3  # fallback
+        assert result["builder_result"]["confidence"] == 0.0
+        assert result["builder_result"]["terminal_status"] == "failed"
+        assert result["builder_result"]["terminal_reason"] == "no_deliverable"
         assert captured["status"] == "failed"
         assert captured["artifact"]["artifact_path"] is None
         assert "deliverable" in captured["error_message"]
+
+    def test_loop_hard_stop_becomes_clean_terminal_failure(self, monkeypatch):
+        from langchain_core.messages import AIMessage
+
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba_module
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        captured: dict[str, object] = {}
+        monkeypatch.setattr(
+            ba_module,
+            "fire_completion_webhook_from_artifact",
+            lambda **kwargs: captured.update(kwargs) or True,
+        )
+        state = {
+            "messages": [AIMessage(content="[FORCED STOP]", tool_calls=[])],
+            "loop_detection_hard_stop": True,
+            "loop_detection_stop_reason": "repeated_tool_calls",
+        }
+
+        result = BuilderArtifactMiddleware().after_model(state, _make_runtime())
+
+        assert result is not None
+        artifact = result["builder_result"]
+        assert artifact["status"] == "failed"
+        assert artifact["failure_code"] == "builder_loop_limit_exceeded"
+        assert artifact["terminal_reason"] == "loop_limit"
+        assert result["builder_terminal_halt_reason"] == "loop_limit"
+        assert result["jump_to"] == "end"
+        assert captured["status"] == "failed"
 
     def test_ignores_non_builder_tool_calls(self):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -3128,8 +3159,8 @@ class TestBuilderArtifactMiddleware:
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
         assert choice == {"type": "tool", "name": "render_html_to_pdf"}
 
-    def test_force_choice_pdf_presentation_target_uses_deck_compile(self, tmp_path):
-        """PDF slide exports use the deck path, not the report PDF renderer."""
+    def test_force_choice_pdf_presentation_target_does_not_use_pptx_service(self, tmp_path):
+        """The authoritative prepare service is scoped to .pptx output."""
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3160,7 +3191,7 @@ class TestBuilderArtifactMiddleware:
         }
 
         choice = BuilderArtifactMiddleware()._force_choice_for_state(state)
-        assert choice == {"type": "tool", "name": "build_deck_from_slides"}
+        assert choice == {"type": "tool", "name": "write_file"}
 
     def test_force_choice_pdf_target_does_not_render_markdown_as_html(self, tmp_path):
         """Markdown sources are not valid html_path inputs for render_html_to_pdf."""
@@ -3289,14 +3320,14 @@ class TestBuilderArtifactMiddleware:
         mw = BuilderArtifactMiddleware()
 
         update = mw._combined_before_model_updates(state, _make_runtime(thread_id="thread-x"))
-        assert update is None
+        assert update == {"builder_pptx_route_trace_emitted": True}
 
     def test_complete_slide_html_latches_deck_builder(self, tmp_path):
         # HTML-slide path + floor (2026-06-29): the compile latch fires on
         # slide-HTML completeness, decoupled from image yield. Here 3/3 slide
         # HTML files exist but only 1 image succeeded — the latch still fires and
-        # steers to build_deck_from_slides (the harness placeholders the missing
-        # visuals), instead of looping for all images.
+        # steers to the authoritative prepare service instead of lower-level
+        # compiler or serial image loops.
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3317,7 +3348,7 @@ class TestBuilderArtifactMiddleware:
         assert update is not None
         assert update["builder_pptx_compile_latch_pending"] is True
         content = update["messages"][0].content
-        assert "build_deck_from_slides" in content
+        assert "prepare_deck_build" in content
         # deck_plan.json / image_path are image-forward residue and must be absent
         # ("generate.py --plan-file" may still appear inside the do-NOT prohibition).
         assert "deck_plan.json" not in content
@@ -4420,8 +4451,7 @@ class TestBuilderArtifactMiddleware:
         assert "builder-thread" not in calls
 
     def test_pptx_skill_read_alone_still_gets_deck_steering_correction(self, tmp_path):
-        # The drift/skill correction still fires and injects the canonical
-        # HTML-slide deck steering message (build_deck_from_slides), not image-forward.
+        # The drift/skill correction injects the authoritative service route.
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -4442,8 +4472,8 @@ class TestBuilderArtifactMiddleware:
         assert result is not None
         assert result["builder_pptx_skill_correction_emitted"] is True
         content = result["messages"][0].content
-        assert "build_deck_from_slides" in content
-        assert "/mnt/user-data/outputs/slides/" in content
+        assert "prepare_deck_build" in content
+        assert "html_source" in content
         assert "deck_plan.json" not in content
         assert "image_path" not in content
 
@@ -4463,7 +4493,9 @@ class TestBuilderArtifactMiddleware:
             ],
         }
 
-        assert mw.before_model(state, _make_runtime(thread_id="thread-x")) is None
+        assert mw.before_model(state, _make_runtime(thread_id="thread-x")) == {
+            "builder_pptx_route_trace_emitted": True
+        }
 
     def test_force_choice_pptx_no_output_waits_for_skill_correction(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -4480,7 +4512,10 @@ class TestBuilderArtifactMiddleware:
             "builder_timeout_seconds": 1800,
         }
 
-        assert BuilderArtifactMiddleware()._force_choice_for_state(state, runtime) is None
+        assert BuilderArtifactMiddleware()._force_choice_for_state(state, runtime) == {
+            "type": "tool",
+            "name": "prepare_deck_build",
+        }
 
     # ---------------------------------------------------------------------
     # Wall-clock-aware force-emit (companion-to-builder timeout fix)

@@ -72,6 +72,20 @@ services:
         value: "1"
       - key: SOPHIA_BUILDER_PRIMARY_COOLDOWN_SECONDS
         value: "300"
+      # Fresh PPTX runtime contract. These values are copied into initial
+      # graph state and shared with image/native subprocesses.
+      - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_MAX_NON_ARTIFACT_TURNS
+        value: "12"
+      - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_FORCE_EMIT_REMAINING_TURNS
+        value: "2"
+      - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_SOFT_WARN_AT_TURN
+        value: "6"
+      - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_MAX_WALL_CLOCK_SECONDS
+        value: "480"
+      - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_PREPARE_FORCE_AT_TURN
+        value: "8"
+      - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_PREPARE_FORCE_AFTER_SECONDS
+        value: "120"
       # Uncomment only if the write key spans multiple LangSmith workspaces.
       # - key: LANGSMITH_WORKSPACE_ID
       #   sync: false

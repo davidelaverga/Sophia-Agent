@@ -41,6 +41,7 @@ import datetime as dt
 import logging
 import re
 import shutil
+import time
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -1945,6 +1946,20 @@ async def _dispatch_via_asgi(
     if materialized_edit_context is not None:
         delegation_with_parent["edit_context"] = materialized_edit_context
 
+    kickoff_ms = int(time.time() * 1000)
+    try:
+        max_wall_clock_seconds = max(
+            0,
+            int(builder_budget.get("max_wall_clock_seconds", 0) or 0),
+        )
+    except (TypeError, ValueError):
+        max_wall_clock_seconds = 0
+    deadline_epoch_ms = (
+        kickoff_ms + max_wall_clock_seconds * 1000
+        if max_wall_clock_seconds > 0
+        else 0
+    )
+
     run_input: dict[str, Any] = {
         "messages": [{"role": "user", "content": description}],
         "delegation_context": delegation_with_parent,
@@ -1954,6 +1969,11 @@ async def _dispatch_via_asgi(
         # Hard cost/token/turn circuit-breaker enforced by the builder
         # middlewares. Tiered by deliverable complexity and env-overridable.
         "builder_budget": builder_budget,
+        # One authoritative clock for middleware, image generation, native
+        # compilation, preview rendering, and terminal diagnostics.
+        "builder_task_kickoff_ms": kickoff_ms,
+        "builder_timeout_seconds": max_wall_clock_seconds,
+        "builder_deadline_epoch_ms": deadline_epoch_ms,
         "builder_artifact_target_path": delegation_context.get("artifact_target_path"),
     }
     if materialized_edit_context is not None:
