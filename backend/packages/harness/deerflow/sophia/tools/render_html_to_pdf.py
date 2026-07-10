@@ -22,6 +22,7 @@ from __future__ import annotations
 import logging
 import os
 import shutil
+import signal
 import subprocess  # noqa: S404 — node by absolute path + fixed bundled script
 from html.parser import HTMLParser
 from pathlib import Path
@@ -40,6 +41,7 @@ from deerflow.sophia.tools.render_markdown_to_pdf import (
 logger = logging.getLogger(__name__)
 
 _RENDER_TIMEOUT_SECONDS = 120
+_PROCESS_GROUP_DRAIN_SECONDS = 10
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 _SVG_STRUCTURAL_TAGS = {
     "clippath",
@@ -292,13 +294,7 @@ def _run_html_pdf_render(
     margin: str | None,
 ) -> str | None:
     try:
-        completed = subprocess.run(  # noqa: S603 — fixed node + bundled script, file path args only
-            _html_pdf_command(node, script, host_html, host_pdf, margin),
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_RENDER_TIMEOUT_SECONDS,
-        )
+        completed = _run_html_pdf_renderer_process(_html_pdf_command(node, script, host_html, host_pdf, margin))
     except subprocess.TimeoutExpired:
         logger.warning("render_html_to_pdf: chromium render timed out html=%s", html_path)
         return _result(
@@ -307,6 +303,53 @@ def _run_html_pdf_render(
             error=f"Chromium render exceeded {_RENDER_TIMEOUT_SECONDS}s.",
         )
     return _html_pdf_render_failure(completed, host_pdf, html_path)
+
+
+def _run_html_pdf_renderer_process(cmd: list[str]) -> subprocess.CompletedProcess[str]:
+    if os.name == "nt":
+        return subprocess.run(  # noqa: S603 — fixed node + bundled script, file path args only
+            cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_RENDER_TIMEOUT_SECONDS,
+        )
+    process = subprocess.Popen(  # noqa: S603 — fixed node + bundled script, file path args only
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        stdout, stderr = process.communicate(timeout=_RENDER_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        _terminate_html_pdf_renderer_group(process)
+        try:
+            stdout, stderr = process.communicate(timeout=_PROCESS_GROUP_DRAIN_SECONDS)
+        except subprocess.TimeoutExpired:
+            stdout, stderr = "", ""
+        raise subprocess.TimeoutExpired(
+            process.args,
+            _RENDER_TIMEOUT_SECONDS,
+            output=stdout,
+            stderr=stderr,
+        ) from None
+    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
+
+
+def _terminate_html_pdf_renderer_group(process: subprocess.Popen[str]) -> None:
+    try:
+        process_group = os.getpgid(process.pid)
+    except (ProcessLookupError, OSError):
+        process_group = process.pid
+    try:
+        os.killpg(process_group, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError, OSError):
+        try:
+            process.kill()
+        except OSError:
+            pass
 
 
 def _html_pdf_path_error(html_path: str, pdf_path: str) -> str | None:

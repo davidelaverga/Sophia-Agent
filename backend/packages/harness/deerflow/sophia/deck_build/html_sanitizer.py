@@ -104,7 +104,7 @@ def validate_and_sanitize_slide_html(
     validation.warnings.extend(scanner.warnings)
     validation.image_refs = list(dict.fromkeys(scanner.image_refs))
     _validate_canvas(source, scanner, validation)
-    _validate_background(source, scanner, validation)
+    _validate_background(scanner, validation)
     _validate_css(scanner.styles, validation)
     _validate_image_refs(validation.image_refs, allowed_asset_refs, validation)
     sanitized = _sanitize_css(source)
@@ -163,14 +163,12 @@ def _validate_canvas(source: str, scanner: _HtmlScanner, validation: HtmlSourceV
         validation.errors.append("html must include a body/main slide canvas")
 
 
-def _validate_background(source: str, scanner: _HtmlScanner, validation: HtmlSourceValidation) -> None:
-    haystack = "\n".join(scanner.styles + [scanner.body_attrs.get("style", ""), scanner.main_attrs.get("style", ""), source[:5000]])
-    background_match = re.search(r"\bbackground(?:-color)?\s*:\s*([^;{}]+)", haystack, re.I)
-    if not background_match:
+def _validate_background(scanner: _HtmlScanner, validation: HtmlSourceValidation) -> None:
+    backgrounds = _canvas_backgrounds(scanner)
+    if not backgrounds:
         validation.errors.append("slide canvas must declare an opaque background")
         return
-    value = background_match.group(1).strip().lower()
-    if "transparent" in value or "rgba(" in value and re.search(r"rgba\([^)]*,\s*0(?:\.0+)?\s*\)", value):
+    if not any(_background_is_opaque(value) for value in backgrounds):
         validation.errors.append("slide background must be opaque")
 
 
@@ -213,7 +211,18 @@ def _first_px(source: str, prop: str) -> int | None:
 
 
 def _canvas_size(scanner: _HtmlScanner) -> tuple[int | None, int | None]:
-    candidates = [
+    for candidate in _canvas_style_candidates(scanner):
+        if not candidate:
+            continue
+        width = _first_px(candidate, "width")
+        height = _first_px(candidate, "height")
+        if width is not None and height is not None:
+            return width, height
+    return None, None
+
+
+def _canvas_style_candidates(scanner: _HtmlScanner) -> list[str]:
+    return [
         scanner.main_attrs.get("style", ""),
         scanner.body_attrs.get("style", ""),
         *(_selector_rule_body(css, "main") for css in scanner.styles),
@@ -222,14 +231,21 @@ def _canvas_size(scanner: _HtmlScanner) -> tuple[int | None, int | None]:
         *(_selector_rule_body(css, "html, body") for css in scanner.styles),
         *(_selector_rule_body(css, "html") for css in scanner.styles),
     ]
-    for candidate in candidates:
-        if not candidate:
-            continue
-        width = _first_px(candidate, "width")
-        height = _first_px(candidate, "height")
-        if width is not None and height is not None:
-            return width, height
-    return None, None
+
+
+def _canvas_backgrounds(scanner: _HtmlScanner) -> list[str]:
+    values: list[str] = []
+    for candidate in _canvas_style_candidates(scanner):
+        match = re.search(r"\bbackground(?:-color)?\s*:\s*([^;{}]+)", candidate, re.I)
+        if match:
+            values.append(match.group(1).strip().lower())
+    return values
+
+
+def _background_is_opaque(value: str) -> bool:
+    if "transparent" in value:
+        return False
+    return not ("rgba(" in value and re.search(r"rgba\([^)]*,\s*0(?:\.0+)?\s*\)", value))
 
 
 def _selector_rule_body(css: str, selector: str) -> str:

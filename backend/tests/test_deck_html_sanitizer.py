@@ -85,6 +85,18 @@ html, body { width: 1920px; height: 1080px; background: #0A0E14; }
     assert result.canvas_height_px == 1080
 
 
+def test_background_uses_canvas_not_transparent_child_component() -> None:
+    html = """<!doctype html><html><head><style>
+.badge { background: transparent; }
+html, body { width: 1920px; height: 1080px; background: #FFFFFF; }
+.canvas { width: 1920px; height: 1080px; }
+</style></head><body><main class="canvas"><span class="badge">A</span><h1>Title</h1></main></body></html>"""
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+
+
 def test_rejects_css_subresource_urls_before_rendering() -> None:
     html = """<!doctype html><html><head><style>
 html, body { width: 1920px; height: 1080px; background: #0A0E14; }
