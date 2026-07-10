@@ -43,6 +43,29 @@ def test_deck_native_subprocess_honors_expired_parent_deadline(
     assert "deck deadline exceeded" in result.stderr
 
 
+def test_deck_native_subprocess_timeout_uses_process_group_runner(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    script = tmp_path / "deck.py"
+    script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    captured: dict = {}
+
+    def _timeout(command, *, timeout, cwd):
+        captured.update(command=command, timeout=timeout, cwd=cwd)
+        raise subprocess.TimeoutExpired(command, timeout, output="partial", stderr="hung child")
+
+    monkeypatch.setattr(native_service_module, "run_process_group", _timeout)
+
+    result = DeckNativeService(scripts_dir=tmp_path)._run(["python", str(script)], timeout=30)
+
+    assert captured == {"command": ["python", str(script)], "timeout": 30, "cwd": tmp_path}
+    assert result.returncode == 124
+    assert result.stdout == "partial"
+    assert "hands-on-deck subprocess timed out after 30s" in result.stderr
+    assert "hung child" in result.stderr
+
+
 def test_deck_native_render_clears_stale_images_before_counting_success(
     tmp_path: Path,
     monkeypatch,

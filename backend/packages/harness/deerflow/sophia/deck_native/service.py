@@ -17,6 +17,7 @@ from deerflow.sophia.deck_native.models import (
     NativeDeckRenderResult,
 )
 from deerflow.sophia.deck_native.paths import hands_on_deck_scripts_dir
+from deerflow.sophia.process_group import run_process_group
 
 _CLI_TIMEOUT_SECONDS = 180
 _RENDER_TIMEOUT_SECONDS = 240
@@ -297,11 +298,8 @@ class DeckNativeService:
                 )
             timeout = max(1, min(timeout, int(remaining)))
         try:
-            return subprocess.run(  # noqa: S603 - command is a sanitized argv list.
+            return run_process_group(
                 command,
-                check=False,
-                capture_output=True,
-                text=True,
                 timeout=timeout,
                 cwd=self._scripts_dir,
             )

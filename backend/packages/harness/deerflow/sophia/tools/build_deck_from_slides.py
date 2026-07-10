@@ -24,7 +24,6 @@ import logging
 import os
 import re
 import shutil
-import signal
 import subprocess  # noqa: S404 — node by absolute path + fixed bundled scripts
 import tempfile
 from pathlib import Path
@@ -33,6 +32,7 @@ from typing import Any
 from langchain.tools import ToolRuntime, tool
 
 from deerflow.sandbox.tools import get_thread_data
+from deerflow.sophia.process_group import run_process_group
 from deerflow.sophia.tools.render_html_to_pdf import (
     _host_path_for_virtual_output,
     _resolved_host_path_error,
@@ -43,7 +43,6 @@ from deerflow.sophia.tools.render_markdown_to_pdf import _ensure_relative_to_out
 logger = logging.getLogger(__name__)
 
 _PER_SLIDE_TIMEOUT_SECONDS = 90
-_PROCESS_GROUP_DRAIN_SECONDS = 10
 _WRAP_TIMEOUT_SECONDS = 120
 _OUTPUTS_VIRTUAL_PREFIX = "/mnt/user-data/outputs/"
 _DECK_WIDTH = 1920
@@ -154,50 +153,7 @@ def _run_slide_render(cmd: list[str], html: Path) -> tuple[subprocess.CompletedP
 
 
 def _run_slide_renderer_process(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    if os.name == "nt":
-        return subprocess.run(  # noqa: S603 — fixed node + bundled script, file path args only
-            cmd,
-            check=False,
-            capture_output=True,
-            text=True,
-            timeout=_PER_SLIDE_TIMEOUT_SECONDS,
-        )
-    process = subprocess.Popen(  # noqa: S603 — fixed node + bundled script, file path args only
-        cmd,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-        text=True,
-        start_new_session=True,
-    )
-    try:
-        stdout, stderr = process.communicate(timeout=_PER_SLIDE_TIMEOUT_SECONDS)
-    except subprocess.TimeoutExpired:
-        _terminate_slide_renderer_group(process)
-        try:
-            stdout, stderr = process.communicate(timeout=_PROCESS_GROUP_DRAIN_SECONDS)
-        except subprocess.TimeoutExpired:
-            stdout, stderr = "", ""
-        raise subprocess.TimeoutExpired(
-            process.args,
-            _PER_SLIDE_TIMEOUT_SECONDS,
-            output=stdout,
-            stderr=stderr,
-        ) from None
-    return subprocess.CompletedProcess(process.args, process.returncode, stdout, stderr)
-
-
-def _terminate_slide_renderer_group(process: subprocess.Popen[str]) -> None:
-    try:
-        process_group = os.getpgid(process.pid)
-    except (ProcessLookupError, OSError):
-        process_group = process.pid
-    try:
-        os.killpg(process_group, signal.SIGKILL)
-    except (ProcessLookupError, PermissionError, OSError):
-        try:
-            process.kill()
-        except OSError:
-            pass
+    return run_process_group(cmd, timeout=_PER_SLIDE_TIMEOUT_SECONDS)
 
 
 def _slide_render_succeeded(completed: subprocess.CompletedProcess[str] | None, png: Path) -> bool:

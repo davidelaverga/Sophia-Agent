@@ -244,34 +244,10 @@ def test_timeout_returns_structured_error(staged, monkeypatch, tmp_path):
     (staged / "report.html").write_text("<html><body>hi</body></html>")
     _wire_node(monkeypatch, tmp_path)
 
-    killed_groups: list[tuple[int, int]] = []
-    popen_kwargs: dict = {}
+    def _timeout(cmd):
+        raise subprocess.TimeoutExpired(cmd, render_html._RENDER_TIMEOUT_SECONDS)
 
-    class _HungRenderer:
-        pid = 4321
-        args = ["node", "render_html_to_pdf.mjs"]
-        returncode = -9
-        communicate_calls = 0
-
-        def communicate(self, *, timeout):
-            self.communicate_calls += 1
-            if self.communicate_calls == 1:
-                raise subprocess.TimeoutExpired(self.args, timeout)
-            return "", ""
-
-        def kill(self):
-            raise AssertionError("direct-child fallback should not be needed")
-
-    process = _HungRenderer()
-
-    def _fake_popen(cmd, **kwargs):
-        popen_kwargs.update(kwargs)
-        process.args = cmd
-        return process
-
-    monkeypatch.setattr(render_html.subprocess, "Popen", _fake_popen)
-    monkeypatch.setattr(render_html.os, "getpgid", lambda pid: pid)
-    monkeypatch.setattr(render_html.os, "killpg", lambda pgid, sig: killed_groups.append((pgid, sig)))
+    monkeypatch.setattr(render_html, "_run_html_pdf_renderer_process", _timeout)
 
     result = _call(
         runtime=_fake_runtime(),
@@ -280,9 +256,6 @@ def test_timeout_returns_structured_error(staged, monkeypatch, tmp_path):
     )
     assert result["success"] is False
     assert result["error_type"] == "render_timeout"
-    assert popen_kwargs["start_new_session"] is True
-    assert killed_groups == [(process.pid, render_html.signal.SIGKILL)]
-    assert process.communicate_calls == 2
 
 
 # ---- Node-level smoke (real renderer) --------------------------------------

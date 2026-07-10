@@ -201,43 +201,16 @@ def test_slide_render_command_sets_opaque_neutral_bg_color():
     assert deck._DECK_BG == "#f7f9fc"
 
 
-def test_slide_render_timeout_kills_chromium_process_group(monkeypatch):
-    killed_groups: list[tuple[int, int]] = []
-    popen_kwargs: dict = {}
+def test_slide_render_timeout_returns_structured_error(monkeypatch):
+    def _timeout(cmd):
+        raise deck.subprocess.TimeoutExpired(cmd, deck._PER_SLIDE_TIMEOUT_SECONDS)
 
-    class _HungRenderer:
-        pid = 4321
-        args = ["node", "render_html_to_png.mjs"]
-        returncode = -9
-        communicate_calls = 0
+    monkeypatch.setattr(deck, "_run_slide_renderer_process", _timeout)
 
-        def communicate(self, *, timeout):
-            self.communicate_calls += 1
-            if self.communicate_calls == 1:
-                raise deck.subprocess.TimeoutExpired(self.args, timeout)
-            return "", ""
-
-        def kill(self):
-            raise AssertionError("direct-child fallback should not be needed")
-
-    process = _HungRenderer()
-
-    def _fake_popen(cmd, **kwargs):
-        popen_kwargs.update(kwargs)
-        process.args = cmd
-        return process
-
-    monkeypatch.setattr(deck.subprocess, "Popen", _fake_popen)
-    monkeypatch.setattr(deck.os, "getpgid", lambda pid: pid)
-    monkeypatch.setattr(deck.os, "killpg", lambda pgid, sig: killed_groups.append((pgid, sig)))
-
-    completed, error = deck._run_slide_render(process.args, Path("01.html"))
+    completed, error = deck._run_slide_render(["node", "render_html_to_png.mjs"], Path("01.html"))
 
     assert completed is None
     assert json.loads(error or "{}")["error_type"] == "slide_render_timeout"
-    assert popen_kwargs["start_new_session"] is True
-    assert killed_groups == [(process.pid, deck.signal.SIGKILL)]
-    assert process.communicate_calls == 2
 
 
 def test_missing_slide_images_fail_deck_render(tmp_path, monkeypatch):
