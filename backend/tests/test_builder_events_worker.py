@@ -363,6 +363,60 @@ async def test_internal_post_preserves_zero_native_deck_diagnostics(
 
 
 @pytest.mark.anyio
+async def test_internal_post_persists_terminal_deck_diagnostics(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    monkeypatch,
+):
+    captured: dict = {}
+    fake_threads = MagicMock()
+
+    async def _update_state(thread_id: str, values: dict):
+        captured["thread_id"] = thread_id
+        captured["values"] = values
+
+    fake_threads.update_state = AsyncMock(side_effect=_update_state)
+    fake_client = MagicMock()
+    fake_client.threads = fake_threads
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    terminal_fields = {
+        "terminal_status": "completed",
+        "terminal_reason": "deck_build_succeeded",
+        "first_prepare_turn": 8,
+        "prepare_call_count": 1,
+        "prepare_result_count": 1,
+        "prepare_retry_executed": False,
+        "dangling_prepare_call_count": 0,
+        "creative_plan_accepted": True,
+    }
+
+    async with client:
+        response = await client.post(
+            "/internal/builder-events",
+            json={
+                "thread_id": "parent-thread",
+                "task_id": "builder-task",
+                "run_id": "run-1",
+                "status": "success",
+                "agent_name": "sophia_builder",
+                "artifact_path": "mnt/user-data/outputs/deck.pptx",
+                "artifact_ext": "pptx",
+                **terminal_fields,
+            },
+        )
+        last_response = await client.get("/api/threads/parent-thread/builder-events/last")
+
+    assert response.status_code == 202
+    task_update = captured["values"]["async_tasks"]["builder-task"]
+    for key, value in terminal_fields.items():
+        assert task_update[key] == value
+        assert task_update["builder_result"][key] == value
+        assert captured["values"]["last_builder_artifact"][key] == value
+        assert last_response.json()[key] == value
+
+
+@pytest.mark.anyio
 async def test_internal_post_hydrates_missing_run_id_from_parent_task(
     app: FastAPI,
     client: httpx.AsyncClient,
