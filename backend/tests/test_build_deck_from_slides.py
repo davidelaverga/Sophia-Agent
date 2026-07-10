@@ -171,6 +171,7 @@ def test_success_renders_each_slide_then_wraps(tmp_path, monkeypatch):
             out.write_bytes(b"PK\x03\x04 fake-pptx")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
+    monkeypatch.setattr(deck, "_run_slide_renderer_process", _fake_run)
     monkeypatch.setattr(deck.subprocess, "run", _fake_run)
 
     r = _call(runtime=_runtime(), output_path=f"{_OUTPUTS}deck.pptx", title="My Deck")
@@ -200,6 +201,45 @@ def test_slide_render_command_sets_opaque_neutral_bg_color():
     assert deck._DECK_BG == "#f7f9fc"
 
 
+def test_slide_render_timeout_kills_chromium_process_group(monkeypatch):
+    killed_groups: list[tuple[int, int]] = []
+    popen_kwargs: dict = {}
+
+    class _HungRenderer:
+        pid = 4321
+        args = ["node", "render_html_to_png.mjs"]
+        returncode = -9
+        communicate_calls = 0
+
+        def communicate(self, *, timeout):
+            self.communicate_calls += 1
+            if self.communicate_calls == 1:
+                raise deck.subprocess.TimeoutExpired(self.args, timeout)
+            return "", ""
+
+        def kill(self):
+            raise AssertionError("direct-child fallback should not be needed")
+
+    process = _HungRenderer()
+
+    def _fake_popen(cmd, **kwargs):
+        popen_kwargs.update(kwargs)
+        process.args = cmd
+        return process
+
+    monkeypatch.setattr(deck.subprocess, "Popen", _fake_popen)
+    monkeypatch.setattr(deck.os, "getpgid", lambda pid: pid)
+    monkeypatch.setattr(deck.os, "killpg", lambda pgid, sig: killed_groups.append((pgid, sig)))
+
+    completed, error = deck._run_slide_render(process.args, Path("01.html"))
+
+    assert completed is None
+    assert json.loads(error or "{}")["error_type"] == "slide_render_timeout"
+    assert popen_kwargs["start_new_session"] is True
+    assert killed_groups == [(process.pid, deck.signal.SIGKILL)]
+    assert process.communicate_calls == 2
+
+
 def test_missing_slide_images_fail_deck_render(tmp_path, monkeypatch):
     # Generated visuals are mandatory for normal decks. A slide that references
     # an absent local image must fail render instead of screenshotting a broken or
@@ -224,7 +264,7 @@ def test_missing_slide_images_fail_deck_render(tmp_path, monkeypatch):
             raise AssertionError("wrap should not run when slide render fails")
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
-    monkeypatch.setattr(deck.subprocess, "run", _fake_run)
+    monkeypatch.setattr(deck, "_run_slide_renderer_process", _fake_run)
 
     r = _call(runtime=_runtime(), output_path=f"{_OUTPUTS}deck.pptx")
 
@@ -241,7 +281,11 @@ def test_slide_render_failure_is_reported(tmp_path, monkeypatch):
     monkeypatch.setattr(deck, "_host_path_for_virtual_output", lambda p, td: outputs / p.removeprefix(_OUTPUTS))
     monkeypatch.setattr(deck.shutil, "which", lambda _: "/usr/bin/node")
     monkeypatch.setattr(deck, "_js_script_path", lambda name: tmp_path / name)
-    monkeypatch.setattr(deck.subprocess, "run", lambda cmd, **k: SimpleNamespace(returncode=1, stdout="", stderr="boom"))
+    monkeypatch.setattr(
+        deck,
+        "_run_slide_renderer_process",
+        lambda cmd: SimpleNamespace(returncode=1, stdout="", stderr="boom"),
+    )
     r = _call(runtime=_runtime(), output_path=f"{_OUTPUTS}deck.pptx")
     assert r["success"] is False and r["error_type"] == "slide_render_failed"
 
