@@ -77,6 +77,14 @@ backend/.coverage
 !skills/public/
 !skills/public/chart-visualization/
 !skills/public/chart-visualization/**
+!skills/public/academic-paper-review/
+!skills/public/academic-paper-review/**
+!skills/public/data-analysis/
+!skills/public/data-analysis/**
+!skills/public/deep-research/
+!skills/public/deep-research/**
+!skills/public/hallmark/
+!skills/public/hallmark/**
 !skills/public/image-generation/
 !skills/public/image-generation/**
 !skills/public/pdf-report/
@@ -85,6 +93,10 @@ backend/.coverage
 !skills/public/ppt-generation/**
 !skills/public/sophia/
 !skills/public/sophia/**
+!skills/public/systematic-literature-review/
+!skills/public/systematic-literature-review/**
+!skills/public/visual-design/
+!skills/public/visual-design/**
 !voice/
 skills/public/**/__pycache__/
 skills/public/**/*.py[cod]

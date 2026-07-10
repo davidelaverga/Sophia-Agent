@@ -1,5 +1,6 @@
 """Deployment guard for Sophia's PDF rendering runtime."""
 
+import ast
 import re
 from pathlib import Path
 
@@ -11,6 +12,24 @@ def _compose_langgraph_block(path: Path) -> str:
     if next_service is None:
         return text[start:]
     return text[start : start + len("  langgraph:") + next_service.start()]
+
+
+def _builder_relevant_skills(repo_root: Path) -> tuple[str, ...]:
+    middleware_path = (
+        repo_root
+        / "backend/packages/harness/deerflow/agents/sophia_agent/middlewares/builder_task.py"
+    )
+    tree = ast.parse(middleware_path.read_text(encoding="utf-8"))
+    for node in ast.walk(tree):
+        if (
+            isinstance(node, ast.AnnAssign)
+            and isinstance(node.target, ast.Name)
+            and node.target.id == "_BUILDER_RELEVANT_SKILLS"
+        ):
+            value = ast.literal_eval(node.value)
+            assert isinstance(value, tuple)
+            return value
+    raise AssertionError("BuilderTaskMiddleware._BUILDER_RELEVANT_SKILLS not found")
 
 
 def test_langgraph_dockerfile_installs_pdf_runtime() -> None:
@@ -61,13 +80,12 @@ def test_docker_context_includes_builder_skill_runtime_assets() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     dockerignore = (repo_root / ".dockerignore").read_text(encoding="utf-8")
 
-    for skill_dir in (
+    required_skill_dirs = {
         "chart-visualization",
-        "image-generation",
-        "pdf-report",
-        "ppt-generation",
         "sophia",
-    ):
+        *_builder_relevant_skills(repo_root),
+    }
+    for skill_dir in required_skill_dirs:
         assert f"!skills/public/{skill_dir}/" in dockerignore
         assert f"!skills/public/{skill_dir}/**" in dockerignore
 
