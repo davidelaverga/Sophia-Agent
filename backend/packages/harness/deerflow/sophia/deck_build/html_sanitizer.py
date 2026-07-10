@@ -61,6 +61,7 @@ class _HtmlScanner(HTMLParser):
         for name, value in attr_map.items():
             if name.startswith("on"):
                 self.errors.append(f"inline event handler {name} is forbidden")
+            self.errors.extend(_subresource_attribute_errors(name))
             if name in {"src", "href"}:
                 _validate_uri(value, errors=self.errors)
                 if clean_tag == "img" and name == "src":
@@ -144,6 +145,12 @@ def _validate_uri(value: str, *, errors: list[str]) -> None:
         errors.append("remote http(s) URLs are forbidden")
     if _DATA_URI_RE.search(clean):
         errors.append("data URIs are forbidden")
+
+
+def _subresource_attribute_errors(name: str) -> list[str]:
+    if name == "srcset":
+        return ["srcset subresources are forbidden; use one planned src asset"]
+    return []
 
 
 def _validate_canvas(source: str, scanner: _HtmlScanner, validation: HtmlSourceValidation) -> None:

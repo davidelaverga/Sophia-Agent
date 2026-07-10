@@ -46,6 +46,21 @@ html, body { width: 1920px; height: 1080px; background: #fff; }
     assert any("remote http" in error for error in result.errors)
 
 
+def test_rejects_remote_srcset_with_planned_local_src() -> None:
+    html = """<!doctype html><html><head><style>
+html, body { width: 1920px; height: 1080px; background: #fff; }
+</style></head><body><main><img src="../assets/slide-01.png" srcset="../assets/slide-01.png 1x, https://example.com/slide.png 2x"></main></body></html>"""
+
+    _sanitized, result = validate_and_sanitize_slide_html(
+        _slide(html),
+        allowed_asset_refs={"slide-01.png"},
+    )
+
+    assert result.valid is False
+    assert result.image_refs == ["../assets/slide-01.png"]
+    assert any("srcset subresources are forbidden" in error for error in result.errors)
+
+
 def test_rejects_missing_fixed_canvas() -> None:
     html = "<html><body><main><h1>Title</h1></main></body></html>"
 

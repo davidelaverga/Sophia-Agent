@@ -67,6 +67,33 @@ def test_deck_native_render_clears_stale_images_before_counting_success(
     assert result.rendered_slide_count == 0
 
 
+def test_deck_native_render_requires_every_requested_slide(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    pptx = tmp_path / "deck.pptx"
+    pptx.touch()
+    render_dir = tmp_path / "rendered"
+    service = DeckNativeService(scripts_dir=tmp_path)
+
+    def _partial_render(*_args, **_kwargs):
+        render_dir.mkdir(exist_ok=True)
+        (render_dir / "slide-1.jpg").write_bytes(b"current")
+        return subprocess.CompletedProcess([], 0, stdout="", stderr="")
+
+    monkeypatch.setattr(service, "_run", _partial_render)
+
+    result = service.render(
+        pptx_path=str(pptx),
+        output_dir=str(render_dir),
+        slides=[0, 1],
+    )
+
+    assert result.success is False
+    assert result.rendered_slide_count == 1
+    assert result.errors == ["native render incomplete: expected 2 slide image(s), rendered 1"]
+
+
 def _wide_base_deck(path: Path) -> None:
     presentation = Presentation()
     presentation.slide_width = Inches(20)

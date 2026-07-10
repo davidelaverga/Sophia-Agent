@@ -263,11 +263,13 @@ class DeckNativeService:
             command.extend(["--slide", ",".join(str(slide) for slide in valid_slides)])
         completed = self._run(command, timeout=_RENDER_TIMEOUT_SECONDS)
         rendered = len(list(render_dir.glob("slide-*.jpg")))
+        complete, expected_label = _render_completeness(rendered, valid_slides)
+        errors = _render_errors(completed, complete=complete, expected_label=expected_label, rendered=rendered)
         return NativeDeckRenderResult(
-            success=completed.returncode == 0 and rendered > 0,
+            success=completed.returncode == 0 and complete,
             render_dir=str(render_dir) if render_dir.is_dir() else None,
             rendered_slide_count=rendered,
-            errors=[] if completed.returncode == 0 else _errors(completed),
+            errors=errors,
         )
 
     def diff(self, *, before_path: str, after_path: str) -> dict[str, Any]:
@@ -358,6 +360,27 @@ def _errors(completed: subprocess.CompletedProcess[str]) -> list[str]:
     if not text:
         return [f"process exited with code {completed.returncode}"]
     return [text[:_ERROR_TEXT_LIMIT]]
+
+
+def _render_completeness(rendered: int, requested_slides: list[int]) -> tuple[bool, str]:
+    if not requested_slides:
+        return rendered > 0, "at least 1"
+    expected = len(set(requested_slides))
+    return rendered == expected, str(expected)
+
+
+def _render_errors(
+    completed: subprocess.CompletedProcess[str],
+    *,
+    complete: bool,
+    expected_label: str,
+    rendered: int,
+) -> list[str]:
+    if completed.returncode != 0:
+        return _errors(completed)
+    if not complete:
+        return [f"native render incomplete: expected {expected_label} slide image(s), rendered {rendered}"]
+    return []
 
 
 def _validation_error_count(completed: subprocess.CompletedProcess[str]) -> int:
