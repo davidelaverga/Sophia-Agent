@@ -80,10 +80,14 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "native_mechanical_report",
     "mechanical_gate_results",
     "html_source_validation",
+    "source_retention_report",
+    "native_contrast_report",
     "creative_plan_path",
     "deck_quality_status",
     "failure_code",
     "deck_failure_code",
+    "root_failure_code",
+    "root_failure_summary",
     "expected_generated_visual_count",
     "successful_generated_visual_count",
     "referenced_visual_count",
@@ -100,6 +104,12 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "terminal_reason",
     "first_prepare_turn",
     "prepare_call_count",
+    "prepare_emitted_call_count",
+    "prepare_normalized_call_count",
+    "prepare_schema_failure_count",
+    "prepare_parallel_call_count",
+    "prepare_service_call_count",
+    "prepare_service_result_count",
     "prepare_result_count",
     "prepare_retry_executed",
     "dangling_prepare_call_count",
@@ -169,10 +179,14 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "native_mechanical_report",
         "mechanical_gate_results",
         "html_source_validation",
+        "source_retention_report",
+        "native_contrast_report",
         "creative_plan_path",
         "deck_quality_status",
         "failure_code",
         "deck_failure_code",
+        "root_failure_code",
+        "root_failure_summary",
         "expected_generated_visual_count",
         "successful_generated_visual_count",
         "referenced_visual_count",
@@ -189,6 +203,12 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "terminal_reason",
         "first_prepare_turn",
         "prepare_call_count",
+        "prepare_emitted_call_count",
+        "prepare_normalized_call_count",
+        "prepare_schema_failure_count",
+        "prepare_parallel_call_count",
+        "prepare_service_call_count",
+        "prepare_service_result_count",
         "prepare_result_count",
         "prepare_retry_executed",
         "dangling_prepare_call_count",
@@ -460,10 +480,20 @@ class BuilderCompletionEvent(BaseModel):
     terminal_reason: str | None = None
     first_prepare_turn: int | None = None
     prepare_call_count: int | None = None
+    prepare_emitted_call_count: int | None = None
+    prepare_normalized_call_count: int | None = None
+    prepare_schema_failure_count: int | None = None
+    prepare_parallel_call_count: int | None = None
+    prepare_service_call_count: int | None = None
+    prepare_service_result_count: int | None = None
     prepare_result_count: int | None = None
     prepare_retry_executed: bool | None = None
     dangling_prepare_call_count: int | None = None
     creative_plan_accepted: bool | None = None
+    source_retention_report: dict[str, Any] | None = None
+    native_contrast_report: dict[str, Any] | None = None
+    root_failure_code: str | None = None
+    root_failure_summary: str | None = None
     source_artifact_path: str | None = None
     revision_of_artifact_path: str | None = None
     summary: str | None = None

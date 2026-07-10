@@ -6,20 +6,29 @@ from dataclasses import asdict
 from pathlib import Path
 from typing import Any
 
-from deerflow.sophia.deck_build.design_plan import resolve_deck_design_plan
 from deerflow.sophia.deck_build.models import (
     DeckBuild,
     DeckColorToken,
     DeckCreativePlan,
+    DeckCritiqueScores,
     DeckDesignPlan,
     DeckGridPlan,
     DeckImageAssetPlan,
+    DeckPlanCritique,
     DeckSlideCompositionPlan,
     DeckTypographyPlan,
 )
 from deerflow.sophia.deck_build.tool_contract import normalize_slide_composition_aliases
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}$")
+_DECK_ELEMENT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_DECK_ID_ATTRIBUTE_RE = re.compile(r"\bdata-deck-id\s*=\s*([\"'])([^\"']+)\1", re.I)
+_SEMANTIC_IMAGE_TEXT_RE = re.compile(
+    r"\b(?:include|show|render|display|write|add)\s+(?:the\s+)?"
+    r"(?:words?|text|labels?|title|caption|annotations?|axis|formula)\b|"
+    r"\b(?:labelled|labeled|annotated)\s+(?:diagram|graphic|image|illustration)\b",
+    re.I,
+)
 _ALLOWED_IMAGE_STRATEGIES = {"hero_only", "sparse_signature", "image_led", "diagram_native", "hybrid"}
 _ALLOWED_INTEGRATIONS = {
     "full_bleed_background",
@@ -28,6 +37,17 @@ _ALLOWED_INTEGRATIONS = {
     "texture_layer",
     "subject_photo",
     "none",
+}
+_MANDATORY_SKILL_REF = "hands-on-deck/designing-slides"
+_GENERIC_SIGNATURES = {
+    "subject-derived visual system",
+    "professional technical visual system",
+    "clean modern visual system",
+}
+_GENERIC_RHYTHMS = {
+    "varied slide structures with one idea per slide",
+    "varied layouts",
+    "one idea per slide",
 }
 
 
@@ -52,22 +72,57 @@ def normalize_creative_plan(
         )
     design_plan = _coerce_design_plan(
         raw.get("design_plan"),
-        deck=deck,
-        request_context=request_context,
-        source_design_plan=source_design_plan,
     )
     image_assets = _coerce_image_assets(raw.get("image_assets"))
     slide_compositions = _coerce_slide_compositions(raw.get("slide_compositions"))
+    skill_refs = _required_text_list(
+        raw.get("skill_refs"),
+        path="creative_plan.skill_refs",
+        minimum=1,
+        limit=12,
+        item_limit=100,
+    )
+    if _MANDATORY_SKILL_REF not in skill_refs:
+        raise CreativePlanValidationError(
+            "deck_creative_plan_invalid",
+            f"creative_plan.skill_refs must include {_MANDATORY_SKILL_REF}",
+        )
     plan = DeckCreativePlan(
         subject=_required_text(raw, "subject", limit=160, path="creative_plan"),
         audience=_required_text(raw, "audience", limit=160, path="creative_plan"),
         goal=_required_text(raw, "goal", limit=220, path="creative_plan"),
+        viewing_context=_required_text(raw, "viewing_context", limit=240, path="creative_plan"),
+        subject_materials=_required_text_list(
+            raw.get("subject_materials"),
+            path="creative_plan.subject_materials",
+            minimum=3,
+            limit=12,
+            item_limit=160,
+        ),
         story_arc=_required_text(raw, "story_arc", limit=800, path="creative_plan"),
         design_plan=design_plan,
-        image_strategy=_enum_text(raw.get("image_strategy"), _ALLOWED_IMAGE_STRATEGIES, "hybrid"),
+        image_strategy=_required_enum(
+            raw.get("image_strategy"),
+            _ALLOWED_IMAGE_STRATEGIES,
+            "creative_plan.image_strategy",
+        ),
+        image_strategy_rationale=_required_text(
+            raw,
+            "image_strategy_rationale",
+            limit=360,
+            path="creative_plan",
+        ),
         image_assets=image_assets,
         slide_compositions=slide_compositions,
-        anti_slop_commitments=_text_list(raw.get("anti_slop_commitments"), limit=10, item_limit=180),
+        skill_refs=skill_refs,
+        plan_critique=_coerce_plan_critique(raw.get("plan_critique")),
+        anti_slop_commitments=_required_text_list(
+            raw.get("anti_slop_commitments"),
+            path="creative_plan.anti_slop_commitments",
+            minimum=1,
+            limit=10,
+            item_limit=180,
+        ),
     )
     _validate_slide_links(plan, deck)
     return plan
@@ -80,54 +135,59 @@ def write_creative_plan(plan: DeckCreativePlan, host_path: Path) -> None:
 
 def _coerce_design_plan(
     raw: Any,
-    *,
-    deck: DeckBuild,
-    request_context: str,
-    source_design_plan: dict[str, Any] | None,
 ) -> DeckDesignPlan:
     if not isinstance(raw, dict):
-        return resolve_deck_design_plan(
-            deck_title=deck.deck_title,
-            slides=[
-                {"title": slide.title, "role": slide.role, "layout_kind": slide.layout_kind}
-                for slide in deck.slides
-            ],
-            register=deck.register,
-            style_profile=deck.style_profile,
-            design_plan=source_design_plan,
-            request_context=request_context,
+        raise CreativePlanValidationError(
+            "deck_creative_plan_invalid",
+            "creative_plan.design_plan is required and must contain explicit design evidence.",
         )
     palette = raw.get("palette")
-    palette_tokens = [_coerce_color_token(item) for item in palette] if isinstance(palette, list) else []
+    palette_tokens = [
+        _coerce_color_token(item, path=f"creative_plan.design_plan.palette[{index}]")
+        for index, item in enumerate(palette)
+    ] if isinstance(palette, list) else []
     typography = _coerce_typography(raw.get("typography"))
     grid = _coerce_grid(raw.get("grid"))
-    if not palette_tokens:
-        fallback = resolve_deck_design_plan(
-            deck_title=deck.deck_title,
-            slides=[
-                {"title": slide.title, "role": slide.role, "layout_kind": slide.layout_kind}
-                for slide in deck.slides
-            ],
-            register=deck.register,
-            style_profile=deck.style_profile,
-            design_plan=source_design_plan,
-            request_context=request_context,
+    if len(palette_tokens) < 4:
+        raise CreativePlanValidationError(
+            "deck_creative_plan_invalid",
+            "creative_plan.design_plan.palette requires at least four named colors.",
         )
-        palette_tokens = fallback.palette
-        if typography is None:
-            typography = fallback.typography
+    if typography is None:
+        raise CreativePlanValidationError(
+            "deck_creative_plan_invalid",
+            "creative_plan.design_plan.typography is required.",
+        )
+    signature = _required_text(raw, "signature", limit=240, path="creative_plan.design_plan")
+    rhythm = _required_text(raw, "rhythm", limit=240, path="creative_plan.design_plan")
+    if signature.lower() in _GENERIC_SIGNATURES:
+        raise CreativePlanValidationError(
+            "deck_creative_plan_invalid",
+            "creative_plan.design_plan.signature must be subject-specific, not a generic fallback.",
+        )
+    if rhythm.lower() in _GENERIC_RHYTHMS:
+        raise CreativePlanValidationError(
+            "deck_creative_plan_invalid",
+            "creative_plan.design_plan.rhythm must describe a specific sequence, not a generic fallback.",
+        )
     return DeckDesignPlan(
-        source=_clean_text(raw.get("source"), limit=80) or "creative_plan",
-        subject=_clean_text(raw.get("subject"), limit=160) or deck.deck_title,
-        audience=_clean_text(raw.get("audience"), limit=160) or "technical stakeholders",
-        goal=_clean_text(raw.get("goal"), limit=220) or "explain the system clearly",
-        style_lane=_clean_text(raw.get("style_lane"), limit=80) or "custom_subject_derived",
+        source=_required_text(raw, "source", limit=80, path="creative_plan.design_plan"),
+        subject=_required_text(raw, "subject", limit=160, path="creative_plan.design_plan"),
+        audience=_required_text(raw, "audience", limit=160, path="creative_plan.design_plan"),
+        goal=_required_text(raw, "goal", limit=220, path="creative_plan.design_plan"),
+        style_lane=_required_text(raw, "style_lane", limit=80, path="creative_plan.design_plan"),
         palette=palette_tokens,
-        typography=typography or DeckTypographyPlan(display="Aptos Display", body="Aptos", utility="Aptos"),
+        typography=typography,
         grid=grid,
-        signature=_clean_text(raw.get("signature"), limit=240) or "subject-derived visual system",
-        rhythm=_clean_text(raw.get("rhythm"), limit=240) or "varied slide structures with one idea per slide",
-        anti_slop_profile=_text_list(raw.get("anti_slop_profile"), limit=12, item_limit=160),
+        signature=signature,
+        rhythm=rhythm,
+        anti_slop_profile=_required_text_list(
+            raw.get("anti_slop_profile"),
+            path="creative_plan.design_plan.anti_slop_profile",
+            minimum=1,
+            limit=12,
+            item_limit=160,
+        ),
         requested_style_terms=_text_list(raw.get("requested_style_terms"), limit=12, item_limit=80),
         normalized_from_style_profile={
             str(key): _safe_json_value(value)
@@ -138,17 +198,17 @@ def _coerce_design_plan(
     )
 
 
-def _coerce_color_token(raw: Any) -> DeckColorToken:
+def _coerce_color_token(raw: Any, *, path: str) -> DeckColorToken:
     if not isinstance(raw, dict):
-        return DeckColorToken("accent", "#2563EB", "fallback accent")
-    name = _clean_text(raw.get("name"), limit=60) or "accent"
-    hex_value = _clean_text(raw.get("hex"), limit=16) or "#2563EB"
+        raise CreativePlanValidationError("deck_creative_plan_invalid", f"{path} must be an object")
+    name = _required_text(raw, "name", limit=60, path=path)
+    hex_value = _required_text(raw, "hex", limit=16, path=path)
     if not re.match(r"^#[0-9a-fA-F]{6}$", hex_value):
-        hex_value = "#2563EB"
+        raise CreativePlanValidationError("deck_creative_plan_invalid", f"{path}.hex must be a six-digit CSS hex color")
     return DeckColorToken(
         name=name,
         hex=hex_value,
-        role=_clean_text(raw.get("role"), limit=120) or "deck color token",
+        role=_required_text(raw, "role", limit=120, path=path),
     )
 
 
@@ -156,9 +216,14 @@ def _coerce_typography(raw: Any) -> DeckTypographyPlan | None:
     if not isinstance(raw, dict):
         return None
     return DeckTypographyPlan(
-        display=_clean_text(raw.get("display"), limit=80) or "Aptos Display",
-        body=_clean_text(raw.get("body"), limit=80) or "Aptos",
-        utility=_clean_text(raw.get("utility"), limit=80) or "Aptos",
+        display=_required_text(raw, "display", limit=80, path="creative_plan.design_plan.typography"),
+        body=_required_text(raw, "body", limit=80, path="creative_plan.design_plan.typography"),
+        utility=_clean_text(raw.get("utility"), limit=80) or _required_text(
+            raw,
+            "body",
+            limit=80,
+            path="creative_plan.design_plan.typography",
+        ),
         display_weight=_int(raw.get("display_weight"), default=720, minimum=100, maximum=900),
         body_weight=_int(raw.get("body_weight"), default=420, minimum=100, maximum=900),
     )
@@ -192,6 +257,11 @@ def _coerce_image_assets(raw: Any) -> list[DeckImageAssetPlan]:
         seen.add(asset_id)
         path = f"creative_plan.image_assets[{index - 1}]"
         prompt = _required_text(item, "prompt", limit=1200, path=path)
+        if _SEMANTIC_IMAGE_TEXT_RE.search(prompt):
+            raise CreativePlanValidationError(
+                "deck_image_asset_plan_invalid",
+                f"{path}.prompt asks generated imagery to carry semantic text or labels",
+            )
         assets.append(
             DeckImageAssetPlan(
                 asset_id=asset_id,
@@ -230,6 +300,8 @@ def _coerce_slide_compositions(raw: Any) -> list[DeckSlideCompositionPlan]:
                 composition_rationale=_required_text(item, "composition_rationale", limit=300, path=path),
                 native_elements=_text_list(item.get("native_elements"), limit=16, item_limit=80),
                 image_asset_ids=[_clean_id(value) for value in _text_list(item.get("image_asset_ids"), limit=8, item_limit=80) if _clean_id(value)],
+                required_element_ids=_required_deck_ids(item.get("required_element_ids"), path=path),
+                structural_fingerprint=_required_text(item, "structural_fingerprint", limit=180, path=path),
                 risk_notes=_text_list(item.get("risk_notes"), limit=8, item_limit=140),
             )
         )
@@ -238,7 +310,6 @@ def _coerce_slide_compositions(raw: Any) -> list[DeckSlideCompositionPlan]:
 
 def _validate_slide_links(plan: DeckCreativePlan, deck: DeckBuild) -> None:
     selectors = {slide.selector for slide in deck.slides}
-    asset_ids = {asset.asset_id for asset in plan.image_assets}
     composition_selectors = {composition.selector for composition in plan.slide_compositions}
     missing_compositions = sorted(selectors - composition_selectors)
     if missing_compositions:
@@ -246,6 +317,13 @@ def _validate_slide_links(plan: DeckCreativePlan, deck: DeckBuild) -> None:
             "deck_creative_plan_invalid",
             f"creative_plan.slide_compositions missing selectors: {', '.join(missing_compositions[:5])}",
         )
+    _validate_image_asset_links(plan, selectors)
+    _validate_composition_asset_links(plan)
+    _validate_required_html_ids(plan, deck)
+    _validate_structural_fingerprints(plan)
+
+
+def _validate_image_asset_links(plan: DeckCreativePlan, selectors: set[str]) -> None:
     for asset in plan.image_assets:
         if asset.slide_selector not in selectors:
             raise CreativePlanValidationError(
@@ -257,6 +335,10 @@ def _validate_slide_links(plan: DeckCreativePlan, deck: DeckBuild) -> None:
                 "deck_image_asset_plan_invalid",
                 f"image asset {asset.asset_id} must set no_baked_text=true",
             )
+
+
+def _validate_composition_asset_links(plan: DeckCreativePlan) -> None:
+    asset_ids = {asset.asset_id for asset in plan.image_assets}
     for composition in plan.slide_compositions:
         unknown = [asset_id for asset_id in composition.image_asset_ids if asset_id not in asset_ids]
         if unknown:
@@ -266,11 +348,123 @@ def _validate_slide_links(plan: DeckCreativePlan, deck: DeckBuild) -> None:
             )
 
 
+def _validate_required_html_ids(plan: DeckCreativePlan, deck: DeckBuild) -> None:
+    slides_by_selector = {slide.selector: slide for slide in deck.slides}
+    for composition in plan.slide_compositions:
+        slide = slides_by_selector.get(composition.selector)
+        if slide is None or not (slide.html_source or "").strip():
+            continue
+        source_ids = {
+            match.group(2)
+            for match in _DECK_ID_ATTRIBUTE_RE.finditer(slide.html_source or "")
+        }
+        missing_ids = [element_id for element_id in composition.required_element_ids if element_id not in source_ids]
+        if missing_ids:
+            raise CreativePlanValidationError(
+                "deck_creative_plan_invalid",
+                f"creative_plan slide {composition.selector} required_element_ids missing from html_source: {', '.join(missing_ids[:5])}",
+            )
+
+
+def _validate_structural_fingerprints(plan: DeckCreativePlan) -> None:
+    fingerprints = [composition.structural_fingerprint.strip().lower() for composition in plan.slide_compositions]
+    if len(fingerprints) >= 3 and len(set(fingerprints)) == 1:
+        raise CreativePlanValidationError(
+            "deck_creative_plan_invalid",
+            "creative_plan.slide_compositions must not reuse one structural_fingerprint for every slide",
+        )
+
+
+def _coerce_plan_critique(raw: Any) -> DeckPlanCritique:
+    if not isinstance(raw, dict):
+        raise CreativePlanValidationError("deck_creative_plan_invalid", "creative_plan.plan_critique is required")
+    initial = _coerce_critique_scores(raw.get("initial_scores"), path="creative_plan.plan_critique.initial_scores")
+    final = _coerce_critique_scores(raw.get("final_scores"), path="creative_plan.plan_critique.final_scores")
+    below_threshold = [
+        name
+        for name, value in final.to_dict().items()
+        if int(value) < 3
+    ]
+    if below_threshold:
+        raise CreativePlanValidationError(
+            "deck_creative_plan_invalid",
+            f"creative_plan.plan_critique.final_scores.{below_threshold[0]} must be at least 3 after revision",
+        )
+    return DeckPlanCritique(
+        initial_scores=initial,
+        weakest_point=_required_text(raw, "weakest_point", limit=240, path="creative_plan.plan_critique"),
+        revision_made=_required_text(raw, "revision_made", limit=360, path="creative_plan.plan_critique"),
+        final_scores=final,
+    )
+
+
+def _coerce_critique_scores(raw: Any, *, path: str) -> DeckCritiqueScores:
+    if not isinstance(raw, dict):
+        raise CreativePlanValidationError("deck_creative_plan_invalid", f"{path} is required")
+    return DeckCritiqueScores(
+        philosophy=_score(raw.get("philosophy"), f"{path}.philosophy"),
+        hierarchy=_score(raw.get("hierarchy"), f"{path}.hierarchy"),
+        execution_feasibility=_score(raw.get("execution_feasibility"), f"{path}.execution_feasibility"),
+        specificity=_score(raw.get("specificity"), f"{path}.specificity"),
+        restraint=_score(raw.get("restraint"), f"{path}.restraint"),
+        variety=_score(raw.get("variety"), f"{path}.variety"),
+    )
+
+
+def _score(value: Any, path: str) -> int:
+    try:
+        score = int(value)
+    except (TypeError, ValueError) as exc:
+        raise CreativePlanValidationError("deck_creative_plan_invalid", f"{path} must be an integer from 1 to 5") from exc
+    if not 1 <= score <= 5:
+        raise CreativePlanValidationError("deck_creative_plan_invalid", f"{path} must be from 1 to 5")
+    return score
+
+
+def _required_deck_ids(value: Any, *, path: str) -> list[str]:
+    ids = _required_text_list(
+        value,
+        path=f"{path}.required_element_ids",
+        minimum=1,
+        limit=32,
+        item_limit=64,
+    )
+    invalid = [element_id for element_id in ids if not _DECK_ELEMENT_ID_RE.fullmatch(element_id)]
+    if invalid:
+        raise CreativePlanValidationError(
+            "deck_creative_plan_invalid",
+            f"{path}.required_element_ids contains invalid ID: {invalid[0]}",
+        )
+    if len(ids) != len(set(ids)):
+        raise CreativePlanValidationError(
+            "deck_creative_plan_invalid",
+            f"{path}.required_element_ids contains duplicates",
+        )
+    return ids
+
+
 def _required_text(raw: dict[str, Any], key: str, *, limit: int, path: str) -> str:
     value = _clean_text(raw.get(key), limit=limit)
     if not value:
         raise CreativePlanValidationError("deck_creative_plan_invalid", f"{path}.{key} is required")
     return value
+
+
+def _required_text_list(
+    value: Any,
+    *,
+    path: str,
+    minimum: int,
+    limit: int,
+    item_limit: int,
+) -> list[str]:
+    items = _text_list(value, limit=limit, item_limit=item_limit)
+    if len(items) < minimum:
+        raise CreativePlanValidationError(
+            "deck_creative_plan_invalid",
+            f"{path} requires at least {minimum} item(s)",
+        )
+    return items
 
 
 def _clean_text(value: Any, *, limit: int) -> str:
@@ -287,6 +481,16 @@ def _clean_id(value: Any) -> str:
 def _enum_text(value: Any, allowed: set[str], fallback: str) -> str:
     text = _clean_text(value, limit=80)
     return text if text in allowed else fallback
+
+
+def _required_enum(value: Any, allowed: set[str], path: str) -> str:
+    text = _clean_text(value, limit=80)
+    if text not in allowed:
+        raise CreativePlanValidationError(
+            "deck_creative_plan_invalid",
+            f"{path} must be one of: {', '.join(sorted(allowed))}",
+        )
+    return text
 
 
 def _text_list(value: Any, *, limit: int, item_limit: int) -> list[str]:

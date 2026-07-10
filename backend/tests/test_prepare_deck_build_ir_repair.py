@@ -3,6 +3,8 @@ from __future__ import annotations
 import json
 from types import SimpleNamespace
 
+from test_deck_build_service import _creative_plan as _canonical_creative_plan
+
 import deerflow.sophia.tools.prepare_deck_build as prepare_module
 from deerflow.sophia.deck_build.models import DeckBuildResult
 from deerflow.sophia.deck_build.tool_contract import DeckCreativePlanInput
@@ -37,41 +39,7 @@ def _runtime() -> SimpleNamespace:
 
 
 def _creative_plan() -> DeckCreativePlanInput:
-    return DeckCreativePlanInput.model_validate(
-        {
-            "subject": "Deck runtime",
-            "audience": "Engineers",
-            "goal": "Explain the build contract",
-            "story_arc": "Plan, build, verify",
-            "design_plan": {
-                "source": "creative_plan",
-                "subject": "Deck runtime",
-                "audience": "Engineers",
-                "goal": "Explain the build contract",
-                "style_lane": "restrained technical",
-                "palette": [
-                    {"name": "background", "hex": "#0B1020", "role": "canvas"},
-                    {"name": "ink", "hex": "#F7FAFC", "role": "text"},
-                ],
-                "typography": {"display": "Aptos Display", "body": "Aptos"},
-                "signature": "precise connector lines",
-                "rhythm": "alternate diagrams and evidence",
-            },
-            "image_strategy": "diagram_native",
-            "image_assets": [],
-            "slide_compositions": [
-                {
-                    "selector": "slide:1",
-                    "slide_role": "cover",
-                    "headline_intent": "Establish the runtime contract",
-                    "layout_name": "cover_hero",
-                    "composition_rationale": "Open with one clear system statement",
-                    "native_elements": ["title", "subtitle"],
-                    "image_asset_ids": [],
-                }
-            ],
-        }
-    )
+    return DeckCreativePlanInput.model_validate(_canonical_creative_plan(include_asset=False))
 
 
 def test_prepare_deck_build_adds_repair_instruction_for_retryable_ir(monkeypatch) -> None:

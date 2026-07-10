@@ -5,6 +5,16 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+from test_deck_build_service import (
+    _creative_plan as _canonical_creative_plan,
+)
+from test_deck_build_service import (
+    _FakeNativeService as _CanonicalFakeNativeService,
+)
+from test_deck_build_service import (
+    _slides as _canonical_slides,
+)
+
 from deerflow.sophia.deck_build import service as deck_service
 from deerflow.sophia.deck_build.service import DeckBuildService
 from deerflow.sophia.deck_build.tracing import DEFAULT_DECK_COMPILE_MODE, NATIVE_DECK_COMPILE_MODE
@@ -163,13 +173,13 @@ def test_deck_native_spans_are_aggregated_and_mark_native_compile_mode(tmp_path:
 
     monkeypatch.setattr(deck_service, "deck_span", capture_span)
 
-    result = DeckBuildService(native_service=TraceNativeService()).prepare_and_build(
+    result = DeckBuildService(native_service=_CanonicalFakeNativeService()).prepare_and_build(
         runtime=_runtime(tmp_path / "outputs"),
         deck_title="Trace Deck",
-        slides=[_slide()],
+        slides=_canonical_slides(count=1, include_asset=False),
         output_path=f"{_OUTPUTS}trace.pptx",
         visual_policy="text_only",
-        creative_plan=_creative_plan(),
+        creative_plan=_canonical_creative_plan(include_asset=False),
     )
 
     native_spans = [span for span in spans if span["name"].startswith("deck.native.")]
@@ -181,6 +191,8 @@ def test_deck_native_spans_are_aggregated_and_mark_native_compile_mode(tmp_path:
         "deck.native.patch_apply",
         "deck.native.inspect",
         "deck.native.lint_fix",
+        "deck.native.inspect_final",
+        "deck.native.contrast",
         "deck.native.render",
         "deck.native.diff",
         "deck.native.mechanical_report",
@@ -192,7 +204,7 @@ def test_deck_native_spans_are_aggregated_and_mark_native_compile_mode(tmp_path:
     assert requirement_span["outputs"]["deck_py_exists"] is True
     compile_spans = [span for span in native_spans if span["name"] != "deck.native.requirement"]
     assert all(span["kwargs"]["deck_compile_mode"] == NATIVE_DECK_COMPILE_MODE for span in compile_spans)
-    inspect_output = next(span["outputs"] for span in native_spans if span["name"] == "deck.native.inspect")
+    inspect_output = next(span["outputs"] for span in native_spans if span["name"] == "deck.native.inspect_final")
     assert inspect_output["native_editability_score"] == 0.9
     report_output = next(span["outputs"] for span in native_spans if span["name"] == "deck.native.mechanical_report")
     assert report_output["inspect_success"] is True

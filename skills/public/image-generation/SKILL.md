@@ -144,21 +144,10 @@ You may use this image skill for up to **3 conceptual/editorial illustrations pe
 cover/hero plus key concepts): subject-only prompts, no text baked into the image,
 theme-matched palette. Reserve generated images for conceptual/aesthetic figures only.
 
-Reference library: for Excalidraw-style technical slide visuals, first inspect
-`/mnt/skills/public/image-generation/references/manifest.json`. It is a v2 style manifest:
-choose one `visual_style` for the whole deck, use the matching `prompt_anchor` in every slide
-prompt, and vary `diagram_type` within that style. Pass a seed image with `--reference-images`
-only when the chosen style lists a real ref for the target diagram type. If the chosen style has
-no ref for that type, do not invent a path; rely on the text prompt anchor.
-
-- nested-container architecture -> `architecture_nested`
-- comparison panels -> `comparison_panels` or `two_panel_comparison`
-- swimlane / staged process -> `process_guards`
-- conceptual loop/metaphor -> `experiment_loop`
-
-The reference sets the look; the prompt still supplies the exact structure and
-brand palette. Keep one visual style per deck, but keep text and labels out of
-the generated bitmap by default.
+For decks, generated images are limited to hero atmosphere, subject-world
+imagery, conceptual metaphor, photography, or non-semantic texture/material.
+Architecture, process, timelines, comparisons, causal maps, evidence, labels,
+arrows, values, formulas, and exact relationships remain native.
 
 Before accepting a presentation slide visual, check hierarchy, specificity, restraint, and
 variety. Reject purple/pink generic hero slides, single-font template looks, and stock-deck

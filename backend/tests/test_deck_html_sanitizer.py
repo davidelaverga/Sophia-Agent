@@ -16,7 +16,7 @@ def _slide(html: str) -> DeckSlideSpec:
     )
 
 
-def test_valid_html_is_sanitized_and_preserves_planned_asset_ref() -> None:
+def test_lossy_css_is_rejected_even_when_sanitized_and_asset_ref_is_preserved() -> None:
     html = """<!doctype html><html><head><style>
 html, body { width: 1920px; height: 1080px; background: #0A0E14; }
 .canvas { width: 1920px; height: 1080px; background: #0A0E14; box-shadow: 0 0 12px #000; }
@@ -27,9 +27,10 @@ html, body { width: 1920px; height: 1080px; background: #0A0E14; }
         allowed_asset_refs={"slide-01.png"},
     )
 
-    assert result.valid is True
+    assert result.valid is False
     assert result.sanitized is True
     assert result.image_refs == ["../assets/slide-01.png"]
+    assert "lossy_native_deck_css: box-shadow" in result.errors
     assert "box-shadow" not in sanitized
 
 
@@ -84,6 +85,20 @@ def test_rejects_missing_fixed_canvas() -> None:
     assert result.valid is False
     assert "slide canvas must be 1920x1080px" in result.errors
     assert "slide canvas must declare an opaque background" in result.errors
+
+
+def test_rejects_duplicate_semantic_source_ids() -> None:
+    html = """<!doctype html><html><head><style>
+    html, body { width: 1920px; height: 1080px; background: #fff; }
+    </style></head><body><main>
+    <h1 data-deck-id="title" data-deck-role="title" data-deck-required="true">One</h1>
+    <p data-deck-id="title" data-deck-role="narrative">Two</p>
+    </main></body></html>"""
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert "duplicate data-deck-id: title" in result.errors
 
 
 def test_canvas_size_uses_slide_canvas_not_first_child_width() -> None:

@@ -10,10 +10,11 @@ medium. Do not mix workflows just because another tool is available.
 
 ## Medium Routing
 
-- Presentations (`.pptx`) are native DeckBuildService decks. The builder
-  reads `/mnt/skills/public/sophia/deck_craft.md` and submits creative_plan plus
-  slide html_source through `prepare_deck_build`; DeckBuildService owns
-  sanitization, planned generated assets, native PowerPoint compilation,
+- Presentations (`.pptx`) are native DeckBuildService decks. The builder owns
+  the creative plan, image plan, composition, and compiler-supported slide HTML.
+  It reads `/mnt/skills/public/sophia/deck_craft.md` and submits creative_plan plus
+  slide html_source through `prepare_deck_build`; DeckBuildService owns safe
+  execution, sanitization, planned generated assets, native PowerPoint compilation,
   inspection, mechanical gates, and terminal failure.
   Screenshot-backed PPTX decks are not acceptable
   production output. If native deck generation fails, emit `artifact_path=null`
@@ -37,6 +38,8 @@ medium. Do not mix workflows just because another tool is available.
 
 - Do not tell the model to author `slides/*.html`, prompt JSON files, image
   manifests, or compiler commands for fresh decks.
+- Inline SVG is unsupported for native PPTX. Semantic diagrams use supported
+  HTML/CSS native shapes with required source IDs.
 - Every slide must be opaque to all four edges — set an opaque background on
   `html, body` and on the slide wrapper. A white band/gutter at any edge is a
   defect (the render fills uncovered regions with the deck background, not white).

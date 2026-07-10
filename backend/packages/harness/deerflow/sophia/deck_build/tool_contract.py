@@ -2,9 +2,14 @@
 
 from __future__ import annotations
 
-from typing import Any, Literal
+from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, model_validator
+
+from deerflow.sophia.deck_build.prepare_input import (
+    normalize_creative_plan_value,
+    normalize_slides_value,
+)
 
 
 def normalize_slide_composition_aliases(raw: Any) -> Any:
@@ -51,7 +56,7 @@ class DeckDesignPlanInput(BaseModel):
     audience: str = Field(description="Primary audience.")
     goal: str = Field(description="Communication goal.")
     style_lane: str = Field(description="Subject-derived visual direction; avoid generic dashboard styling.")
-    palette: list[DeckColorTokenInput] = Field(description="Named deck color tokens.")
+    palette: list[DeckColorTokenInput] = Field(min_length=4, max_length=8, description="Named deck color tokens.")
     typography: DeckTypographyInput
     grid: DeckGridInput = Field(default_factory=DeckGridInput)
     signature: str = Field(description="Distinctive visual motif tying the deck together.")
@@ -78,6 +83,22 @@ class DeckImageAssetInput(BaseModel):
     no_baked_text: bool = Field(default=True, description="Must remain true.")
 
 
+class DeckCritiqueScoresInput(BaseModel):
+    philosophy: int = Field(ge=1, le=5)
+    hierarchy: int = Field(ge=1, le=5)
+    execution_feasibility: int = Field(ge=1, le=5)
+    specificity: int = Field(ge=1, le=5)
+    restraint: int = Field(ge=1, le=5)
+    variety: int = Field(ge=1, le=5)
+
+
+class DeckPlanCritiqueInput(BaseModel):
+    initial_scores: DeckCritiqueScoresInput
+    weakest_point: str = Field(min_length=1, description="The weakest initial design dimension.")
+    revision_made: str = Field(min_length=1, description="Specific revision made before authoring HTML.")
+    final_scores: DeckCritiqueScoresInput
+
+
 class DeckSlideCompositionInput(BaseModel):
     selector: str = Field(description="Canonical slide selector, for example slide:1.")
     slide_role: str = Field(description="Narrative role such as cover, architecture, evidence, or closing.")
@@ -86,6 +107,14 @@ class DeckSlideCompositionInput(BaseModel):
     composition_rationale: str = Field(description="Why this composition fits the slide's content.")
     native_elements: list[str] = Field(description="Native text, shape, chart, and diagram elements.")
     image_asset_ids: list[str] = Field(description="Generated asset IDs used by this slide; empty when none.")
+    required_element_ids: list[str] = Field(
+        min_length=1,
+        description="Semantic data-deck-id values that must survive native compilation.",
+    )
+    structural_fingerprint: str = Field(
+        min_length=1,
+        description="Compact description of this slide's distinct spatial structure.",
+    )
     risk_notes: list[str] = Field(default_factory=list)
 
     @model_validator(mode="before")
@@ -98,6 +127,11 @@ class DeckCreativePlanInput(BaseModel):
     subject: str = Field(description="Presentation subject.")
     audience: str = Field(description="Primary audience.")
     goal: str = Field(description="Desired audience outcome.")
+    viewing_context: str = Field(description="How and where the deck will be viewed.")
+    subject_materials: list[str] = Field(
+        min_length=3,
+        description="At least three subject-specific materials, diagrams, metaphors, or visual cues.",
+    )
     story_arc: str = Field(description="Concise beginning-to-end narrative arc.")
     design_plan: DeckDesignPlanInput
     image_strategy: Literal[
@@ -107,8 +141,43 @@ class DeckCreativePlanInput(BaseModel):
         "diagram_native",
         "hybrid",
     ]
+    image_strategy_rationale: str = Field(description="Why the selected visual medium fits this deck.")
     image_assets: list[DeckImageAssetInput] = Field(description="Planned generated assets; may be empty.")
     slide_compositions: list[DeckSlideCompositionInput] = Field(
         description="Exactly one canonical composition record for every slide."
     )
+    skill_refs: list[str] = Field(
+        min_length=1,
+        description="Design guidance used; must include hands-on-deck/designing-slides.",
+    )
+    plan_critique: DeckPlanCritiqueInput
     anti_slop_commitments: list[str] = Field(default_factory=list)
+
+
+class DeckSlideInput(BaseModel):
+    title: str = Field(min_length=1, max_length=90)
+    narrative: str = Field(min_length=1, max_length=280)
+    role: str = Field(default="content")
+    layout_kind: str = Field(default="single_visual_focus")
+    html_source: str = Field(min_length=1, description="Complete 1920x1080 compiler-supported slide HTML.")
+    speaker_notes: str | None = None
+    claim: str | None = None
+    visual_prompt: str | None = None
+
+
+NormalizedDeckSlides = Annotated[list[DeckSlideInput], BeforeValidator(normalize_slides_value)]
+NormalizedDeckCreativePlan = Annotated[
+    DeckCreativePlanInput,
+    BeforeValidator(normalize_creative_plan_value),
+]
+
+
+class PrepareDeckBuildInput(BaseModel):
+    deck_title: str
+    slides: NormalizedDeckSlides
+    output_path: str
+    creative_plan: NormalizedDeckCreativePlan
+    register: str = "professional_technical"
+    visual_policy: str = "auto"
+    style_profile: dict[str, Any] | None = None
+    design_plan: dict[str, Any] | None = None

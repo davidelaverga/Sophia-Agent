@@ -4,11 +4,15 @@ Fresh PPTX decks are designed, not templated.
 
 ## Required Planning Order
 
-1. Pin subject, audience, and goal.
-2. Create a subject-derived design plan: palette, type, grid, signature motif, and slide rhythm.
-3. Create an image asset plan: decide which slides need generated assets and why.
-4. Author native-convertible slide HTML/CSS from that plan.
-5. Call `prepare_deck_build` with the creative plan and all slide HTML sources.
+1. Read `/mnt/skills/public/hands-on-deck/designing-slides.md`, applying Sophia's 1920x1080 override.
+2. Pin subject, audience, goal, and viewing context.
+3. Name subject-specific materials, diagrams, metaphors, vocabulary, and texture.
+4. Choose palette, typography, grid, signature, and slide rhythm.
+5. Decide image strategy and exact non-semantic image roles.
+6. Critique the plan on deck-hallmark's six axes.
+7. Revise the weakest point and record final scores.
+8. Author compiler-supported slide HTML/CSS with semantic source IDs.
+9. Call `prepare_deck_build` with the creative plan and all slide HTML sources.
 
 ## Creative Plan Contract
 
@@ -20,6 +24,8 @@ minimum shape is:
   "subject": "Agent runtime reliability",
   "audience": "Platform engineers",
   "goal": "Explain the failure controls",
+  "viewing_context": "Projected in a platform architecture review",
+  "subject_materials": ["control-flow rails", "runtime signals", "circuit-breaker states"],
   "story_arc": "Failure signal to deterministic recovery",
   "design_plan": {
     "source": "creative_plan",
@@ -27,8 +33,13 @@ minimum shape is:
     "audience": "Platform engineers",
     "goal": "Explain the failure controls",
     "style_lane": "runtime_control_plane",
-    "palette": [{"name": "ink", "hex": "#101828", "role": "primary text"}],
-    "typography": {"display": "Aptos Display", "body": "Aptos"},
+    "palette": [
+      {"name": "night", "hex": "#101828", "role": "slide substrate"},
+      {"name": "signal", "hex": "#38BDF8", "role": "runtime paths"},
+      {"name": "paper", "hex": "#F8FAFC", "role": "primary text"},
+      {"name": "warning", "hex": "#F59E0B", "role": "failure states"}
+    ],
+    "typography": {"display": "Georgia", "body": "Trebuchet MS"},
     "grid": {},
     "signature": "control-flow rails",
     "rhythm": "alternate system views with evidence",
@@ -36,6 +47,7 @@ minimum shape is:
     "requested_style_terms": []
   },
   "image_strategy": "diagram_native",
+  "image_strategy_rationale": "Exact runtime relationships must remain editable and labeled natively",
   "image_assets": [],
   "slide_compositions": [{
     "selector": "slide:1",
@@ -45,8 +57,17 @@ minimum shape is:
     "composition_rationale": "A single strong system motif opens the story",
     "native_elements": ["headline", "system rail", "status marker"],
     "image_asset_ids": [],
+    "required_element_ids": ["cover-headline", "control-rail"],
+    "structural_fingerprint": "left headline crossed by one horizontal control rail",
     "risk_notes": []
   }],
+  "skill_refs": ["hands-on-deck/designing-slides", "deck-hallmark/slop-test"],
+  "plan_critique": {
+    "initial_scores": {"philosophy": 4, "hierarchy": 4, "execution_feasibility": 3, "specificity": 4, "restraint": 4, "variety": 3},
+    "weakest_point": "The first plan repeated the control rail too literally",
+    "revision_made": "Reserved the rail for transitions and varied the evidence compositions",
+    "final_scores": {"philosophy": 4, "hierarchy": 4, "execution_feasibility": 4, "specificity": 4, "restraint": 4, "variety": 4}
+  },
   "anti_slop_commitments": ["Vary composition by narrative role"]
 }
 ```
@@ -61,7 +82,8 @@ The compatibility aliases `slide`, `role`, and `layout` map only to
 - Never bake titles, narrative, labels, formulas, axis text, captions, or callouts into images.
 - Use native HTML/PPTX text and shapes for semantic information.
 - Hero or full-bleed images are allowed only as assets inside slides that still contain native text.
-- Technical architecture, process, comparison, and evidence slides usually use native HTML/SVG/CSS structures, not bitmap diagrams.
+- Technical architecture, process, comparison, and evidence slides use native HTML/CSS/PPTX-compatible structures, not bitmap diagrams.
+- Inline SVG is unsupported by the current native compiler and must not be used.
 
 ## Anti-Slop Rules
 
@@ -78,3 +100,4 @@ The compatibility aliases `slide`, `role`, and `layout` map only to
 - No scripts, external URLs, remote fonts, data URIs, iframes, objects, embeds, or inline event handlers.
 - Use PPTX-safe layout, fills, borders, radii, gradients, tables, local planned images, and native text.
 - Avoid fragile effects that disappear or compile poorly: filters, blend modes, custom webfonts, box shadows, animations, and negative letter spacing.
+- Every required headline, body group, diagram node, connector, table, evidence panel, image container, and closing synthesis object needs a unique `data-deck-id`, `data-deck-role`, and `data-deck-required="true"`.

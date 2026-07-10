@@ -34,11 +34,14 @@ This file is for the Sophia builder only.
 - Fresh presentations are built through `prepare_deck_build`. Provide complete
   D2.1 input: a clear slide intent in creative_plan plus each slide's title, narrative, role,
   layout_kind, speaker_notes, and html_source. Keep every narrative concise and
-  <= 280 characters. DeckBuildService owns HTML sanitization, planned generated
+  <= 280 characters. The builder owns creative plan, image plan, composition,
+  and slide HTML. DeckBuildService owns HTML sanitization, planned generated
   assets, native PowerPoint compilation, inspection, mechanical gates, and
   terminal failure.
-- DeckBuildService owns the design plan, composition, asset policy, and native
-  PowerPoint execution after the typed request is accepted.
+- Read `deck_craft`, `hands-on-deck`, and the hands-on-deck design reference
+  before the first prepare call. Use deck-impeccable and deck-hallmark as routed.
+- Inline SVG is unsupported. Every required semantic element needs a stable
+  `data-deck-id`, `data-deck-role`, and `data-deck-required="true"`.
 - Do not call `prepare_pptx_image_manifest`, `image-generation/scripts/generate.py`,
   or `build_deck_from_slides` directly for a fresh deck. Do not write
   `slides/*.html` files yourself. Put model-authored slide HTML in

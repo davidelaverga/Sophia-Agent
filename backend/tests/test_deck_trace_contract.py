@@ -8,6 +8,19 @@ from pathlib import Path
 from types import ModuleType, SimpleNamespace
 from typing import Any
 
+from test_deck_build_service import (
+    _creative_plan as _canonical_creative_plan,
+)
+from test_deck_build_service import (
+    _fake_batch as _canonical_fake_batch,
+)
+from test_deck_build_service import (
+    _FakeNativeService as _CanonicalFakeNativeService,
+)
+from test_deck_build_service import (
+    _slides as _canonical_slides,
+)
+
 from deerflow.sandbox.tools import replace_virtual_path
 from deerflow.sophia.deck_build import service as deck_service
 from deerflow.sophia.deck_build.service import DeckBuildService
@@ -366,14 +379,14 @@ def test_deck_service_uses_manifest_span_for_prompt_hashes_not_prompt_write_span
     monkeypatch.setattr(deck_service, "deck_span", capture_span)
     runtime = _runtime(tmp_path / "outputs")
     result = DeckBuildService(
-        image_batch_runner=_fake_batch,
-        native_service=_FakeNativeService(),
+        image_batch_runner=_canonical_fake_batch(runtime),
+        native_service=_CanonicalFakeNativeService(),
     ).prepare_and_build(
         runtime=runtime,
         deck_title="Technical Deck",
-        slides=_slides(),
+        slides=_canonical_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
-        creative_plan=_creative_plan(),
+        creative_plan=_canonical_creative_plan(),
     )
 
     assert result.success is True

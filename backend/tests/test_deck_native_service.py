@@ -239,7 +239,14 @@ def test_deck_native_inspect_marks_full_slide_picture_inventory(tmp_path: Path) 
             {
                 "ops": [
                     {"op": "add-slide", "layout": "Blank"},
-                    {"op": "add-picture", "slide": 0, "image": str(image), "at": [0, 0], "size": [20, 11.25]},
+                    {
+                        "op": "add-picture",
+                        "slide": 0,
+                        "image": str(image),
+                        "at": [0, 0],
+                        "size": [20, 11.25],
+                        "name": "hero-background",
+                    },
                 ]
             }
         ),
@@ -257,6 +264,7 @@ def test_deck_native_inspect_marks_full_slide_picture_inventory(tmp_path: Path) 
     slide = inventory["slides"]["slide:1"]
     assert slide["full_slide_picture_count"] == 1
     assert slide["shapes"][0]["full_slide"] is True
+    assert slide["shapes"][0]["name"] == "hero-background"
 
 
 def test_native_mechanical_report_is_compact() -> None:
@@ -283,6 +291,8 @@ def test_native_mechanical_report_is_compact() -> None:
         "lint_issue_count_before": 1,
         "lint_fix_applied_count": 1,
         "lint_residue_count": 0,
+        "lint_residue_kinds": {},
+        "lint_residue": [],
         "render_success": True,
         "rendered_slide_count": 2,
         "diff_success": True,
@@ -300,8 +310,8 @@ def test_deck_native_html_to_patch_compiles_when_playwright_available(tmp_path: 
     _wide_base_deck(base)
     html.write_text(
         """<!doctype html><html><body style="margin:0;width:1920px;height:1080px">
-        <h1 style="position:absolute;left:96px;top:90px;font-size:72px">Native HTML</h1>
-        <p style="position:absolute;left:96px;top:220px;font-size:36px">Compiled through html2patch.</p>
+        <h1 data-deck-id="title" data-deck-role="title" data-deck-required="true" style="position:absolute;left:96px;top:90px;font-size:72px;background:#fff;border:2px solid #111">Native HTML</h1>
+        <p data-deck-id="narrative" data-deck-role="narrative" data-deck-required="true" style="position:absolute;left:96px;top:220px;font-size:36px">Compiled through html2patch.</p>
         </body></html>""",
         encoding="utf-8",
     )
@@ -315,6 +325,9 @@ def test_deck_native_html_to_patch_compiles_when_playwright_available(tmp_path: 
 
     assert patched.success is True
     assert patched.patch_op_count > 0
+    source_map = json.loads(Path(patched.source_map_path or "").read_text(encoding="utf-8"))
+    assert set(source_map["slides"]["slide:1"]["elements"]) == {"title", "narrative"}
+    assert len(source_map["slides"]["slide:1"]["elements"]["title"]["shape_names"]) >= 2
     assert applied.success is True
     assert inspected.native_text_shape_count >= 2
     assert inspected.full_slide_picture_count == 0

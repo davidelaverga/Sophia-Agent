@@ -48,13 +48,14 @@ def test_fresh_deck_prompt_surfaces_route_to_prepare_deck_build() -> None:
     assert "picture is never itself the whole slide" in lower_text or "not itself a complete slide" in lower_text
 
 
-def test_ppt_skill_quarantines_legacy_route_only_when_prepare_deck_build_absent() -> None:
+def test_ppt_skill_requires_authoritative_prepare_route_and_design_adapters() -> None:
     text = (PROJECT_ROOT / "skills" / "public" / "ppt-generation" / "SKILL.md").read_text(encoding="utf-8")
 
-    assert "does not expose\n`prepare_deck_build`" in text
-    assert "does expose `prepare_pptx_image_manifest` plus\n`build_deck_from_slides`" in text
-    assert "Do not mix this route with\n`prepare_deck_build`" in text
-    assert "When `prepare_deck_build` is exposed" in text
+    assert "authoritative fresh-deck route" in text
+    assert "hands-on-deck/designing-slides" in text
+    assert "deck-impeccable" in text
+    assert "deck-hallmark" in text
+    assert "Do not call `prepare_pptx_image_manifest`" in text
 
 
 def test_fresh_deck_prompt_surfaces_do_not_teach_old_workflow() -> None:

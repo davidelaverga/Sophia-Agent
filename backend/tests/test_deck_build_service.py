@@ -7,6 +7,10 @@ from types import SimpleNamespace
 
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
+from pptx import Presentation
+from pptx.dml.color import RGBColor
+from pptx.enum.shapes import MSO_SHAPE
+from pptx.util import Inches, Pt
 
 from deerflow.agents.sophia_agent.builder_tools import (
     assert_deck_tool_contract,
@@ -72,13 +76,13 @@ h1 {{ position: absolute; left: 120px; top: 90px; width: 1250px; margin: 0; font
 .diagram {{ position: absolute; left: 120px; top: 280px; width: 1500px; height: 420px; border: 3px solid #38BDF8; background: #111827; }}
 .node {{ position: absolute; top: 130px; width: 300px; height: 120px; border: 2px solid #38BDF8; }}
 .node.a {{ left: 120px; }} .node.b {{ left: 600px; }} .node.c {{ left: 1080px; }}
-.asset {{ position: absolute; inset: 0; margin: 0; opacity: .28; }}
+.asset {{ position: absolute; inset: 0; margin: 0; }}
 .asset img {{ width: 100%; height: 100%; object-fit: cover; }}
 </style></head><body><main class="canvas">
 {asset}
-<h1>{title}</h1>
-<section class="diagram"><div class="node a"></div><div class="node b"></div><div class="node c"></div></section>
-<p class="narrative">{narrative}</p>
+	<h1 data-deck-id="title-{index}" data-deck-role="title" data-deck-required="true">{title}</h1>
+	<section class="diagram" data-deck-id="diagram-{index}" data-deck-role="diagram"><div class="node a"></div><div class="node b"></div><div class="node c"></div></section>
+	<p class="narrative" data-deck-id="narrative-{index}" data-deck-role="narrative" data-deck-required="true">{narrative}</p>
 </main></body></html>"""
 
 
@@ -120,6 +124,8 @@ def _creative_plan(*, include_asset: bool = True) -> dict:
         "subject": "Technical Deck",
         "audience": "technical stakeholders",
         "goal": "explain the system clearly",
+        "viewing_context": "Presented live to technical stakeholders on a 16:9 display.",
+        "subject_materials": ["system topology", "signal flow", "operational evidence"],
         "story_arc": "Frame the system, explain the architecture, close with synthesis.",
         "design_plan": {
             "source": "test",
@@ -142,6 +148,7 @@ def _creative_plan(*, include_asset: bool = True) -> dict:
             "requested_style_terms": ["dark_technical"],
         },
         "image_strategy": "hybrid" if include_asset else "diagram_native",
+        "image_strategy_rationale": "Use one atmospheric asset while keeping semantic system structure native.",
         "image_assets": image_assets,
         "slide_compositions": [
             {
@@ -152,6 +159,8 @@ def _creative_plan(*, include_asset: bool = True) -> dict:
                 "composition_rationale": "Use native structure with clear hierarchy.",
                 "native_elements": ["title", "narrative", "diagram"],
                 "image_asset_ids": ["cover-texture"] if include_asset and index == 1 else [],
+                "required_element_ids": [f"title-{index}", f"diagram-{index}", f"narrative-{index}"],
+                "structural_fingerprint": f"{role}-{layout}-slide-{index}",
                 "risk_notes": [],
             }
             for index, (role, layout) in enumerate(
@@ -163,6 +172,27 @@ def _creative_plan(*, include_asset: bool = True) -> dict:
                 start=1,
             )
         ],
+        "skill_refs": ["hands-on-deck/designing-slides", "deck-impeccable/critique"],
+        "plan_critique": {
+            "initial_scores": {
+                "philosophy": 3,
+                "hierarchy": 4,
+                "execution_feasibility": 4,
+                "specificity": 3,
+                "restraint": 4,
+                "variety": 3,
+            },
+            "weakest_point": "The initial structures were too similar.",
+            "revision_made": "Assigned a distinct spatial fingerprint to each narrative role.",
+            "final_scores": {
+                "philosophy": 4,
+                "hierarchy": 4,
+                "execution_feasibility": 4,
+                "specificity": 4,
+                "restraint": 4,
+                "variety": 4,
+            },
+        },
         "anti_slop_commitments": ["structural variety across slides", "no screenshot substrate"],
     }
 
@@ -216,6 +246,8 @@ class _FakeNativeService:
         self.calls = calls if calls is not None else []
         self.full_slide_picture_count = full_slide_picture_count
         self.slide_count = 0
+        self.source_map_path: str | None = None
+        self.inventory_path: str | None = None
 
     def preflight(self) -> NativeDeckPreflight:
         return NativeDeckPreflight(True, True, True, True, [])
@@ -233,13 +265,89 @@ class _FakeNativeService:
         patch = Path(output_patch_path)
         patch.parent.mkdir(parents=True, exist_ok=True)
         patch.write_text(json.dumps({"ops": []}), encoding="utf-8")
-        return NativeDeckPatchResult(True, None, str(patch), 0, 0, [])
+        source_map = {
+            "schema_version": "sophia-deck-source-map/v1",
+            "slides": {
+                f"slide:{index}": {
+                    "elements": {
+                        f"title-{index}": {
+                            "source_role": "title",
+                            "source_required": True,
+                            "shape_names": [f"s{index}-title-{index}-text"],
+                        },
+                        f"diagram-{index}": {
+                            "source_role": "diagram",
+                            "source_required": False,
+                            "shape_names": [f"s{index}-diagram-{index}-box"],
+                        },
+                        f"narrative-{index}": {
+                            "source_role": "narrative",
+                            "source_required": True,
+                            "shape_names": [f"s{index}-narrative-{index}-text"],
+                        },
+                    }
+                }
+                for index in range(1, self.slide_count + 1)
+            },
+        }
+        source_map_path = patch.with_suffix(".source-map.json")
+        source_map_path.write_text(json.dumps(source_map), encoding="utf-8")
+        self.source_map_path = str(source_map_path)
+        return NativeDeckPatchResult(
+            success=True,
+            output_pptx_path=None,
+            patch_path=str(patch),
+            patch_op_count=0,
+            validation_error_count=0,
+            errors=[],
+            source_map_path=self.source_map_path,
+        )
 
     def apply_patch(self, *, base_deck_path: str, patch_path: str, output_path: str, fix: bool = True) -> NativeDeckPatchResult:
         self.calls.append({"stage": "apply_patch", "output_path": output_path, "fix": fix})
         output = Path(output_path)
         output.parent.mkdir(parents=True, exist_ok=True)
-        output.write_bytes(b"fake native pptx")
+        presentation = Presentation()
+        presentation.slide_width = Inches(13.333333)
+        presentation.slide_height = Inches(7.5)
+        blank = presentation.slide_layouts[6]
+        inventory: dict[str, dict] = {}
+        for index in range(1, self.slide_count + 1):
+            slide = presentation.slides.add_slide(blank)
+            background = slide.background.fill
+            background.solid()
+            background.fore_color.rgb = RGBColor(0x0A, 0x0E, 0x14)
+            title = slide.shapes.add_textbox(Inches(0.8), Inches(0.6), Inches(10), Inches(0.8))
+            title.name = f"s{index}-title-{index}-text"
+            title.text_frame.paragraphs[0].text = f"Slide {index} System Story"
+            title_run = title.text_frame.paragraphs[0].runs[0]
+            title_run.font.size = Pt(32)
+            title_run.font.color.rgb = RGBColor(0xEE, 0xF4, 0xFB)
+            diagram = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(0.8), Inches(2), Inches(10), Inches(2.5))
+            diagram.name = f"s{index}-diagram-{index}-box"
+            diagram.fill.solid()
+            diagram.fill.fore_color.rgb = RGBColor(0x11, 0x18, 0x27)
+            narrative = slide.shapes.add_textbox(Inches(0.8), Inches(5.7), Inches(10), Inches(0.6))
+            narrative.name = f"s{index}-narrative-{index}-text"
+            narrative.text_frame.paragraphs[0].text = "A concise technical narrative explains the point."
+            narrative_run = narrative.text_frame.paragraphs[0].runs[0]
+            narrative_run.font.size = Pt(20)
+            narrative_run.font.color.rgb = RGBColor(0xEE, 0xF4, 0xFB)
+            inventory[f"slide:{index}"] = {
+                "native_slide_index": index - 1,
+                "title": title.name,
+                "body": narrative.name,
+                "visual": diagram.name,
+                "shapes": [
+                    {"name": title.name},
+                    {"name": diagram.name},
+                    {"name": narrative.name},
+                ],
+            }
+        presentation.save(output)
+        inventory_path = output.with_suffix(".shape-inventory.json")
+        inventory_path.write_text(json.dumps({"slides": inventory}), encoding="utf-8")
+        self.inventory_path = str(inventory_path)
         return NativeDeckPatchResult(True, str(output), patch_path, 0, 0, [])
 
     def inspect(self, _pptx_path: str) -> NativeDeckInspectResult:
@@ -247,12 +355,12 @@ class _FakeNativeService:
         return NativeDeckInspectResult(
             True,
             slide_count=self.slide_count,
-            shape_count=native_text_shapes + self.full_slide_picture_count,
+            shape_count=max(1, self.slide_count) * 3 + self.full_slide_picture_count,
             native_text_shape_count=native_text_shapes,
             picture_shape_count=self.full_slide_picture_count,
             full_slide_picture_count=self.full_slide_picture_count,
             native_editability_score=0.9,
-            shape_inventory_path=None,
+            shape_inventory_path=self.inventory_path,
             raw_json_path=None,
             errors=[],
         )
@@ -268,6 +376,25 @@ class _FakeNativeService:
 
     def diff(self, *, before_path: str, after_path: str) -> dict:
         return {"success": True, "changed": True, "errors": []}
+
+
+class _InvalidPptxNativeService(_FakeNativeService):
+    def apply_patch(
+        self,
+        *,
+        base_deck_path: str,
+        patch_path: str,
+        output_path: str,
+        fix: bool = True,
+    ) -> NativeDeckPatchResult:
+        result = super().apply_patch(
+            base_deck_path=base_deck_path,
+            patch_path=patch_path,
+            output_path=output_path,
+            fix=fix,
+        )
+        Path(output_path).write_bytes(b"not a valid pptx package")
+        return result
 
 
 def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_json(tmp_path: Path) -> None:
@@ -318,7 +445,8 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert len(list((outputs / "slides").glob("*.html"))) == 3
     html = (outputs / "slides" / "02-architecture.html").read_text(encoding="utf-8")
     assert 'class="diagram"' in html
-    assert "<h1>Slide 2 System Story</h1>" in html
+    assert 'data-deck-id="title-2"' in html
+    assert ">Slide 2 System Story</h1>" in html
     build = json.loads((outputs / "deck_build" / "build.json").read_text(encoding="utf-8"))
     assert build["schema_version"] == "sophia-deck-build/v1"
     assert build["status"] == "evaluated"
@@ -337,6 +465,24 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert loaded is not None
     assert loaded.build_id == result.build_id
     assert loaded.slides[0].selector == "slide:1"
+
+
+def test_deck_build_service_contrast_analyzer_failure_is_clean_terminal_result(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    result = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        native_service=_InvalidPptxNativeService(),
+    ).prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
+    )
+
+    assert result.success is False
+    assert result.failure_code == "deck_native_contrast_analysis_failed"
+    assert result.retryable is False
 
 
 def test_deck_build_service_clears_stale_slide_html_before_compile(tmp_path: Path) -> None:
@@ -852,7 +998,8 @@ def test_deck_build_service_text_only_requires_explicit_request_and_compiles_wit
     assert not (tmp_path / "outputs" / "assets" / "prompts").exists()
     cover_html = (tmp_path / "outputs" / "slides" / "01-cover.html").read_text(encoding="utf-8")
     assert "<img" not in cover_html
-    assert "<h1>Slide 1 System Story</h1>" in cover_html
+    assert 'data-deck-id="title-1"' in cover_html
+    assert ">Slide 1 System Story</h1>" in cover_html
     assert 'class="diagram"' in cover_html
 
 
@@ -898,6 +1045,8 @@ def test_prepare_deck_build_tool_schema_excludes_runtime() -> None:
         "composition_rationale",
         "native_elements",
         "image_asset_ids",
+        "required_element_ids",
+        "structural_fingerprint",
     }
 
 
@@ -1130,6 +1279,120 @@ def test_prepare_deck_build_retryable_ir_second_failure_is_terminal(tmp_path: Pa
     assert isinstance(command, Command)
     assert command.goto == "end"
     assert command.update["builder_result"]["failure_code"] == "invalid_deck_ir"
+
+
+def test_prepare_deck_build_schema_failure_gets_one_bounded_retry(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state["builder_pptx_diagnostics"] = {"prepare_emitted_call_count": 1, "prepare_call_count": 1}
+    request = SimpleNamespace(
+        tool_call={"id": "tc-schema-1", "name": "prepare_deck_build", "args": {}},
+        state=runtime.state,
+        runtime=runtime,
+    )
+    result = ToolMessage(
+        content="creative_plan.slide_compositions.0.headline_intent: Field required",
+        tool_call_id="tc-schema-1",
+        name="prepare_deck_build",
+        status="error",
+    )
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_result_command(request, result)
+
+    assert isinstance(command, Command)
+    assert not command.goto
+    assert command.update["builder_deck_prepare_phase"] == "retry_pending"
+    diagnostics = command.update["builder_pptx_diagnostics"]
+    assert diagnostics["prepare_schema_failure_count"] == 1
+    assert diagnostics["prepare_result_count"] == 1
+    assert "prepare_service_call_count" not in diagnostics
+    assert diagnostics["deck_root_failure_code"] == "deck_prepare_argument_invalid"
+
+
+def test_prepare_deck_build_second_schema_failure_preserves_root_cause(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state["builder_pptx_diagnostics"] = {
+        "prepare_emitted_call_count": 2,
+        "prepare_call_count": 2,
+        "prepare_result_count": 1,
+        "prepare_schema_failure_count": 1,
+        "deck_root_failure_code": "deck_prepare_argument_invalid",
+        "deck_root_failure_summary": "The first call omitted headline_intent.",
+    }
+    request = SimpleNamespace(
+        tool_call={"id": "tc-schema-2", "name": "prepare_deck_build", "args": {}},
+        state=runtime.state,
+        runtime=runtime,
+    )
+    result = ToolMessage(
+        content="creative_plan.slide_compositions.0.layout_name: Field required",
+        tool_call_id="tc-schema-2",
+        name="prepare_deck_build",
+        status="error",
+    )
+    monkeypatch.setattr(BuilderArtifactMiddleware, "_upload_fallback_and_fire", lambda *args, **kwargs: None)
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_result_command(request, result)
+
+    assert isinstance(command, Command)
+    assert command.goto == "end"
+    artifact = command.update["builder_result"]
+    assert artifact["failure_code"] == "deck_prepare_retry_exhausted"
+    assert artifact["root_failure_code"] == "deck_prepare_argument_invalid"
+    assert artifact["root_failure_summary"] == "The first call omitted headline_intent."
+
+
+def test_third_prepare_call_is_rejected_before_service_execution(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state["builder_pptx_diagnostics"] = {
+        "prepare_emitted_call_count": 3,
+        "prepare_call_count": 3,
+        "prepare_service_result_count": 2,
+        "deck_root_failure_code": "deck_creative_plan_invalid",
+        "deck_root_failure_summary": "The first plan failed critique validation.",
+    }
+    request = SimpleNamespace(
+        tool_call={"id": "tc-third", "name": "prepare_deck_build", "args": {}},
+        state=runtime.state,
+        runtime=runtime,
+    )
+    monkeypatch.setattr(BuilderArtifactMiddleware, "_upload_fallback_and_fire", lambda *args, **kwargs: None)
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_exhausted_command(request)
+
+    assert command is not None
+    assert command.goto == "end"
+    assert command.update["builder_result"]["failure_code"] == "deck_prepare_retry_exhausted"
+    assert command.update["builder_result"]["root_failure_code"] == "deck_creative_plan_invalid"
+    assert "prepare_call_count" not in command.update["builder_pptx_diagnostics"]
+
+
+def test_parallel_prepare_calls_are_rejected_before_service_execution(tmp_path: Path, monkeypatch) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    calls = [
+        {"id": "tc-parallel-1", "name": "prepare_deck_build", "args": {}},
+        {"id": "tc-parallel-2", "name": "prepare_deck_build", "args": {}},
+    ]
+    update = BuilderArtifactMiddleware._prepare_call_after_model_update(runtime.state, calls)
+    runtime.state.update(update)
+    request = SimpleNamespace(
+        tool_call=calls[0],
+        state=runtime.state,
+        runtime=runtime,
+    )
+    monkeypatch.setattr(BuilderArtifactMiddleware, "_upload_fallback_and_fire", lambda *args, **kwargs: None)
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_exhausted_command(request)
+
+    assert command is not None
+    assert command.goto == "end"
+    artifact = command.update["builder_result"]
+    assert artifact["failure_code"] == "deck_prepare_parallel_calls_forbidden"
+    assert artifact["root_failure_code"] == "deck_prepare_parallel_calls_forbidden"
+    assert artifact["prepare_parallel_call_count"] == 2
+    assert artifact.get("prepare_service_call_count") is None
 
 
 def test_pptx_terminal_outcome_prefers_deck_failure_payload_counts(monkeypatch) -> None:

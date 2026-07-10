@@ -837,10 +837,24 @@ def _visual_composition_directives() -> str | None:
 def _deck_craft_directives() -> str | None:
     path = SKILLS_PATH / "deck_craft.md"
     try:
-        return path.read_text(encoding="utf-8").strip() or None
+        primer = path.read_text(encoding="utf-8").strip()
     except OSError:
         logger.warning("BuilderTask: deck_craft.md missing/unreadable path=%s", path)
         return None
+    if not primer:
+        return None
+    return (
+        "<deck_skill_contract>\n"
+        "Required before the first prepare_deck_build call:\n"
+        "1. Read /mnt/skills/public/sophia/deck_craft.md.\n"
+        "2. Read /mnt/skills/public/hands-on-deck/SKILL.md and designing-slides.md.\n"
+        "Use deck-impeccable for hierarchy, spacing, density, critique, and polish.\n"
+        "Use deck-hallmark for structural variety and anti-slop critique.\n"
+        "Use image-generation only through creative_plan.image_assets.\n"
+        "Professional and technical are quality constraints, not styles.\n"
+        "</deck_skill_contract>\n\n"
+        + primer
+    )
 
 
 def _terminal_artifact_format_line(artifact_target_ext: str, task_type: str = "") -> str:
@@ -905,19 +919,12 @@ def _pptx_visual_guidance(*, deck_service_enabled: bool, image_generation_enable
             "build_deck_from_slides, python-pptx, or pptxgenjs directly. Normal decks may use "
             "optional generated assets as the creative_plan declares; a full-bleed picture may be an asset "
             "inside a native deck but is not itself a complete slide. Only an explicitly plain text-only/no-visual "
-            "request should set visual_policy='text_only'. Default to restrained professional technical "
-            "visuals; do not use chalkboard, handwritten, whiteboard, sketch, cyberpunk, neon, or "
-            "playful styles unless explicitly requested."
+            "request should set visual_policy='text_only'. Derive the visual direction from the subject, "
+            "audience, goal, viewing context, and subject materials. Inline SVG is unsupported."
         )
     return (
-        "Decks use the explicit local legacy/debug HTML-slide workflow in this run. Use prepare_pptx_image_manifest "
-        "to create the deterministic slide visual manifest, generate the required slide visuals, "
-        "author slides/*.html that reference the generated ../assets/slide-XX.png images, and "
-        "compile with build_deck_from_slides. Generate only the selected visual-only "
-        "assets the legacy diagnostic plan requires; do not ship an HTML-only/no-image deck unless the user explicitly asked "
-        "for plain text-only/no-visual slides. Default to restrained professional technical visuals; "
-        "do not use chalkboard, handwritten, whiteboard, sketch, cyberpunk, neon, or playful styles "
-        "unless explicitly requested."
+        "Fresh native PPTX generation is unavailable in this run. Stop cleanly with artifact_path=null; "
+        "do not invoke lower-level manifest, image, HTML-slide, shell, or custom compiler workflows."
     )
 
 
@@ -1269,10 +1276,13 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         deck_service_enabled = deck_route_for_task(task_type, artifact_target_ext) == "deck_build_service"
         is_html_target = artifact_target_ext in {".html", ".htm"}
         skills_block = self._build_skills_inventory_block(
-            include_image_generation=image_generation_enabled,
+            include_image_generation=image_generation_enabled or (
+                deck_service_enabled and artifact_target_ext == ".pptx"
+            ),
             # hallmark + visual-design surface when visuals are requested OR
             # the target is HTML (Phase 4c: hallmark is the HTML design system).
             include_visual_design=_visuals_requested(delegation_context) or is_html_target,
+            presentation_design_mode=deck_service_enabled and artifact_target_ext == ".pptx",
             include_pdf_report=artifact_target_ext == ".pdf",
             include_research_skills=(artifact_target_ext == ".pdf" and not is_pdf_presentation_target)
             or task_type in {"research", "document", "visual_report"},
@@ -1587,6 +1597,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
     _BUILDER_RELEVANT_SKILLS: tuple[str, ...] = (
         "visual-design",
         "hallmark",
+        "hands-on-deck",
+        "deck-impeccable",
+        "deck-hallmark",
         "pdf-report",
         "ppt-generation",
         "image-generation",
@@ -1602,6 +1615,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         *,
         include_image_generation: bool = True,
         include_visual_design: bool = False,
+        presentation_design_mode: bool = False,
         include_pdf_report: bool = True,
         include_research_skills: bool = True,
     ) -> str | None:
@@ -1640,9 +1654,24 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             return None
 
         allowed_skill_names = set(cls._BUILDER_RELEVANT_SKILLS)
+        if presentation_design_mode:
+            allowed_skill_names.intersection_update(
+                {
+                    "hands-on-deck",
+                    "deck-impeccable",
+                    "deck-hallmark",
+                    "ppt-generation",
+                    "image-generation",
+                }
+            )
+            include_image_generation = True
+        else:
+            allowed_skill_names.difference_update(
+                {"hands-on-deck", "deck-impeccable", "deck-hallmark"}
+            )
         if not include_image_generation:
             allowed_skill_names.discard("image-generation")
-        if not include_visual_design:
+        if not include_visual_design or presentation_design_mode:
             allowed_skill_names.discard("visual-design")
             allowed_skill_names.discard("hallmark")
         if not include_pdf_report:

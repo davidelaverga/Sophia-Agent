@@ -9,16 +9,27 @@ from langchain.tools import ToolRuntime, tool
 
 from deerflow.sophia.deck_build.ir_repair import deck_ir_repair_instruction_from_failure
 from deerflow.sophia.deck_build.service import DeckBuildService
-from deerflow.sophia.deck_build.tool_contract import DeckCreativePlanInput
+from deerflow.sophia.deck_build.tool_contract import (
+    DeckCreativePlanInput,
+    DeckSlideInput,
+    NormalizedDeckCreativePlan,
+    NormalizedDeckSlides,
+    PrepareDeckBuildInput,
+)
 
 
-@tool("prepare_deck_build", parse_docstring=True)
+@tool(
+    "prepare_deck_build",
+    args_schema=PrepareDeckBuildInput,
+    description="Build a fresh native PPTX deck from a typed creative plan and compiler-supported slide HTML.",
+    parse_docstring=True,
+)
 def prepare_deck_build(
     runtime: ToolRuntime,
     deck_title: str,
-    slides: list[dict[str, Any]],
+    slides: NormalizedDeckSlides,
     output_path: str,
-    creative_plan: DeckCreativePlanInput,
+    creative_plan: NormalizedDeckCreativePlan,
     register: str = "professional_technical",
     visual_policy: str = "auto",
     style_profile: dict[str, Any] | None = None,
@@ -53,16 +64,25 @@ def prepare_deck_build(
         creative/html/mechanical failure and call prepare_deck_build exactly
         once more. Terminal failures must be emitted with artifact_path=null.
     """
+    normalized_slides = [
+        slide.model_dump() if isinstance(slide, DeckSlideInput) else slide
+        for slide in slides
+    ]
+    normalized_plan = (
+        creative_plan.model_dump()
+        if isinstance(creative_plan, DeckCreativePlanInput)
+        else creative_plan
+    )
     result = DeckBuildService().prepare_and_build(
         runtime=runtime,
         deck_title=deck_title,
-        slides=slides,
+        slides=normalized_slides,
         output_path=output_path,
         register=register,
         visual_policy=visual_policy,
         style_profile=style_profile,
         design_plan=design_plan,
-        creative_plan=creative_plan.model_dump(),
+        creative_plan=normalized_plan,
     )
     payload = result.to_dict()
     if payload.get("repair_instruction") is None:

@@ -677,10 +677,19 @@ def test_completion_payload_preserves_terminal_and_prepare_metadata():
         "failure_code": "deck_prepare_tool_result_missing",
         "first_prepare_turn": 8,
         "prepare_call_count": 2,
+        "prepare_emitted_call_count": 2,
+        "prepare_normalized_call_count": 1,
+        "prepare_schema_failure_count": 1,
+        "prepare_service_call_count": 1,
+        "prepare_service_result_count": 1,
         "prepare_result_count": 1,
         "prepare_retry_executed": True,
         "dangling_prepare_call_count": 1,
         "creative_plan_accepted": False,
+        "root_failure_code": "deck_prepare_argument_invalid",
+        "root_failure_summary": "The first prepare call failed schema validation.",
+        "source_retention_report": {"passed": False, "missing_required_count": 1},
+        "native_contrast_report": {"passed": False, "required_issue_count": 1},
         "confidence": 0.0,
     }
 
@@ -697,10 +706,18 @@ def test_completion_payload_preserves_terminal_and_prepare_metadata():
     assert parsed.terminal_reason == "deck_prepare_tool_result_missing"
     assert parsed.first_prepare_turn == 8
     assert parsed.prepare_call_count == 2
+    assert parsed.prepare_emitted_call_count == 2
+    assert parsed.prepare_normalized_call_count == 1
+    assert parsed.prepare_schema_failure_count == 1
+    assert parsed.prepare_service_call_count == 1
+    assert parsed.prepare_service_result_count == 1
     assert parsed.prepare_result_count == 1
     assert parsed.prepare_retry_executed is True
     assert parsed.dangling_prepare_call_count == 1
     assert parsed.creative_plan_accepted is False
+    assert parsed.root_failure_code == "deck_prepare_argument_invalid"
+    assert parsed.source_retention_report == {"passed": False, "missing_required_count": 1}
+    assert parsed.native_contrast_report == {"passed": False, "required_issue_count": 1}
 
 
 def test_phantom_success_coerces_to_error():

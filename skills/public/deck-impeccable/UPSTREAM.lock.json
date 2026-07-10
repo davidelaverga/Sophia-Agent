@@ -1,0 +1,50 @@
+{
+  "files": [
+    {
+      "mirror_path": "skills/public/deck-impeccable/reference/layout.md",
+      "mirror_sha256": "6dd9c16b556cfbc3db1afe6cee87e002b3f3d5c0001853217145dc04b6dd9a52",
+      "source_path": "third_party/impeccable/reference/layout.md",
+      "source_sha256": "6dd9c16b556cfbc3db1afe6cee87e002b3f3d5c0001853217145dc04b6dd9a52"
+    },
+    {
+      "mirror_path": "skills/public/deck-impeccable/reference/critique.md",
+      "mirror_sha256": "bf688a8031616748d21146327eced18c0fc8148faa5dd13013180ee0a2e94881",
+      "source_path": "third_party/impeccable/reference/critique.md",
+      "source_sha256": "bf688a8031616748d21146327eced18c0fc8148faa5dd13013180ee0a2e94881"
+    },
+    {
+      "mirror_path": "skills/public/deck-impeccable/reference/polish.md",
+      "mirror_sha256": "727673406646bb97ad7904d67ed63a18e155f2c0b7bb665ba6a5b093913508f6",
+      "source_path": "third_party/impeccable/reference/polish.md",
+      "source_sha256": "727673406646bb97ad7904d67ed63a18e155f2c0b7bb665ba6a5b093913508f6"
+    },
+    {
+      "mirror_path": "skills/public/deck-impeccable/reference/bolder.md",
+      "mirror_sha256": "12b096ab618d00aa4e375910f8997992f43c817f662cec142f402b69d4dac536",
+      "source_path": "third_party/impeccable/reference/bolder.md",
+      "source_sha256": "12b096ab618d00aa4e375910f8997992f43c817f662cec142f402b69d4dac536"
+    },
+    {
+      "mirror_path": "skills/public/deck-impeccable/reference/quieter.md",
+      "mirror_sha256": "89be275103e671e788789d029587ded0f4987a15addfcc8d5bffd8f5db2b1226",
+      "source_path": "third_party/impeccable/reference/quieter.md",
+      "source_sha256": "89be275103e671e788789d029587ded0f4987a15addfcc8d5bffd8f5db2b1226"
+    },
+    {
+      "mirror_path": "skills/public/deck-impeccable/LICENSE",
+      "mirror_sha256": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812",
+      "source_path": "third_party/impeccable/LICENSE",
+      "source_sha256": "02bb8c3b4e70190e3986c0404ad2fd8d639b4f534252d82379cc1b502b6d1812"
+    },
+    {
+      "mirror_path": "skills/public/deck-impeccable/NOTICE.md",
+      "mirror_sha256": "c60a093c2845fd9fb82f9c6f742ece31f379f8190b535309d32d66c45ccffdcb",
+      "source_path": "third_party/impeccable/NOTICE.md",
+      "source_sha256": "c60a093c2845fd9fb82f9c6f742ece31f379f8190b535309d32d66c45ccffdcb"
+    }
+  ],
+  "name": "impeccable",
+  "source_url": "https://github.com/pbakaus/impeccable",
+  "synced_at": "2026-07-10T22:40:46.012006+00:00",
+  "upstream_commit": "630fc2682a5bd39b25a8e61f74b6b3f14f2b1e21"
+}

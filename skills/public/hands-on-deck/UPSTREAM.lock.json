@@ -1,0 +1,26 @@
+{
+  "files": [
+    {
+      "mirror_path": "skills/public/hands-on-deck/designing-slides.md",
+      "mirror_sha256": "31dbd43427849592926e64d86ba968998a681743e832685c9194ed7ad2d2d146",
+      "source_path": "third_party/hands_on_deck/skills/hands-on-deck/designing-slides.md",
+      "source_sha256": "31dbd43427849592926e64d86ba968998a681743e832685c9194ed7ad2d2d146"
+    },
+    {
+      "mirror_path": "skills/public/hands-on-deck/docs/html2patch-spec.md",
+      "mirror_sha256": "a178c303dac03e1f6a8c40a9ce28011712561ef1a61ff7569fedcc0d51431352",
+      "source_path": "third_party/hands_on_deck/docs/html2patch-spec.md",
+      "source_sha256": "a178c303dac03e1f6a8c40a9ce28011712561ef1a61ff7569fedcc0d51431352"
+    },
+    {
+      "mirror_path": "skills/public/hands-on-deck/LICENSE",
+      "mirror_sha256": "4a0870f370917b8df17ae1edc7c7a3fa065f7b8067af12fff19e47b64d4f10a6",
+      "source_path": "third_party/hands_on_deck/LICENSE",
+      "source_sha256": "4a0870f370917b8df17ae1edc7c7a3fa065f7b8067af12fff19e47b64d4f10a6"
+    }
+  ],
+  "name": "hands-on-deck",
+  "source_url": "https://github.com/EveryInc/hands-on-deck",
+  "synced_at": "2026-07-10T22:40:46.009403+00:00",
+  "upstream_commit": "1e94c3aa6bbe810708406ede1c248ebfd651bb2a"
+}

@@ -30,7 +30,8 @@ def test_builder_obligations_are_trimmed_to_artifact_contract() -> None:
     assert "Fresh presentations are built through `prepare_deck_build`" in contract
     assert "slide intent" in contract
     assert "optional generated assets declared in creative_plan.image_assets" in contract
-    assert "design plan, composition, asset policy" in contract
+    assert "creative plan, image plan, composition" in contract
+    assert "data-deck-required" in contract
     assert "native PowerPoint" in contract
     assert "artifact_path=null" in contract
     assert "pure image-forward" not in contract

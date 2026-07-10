@@ -12,8 +12,8 @@ from langchain.chat_models.base import BaseChatModel
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import BaseTool, tool
-from pydantic import PrivateAttr
 from langgraph.runtime import Runtime
+from pydantic import PrivateAttr
 
 from deerflow.agents.middlewares.dangling_tool_call_middleware import (
     DanglingToolCallMiddleware,
@@ -189,12 +189,21 @@ def test_retryable_prepare_runs_one_real_retry_then_finalizes(
     assert result["builder_result"]["terminal_status"] == "completed"
     assert result["builder_result"]["terminal_reason"] == "deck_build_succeeded"
     assert result["builder_result"]["prepare_call_count"] == 2
+    assert result["builder_result"]["prepare_emitted_call_count"] == 2
+    assert result["builder_result"]["prepare_normalized_call_count"] == 2
+    assert result["builder_result"]["prepare_service_call_count"] == 2
+    assert result["builder_result"]["prepare_service_result_count"] == 2
     assert result["builder_result"]["prepare_result_count"] == 2
     assert result["builder_result"]["prepare_retry_executed"] is True
     assert result["builder_result"]["creative_plan_accepted"] is True
+    assert result["builder_result"]["root_failure_code"] == "deck_creative_plan_invalid"
     assert result["builder_deck_prepare_phase"] == "terminal"
     diagnostics = result["builder_pptx_diagnostics"]
     assert diagnostics["prepare_call_count"] == 2
+    assert diagnostics["prepare_emitted_call_count"] == 2
+    assert diagnostics["prepare_normalized_call_count"] == 2
+    assert diagnostics["prepare_service_call_count"] == 2
+    assert diagnostics["prepare_service_result_count"] == 2
     assert diagnostics["prepare_result_count"] == 2
     assert diagnostics["prepare_retry_executed"] is True
     assert diagnostics["creative_plan_accepted"] is True

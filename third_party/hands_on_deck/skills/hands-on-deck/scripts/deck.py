@@ -1745,6 +1745,8 @@ def op_add_picture(ctx, op):
     elif "height" in op:
         kw = {"height": Inches(op["height"])}
     sh = slide.shapes.add_picture(str(op["image"]), Inches(l), Inches(t), **kw)
+    if "name" in op:
+        sh.name = op["name"]
     if "crop" in op:
         c = op["crop"]
         if not (isinstance(c, (list, tuple)) and len(c) == 4):
@@ -2053,7 +2055,7 @@ def validate_ops(ctx, ops):
             continue
         if any(key in op and op[key] >= n_orig for key in ("slide", "from_slide")):
             continue  # targets a slide an earlier add-slide creates — checkable only at run time
-        if kind in ("add-shape", "add-table") and "name" in op:
+        if kind in ("add-shape", "add-picture", "add-table") and "name" in op:
             created.add((op["slide"], op["name"]))
         if kind in ("set-text", "move", "resize", "set-style", "delete", "duplicate", "reorder",
                     "add-row", "delete-row", "add-col", "delete-col"):
@@ -2406,6 +2408,7 @@ def cmd_fix(args):
                         # floors made it a no-op — don't pretend we fixed anything
                         residue.append({
                             "slide": slide_idx, "shape": sid,
+                            "kind": "frame_overflow",
                             "issue": 'text overflows %.2f" but the font is already at the readability floor (%gpt)'
                                      % (ov, MIN_FONT_PT),
                             "suggest": "shorten the text with set-text, or resize/move the shape",
@@ -2424,6 +2427,7 @@ def cmd_fix(args):
                     # pictures off one edge MAY be intentional bleed — never auto-move
                     residue.append({
                         "slide": slide_idx, "shape": sid,
+                        "kind": "slide_overflow_non_text",
                         "issue": '%s (%s) extends %.2f" off the slide (may be intentional bleed)' % (sid, r.type, ovs),
                         "suggest": "move %s by [%s] if unintended" % (sid, ("-%.2f, 0" % ovs) if axis == "x" else ("0, -%.2f" % ovs)),
                     })
@@ -2454,6 +2458,8 @@ def cmd_fix(args):
                             suggest = 'move %s by [0, %.2f]' % (other_sid, round(dy + 0.05, 2))
                         residue.append({
                             "slide": slide_idx, "shape": sid,
+                            "kind": "overlap",
+                            "overlap_area": round(area, 4),
                             "issue": "overlaps %s by %.2f sq in (needs judgment — could be intentional design)" % (other_sid, area),
                             "suggest": suggest,
                         })
@@ -2462,6 +2468,8 @@ def cmd_fix(args):
                 for pic_sid, area in iss["covered_by"].items():
                     residue.append({
                         "slide": slide_idx, "shape": sid,
+                        "kind": "covered_by_picture",
+                        "covered_area": round(area, 4),
                         "issue": "text extends under PICTURE %s by %.2f sq in — it renders clipped/hidden behind the picture" % (pic_sid, area),
                         "suggest": "reorder %s z:front to draw the text on top, or move/shrink them apart" % sid,
                     })
@@ -2482,6 +2490,7 @@ def cmd_fix(args):
         if still is not None and still > 0.12:
             residue.append({
                 "slide": f["slide"], "shape": f["shape"],
+                "kind": "repair_still_failing",
                 "issue": '%s applied (%s) but %s is still %.2f" (was %.2f")' % (f["action"], f["detail"], key, still, f.get("was", 0)),
                 "suggest": "shorten the text with set-text, or resize/move the shape",
             })

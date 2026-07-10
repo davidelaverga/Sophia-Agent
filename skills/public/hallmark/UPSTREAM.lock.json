@@ -1,0 +1,24 @@
+{
+  "files": [
+    {
+      "path": "skills/public/hallmark/SKILL.md",
+      "sha256": "5437b73a1a829210681ca21fa09b7276a5978875f960d3998846e0dc333e9343"
+    },
+    {
+      "path": "skills/public/hallmark/references/structure.md",
+      "sha256": "ca5c0296ae428f8c4c5214407d431bbda5c453f98f2e7abdec03d644271af32b"
+    },
+    {
+      "path": "skills/public/hallmark/references/anti-patterns.md",
+      "sha256": "a36eb346ad59cafaa26119ed1e7c0bbb8aca6637209ee110eb630dd1a9307070"
+    },
+    {
+      "path": "skills/public/hallmark/references/slop-test.md",
+      "sha256": "6eb49fc64ca54929d2c1600e2a6014268f1a7593787c0ed3f6ecb4ac8390ad86"
+    }
+  ],
+  "name": "hallmark",
+  "source_url": "https://github.com/Nutlope/hallmark",
+  "synced_at": "2026-07-10T22:40:46.013131+00:00",
+  "upstream_commit": "aeb42fb354ff4efa36ab475773a082315a3af2ce"
+}

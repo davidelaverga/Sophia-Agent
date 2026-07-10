@@ -125,7 +125,9 @@ class DeckNativeService:
         html = [_path_arg(path, "html_path", suffixes={".html", ".htm"}, must_exist=True) for path in html_paths]
         base = _path_arg(base_deck_path, "base_deck_path", suffix=".pptx", must_exist=True)
         patch = _path_arg(output_patch_path, "output_patch_path", suffix=".json", create_parent=True)
+        source_map = patch.with_name(f"{patch.stem}.source-element-map.json")
         patch.unlink(missing_ok=True)
+        source_map.unlink(missing_ok=True)
         command = [
             self._python,
             str(self._html2patch_cli),
@@ -136,10 +138,13 @@ class DeckNativeService:
             "Blank",
             "-o",
             str(patch),
+            "--source-map",
+            str(source_map),
         ]
         completed = self._run(command)
         if completed.returncode != 0:
             patch.unlink(missing_ok=True)
+            source_map.unlink(missing_ok=True)
             return NativeDeckPatchResult(
                 success=False,
                 output_pptx_path=None,
@@ -155,6 +160,7 @@ class DeckNativeService:
             patch_op_count=_patch_op_count(patch),
             validation_error_count=0,
             errors=[] if patch.is_file() else ["html2patch did not write patch output"],
+            source_map_path=str(source_map) if source_map.is_file() else None,
         )
 
     def apply_patch(
@@ -242,7 +248,7 @@ class DeckNativeService:
             residue=residue_items,
             errors=[],
             issue_kinds=_kind_counts(fixed, "action"),
-            residue_kinds=_kind_counts(residue_items, "issue"),
+            residue_kinds=_kind_counts(residue_items, "kind"),
         )
 
     def render(
@@ -417,6 +423,8 @@ def native_mechanical_report(
         "lint_issue_count_before": lint_fix.lint_issue_count_before,
         "lint_fix_applied_count": lint_fix.fix_applied_count,
         "lint_residue_count": lint_fix.residue_count,
+        "lint_residue_kinds": lint_fix.residue_kinds,
+        "lint_residue": lint_fix.residue,
         "render_success": render.success,
         "rendered_slide_count": render.rendered_slide_count,
         "diff_success": bool(diff.get("success")),

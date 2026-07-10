@@ -83,8 +83,14 @@ backend/.coverage
 !skills/public/data-analysis/**
 !skills/public/deep-research/
 !skills/public/deep-research/**
+!skills/public/deck-hallmark/
+!skills/public/deck-hallmark/**
+!skills/public/deck-impeccable/
+!skills/public/deck-impeccable/**
 !skills/public/hallmark/
 !skills/public/hallmark/**
+!skills/public/hands-on-deck/
+!skills/public/hands-on-deck/**
 !skills/public/image-generation/
 !skills/public/image-generation/**
 !skills/public/pdf-report/

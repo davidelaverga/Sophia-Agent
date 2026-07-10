@@ -258,10 +258,29 @@ def test_builder_completion_attaches_prepare_terminal_metadata_and_failure_feedb
         "builder_pptx_diagnostics": {
             "first_prepare_turn": 8,
             "prepare_call_count": 2,
+            "prepare_emitted_call_count": 2,
+            "prepare_normalized_call_count": 1,
+            "prepare_schema_failure_count": 1,
+            "prepare_service_call_count": 1,
+            "prepare_service_result_count": 1,
             "prepare_result_count": 1,
             "prepare_retry_executed": True,
             "dangling_prepare_call_count": 1,
             "creative_plan_accepted": False,
+            "deck_root_failure_code": "deck_prepare_argument_invalid",
+            "deck_root_failure_summary": "The first prepare call failed schema validation.",
+            "source_retention_report": {
+                "passed": False,
+                "missing_required_count": 1,
+                "duplicate_source_id_count": 0,
+                "low_retention": [{"selector": "slide:1", "retention_ratio": 0.5}],
+            },
+            "native_contrast_report": {
+                "passed": False,
+                "checked_run_count": 4,
+                "required_issue_count": 1,
+                "indeterminate_required_count": 1,
+            },
         }
     }
     artifact = {
@@ -278,10 +297,21 @@ def test_builder_completion_attaches_prepare_terminal_metadata_and_failure_feedb
 
     assert run_tree.metadata["first_prepare_turn"] == 8
     assert run_tree.metadata["prepare_call_count"] == 2
+    assert run_tree.metadata["prepare_emitted_call_count"] == 2
+    assert run_tree.metadata["prepare_normalized_call_count"] == 1
+    assert run_tree.metadata["prepare_schema_failure_count"] == 1
+    assert run_tree.metadata["prepare_service_call_count"] == 1
+    assert run_tree.metadata["prepare_service_result_count"] == 1
     assert run_tree.metadata["prepare_result_count"] == 1
     assert run_tree.metadata["prepare_retry_executed"] is True
     assert run_tree.metadata["dangling_prepare_call_count"] == 1
     assert run_tree.metadata["creative_plan_accepted"] is False
+    assert run_tree.metadata["root_failure_code"] == "deck_prepare_argument_invalid"
+    assert run_tree.metadata["source_retention_passed"] is False
+    assert run_tree.metadata["source_retention_missing_required_count"] == 1
+    assert run_tree.metadata["source_retention_low_count"] == 1
+    assert run_tree.metadata["native_contrast_passed"] is False
+    assert run_tree.metadata["native_contrast_required_issue_count"] == 1
     assert run_tree.metadata["terminal_status"] == "failed"
     assert run_tree.metadata["terminal_reason"] == "deck_prepare_tool_result_missing"
     assert "builder_terminal:failed" in run_tree.tags

@@ -41,6 +41,7 @@ class NativeDeckPatchResult:
     patch_op_count: int
     validation_error_count: int
     errors: list[str] = field(default_factory=list)
+    source_map_path: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

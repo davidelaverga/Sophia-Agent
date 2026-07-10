@@ -1,11 +1,11 @@
 from __future__ import annotations
 
 import pytest
+from test_deck_build_service import _creative_plan, _runtime, _slides
 
 from deerflow.sophia.deck_build.creative_plan import CreativePlanValidationError, normalize_creative_plan
 from deerflow.sophia.deck_build.models import DeckBuild
 from deerflow.sophia.deck_build.service import DeckBuildService
-from test_deck_build_service import _creative_plan, _runtime, _slides
 
 
 def _deck(tmp_path) -> DeckBuild:
@@ -63,3 +63,24 @@ def test_creative_plan_forces_native_base_canvas_size(tmp_path) -> None:
 
     assert plan.design_plan.grid.slide_width_px == 1920
     assert plan.design_plan.grid.slide_height_px == 1080
+
+
+def test_creative_plan_rejects_unfinished_critique_revision(tmp_path) -> None:
+    raw = _creative_plan()
+    raw["plan_critique"]["final_scores"]["specificity"] = 2
+
+    with pytest.raises(CreativePlanValidationError) as exc:
+        normalize_creative_plan(raw, deck=_deck(tmp_path), request_context="")
+
+    assert "final_scores.specificity" in exc.value.summary
+
+
+def test_creative_plan_rejects_repeated_structural_fingerprint(tmp_path) -> None:
+    raw = _creative_plan()
+    for composition in raw["slide_compositions"]:
+        composition["structural_fingerprint"] = "same-layout"
+
+    with pytest.raises(CreativePlanValidationError) as exc:
+        normalize_creative_plan(raw, deck=_deck(tmp_path), request_context="")
+
+    assert "structural_fingerprint" in exc.value.summary

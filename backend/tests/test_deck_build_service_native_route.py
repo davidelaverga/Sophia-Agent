@@ -76,7 +76,11 @@ body {{ overflow: hidden; color: #EEF4FB; font-family: Aptos, Arial, sans-serif;
 h1 {{ position: absolute; left: 120px; top: 110px; width: 1280px; font-size: 64px; }}
 p {{ position: absolute; left: 120px; top: 780px; width: 1240px; font-size: 30px; color: #A7B4C2; }}
 .panel {{ position: absolute; left: 120px; top: 300px; width: 1320px; height: 360px; border: 3px solid #38BDF8; background: #111827; }}
-</style></head><body><main class="canvas"><h1>{title}</h1><div class="panel"></div><p>{narrative}</p></main></body></html>"""
+</style></head><body><main class="canvas">
+<h1 data-deck-id="title" data-deck-role="title" data-deck-required="true">{title}</h1>
+<div class="panel" data-deck-id="diagram" data-deck-role="diagram"></div>
+<p data-deck-id="narrative" data-deck-role="narrative" data-deck-required="true">{narrative}</p>
+</main></body></html>"""
 
 
 def _creative_plan() -> dict[str, Any]:
@@ -84,6 +88,8 @@ def _creative_plan() -> dict[str, Any]:
         "subject": "Native Deck",
         "audience": "technical stakeholders",
         "goal": "verify native PowerPoint substrate",
+        "viewing_context": "Reviewed live on a standard 16:9 technical presentation display.",
+        "subject_materials": ["native text shapes", "shape inventory", "source-retention map"],
         "story_arc": "Show native compile, then inspect shape inventory.",
         "design_plan": {
             "source": "test",
@@ -105,6 +111,7 @@ def _creative_plan() -> dict[str, Any]:
             "requested_style_terms": ["dark_technical"],
         },
         "image_strategy": "diagram_native",
+        "image_strategy_rationale": "The subject is compiler structure, so native shapes are the clearest medium.",
         "image_assets": [],
         "slide_compositions": [
             {
@@ -115,6 +122,8 @@ def _creative_plan() -> dict[str, Any]:
                 "composition_rationale": "Dark native statement slide.",
                 "native_elements": ["title", "panel", "narrative"],
                 "image_asset_ids": [],
+                "required_element_ids": ["title", "diagram", "narrative"],
+                "structural_fingerprint": "cover-left-title-central-proof-panel",
             },
             {
                 "selector": "slide:2",
@@ -124,8 +133,31 @@ def _creative_plan() -> dict[str, Any]:
                 "composition_rationale": "Native text and panel structure.",
                 "native_elements": ["title", "panel", "narrative"],
                 "image_asset_ids": [],
+                "required_element_ids": ["title", "diagram", "narrative"],
+                "structural_fingerprint": "inventory-top-title-wide-evidence-panel",
             },
         ],
+        "skill_refs": ["hands-on-deck/designing-slides", "deck-impeccable/critique"],
+        "plan_critique": {
+            "initial_scores": {
+                "philosophy": 3,
+                "hierarchy": 4,
+                "execution_feasibility": 4,
+                "specificity": 3,
+                "restraint": 4,
+                "variety": 3,
+            },
+            "weakest_point": "The proof sequence initially lacked structural distinction.",
+            "revision_made": "Separated the cover proof from the inventory evidence composition.",
+            "final_scores": {
+                "philosophy": 4,
+                "hierarchy": 4,
+                "execution_feasibility": 4,
+                "specificity": 4,
+                "restraint": 4,
+                "variety": 4,
+            },
+        },
         "anti_slop_commitments": ["structural variety", "native text"],
     }
 
@@ -147,7 +179,10 @@ class PatchWritingNativeService:
                         "at": [0.8, 0.7],
                         "size": [12.5, 0.8],
                         "text": [f"Native title {index + 1}"],
-                        "name": f"title-{index + 1}",
+                        "font_size": 28,
+                        "color": "111827",
+                        "fill": "FFFFFF",
+                        "name": f"s{index + 1}-title-text",
                     },
                     {
                         "op": "add-shape",
@@ -156,14 +191,57 @@ class PatchWritingNativeService:
                         "at": [0.8, 1.9],
                         "size": [10.5, 0.7],
                         "text": [f"Native body {index + 1}"],
-                        "name": f"body-{index + 1}",
+                        "font_size": 20,
+                        "color": "111827",
+                        "fill": "FFFFFF",
+                        "name": f"s{index + 1}-narrative-text",
+                    },
+                    {
+                        "op": "add-shape",
+                        "slide": index,
+                        "kind": "rect",
+                        "at": [0.8, 3.0],
+                        "size": [10.5, 2.0],
+                        "fill": "E2E8F0",
+                        "name": f"s{index + 1}-diagram-box",
                     },
                 ]
             )
         patch_path = Path(output_patch_path)
         patch_path.parent.mkdir(parents=True, exist_ok=True)
         patch_path.write_text(json.dumps({"ops": ops}), encoding="utf-8")
-        return NativeDeckPatchResult(True, None, str(patch_path), len(ops), 0, [])
+        source_map_path = patch_path.with_suffix(".source-map.json")
+        source_map_path.write_text(
+            json.dumps(
+                {
+                    "schema_version": "sophia-deck-source-map/v1",
+                    "slides": {
+                        f"slide:{index}": {
+                            "elements": {
+                                "title": {
+                                    "source_role": "title",
+                                    "source_required": True,
+                                    "shape_names": [f"s{index}-title-text"],
+                                },
+                                "diagram": {
+                                    "source_role": "diagram",
+                                    "source_required": False,
+                                    "shape_names": [f"s{index}-diagram-box"],
+                                },
+                                "narrative": {
+                                    "source_role": "narrative",
+                                    "source_required": True,
+                                    "shape_names": [f"s{index}-narrative-text"],
+                                },
+                            }
+                        }
+                        for index in range(1, len(html_paths) + 1)
+                    },
+                }
+            ),
+            encoding="utf-8",
+        )
+        return NativeDeckPatchResult(True, None, str(patch_path), len(ops), 0, [], str(source_map_path))
 
     def apply_patch(self, **kwargs: Any):
         return self._real.apply_patch(**kwargs)

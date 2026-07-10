@@ -3,13 +3,13 @@ from __future__ import annotations
 from pathlib import Path
 
 from PIL import Image, ImageDraw
+from test_deck_build_service import _creative_plan, _runtime, _slides
 
 from deerflow.sophia.deck_build.creative_plan import normalize_creative_plan
 from deerflow.sophia.deck_build.image_assets import apply_creative_asset_plan
 from deerflow.sophia.deck_build.mechanical_gates import evaluate_mechanical_gates
 from deerflow.sophia.deck_build.models import DeckBuild
 from deerflow.sophia.deck_build.service import DeckBuildService
-from test_deck_build_service import _creative_plan, _runtime, _slides
 
 
 def _built_deck(tmp_path, *, repeated: bool = False, old_marker: bool = False):
@@ -98,3 +98,39 @@ def test_mechanical_gates_fail_dark_request_rendered_light(tmp_path) -> None:
 
     assert result.passed is False
     assert any(issue.code == "dark_request_rendered_light" for issue in result.issues)
+
+
+def test_non_text_overflow_requires_explicit_bleed_source_role(tmp_path) -> None:
+    deck = _built_deck(tmp_path)
+    deck.native_mechanical_report = {
+        "lint_residue_count": 1,
+        "lint_residue_kinds": {"slide_overflow_non_text": 1},
+        "lint_residue": [
+            {
+                "slide": 0,
+                "shape": "s1-background-box",
+                "kind": "slide_overflow_non_text",
+            }
+        ],
+    }
+
+    failed = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path))
+    assert any(issue.code == "native_lint_unapproved_bleed" for issue in failed.issues)
+
+    deck.source_element_map = {
+        "slides": {
+            "slide:1": {
+                "elements": {
+                    "background": {
+                        "source_role": "background",
+                        "shape_names": ["s1-background-box"],
+                    }
+                }
+            }
+        }
+    }
+    allowed_root = tmp_path / "allowed"
+    allowed_root.mkdir()
+    allowed = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(allowed_root))
+    assert allowed.passed is True
+    assert "native_lint_advisory:slide_overflow_non_text" in allowed.warnings

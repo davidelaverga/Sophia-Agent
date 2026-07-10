@@ -136,6 +136,30 @@ class DeckImageAssetPlan:
 
 
 @dataclass
+class DeckCritiqueScores:
+    philosophy: int
+    hierarchy: int
+    execution_feasibility: int
+    specificity: int
+    restraint: int
+    variety: int
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
+class DeckPlanCritique:
+    initial_scores: DeckCritiqueScores
+    weakest_point: str
+    revision_made: str
+    final_scores: DeckCritiqueScores
+
+    def to_dict(self) -> dict[str, Any]:
+        return asdict(self)
+
+
+@dataclass
 class DeckSlideCompositionPlan:
     selector: str
     slide_role: str
@@ -144,6 +168,8 @@ class DeckSlideCompositionPlan:
     composition_rationale: str
     native_elements: list[str]
     image_asset_ids: list[str]
+    required_element_ids: list[str]
+    structural_fingerprint: str
     risk_notes: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -155,11 +181,16 @@ class DeckCreativePlan:
     subject: str
     audience: str
     goal: str
+    viewing_context: str
+    subject_materials: list[str]
     story_arc: str
     design_plan: DeckDesignPlan
     image_strategy: str
+    image_strategy_rationale: str
     image_assets: list[DeckImageAssetPlan]
     slide_compositions: list[DeckSlideCompositionPlan]
+    skill_refs: list[str]
+    plan_critique: DeckPlanCritique
     anti_slop_commitments: list[str] = field(default_factory=list)
 
     def to_dict(self) -> dict[str, Any]:
@@ -263,6 +294,9 @@ class DeckBuild:
     full_slide_picture_count: int = 0
     native_shape_inventory: dict[str, Any] = field(default_factory=dict)
     native_mechanical_report: dict[str, Any] = field(default_factory=dict)
+    source_element_map: dict[str, Any] = field(default_factory=dict)
+    source_retention_report: dict[str, Any] = field(default_factory=dict)
+    native_contrast_report: dict[str, Any] = field(default_factory=dict)
     successful_visual_count: int = 0
     referenced_visual_count: int = 0
     missing_visual_count: int = 0
@@ -363,6 +397,10 @@ class DeckBuildResult:
     batch_timeout_count: int = 0
     partial_batch_salvaged: bool = False
     native_mechanical_report: dict[str, Any] = field(default_factory=dict)
+    source_retention_report: dict[str, Any] = field(default_factory=dict)
+    native_contrast_report: dict[str, Any] = field(default_factory=dict)
+    root_failure_code: str | None = None
+    root_failure_summary: str | None = None
     repair_instruction: dict[str, Any] | None = None
 
     def to_dict(self) -> dict[str, Any]:

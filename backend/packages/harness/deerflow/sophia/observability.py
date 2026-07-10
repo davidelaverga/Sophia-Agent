@@ -770,6 +770,7 @@ def _add_terminal_gate_metadata(
     diagnostics: dict[str, Any],
 ) -> None:
     _add_pptx_terminal_metadata(metadata, diagnostics)
+    _add_deck_fidelity_metadata(metadata, artifact=artifact, diagnostics=diagnostics)
     _add_pdf_layout_metadata(metadata, state=state, artifact=artifact)
     _add_artifact_acceptance_metadata(metadata, artifact)
     _add_report_grammar_metadata(metadata, state=state, artifact=artifact)
@@ -792,6 +793,12 @@ def _add_pptx_terminal_metadata(metadata: dict[str, Any], diagnostics: dict[str,
         "missing_expected_visual_count",
         "first_prepare_turn",
         "prepare_call_count",
+        "prepare_emitted_call_count",
+        "prepare_normalized_call_count",
+        "prepare_schema_failure_count",
+        "prepare_parallel_call_count",
+        "prepare_service_call_count",
+        "prepare_service_result_count",
         "prepare_result_count",
         "prepare_retry_executed",
         "dangling_prepare_call_count",
@@ -799,6 +806,40 @@ def _add_pptx_terminal_metadata(metadata: dict[str, Any], diagnostics: dict[str,
         "prepare_latch_activated_at_turn",
     ):
         _merge_safe_metadata(metadata, key, diagnostics.get(key))
+
+
+def _add_deck_fidelity_metadata(
+    metadata: dict[str, Any],
+    *,
+    artifact: dict[str, Any],
+    diagnostics: dict[str, Any],
+) -> None:
+    retention = _as_dict(
+        diagnostics.get("source_retention_report")
+        or artifact.get("source_retention_report")
+    )
+    contrast = _as_dict(
+        diagnostics.get("native_contrast_report")
+        or artifact.get("native_contrast_report")
+    )
+    for key in (
+        "passed",
+        "missing_required_count",
+        "duplicate_source_id_count",
+    ):
+        _merge_safe_metadata(metadata, f"source_retention_{key}", retention.get(key))
+    _merge_safe_metadata(
+        metadata,
+        "source_retention_low_count",
+        len(retention.get("low_retention") or []) if retention else None,
+    )
+    for key in (
+        "passed",
+        "checked_run_count",
+        "required_issue_count",
+        "indeterminate_required_count",
+    ):
+        _merge_safe_metadata(metadata, f"native_contrast_{key}", contrast.get(key))
 
 
 def _add_pdf_layout_metadata(
@@ -828,10 +869,20 @@ def _add_artifact_acceptance_metadata(metadata: dict[str, Any], artifact: dict[s
         "terminal_reason",
         "first_prepare_turn",
         "prepare_call_count",
+        "prepare_emitted_call_count",
+        "prepare_normalized_call_count",
+        "prepare_schema_failure_count",
+        "prepare_parallel_call_count",
+        "prepare_service_call_count",
+        "prepare_service_result_count",
         "prepare_result_count",
         "prepare_retry_executed",
         "dangling_prepare_call_count",
         "creative_plan_accepted",
+        "root_failure_code",
+        "root_failure_summary",
+        "source_retention_report",
+        "native_contrast_report",
     ):
         _merge_safe_metadata(metadata, key, artifact.get(key))
 
@@ -992,6 +1043,8 @@ def _add_deck_build_metadata(
         "deck_route": _first_present(diagnostics.get("deck_route"), artifact.get("deck_route")),
         "deck_compile_mode": _first_present(diagnostics.get("deck_compile_mode"), artifact.get("deck_compile_mode")),
         "deck_failure_code": _first_present(diagnostics.get("deck_failure_code"), artifact.get("deck_failure_code"), artifact.get("failure_code")),
+        "root_failure_code": _first_present(diagnostics.get("deck_root_failure_code"), artifact.get("root_failure_code")),
+        "root_failure_summary": _first_present(diagnostics.get("deck_root_failure_summary"), artifact.get("root_failure_summary")),
         "deck_template_renderer_version": _first_present(diagnostics.get("deck_template_renderer_version"), artifact.get("deck_template_renderer_version")),
         "deck_quality_status": _first_present(diagnostics.get("deck_quality_status"), artifact.get("deck_quality_status")),
         "creative_plan_path": _first_present(diagnostics.get("creative_plan_path"), artifact.get("creative_plan_path")),
@@ -1003,6 +1056,8 @@ def _add_deck_build_metadata(
         "full_slide_picture_count": full_slide_picture_count,
         "mechanical_gate_results": _first_present(diagnostics.get("mechanical_gate_results"), artifact.get("mechanical_gate_results")),
         "html_source_validation": _first_present(diagnostics.get("html_source_validation"), artifact.get("html_source_validation")),
+        "source_retention_report": _first_present(diagnostics.get("source_retention_report"), artifact.get("source_retention_report")),
+        "native_contrast_report": _first_present(diagnostics.get("native_contrast_report"), artifact.get("native_contrast_report")),
     }.items():
         _merge_safe_metadata(metadata, key, source)
     for key, source in {

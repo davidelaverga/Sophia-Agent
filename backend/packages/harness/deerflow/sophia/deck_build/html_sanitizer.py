@@ -5,6 +5,11 @@ from dataclasses import asdict, dataclass, field
 from html.parser import HTMLParser
 from typing import Any
 
+from deerflow.sophia.deck_build.compiler_capabilities import (
+    lossy_css_in_html,
+    unsupported_css_in_html,
+    unsupported_tags_in_html,
+)
 from deerflow.sophia.deck_build.models import DeckSlideSpec
 from deerflow.sophia.deck_build.tracing import safe_excerpt
 
@@ -23,6 +28,7 @@ _DATA_URI_RE = re.compile(r"^data:", re.I)
 _FILE_URI_RE = re.compile(r"^file:", re.I)
 _CSS_URL_RE = re.compile(r"\burl\s*\(", re.I)
 _URL_ATTRIBUTE_NAMES = {"src", "href", "poster", "background", "data"}
+_DECK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 
 @dataclass
@@ -34,6 +40,9 @@ class HtmlSourceValidation:
     image_refs: list[str] = field(default_factory=list)
     canvas_width_px: int | None = None
     canvas_height_px: int | None = None
+    unsupported_tags: list[str] = field(default_factory=list)
+    unsupported_css: list[str] = field(default_factory=list)
+    source_elements: list[dict[str, Any]] = field(default_factory=list)
     sanitized: bool = False
 
     def to_dict(self) -> dict[str, Any]:
@@ -50,6 +59,7 @@ class _HtmlScanner(HTMLParser):
         self.styles: list[str] = []
         self.body_attrs: dict[str, str] = {}
         self.main_attrs: dict[str, str] = {}
+        self.source_elements: list[dict[str, Any]] = []
         self.in_style = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
@@ -77,6 +87,21 @@ class _HtmlScanner(HTMLParser):
             self.main_attrs = attr_map
         if clean_tag == "style":
             self.in_style = True
+        self._record_source_element(clean_tag, attr_map)
+
+    def _record_source_element(self, tag: str, attrs: dict[str, str]) -> None:
+        source_id = attrs.get("data-deck-id", "").strip()
+        source_role = attrs.get("data-deck-role", "").strip()
+        source_required = attrs.get("data-deck-required", "").strip().lower() == "true"
+        if source_id or source_role or source_required:
+            self.source_elements.append(
+                {
+                    "tag": tag,
+                    "source_id": source_id,
+                    "source_role": source_role,
+                    "source_required": source_required,
+                }
+            )
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() == "style":
@@ -106,6 +131,16 @@ def validate_and_sanitize_slide_html(
     validation.errors.extend(scanner.errors)
     validation.warnings.extend(scanner.warnings)
     validation.image_refs = list(dict.fromkeys(scanner.image_refs))
+    validation.source_elements = scanner.source_elements
+    validation.unsupported_tags = unsupported_tags_in_html(source)
+    validation.unsupported_css = unsupported_css_in_html(source)
+    for tag in validation.unsupported_tags:
+        validation.errors.append(f"unsupported_native_deck_tag: {tag}")
+    for prop in validation.unsupported_css:
+        validation.errors.append(f"unsupported_native_deck_css: {prop}")
+    for prop in lossy_css_in_html(source):
+        validation.errors.append(f"lossy_native_deck_css: {prop}")
+    _validate_source_elements(scanner.source_elements, validation)
     _validate_canvas(source, scanner, validation)
     _validate_background(scanner, validation)
     _validate_css(scanner.styles, validation)
@@ -138,6 +173,16 @@ def validation_summary(results: list[HtmlSourceValidation]) -> dict[str, Any]:
             result.selector: result.image_refs
             for result in results
             if result.image_refs
+        },
+        "unsupported_tags": {
+            result.selector: result.unsupported_tags
+            for result in results
+            if result.unsupported_tags
+        },
+        "unsupported_css": {
+            result.selector: result.unsupported_css
+            for result in results
+            if result.unsupported_css
         },
     }
 
@@ -190,6 +235,24 @@ def _validate_css(styles: list[str], validation: HtmlSourceValidation) -> None:
         validation.warnings.append("CSS contains fragile decorative effects that may be sanitized")
     if "position: fixed" in css.lower():
         validation.errors.append("position: fixed overlays are forbidden")
+
+
+def _validate_source_elements(elements: list[dict[str, Any]], validation: HtmlSourceValidation) -> None:
+    seen: set[str] = set()
+    for element in elements:
+        source_id = str(element.get("source_id") or "")
+        source_role = str(element.get("source_role") or "")
+        required = bool(element.get("source_required"))
+        if source_id and not _DECK_ID_RE.fullmatch(source_id):
+            validation.errors.append(f"invalid data-deck-id: {safe_excerpt(source_id, limit=80)}")
+        if source_id in seen:
+            validation.errors.append(f"duplicate data-deck-id: {safe_excerpt(source_id, limit=80)}")
+        if source_id:
+            seen.add(source_id)
+        if required and not source_id:
+            validation.errors.append("data-deck-required=true requires data-deck-id")
+        if required and not source_role:
+            validation.errors.append(f"required element {source_id or '<unknown>'} requires data-deck-role")
 
 
 def _validate_image_refs(refs: list[str], allowed_asset_refs: set[str], validation: HtmlSourceValidation) -> None:

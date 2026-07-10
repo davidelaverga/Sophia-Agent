@@ -4895,14 +4895,30 @@ def _pptx_contains_visual_evidence(path: Path) -> bool:
     try:
         with zipfile.ZipFile(path) as archive:
             names = set(archive.namelist())
+            if any(
+                name.startswith("ppt/media/")
+                or name.startswith("ppt/charts/")
+                or name.startswith("ppt/diagrams/")
+                for name in names
+            ):
+                return True
+            for name in names:
+                if not name.startswith("ppt/slides/slide") or not name.endswith(".xml"):
+                    continue
+                slide_xml = archive.read(name)
+                if any(
+                    marker in slide_xml
+                    for marker in (b"<p:cxnSp", b"<a:tbl", b"<p:graphicFrame", b"<p:pic")
+                ):
+                    return True
+                if any(
+                    b'txBox="1"' not in shape_xml
+                    for shape_xml in re.findall(rb"<p:sp\b.*?</p:sp>", slide_xml, re.S)
+                ):
+                    return True
     except (OSError, zipfile.BadZipFile):
         return False
-    return any(
-        name.startswith("ppt/media/")
-        or name.startswith("ppt/charts/")
-        or name.startswith("ppt/diagrams/")
-        for name in names
-    )
+    return False
 
 
 def _pdf_object(value: Any) -> Any:
@@ -11305,6 +11321,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             or int((request.state or {}).get("builder_deck_creative_repair_attempt_count", 0) or 0)
         )
         failure_code = payload.get("failure_code") or (None if success else status_reason or "deck_build_failed")
+        prior_diagnostics = _pptx_diagnostics(request.state or {})
+        root_failure_code = (
+            payload.get("root_failure_code")
+            or prior_diagnostics.get("deck_root_failure_code")
+            or (failure_code if not success else None)
+        )
+        root_failure_summary = (
+            payload.get("root_failure_summary")
+            or prior_diagnostics.get("deck_root_failure_summary")
+            or (payload.get("failure_summary") if not success else None)
+        )
         image_generation_status = str(payload.get("image_generation_status") or ("success" if success else "failed"))
         primary_image_batch_status = str(payload.get("primary_image_batch_status") or ("success" if success else "failed"))
         primary_image_batch_error_class = payload.get("primary_image_batch_error_class") or (None if success else failure_code)
@@ -11321,6 +11348,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "deck_status": "evaluated" if success else "failed_terminal",
             "deck_quality_status": quality_status,
             "deck_failure_code": failure_code,
+            "deck_root_failure_code": root_failure_code,
+            "deck_root_failure_summary": root_failure_summary,
             "deck_template_renderer_version": "deck_creative_html_native_v1",
             "expected_generated_visual_count": expected,
             "successful_generated_visual_count": successful,
@@ -11333,6 +11362,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 and missing == 0
             ),
             "prepare_result_count": 1,
+            "prepare_normalized_call_count": 1,
+            "prepare_service_call_count": 1,
+            "prepare_service_result_count": 1,
             "prepare_retry_executed": retry_executed,
             "image_generation_status": image_generation_status,
             "image_generation_reason": payload.get("image_generation_reason"),
@@ -11343,12 +11375,31 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "partial_batch_salvaged": bool(payload.get("partial_batch_salvaged")),
             "pptx_plan_slide_count": slide_count,
             "pptx_generator_slide_count": slide_count if success else 0,
-            "pptx_generator_picture_count": slide_count if success else 0,
+            "pptx_generator_picture_count": int(payload.get("picture_shape_count") or 0) if success else 0,
             "pptx_generator_attempt_count": 1 if success else 0,
             "pptx_generator_success_count": 1 if success else 0,
             "pptx_generator_bytes_total": bytes_count if success else 0,
             "pptx_generator_error_class": None if success else failure_code,
         }
+        delta.update(
+            BuilderArtifactMiddleware._prepare_deck_build_optional_delta(
+                payload=payload,
+                pptx_path=pptx_path,
+                success=success,
+                state=request.state or {},
+            )
+        )
+        return delta
+
+    @staticmethod
+    def _prepare_deck_build_optional_delta(
+        *,
+        payload: dict[str, Any],
+        pptx_path: str | None,
+        success: bool,
+        state: dict[str, Any],
+    ) -> dict[str, Any]:
+        delta: dict[str, Any] = {}
         native_editability_score = payload.get("native_editability_score")
         if isinstance(native_editability_score, (int, float)) and not isinstance(native_editability_score, bool):
             delta["native_editability_score"] = native_editability_score
@@ -11358,8 +11409,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 delta[key] = value
         if pptx_path and success:
             delta["pptx_output_paths"] = [pptx_path]
-            if _pptx_diagnostics(request.state or {}).get("time_to_first_valid_artifact_ms") is None:
-                elapsed = _elapsed_since_builder_start_ms(request.state or {})
+            if _pptx_diagnostics(state).get("time_to_first_valid_artifact_ms") is None:
+                elapsed = _elapsed_since_builder_start_ms(state)
                 if elapsed is not None:
                     delta["time_to_first_valid_artifact_ms"] = elapsed
         if payload.get("quality_warning"):
@@ -11373,6 +11424,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         html_validation = payload.get("html_source_validation")
         if isinstance(html_validation, dict):
             delta["html_source_validation"] = html_validation
+        source_retention = payload.get("source_retention_report")
+        if isinstance(source_retention, dict):
+            delta["source_retention_report"] = source_retention
+        native_contrast = payload.get("native_contrast_report")
+        if isinstance(native_contrast, dict):
+            delta["native_contrast_report"] = native_contrast
         creative_plan_path = payload.get("creative_plan_path")
         if isinstance(creative_plan_path, str) and creative_plan_path.strip():
             delta["creative_plan_path"] = creative_plan_path
@@ -11490,7 +11547,64 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         payload = self._deck_builder_result_payload(result)
         delta = self._prepare_deck_build_result_delta(request, result)
         if delta is None or payload is None:
-            return result
+            state = request.state or {}
+            diagnostics = _pptx_diagnostics(state)
+            emitted_count = int(
+                diagnostics.get("prepare_emitted_call_count")
+                or diagnostics.get("prepare_call_count")
+                or 0
+            )
+            schema_delta = {
+                "prepare_result_count": 1,
+                "prepare_schema_failure_count": 1,
+                "deck_status": "failed_terminal" if emitted_count >= 2 else "repair_pending",
+                "deck_failure_code": "deck_prepare_argument_invalid",
+                "deck_root_failure_code": diagnostics.get("deck_root_failure_code")
+                or "deck_prepare_argument_invalid",
+                "deck_root_failure_summary": diagnostics.get("deck_root_failure_summary")
+                or "prepare_deck_build arguments failed typed schema validation.",
+            }
+            if emitted_count < 2:
+                return Command(
+                    update={
+                        "messages": [result],
+                        "builder_pptx_diagnostics": schema_delta,
+                        "builder_deck_prepare_phase": "retry_pending",
+                        "builder_deck_prepare_repair_message": (
+                            "Repair the prepare_deck_build arguments using the canonical typed schema, "
+                            "including every required creative_plan field and slide html_source, then "
+                            "call prepare_deck_build exactly once more."
+                        ),
+                        "builder_deck_prepare_repair_prompt_injected": False,
+                        "builder_deck_prepare_expected_tool_call_id": None,
+                    }
+                )
+            failure_payload = {
+                "success": False,
+                "failure_code": "deck_prepare_retry_exhausted",
+                "failure_summary": "prepare_deck_build failed typed argument validation twice.",
+                "root_failure_code": schema_delta["deck_root_failure_code"],
+                "root_failure_summary": schema_delta["deck_root_failure_summary"],
+                "retryable": False,
+            }
+            fallback = self._prepare_deck_build_failure_fallback(
+                state=state,
+                runtime=request.runtime,
+                payload=failure_payload,
+                delta=schema_delta,
+            )
+            return Command(
+                update={
+                    "messages": [result],
+                    "builder_pptx_diagnostics": schema_delta,
+                    "builder_result": fallback,
+                    "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
+                    "builder_deck_prepare_phase": "terminal",
+                    "builder_deck_prepare_expected_tool_call_id": None,
+                    **_terminal_halt_fields(state, "deck_prepare_retry_exhausted"),
+                },
+                goto="end",
+            )
         if delta.get("deck_status") == "failed_terminal":
             retry_command = self._prepare_deck_build_retry_command(request, result, payload, delta)
             if retry_command is not None:
@@ -11590,6 +11704,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "native_mechanical_report": delta.get("native_mechanical_report"),
             "mechanical_gate_results": delta.get("mechanical_gate_results"),
             "html_source_validation": delta.get("html_source_validation"),
+            "source_retention_report": delta.get("source_retention_report"),
+            "native_contrast_report": delta.get("native_contrast_report"),
             "creative_plan_path": creative_plan_path or None,
             "creative_plan_accepted": bool(delta.get("creative_plan_accepted")),
             "deck_quality_status": payload.get("quality_status") or "passed",
@@ -11605,6 +11721,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "successful_generated_visual_count": delta.get("successful_generated_visual_count"),
             "referenced_visual_count": delta.get("referenced_visual_count"),
             "missing_expected_visual_count": delta.get("missing_expected_visual_count"),
+            "root_failure_code": delta.get("deck_root_failure_code"),
+            "root_failure_summary": delta.get("deck_root_failure_summary"),
+            "prepare_call_count": diagnostics.get("prepare_call_count"),
+            "prepare_emitted_call_count": diagnostics.get("prepare_emitted_call_count"),
+            "prepare_normalized_call_count": diagnostics.get("prepare_normalized_call_count"),
+            "prepare_schema_failure_count": diagnostics.get("prepare_schema_failure_count"),
+            "prepare_parallel_call_count": diagnostics.get("prepare_parallel_call_count"),
+            "prepare_service_call_count": diagnostics.get("prepare_service_call_count"),
+            "prepare_service_result_count": diagnostics.get("prepare_service_result_count"),
+            "prepare_result_count": diagnostics.get("prepare_result_count"),
         }
         artifact = _apply_artifact_request_metadata(artifact, final_state)
         artifact = _apply_visual_missing_quality_metadata(artifact, final_state)
@@ -11648,6 +11774,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     ) -> dict[str, Any]:
         failure_code = str(payload.get("failure_code") or delta.get("deck_failure_code") or "deck_build_failed")
         failure_summary = str(payload.get("failure_summary") or "DeckBuildService failed before a deliverable was available.")
+        prior_diagnostics = _pptx_diagnostics(state)
+        root_failure_code = str(
+            payload.get("root_failure_code")
+            or delta.get("deck_root_failure_code")
+            or prior_diagnostics.get("deck_root_failure_code")
+            or failure_code
+        )
+        root_failure_summary = str(
+            payload.get("root_failure_summary")
+            or delta.get("deck_root_failure_summary")
+            or prior_diagnostics.get("deck_root_failure_summary")
+            or failure_summary
+        )
         terminal_status = "timed_out" if failure_code == "deck_deadline_exceeded" else "failed"
         diagnostics = _merge_builder_pptx_diagnostics(
             _pptx_diagnostics(state),
@@ -11671,6 +11810,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "artifact_acceptance_status": "failed",
             "failure_code": failure_code,
             "failure_summary": failure_summary,
+            "root_failure_code": root_failure_code,
+            "root_failure_summary": root_failure_summary,
             "deck_build_id": payload.get("build_id"),
             "deck_build_path": payload.get("deck_build_path"),
             "deck_route": delta.get("deck_route") or payload.get("deck_route"),
@@ -11684,6 +11825,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "native_mechanical_report": delta.get("native_mechanical_report"),
             "mechanical_gate_results": delta.get("mechanical_gate_results"),
             "html_source_validation": delta.get("html_source_validation"),
+            "source_retention_report": delta.get("source_retention_report"),
+            "native_contrast_report": delta.get("native_contrast_report"),
             "creative_plan_path": delta.get("creative_plan_path"),
             "deck_quality_status": payload.get("quality_status") or "failed",
             "quality_warning": payload.get("quality_warning"),
@@ -11698,6 +11841,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "successful_generated_visual_count": delta.get("successful_generated_visual_count"),
             "referenced_visual_count": delta.get("referenced_visual_count"),
             "missing_expected_visual_count": delta.get("missing_expected_visual_count"),
+            "prepare_call_count": diagnostics.get("prepare_call_count"),
+            "prepare_emitted_call_count": diagnostics.get("prepare_emitted_call_count"),
+            "prepare_normalized_call_count": diagnostics.get("prepare_normalized_call_count"),
+            "prepare_schema_failure_count": diagnostics.get("prepare_schema_failure_count"),
+            "prepare_parallel_call_count": diagnostics.get("prepare_parallel_call_count"),
+            "prepare_service_call_count": diagnostics.get("prepare_service_call_count"),
+            "prepare_service_result_count": diagnostics.get("prepare_service_result_count"),
+            "prepare_result_count": diagnostics.get("prepare_result_count"),
         }
         deck_build_path = payload.get("deck_build_path")
         if isinstance(deck_build_path, str) and deck_build_path.strip():
@@ -12076,18 +12227,41 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     ) -> Command | None:
         if request.tool_call.get("name") != _PREPARE_DECK_BUILD_TOOL_NAME:
             return None
-        if int(_pptx_diagnostics(request.state or {}).get("prepare_result_count", 0) or 0) < 2:
+        diagnostics = _pptx_diagnostics(request.state or {})
+        emitted_count = int(
+            diagnostics.get("prepare_emitted_call_count")
+            or diagnostics.get("prepare_call_count")
+            or 0
+        )
+        service_result_count = int(diagnostics.get("prepare_service_result_count", 0) or 0)
+        parallel_call_count = int(diagnostics.get("prepare_parallel_call_count", 0) or 0)
+        if parallel_call_count <= 1 and emitted_count <= 2 and service_result_count < 2:
             return None
+        root_failure_code = diagnostics.get("deck_root_failure_code") or diagnostics.get("deck_failure_code")
+        root_failure_summary = diagnostics.get("deck_root_failure_summary")
+        failure_code = (
+            "deck_prepare_parallel_calls_forbidden"
+            if parallel_call_count > 1
+            else "deck_prepare_retry_exhausted"
+        )
+        failure_summary = (
+            "prepare_deck_build calls must be sequential; multiple calls were emitted in one model turn."
+            if parallel_call_count > 1
+            else "prepare_deck_build already used its one bounded repair attempt."
+        )
         payload = {
             "success": False,
-            "failure_code": "deck_prepare_retry_exhausted",
-            "failure_summary": "prepare_deck_build already used its one bounded repair attempt.",
+            "failure_code": failure_code,
+            "failure_summary": failure_summary,
             "retryable": False,
+            "root_failure_code": root_failure_code,
+            "root_failure_summary": root_failure_summary,
         }
         delta = {
             "deck_status": "failed_terminal",
-            "deck_failure_code": payload["failure_code"],
-            "prepare_call_count": 1,
+            "deck_failure_code": failure_code,
+            "deck_root_failure_code": root_failure_code,
+            "deck_root_failure_summary": root_failure_summary,
         }
         fallback = self._prepare_deck_build_failure_fallback(
             state=request.state or {},
@@ -12108,7 +12282,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                 "builder_non_artifact_turns": 0,
                 "builder_deck_prepare_phase": "terminal",
-                **_terminal_halt_fields(request.state or {}, "deck_prepare_retry_exhausted"),
+                **_terminal_halt_fields(request.state or {}, failure_code),
             },
             goto="end",
         )
@@ -13375,7 +13549,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         ]
         if not calls:
             return {}
-        diagnostics: dict[str, Any] = {"prepare_call_count": len(calls)}
+        diagnostics: dict[str, Any] = {
+            "prepare_call_count": len(calls),
+            "prepare_emitted_call_count": len(calls),
+        }
+        if len(calls) > 1:
+            diagnostics.update(
+                {
+                    "prepare_parallel_call_count": len(calls),
+                    "deck_root_failure_code": "deck_prepare_parallel_calls_forbidden",
+                    "deck_root_failure_summary": (
+                        "Multiple prepare_deck_build calls were emitted in one model turn."
+                    ),
+                }
+            )
         if _pptx_diagnostics(state).get("first_prepare_turn") is None:
             diagnostics["first_prepare_turn"] = int(
                 state.get("builder_non_artifact_turns", 0) or 0

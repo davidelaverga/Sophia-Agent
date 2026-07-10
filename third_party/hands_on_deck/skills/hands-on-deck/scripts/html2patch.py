@@ -33,10 +33,22 @@ PT_PER_PX = 0.75
 # All geometry is in CSS px; Python converts to inches/points.
 EXTRACT_JS = r"""
 () => {
-  const out = { body: {}, items: [], warnings: [] };
+  const out = { body: {}, items: [], warnings: [], errors: [] };
   const cs = (el) => window.getComputedStyle(el);
   const TEXT_TAGS = new Set(['P','H1','H2','H3','H4','H5','H6']);
   const SINGLE_WEIGHT = new Set(['impact']);  // faux-bold widens text in PPT
+
+  const sourceMeta = (el) => ({
+    sourceId: el.getAttribute('data-deck-id') || null,
+    sourceRole: el.getAttribute('data-deck-role') || null,
+    sourceRequired: el.getAttribute('data-deck-required') === 'true',
+  });
+  const seenSourceIds = new Set();
+  document.querySelectorAll('[data-deck-id]').forEach(el => {
+    const sourceId = el.getAttribute('data-deck-id');
+    if (seenSourceIds.has(sourceId)) out.errors.push('duplicate data-deck-id: ' + sourceId);
+    seenSourceIds.add(sourceId);
+  });
 
   // an element whose rendered children are all inline (or text/BR) is a text
   // block even if it isn't a <p>/<h*> — figcaption, blockquote, dt, a bare div
@@ -281,6 +293,7 @@ EXTRACT_JS = r"""
       bgFit: (style2.backgroundSize || '').includes('cover') ? 'cover'
            : (style2.backgroundSize || '').includes('contain') ? 'contain' : 'fill',
       item: {
+        ...sourceMeta(el2),
         type: 'box', box: box2, rotation: rot2,
         fill: fill ? fill.hex : null,
         fillAlpha: fill ? fill.alpha : 1,
@@ -309,7 +322,7 @@ EXTRACT_JS = r"""
 
     if (tag === 'IMG') {
       const r = el.getBoundingClientRect();
-      out.items.push({ type: 'image', src: el.currentSrc || el.src,
+      out.items.push({ ...sourceMeta(el), type: 'image', src: el.currentSrc || el.src,
                        box: { x: r.left, y: r.top, w: r.width, h: r.height },
                        fit: style.objectFit || 'fill' });
       return;
@@ -352,7 +365,7 @@ EXTRACT_JS = r"""
         const colWidths = firstTr
           ? Array.from(firstTr.querySelectorAll('th,td')).map(c => c.getBoundingClientRect().width)
           : [];
-        out.items.push({ type: 'table', box: { x: r.left, y: r.top, w: r.width, h: r.height },
+        out.items.push({ ...sourceMeta(el), type: 'table', box: { x: r.left, y: r.top, w: r.width, h: r.height },
                          rows, cellStyles, colWidths,
                          fontSizePx: parseFloat(cs(el).fontSize) });
       }
@@ -365,11 +378,11 @@ EXTRACT_JS = r"""
       const paint = paintOf(el, style, rot, box);
       if (paint) {
         out.items.push(paint.item);  // badge/pill: the box paints under its text
-        if (paint.bgUrl) out.items.push({ type: 'image', src: paint.bgUrl, box, fit: paint.bgFit });
+        if (paint.bgUrl) out.items.push({ ...sourceMeta(el), type: 'image', src: paint.bgUrl, box, fit: paint.bgFit });
       }
       const paras = collectRuns(el, style.textTransform);
       if (paras.length)
-        out.items.push({ type: 'text', box, rotation: rot,
+        out.items.push({ ...sourceMeta(el), type: 'text', box, rotation: rot,
                          paragraphs: paras.map(runs => ({ runs })),
                          vanchor: measureVAnchor(el, style),
                          meta: blockMeta(el, style) });
@@ -394,7 +407,7 @@ EXTRACT_JS = r"""
         });
       });
       if (paragraphs.length)
-        out.items.push({ type: 'text', box: boxOf(el, rot), rotation: rot,
+        out.items.push({ ...sourceMeta(el), type: 'text', box: boxOf(el, rot), rotation: rot,
                          paragraphs, meta: blockMeta(el, style) });
       return;  // li content fully consumed
     }
@@ -406,7 +419,7 @@ EXTRACT_JS = r"""
       if (paint) {
         out.items.push(paint.item);
         if (paint.bgUrl)
-          out.items.push({ type: 'image', src: paint.bgUrl, box: paint.item.box, fit: paint.bgFit });
+          out.items.push({ ...sourceMeta(el), type: 'image', src: paint.bgUrl, box: paint.item.box, fit: paint.bgFit });
         // loose text mixed with block children is invisible to us — warn
         for (const n of el.childNodes)
           if (n.nodeType === Node.TEXT_NODE && n.textContent.trim())
@@ -430,7 +443,7 @@ EXTRACT_JS = r"""
         out.items.push(paint.item);
       }
       if (paint.bgUrl)
-        out.items.push({ type: 'image', src: paint.bgUrl, box: r, fit: paint.bgFit });
+        out.items.push({ ...sourceMeta(document.body), type: 'image', src: paint.bgUrl, box: r, fit: paint.bgFit });
     }
   }
   document.body.childNodes.forEach(n => { if (n.nodeType === Node.ELEMENT_NODE) emit(n); });
@@ -690,11 +703,13 @@ def table_ops(item, slide_ref, name, warnings):
     return ops
 
 
-def picture_op(path, box, fit, slide_ref):
+def picture_op(path, box, fit, slide_ref, name=None):
     """add-picture op honoring object-fit / background-size semantics."""
     op = {"op": "add-picture", "slide": slide_ref, "image": str(path),
           "at": [px2in(box["x"]), px2in(box["y"])],
           "size": [px2in(box["w"]), px2in(box["h"])]}
+    if name:
+        op["name"] = name
     if fit in ("cover", "contain"):
         from PIL import Image as PILImage
 
@@ -719,14 +734,42 @@ def picture_op(path, box, fit, slide_ref):
     return op
 
 
-def compile_page(extract, slide_ref, html_path, tmpdir, prefix, warnings):
+def compile_page(extract, slide_ref, html_path, tmpdir, prefix, warnings, source_map):
     """All ops for one extracted page targeting slide_ref."""
     ops = []
     seq = [0]
+    source_seq = {}
 
     def next_name(kind):
         seq[0] += 1
         return "%s-%s-%d" % (prefix, kind, seq[0])
+
+    def item_name(item, kind):
+        source_id = item.get("sourceId")
+        if not source_id:
+            return next_name(kind)
+        key = (source_id, kind)
+        source_seq[key] = source_seq.get(key, 0) + 1
+        return "%s-%s-%s-%d" % (prefix, source_id, kind, source_seq[key])
+
+    def record_source(item, emitted):
+        source_id = item.get("sourceId")
+        if not source_id:
+            return
+        selector = "slide:%d" % (slide_ref + 1)
+        slide_map = source_map.setdefault("slides", {}).setdefault(selector, {"elements": {}})
+        element = slide_map["elements"].setdefault(source_id, {
+            "source_role": item.get("sourceRole"),
+            "source_required": bool(item.get("sourceRequired")),
+            "shape_names": [],
+        })
+        for index, op in enumerate(emitted, start=1):
+            if op.get("op") not in ("add-shape", "add-picture", "add-table"):
+                continue
+            if not op.get("name"):
+                op["name"] = "%s-part-%d" % (item_name(item, op.get("kind", "shape")), index)
+            if op["name"] not in element["shape_names"]:
+                element["shape_names"].append(op["name"])
 
     # the body's own paint arrives as the first item(s) from the extractor
     for item in extract["items"]:
@@ -734,13 +777,17 @@ def compile_page(extract, slide_ref, html_path, tmpdir, prefix, warnings):
             p = resolve_image(item["src"], html_path.parent, tmpdir, warnings)
             if not p:
                 continue
-            ops.append(picture_op(p, item["box"], item.get("fit", "fill"), slide_ref))
+            emitted = [picture_op(p, item["box"], item.get("fit", "fill"), slide_ref, item_name(item, "image"))]
         elif item["type"] == "text":
-            ops += text_block_ops(item, slide_ref, next_name("text"), warnings)
+            emitted = text_block_ops(item, slide_ref, item_name(item, "text"), warnings)
         elif item["type"] == "box":
-            ops += box_ops(item, slide_ref, next_name("box"), warnings)
+            emitted = box_ops(item, slide_ref, item_name(item, "box"), warnings)
         elif item["type"] == "table":
-            ops += table_ops(item, slide_ref, next_name("table"), warnings)
+            emitted = table_ops(item, slide_ref, item_name(item, "table"), warnings)
+        else:
+            emitted = []
+        record_source(item, emitted)
+        ops += emitted
     return ops
 
 
@@ -758,6 +805,7 @@ def main():
                     help="shape name prefix (default: h2p-<n>)")
     ap.add_argument("--strict", action="store_true", help="treat warnings as errors")
     ap.add_argument("-o", "--out", help="output patch path (default: stdout)")
+    ap.add_argument("--source-map", help="optional source-element map JSON path")
     args = ap.parse_args()
 
     if args.slide is not None and len(args.html) > 1:
@@ -789,6 +837,7 @@ def main():
 
     warnings = []
     all_ops = []
+    source_map = {"schema_version": "sophia-deck-source-map/v1", "slides": {}}
     tmpdir = tempfile.mkdtemp(prefix="html2patch-")
 
     with sync_playwright() as pw:
@@ -802,7 +851,7 @@ def main():
             extract = page.evaluate(EXTRACT_JS)
             body = extract["body"]
 
-            errs = []
+            errs = list(extract.get("errors") or [])
             if abs(body["w"] / PX_PER_IN - slide_w) > 0.05 or abs(body["h"] / PX_PER_IN - slide_h) > 0.05:
                 errs.append(
                     "%s: body is %.2fx%.2fin but the slide is %.2fx%.2fin — set "
@@ -826,7 +875,7 @@ def main():
             prefix = args.prefix or ("h2p-%d" % (i + 1) if len(args.html) > 1 else "h2p")
             for w in extract["warnings"]:
                 warnings.append("%s: %s" % (html_file, w))
-            all_ops += compile_page(extract, slide_ref, html_path, tmpdir, prefix, warnings)
+            all_ops += compile_page(extract, slide_ref, html_path, tmpdir, prefix, warnings, source_map)
         browser.close()
 
     for w in sorted(set(warnings)):
@@ -835,6 +884,11 @@ def main():
         die("%d warning(s) with --strict" % len(warnings))
 
     patch = json.dumps({"ops": all_ops}, indent=1, ensure_ascii=False)
+    if args.source_map:
+        Path(args.source_map).write_text(
+            json.dumps(source_map, indent=2, ensure_ascii=False) + "\n",
+            encoding="utf-8",
+        )
     if args.out:
         Path(args.out).write_text(patch + "\n")
         sys.stderr.write("html2patch: %d op(s) -> %s\n" % (len(all_ops), args.out))

@@ -40,6 +40,11 @@ from deerflow.sophia.deck_build.image_assets import (
 from deerflow.sophia.deck_build.image_prompting import deck_asset_prompt_payload
 from deerflow.sophia.deck_build.mechanical_gates import evaluate_mechanical_gates
 from deerflow.sophia.deck_build.models import DeckBuild, DeckBuildResult, DeckSlideSpec
+from deerflow.sophia.deck_build.native_contrast import evaluate_native_contrast
+from deerflow.sophia.deck_build.source_retention import (
+    evaluate_source_retention,
+    retention_summary,
+)
 from deerflow.sophia.deck_build.storage import save_deck_build
 from deerflow.sophia.deck_build.tracing import (
     DEFAULT_ARTIFACT_TARGET_EXT,
@@ -1062,6 +1067,7 @@ class DeckBuildService:
                 raise DeckBuildFailure("deck_deadline_exceeded", _native_error_summary(html2patch.errors, "Deck deadline exceeded."), retryable=False)
             code = "deck_native_startup_failed" if _native_startup_error(html2patch.errors) else "deck_native_html2patch_failed"
             raise DeckBuildFailure(code, _native_error_summary(html2patch.errors, "Native html2patch failed."), retryable=False)
+        deck.source_element_map = _load_json_dict(html2patch.source_map_path)
         _assert_deck_deadline(runtime, stage="native_patch_apply")
         with deck_span(
             "deck.native.patch_apply",
@@ -1135,6 +1141,39 @@ class DeckBuildService:
         for slide in deck.slides:
             slide.gate_results["native_editability_score"] = deck.native_editability_score
             slide.gate_results["lint_residue_count"] = lint_fix.residue_count
+        final_inspected = self._inspect_final_native_pptx(
+            deck=deck,
+            runtime=runtime,
+            output_host=output_host,
+            fix_applied_count=lint_fix.fix_applied_count,
+        )
+        with deck_span(
+            "deck.source_retention.evaluate",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            deck_compile_mode=deck.deck_compile_mode,
+            inputs={"source_map_slide_count": len(deck.source_element_map.get("slides") or {})},
+        ) as run:
+            retention_reports = evaluate_source_retention(
+                slides=deck.slides,
+                native_shape_inventory=deck.native_shape_inventory,
+                source_element_map=deck.source_element_map,
+            )
+            deck.source_retention_report = retention_summary(retention_reports)
+            finish_span(
+                run,
+                {
+                    "passed": deck.source_retention_report.get("passed"),
+                    "missing_required_count": deck.source_retention_report.get("missing_required_count"),
+                    "duplicate_source_id_count": deck.source_retention_report.get("duplicate_source_id_count"),
+                    "low_retention_count": len(deck.source_retention_report.get("low_retention") or []),
+                },
+            )
+        self._evaluate_final_native_contrast(deck=deck, runtime=runtime, output_host=output_host)
         _assert_deck_deadline(runtime, stage="native_render")
         with deck_span(
             "deck.native.render",
@@ -1172,11 +1211,13 @@ class DeckBuildService:
                 raise DeckBuildFailure("deck_deadline_exceeded", "The shared builder deadline expired during native diff.", retryable=False)
             deck.quality_warning = _merge_warning(deck.quality_warning, "native_diff_unavailable")
         deck.native_mechanical_report = native_mechanical_report(
-            inspect=inspected,
+            inspect=final_inspected,
             lint_fix=lint_fix,
             render=rendered,
             diff=diff,
         )
+        deck.native_mechanical_report["source_retention"] = deck.source_retention_report
+        deck.native_mechanical_report["contrast"] = deck.native_contrast_report
         with deck_span(
             "deck.native.mechanical_report",
             runtime=runtime,
@@ -1216,6 +1257,84 @@ class DeckBuildService:
         deck.pptx_path = deck.output_path
         deck.compile_overflow_slides = []
         deck.status = "compiled"
+
+    def _inspect_final_native_pptx(
+        self,
+        *,
+        deck: DeckBuild,
+        runtime: ToolRuntime,
+        output_host: Path,
+        fix_applied_count: int,
+    ) -> NativeDeckInspectResult:
+        _assert_deck_deadline(runtime, stage="native_final_inspect")
+        with deck_span(
+            "deck.native.inspect_final",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            deck_compile_mode=deck.deck_compile_mode,
+            inputs={"pptx_file": basename(deck.output_path), "fix_applied_count": fix_applied_count},
+        ) as run:
+            inspected = self._native_service.inspect(str(output_host))
+            finish_span(run, _native_inspect_span_outputs(inspected))
+        if not inspected.success:
+            raise DeckBuildFailure(
+                "deck_native_inspect_failed",
+                _native_error_summary(inspected.errors, "Final native inspect failed."),
+                retryable=False,
+            )
+        self._record_native_inspect(deck, inspected)
+        return inspected
+
+    def _evaluate_final_native_contrast(
+        self,
+        *,
+        deck: DeckBuild,
+        runtime: ToolRuntime,
+        output_host: Path,
+    ) -> None:
+        with deck_span(
+            "deck.native.contrast",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            run_type="tool",
+            deck_compile_mode=deck.deck_compile_mode,
+            inputs={"pptx_file": basename(deck.output_path)},
+        ) as run:
+            try:
+                deck.native_contrast_report = evaluate_native_contrast(
+                    pptx_path=output_host,
+                    source_element_map=deck.source_element_map,
+                )
+            except Exception as exc:  # noqa: BLE001 - analyzer failures become clean terminal results.
+                finish_span(
+                    run,
+                    {
+                        "passed": False,
+                        "failure_code": "deck_native_contrast_analysis_failed",
+                        "error_class": type(exc).__name__,
+                    },
+                )
+                raise DeckBuildFailure(
+                    "deck_native_contrast_analysis_failed",
+                    "The final native PPTX could not be analyzed for deterministic text contrast.",
+                    retryable=False,
+                ) from exc
+            finish_span(
+                run,
+                {
+                    "passed": deck.native_contrast_report.get("passed"),
+                    "checked_run_count": deck.native_contrast_report.get("checked_run_count"),
+                    "required_issue_count": deck.native_contrast_report.get("required_issue_count"),
+                    "indeterminate_required_count": deck.native_contrast_report.get("indeterminate_required_count"),
+                },
+            )
 
     def _record_native_inspect(self, deck: DeckBuild, inspected: NativeDeckInspectResult) -> None:
         deck.native_editability_score = inspected.native_editability_score
@@ -1422,6 +1541,8 @@ class DeckBuildService:
             batch_timeout_count=deck.batch_timeout_count,
             partial_batch_salvaged=deck.partial_batch_salvaged,
             native_mechanical_report=deck.native_mechanical_report,
+            source_retention_report=deck.source_retention_report,
+            native_contrast_report=deck.native_contrast_report,
             repair_instruction=None,
         )
 
@@ -1540,6 +1661,10 @@ class DeckBuildService:
             quality_warning=deck.quality_warning,
             warnings=[deck.quality_warning] if deck.quality_warning else [],
             native_mechanical_report=deck.native_mechanical_report,
+            source_retention_report=deck.source_retention_report,
+            native_contrast_report=deck.native_contrast_report,
+            root_failure_code=exc.code,
+            root_failure_summary=exc.summary,
             repair_instruction=_repair_instruction_for_failure(exc),
         )
 
@@ -1807,6 +1932,7 @@ def _native_patch_span_outputs(result: NativeDeckPatchResult) -> dict[str, Any]:
         "patch_file": basename(result.patch_path),
         "output_file": basename(result.output_pptx_path),
         "patch_op_count": result.patch_op_count,
+        "source_map_file": basename(result.source_map_path),
         "validation_error_count": result.validation_error_count,
         "error_count": len(result.errors),
         "error_excerpt": safe_excerpt(result.errors[0]) if result.errors else None,
@@ -1862,6 +1988,16 @@ def _load_native_shape_inventory(path: str | None) -> dict[str, Any]:
         return {}
     slides = payload.get("slides") if isinstance(payload, dict) else None
     return slides if isinstance(slides, dict) else {}
+
+
+def _load_json_dict(path: str | None) -> dict[str, Any]:
+    if not path:
+        return {}
+    try:
+        payload = json.loads(Path(path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return payload if isinstance(payload, dict) else {}
 
 
 def _slide_html_virtual_path(slide: DeckSlideSpec) -> str:
