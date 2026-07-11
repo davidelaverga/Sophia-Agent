@@ -188,6 +188,26 @@ html, body { width: 1920px; height: 1080px; background: #0A0E14; }
     assert any("CSS url(...)" in error for error in result.errors)
 
 
+def test_rejects_css_image_set_subresources_before_rendering() -> None:
+    for function_name, source in (
+        ("image-set", '"https://example.com/hero.png" 1x'),
+        ("image-set", '"file:///etc/passwd" 1x'),
+        ("-webkit-image-set", '"../assets/slide-01.png" 1x'),
+    ):
+        html = f"""<!doctype html><html><head><style>
+html, body {{ width: 1920px; height: 1080px; background: #0A0E14; }}
+.canvas {{ width: 1920px; height: 1080px; background-image: {function_name}({source}); }}
+</style></head><body><main class="canvas"><h1>Title</h1></main></body></html>"""
+
+        _sanitized, result = validate_and_sanitize_slide_html(
+            _slide(html),
+            allowed_asset_refs={"slide-01.png"},
+        )
+
+        assert result.valid is False
+        assert any("CSS image-set(...)" in error for error in result.errors)
+
+
 def test_accepts_direct_planned_asset_reference() -> None:
     html = """<!doctype html><html><head><style>
 html, body { width: 1920px; height: 1080px; background: #0A0E14; }

@@ -28,6 +28,7 @@ _REMOTE_URI_RE = re.compile(r"^(?:https?:)?//|^https?:", re.I)
 _DATA_URI_RE = re.compile(r"^data:", re.I)
 _FILE_URI_RE = re.compile(r"^file:", re.I)
 _CSS_URL_RE = re.compile(r"\burl\s*\(", re.I)
+_CSS_IMAGE_SET_RE = re.compile(r"\b(?:-webkit-)?image-set\s*\(", re.I)
 _URL_ATTRIBUTE_NAMES = {"src", "href", "poster", "background", "data"}
 _LEGACY_SUBRESOURCE_ATTRIBUTE_NAMES = {"poster", "background", "data"}
 _DECK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -374,3 +375,5 @@ def _selector_rule_body(css: str, selector: str) -> str:
 def _validate_css_urls(css: str, validation: HtmlSourceValidation) -> None:
     if _CSS_URL_RE.search(css):
         validation.errors.append("CSS url(...) subresources are forbidden; use planned <img> assets")
+    if _CSS_IMAGE_SET_RE.search(css):
+        validation.errors.append("CSS image-set(...) subresources are forbidden; use planned <img> assets")
