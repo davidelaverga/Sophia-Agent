@@ -237,6 +237,8 @@ class DeckSlideSpec:
     narrative: str
     claim: str | None = None
     visual_prompt: str | None = None
+    html_body: str | None = None
+    slide_css: str | None = None
     html_source: str | None = None
     speaker_notes: str | None = None
     visual_required: bool = True
@@ -272,6 +274,11 @@ class DeckBuild:
     output_path: str
     slides: list[DeckSlideSpec]
     expected_visual_count: int
+    deck_stylesheet: str | None = None
+    deck_authoring_contract: str = "legacy_full_html_v1"
+    deck_stylesheet_hash: str | None = None
+    deck_html_fragment_count: int = 0
+    deck_assembled_html_bytes: int = 0
     design_plan: DeckDesignPlan | dict[str, Any] | None = None
     creative_plan: DeckCreativePlan | dict[str, Any] | None = None
     creative_plan_path: str | None = None
@@ -373,6 +380,10 @@ class DeckBuildResult:
     successful_visual_count: int = 0
     referenced_visual_count: int = 0
     missing_visual_count: int = 0
+    deck_authoring_contract: str = "legacy_full_html_v1"
+    deck_stylesheet_hash: str | None = None
+    deck_html_fragment_count: int = 0
+    deck_assembled_html_bytes: int = 0
     creative_plan_path: str | None = None
     design_plan_path: str | None = None
     asset_policy_path: str | None = None

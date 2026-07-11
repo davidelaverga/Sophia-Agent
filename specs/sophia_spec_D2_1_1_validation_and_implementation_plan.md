@@ -15,6 +15,23 @@ D2.1.1 is valid in direction and should be implemented. Its central contract is 
 
 The implementation must not follow the supplied file ledger literally. Validation found several repository and upstream mismatches that would otherwise reintroduce the same production loops or create new model-facing route conflicts. The amendments in this document are authoritative when they differ from the source spec.
 
+### 1.1 Runtime remediation amendment
+
+Production evidence from 2026-07-11 showed that six repeated complete HTML
+documents made the 120-second prepare latch unenforceable and left too little
+of the eight-minute deadline for native execution. The model still owns CSS,
+markup, semantics, and composition, but the model-facing transport is now:
+
+```text
+deck_stylesheet
+slides[*].html_body
+slides[*].slide_css (optional)
+```
+
+DeckBuildService contributes only a fixed document shell and does not import
+or activate `html_design_renderer.py`. Legacy `html_source` is accepted only
+for transitional internal callers and is hidden from the model schema.
+
 ## 2. Evidence Reviewed
 
 ### Local implementation

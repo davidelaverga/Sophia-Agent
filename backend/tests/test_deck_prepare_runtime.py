@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Any, NotRequired, override
 
+import pytest
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import hook_config
@@ -22,6 +24,9 @@ from deerflow.agents.sophia_agent.middlewares import builder_artifact as artifac
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
     BuilderArtifactState,
+)
+from deerflow.agents.sophia_agent.middlewares.builder_provider_fallback import (
+    BuilderProviderFallbackMiddleware,
 )
 
 
@@ -69,6 +74,19 @@ class _PrepareSequenceModel(BaseChatModel):
         if not self._responses:
             raise AssertionError("deck runtime requested an unexpected extra model turn")
         return ChatResult(generations=[ChatGeneration(message=self._responses.pop(0))])
+
+
+class _ModelRequest:
+    def __init__(self, state: dict[str, Any], model_settings: dict[str, Any] | None = None) -> None:
+        self.state = state
+        self.model_settings = model_settings or {}
+        self.model = object()
+
+    def override(self, **overrides: Any) -> _ModelRequest:
+        return _ModelRequest(
+            overrides.get("state", self.state),
+            overrides.get("model_settings", self.model_settings),
+        )
 
 
 def _prepare_call(call_id: str, *, repaired: bool) -> AIMessage:
@@ -190,6 +208,7 @@ def test_retryable_prepare_runs_one_real_retry_then_finalizes(
     assert result["builder_result"]["terminal_reason"] == "deck_build_succeeded"
     assert result["builder_result"]["prepare_call_count"] == 2
     assert result["builder_result"]["prepare_emitted_call_count"] == 2
+    assert result["builder_result"]["prepare_execution_count"] == 2
     assert result["builder_result"]["prepare_normalized_call_count"] == 2
     assert result["builder_result"]["prepare_service_call_count"] == 2
     assert result["builder_result"]["prepare_service_result_count"] == 2
@@ -201,16 +220,14 @@ def test_retryable_prepare_runs_one_real_retry_then_finalizes(
     diagnostics = result["builder_pptx_diagnostics"]
     assert diagnostics["prepare_call_count"] == 2
     assert diagnostics["prepare_emitted_call_count"] == 2
+    assert diagnostics["prepare_execution_count"] == 2
     assert diagnostics["prepare_normalized_call_count"] == 2
     assert diagnostics["prepare_service_call_count"] == 2
     assert diagnostics["prepare_service_result_count"] == 2
     assert diagnostics["prepare_result_count"] == 2
     assert diagnostics["prepare_retry_executed"] is True
     assert diagnostics["creative_plan_accepted"] is True
-    assert not any(
-        "interrupted and did not return" in str(message.content)
-        for message in result["messages"]
-    )
+    assert not any("interrupted and did not return" in str(message.content) for message in result["messages"])
     assert any(call.get("tool_choice") for call in model._bind_calls)
 
 
@@ -250,6 +267,45 @@ def test_service_owned_presentation_completion_never_forces_write_file() -> None
     choice = BuilderArtifactMiddleware()._completion_tool_choice_for_state(state)
 
     assert choice == {"type": "tool", "name": "prepare_deck_build"}
+
+
+def test_presentation_model_request_is_bounded_by_authoring_deadline() -> None:
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation"},
+        "builder_task_kickoff_ms": int(time.time() * 1000) - 30_000,
+        "builder_budget": {
+            "tier": "presentation",
+            "prepare_force_after_seconds": 120,
+            "authoring_max_tokens": 16_384,
+            "authoring_timeout_seconds": 110,
+        },
+    }
+
+    request = BuilderArtifactMiddleware._bounded_presentation_model_request(_ModelRequest(state))
+
+    assert request.model_settings["max_tokens"] == 16_384
+    assert 88 <= request.model_settings["timeout"] <= 90
+    assert request.model_settings["max_retries"] == 0
+
+
+def test_presentation_authoring_disables_provider_fallback() -> None:
+    state = {
+        "builder_budget": {"tier": "presentation"},
+        "builder_pptx_diagnostics": {"prepare_emitted_call_count": 0},
+    }
+    request = _ModelRequest(state)
+    calls = 0
+
+    def handler(_request):
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("primary failed")
+
+    with pytest.raises(RuntimeError, match="primary failed"):
+        BuilderProviderFallbackMiddleware().wrap_model_call(request, handler)
+
+    assert calls == 1
 
 
 def test_missing_retry_result_terminalizes_before_dangling_repair(
@@ -319,7 +375,4 @@ def test_missing_retry_result_terminalizes_before_dangling_repair(
     assert result["builder_result"]["failure_code"] == "deck_prepare_tool_result_missing"
     assert result["builder_deck_prepare_phase"] == "terminal"
     assert result["builder_pptx_diagnostics"]["dangling_prepare_call_count"] == 1
-    assert not any(
-        "interrupted and did not return" in str(message.content)
-        for message in result["messages"]
-    )
+    assert not any("interrupted and did not return" in str(message.content) for message in result["messages"])

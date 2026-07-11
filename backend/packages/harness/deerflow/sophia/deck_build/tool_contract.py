@@ -4,7 +4,8 @@ from __future__ import annotations
 
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic.json_schema import SkipJsonSchema
 
 from deerflow.sophia.deck_build.prepare_input import (
     normalize_creative_plan_value,
@@ -143,9 +144,7 @@ class DeckCreativePlanInput(BaseModel):
     ]
     image_strategy_rationale: str = Field(description="Why the selected visual medium fits this deck.")
     image_assets: list[DeckImageAssetInput] = Field(description="Planned generated assets; may be empty.")
-    slide_compositions: list[DeckSlideCompositionInput] = Field(
-        description="Exactly one canonical composition record for every slide."
-    )
+    slide_compositions: list[DeckSlideCompositionInput] = Field(description="Exactly one canonical composition record for every slide.")
     skill_refs: list[str] = Field(
         min_length=1,
         description="Design guidance used; must include hands-on-deck/designing-slides.",
@@ -154,15 +153,78 @@ class DeckCreativePlanInput(BaseModel):
     anti_slop_commitments: list[str] = Field(default_factory=list)
 
 
+_MAX_DECK_STYLESHEET_BYTES = 24 * 1024
+_MAX_SLIDE_HTML_BODY_BYTES = 16 * 1024
+_MAX_SLIDE_CSS_BYTES = 8 * 1024
+_MAX_AUTHORING_PAYLOAD_BYTES = 128 * 1024
+_DOCUMENT_FRAGMENT_TAGS = ("<html", "</html", "<head", "</head", "<body", "</body", "<style", "</style")
+
+
+def _utf8_size(value: str | None) -> int:
+    return len((value or "").encode("utf-8"))
+
+
+def _compact_slide_json_schema(schema: dict[str, Any]) -> None:
+    required = schema.setdefault("required", [])
+    if "html_body" not in required:
+        required.append("html_body")
+    body_schema = schema.get("properties", {}).get("html_body")
+    if isinstance(body_schema, dict):
+        body_schema.pop("default", None)
+
+
+def _compact_prepare_json_schema(schema: dict[str, Any]) -> None:
+    required = schema.setdefault("required", [])
+    if "deck_stylesheet" not in required:
+        required.append("deck_stylesheet")
+    stylesheet_schema = schema.get("properties", {}).get("deck_stylesheet")
+    if isinstance(stylesheet_schema, dict):
+        stylesheet_schema.pop("default", None)
+
+
 class DeckSlideInput(BaseModel):
+    model_config = ConfigDict(json_schema_extra=_compact_slide_json_schema)
     title: str = Field(min_length=1, max_length=90)
     narrative: str = Field(min_length=1, max_length=280)
     role: str = Field(default="content")
     layout_kind: str = Field(default="single_visual_focus")
-    html_source: str = Field(min_length=1, description="Complete 1920x1080 compiler-supported slide HTML.")
+    html_body: str | None = Field(
+        default=None,
+        description=("Compiler-supported markup inside the slide canvas. Do not include html, head, body, or style tags."),
+    )
+    slide_css: str | None = Field(
+        default=None,
+        description="Optional CSS used only by this slide; shared rules belong in deck_stylesheet.",
+    )
+    # Transitional service compatibility. Keeping this out of JSON schema prevents
+    # new model calls from rediscovering the oversized six-document contract.
+    html_source: SkipJsonSchema[str | None] = Field(default=None)
     speaker_notes: str | None = None
     claim: str | None = None
     visual_prompt: str | None = None
+
+    @model_validator(mode="after")
+    def _validate_authoring_source(self) -> DeckSlideInput:
+        body = (self.html_body or "").strip()
+        source = (self.html_source or "").strip()
+        slide_css = (self.slide_css or "").strip()
+        if body and source:
+            raise ValueError("html_body and legacy html_source are mutually exclusive")
+        if not body and not source:
+            raise ValueError("html_body is required for compact deck authoring")
+        if body:
+            lower = body.lower()
+            forbidden = next((tag for tag in _DOCUMENT_FRAGMENT_TAGS if tag in lower), None)
+            if forbidden:
+                raise ValueError(f"html_body contains forbidden document tag {forbidden}")
+            if _utf8_size(body) > _MAX_SLIDE_HTML_BODY_BYTES:
+                raise ValueError("html_body exceeds the 16384-byte limit")
+        if slide_css:
+            if "</style" in slide_css.lower():
+                raise ValueError("slide_css must not contain a closing style tag")
+            if _utf8_size(slide_css) > _MAX_SLIDE_CSS_BYTES:
+                raise ValueError("slide_css exceeds the 8192-byte limit")
+        return self
 
 
 NormalizedDeckSlides = Annotated[list[DeckSlideInput], BeforeValidator(normalize_slides_value)]
@@ -173,11 +235,43 @@ NormalizedDeckCreativePlan = Annotated[
 
 
 class PrepareDeckBuildInput(BaseModel):
+    model_config = ConfigDict(json_schema_extra=_compact_prepare_json_schema)
     deck_title: str
     slides: NormalizedDeckSlides
     output_path: str
     creative_plan: NormalizedDeckCreativePlan
+    deck_stylesheet: str | None = Field(
+        default=None,
+        description=("Shared compiler-supported CSS for every slide. It must style the main 1920x1080 canvas with an opaque background."),
+    )
     register: str = "professional_technical"
     visual_policy: str = "auto"
     style_profile: dict[str, Any] | None = None
     design_plan: dict[str, Any] | None = None
+
+    @model_validator(mode="after")
+    def _validate_authoring_mode(self) -> PrepareDeckBuildInput:
+        compact_indexes = [index for index, slide in enumerate(self.slides) if (slide.html_body or "").strip()]
+        legacy_indexes = [index for index, slide in enumerate(self.slides) if (slide.html_source or "").strip()]
+        if compact_indexes and legacy_indexes:
+            raise ValueError("slides use mixed authoring modes; every slide must use html_body or every slide must use legacy html_source")
+        stylesheet = (self.deck_stylesheet or "").strip()
+        if compact_indexes:
+            if len(compact_indexes) != len(self.slides):
+                raise ValueError("compact authoring requires html_body for every slide")
+            if not stylesheet:
+                raise ValueError("deck_stylesheet is required for compact deck authoring")
+            if "</style" in stylesheet.lower():
+                raise ValueError("deck_stylesheet must not contain a closing style tag")
+            if _utf8_size(stylesheet) > _MAX_DECK_STYLESHEET_BYTES:
+                raise ValueError("deck_stylesheet exceeds the 24576-byte limit")
+        elif stylesheet:
+            raise ValueError("deck_stylesheet cannot be combined with legacy html_source")
+        total_bytes = _utf8_size(stylesheet)
+        for slide in self.slides:
+            total_bytes += _utf8_size(slide.html_body)
+            total_bytes += _utf8_size(slide.slide_css)
+            total_bytes += _utf8_size(slide.html_source)
+        if total_bytes > _MAX_AUTHORING_PAYLOAD_BYTES:
+            raise ValueError("deck authoring payload exceeds the 131072-byte limit")
+        return self

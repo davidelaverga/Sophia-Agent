@@ -33,6 +33,34 @@ _LEGACY_SUBRESOURCE_ATTRIBUTE_NAMES = {"poster", "background", "data"}
 _DECK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 
+def assemble_compact_slide_html(
+    *,
+    deck_stylesheet: str,
+    html_body: str,
+    slide_css: str | None = None,
+) -> str:
+    """Wrap model-owned CSS and markup in a content-free compiler shell."""
+
+    return f"""<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<style>
+html, body {{ margin: 0; padding: 0; width: 1920px; height: 1080px; overflow: hidden; }}
+main {{ width: 1920px; height: 1080px; box-sizing: border-box; overflow: hidden; }}
+{deck_stylesheet}
+{slide_css or ""}
+</style>
+</head>
+<body>
+<main class="slide-root" style="width: 1920px; height: 1080px;">
+{html_body}
+</main>
+</body>
+</html>
+"""
+
+
 @dataclass
 class HtmlSourceValidation:
     selector: str
@@ -169,16 +197,8 @@ def validate_and_sanitize_slide_html(
 
 
 def validation_summary(results: list[HtmlSourceValidation]) -> dict[str, Any]:
-    errors = [
-        {"selector": result.selector, "error": error}
-        for result in results
-        for error in result.errors
-    ]
-    warnings = [
-        {"selector": result.selector, "warning": warning}
-        for result in results
-        for warning in result.warnings
-    ]
+    errors = [{"selector": result.selector, "error": error} for result in results for error in result.errors]
+    warnings = [{"selector": result.selector, "warning": warning} for result in results for warning in result.warnings]
     return {
         "valid": not errors,
         "slide_count": len(results),
@@ -186,21 +206,9 @@ def validation_summary(results: list[HtmlSourceValidation]) -> dict[str, Any]:
         "warning_count": len(warnings),
         "errors": errors[:12],
         "warnings": warnings[:12],
-        "image_refs": {
-            result.selector: result.image_refs
-            for result in results
-            if result.image_refs
-        },
-        "unsupported_tags": {
-            result.selector: result.unsupported_tags
-            for result in results
-            if result.unsupported_tags
-        },
-        "unsupported_css": {
-            result.selector: result.unsupported_css
-            for result in results
-            if result.unsupported_css
-        },
+        "image_refs": {result.selector: result.image_refs for result in results if result.image_refs},
+        "unsupported_tags": {result.selector: result.unsupported_tags for result in results if result.unsupported_tags},
+        "unsupported_css": {result.selector: result.unsupported_css for result in results if result.unsupported_css},
     }
 
 

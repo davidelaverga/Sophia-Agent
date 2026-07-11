@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from copy import deepcopy
 from pathlib import Path
 
 import pytest
@@ -51,6 +52,79 @@ def test_prepare_contract_rejects_double_encoded_json() -> None:
         )
 
     assert exc.value.errors()[0]["loc"] == ("slides",)
+
+
+def test_prepare_contract_rejects_mixed_compact_and_legacy_sources() -> None:
+    slides = _slides()
+    slides[0]["html_body"] = "<section>compact</section>"
+    with pytest.raises(ValidationError) as exc:
+        PrepareDeckBuildInput.model_validate(
+            {
+                "deck_title": "Technical Deck",
+                "slides": slides,
+                "output_path": "/mnt/user-data/outputs/deck.pptx",
+                "creative_plan": _creative_plan(),
+                "deck_stylesheet": "main { background: #101828; }",
+            }
+        )
+
+    assert "slides.0" in str(exc.value)
+
+
+def _compact_slide() -> dict:
+    slide = deepcopy(_slides()[0])
+    slide.pop("html_source")
+    slide["html_body"] = '<h1 data-deck-id="title" data-deck-role="title">Compact</h1>'
+    return slide
+
+
+def test_prepare_contract_rejects_document_tags_and_oversized_fragments() -> None:
+    slide = _compact_slide()
+    slide["html_body"] = "<body>not a fragment</body>"
+    with pytest.raises(ValidationError) as tag_error:
+        PrepareDeckBuildInput.model_validate(
+            {
+                "deck_title": "Technical Deck",
+                "slides": [slide],
+                "output_path": "/mnt/user-data/outputs/deck.pptx",
+                "creative_plan": _creative_plan(),
+                "deck_stylesheet": "main { background: #101828; }",
+            }
+        )
+    assert tag_error.value.errors()[0]["loc"] == ("slides", 0)
+
+    slide["html_body"] = "x" * (16 * 1024 + 1)
+    with pytest.raises(ValidationError) as size_error:
+        PrepareDeckBuildInput.model_validate(
+            {
+                "deck_title": "Technical Deck",
+                "slides": [slide],
+                "output_path": "/mnt/user-data/outputs/deck.pptx",
+                "creative_plan": _creative_plan(),
+                "deck_stylesheet": "main { background: #101828; }",
+            }
+        )
+    assert size_error.value.errors()[0]["loc"] == ("slides", 0)
+
+
+def test_prepare_contract_rejects_total_authoring_payload_over_128_kib() -> None:
+    slides = []
+    for index in range(8):
+        slide = _compact_slide()
+        slide["title"] = f"Compact {index}"
+        slide["html_body"] = "x" * (16 * 1024)
+        slides.append(slide)
+
+    with pytest.raises(ValidationError, match="131072-byte limit"):
+        PrepareDeckBuildInput.model_validate(
+            {
+                "deck_title": "Technical Deck",
+                "slides": slides,
+                "output_path": "/mnt/user-data/outputs/deck.pptx",
+                "creative_plan": _creative_plan(),
+                "deck_stylesheet": "main { background: #101828; }",
+            }
+        )
 
 
 def test_compiler_capabilities_reject_svg_and_lossy_semantic_css() -> None:

@@ -136,8 +136,7 @@ def log_builder_tracing_startup_status() -> None:
     try:
         config = get_tracing_config()
         logger.info(
-            "[tracing] builder_tracing_flag=%s langsmith_tracing_enabled=%s "
-            "project=%s endpoint=%s api_key_present=%s",
+            "[tracing] builder_tracing_flag=%s langsmith_tracing_enabled=%s project=%s endpoint=%s api_key_present=%s",
             langsmith_builder_tracing_requested(),
             config.enabled,
             config.project,
@@ -537,11 +536,7 @@ def _qc_results(diagnostics: dict[str, Any]) -> list[dict[str, Any]]:
 
 
 def _degraded(artifact: dict[str, Any], diagnostics: dict[str, Any]) -> bool:
-    return bool(
-        _true_artifact_fallback(artifact)
-        or artifact.get("quality_warning")
-        or _as_int(diagnostics.get("dropped_image_refs")) > 0
-    )
+    return bool(_true_artifact_fallback(artifact) or artifact.get("quality_warning") or _as_int(diagnostics.get("dropped_image_refs")) > 0)
 
 
 def _fallback_reason_for_metadata(artifact: dict[str, Any], diagnostics: dict[str, Any]) -> str | None:
@@ -627,15 +622,7 @@ def _emit_rejection_count(state: dict[str, Any]) -> int:
     summaries = state.get("builder_tool_turn_summaries") or []
     if not isinstance(summaries, list):
         return 0
-    return sum(
-        1
-        for summary in summaries
-        if isinstance(summary, dict)
-        and (
-            summary.get("failure_stage") == "emit_rejected"
-            or summary.get("emit_rejected") is True
-        )
-    )
+    return sum(1 for summary in summaries if isinstance(summary, dict) and (summary.get("failure_stage") == "emit_rejected" or summary.get("emit_rejected") is True))
 
 
 def _image_hashes_from_records(records: object) -> list[str]:
@@ -685,11 +672,7 @@ def _visual_record_grammar(record: Any) -> str | None:
 
 def _deck_gate_tag(state: dict[str, Any], artifact_ext: str | None, image_forward: bool) -> str | None:
     diagnostics = _as_dict(state.get("builder_pptx_diagnostics"))
-    if artifact_ext == "pptx" and (
-        image_forward
-        or state.get("builder_presentation_terminal_ready") is True
-        or _as_int(diagnostics.get("pptx_generator_success_count")) > 0
-    ):
+    if artifact_ext == "pptx" and (image_forward or state.get("builder_presentation_terminal_ready") is True or _as_int(diagnostics.get("pptx_generator_success_count")) > 0):
         return "deck_latch_passed"
     return None
 
@@ -699,12 +682,7 @@ def _artifact_is_pdf(artifact: dict[str, Any], artifact_ext: str | None) -> bool
 
 
 def _artifact_pdf_layout_failed(artifact: dict[str, Any]) -> bool:
-    failure_code = str(
-        artifact.get("failure_code")
-        or artifact.get("acceptance_failure_code")
-        or artifact.get("error_reason")
-        or ""
-    )
+    failure_code = str(artifact.get("failure_code") or artifact.get("acceptance_failure_code") or artifact.get("error_reason") or "")
     return failure_code == "pdf_page_count_off_target" or artifact.get("artifact_acceptance_status") == "failed"
 
 
@@ -794,6 +772,7 @@ def _add_pptx_terminal_metadata(metadata: dict[str, Any], diagnostics: dict[str,
         "first_prepare_turn",
         "prepare_call_count",
         "prepare_emitted_call_count",
+        "prepare_execution_count",
         "prepare_normalized_call_count",
         "prepare_schema_failure_count",
         "prepare_parallel_call_count",
@@ -804,6 +783,12 @@ def _add_pptx_terminal_metadata(metadata: dict[str, Any], diagnostics: dict[str,
         "dangling_prepare_call_count",
         "creative_plan_accepted",
         "prepare_latch_activated_at_turn",
+        "deck_authoring_contract",
+        "deck_authoring_elapsed_ms",
+        "prepare_force_reason",
+        "deck_html_fragment_count",
+        "deck_assembled_html_bytes",
+        "deck_stylesheet_hash",
     ):
         _merge_safe_metadata(metadata, key, diagnostics.get(key))
 
@@ -814,14 +799,8 @@ def _add_deck_fidelity_metadata(
     artifact: dict[str, Any],
     diagnostics: dict[str, Any],
 ) -> None:
-    retention = _as_dict(
-        diagnostics.get("source_retention_report")
-        or artifact.get("source_retention_report")
-    )
-    contrast = _as_dict(
-        diagnostics.get("native_contrast_report")
-        or artifact.get("native_contrast_report")
-    )
+    retention = _as_dict(diagnostics.get("source_retention_report") or artifact.get("source_retention_report"))
+    contrast = _as_dict(diagnostics.get("native_contrast_report") or artifact.get("native_contrast_report"))
     for key in (
         "passed",
         "missing_required_count",
@@ -870,6 +849,7 @@ def _add_artifact_acceptance_metadata(metadata: dict[str, Any], artifact: dict[s
         "first_prepare_turn",
         "prepare_call_count",
         "prepare_emitted_call_count",
+        "prepare_execution_count",
         "prepare_normalized_call_count",
         "prepare_schema_failure_count",
         "prepare_parallel_call_count",
@@ -879,6 +859,9 @@ def _add_artifact_acceptance_metadata(metadata: dict[str, Any], artifact: dict[s
         "prepare_retry_executed",
         "dangling_prepare_call_count",
         "creative_plan_accepted",
+        "deck_authoring_contract",
+        "deck_authoring_elapsed_ms",
+        "prepare_force_reason",
         "root_failure_code",
         "root_failure_summary",
         "source_retention_report",
@@ -904,21 +887,13 @@ def _add_report_grammar_metadata(
 def _add_report_grammar_count_metadata(metadata: dict[str, Any], artifact: dict[str, Any]) -> None:
     artifact_grammar_counts = artifact.get("report_visual_grammar_counts")
     if isinstance(artifact_grammar_counts, dict):
-        metadata["report_visual_grammar_counts"] = {
-            str(key): int(value)
-            for key, value in artifact_grammar_counts.items()
-            if isinstance(value, int)
-        }
+        metadata["report_visual_grammar_counts"] = {str(key): int(value) for key, value in artifact_grammar_counts.items() if isinstance(value, int)}
 
 
 def _add_report_grammar_problem_metadata(metadata: dict[str, Any], artifact: dict[str, Any]) -> None:
     artifact_grammar_problems = artifact.get("report_visual_grammar_problems")
     if isinstance(artifact_grammar_problems, list):
-        metadata["report_visual_grammar_problems"] = [
-            str(problem)[:240]
-            for problem in artifact_grammar_problems[:8]
-            if isinstance(problem, str) and problem.strip()
-        ]
+        metadata["report_visual_grammar_problems"] = [str(problem)[:240] for problem in artifact_grammar_problems[:8] if isinstance(problem, str) and problem.strip()]
 
 
 def _image_forward_stats(diagnostics: dict[str, Any]) -> tuple[int, int, int, bool]:
@@ -973,11 +948,7 @@ def _base_builder_metadata(
 def _safe_lifecycle_markers(markers: Any) -> dict[str, Any]:
     if not isinstance(markers, dict):
         return {}
-    return {
-        str(key): value
-        for key, value in markers.items()
-        if _safe_metadata_value(key) is not None and _safe_metadata_value(value) is not None
-    }
+    return {str(key): value for key, value in markers.items() if _safe_metadata_value(key) is not None and _safe_metadata_value(value) is not None}
 
 
 def _add_state_summary_metadata(metadata: dict[str, Any], state: dict[str, Any]) -> None:
@@ -1085,26 +1056,15 @@ def _builder_observability_tags(
     image_forward: bool,
     qc_invocations: int,
 ) -> list[str]:
-    terminal_status = str(
-        artifact.get("terminal_status") or artifact.get("status") or ""
-    ).strip()
-    dangling_prepare_calls = _as_int(
-        artifact.get("dangling_prepare_call_count")
-        or _as_dict(state.get("builder_pptx_diagnostics")).get("dangling_prepare_call_count")
-    )
+    terminal_status = str(artifact.get("terminal_status") or artifact.get("status") or "").strip()
+    dangling_prepare_calls = _as_int(artifact.get("dangling_prepare_call_count") or _as_dict(state.get("builder_pptx_diagnostics")).get("dangling_prepare_call_count"))
     tags = [
         f"artifact:{artifact_ext}" if artifact_ext else "artifact:unknown",
         f"builder_terminal:{terminal_status}" if terminal_status else None,
         "deck_prepare_result_missing" if dangling_prepare_calls > 0 else None,
         "image_forward" if image_forward else "mixed_or_fallback",
         "qc_ran" if qc_invocations > 0 else None,
-        "deck_screenshot_forbidden"
-        if (
-            _as_dict(state.get("builder_pptx_diagnostics")).get("deck_compile_mode")
-            or artifact.get("deck_compile_mode")
-        )
-        in {"html_screenshot_fallback", "html_screenshot_debug"}
-        else None,
+        "deck_screenshot_forbidden" if (_as_dict(state.get("builder_pptx_diagnostics")).get("deck_compile_mode") or artifact.get("deck_compile_mode")) in {"html_screenshot_fallback", "html_screenshot_debug"} else None,
         *_builder_gate_tags(
             state=state,
             artifact=artifact,
@@ -1172,6 +1132,25 @@ def _add_run_tags(run_tree: Any, tags: list[str]) -> None:
         logger.debug("LangSmith tag attachment failed", exc_info=True)
 
 
+def _root_run_tree(run_tree: Any) -> Any:
+    current = run_tree
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        parent = getattr(current, "parent_run", None)
+        if parent is None:
+            return current
+        current = parent
+    return run_tree
+
+
+def _patch_run_tree(run_tree: Any) -> None:
+    try:
+        run_tree.patch(exclude_inputs=True)
+    except Exception:  # noqa: BLE001
+        logger.debug("LangSmith root patch failed", exc_info=True)
+
+
 def _feedback_comment(reasons: list[str]) -> str:
     return json.dumps(reasons, ensure_ascii=False)
 
@@ -1186,11 +1165,7 @@ def _create_qc_feedback(run_tree: Any, qc_results: list[dict[str, Any]]) -> None
         client = _feedback_client()
         for result in qc_results:
             reasons = result.get("reasons")
-            neutral = (
-                result.get("skipped") is True
-                or result.get("advisory") is True
-                or result.get("parser_error") is True
-            )
+            neutral = result.get("skipped") is True or result.get("advisory") is True or result.get("parser_error") is True
             client.create_feedback(
                 run_id=run_id,
                 key="slide_qc",
@@ -1202,9 +1177,7 @@ def _create_qc_feedback(run_tree: Any, qc_results: list[dict[str, Any]]) -> None
 
 
 def _create_terminal_feedback(run_tree: Any, artifact: dict[str, Any]) -> None:
-    terminal_status = str(
-        artifact.get("terminal_status") or artifact.get("status") or ""
-    ).strip()
+    terminal_status = str(artifact.get("terminal_status") or artifact.get("status") or "").strip()
     if terminal_status not in {"completed", "failed", "timed_out"}:
         return
     run_id = getattr(run_tree, "id", None)
@@ -1240,13 +1213,19 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
             )
         return False
     metadata, tags, qc_results = builder_observability_payload(state, artifact)
+    root_run = _root_run_tree(run_tree)
     _add_run_metadata(run_tree, metadata)
     _add_run_tags(run_tree, tags)
-    _create_qc_feedback(run_tree, qc_results)
-    _create_terminal_feedback(run_tree, artifact)
+    if root_run is not run_tree:
+        _add_run_metadata(root_run, metadata)
+        _add_run_tags(root_run, tags)
+    _patch_run_tree(root_run)
+    _create_qc_feedback(root_run, qc_results)
+    _create_terminal_feedback(root_run, artifact)
     logger.info(
-        "Sophia builder LangSmith completion annotation attached: run_id=%s project=%s",
+        "Sophia builder LangSmith completion annotation attached: run_id=%s root_run_id=%s project=%s",
         getattr(run_tree, "id", None),
+        getattr(root_run, "id", None),
         _safe_metadata_value(get_tracing_config().project),
     )
     return True

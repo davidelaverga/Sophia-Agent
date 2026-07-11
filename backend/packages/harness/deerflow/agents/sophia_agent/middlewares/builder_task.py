@@ -91,20 +91,11 @@ def _delegation_boundary_sections(
     brief_schema: dict[str, Any] | None = None
     if isinstance(existing_schema, dict):
         pass
-    elif (
-        brief_extraction.extraction_enabled()
-        and brief_extraction.extraction_triggered(stats)
-        and isinstance(parent_user_id, str)
-        and isinstance(parent_thread_id, str)
-    ):
+    elif brief_extraction.extraction_enabled() and brief_extraction.extraction_triggered(stats) and isinstance(parent_user_id, str) and isinstance(parent_thread_id, str):
         entries = delegation_ledger.read_ledger_with_fallback(parent_user_id, parent_thread_id)
         brief_schema = brief_extraction.extract_brief(entries, task_type)
         if brief_schema is not None:
-            sections.append(
-                "<build_brief_schema>\n"
-                + _json.dumps(brief_schema, indent=2, ensure_ascii=False)
-                + "\n</build_brief_schema>"
-            )
+            sections.append("<build_brief_schema>\n" + _json.dumps(brief_schema, indent=2, ensure_ascii=False) + "\n</build_brief_schema>")
             state_updates["brief_schema"] = brief_schema
 
     # D-5: briefing-directive gate over the extracted schema.
@@ -138,6 +129,7 @@ def _delegation_boundary_sections(
 # candidates to pick a path.
 _ENDGAME_MAX_FILES = 10
 
+
 def _list_outputs_for_prompt(state: BuilderTaskState) -> list[dict[str, Any]]:
     """Return up to ``_ENDGAME_MAX_FILES`` recent files in the builder's
     ``outputs/`` directory, sorted by mtime descending.
@@ -156,9 +148,7 @@ def _list_outputs_for_prompt(state: BuilderTaskState) -> list[dict[str, Any]]:
     prompt assembly).
     """
     thread_data = state.get("thread_data") or {}
-    outputs_host_path = (
-        thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
-    )
+    outputs_host_path = thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
     if not isinstance(outputs_host_path, str) or not outputs_host_path:
         return []
 
@@ -168,9 +158,16 @@ def _list_outputs_for_prompt(state: BuilderTaskState) -> list[dict[str, Any]]:
         min_mtime = (float(builder_task_started_at_ms) / 1000.0) - 5.0
 
     _DELIVERABLE_EXTS = {
-        ".pdf", ".pptx", ".docx", ".xlsx",
-        ".png", ".jpg", ".jpeg", ".svg",
-        ".html", ".zip",
+        ".pdf",
+        ".pptx",
+        ".docx",
+        ".xlsx",
+        ".png",
+        ".jpg",
+        ".jpeg",
+        ".svg",
+        ".html",
+        ".zip",
     }
     _INTERMEDIATE_EXTS = {".json", ".csv", ".tsv", ".txt"}
 
@@ -246,9 +243,7 @@ def _list_outputs_for_prompt(state: BuilderTaskState) -> list[dict[str, Any]]:
 # produces (``/mnt/user-data/uploads/<safe-filename>``), where the
 # filename is restricted to alphanumerics, dot, underscore, dash.
 # Anything else is dropped from the prompt (and logged for triage).
-_SAFE_UPLOADED_IMAGE_PATH = re.compile(
-    r"^/mnt/user-data/uploads/[A-Za-z0-9._-]+$"
-)
+_SAFE_UPLOADED_IMAGE_PATH = re.compile(r"^/mnt/user-data/uploads/[A-Za-z0-9._-]+$")
 
 
 def _uploaded_images_sections(raw: Any, vision_enabled: bool) -> list[str]:
@@ -305,9 +300,7 @@ def _uploaded_images_sections(raw: Any, vision_enabled: bool) -> list[str]:
             rejected += 1
     if rejected:
         logger.warning(
-            "[BuilderTask] dropped %d uploaded_image_paths entry/entries "
-            "from briefing block — failed prompt-safe allow-list "
-            "(no newlines, no tags, no spaces). Prompt-injection guard.",
+            "[BuilderTask] dropped %d uploaded_image_paths entry/entries from briefing block — failed prompt-safe allow-list (no newlines, no tags, no spaces). Prompt-injection guard.",
             rejected,
         )
     if not safe_paths:
@@ -452,32 +445,13 @@ def _valid_page_count(value: str) -> int | None:
 
 
 def _page_target_is_output_context(text: str, match: re.Match[str]) -> bool:
-    before = text[max(0, match.start() - 100): match.start()]
-    after = text[match.end(): match.end() + 100]
-    source_context_before = bool(
-        _PAGE_SOURCE_CONTEXT_BEFORE_RE.search(before)
-        or _PAGE_SOURCE_ACTION_BEFORE_RE.search(before)
-    )
+    before = text[max(0, match.start() - 100) : match.start()]
+    after = text[match.end() : match.end() + 100]
+    source_context_before = bool(_PAGE_SOURCE_CONTEXT_BEFORE_RE.search(before) or _PAGE_SOURCE_ACTION_BEFORE_RE.search(before))
     after_pdf = _PAGE_TARGET_OUTPUT_AFTER_RE.search(after)
-    after_targets_pdf = bool(
-        after_pdf
-        and len(re.findall(r"\w+", after[: after_pdf.start()])) <= 4
-        and not _PAGE_TARGET_SOURCE_NOUN_RE.search(after[: after_pdf.start()])
-        and not source_context_before
-    )
-    after_targets_output_noun = bool(
-        (
-            _PAGE_TARGET_OUTPUT_VERB_BEFORE_RE.search(before)
-            or _PAGE_TARGET_OUTPUT_TRANSITION_BEFORE_RE.search(before)
-        )
-        and _PAGE_TARGET_OUTPUT_NOUN_AFTER_RE.search(after)
-    )
-    return bool(
-        after_targets_pdf
-        or after_targets_output_noun
-        or _PAGE_TARGET_OUTPUT_NOUN_BEFORE_COUNT_RE.search(before)
-        or _PAGE_TARGET_OUTPUT_BEFORE_RE.search(before)
-    )
+    after_targets_pdf = bool(after_pdf and len(re.findall(r"\w+", after[: after_pdf.start()])) <= 4 and not _PAGE_TARGET_SOURCE_NOUN_RE.search(after[: after_pdf.start()]) and not source_context_before)
+    after_targets_output_noun = bool((_PAGE_TARGET_OUTPUT_VERB_BEFORE_RE.search(before) or _PAGE_TARGET_OUTPUT_TRANSITION_BEFORE_RE.search(before)) and _PAGE_TARGET_OUTPUT_NOUN_AFTER_RE.search(after))
+    return bool(after_targets_pdf or after_targets_output_noun or _PAGE_TARGET_OUTPUT_NOUN_BEFORE_COUNT_RE.search(before) or _PAGE_TARGET_OUTPUT_BEFORE_RE.search(before))
 
 
 def _page_range_target(combined: str) -> tuple[int, int] | None:
@@ -510,18 +484,12 @@ def _valid_slide_count(value: str) -> int | None:
 
 
 def _slide_target_is_output_context(text: str, match: re.Match[str]) -> bool:
-    before = text[max(0, match.start() - 100): match.start()]
-    after = text[match.end(): match.end() + 100]
+    before = text[max(0, match.start() - 100) : match.start()]
+    after = text[match.end() : match.end() + 100]
     return bool(
         _SLIDE_TARGET_OUTPUT_BEFORE_RE.search(before)
         or _SLIDE_TARGET_BUILD_VERB_ADJACENT_RE.search(before)
-        or (
-            (
-                _SLIDE_TARGET_OUTPUT_VERB_BEFORE_RE.search(before)
-                or _SLIDE_TARGET_OUTPUT_TRANSITION_BEFORE_RE.search(before)
-            )
-            and _SLIDE_TARGET_OUTPUT_NOUN_AFTER_RE.search(after)
-        )
+        or ((_SLIDE_TARGET_OUTPUT_VERB_BEFORE_RE.search(before) or _SLIDE_TARGET_OUTPUT_TRANSITION_BEFORE_RE.search(before)) and _SLIDE_TARGET_OUTPUT_NOUN_AFTER_RE.search(after))
     )
 
 
@@ -677,6 +645,7 @@ _IMAGE_GENERATION_OPTOUT_PATTERNS = tuple(
     )
 )
 
+
 def _text_marker_present(text: str, marker: str) -> bool:
     return re.search(rf"(?<![a-z0-9]){re.escape(marker)}(?![a-z0-9])", text) is not None
 
@@ -747,10 +716,7 @@ def _is_pdf_image_generation_target(artifact_target_ext: str, task_type: str) ->
 
 
 def _visuals_requested(delegation_context: dict[str, Any]) -> bool:
-    combined = "\n".join(
-        str(delegation_context.get(key) or "").lower()
-        for key in ("task", "description", "artifact_brief", "original_task")
-    )
+    combined = "\n".join(str(delegation_context.get(key) or "").lower() for key in ("task", "description", "artifact_brief", "original_task"))
     return any(_text_marker_present(combined, marker) for marker in _VISUAL_REQUEST_MARKERS)
 
 
@@ -763,11 +729,7 @@ def _polished_deck_images_requested(delegation_context: dict[str, Any]) -> bool:
 
 def _critical_emit_guidance(artifact_target_ext: str, task_type: str = "") -> str:
     if artifact_target_ext == ".pdf" and _is_presentation_task_type(task_type):
-        return (
-            "for this PDF slide-deck delivery target, emit the valid .pdf produced "
-            "by render_html_to_pdf. Do NOT emit a PPTX, PPTX preview PDF, HTML "
-            "source, or generator script as the requested PDF deliverable.\n"
-        )
+        return "for this PDF slide-deck delivery target, emit the valid .pdf produced by render_html_to_pdf. Do NOT emit a PPTX, PPTX preview PDF, HTML source, or generator script as the requested PDF deliverable.\n"
     if artifact_target_ext == ".pdf":
         return (
             "for this PDF target, emit the valid .pdf if it exists. A .md/.html "
@@ -776,20 +738,12 @@ def _critical_emit_guidance(artifact_target_ext: str, task_type: str = "") -> st
             "artifact_is_fallback=true, and fallback_reason. Do NOT emit a "
             "generator .py as a PDF deliverable.\n"
         )
-    return (
-        "if no user-facing deliverable exists, do NOT emit a generator script "
-        "unless the user explicitly requested source code. Emit with "
-        "artifact_path=null and an honest companion_summary instead.\n"
-    )
+    return "if no user-facing deliverable exists, do NOT emit a generator script unless the user explicitly requested source code. Emit with artifact_path=null and an honest companion_summary instead.\n"
 
 
 def _critical_pick_guidance(artifact_target_ext: str) -> str:
     if artifact_target_ext == ".pdf":
-        return (
-            "first file marked 'deliverable'. If only generator files exist, "
-            "do not emit them; emit with artifact_path=null and an honest "
-            "companion_summary instead.\n"
-        )
+        return "first file marked 'deliverable'. If only generator files exist, do not emit them; emit with artifact_path=null and an honest companion_summary instead.\n"
     return "first file marked 'deliverable'. Do not choose generator scripts as user-facing artifacts. "
 
 
@@ -845,15 +799,13 @@ def _deck_craft_directives() -> str | None:
         return None
     return (
         "<deck_skill_contract>\n"
-        "Required before the first prepare_deck_build call:\n"
-        "1. Read /mnt/skills/public/sophia/deck_craft.md.\n"
-        "2. Read /mnt/skills/public/hands-on-deck/SKILL.md and designing-slides.md.\n"
-        "Use deck-impeccable for hierarchy, spacing, density, critique, and polish.\n"
-        "Use deck-hallmark for structural variety and anti-slop critique.\n"
+        "This injected bundle is the authoritative compact deck-craft contract.\n"
+        "Apply hands-on-deck hierarchy and compiler constraints, deck-impeccable spacing and polish, "
+        "and deck-hallmark structural-variety critique directly from this bundle.\n"
+        "The full skill references remain available for optional inspection; separate reads are not required.\n"
         "Use image-generation only through creative_plan.image_assets.\n"
         "Professional and technical are quality constraints, not styles.\n"
-        "</deck_skill_contract>\n\n"
-        + primer
+        "</deck_skill_contract>\n\n" + primer
     )
 
 
@@ -871,13 +823,10 @@ def _terminal_artifact_format_line(artifact_target_ext: str, task_type: str = ""
             "- This is an HTML target: write a STANDALONE .html file (a complete "
             "<!doctype html>/<html>...</html> document). Do NOT wrap the HTML in "
             "Markdown code fences (```html). Do NOT write a .md file and call it HTML. "
-            "Call emit_builder_artifact with artifact_type=\"html\" (or \"webpage\").\n"
+            'Call emit_builder_artifact with artifact_type="html" (or "webpage").\n'
         )
     if artifact_target_ext == ".md":
-        return (
-            "- This is a Markdown target: write a real .md file. Call "
-            "emit_builder_artifact with artifact_type=\"document\".\n"
-        )
+        return '- This is a Markdown target: write a real .md file. Call emit_builder_artifact with artifact_type="document".\n'
     if artifact_target_ext == ".pdf" and _is_presentation_task_type(task_type):
         return (
             "- This is a PDF slide-deck delivery target: author ONE self-contained "
@@ -887,14 +836,14 @@ def _terminal_artifact_format_line(artifact_target_ext: str, task_type: str = ""
             "prepare_pptx_image_manifest, build_deck_from_slides, python-pptx, "
             "or pptxgenjs for this target; those routes produce PPTX artifacts or "
             "PPTX preview PDFs, not the requested primary PDF deliverable. Call "
-            "emit_builder_artifact with artifact_type=\"pdf\" and the real .pdf path.\n"
+            'emit_builder_artifact with artifact_type="pdf" and the real .pdf path.\n'
         )
     if artifact_target_ext == ".pdf":
         return (
             "- This is a PDF target: author ONE self-contained HTML file with inline "
             "<svg> charts/diagrams, then render the real .pdf via "
             "render_html_to_pdf. Call emit_builder_artifact with "
-            "artifact_type=\"pdf\". If rendering genuinely fails after the "
+            'artifact_type="pdf". If rendering genuinely fails after the '
             "bounded repair, a .md/.html fallback must be explicitly marked "
             "with requested_artifact_ext, artifact_is_fallback=true, and "
             "fallback_reason; otherwise emit with artifact_path=null and an "
@@ -908,9 +857,9 @@ def _pptx_visual_guidance(*, deck_service_enabled: bool, image_generation_enable
         return "Image generation is not listed for this non-PPTX run. Use the medium-specific local figure workflow."
     if deck_service_enabled:
         return (
-            "Decks are built by prepare_deck_build. Read /mnt/skills/public/sophia/deck_craft.md, "
-            "then submit a complete creative_plan plus slide entries with title, narrative, "
-            "role, layout_kind, speaker_notes, and html_source for each slide; every narrative "
+            "Decks are built by prepare_deck_build using the injected compact deck-craft contract. "
+            "Submit a complete creative_plan, one shared deck_stylesheet, and slide entries with title, narrative, "
+            "role, layout_kind, speaker_notes, html_body, and optional slide_css; every narrative "
             "must be <= 280 characters. The harness owns HTML sanitization, planned generated assets, native PowerPoint compilation, inspection, "
             "validation, and terminal failure. Screenshot-backed PPTX is not an acceptable fallback; if native "
             "deck generation fails, prepare_deck_build returns failure and you emit artifact_path=null. "
@@ -922,10 +871,7 @@ def _pptx_visual_guidance(*, deck_service_enabled: bool, image_generation_enable
             "request should set visual_policy='text_only'. Derive the visual direction from the subject, "
             "audience, goal, viewing context, and subject materials. Inline SVG is unsupported."
         )
-    return (
-        "Fresh native PPTX generation is unavailable in this run. Stop cleanly with artifact_path=null; "
-        "do not invoke lower-level manifest, image, HTML-slide, shell, or custom compiler workflows."
-    )
+    return "Fresh native PPTX generation is unavailable in this run. Stop cleanly with artifact_path=null; do not invoke lower-level manifest, image, HTML-slide, shell, or custom compiler workflows."
 
 
 def _terminal_artifact_handoff_section(
@@ -960,9 +906,7 @@ def _terminal_artifact_handoff_section(
         "plain-text ending with no emit is treated as a failed build with no deliverable.\n"
         f"- Use the exact target path `{safe_target}` for artifact_path unless you have "
         "written exactly one stronger verified deliverable candidate under "
-        "/mnt/user-data/outputs/.\n"
-        + _terminal_artifact_format_line(artifact_target_ext, task_type)
-        + "- If you genuinely cannot create the artifact, do NOT pretend success and do NOT "
+        "/mnt/user-data/outputs/.\n" + _terminal_artifact_format_line(artifact_target_ext, task_type) + "- If you genuinely cannot create the artifact, do NOT pretend success and do NOT "
         "end with plain text: emit_builder_artifact with a specific, safe fallback_reason "
         "(or accept the force-stop fallback) so the failure is reported honestly.\n"
         "</terminal_artifact_handoff>"
@@ -987,11 +931,7 @@ def _builder_workflow_sections(
     for name in dict.fromkeys(cards):
         content = _workflow_card(name)
         if content:
-            sections.append(
-                f"<builder_workflow_card name=\"{name}\" task_type=\"{html.escape(task_type, quote=True)}\">\n"
-                f"{content}\n"
-                "</builder_workflow_card>"
-            )
+            sections.append(f'<builder_workflow_card name="{name}" task_type="{html.escape(task_type, quote=True)}">\n{content}\n</builder_workflow_card>')
     return sections
 
 
@@ -1070,10 +1010,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         active_ritual: str | None = delegation_context.get("active_ritual")
         ritual_phase: str | None = delegation_context.get("ritual_phase")
         allow_web_research = True
-        artifact_target_path = (
-            state.get("builder_artifact_target_path")
-            or delegation_context.get("artifact_target_path")
-        )
+        artifact_target_path = state.get("builder_artifact_target_path") or delegation_context.get("artifact_target_path")
         artifact_target_ext = _artifact_target_extension(artifact_target_path)
         page_target_updates: dict[str, Any] = {}
         slide_target_updates: dict[str, Any] = {}
@@ -1094,9 +1031,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 )
         is_presentation_task = _is_presentation_task_type(task_type)
         is_pdf_presentation_target = artifact_target_ext == ".pdf" and is_presentation_task
-        if artifact_target_ext == ".pptx" or is_pdf_presentation_target or (
-            not artifact_target_ext and is_presentation_task
-        ):
+        if artifact_target_ext == ".pptx" or is_pdf_presentation_target or (not artifact_target_ext and is_presentation_task):
             value = state.get("builder_pptx_requested_slide_count")
             if isinstance(value, int):
                 slide_target_updates["builder_pptx_requested_slide_count"] = value
@@ -1105,15 +1040,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                     delegation_context,
                     companion_artifact=companion_artifact,
                 )
-        tracked_sources = [
-            source for source in (state.get("builder_search_sources") or []) if isinstance(source, dict)
-        ]
+        tracked_sources = [source for source in (state.get("builder_search_sources") or []) if isinstance(source, dict)]
         non_artifact_turns = int(state.get("builder_non_artifact_turns", 0) or 0)
-        recent_tool_names = [
-            str(name).strip()
-            for name in (state.get("builder_last_tool_names") or [])
-            if str(name).strip()
-        ]
+        recent_tool_names = [str(name).strip() for name in (state.get("builder_last_tool_names") or []) if str(name).strip()]
 
         # Wall-clock budget awareness — sourced from extra_configurable which
         # SubagentExecutor merges into initial state (see executor.py:835).
@@ -1131,11 +1060,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             started_ms = state.get("builder_task_kickoff_ms") or 0
         wall_clock_pct: int | None = None
         wall_clock_elapsed_s: int | None = None
-        if (
-            builder_timeout_seconds > 0
-            and isinstance(started_ms, (int, float))
-            and started_ms > 0
-        ):
+        if builder_timeout_seconds > 0 and isinstance(started_ms, (int, float)) and started_ms > 0:
             elapsed_ms = max(0, int(time.time() * 1000) - int(started_ms))
             wall_clock_elapsed_s = int(elapsed_ms / 1000)
             wall_clock_pct = int(round(elapsed_ms / (builder_timeout_seconds * 1000) * 100))
@@ -1155,7 +1080,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             ritual_section = self._ritual_guidance(active_ritual, ritual_phase)
             safe_phase = html.escape(str(ritual_phase or "none"), quote=True)
             if ritual_section:
-                sections.append(f"<ritual_guidance ritual=\"{active_ritual}\" phase=\"{safe_phase}\">\n{ritual_section}\n</ritual_guidance>")
+                sections.append(f'<ritual_guidance ritual="{active_ritual}" phase="{safe_phase}">\n{ritual_section}\n</ritual_guidance>')
 
         # Session context from companion artifact
         session_fields = {
@@ -1276,16 +1201,13 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         deck_service_enabled = deck_route_for_task(task_type, artifact_target_ext) == "deck_build_service"
         is_html_target = artifact_target_ext in {".html", ".htm"}
         skills_block = self._build_skills_inventory_block(
-            include_image_generation=image_generation_enabled or (
-                deck_service_enabled and artifact_target_ext == ".pptx"
-            ),
+            include_image_generation=image_generation_enabled or (deck_service_enabled and artifact_target_ext == ".pptx"),
             # hallmark + visual-design surface when visuals are requested OR
             # the target is HTML (Phase 4c: hallmark is the HTML design system).
             include_visual_design=_visuals_requested(delegation_context) or is_html_target,
             presentation_design_mode=deck_service_enabled and artifact_target_ext == ".pptx",
             include_pdf_report=artifact_target_ext == ".pdf",
-            include_research_skills=(artifact_target_ext == ".pdf" and not is_pdf_presentation_target)
-            or task_type in {"research", "document", "visual_report"},
+            include_research_skills=(artifact_target_ext == ".pdf" and not is_pdf_presentation_target) or task_type in {"research", "document", "visual_report"},
         )
         # Artifact Visual System Phase 5a: the always-injected visual director
         # frames every downstream block, so it goes BEFORE the skills inventory.
@@ -1307,19 +1229,12 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             allow_web_research=allow_web_research,
         )
         if workflow_sections:
-            sections.append(
-                "<builder_target_workflows>\n"
-                + "\n\n".join(workflow_sections)
-                + "\n</builder_target_workflows>"
-            )
+            sections.append("<builder_target_workflows>\n" + "\n\n".join(workflow_sections) + "\n</builder_target_workflows>")
 
         pptx_library_guidance = (
-            "For PPTX, submit creative_plan plus slide html_source through prepare_deck_build; NEVER write "
-            "custom python-pptx/pptxgenjs scripts or lower-level compiler files yourself."
+            "For PPTX, submit creative_plan, deck_stylesheet, and slide html_body through prepare_deck_build; NEVER write custom python-pptx/pptxgenjs scripts or lower-level compiler files yourself."
             if deck_service_enabled
-            else "For PPTX, this is an explicit non-production legacy/debug route; use the exposed ppt-generation workflow tools "
-            "prepare_pptx_image_manifest and build_deck_from_slides; NEVER write "
-            "custom python-pptx/pptxgenjs scripts."
+            else "For PPTX, this is an explicit non-production legacy/debug route; use the exposed ppt-generation workflow tools prepare_pptx_image_manifest and build_deck_from_slides; NEVER write custom python-pptx/pptxgenjs scripts."
         )
         sections.append(
             "<preinstalled_libraries>\n"
@@ -1332,17 +1247,14 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "- Other: markdown, requests, httpx\n"
             "If you ever see ModuleNotFoundError for one of these, the import path is wrong — check the module name above. "
             "Never call `pip install` via bash_tool; it wastes your turn budget.\n"
-                "Important: these libraries do NOT replace target workflow cards. For PDF, author "
-                "HTML with inline <svg> and render via render_html_to_pdf instead of reportlab/fpdf "
-                f"scripts. {pptx_library_guidance}\n"
+            "Important: these libraries do NOT replace target workflow cards. For PDF, author "
+            "HTML with inline <svg> and render via render_html_to_pdf instead of reportlab/fpdf "
+            f"scripts. {pptx_library_guidance}\n"
             "</preinstalled_libraries>"
         )
 
         if tracked_sources:
-            source_lines = [
-                f"- {source.get('title', source.get('url', 'Untitled'))} — {source.get('url', '')}"
-                for source in tracked_sources[:8]
-            ]
+            source_lines = [f"- {source.get('title', source.get('url', 'Untitled'))} — {source.get('url', '')}" for source in tracked_sources[:8]]
             sections.append("<tracked_sources>\n" + "\n".join(source_lines) + "\n</tracked_sources>")
 
         # Completion instruction — always present, includes budget so the model
@@ -1367,7 +1279,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             image_generation_enabled=image_generation_enabled,
         )
         pptx_delivery_line = (
-            "For fresh decks, call prepare_deck_build once with the complete creative_plan and slide html_source list "
+            "For fresh decks, call prepare_deck_build once with the complete creative_plan, shared deck_stylesheet, and slide html_body list "
             "(or one repair retry when retryable=true); "
             "emit the returned native PPTX or a clean null-artifact failure if native generation "
             "fails. Screenshot-backed PPTX is not an acceptable fallback. Never write lower-level "
@@ -1429,8 +1341,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "as inline static `<svg>` (bar/line/column for quantitative data; box-and-arrow flow / comparison / "
             "mind-map for structure); NO remote `generate_chart`, NO client-side JS. Vary the figure family to "
             "fit each figure's content; never route every figure to the same kind.\n"
-                f"    * **PPTX presentation**: follow the ppt-generation skill. {pptx_delivery_line} "
-                f"{pptx_visual_guidance}\n"
+            f"    * **PPTX presentation**: follow the ppt-generation skill. {pptx_delivery_line} "
+            f"{pptx_visual_guidance}\n"
             "    * **HTML**: follow the HTML workflow card. Standalone browser-renderable HTML is a text "
             "deliverable, not a frontend app unless the user requested app behavior.\n"
             "    * **Standalone chart / image**: use the image-generation skill, or author the chart as a "
@@ -1460,17 +1372,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         if non_artifact_turns > 0:
             joined_tools = ", ".join(recent_tool_names) if recent_tool_names else "unknown"
-            escalation = (
-                "<builder_endgame>\n"
-                f"Turn budget: {non_artifact_turns}/{_HARD_CEILING} used. "
-                f"{remaining} turn(s) remaining before forced termination.\n"
-                f"Most recent tool calls: {joined_tools}.\n"
-            )
+            escalation = f"<builder_endgame>\nTurn budget: {non_artifact_turns}/{_HARD_CEILING} used. {remaining} turn(s) remaining before forced termination.\nMost recent tool calls: {joined_tools}.\n"
             if wall_clock_pct is not None and wall_clock_elapsed_s is not None:
-                escalation += (
-                    f"Wall-clock: {wall_clock_elapsed_s}s of {builder_timeout_seconds}s used "
-                    f"({wall_clock_pct}%).\n"
-                )
+                escalation += f"Wall-clock: {wall_clock_elapsed_s}s of {builder_timeout_seconds}s used ({wall_clock_pct}%).\n"
             # PR-A (2026-04-27): thresholds rescaled for the bumped ceiling
             # (10 → 20). Same proportions as before — CRITICAL at the last
             # ~15% of the budget (remaining<=3), WARNING at the last ~30%
@@ -1479,10 +1383,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             # Wall-clock-aware promotion: when the per-run wall-clock budget
             # has crossed the configured force fraction, escalate to CRITICAL
             # even if turn-count remaining is still high.
-            wall_clock_critical = (
-                wall_clock_pct is not None
-                and wall_clock_pct >= wall_clock_force_pct
-            )
+            wall_clock_critical = wall_clock_pct is not None and wall_clock_pct >= wall_clock_force_pct
             if remaining <= 3 or wall_clock_critical:
                 escalation += (
                     "CRITICAL: You are about to be terminated. "
@@ -1505,12 +1406,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 if outputs_listing:
                     now_s = time.time()
                     file_lines: list[str] = []
-                    has_deliverable = any(
-                        item["category"] == "deliverable" for item in outputs_listing
-                    )
-                    has_generator = any(
-                        item["category"] == "generator" for item in outputs_listing
-                    )
+                    has_deliverable = any(item["category"] == "deliverable" for item in outputs_listing)
+                    has_generator = any(item["category"] == "generator" for item in outputs_listing)
                     for item in outputs_listing:
                         size_str = _format_size(item["size_bytes"])
                         age_str = _format_age(now_s, item["mtime"])
@@ -1530,35 +1427,15 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                             )
                         else:
                             tag = "(intermediate — do NOT emit as final)"
-                        file_lines.append(
-                            f"  - {item['path']}  ({size_str}, modified {age_str})  {tag}"
-                        )
-                    escalation += (
-                        "Files currently in /mnt/user-data/outputs/ that you may emit:\n"
-                        + "\n".join(file_lines)
-                        + "\n"
-                    )
+                        file_lines.append(f"  - {item['path']}  ({size_str}, modified {age_str})  {tag}")
+                    escalation += "Files currently in /mnt/user-data/outputs/ that you may emit:\n" + "\n".join(file_lines) + "\n"
                 else:
-                    escalation += (
-                        "No files were detected in /mnt/user-data/outputs/. "
-                        "Emit with artifact_path=null is INVALID — "
-                        "write at least one file before emit_builder_artifact, "
-                        "or accept the force-stop fallback.\n"
-                    )
+                    escalation += "No files were detected in /mnt/user-data/outputs/. Emit with artifact_path=null is INVALID — write at least one file before emit_builder_artifact, or accept the force-stop fallback.\n"
             elif remaining <= 6:
-                escalation += (
-                    "WARNING: Running low on turns. Wrap up edits and call "
-                    "emit_builder_artifact within the next 1-2 turns. "
-                    "Stop re-planning with write_todos; that wastes a turn.\n"
-                )
+                escalation += "WARNING: Running low on turns. Wrap up edits and call emit_builder_artifact within the next 1-2 turns. Stop re-planning with write_todos; that wastes a turn.\n"
             else:
-                escalation += (
-                    "If the deliverable is ready, your NEXT action must be emit_builder_artifact.\n"
-                )
-            escalation += (
-                "Do not end with plain text and do not call any tools after emit_builder_artifact.\n"
-                "</builder_endgame>"
-            )
+                escalation += "If the deliverable is ready, your NEXT action must be emit_builder_artifact.\n"
+            escalation += "Do not end with plain text and do not call any tools after emit_builder_artifact.\n</builder_endgame>"
             sections.append(escalation)
 
         briefing = "<builder_briefing>\n" + "\n\n".join(sections) + "\n</builder_briefing>"
@@ -1568,8 +1445,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         log_middleware(
             "BuilderTask",
-            f"task_type={task_type} tone={tone_estimate:.1f} ritual={active_ritual or 'none'} "
-            f"non_artifact_turns={non_artifact_turns}",
+            f"task_type={task_type} tone={tone_estimate:.1f} ritual={active_ritual or 'none'} non_artifact_turns={non_artifact_turns}",
             _t0,
         )
         return {
@@ -1666,9 +1542,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             )
             include_image_generation = True
         else:
-            allowed_skill_names.difference_update(
-                {"hands-on-deck", "deck-impeccable", "deck-hallmark"}
-            )
+            allowed_skill_names.difference_update({"hands-on-deck", "deck-impeccable", "deck-hallmark"})
         if not include_image_generation:
             allowed_skill_names.discard("image-generation")
         if not include_visual_design or presentation_design_mode:
@@ -1677,9 +1551,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         if not include_pdf_report:
             allowed_skill_names.discard("pdf-report")
         if not include_research_skills:
-            allowed_skill_names.difference_update(
-                {"deep-research", "academic-paper-review", "systematic-literature-review"}
-            )
+            allowed_skill_names.difference_update({"deep-research", "academic-paper-review", "systematic-literature-review"})
         relevant = [s for s in skills if getattr(s, "name", None) in allowed_skill_names]
         # Log either way so "did the builder see skills this run?" is
         # answerable from a single grep on the langgraph-server logs.
@@ -1708,13 +1580,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                 location = skill.get_container_file_path(container_base)
             except Exception:
                 location = f"{container_base}/{name}/SKILL.md"
-            items.append(
-                f"  <skill>\n"
-                f"    <name>{name}</name>\n"
-                f"    <description>{description}</description>\n"
-                f"    <location>{location}</location>\n"
-                f"  </skill>"
-            )
+            items.append(f"  <skill>\n    <name>{name}</name>\n    <description>{description}</description>\n    <location>{location}</location>\n  </skill>")
 
         return (
             "<skill_system>\n"
@@ -1732,9 +1598,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "4. Compose downstream artifacts (e.g. a Markdown document referencing local "
             "visual assets) using the generated output paths.\n"
             "\n"
-            "<available_skills>\n"
-            + "\n".join(items)
-            + "\n</available_skills>\n"
+            "<available_skills>\n" + "\n".join(items) + "\n</available_skills>\n"
             "</skill_system>"
         )
 
@@ -1742,50 +1606,23 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
     def _tone_guidance(tone_estimate: float, band: str) -> str:
         """Map tone_estimate to behavioral instructions for the builder."""
         if tone_estimate < 1.0 or band == "shutdown":
-            return (
-                "User is very low. Make ALL decisions yourself. Keep simple. "
-                "Minimize user input. Quality over ambition."
-            )
+            return "User is very low. Make ALL decisions yourself. Keep simple. Minimize user input. Quality over ambition."
         if tone_estimate < 1.5 or band == "grief_fear":
-            return (
-                "User is low. Make most decisions. Keep clean. "
-                "Deliverable should feel like relief."
-            )
+            return "User is low. Make most decisions. Keep clean. Deliverable should feel like relief."
         if tone_estimate < 2.5 or band == "anger_antagonism":
-            return (
-                "User is frustrated. Be direct and efficient. No flourishes. "
-                "Solve problems, don't flag them."
-            )
+            return "User is frustrated. Be direct and efficient. No flourishes. Solve problems, don't flag them."
         if tone_estimate < 3.5 or band == "engagement":
-            return (
-                "User has energy. Can be more ambitious. Include thoughtful details. "
-                "1-2 decision points OK."
-            )
+            return "User has energy. Can be more ambitious. Include thoughtful details. 1-2 decision points OK."
         # tone >= 3.5 or enthusiasm
-        return (
-            "User is high energy. Be ambitious. Add surprise element. "
-            "Don't play it safe."
-        )
+        return "User is high energy. Be ambitious. Add surprise element. Don't play it safe."
 
     @staticmethod
     def _ritual_guidance(ritual: str, phase: str | None) -> str | None:
         """Map active ritual to builder behavioral guidance."""
         guidance_map: dict[str, str] = {
-            "prepare": (
-                "User is getting ready for something important. "
-                "Output should feel like armor, not homework."
-            ),
-            "debrief": (
-                "User is processing what happened. Structure around "
-                "what happened \u2192 what worked \u2192 what didn't \u2192 what's next."
-            ),
-            "vent": (
-                "User moved from venting to action. Keep simple. "
-                "Don't add complexity."
-            ),
-            "reset": (
-                "User is clearing the deck. Output should feel clean "
-                "and forward-looking."
-            ),
+            "prepare": ("User is getting ready for something important. Output should feel like armor, not homework."),
+            "debrief": ("User is processing what happened. Structure around what happened \u2192 what worked \u2192 what didn't \u2192 what's next."),
+            "vent": ("User moved from venting to action. Keep simple. Don't add complexity."),
+            "reset": ("User is clearing the deck. Output should feel clean and forward-looking."),
         }
         return guidance_map.get(ritual)

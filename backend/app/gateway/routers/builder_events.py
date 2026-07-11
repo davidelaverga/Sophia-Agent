@@ -105,6 +105,7 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "first_prepare_turn",
     "prepare_call_count",
     "prepare_emitted_call_count",
+    "prepare_execution_count",
     "prepare_normalized_call_count",
     "prepare_schema_failure_count",
     "prepare_parallel_call_count",
@@ -114,6 +115,9 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "prepare_retry_executed",
     "dangling_prepare_call_count",
     "creative_plan_accepted",
+    "deck_authoring_contract",
+    "deck_authoring_elapsed_ms",
+    "prepare_force_reason",
     "error_message",
     "builder_failure_diagnostics",
     "trace_id",
@@ -123,12 +127,7 @@ _session_store = SessionStore()
 
 
 def _langgraph_url() -> str:
-    return (
-        os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
-        or os.getenv("LANGGRAPH_URL")
-        or os.getenv("SOPHIA_BACKEND_BASE_URL")
-        or "http://127.0.0.1:2024"
-    ).strip().rstrip("/")
+    return (os.getenv("SOPHIA_LANGGRAPH_BASE_URL") or os.getenv("LANGGRAPH_URL") or os.getenv("SOPHIA_BACKEND_BASE_URL") or "http://127.0.0.1:2024").strip().rstrip("/")
 
 
 def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
@@ -204,6 +203,7 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "first_prepare_turn",
         "prepare_call_count",
         "prepare_emitted_call_count",
+        "prepare_execution_count",
         "prepare_normalized_call_count",
         "prepare_schema_failure_count",
         "prepare_parallel_call_count",
@@ -213,6 +213,9 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "prepare_retry_executed",
         "dangling_prepare_call_count",
         "creative_plan_accepted",
+        "deck_authoring_contract",
+        "deck_authoring_elapsed_ms",
+        "prepare_force_reason",
         "source_artifact_path",
         "revision_of_artifact_path",
         "summary",
@@ -225,11 +228,7 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
     result = {key: payload.get(key) for key in result_keys if payload.get(key) is not None}
     artifact_path = payload.get("artifact_path")
     artifact_url = payload.get("artifact_url")
-    if (
-        not (isinstance(artifact_path, str) and artifact_path.strip())
-        and isinstance(artifact_url, str)
-        and artifact_url.strip()
-    ):
+    if not (isinstance(artifact_path, str) and artifact_path.strip()) and isinstance(artifact_url, str) and artifact_url.strip():
         result["artifact_url"] = artifact_url
     return result
 
@@ -239,11 +238,7 @@ def _present_payload_fields(payload: dict[str, Any], keys: tuple[str, ...]) -> d
 
 
 def _terminal_async_task_update(payload: dict[str, Any]) -> dict[str, Any]:
-    completed_at = (
-        payload.get("completed_at")
-        if isinstance(payload.get("completed_at"), str)
-        else datetime.now(UTC).isoformat()
-    )
+    completed_at = payload.get("completed_at") if isinstance(payload.get("completed_at"), str) else datetime.now(UTC).isoformat()
     task_id = str(payload.get("task_id") or "")
     run_id = payload.get("run_id")
     result = _durable_builder_result(payload)
@@ -323,13 +318,7 @@ async def _hydrate_missing_run_id(payload: dict[str, Any]) -> dict[str, Any]:
 def _should_persist_last_builder_artifact(payload: dict[str, Any]) -> bool:
     artifact_path = payload.get("artifact_path")
     artifact_url = payload.get("artifact_url")
-    return (
-        str(payload.get("status") or "").lower() in _SUCCESSFUL_BUILDER_STATUSES
-        and (
-            (isinstance(artifact_path, str) and bool(artifact_path.strip()))
-            or (isinstance(artifact_url, str) and bool(artifact_url.strip()))
-        )
-    )
+    return str(payload.get("status") or "").lower() in _SUCCESSFUL_BUILDER_STATUSES and ((isinstance(artifact_path, str) and bool(artifact_path.strip())) or (isinstance(artifact_url, str) and bool(artifact_url.strip())))
 
 
 async def _persist_builder_terminal_state(payload: dict[str, Any]) -> None:
@@ -411,9 +400,7 @@ class BuilderCompletionEvent(BaseModel):
     fallback_reason: str | None = None
     format_conflict_resolved: str | None = Field(
         None,
-        description="Correction wave 2026-06-12: 'user_intent' when the "
-        "emit-time guard honored the user's explicit current-turn format "
-        "over a misderived dispatch target.",
+        description="Correction wave 2026-06-12: 'user_intent' when the emit-time guard honored the user's explicit current-turn format over a misderived dispatch target.",
     )
     format_conflict_original_target_ext: str | None = None
     image_generation_status: str | None = None
@@ -449,27 +436,21 @@ class BuilderCompletionEvent(BaseModel):
     visual_quality_gap_count: int | None = None
     image_generation_outcome: dict[str, Any] | None = Field(
         None,
-        description="VQ-3 harness-stamped enrichment outcome: "
-        "{attempted: int, succeeded: int, skip_reason?: str}.",
+        description="VQ-3 harness-stamped enrichment outcome: {attempted: int, succeeded: int, skip_reason?: str}.",
     )
     iterations_used: int | None = None
     unmet_conditions: list[str] | None = None
     brief_assumptions: list[str] | None = Field(
         None,
-        description="Spec D D-5: assumptions the builder stated for brief "
-        "fields not present in the parent conversation — relayed by the "
-        "companion, never presented as something the user said.",
+        description="Spec D D-5: assumptions the builder stated for brief fields not present in the parent conversation — relayed by the companion, never presented as something the user said.",
     )
     artifact_preview_filename: str | None = Field(
         None,
-        description="Canvas preview sibling (e.g. <deck>.preview.pdf rendered "
-        "from a .pptx) so the webapp can render binary formats through the "
-        "PDF canvas.",
+        description="Canvas preview sibling (e.g. <deck>.preview.pdf rendered from a .pptx) so the webapp can render binary formats through the PDF canvas.",
     )
     quality_warning: str | None = Field(
         None,
-        description="Honest quality note on a delivered primary (e.g. "
-        "visuals_not_embedded) — never a fallback flag.",
+        description="Honest quality note on a delivered primary (e.g. visuals_not_embedded) — never a fallback flag.",
     )
     visuals_missing: bool | None = None
     budget_stop_reason: str | None = None
@@ -481,6 +462,7 @@ class BuilderCompletionEvent(BaseModel):
     first_prepare_turn: int | None = None
     prepare_call_count: int | None = None
     prepare_emitted_call_count: int | None = None
+    prepare_execution_count: int | None = None
     prepare_normalized_call_count: int | None = None
     prepare_schema_failure_count: int | None = None
     prepare_parallel_call_count: int | None = None
@@ -490,6 +472,9 @@ class BuilderCompletionEvent(BaseModel):
     prepare_retry_executed: bool | None = None
     dangling_prepare_call_count: int | None = None
     creative_plan_accepted: bool | None = None
+    deck_authoring_contract: str | None = None
+    deck_authoring_elapsed_ms: int | None = None
+    prepare_force_reason: str | None = None
     source_retention_report: dict[str, Any] | None = None
     native_contrast_report: dict[str, Any] | None = None
     root_failure_code: str | None = None
@@ -504,8 +489,7 @@ class BuilderCompletionEvent(BaseModel):
     source: str | None = Field(None, description="Origin: subagent_executor | async_subagent_monitor")
     user_id: str | None = Field(
         None,
-        description="Originating user id, used by the companion wakeup worker to "
-        "construct a properly-attributed synthetic turn.",
+        description="Originating user id, used by the companion wakeup worker to construct a properly-attributed synthetic turn.",
     )
 
 
@@ -531,15 +515,11 @@ class BuilderProgressEvent(BaseModel):
 
     task_id: str = Field(..., description="Builder thread_id / subagent task id.")
     run_id: str = Field(..., description="LangGraph run id (for diagnostics).")
-    parent_thread_id: str | None = Field(
-        None, description="Parent companion thread id used for authenticated web fan-out."
-    )
+    parent_thread_id: str | None = Field(None, description="Parent companion thread id used for authenticated web fan-out.")
     sequence: int | None = Field(None, ge=1, description="Monotonic sequence within this builder run.")
     occurred_at: str | None = Field(None, description="ISO timestamp assigned by the producer.")
     event_name: str = Field(..., description="messages | updates | custom")
-    data: Any | None = Field(
-        default=None, description="Mode-specific payload — see class docstring."
-    )
+    data: Any | None = Field(default=None, description="Mode-specific payload — see class docstring.")
 
 
 # ---- Routers ---------------------------------------------------------------
@@ -662,9 +642,7 @@ async def receive_builder_progress(event: BuilderProgressEvent, request: Request
         applied = False
     web_delivered = 0
     try:
-        web_delivered = await get_builder_canvas_worker(request.app).publish_progress(
-            event.model_dump()
-        )
+        web_delivered = await get_builder_canvas_worker(request.app).publish_progress(event.model_dump())
     except RuntimeError:
         # Channel-only test fixtures and older app factories need not mount
         # the browser worker.

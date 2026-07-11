@@ -13,9 +13,11 @@ import pytest
 
 # --- User ID validation and path traversal ---
 
+
 class TestUserIdValidation:
     def test_valid_user_id(self):
         from deerflow.agents.sophia_agent.utils import validate_user_id
+
         assert validate_user_id("user_123") == "user_123"
         assert validate_user_id("test-user") == "test-user"
         assert validate_user_id("ABC") == "ABC"
@@ -27,29 +29,35 @@ class TestUserIdValidation:
 
     def test_empty_user_id_rejected(self):
         from deerflow.agents.sophia_agent.utils import validate_user_id
+
         with pytest.raises(ValueError):
             validate_user_id("")
 
-    @pytest.mark.parametrize("malicious_id", [
-        "../etc/passwd",
-        "..\\windows\\system32",
-        "valid_user/../../other",
-        "user\x00hidden",
-        " user",
-        "user ",
-        "user..hidden",
-        "a" * 200,
-        "user id with spaces",
-        "user;rm -rf",
-        "user$(whoami)",
-    ])
+    @pytest.mark.parametrize(
+        "malicious_id",
+        [
+            "../etc/passwd",
+            "..\\windows\\system32",
+            "valid_user/../../other",
+            "user\x00hidden",
+            " user",
+            "user ",
+            "user..hidden",
+            "a" * 200,
+            "user id with spaces",
+            "user;rm -rf",
+            "user$(whoami)",
+        ],
+    )
     def test_malicious_user_id_rejected(self, malicious_id):
         from deerflow.agents.sophia_agent.utils import validate_user_id
+
         with pytest.raises(ValueError):
             validate_user_id(malicious_id)
 
     def test_safe_user_path_valid(self, tmp_path):
         from deerflow.agents.sophia_agent.utils import safe_user_path
+
         users_dir = tmp_path / "users"
         users_dir.mkdir()
         result = safe_user_path(users_dir, "test_user", "identity.md")
@@ -58,6 +66,7 @@ class TestUserIdValidation:
 
     def test_safe_user_path_traversal_rejected(self, tmp_path):
         from deerflow.agents.sophia_agent.utils import safe_user_path
+
         users_dir = tmp_path / "users"
         users_dir.mkdir()
         with pytest.raises(ValueError):
@@ -73,6 +82,7 @@ class TestUserIdValidation:
 class TestExtractLastMessageText:
     def test_plain_string_content(self):
         from deerflow.agents.sophia_agent.utils import extract_last_message_text
+
         msg = MagicMock()
         msg.content = "Hello world"
         msg.type = "human"
@@ -80,6 +90,7 @@ class TestExtractLastMessageText:
 
     def test_multimodal_list_content(self):
         from deerflow.agents.sophia_agent.utils import extract_last_message_text
+
         msg = MagicMock()
         msg.content = [{"text": "Hello"}, {"text": "world"}]
         msg.type = "human"
@@ -87,6 +98,7 @@ class TestExtractLastMessageText:
 
     def test_nested_content_dict(self):
         from deerflow.agents.sophia_agent.utils import extract_last_message_text
+
         msg = MagicMock()
         msg.type = "human"
         msg.content = [{"type": "text", "content": "Hello"}, {"value": "world"}]
@@ -107,6 +119,7 @@ class TestExtractLastMessageText:
 
     def test_empty_messages(self):
         from deerflow.agents.sophia_agent.utils import extract_last_message_text
+
         assert extract_last_message_text([]) == ""
 
 
@@ -153,7 +166,9 @@ class TestMessageCoercionMiddleware:
 
         assert mw.before_agent(state, _make_runtime()) is None
 
+
 # --- Helpers ---
+
 
 def _make_runtime(**context_kwargs):
     """Create a mock Runtime with context."""
@@ -211,9 +226,11 @@ def _make_ai_message_with_tool_call(tool_name: str, args: dict, tool_call_id: st
 
 # --- CrisisCheckMiddleware ---
 
+
 class TestCrisisCheckMiddleware:
     def _get_middleware(self):
         from deerflow.agents.sophia_agent.middlewares.crisis_check import CrisisCheckMiddleware
+
         return CrisisCheckMiddleware()
 
     def test_crisis_signal_detected(self):
@@ -251,6 +268,7 @@ class TestCrisisCheckMiddleware:
 
     def test_all_crisis_signals(self):
         from deerflow.agents.sophia_agent.middlewares.crisis_check import CRISIS_SIGNALS
+
         mw = self._get_middleware()
         for signal in CRISIS_SIGNALS:
             state = {"messages": [_make_message(signal)]}
@@ -261,6 +279,7 @@ class TestCrisisCheckMiddleware:
 
     def test_normalize_text(self):
         from deerflow.agents.sophia_agent.middlewares.crisis_check import _normalize_text
+
         assert _normalize_text("HELLO") == "hello"
         assert _normalize_text("dieee") == "die"
         assert _normalize_text("wannna") == "wana"
@@ -271,17 +290,20 @@ class TestCrisisCheckMiddleware:
 
     # --- MUST_DETECT parametrized ---
 
-    @pytest.mark.parametrize("text", [
-        "I want to die",
-        "I WANT TO DIE",
-        "i wanna die",
-        "kms",
-        "I don't want to be alive",
-        "better off dead",
-        "honestly I just want to die sometimes",
-        "been thinking about how to kill myself",
-        "I wannna dieee",
-    ])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "I want to die",
+            "I WANT TO DIE",
+            "i wanna die",
+            "kms",
+            "I don't want to be alive",
+            "better off dead",
+            "honestly I just want to die sometimes",
+            "been thinking about how to kill myself",
+            "I wannna dieee",
+        ],
+    )
     def test_must_detect(self, text):
         mw = self._get_middleware()
         state = {"messages": [_make_message(text)]}
@@ -292,13 +314,16 @@ class TestCrisisCheckMiddleware:
 
     # --- MUST_NOT_DETECT parametrized ---
 
-    @pytest.mark.parametrize("text", [
-        "this traffic is killing me",
-        "I'm dying of laughter",
-        "that joke killed me",
-        "I could die for some pizza right now",
-        "the character dies in the movie",
-    ])
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "this traffic is killing me",
+            "I'm dying of laughter",
+            "that joke killed me",
+            "I could die for some pizza right now",
+            "the character dies in the movie",
+        ],
+    )
     def test_must_not_detect(self, text):
         mw = self._get_middleware()
         state = {"messages": [_make_message(text)]}
@@ -308,6 +333,7 @@ class TestCrisisCheckMiddleware:
 
 # --- FileInjectionMiddleware ---
 
+
 class TestFileInjectionMiddleware:
     def _make_file(self, tmp_path: Path, name: str, content: str) -> Path:
         p = tmp_path / name
@@ -316,6 +342,7 @@ class TestFileInjectionMiddleware:
 
     def test_injects_file_content(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
+
         path = self._make_file(tmp_path, "test.md", "# Test Content")
         mw = FileInjectionMiddleware((path, False))
         result = mw.before_agent({"messages": []}, _make_runtime())
@@ -324,6 +351,7 @@ class TestFileInjectionMiddleware:
 
     def test_soul_md_injects_on_crisis(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
+
         path = self._make_file(tmp_path, "soul.md", "Soul content")
         mw = FileInjectionMiddleware((path, False))
         result = mw.before_agent({"messages": [], "skip_expensive": True}, _make_runtime())
@@ -332,6 +360,7 @@ class TestFileInjectionMiddleware:
 
     def test_voice_md_skips_on_crisis(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
+
         path = self._make_file(tmp_path, "voice.md", "Voice content")
         mw = FileInjectionMiddleware((path, True))
         result = mw.before_agent({"messages": [], "skip_expensive": True}, _make_runtime())
@@ -339,6 +368,7 @@ class TestFileInjectionMiddleware:
 
     def test_multiple_files(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
+
         soul = self._make_file(tmp_path, "soul.md", "Soul")
         voice = self._make_file(tmp_path, "voice.md", "Voice")
         mw = FileInjectionMiddleware((soul, False), (voice, True))
@@ -351,15 +381,18 @@ class TestFileInjectionMiddleware:
 
     def test_missing_file_raises_at_init(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.file_injection import FileInjectionMiddleware
+
         with pytest.raises(FileNotFoundError):
             FileInjectionMiddleware((tmp_path / "nonexistent.md", False))
 
 
 # --- PlatformContextMiddleware ---
 
+
 class TestPlatformContextMiddleware:
     def _get_middleware(self):
         from deerflow.agents.sophia_agent.middlewares.platform_context import PlatformContextMiddleware
+
         return PlatformContextMiddleware()
 
     def test_voice_platform(self):
@@ -392,9 +425,11 @@ class TestPlatformContextMiddleware:
 
 # --- TurnCountMiddleware ---
 
+
 class TestTurnCountMiddleware:
     def _get_middleware(self):
         from deerflow.agents.sophia_agent.middlewares.turn_count import TurnCountMiddleware
+
         return TurnCountMiddleware()
 
     def test_first_turn_reports_zero_completed_turns(self):
@@ -429,16 +464,19 @@ class TestTurnCountMiddleware:
 
 # --- UserIdentityMiddleware ---
 
+
 class TestUserIdentityMiddleware:
     def test_loads_identity_file(self, tmp_path):
         import deerflow.agents.sophia_agent.paths as paths
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
+
         # Create a temporary user identity file
         user_dir = tmp_path / "test_user"
         user_dir.mkdir(parents=True)
         (user_dir / "identity.md").write_text("Name: Test User\nRole: Developer")
 
         import deerflow.agents.sophia_agent.middlewares.user_identity as mod
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -456,6 +494,7 @@ class TestUserIdentityMiddleware:
         import deerflow.agents.sophia_agent.middlewares.user_identity as mod
         import deerflow.agents.sophia_agent.paths as paths
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -469,6 +508,7 @@ class TestUserIdentityMiddleware:
 
     def test_skips_on_crisis(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.user_identity import UserIdentityMiddleware
+
         mw = UserIdentityMiddleware("test_user")
         result = mw.before_agent({"messages": [], "skip_expensive": True}, _make_runtime())
         assert result is None
@@ -476,20 +516,20 @@ class TestUserIdentityMiddleware:
 
 # --- SessionStateMiddleware ---
 
+
 class TestSessionStateMiddleware:
     def test_smart_opener_on_greeting(self, tmp_path):
         """Greeting message → opener delivered as first_turn_instruction."""
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
         import deerflow.agents.sophia_agent.paths as paths
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
 
         user_dir = tmp_path / "test_user" / "handoffs"
         user_dir.mkdir(parents=True)
-        (user_dir / "latest.md").write_text(
-            '---\nsmart_opener: "How did the pitch go?"\n---\nSession notes here.'
-        )
+        (user_dir / "latest.md").write_text('---\nsmart_opener: "How did the pitch go?"\n---\nSession notes here.')
 
         try:
             mw = mod.SessionStateMiddleware("test_user")
@@ -509,15 +549,14 @@ class TestSessionStateMiddleware:
         """Real content on turn 0 → opener becomes context, not instruction."""
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
         import deerflow.agents.sophia_agent.paths as paths
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
 
         user_dir = tmp_path / "test_user" / "handoffs"
         user_dir.mkdir(parents=True)
-        (user_dir / "latest.md").write_text(
-            '---\nsmart_opener: "How did the pitch go?"\n---\n'
-        )
+        (user_dir / "latest.md").write_text('---\nsmart_opener: "How did the pitch go?"\n---\n')
 
         try:
             mw = mod.SessionStateMiddleware("test_user")
@@ -537,6 +576,7 @@ class TestSessionStateMiddleware:
     def test_no_opener_on_turn_1(self, tmp_path):
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
         import deerflow.agents.sophia_agent.paths as paths
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -556,6 +596,7 @@ class TestSessionStateMiddleware:
     def test_missing_handoff_returns_none(self, tmp_path):
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
         import deerflow.agents.sophia_agent.paths as paths
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -571,15 +612,14 @@ class TestSessionStateMiddleware:
         """Greeting on turn 0 with handoff file injects <first_turn_instruction>."""
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
         import deerflow.agents.sophia_agent.paths as paths
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
 
         user_dir = tmp_path / "test_user" / "handoffs"
         user_dir.mkdir(parents=True)
-        (user_dir / "latest.md").write_text(
-            '---\nsmart_opener: "How did the pitch go?"\n---\nSome session notes.'
-        )
+        (user_dir / "latest.md").write_text('---\nsmart_opener: "How did the pitch go?"\n---\nSome session notes.')
 
         try:
             mw = mod.SessionStateMiddleware("test_user")
@@ -600,15 +640,14 @@ class TestSessionStateMiddleware:
         """Substantive user message on turn 0 injects <session_context>, not <first_turn_instruction>."""
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
         import deerflow.agents.sophia_agent.paths as paths
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
 
         user_dir = tmp_path / "test_user" / "handoffs"
         user_dir.mkdir(parents=True)
-        (user_dir / "latest.md").write_text(
-            '---\nsmart_opener: "How did the pitch go?"\n---\nSome session notes.'
-        )
+        (user_dir / "latest.md").write_text('---\nsmart_opener: "How did the pitch go?"\n---\nSome session notes.')
 
         try:
             mw = mod.SessionStateMiddleware("test_user")
@@ -630,6 +669,7 @@ class TestSessionStateMiddleware:
         """No handoff file on disk — middleware returns None gracefully."""
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
         import deerflow.agents.sophia_agent.paths as paths
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
@@ -652,15 +692,14 @@ class TestSessionStateMiddleware:
         """turn_count=1 causes the middleware to skip entirely."""
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
         import deerflow.agents.sophia_agent.paths as paths
+
         original_users_dir = paths.USERS_DIR
         paths.USERS_DIR = tmp_path
         mod.USERS_DIR = tmp_path
 
         user_dir = tmp_path / "test_user" / "handoffs"
         user_dir.mkdir(parents=True)
-        (user_dir / "latest.md").write_text(
-            '---\nsmart_opener: "How did the pitch go?"\n---\n'
-        )
+        (user_dir / "latest.md").write_text('---\nsmart_opener: "How did the pitch go?"\n---\n')
 
         try:
             mw = mod.SessionStateMiddleware("test_user")
@@ -673,11 +712,14 @@ class TestSessionStateMiddleware:
             paths.USERS_DIR = original_users_dir
             mod.USERS_DIR = original_users_dir
 
-    @pytest.mark.parametrize("frontmatter,expected_opener", [
-        ('smart_opener: "How did the pitch go?"', "How did the pitch go?"),
-        ("smart_opener: 'How did the pitch go?'", "How did the pitch go?"),
-        ("smart_opener: How did the pitch go?", "How did the pitch go?"),
-    ])
+    @pytest.mark.parametrize(
+        "frontmatter,expected_opener",
+        [
+            ('smart_opener: "How did the pitch go?"', "How did the pitch go?"),
+            ("smart_opener: 'How did the pitch go?'", "How did the pitch go?"),
+            ("smart_opener: How did the pitch go?", "How did the pitch go?"),
+        ],
+    )
     def test_opener_round_trip(self, tmp_path, frontmatter, expected_opener):
         """_extract_smart_opener handles double quotes, single quotes, and no quotes."""
         import deerflow.agents.sophia_agent.middlewares.session_state as mod
@@ -688,6 +730,7 @@ class TestSessionStateMiddleware:
 
 
 # --- ToneGuidanceMiddleware ---
+
 
 class TestToneGuidanceMiddleware:
     def _create_tone_file(self, tmp_path: Path) -> Path:
@@ -766,6 +809,7 @@ Witness the win before anything else.
 
     def test_parses_bands(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
+
         path = self._create_tone_file(tmp_path)
         mw = ToneGuidanceMiddleware(path)
         assert len(mw._bands) == 5
@@ -785,6 +829,7 @@ Witness the win before anything else.
 
     def test_default_tone_maps_to_engagement(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
+
         path = self._create_tone_file(tmp_path)
         mw = ToneGuidanceMiddleware(path)
         result = mw.before_agent({"messages": []}, _make_runtime())
@@ -792,6 +837,7 @@ Witness the win before anything else.
 
     def test_low_tone_maps_to_shutdown(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
+
         path = self._create_tone_file(tmp_path)
         mw = ToneGuidanceMiddleware(path)
         result = mw.before_agent(
@@ -802,6 +848,7 @@ Witness the win before anything else.
 
     def test_high_tone_maps_to_enthusiasm(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
+
         path = self._create_tone_file(tmp_path)
         mw = ToneGuidanceMiddleware(path)
         result = mw.before_agent(
@@ -812,6 +859,7 @@ Witness the win before anything else.
 
     def test_injects_single_band_not_full_file(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
+
         path = self._create_tone_file(tmp_path)
         mw = ToneGuidanceMiddleware(path)
         result = mw.before_agent({"messages": []}, _make_runtime())
@@ -823,6 +871,7 @@ Witness the win before anything else.
 
     def test_skips_on_crisis(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
+
         path = self._create_tone_file(tmp_path)
         mw = ToneGuidanceMiddleware(path)
         result = mw.before_agent({"messages": [], "skip_expensive": True}, _make_runtime())
@@ -830,6 +879,7 @@ Witness the win before anything else.
 
     def test_tone_to_band_boundaries(self):
         from deerflow.agents.sophia_agent.middlewares.tone_guidance import ToneGuidanceMiddleware
+
         assert ToneGuidanceMiddleware.tone_to_band(0.0) == "shutdown"
         assert ToneGuidanceMiddleware.tone_to_band(0.5) == "grief_fear"
         assert ToneGuidanceMiddleware.tone_to_band(1.5) == "anger_antagonism"
@@ -840,9 +890,11 @@ Witness the win before anything else.
 
 # --- ContextAdaptationMiddleware ---
 
+
 class TestContextAdaptationMiddleware:
     def test_loads_context_file(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
+
         ctx_dir = tmp_path / "context"
         ctx_dir.mkdir()
         (ctx_dir / "work.md").write_text("Work context guidance")
@@ -853,6 +905,7 @@ class TestContextAdaptationMiddleware:
 
     def test_invalid_mode_defaults_to_life(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
+
         ctx_dir = tmp_path / "context"
         ctx_dir.mkdir()
         (ctx_dir / "life.md").write_text("Life context")
@@ -863,6 +916,7 @@ class TestContextAdaptationMiddleware:
     def test_only_active_file_loaded(self, tmp_path):
         """Only the active context mode file should be loaded, not all 3."""
         from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
+
         ctx_dir = tmp_path / "context"
         ctx_dir.mkdir()
         (ctx_dir / "work.md").write_text("Work context")
@@ -877,6 +931,7 @@ class TestContextAdaptationMiddleware:
     def test_missing_context_file_returns_mode_only(self, tmp_path):
         """Missing context file should log warning and return None from before_agent."""
         from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
+
         ctx_dir = tmp_path / "context"
         ctx_dir.mkdir()
         # No work.md file created
@@ -887,6 +942,7 @@ class TestContextAdaptationMiddleware:
 
     def test_skips_on_crisis(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.context_adaptation import ContextAdaptationMiddleware
+
         ctx_dir = tmp_path / "context"
         ctx_dir.mkdir()
         mw = ContextAdaptationMiddleware(ctx_dir, "work")
@@ -896,9 +952,11 @@ class TestContextAdaptationMiddleware:
 
 # --- RitualMiddleware ---
 
+
 class TestRitualMiddleware:
     def test_sets_ritual_state(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.ritual import RitualMiddleware
+
         rituals_dir = tmp_path / "rituals"
         rituals_dir.mkdir()
         (rituals_dir / "debrief.md").write_text("Debrief ritual instructions")
@@ -910,6 +968,7 @@ class TestRitualMiddleware:
 
     def test_no_ritual_returns_none_state(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.ritual import RitualMiddleware
+
         rituals_dir = tmp_path / "rituals"
         rituals_dir.mkdir()
         mw = RitualMiddleware(rituals_dir, None)
@@ -918,6 +977,7 @@ class TestRitualMiddleware:
 
     def test_invalid_ritual_treated_as_none(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.ritual import RitualMiddleware
+
         rituals_dir = tmp_path / "rituals"
         rituals_dir.mkdir()
         mw = RitualMiddleware(rituals_dir, "invalid_ritual")
@@ -926,6 +986,7 @@ class TestRitualMiddleware:
 
     def test_skips_on_crisis(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.ritual import RitualMiddleware
+
         rituals_dir = tmp_path / "rituals"
         rituals_dir.mkdir()
         (rituals_dir / "vent.md").write_text("Vent instructions")
@@ -936,18 +997,18 @@ class TestRitualMiddleware:
 
 # --- SkillRouterMiddleware ---
 
+
 class TestSkillRouterMiddleware:
     def _make_skills_dir(self, tmp_path: Path) -> Path:
         skills_dir = tmp_path / "skills"
         skills_dir.mkdir()
-        for name in ["crisis_redirect", "boundary_holding", "vulnerability_holding",
-                      "trust_building", "identity_fluidity_support",
-                      "celebrating_breakthrough", "challenging_growth", "active_listening"]:
+        for name in ["crisis_redirect", "boundary_holding", "vulnerability_holding", "trust_building", "identity_fluidity_support", "celebrating_breakthrough", "challenging_growth", "active_listening"]:
             (skills_dir / f"{name}.md").write_text(f"# {name} skill instructions")
         return skills_dir
 
     def test_force_skill_takes_priority(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
         result = mw.before_agent(
             {"messages": [_make_message("hello")], "force_skill": "crisis_redirect", "skip_expensive": True},
@@ -957,6 +1018,7 @@ class TestSkillRouterMiddleware:
 
     def test_new_user_gets_trust_building(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
         result = mw.before_agent(
             {"messages": [_make_message("hello")], "skill_session_data": {"sessions_total": 2, "trust_established": False, "complaint_signatures": {}, "skill_history": []}},
@@ -966,6 +1028,7 @@ class TestSkillRouterMiddleware:
 
     def test_default_active_listening(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
         result = mw.before_agent(
             {"messages": [_make_message("I had a good day")], "skill_session_data": {"sessions_total": 10, "trust_established": True, "complaint_signatures": {}, "skill_history": []}},
@@ -975,6 +1038,7 @@ class TestSkillRouterMiddleware:
 
     def test_boundary_violation(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
         result = mw.before_agent(
             {"messages": [_make_message("be my girlfriend please")], "skill_session_data": {"sessions_total": 10, "trust_established": True, "complaint_signatures": {}, "skill_history": []}},
@@ -984,6 +1048,7 @@ class TestSkillRouterMiddleware:
 
     def test_vulnerability_detection(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
         result = mw.before_agent(
             {"messages": [_make_message("I've never told anyone this before")], "skill_session_data": {"sessions_total": 10, "trust_established": True, "complaint_signatures": {}, "skill_history": []}},
@@ -994,6 +1059,7 @@ class TestSkillRouterMiddleware:
     def test_breakthrough_detection_with_tone_spike(self, tmp_path):
         """Tone spike >= 1.0 with insight language triggers celebrating_breakthrough."""
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
         result = mw.before_agent(
             {
@@ -1014,6 +1080,7 @@ class TestSkillRouterMiddleware:
     def test_breakthrough_not_triggered_without_spike(self, tmp_path):
         """Small tone change should not trigger breakthrough."""
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
         result = mw.before_agent(
             {
@@ -1034,6 +1101,7 @@ class TestSkillRouterMiddleware:
     def test_last_tone_estimate_stored_in_session_data(self, tmp_path):
         """Verify last_tone_estimate is updated after each turn."""
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
         result = mw.before_agent(
             {
@@ -1052,6 +1120,7 @@ class TestSkillRouterMiddleware:
 
     def test_session_data_persists(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
         result = mw.before_agent(
             {"messages": [_make_message("hello")]},
@@ -1063,6 +1132,7 @@ class TestSkillRouterMiddleware:
     def test_sessions_total_not_incremented_on_subsequent_turns(self, tmp_path):
         """sessions_total must only increment on turn_count == 0 (session start)."""
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
         sd = {
             "sessions_total": 3,
@@ -1080,6 +1150,7 @@ class TestSkillRouterMiddleware:
     def test_sessions_total_increments_on_turn_zero(self, tmp_path):
         """sessions_total increments exactly once per session (turn_count == 0)."""
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
         sd = {
             "sessions_total": 3,
@@ -1096,6 +1167,7 @@ class TestSkillRouterMiddleware:
     def test_trust_established_visible_to_select_skill_same_turn(self, tmp_path):
         """trust_established updated in before_agent must be visible to _select_skill on the same turn."""
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
         # sessions_total is 4 in state. turn_count == 0 increments it to 5,
         # which should set trust_established = True (threshold is 5).
@@ -1120,6 +1192,7 @@ class TestSkillRouterMiddleware:
     def test_breakthrough_detection_with_passed_session_data(self, tmp_path):
         """Breakthrough detection works with session_data passed to _select_skill."""
         from deerflow.agents.sophia_agent.middlewares.skill_router import SkillRouterMiddleware
+
         mw = SkillRouterMiddleware(self._make_skills_dir(tmp_path))
         result = mw.before_agent(
             {
@@ -1141,9 +1214,11 @@ class TestSkillRouterMiddleware:
 
 # --- ArtifactMiddleware ---
 
+
 class TestArtifactMiddleware:
     def test_injects_instructions(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
         path = tmp_path / "artifact_instructions.md"
         path.write_text("Artifact instructions content")
         mw = ArtifactMiddleware(path)
@@ -1175,6 +1250,7 @@ class TestArtifactMiddleware:
 
     def test_captures_tool_call(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
         path = tmp_path / "artifact_instructions.md"
         path.write_text("Instructions")
         mw = ArtifactMiddleware(path)
@@ -1199,6 +1275,7 @@ class TestArtifactMiddleware:
         from langchain_core.messages import ToolMessage
 
         from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
         path = tmp_path / "artifact_instructions.md"
         path.write_text("Instructions")
         mw = ArtifactMiddleware(path)
@@ -1220,6 +1297,7 @@ class TestArtifactMiddleware:
 
     def test_skips_on_crisis(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
         path = tmp_path / "artifact_instructions.md"
         path.write_text("Instructions")
         mw = ArtifactMiddleware(path)
@@ -1229,6 +1307,7 @@ class TestArtifactMiddleware:
     def test_captures_artifact_with_tool_message_present(self, tmp_path):
         """after_model captures artifact from AIMessage even when ToolMessage is also in the list."""
         from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
         path = tmp_path / "artifact_instructions.md"
         path.write_text("Instructions")
         mw = ArtifactMiddleware(path)
@@ -1258,6 +1337,7 @@ class TestArtifactMiddleware:
     def test_previous_artifact_rotation(self, tmp_path):
         """previous_artifact is set to the old current_artifact when a new one is captured."""
         from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
         path = tmp_path / "artifact_instructions.md"
         path.write_text("Instructions")
         mw = ArtifactMiddleware(path)
@@ -1285,6 +1365,7 @@ class TestArtifactMiddleware:
         from langchain_core.messages import ToolMessage
 
         from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
         path = tmp_path / "artifact_instructions.md"
         path.write_text("Instructions")
         mw = ArtifactMiddleware(path)
@@ -1301,12 +1382,7 @@ class TestArtifactMiddleware:
             "user_next_action": "Open or download the document and tell me what to revise next.",
         }
         tool_msg = ToolMessage(
-            content=(
-                "Builder completed successfully.\n"
-                "Title: One-Page Document: The Dangers of War\n"
-                "Summary: Created the requested one-page document about the dangers of war.\n"
-                f"Full result: {json.dumps(builder_result)}"
-            ),
+            content=(f"Builder completed successfully.\nTitle: One-Page Document: The Dangers of War\nSummary: Created the requested one-page document about the dangers of war.\nFull result: {json.dumps(builder_result)}"),
             tool_call_id="builder-direct-test",
             name="switch_to_builder",
             status="success",
@@ -1333,6 +1409,7 @@ class TestArtifactMiddleware:
     def test_after_model_does_not_end_on_mixed_tool_calls(self, tmp_path):
         """after_model leaves the loop alone when emit_artifact is mixed with other tools."""
         from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
         path = tmp_path / "artifact_instructions.md"
         path.write_text("Instructions")
         mw = ArtifactMiddleware(path)
@@ -1351,6 +1428,7 @@ class TestArtifactMiddleware:
     def test_after_model_returns_none_without_emit_artifact(self, tmp_path):
         """after_model returns None when no emit_artifact tool_call exists."""
         from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
         path = tmp_path / "artifact_instructions.md"
         path.write_text("Instructions")
         mw = ArtifactMiddleware(path)
@@ -1433,9 +1511,7 @@ class TestArtifactMiddleware:
         assert "<builder_completed>" in block
         assert "WAKEUP TURN" not in block
 
-    def test_wakeup_synthesis_fallback_detection_when_context_flag_missing(
-        self, tmp_path
-    ):
+    def test_wakeup_synthesis_fallback_detection_when_context_flag_missing(self, tmp_path):
         """When the runtime context lacks ``is_builder_wakeup`` (older
         callers, tests), the middleware falls back to inspecting the
         message tail. Empty messages or a non-HumanMessage tail counts as
@@ -1467,9 +1543,11 @@ class TestArtifactMiddleware:
 
 # --- PromptAssemblyMiddleware ---
 
+
 class TestPromptAssemblyMiddleware:
     def _make_model_request(self, messages, state):
         """Create a mock ModelRequest for wrap_model_call testing."""
+
         def _build_request(current_messages):
             new_req = MagicMock()
             new_req.messages = current_messages
@@ -1487,6 +1565,7 @@ class TestPromptAssemblyMiddleware:
         from langchain_core.messages import HumanMessage, SystemMessage
 
         from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
+
         mw = PromptAssemblyMiddleware()
 
         human_msg = HumanMessage(content="hello")
@@ -1498,6 +1577,7 @@ class TestPromptAssemblyMiddleware:
 
         # Track what the handler receives
         captured = {}
+
         def handler(req):
             captured["messages"] = req.messages
             return MagicMock()
@@ -1519,6 +1599,7 @@ class TestPromptAssemblyMiddleware:
         from langchain_core.messages import HumanMessage
 
         from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
+
         mw = PromptAssemblyMiddleware()
 
         human_msg = HumanMessage(content="hello")
@@ -1527,6 +1608,7 @@ class TestPromptAssemblyMiddleware:
 
         # Handler should receive the original request (unmodified)
         captured = {}
+
         def handler(req):
             captured["request"] = req
             return MagicMock()
@@ -1539,6 +1621,7 @@ class TestPromptAssemblyMiddleware:
         from langchain_core.messages import HumanMessage, SystemMessage
 
         from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
+
         mw = PromptAssemblyMiddleware()
 
         old_sys = SystemMessage(content="old system", id="old-sys")
@@ -1550,6 +1633,7 @@ class TestPromptAssemblyMiddleware:
         request = self._make_model_request([old_sys, human_msg], state)
 
         captured = {}
+
         def handler(req):
             captured["messages"] = req.messages
             return MagicMock()
@@ -1568,15 +1652,18 @@ class TestPromptAssemblyMiddleware:
         from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
         from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
+
         mw = PromptAssemblyMiddleware()
 
         ai_msg = AIMessage(
             content="",
-            tool_calls=[{
-                "name": "switch_to_builder",
-                "id": "builder-direct-1",
-                "args": {"task": "Create a document", "task_type": "document"},
-            }],
+            tool_calls=[
+                {
+                    "name": "switch_to_builder",
+                    "id": "builder-direct-1",
+                    "args": {"task": "Create a document", "task_type": "document"},
+                }
+            ],
         )
         human_msg = HumanMessage(content="Actually, summarize it instead.")
         state = {
@@ -1606,15 +1693,18 @@ class TestPromptAssemblyMiddleware:
         from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
         from deerflow.agents.sophia_agent.middlewares.prompt_assembly import PromptAssemblyMiddleware
+
         mw = PromptAssemblyMiddleware()
 
         ai_msg = AIMessage(
             content="",
-            tool_calls=[{
-                "name": "switch_to_builder",
-                "id": "builder-direct-2",
-                "args": {"task": "Create a document", "task_type": "document"},
-            }],
+            tool_calls=[
+                {
+                    "name": "switch_to_builder",
+                    "id": "builder-direct-2",
+                    "args": {"task": "Create a document", "task_type": "document"},
+                }
+            ],
         )
         human_msg = HumanMessage(content="Please keep going.")
         state = {
@@ -1640,71 +1730,96 @@ class TestPromptAssemblyMiddleware:
 
 # --- emit_artifact tool ---
 
+
 class TestEmitArtifactTool:
     def test_valid_artifact(self):
         from deerflow.sophia.tools.emit_artifact import emit_artifact
-        result = emit_artifact.invoke({
-            "session_goal": "Explore stress at work",
-            "active_goal": "Validate feelings",
-            "next_step": "Ask about coping",
-            "takeaway": "User is overwhelmed",
-            "reflection": "What helps you decompress?",
-            "tone_estimate": 1.8,
-            "tone_target": 2.3,
-            "active_tone_band": "anger_antagonism",
-            "skill_loaded": "active_listening",
-            "ritual_phase": "freeform.work_stress",
-            "voice_emotion_primary": "sympathetic",
-            "voice_emotion_secondary": "calm",
-            "voice_speed": "gentle",
-        })
+
+        result = emit_artifact.invoke(
+            {
+                "session_goal": "Explore stress at work",
+                "active_goal": "Validate feelings",
+                "next_step": "Ask about coping",
+                "takeaway": "User is overwhelmed",
+                "reflection": "What helps you decompress?",
+                "tone_estimate": 1.8,
+                "tone_target": 2.3,
+                "active_tone_band": "anger_antagonism",
+                "skill_loaded": "active_listening",
+                "ritual_phase": "freeform.work_stress",
+                "voice_emotion_primary": "sympathetic",
+                "voice_emotion_secondary": "calm",
+                "voice_speed": "gentle",
+            }
+        )
         assert result == "Artifact recorded."
 
     def test_tone_estimate_bounds(self):
         from deerflow.sophia.tools.emit_artifact import ArtifactInput
+
         with pytest.raises(Exception):
             ArtifactInput(
-                session_goal="test", active_goal="test", next_step="test",
-                takeaway="test", reflection=None, tone_estimate=5.0, tone_target=4.0,
-                active_tone_band="engagement", skill_loaded="active_listening",
-                ritual_phase="freeform.test", voice_emotion_primary="calm",
-                voice_emotion_secondary="calm", voice_speed="normal",
+                session_goal="test",
+                active_goal="test",
+                next_step="test",
+                takeaway="test",
+                reflection=None,
+                tone_estimate=5.0,
+                tone_target=4.0,
+                active_tone_band="engagement",
+                skill_loaded="active_listening",
+                ritual_phase="freeform.test",
+                voice_emotion_primary="calm",
+                voice_emotion_secondary="calm",
+                voice_speed="normal",
             )
 
     def test_voice_speed_enum(self):
         from deerflow.sophia.tools.emit_artifact import ArtifactInput
+
         with pytest.raises(Exception):
             ArtifactInput(
-                session_goal="test", active_goal="test", next_step="test",
-                takeaway="test", reflection=None, tone_estimate=2.0, tone_target=2.5,
-                active_tone_band="engagement", skill_loaded="active_listening",
-                ritual_phase="freeform.test", voice_emotion_primary="calm",
-                voice_emotion_secondary="calm", voice_speed="invalid_speed",
+                session_goal="test",
+                active_goal="test",
+                next_step="test",
+                takeaway="test",
+                reflection=None,
+                tone_estimate=2.0,
+                tone_target=2.5,
+                active_tone_band="engagement",
+                skill_loaded="active_listening",
+                ritual_phase="freeform.test",
+                voice_emotion_primary="calm",
+                voice_emotion_secondary="calm",
+                voice_speed="invalid_speed",
             )
 
     def test_null_like_reflection_string_is_normalized(self):
         from deerflow.sophia.tools.emit_artifact_contract import validate_emit_artifact_args
 
-        artifact = validate_emit_artifact_args({
-            "session_goal": "test",
-            "active_goal": "test",
-            "next_step": "test",
-            "takeaway": "test",
-            "reflection": "null",
-            "tone_estimate": 2.0,
-            "tone_target": 2.5,
-            "active_tone_band": "engagement",
-            "skill_loaded": "active_listening",
-            "ritual_phase": "freeform.test",
-            "voice_emotion_primary": "calm",
-            "voice_emotion_secondary": "calm",
-            "voice_speed": "normal",
-        })
+        artifact = validate_emit_artifact_args(
+            {
+                "session_goal": "test",
+                "active_goal": "test",
+                "next_step": "test",
+                "takeaway": "test",
+                "reflection": "null",
+                "tone_estimate": 2.0,
+                "tone_target": 2.5,
+                "active_tone_band": "engagement",
+                "skill_loaded": "active_listening",
+                "ritual_phase": "freeform.test",
+                "voice_emotion_primary": "calm",
+                "voice_emotion_secondary": "calm",
+                "voice_speed": "normal",
+            }
+        )
 
         assert artifact["reflection"] is None
 
 
 # --- retrieve_memories tool ---
+
 
 class TestRetrieveMemoriesTool:
     def test_tool_uses_bound_user_id(self):
@@ -1765,38 +1880,45 @@ class TestRetrieveMemoriesTool:
 
 # --- Mem0 category selection ---
 
+
 class TestMem0CategorySelection:
     def test_default_categories(self):
         from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+
         cats = _select_categories(None, None, [])
         assert "fact" in cats
         assert "preference" in cats
 
     def test_vent_ritual_adds_feeling_relationship(self):
         from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+
         cats = _select_categories("vent", None, [])
         assert "feeling" in cats
         assert "relationship" in cats
 
     def test_debrief_adds_commitment_decision(self):
         from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+
         cats = _select_categories("debrief", None, [])
         assert "commitment" in cats
         assert "decision" in cats
 
     def test_challenging_growth_adds_pattern_lesson(self):
         from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+
         cats = _select_categories(None, "challenging_growth", [])
         assert "pattern" in cats
         assert "lesson" in cats
 
     def test_ritual_adds_ritual_context(self):
         from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+
         cats = _select_categories("prepare", None, [])
         assert "ritual_context" in cats
 
     def test_work_context_adds_work_categories(self):
         from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+
         cats = _select_categories(None, None, [], context_mode="work")
         assert "project" in cats
         assert "colleague" in cats
@@ -1805,6 +1927,7 @@ class TestMem0CategorySelection:
 
     def test_gaming_context_adds_gaming_categories(self):
         from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+
         cats = _select_categories(None, None, [], context_mode="gaming")
         assert "game" in cats
         assert "achievement" in cats
@@ -1813,6 +1936,7 @@ class TestMem0CategorySelection:
 
     def test_life_context_adds_life_categories(self):
         from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+
         cats = _select_categories(None, None, [], context_mode="life")
         assert "family" in cats
         assert "health" in cats
@@ -1821,6 +1945,7 @@ class TestMem0CategorySelection:
 
     def test_no_context_mode_only_base_categories(self):
         from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+
         cats = _select_categories(None, None, [])
         assert "project" not in cats
         assert "game" not in cats
@@ -1828,6 +1953,7 @@ class TestMem0CategorySelection:
 
     def test_context_plus_ritual_combines_categories(self):
         from deerflow.agents.sophia_agent.middlewares.mem0_memory import _select_categories
+
         cats = _select_categories("debrief", None, [], context_mode="work")
         assert "project" in cats  # from work context
         assert "commitment" in cats  # from debrief ritual
@@ -2150,9 +2276,11 @@ class TestMem0MemoryMiddleware:
 
 # --- SophiaTitleMiddleware ---
 
+
 class TestSophiaTitleMiddleware:
     def test_generates_title_on_first_turn(self):
         from deerflow.agents.sophia_agent.middlewares.title import SophiaTitleMiddleware
+
         mw = SophiaTitleMiddleware()
         result = mw.after_model(
             {"messages": [], "turn_count": 0, "current_artifact": {"session_goal": "Work stress"}},
@@ -2163,6 +2291,7 @@ class TestSophiaTitleMiddleware:
 
     def test_no_title_if_already_set(self):
         from deerflow.agents.sophia_agent.middlewares.title import SophiaTitleMiddleware
+
         mw = SophiaTitleMiddleware()
         result = mw.after_model(
             {"messages": [], "title": "Existing title", "turn_count": 0},
@@ -2173,21 +2302,25 @@ class TestSophiaTitleMiddleware:
 
 # --- emit_builder_artifact tool ---
 
+
 class TestEmitBuilderArtifactTool:
     def test_valid_artifact(self):
         # Invoke emit_builder_artifact with valid input, verify returns JSON string
         from deerflow.sophia.tools.emit_builder_artifact import emit_builder_artifact
-        result = emit_builder_artifact.invoke({
-            "artifact_path": "outputs/report.md",
-            "artifact_type": "document",
-            "artifact_title": "Business Case Report",
-            "steps_completed": 5,
-            "decisions_made": ["Used simple format", "Included ROI section"],
-            "sources_used": [{"title": "Example", "url": "https://example.com"}],
-            "companion_summary": "A clean business case document.",
-            "companion_tone_hint": "Reassuring — user was stressed.",
-            "confidence": 0.85,
-        })
+
+        result = emit_builder_artifact.invoke(
+            {
+                "artifact_path": "outputs/report.md",
+                "artifact_type": "document",
+                "artifact_title": "Business Case Report",
+                "steps_completed": 5,
+                "decisions_made": ["Used simple format", "Included ROI section"],
+                "sources_used": [{"title": "Example", "url": "https://example.com"}],
+                "companion_summary": "A clean business case document.",
+                "companion_tone_hint": "Reassuring — user was stressed.",
+                "confidence": 0.85,
+            }
+        )
         parsed = json.loads(result)
         assert parsed["artifact_type"] == "document"
         assert parsed["confidence"] == 0.85
@@ -2195,19 +2328,27 @@ class TestEmitBuilderArtifactTool:
 
     def test_invalid_confidence_bounds(self):
         from deerflow.sophia.tools.emit_builder_artifact import BuilderArtifactInput
+
         with pytest.raises(Exception):
             BuilderArtifactInput(
-                artifact_path="x", artifact_type="document", artifact_title="x",
-                steps_completed=1, decisions_made=[], companion_summary="x",
-                companion_tone_hint="x", confidence=1.5,  # out of bounds
+                artifact_path="x",
+                artifact_type="document",
+                artifact_title="x",
+                steps_completed=1,
+                decisions_made=[],
+                companion_summary="x",
+                companion_tone_hint="x",
+                confidence=1.5,  # out of bounds
             )
 
 
 # --- BuilderTaskMiddleware ---
 
+
 class TestBuilderTaskMiddleware:
     def test_injects_briefing_with_context(self):
         from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
         mw = BuilderTaskMiddleware()
         state = {
             "system_prompt_blocks": ["existing block"],
@@ -2229,17 +2370,20 @@ class TestBuilderTaskMiddleware:
 
     def test_no_context_returns_none(self):
         from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
         mw = BuilderTaskMiddleware()
         result = mw.before_agent({"system_prompt_blocks": []}, _make_runtime())
         assert result is None
 
     def test_tone_guidance_engagement(self):
         from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
         guidance = BuilderTaskMiddleware._tone_guidance(3.0, "engagement")
         assert "ambitious" in guidance.lower()
 
     def test_tone_guidance_shutdown(self):
         from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+
         guidance = BuilderTaskMiddleware._tone_guidance(0.3, "shutdown")
         assert "simple" in guidance.lower()
 
@@ -2308,9 +2452,7 @@ class TestBuilderTaskMiddleware:
         assert "Sources section" in research_policy
         assert "emit_builder_artifact.sources_used MUST contain structured {title, url}" in research_policy
 
-    def test_skills_inventory_block_lists_all_relevant_skills_unconditionally(
-        self, monkeypatch, caplog
-    ):
+    def test_skills_inventory_block_lists_all_relevant_skills_unconditionally(self, monkeypatch, caplog):
         """Phase B regression. Without this, ``load_skills(enabled_only=True)``
         + missing ``extensions_config.json`` silently returned an empty
         inventory and the ``<skill_system>`` block never reached the prompt
@@ -2351,10 +2493,7 @@ class TestBuilderTaskMiddleware:
 
         def _stub_load_skills(*, enabled_only: bool = False, **_: object):
             # The fix passes enabled_only=False; this stub asserts on it.
-            assert enabled_only is False, (
-                "BuilderTask must pass enabled_only=False so the whitelist "
-                "is the only filter — see Phase B regression context."
-            )
+            assert enabled_only is False, "BuilderTask must pass enabled_only=False so the whitelist is the only filter — see Phase B regression context."
             return list(fake_skills)
 
         # Patch via the central skills module namespace, since builder_task
@@ -2384,13 +2523,9 @@ class TestBuilderTaskMiddleware:
         assert "unrelated-skill" not in block
         # Observability: the INFO breadcrumb fires either way. 7 of the 9 fake
         # skills are whitelisted (chart-visualization + unrelated-skill dropped).
-        assert any(
-            "skills_inventory: 7 skills injected" in rec.message for rec in caplog.records
-        )
+        assert any("skills_inventory: 7 skills injected" in rec.message for rec in caplog.records)
 
-    def test_skills_inventory_block_can_omit_image_generation(
-        self, monkeypatch
-    ):
+    def test_skills_inventory_block_can_omit_image_generation(self, monkeypatch):
         from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
 
         class _FakeSkill:
@@ -2462,13 +2597,9 @@ class TestBuilderTaskMiddleware:
         # The artifact card must be explicitly framed as the user-facing
         # surface so the model does not feel a separate present_files call
         # is needed for visibility.
-        assert "artifact card surfaces the file" in briefing.lower() or (
-            "artifact card" in briefing.lower() and "surfaces" in briefing.lower()
-        )
+        assert "artifact card surfaces the file" in briefing.lower() or ("artifact card" in briefing.lower() and "surfaces" in briefing.lower())
 
-    def test_skills_inventory_block_logs_when_no_relevant_skills_found(
-        self, monkeypatch, caplog
-    ):
+    def test_skills_inventory_block_logs_when_no_relevant_skills_found(self, monkeypatch, caplog):
         """When the on-disk skills directory has none of the four
         whitelisted builder skills (corrupt deploy, etc.), the block
         returns None but the INFO log still fires so the failure is
@@ -2485,10 +2616,7 @@ class TestBuilderTaskMiddleware:
             block = BuilderTaskMiddleware._build_skills_inventory_block()
 
         assert block is None
-        assert any(
-            "skills_inventory: 0 skills injected (none)" in rec.message
-            for rec in caplog.records
-        )
+        assert any("skills_inventory: 0 skills injected (none)" in rec.message for rec in caplog.records)
 
 
 class TestBuilderResearchPolicyMiddleware:
@@ -2534,18 +2662,25 @@ class TestBuilderResearchPolicyMiddleware:
 
 # --- BuilderArtifactMiddleware ---
 
+
 class TestBuilderArtifactMiddleware:
     def test_captures_builder_artifact(self):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
         mw = BuilderArtifactMiddleware()
         # Create a mock AI message with emit_builder_artifact tool call
         msg = MagicMock()
         msg.type = "ai"
-        msg.tool_calls = [{"name": "emit_builder_artifact", "args": {
-            "artifact_path": "outputs/doc.md",
-            "artifact_type": "document",
-            "confidence": 0.9,
-        }}]
+        msg.tool_calls = [
+            {
+                "name": "emit_builder_artifact",
+                "args": {
+                    "artifact_path": "outputs/doc.md",
+                    "artifact_type": "document",
+                    "confidence": 0.9,
+                },
+            }
+        ]
         state = {"messages": [msg]}
         result = mw.after_model(state, _make_runtime())
         assert result is not None
@@ -2590,11 +2725,10 @@ class TestBuilderArtifactMiddleware:
 
         assert result is not None
         diagnostic = result["builder_failure_diagnostics"]
-        assert diagnostic["failure_stage"] == "model_provider"
-        assert diagnostic["failure_code"] == "primary_provider_unavailable"
-        assert diagnostic["provider_error_reason"] == "busy"
-        assert diagnostic["retryable"] is True
-        assert diagnostic["emit_attempted"] is False
+        assert diagnostic["failure_stage"] == "deck_build_service"
+        assert diagnostic["failure_code"] == "deck_authoring_model_failed"
+        assert diagnostic["retryable"] is False
+        assert diagnostic["emit_attempted"] is True
         assert "error_detail" not in diagnostic
         assert "Overloaded" not in repr(diagnostic)
 
@@ -2626,13 +2760,9 @@ class TestBuilderArtifactMiddleware:
             captured["outputs_host_path"] = outputs_host_path
             captured["artifact_args"] = artifact_args
 
-        monkeypatch.setattr(
-            builder_artifact, "_upload_builder_outputs_to_supabase", _spy
-        )
+        monkeypatch.setattr(builder_artifact, "_upload_builder_outputs_to_supabase", _spy)
         # Stub the webhook fire so we don't try to POST during a unit test.
-        monkeypatch.setattr(
-            builder_artifact, "fire_completion_webhook_from_artifact", lambda **_: None
-        )
+        monkeypatch.setattr(builder_artifact, "fire_completion_webhook_from_artifact", lambda **_: None)
 
         mw = BuilderArtifactMiddleware()
         msg = MagicMock()
@@ -2688,18 +2818,12 @@ class TestBuilderArtifactMiddleware:
         monkeypatch.setattr(
             builder_artifact,
             "_upload_builder_outputs_to_supabase",
-            lambda *, thread_id, outputs_host_path, artifact_args: captured.update(
-                thread_id=thread_id
-            ),
+            lambda *, thread_id, outputs_host_path, artifact_args: captured.update(thread_id=thread_id),
         )
-        monkeypatch.setattr(
-            builder_artifact, "fire_completion_webhook_from_artifact", lambda **_: None
-        )
+        monkeypatch.setattr(builder_artifact, "fire_completion_webhook_from_artifact", lambda **_: None)
 
         mw = BuilderArtifactMiddleware()
-        monkeypatch.setattr(
-            mw, "_artifact_files_exist", lambda args, state, runtime: True
-        )
+        monkeypatch.setattr(mw, "_artifact_files_exist", lambda args, state, runtime: True)
 
         msg = MagicMock()
         msg.type = "ai"
@@ -2781,6 +2905,7 @@ class TestBuilderArtifactMiddleware:
 
     def test_ignores_non_builder_tool_calls(self):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
         mw = BuilderArtifactMiddleware()
         msg = MagicMock()
         msg.type = "ai"
@@ -2816,10 +2941,7 @@ class TestBuilderArtifactMiddleware:
         with caplog.at_level(logging.INFO, logger="deerflow.agents.sophia_agent.middlewares.builder_artifact"):
             mw.after_model(state, _make_runtime())
 
-        assert any(
-            "[BuilderSkill] manifest_read: skill=pdf-report" in rec.message
-            for rec in caplog.records
-        )
+        assert any("[BuilderSkill] manifest_read: skill=pdf-report" in rec.message for rec in caplog.records)
 
     def test_logs_skill_script_invoked_for_bash_under_skills_dir(self, caplog):
         """When the builder runs a bundled script via bash, log
@@ -2836,12 +2958,7 @@ class TestBuilderArtifactMiddleware:
         msg.tool_calls = [
             {
                 "name": "bash",
-                "args": {
-                    "command": (
-                        "python /mnt/skills/ppt-generation/scripts/build.py "
-                        "--input spec.json --output deck.pptx"
-                    )
-                },
+                "args": {"command": ("python /mnt/skills/ppt-generation/scripts/build.py --input spec.json --output deck.pptx")},
             }
         ]
         state = {"messages": [msg]}
@@ -2849,10 +2966,7 @@ class TestBuilderArtifactMiddleware:
         with caplog.at_level(logging.INFO, logger="deerflow.agents.sophia_agent.middlewares.builder_artifact"):
             mw.after_model(state, _make_runtime())
 
-        assert any(
-            "[BuilderSkill] script_invoked: skill=ppt-generation" in rec.message
-            for rec in caplog.records
-        )
+        assert any("[BuilderSkill] script_invoked: skill=ppt-generation" in rec.message for rec in caplog.records)
 
     def test_does_not_log_skill_for_unrelated_tool_calls(self, caplog):
         """``write_file`` and unrelated bash commands must not produce
@@ -2892,6 +3006,7 @@ class TestBuilderArtifactMiddleware:
 
     def test_does_not_end_on_mixed_builder_tool_calls(self):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
         mw = BuilderArtifactMiddleware()
         msg = MagicMock()
         msg.type = "ai"
@@ -2928,14 +3043,8 @@ class TestBuilderArtifactMiddleware:
         assert result["builder_non_artifact_turns"] == 18
         # builder_result should NOT be set yet — this is still a normal turn.
         assert "builder_result" not in result
-        soft_warnings = [
-            r for r in caplog.records
-            if r.levelno == logging.WARNING and "soft ceiling warning" in r.getMessage()
-        ]
-        assert soft_warnings, (
-            f"Expected a soft-ceiling WARNING at turn 18. Got: "
-            f"{[r.getMessage() for r in caplog.records]}"
-        )
+        soft_warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "soft ceiling warning" in r.getMessage()]
+        assert soft_warnings, f"Expected a soft-ceiling WARNING at turn 18. Got: {[r.getMessage() for r in caplog.records]}"
         # Warning is emitted exactly once (only at the soft-warn turn).
         assert len(soft_warnings) == 1
 
@@ -2956,14 +3065,8 @@ class TestBuilderArtifactMiddleware:
         with caplog.at_level(logging.WARNING, logger=mod.logger.name):
             mw.after_model(state, _make_runtime())
 
-        soft_warnings = [
-            r for r in caplog.records
-            if r.levelno == logging.WARNING and "soft ceiling warning" in r.getMessage()
-        ]
-        assert not soft_warnings, (
-            f"Did not expect a soft-ceiling WARNING before turn 18. Got: "
-            f"{[r.getMessage() for r in caplog.records]}"
-        )
+        soft_warnings = [r for r in caplog.records if r.levelno == logging.WARNING and "soft ceiling warning" in r.getMessage()]
+        assert not soft_warnings, f"Did not expect a soft-ceiling WARNING before turn 18. Got: {[r.getMessage() for r in caplog.records]}"
 
     def test_builder_artifact_forces_at_hard_ceiling(self):
         """PR-B: at the hard ceiling (30) the middleware force-ends the
@@ -3121,10 +3224,7 @@ class TestBuilderArtifactMiddleware:
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
-        (outputs_dir / "report.html").write_text(
-            "<!doctype html><html><head><title>Report</title></head><body>"
-            "<h1>Report</h1><p>" + ("section content " * 12) + "</p></body></html>"
-        )
+        (outputs_dir / "report.html").write_text("<!doctype html><html><head><title>Report</title></head><body><h1>Report</h1><p>" + ("section content " * 12) + "</p></body></html>")
 
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
@@ -3140,8 +3240,7 @@ class TestBuilderArtifactMiddleware:
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
         (outputs_dir / "report.html").write_text(
-            "<!doctype html><html><body><h1>Slide deck report</h1>"
-            "<p>" + ("analysis " * 16) + "</p></body></html>",
+            "<!doctype html><html><body><h1>Slide deck report</h1><p>" + ("analysis " * 16) + "</p></body></html>",
             encoding="utf-8",
         )
 
@@ -3924,10 +4023,7 @@ class TestBuilderArtifactMiddleware:
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
         (outputs_dir / "report.md").write_text("# Report")
-        (outputs_dir / "report.html").write_text(
-            "<!doctype html><html><head><title>Report</title></head>"
-            "<body><main><h1>Report</h1><p>Visual fallback content.</p></main></body></html>"
-        )
+        (outputs_dir / "report.html").write_text("<!doctype html><html><head><title>Report</title></head><body><main><h1>Report</h1><p>Visual fallback content.</p></main></body></html>")
 
         result = BuilderArtifactMiddleware._build_ceiling_fallback(
             {
@@ -4209,10 +4305,7 @@ class TestBuilderArtifactMiddleware:
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
-        (outputs_dir / "report.html").write_text(
-            "<!doctype html><html><body><h1>Visual report</h1>"
-            "<svg viewBox='0 0 120 60'><rect width='80' height='40'/></svg></body></html>"
-        )
+        (outputs_dir / "report.html").write_text("<!doctype html><html><body><h1>Visual report</h1><svg viewBox='0 0 120 60'><rect width='80' height='40'/></svg></body></html>")
         runtime = _make_runtime(thread_id="thread-x")
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
@@ -4406,9 +4499,7 @@ class TestBuilderArtifactMiddleware:
 
         outputs_dir = tmp_path / "outputs"
         outputs_dir.mkdir()
-        (outputs_dir / "deck.html").write_text(
-            "```html\n<!doctype html><html><head><title>Deck</title></head><body><h1>Deck</h1></body></html>\n```"
-        )
+        (outputs_dir / "deck.html").write_text("```html\n<!doctype html><html><head><title>Deck</title></head><body><h1>Deck</h1></body></html>\n```")
         runtime = _make_runtime(thread_id="thread-x")
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
@@ -4473,7 +4564,8 @@ class TestBuilderArtifactMiddleware:
         assert result["builder_pptx_skill_correction_emitted"] is True
         content = result["messages"][0].content
         assert "prepare_deck_build" in content
-        assert "html_source" in content
+        assert "deck_stylesheet" in content
+        assert "html_body" in content
         assert "deck_plan.json" not in content
         assert "image_path" not in content
 
@@ -4493,9 +4585,7 @@ class TestBuilderArtifactMiddleware:
             ],
         }
 
-        assert mw.before_model(state, _make_runtime(thread_id="thread-x")) == {
-            "builder_pptx_route_trace_emitted": True
-        }
+        assert mw.before_model(state, _make_runtime(thread_id="thread-x")) == {"builder_pptx_route_trace_emitted": True}
 
     def test_force_choice_pptx_no_output_waits_for_skill_correction(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -4842,14 +4932,8 @@ class TestBuilderArtifactMiddleware:
         # builder_result must NOT be set, and no jump_to end
         assert "builder_result" not in after_result
         assert "jump_to" not in after_result
-        warning_records = [
-            r for r in caplog.records
-            if r.levelno == logging.WARNING and "emit rejected" in r.getMessage()
-        ]
-        assert warning_records, (
-            f"Expected an 'emit rejected' WARNING. Got: "
-            f"{[r.getMessage() for r in caplog.records]}"
-        )
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING and "emit rejected" in r.getMessage()]
+        assert warning_records, f"Expected an 'emit rejected' WARNING. Got: {[r.getMessage() for r in caplog.records]}"
 
         # wrap_tool_call must return a Command routing back to model
         request = ToolCallRequest(
@@ -5032,19 +5116,21 @@ class TestBuilderArtifactMiddleware:
         msg = MagicMock()
         msg.type = "ai"
         # artifact_path None — same shape the model produced in run 675c2c35.
-        msg.tool_calls = [{
-            "name": "emit_builder_artifact",
-            "args": {
-                "artifact_path": None,
-                "artifact_type": "document",
-                "artifact_title": "Untitled",
-                "steps_completed": 22,
-                "decisions_made": [],
-                "companion_summary": "Done.",
-                "companion_tone_hint": "Neutral",
-                "confidence": 0.5,
-            },
-        }]
+        msg.tool_calls = [
+            {
+                "name": "emit_builder_artifact",
+                "args": {
+                    "artifact_path": None,
+                    "artifact_type": "document",
+                    "artifact_title": "Untitled",
+                    "steps_completed": 22,
+                    "decisions_made": [],
+                    "companion_summary": "Done.",
+                    "companion_tone_hint": "Neutral",
+                    "confidence": 0.5,
+                },
+            }
+        ]
         runtime = _make_runtime(thread_id="test-thread")
 
         # First empty rejection — counter 27 → 28, consecutive_empty 0 → 1.
@@ -5090,10 +5176,12 @@ class TestBuilderArtifactMiddleware:
         mw = BuilderArtifactMiddleware()
         msg = MagicMock()
         msg.type = "ai"
-        msg.tool_calls = [{
-            "name": "emit_builder_artifact",
-            "args": {"artifact_path": None, "artifact_type": "document", "confidence": 0.3},
-        }]
+        msg.tool_calls = [
+            {
+                "name": "emit_builder_artifact",
+                "args": {"artifact_path": None, "artifact_type": "document", "confidence": 0.3},
+            }
+        ]
         runtime = _make_runtime(thread_id="test-thread")
         state = {
             "messages": [msg],
@@ -5149,22 +5237,25 @@ class TestBuilderArtifactMiddleware:
         mw = BuilderArtifactMiddleware()
         msg = MagicMock()
         msg.type = "ai"
-        msg.tool_calls = [{
-            "name": "emit_builder_artifact",
-            "args": {
-                "artifact_path": "/mnt/user-data/outputs/typo.pdf",  # doesn't exist
-                "artifact_type": "document",
-                "artifact_title": "Typo",
-                "steps_completed": 5,
-                "decisions_made": [],
-                "companion_summary": "Done.",
-                "companion_tone_hint": "Neutral",
-                "confidence": 0.5,
-            },
-        }]
+        msg.tool_calls = [
+            {
+                "name": "emit_builder_artifact",
+                "args": {
+                    "artifact_path": "/mnt/user-data/outputs/typo.pdf",  # doesn't exist
+                    "artifact_type": "document",
+                    "artifact_title": "Typo",
+                    "steps_completed": 5,
+                    "decisions_made": [],
+                    "companion_summary": "Done.",
+                    "companion_tone_hint": "Neutral",
+                    "confidence": 0.5,
+                },
+            }
+        ]
         runtime = _make_runtime(thread_id="test-thread")
         # Patch Supabase to also return False so the path is genuinely missing.
         import unittest.mock
+
         with unittest.mock.patch.object(supabase_artifact_store, "check_artifact_exists", return_value=False):
             state = {
                 "messages": [msg],
@@ -5198,15 +5289,17 @@ class TestBuilderArtifactMiddleware:
         mw = BuilderArtifactMiddleware()
         msg = MagicMock()
         msg.type = "ai"
-        msg.tool_calls = [{
-            "name": "emit_builder_artifact",
-            "args": {
-                "artifact_path": "/mnt/user-data/outputs/missing.pdf",
-                "artifact_type": "document",
-                "artifact_title": "Missing",
-                "confidence": 0.5,
-            },
-        }]
+        msg.tool_calls = [
+            {
+                "name": "emit_builder_artifact",
+                "args": {
+                    "artifact_path": "/mnt/user-data/outputs/missing.pdf",
+                    "artifact_type": "document",
+                    "artifact_title": "Missing",
+                    "confidence": 0.5,
+                },
+            }
+        ]
         runtime = _make_runtime(thread_id="test-thread")
 
         state = {
@@ -5359,9 +5452,11 @@ class TestBuilderArtifactMiddleware:
 
 # --- ArtifactMiddleware synthesis (builder handoff) ---
 
+
 class TestArtifactMiddlewareSynthesis:
     def test_synthesis_injection(self):
         from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
         # Create with a mock instructions file
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
             f.write("# Artifact Instructions\nTest instructions.")
@@ -5392,6 +5487,7 @@ class TestArtifactMiddlewareSynthesis:
 
     def test_no_synthesis_when_already_synthesized(self):
         from deerflow.agents.sophia_agent.middlewares.artifact import ArtifactMiddleware
+
         with tempfile.NamedTemporaryFile(mode="w", suffix=".md", delete=False) as f:
             f.write("# Test")
             f.flush()
@@ -5461,12 +5557,7 @@ class TestArtifactMiddlewareSynthesis:
             "confidence": 0.92,
         }
         tool_message = ToolMessage(
-            content=(
-                "Builder completed successfully.\n"
-                "Title: The Dangers of War: A Personal Reflection\n"
-                "Summary: Created the document.\n"
-                f"Full result: {json.dumps(builder_result)}"
-            ),
+            content=(f"Builder completed successfully.\nTitle: The Dangers of War: A Personal Reflection\nSummary: Created the document.\nFull result: {json.dumps(builder_result)}"),
             tool_call_id="toolu_builder",
             name="switch_to_builder",
             status="success",

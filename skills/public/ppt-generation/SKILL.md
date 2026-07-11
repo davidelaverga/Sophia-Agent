@@ -1,6 +1,6 @@
 ---
 name: ppt-generation
-description: Use this skill whenever the builder must create a fresh PowerPoint deck through prepare_deck_build with a creative plan and compiler-supported slide HTML.
+description: Use this skill whenever the builder must create a fresh PowerPoint deck through prepare_deck_build with a creative plan and compact compiler-supported slide HTML.
 ---
 
 # Sophia Deck Skill — PPTX
@@ -11,8 +11,8 @@ and lower-level compiler workflows are not acceptable fallbacks.
 Fresh decks are DeckBuildService builds by default. Read
 `/mnt/skills/public/sophia/deck_craft.md`, the
 `hands-on-deck/designing-slides`, `deck-impeccable`, and `deck-hallmark`
-adapters selected there, then provide the creative plan and
-slide HTML sources inside `prepare_deck_build`. The harness owns sanitization,
+adapters selected there, then provide the creative plan, one shared stylesheet,
+and compact slide bodies inside `prepare_deck_build`. The harness owns document assembly and sanitization,
 planned assets and asset policy, native PowerPoint compilation, inspection, mechanical gates, and
 terminal failure. It returns either the `.pptx` path or a clean failure.
 
@@ -31,12 +31,15 @@ terminal failure. It returns either the `.pptx` path or a clean failure.
    - role: cover, problem, context, architecture, process, comparison, evidence, timeline, or closing
    - layout_kind: cover_hero, single_visual_focus, visual_left_text_right, text_left_visual_right, comparison_two_column, timeline_flow, or closing_summary
    - speaker_notes: optional
-   - html_source: complete native-convertible slide HTML/CSS on a 1920x1080 opaque canvas
+   - html_body: native-convertible markup inside the slide canvas; no document or style tags
+   - slide_css: optional CSS specific to this slide
    - inline SVG is unsupported; every required semantic element uses stable `data-deck-*` attributes
 
-3. Call `prepare_deck_build(...)` exactly once with the creative_plan, complete slide list, and requested output path, except for one explicit repair retry when the tool returns `retryable=true`.
+3. Provide one `deck_stylesheet` containing the shared model-authored CSS. It must style the 1920x1080 `main` canvas with an opaque background.
 
-4. The harness will:
+4. Call `prepare_deck_build(...)` exactly once with the creative_plan, deck_stylesheet, complete slide list, and requested output path, except for one explicit repair retry when the tool returns `retryable=true`.
+
+5. The harness will:
    - validate/sanitize the creative plan and slide HTML,
    - prepare only the generated assets declared in creative_plan.image_assets,
    - compile through the native PowerPoint substrate,
@@ -44,7 +47,7 @@ terminal failure. It returns either the `.pptx` path or a clean failure.
    - validate mechanical gates,
    - return the `.pptx` path or a clean failure.
 
-5. A valid `.pptx` result is terminalized by the harness immediately. If `prepare_deck_build` returns `retryable=true`, repair the exact creative/html/mechanical issue and call `prepare_deck_build` one more time. A second failure is terminal; do not loop on lower-level deck tools.
+6. A valid `.pptx` result is terminalized by the harness immediately. If `prepare_deck_build` returns `retryable=true`, repair the exact creative/html/mechanical issue and call `prepare_deck_build` one more time. A second failure is terminal; do not loop on lower-level deck tools.
 
 ## Hard Rules
 
@@ -54,7 +57,7 @@ terminal failure. It returns either the `.pptx` path or a clean failure.
 - Generated slide images are visual-area assets only. Do not bake slide title, narrative, footers, formulas, axis labels, paragraph text, page chrome, or large readable labels into images.
 - Professional and technical are quality constraints, not styles. Derive visual direction from the subject, audience, goal, viewing context, and subject materials.
 - Inline SVG is unsupported. Use compiler-supported HTML/CSS/PPTX-compatible structures.
-- Slide HTML sources must be opaque to all edges and may be light or dark according to the request; no image-baked title or narrative.
+- The shared stylesheet and compact slide bodies must be opaque to all edges and may be light or dark according to the request; no image-baked title or narrative.
 - Keep slide text concise. Titles and narratives are real native slide text from the submitted HTML.
 - A `prepare_deck_build` terminal failure is authoritative. Do not retry manually through lower-level tools. Retry `prepare_deck_build` only once when the failure says it is retryable and asks for corrected creative/html/mechanical input.
 

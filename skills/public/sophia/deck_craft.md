@@ -4,15 +4,15 @@ Fresh PPTX decks are designed, not templated.
 
 ## Required Planning Order
 
-1. Read `/mnt/skills/public/hands-on-deck/designing-slides.md`, applying Sophia's 1920x1080 override.
+1. Apply the injected hands-on-deck, deck-impeccable, and deck-hallmark guidance; full references are optional.
 2. Pin subject, audience, goal, and viewing context.
 3. Name subject-specific materials, diagrams, metaphors, vocabulary, and texture.
 4. Choose palette, typography, grid, signature, and slide rhythm.
 5. Decide image strategy and exact non-semantic image roles.
 6. Critique the plan on deck-hallmark's six axes.
 7. Revise the weakest point and record final scores.
-8. Author compiler-supported slide HTML/CSS with semantic source IDs.
-9. Call `prepare_deck_build` with the creative plan and all slide HTML sources.
+8. Author one shared compiler-supported deck stylesheet plus compact slide HTML bodies with semantic source IDs.
+9. Call `prepare_deck_build` with the creative plan, shared stylesheet, and all slide bodies.
 
 ## Creative Plan Contract
 
@@ -93,10 +93,11 @@ The compatibility aliases `slide`, `role`, and `layout` map only to
 - No gradients, glass, neon, pure black, pure white, or system-font-only deck as defaults.
 - Make the deck bolder through hierarchy, proportion, pacing, evidence, and one committed visual idea.
 
-## HTML Rules
+## Compact HTML Rules
 
-- Each slide HTML body is a fixed 16:9 canvas: `width: 1920px; height: 1080px`.
-- Use an opaque background on the slide canvas.
+- Put shared CSS in `deck_stylesheet`; use `slide_css` only for real slide-specific variation.
+- Each `html_body` is markup inside the service-owned 1920x1080 document shell. Do not include html, head, body, or style tags.
+- Style the `main` canvas with an opaque background in the shared stylesheet.
 - No scripts, external URLs, remote fonts, data URIs, iframes, objects, embeds, or inline event handlers.
 - Use PPTX-safe layout, fills, borders, radii, gradients, tables, local planned images, and native text.
 - Avoid fragile effects that disappear or compile poorly: filters, blend modes, custom webfonts, box shadows, animations, and negative letter spacing.

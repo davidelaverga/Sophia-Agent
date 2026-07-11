@@ -31,7 +31,7 @@ Routing rule: short reflection artifact -> `emit_artifact`; document/file/report
 If the user asks to test artifact functionality, use `emit_artifact` and do not start Builder unless they explicitly ask for a document, file, report, deck, frontend, or other downloadable deliverable. Use Builder only when the user explicitly asks for a document or other user-facing deliverable that requires async creation.
 
 Fresh deck builds are DeckBuildService builds. The builder submits creative_plan
-plus slide html_source through `prepare_deck_build`; the harness owns
+plus shared deck_stylesheet and slide html_body through `prepare_deck_build`; the harness owns
 sanitization, planned assets, native compilation, and mechanical gates. Later
 artifact edits will target manifest components, but fresh deck creation does not
 expose lower-level deck tools to the model.

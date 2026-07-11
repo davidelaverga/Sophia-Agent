@@ -63,10 +63,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             return False, "quota"
         if any(pattern in detail for pattern in _AUTH_PATTERNS):
             return False, "auth"
-        if (
-            "thinking.thinking" in detail
-            or ("field required" in detail and any(pattern in detail for pattern in _MALFORMED_REQUEST_PATTERNS))
-        ):
+        if "thinking.thinking" in detail or ("field required" in detail and any(pattern in detail for pattern in _MALFORMED_REQUEST_PATTERNS)):
             return False, "malformed_request"
         if status in _RETRIABLE_STATUS_CODES:
             return True, "transient"
@@ -79,23 +76,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     @classmethod
     def _fallback_message(cls, exc: BaseException, reason: str) -> AIMessage:
         if reason == "quota":
-            content = (
-                "The configured model provider rejected this request because the account is "
-                "out of quota, billing is unavailable, or usage is restricted. Please fix "
-                "the provider account and try again."
-            )
+            content = "The configured model provider rejected this request because the account is out of quota, billing is unavailable, or usage is restricted. Please fix the provider account and try again."
         elif reason == "auth":
-            content = (
-                "The configured model provider rejected this request because authentication "
-                "or access is invalid. Please check the provider credentials and try again."
-            )
+            content = "The configured model provider rejected this request because authentication or access is invalid. Please check the provider credentials and try again."
         elif reason in {"busy", "transient"}:
             content = "The configured model provider is temporarily unavailable. Please wait a moment and continue."
         elif reason == "malformed_request":
-            content = (
-                "The model request payload was malformed before the provider could run it. "
-                "Please retry after the internal message-history issue is fixed."
-            )
+            content = "The model request payload was malformed before the provider could run it. Please retry after the internal message-history issue is fixed."
         else:
             content = f"LLM request failed: {cls._detail(exc)}"
         return AIMessage(
@@ -111,6 +98,13 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
     def _retry_delay_seconds(self, attempt: int) -> float:
         return min(8.0, (self.retry_base_delay_ms / 1000.0) * (2 ** max(0, attempt - 1)))
 
+    def _retry_limit(self, request: ModelRequest) -> int:
+        state = getattr(request, "state", None)
+        budget = state.get("builder_budget") if isinstance(state, dict) else None
+        if isinstance(budget, dict) and budget.get("tier") == "presentation":
+            return 1
+        return self.retry_max_attempts
+
     @override
     def wrap_model_call(
         self,
@@ -118,6 +112,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], ModelResponse],
     ) -> ModelCallResult:
         attempt = 1
+        retry_limit = self._retry_limit(request)
         while True:
             try:
                 return handler(request)
@@ -125,7 +120,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 raise
             except Exception as exc:  # noqa: BLE001 - provider SDKs raise many shapes.
                 retriable, reason = self._classify(exc)
-                if retriable and attempt < self.retry_max_attempts:
+                if retriable and attempt < retry_limit:
                     delay = self._retry_delay_seconds(attempt)
                     logger.warning("Transient LLM error; retrying in %.2fs: %s", delay, self._detail(exc))
                     time.sleep(delay)
@@ -141,6 +136,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         handler: Callable[[ModelRequest], Awaitable[ModelResponse]],
     ) -> ModelCallResult:
         attempt = 1
+        retry_limit = self._retry_limit(request)
         while True:
             try:
                 return await handler(request)
@@ -148,7 +144,7 @@ class LLMErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                 raise
             except Exception as exc:  # noqa: BLE001 - provider SDKs raise many shapes.
                 retriable, reason = self._classify(exc)
-                if retriable and attempt < self.retry_max_attempts:
+                if retriable and attempt < retry_limit:
                     delay = self._retry_delay_seconds(attempt)
                     logger.warning("Transient LLM error; retrying in %.2fs: %s", delay, self._detail(exc))
                     await asyncio.sleep(delay)

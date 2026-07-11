@@ -117,11 +117,7 @@ def deck_tool_contract_snapshot(
         "route": route,
         "deck_build_service_enabled": deck_build_service_enabled(),
         "deck_build_service_flag": deck_build_service_flag_value(),
-        "legacy_reason": (
-            ("deck_build_service_disabled" if deck_service_target else "non_pptx_presentation_target")
-            if route == "legacy_html_slide_to_pptx"
-            else None
-        ),
+        "legacy_reason": (("deck_build_service_disabled" if deck_service_target else "non_pptx_presentation_target") if route == "legacy_html_slide_to_pptx" else None),
         "task_type": task_type,
         "artifact_target_ext": artifact_target_ext,
         "tool_names": tool_names,
@@ -145,15 +141,13 @@ def assert_deck_tool_contract(
         return None
     if snapshot["route"] == "deck_build_service":
         if not snapshot["prepare_deck_build_exposed"] or snapshot["lower_level_deck_tools_exposed"]:
-            raise RuntimeError(
-                "Fresh PPTX deck tool contract drift: expected only prepare_deck_build "
-                "for DeckBuildService route."
-            )
+            raise RuntimeError("Fresh PPTX deck tool contract drift: expected only prepare_deck_build for DeckBuildService route.")
+        injected_keys = frozenset(getattr(prepare_deck_build, "_injected_args_keys", ()))
+        schema_properties = prepare_deck_build.args_schema.model_json_schema().get("properties", {})
+        if injected_keys != frozenset({"runtime"}) or "runtime" in schema_properties:
+            raise RuntimeError("Fresh PPTX deck runtime contract drift: prepare_deck_build must inject runtime exactly once and keep it out of the model-facing schema.")
     elif snapshot["prepare_deck_build_exposed"]:
-        raise RuntimeError(
-            "Fresh PPTX deck tool contract drift: prepare_deck_build exposed while "
-            "legacy deck mode is explicitly enabled."
-        )
+        raise RuntimeError("Fresh PPTX deck tool contract drift: prepare_deck_build exposed while legacy deck mode is explicitly enabled.")
     return snapshot
 
 

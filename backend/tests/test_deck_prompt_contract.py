@@ -33,7 +33,9 @@ def test_fresh_deck_prompt_surfaces_route_to_prepare_deck_build() -> None:
     assert "prepare_deck_build" in text
     assert "deck_craft" in lower_text
     assert "creative_plan" in text
-    assert "html_source" in text
+    assert "deck_stylesheet" in text
+    assert "html_body" in text
+    assert "html_source" not in text
     assert "DeckBuildService" in text
     assert "native PowerPoint" in text
     assert "mechanical gates" in lower_text

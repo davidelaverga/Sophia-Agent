@@ -9,6 +9,15 @@
 > builder, do not inherit hands-on-deck's 1280x720 canvas guidance, and do not
 > implement the union-string tool signature proposed in section 9.
 >
+> **Runtime remediation amendment (2026-07-11):** Model ownership remains
+> authoritative, but the transport is now compact model-authored HTML. The
+> model supplies one shared `deck_stylesheet` plus each slide's `html_body`
+> and optional `slide_css`; DeckBuildService assembles only the content-free
+> 1920x1080 document shell before applying the existing sanitizer, native
+> compiler, source-retention, contrast, and mechanical gates. This is not the
+> forbidden deterministic template renderer. Transitional full `html_source`
+> intake remains internal and is omitted from the model-facing schema.
+>
 > **Imported source SHA-256:**
 > `efa4b260f30b4260e42c666ffe98d66a2c0f88ffdcca16b2fcb1c649867cd9eb`
 

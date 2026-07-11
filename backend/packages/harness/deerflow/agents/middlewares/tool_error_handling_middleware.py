@@ -26,12 +26,23 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
         if len(detail) > 500:
             detail = detail[:497] + "..."
 
-        content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. Continue with available context, or choose an alternative tool."
+        stage = "argument_validation" if exc.__class__.__name__ in {"ValidationError", "SchemaError"} else "tool_execution"
+        if tool_name == "prepare_deck_build":
+            content = "The authoritative deck build arguments failed typed validation." if stage == "argument_validation" else "The authoritative deck build tool failed during execution."
+        else:
+            content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. Continue with available context, or choose an alternative tool."
         return ToolMessage(
             content=content,
             tool_call_id=tool_call_id,
             name=tool_name,
             status="error",
+            additional_kwargs={
+                "tool_error": {
+                    "error_class": exc.__class__.__name__,
+                    "retryable": stage == "argument_validation",
+                    "stage": stage,
+                }
+            },
         )
 
     @override

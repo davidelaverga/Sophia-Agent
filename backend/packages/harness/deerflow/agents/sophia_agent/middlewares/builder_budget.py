@@ -68,18 +68,10 @@ _MODEL_PRICES: dict[str, dict[str, float]] = {
 # would rather trip slightly early than let a runaway through).
 _DEFAULT_PRICE: dict[str, float] = {"in": 3.0, "out": 15.0}
 
-USER_BUDGET_TIMEOUT_MESSAGE = (
-    "Sorry, we hit the token limit for this task. Please let me know if you want to try again."
-)
-USER_BUDGET_COST_MESSAGE = (
-    "Sorry, we hit the cost limit for this task. Please let me know if you want to try again."
-)
-USER_BUDGET_WALL_CLOCK_MESSAGE = (
-    "Sorry, the presentation builder reached its 8-minute time limit before a complete deck was ready."
-)
-USER_BUDGET_TURN_MESSAGE = (
-    "Sorry, the builder reached its turn limit before a complete artifact was ready."
-)
+USER_BUDGET_TIMEOUT_MESSAGE = "Sorry, we hit the token limit for this task. Please let me know if you want to try again."
+USER_BUDGET_COST_MESSAGE = "Sorry, we hit the cost limit for this task. Please let me know if you want to try again."
+USER_BUDGET_WALL_CLOCK_MESSAGE = "Sorry, the presentation builder reached its 8-minute time limit before a complete deck was ready."
+USER_BUDGET_TURN_MESSAGE = "Sorry, the builder reached its turn limit before a complete artifact was ready."
 
 # Default per-run caps. ``0`` / ``0.0`` disables a cap. ``start_builder_task``
 # seeds an explicit copy into ``run_input["builder_budget"]``; this is the
@@ -114,8 +106,10 @@ PRESENTATION_BUILDER_BUDGET: dict[str, Any] = {
     "force_emit_remaining_turns": 2,
     "soft_warn_at_turn": 6,
     "max_wall_clock_seconds": 480,
-    "prepare_force_at_turn": 8,
+    "prepare_force_at_turn": 6,
     "prepare_force_after_seconds": 120,
+    "authoring_max_tokens": 16_384,
+    "authoring_timeout_seconds": 110,
 }
 
 # Flat estimate per gpt-image-2 call (image-generation skill, enrichment-by-
@@ -184,6 +178,16 @@ def _budget_with_env(defaults: dict[str, Any], prefix: str) -> dict[str, Any]:
         budget["prepare_force_after_seconds"] = _env_int(
             f"{prefix}_PREPARE_FORCE_AFTER_SECONDS",
             int(budget["prepare_force_after_seconds"]),
+        )
+    if "authoring_max_tokens" in budget:
+        budget["authoring_max_tokens"] = _env_int(
+            f"{prefix}_AUTHORING_MAX_TOKENS",
+            int(budget["authoring_max_tokens"]),
+        )
+    if "authoring_timeout_seconds" in budget:
+        budget["authoring_timeout_seconds"] = _env_int(
+            f"{prefix}_AUTHORING_TIMEOUT_SECONDS",
+            int(budget["authoring_timeout_seconds"]),
         )
     return budget
 
@@ -279,11 +283,11 @@ def max_wall_clock_seconds(state: dict[str, Any]) -> int:
 def prepare_force_at_turn(state: dict[str, Any]) -> int:
     budget = state.get("builder_budget")
     if not isinstance(budget, dict):
-        return 8
+        return 6
     try:
-        return max(1, int(budget.get("prepare_force_at_turn", 8) or 8))
+        return max(1, int(budget.get("prepare_force_at_turn", 6) or 6))
     except (TypeError, ValueError):
-        return 8
+        return 6
 
 
 def prepare_force_after_seconds(state: dict[str, Any]) -> int:
@@ -296,15 +300,33 @@ def prepare_force_after_seconds(state: dict[str, Any]) -> int:
         return 120
 
 
+def presentation_authoring_max_tokens(state: dict[str, Any]) -> int:
+    budget = state.get("builder_budget")
+    if not isinstance(budget, dict):
+        return 16_384
+    try:
+        return max(1_024, int(budget.get("authoring_max_tokens", 16_384) or 16_384))
+    except (TypeError, ValueError):
+        return 16_384
+
+
+def presentation_authoring_timeout_seconds(state: dict[str, Any]) -> int:
+    budget = state.get("builder_budget")
+    if not isinstance(budget, dict):
+        return 110
+    try:
+        return max(1, int(budget.get("authoring_timeout_seconds", 110) or 110))
+    except (TypeError, ValueError):
+        return 110
+
+
 def estimate_run_cost_usd(state: dict) -> float:
     """Current estimated spend for this run (tokens + image calls)."""
     totals = _sum_usage(state.get("messages", []) or [])
     budget = state.get("builder_budget")
     key = budget.get("cost_model_key") if isinstance(budget, dict) else None
     cost = _estimate_cost_usd(totals, _price_for(key if isinstance(key, str) else None))
-    image_attempts = int(
-        (state.get("builder_pptx_diagnostics") or {}).get("image_generation_attempt_count", 0) or 0
-    )
+    image_attempts = int((state.get("builder_pptx_diagnostics") or {}).get("image_generation_attempt_count", 0) or 0)
     return cost + image_attempts * _IMAGE_GEN_COST_USD
 
 
@@ -513,9 +535,7 @@ class BuilderBudgetMiddleware(AgentMiddleware[BuilderBudgetState]):
                 content = content + note
             elif isinstance(content, list):
                 content = [*content, {"type": "text", "text": note.strip()}]
-            update["messages"] = [
-                last.model_copy(update={"tool_calls": [], "content": content})
-            ]
+            update["messages"] = [last.model_copy(update={"tool_calls": [], "content": content})]
         return update
 
     def _apply(self, state: BuilderBudgetState, runtime: Runtime) -> dict | None:
@@ -543,17 +563,14 @@ class BuilderBudgetMiddleware(AgentMiddleware[BuilderBudgetState]):
         # in BuilderBudgetState: a plain NotRequired redeclaration would
         # shadow the accumulating reducer down to LastValue (see the
         # documented trap in builder_task.py).
-        image_attempts = int(
-            (state.get("builder_pptx_diagnostics") or {}).get("image_generation_attempt_count", 0) or 0
-        )
+        image_attempts = int((state.get("builder_pptx_diagnostics") or {}).get("image_generation_attempt_count", 0) or 0)
         image_cost = image_attempts * _IMAGE_GEN_COST_USD
         cost += image_cost
 
         # Telemetry (Phase 2a): per-turn cumulative usage so cache reads ≫
         # writes can be confirmed and $/build measured from logs.
         logger.info(
-            "[BuilderBudget] usage in=%d out=%d cache_read=%d cache_creation=%d "
-            "image_calls=%d image_cost=$%.2f est_cost=$%.4f",
+            "[BuilderBudget] usage in=%d out=%d cache_read=%d cache_creation=%d image_calls=%d image_cost=$%.2f est_cost=$%.4f",
             totals["input"],
             totals["output"],
             totals["cache_read"],

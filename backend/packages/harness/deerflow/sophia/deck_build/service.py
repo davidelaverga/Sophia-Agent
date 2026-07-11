@@ -30,6 +30,7 @@ from deerflow.sophia.deck_build.creative_plan import (
 from deerflow.sophia.deck_build.design_plan import write_design_plan
 from deerflow.sophia.deck_build.evaluator import DeckEvaluator
 from deerflow.sophia.deck_build.html_sanitizer import (
+    assemble_compact_slide_html,
     validate_and_sanitize_slide_html,
     validation_summary,
 )
@@ -161,6 +162,7 @@ class DeckBuildService:
         output_path: str,
         register: str = "professional_technical",
         visual_policy: str = "auto",
+        deck_stylesheet: str | None = None,
         style_profile: dict[str, Any] | None = None,
         design_plan: dict[str, Any] | None = None,
         creative_plan: dict[str, Any] | None = None,
@@ -186,6 +188,9 @@ class DeckBuildService:
             output_path=output_path,
             slides=[],
             expected_visual_count=0,
+            deck_stylesheet=(deck_stylesheet or "").strip() or None,
+            deck_authoring_contract=("compact_model_html_v1" if (deck_stylesheet or "").strip() else "legacy_full_html_v1"),
+            deck_stylesheet_hash=(hashlib.sha256((deck_stylesheet or "").encode("utf-8")).hexdigest() if (deck_stylesheet or "").strip() else None),
             deck_route=DEFAULT_DECK_ROUTE,
             deck_compile_mode=DEFAULT_DECK_COMPILE_MODE,
             native_required=True,
@@ -292,6 +297,7 @@ class DeckBuildService:
                 "visual_policy='text_only' requires an explicit plain/text-only/no-visual request.",
                 retryable=True,
             )
+        _validate_authoring_inputs(deck, slides)
 
     def _build_slide_specs(
         self,
@@ -318,6 +324,7 @@ class DeckBuildService:
                     visual_prompt = None
                     prompt_sanitized = True
                     prompt_warning = "visual_prompt_dropped_for_asset_policy_guardrail"
+            authoring_sources = _slide_authoring_sources(raw)
             specs.append(
                 DeckSlideSpec(
                     selector=f"slide:{index}",
@@ -328,7 +335,9 @@ class DeckBuildService:
                     narrative=narrative,
                     claim=_clean_text(raw.get("claim")) or None,
                     visual_prompt=visual_prompt,
-                    html_source=str(raw.get("html_source") or "").strip() or None,
+                    html_body=authoring_sources["html_body"],
+                    slide_css=authoring_sources["slide_css"],
+                    html_source=authoring_sources["html_source"],
                     speaker_notes=_clean_text(raw.get("speaker_notes")) or None,
                     visual_required=False,
                     gate_results={
@@ -430,11 +439,7 @@ class DeckBuildService:
             asset_policy_path = _host_path(_ASSET_POLICY, runtime)
             write_asset_policy(deck, asset_policy_path)
             deck.asset_policy_path = _ASSET_POLICY
-            prompt_warnings = [
-                str(slide.gate_results.get("style_warning"))
-                for slide in deck.slides
-                if slide.gate_results.get("style_warning")
-            ]
+            prompt_warnings = [str(slide.gate_results.get("style_warning")) for slide in deck.slides if slide.gate_results.get("style_warning")]
             deck.style_warnings = sorted(set([*deck.style_warnings, *prompt_warnings]))
             finish_span(
                 run,
@@ -446,14 +451,8 @@ class DeckBuildService:
                     "hybrid_slide_count": deck.hybrid_slide_count,
                     "text_only_slide_count": deck.text_only_slide_count,
                     "asset_policy_file": basename(deck.asset_policy_path),
-                    "visual_modes": [
-                        slide.asset_plan.visual_mode if slide.asset_plan else None
-                        for slide in deck.slides
-                    ],
-                    "layout_families": [
-                        getattr(slide.composition_plan, "layout_name", None)
-                        for slide in deck.slides
-                    ],
+                    "visual_modes": [slide.asset_plan.visual_mode if slide.asset_plan else None for slide in deck.slides],
+                    "layout_families": [getattr(slide.composition_plan, "layout_name", None) for slide in deck.slides],
                     "style_warning_count": len(deck.style_warnings),
                 },
             )
@@ -597,11 +596,7 @@ class DeckBuildService:
         batch_attempted = error_class == "timeout" or bool(progress_items)
         if not batch_attempted:
             return {**summary, "batch_attempted": False}
-        progress_by_output = {
-            str(item.get("output_file")): item
-            for item in progress_items
-            if isinstance(item, dict) and item.get("output_file")
-        }
+        progress_by_output = {str(item.get("output_file")): item for item in progress_items if isinstance(item, dict) and item.get("output_file")}
         items: list[dict[str, Any]] = []
         succeeded = 0
         histogram: dict[str, int] = {}
@@ -773,11 +768,7 @@ class DeckBuildService:
                                 "error_class": None if success else result_error_class or "image_generation_failed",
                                 "exit_code": result.get("exit_code"),
                                 "duration_ms": result.get("duration_ms"),
-                                "output_bytes": (
-                                    _file_size(_host_path(slide.visual_asset_path, runtime))
-                                    if slide.visual_asset_path
-                                    else None
-                                ),
+                                "output_bytes": (_file_size(_host_path(slide.visual_asset_path, runtime)) if slide.visual_asset_path else None),
                                 "raw_error_excerpt": safe_excerpt(result.get("raw_error_excerpt")),
                             },
                         )
@@ -876,8 +867,15 @@ class DeckBuildService:
             validations = []
             allowed_asset_refs = planned_asset_ref_basenames(deck)
             for slide in deck.slides:
+                if not slide.html_source and slide.html_body and deck.deck_stylesheet:
+                    slide.html_source = assemble_compact_slide_html(
+                        deck_stylesheet=deck.deck_stylesheet,
+                        html_body=slide.html_body,
+                        slide_css=slide.slide_css,
+                    )
+                    deck.deck_html_fragment_count += 1
                 if not slide.html_source:
-                    summary = f"Slide {slide.index} is missing html_source."
+                    summary = f"Slide {slide.index} is missing html_body."
                     finish_span(run, {"valid": False, "failure_code": "deck_slide_html_missing", "failure_summary": summary})
                     raise DeckBuildFailure("deck_slide_html_missing", summary, retryable=True)
                 virtual = _slide_html_virtual_path(slide)
@@ -902,6 +900,7 @@ class DeckBuildService:
                 host.parent.mkdir(parents=True, exist_ok=True)
                 host.write_text(sanitized, encoding="utf-8")
                 slide.html_source = sanitized
+                deck.deck_assembled_html_bytes += len(sanitized.encode("utf-8"))
                 slide.html_source_path = virtual
                 slide.gate_results["chrome_detected"] = False
                 slide.gate_results["html_source_validation"] = validation.to_dict()
@@ -909,10 +908,7 @@ class DeckBuildService:
             deck.referenced_visual_count = _referenced_planned_asset_count(deck, validations)
             if deck.expected_visual_count > deck.referenced_visual_count:
                 missing = deck.expected_visual_count - deck.referenced_visual_count
-                summary = (
-                    f"Deck creative plan declares {deck.expected_visual_count} generated image asset(s), "
-                    f"but slide HTML references only {deck.referenced_visual_count} planned asset(s)."
-                )
+                summary = f"Deck creative plan declares {deck.expected_visual_count} generated image asset(s), but slide HTML references only {deck.referenced_visual_count} planned asset(s)."
                 finish_span(
                     run,
                     {
@@ -933,10 +929,7 @@ class DeckBuildService:
                     "html_basenames": [basename(slide.html_source_path) for slide in deck.slides],
                     "selectors": [slide.selector for slide in deck.slides],
                     "style_lane": deck.design_plan.style_lane if hasattr(deck.design_plan, "style_lane") else None,
-                    "layout_families": [
-                        getattr(slide.composition_plan, "layout_name", None)
-                        for slide in deck.slides
-                    ],
+                    "layout_families": [getattr(slide.composition_plan, "layout_name", None) for slide in deck.slides],
                     "generated_asset_count": deck.generated_asset_count,
                     "native_html_slide_count": deck.native_html_slide_count,
                     "hybrid_slide_count": deck.hybrid_slide_count,
@@ -1414,6 +1407,10 @@ class DeckBuildService:
                     "native_text_shape_count": deck.native_text_shape_count,
                     "picture_shape_count": deck.picture_shape_count,
                     "full_slide_picture_count": deck.full_slide_picture_count,
+                    "deck_authoring_contract": deck.deck_authoring_contract,
+                    "deck_stylesheet_hash": deck.deck_stylesheet_hash,
+                    "deck_html_fragment_count": deck.deck_html_fragment_count,
+                    "deck_assembled_html_bytes": deck.deck_assembled_html_bytes,
                     "quality_warning": deck.quality_warning,
                     "failure_summary": safe_excerpt(deck.failure_summary),
                     "image_generation_status": deck.image_generation_status,
@@ -1460,6 +1457,9 @@ class DeckBuildService:
                     "native_text_shape_count": deck.native_text_shape_count,
                     "picture_shape_count": deck.picture_shape_count,
                     "full_slide_picture_count": deck.full_slide_picture_count,
+                    "deck_authoring_contract": deck.deck_authoring_contract,
+                    "deck_html_fragment_count": deck.deck_html_fragment_count,
+                    "deck_assembled_html_bytes": deck.deck_assembled_html_bytes,
                     "failure_code": deck.failure_code,
                     "failure_summary": safe_excerpt(deck.failure_summary),
                     "retryable": retryable,
@@ -1520,6 +1520,10 @@ class DeckBuildService:
             successful_visual_count=deck.successful_visual_count,
             referenced_visual_count=deck.referenced_visual_count,
             missing_visual_count=deck.missing_visual_count,
+            deck_authoring_contract=deck.deck_authoring_contract,
+            deck_stylesheet_hash=deck.deck_stylesheet_hash,
+            deck_html_fragment_count=deck.deck_html_fragment_count,
+            deck_assembled_html_bytes=deck.deck_assembled_html_bytes,
             creative_plan_path=deck.creative_plan_path,
             design_plan_path=deck.design_plan_path,
             asset_policy_path=deck.asset_policy_path,
@@ -1637,6 +1641,10 @@ class DeckBuildService:
             successful_visual_count=deck.successful_visual_count,
             referenced_visual_count=deck.referenced_visual_count,
             missing_visual_count=deck.missing_visual_count,
+            deck_authoring_contract=deck.deck_authoring_contract,
+            deck_stylesheet_hash=deck.deck_stylesheet_hash,
+            deck_html_fragment_count=deck.deck_html_fragment_count,
+            deck_assembled_html_bytes=deck.deck_assembled_html_bytes,
             creative_plan_path=deck.creative_plan_path,
             design_plan_path=deck.design_plan_path,
             asset_policy_path=deck.asset_policy_path,
@@ -1694,11 +1702,7 @@ class DeckBuildService:
                 "exit_code": 124,
                 "error_class": "deck_deadline_exceeded" if deadline_near else "timeout",
                 "items": _parse_batch_item_progress(stdout),
-                "raw_error_excerpt": safe_excerpt(
-                    f"image batch subprocess timed out after {timeout}s; "
-                    f"stdout_chars={len(stdout)} stderr_chars={len(stderr)} "
-                    f"{(stderr or stdout).strip()}"
-                ),
+                "raw_error_excerpt": safe_excerpt(f"image batch subprocess timed out after {timeout}s; stdout_chars={len(stdout)} stderr_chars={len(stderr)} {(stderr or stdout).strip()}"),
             }
         summary = _parse_batch_summary(completed.stdout)
         if summary is None:
@@ -1759,11 +1763,7 @@ class DeckBuildService:
                 "exit_code": 124,
                 "error_class": "timeout",
                 "duration_ms": int((time.perf_counter() - started) * 1000),
-                "raw_error_excerpt": safe_excerpt(
-                    f"serial image repair attempt {attempt_no} timed out after {timeout}s; "
-                    f"stdout_chars={len(stdout)} stderr_chars={len(stderr)} "
-                    f"{(stderr or stdout).strip()}"
-                ),
+                "raw_error_excerpt": safe_excerpt(f"serial image repair attempt {attempt_no} timed out after {timeout}s; stdout_chars={len(stdout)} stderr_chars={len(stderr)} {(stderr or stdout).strip()}"),
             }
         output_bytes = _file_size(_host_path(slide.visual_asset_path, runtime))
         success = completed.returncode == 0 and bool(output_bytes and output_bytes > 0)
@@ -1796,12 +1796,7 @@ def _builder_deadline_epoch_ms(runtime: Any) -> int | None:
         return int(raw)
     kickoff = _state_value(runtime, "builder_task_kickoff_ms")
     timeout = _state_value(runtime, "builder_timeout_seconds")
-    if (
-        isinstance(kickoff, (int, float))
-        and kickoff > 0
-        and isinstance(timeout, (int, float))
-        and timeout > 0
-    ):
+    if isinstance(kickoff, (int, float)) and kickoff > 0 and isinstance(timeout, (int, float)) and timeout > 0:
         return int(kickoff) + int(timeout) * 1000
     return None
 
@@ -2032,10 +2027,7 @@ def _repair_instruction_for_failure(exc: DeckBuildFailure) -> dict[str, Any] | N
         "should_retry": True,
         "max_retry_count": 1,
         "failure_scope": "creative_deck_plan" if exc.code.startswith("deck_creative") else "slide_html_or_mechanical_gate",
-        "message": (
-            "Create or repair the subject-derived DeckCreativePlan and every slide.html_source, "
-            "using planned generated images only as assets, then call prepare_deck_build exactly once more."
-        ),
+        "message": ("Create or repair the subject-derived DeckCreativePlan and every slide.html_source, using planned generated images only as assets, then call prepare_deck_build exactly once more."),
         "repair_message": (
             "Repair the D2.1 deck input and call prepare_deck_build exactly once more. "
             "Include creative_plan with design_plan, image_assets, slide_compositions, and one html_source "
@@ -2207,20 +2199,13 @@ def _finalize_image_generation_status(deck: DeckBuild, *, success: bool) -> None
     if deck.successful_visual_count == deck.expected_visual_count and deck.missing_visual_count == 0:
         deck.image_generation_status = "success_after_repair" if deck.serial_repair_count > 0 else "success"
         deck.image_generation_reason = None
-        deck.primary_image_batch_status = deck.primary_image_batch_status or (
-            "repaired" if deck.serial_repair_count > 0 else "success"
-        )
+        deck.primary_image_batch_status = deck.primary_image_batch_status or ("repaired" if deck.serial_repair_count > 0 else "success")
         return
     if deck.successful_visual_count > 0:
         deck.image_generation_status = "partial"
     else:
         deck.image_generation_status = "failed"
-    deck.image_generation_reason = (
-        deck.image_generation_reason
-        or deck.primary_image_batch_error_class
-        or deck.failure_code
-        or "image_generation_failed"
-    )
+    deck.image_generation_reason = deck.image_generation_reason or deck.primary_image_batch_error_class or deck.failure_code or "image_generation_failed"
     deck.primary_image_batch_status = deck.primary_image_batch_status or "failed"
     deck.primary_image_batch_error_class = deck.primary_image_batch_error_class or deck.image_generation_reason
 
@@ -2245,11 +2230,7 @@ def _current_image_trace_env(runtime: ToolRuntime) -> dict[str, str]:
     thread_id = _state_value(runtime, "thread_id")
     if thread_id:
         env["SOPHIA_THREAD_ID"] = str(thread_id)
-    session_id = (
-        _state_value(runtime, "session_id")
-        or _state_value(runtime, "parent_thread_id")
-        or _state_value(runtime, "companion_session_id")
-    )
+    session_id = _state_value(runtime, "session_id") or _state_value(runtime, "parent_thread_id") or _state_value(runtime, "companion_session_id")
     if session_id:
         env["SOPHIA_SESSION_ID"] = str(session_id)
     task_id = _state_value(runtime, "task_id") or _state_value(runtime, "builder_task_id")
@@ -2265,21 +2246,9 @@ def _current_image_trace_env(runtime: ToolRuntime) -> dict[str, str]:
     if build_id:
         env["SOPHIA_BUILD_ID"] = str(build_id)
         env["SOPHIA_DECK_BUILD_ID"] = str(build_id)
-    env["SOPHIA_DECK_ROUTE"] = str(
-        _state_value(runtime, "current_deck_route")
-        or _state_value(runtime, "deck_route")
-        or DEFAULT_DECK_ROUTE
-    )
-    env["SOPHIA_DECK_COMPILE_MODE"] = str(
-        _state_value(runtime, "current_deck_compile_mode")
-        or _state_value(runtime, "deck_compile_mode")
-        or DEFAULT_DECK_COMPILE_MODE
-    )
-    env["SOPHIA_ARTIFACT_TARGET_EXT"] = str(
-        _state_value(runtime, "current_deck_artifact_target_ext")
-        or _state_value(runtime, "artifact_target_ext")
-        or DEFAULT_ARTIFACT_TARGET_EXT
-    )
+    env["SOPHIA_DECK_ROUTE"] = str(_state_value(runtime, "current_deck_route") or _state_value(runtime, "deck_route") or DEFAULT_DECK_ROUTE)
+    env["SOPHIA_DECK_COMPILE_MODE"] = str(_state_value(runtime, "current_deck_compile_mode") or _state_value(runtime, "deck_compile_mode") or DEFAULT_DECK_COMPILE_MODE)
+    env["SOPHIA_ARTIFACT_TARGET_EXT"] = str(_state_value(runtime, "current_deck_artifact_target_ext") or _state_value(runtime, "artifact_target_ext") or DEFAULT_ARTIFACT_TARGET_EXT)
     return env
 
 
@@ -2350,6 +2319,74 @@ def _timeout_stream_text(value: object) -> str:
     if isinstance(value, bytes):
         return value.decode("utf-8", errors="replace")
     return str(value)
+
+
+def _authoring_failure(summary: str) -> DeckBuildFailure:
+    return DeckBuildFailure("invalid_deck_ir", summary, retryable=True)
+
+
+def _validate_authoring_inputs(deck: DeckBuild, slides: list[dict[str, Any]]) -> None:
+    compact_mode = bool(deck.deck_stylesheet)
+    stylesheet = deck.deck_stylesheet or ""
+    if len(stylesheet.encode("utf-8")) > 24 * 1024:
+        raise _authoring_failure("deck_stylesheet exceeds 24576 bytes.")
+    if "</style" in stylesheet.lower():
+        raise _authoring_failure("deck_stylesheet contains a forbidden closing style tag.")
+    total_bytes = len(stylesheet.encode("utf-8"))
+    for index, raw in enumerate(slides):
+        total_bytes += _validate_slide_authoring_input(
+            compact_mode=compact_mode,
+            index=index,
+            raw=raw,
+        )
+    if total_bytes > 128 * 1024:
+        raise _authoring_failure("Deck authoring payload exceeds 131072 bytes.")
+
+
+def _slide_authoring_sources(raw: dict[str, Any]) -> dict[str, str | None]:
+    return {key: str(raw.get(key) or "").strip() or None for key in ("html_body", "slide_css", "html_source")}
+
+
+def _validate_slide_authoring_input(*, compact_mode: bool, index: int, raw: dict[str, Any]) -> int:
+    body = str(raw.get("html_body") or "").strip()
+    slide_css = str(raw.get("slide_css") or "").strip()
+    source = str(raw.get("html_source") or "").strip()
+    _validate_slide_authoring_mode(compact_mode, index, body, slide_css, source)
+    _validate_slide_authoring_tags(compact_mode, index, body, slide_css)
+    _validate_slide_authoring_sizes(index, body, slide_css)
+    return sum(len(value.encode("utf-8")) for value in (body, slide_css, source))
+
+
+def _validate_slide_authoring_mode(
+    compact_mode: bool,
+    index: int,
+    body: str,
+    slide_css: str,
+    source: str,
+) -> None:
+    if compact_mode and (not body or source):
+        raise _authoring_failure(f"slides[{index}] must use html_body only in compact authoring mode.")
+    if not compact_mode and (body or slide_css):
+        raise _authoring_failure(f"slides[{index}] must use legacy html_source only when deck_stylesheet is absent.")
+
+
+def _validate_slide_authoring_tags(compact_mode: bool, index: int, body: str, slide_css: str) -> None:
+    if compact_mode and _fragment_contains_document_tag(body):
+        raise _authoring_failure(f"slides[{index}].html_body contains a document-level tag.")
+    if "</style" in slide_css.lower():
+        raise _authoring_failure(f"slides[{index}].slide_css contains a forbidden closing style tag.")
+
+
+def _validate_slide_authoring_sizes(index: int, body: str, slide_css: str) -> None:
+    if len(body.encode("utf-8")) > 16 * 1024:
+        raise _authoring_failure(f"slides[{index}].html_body exceeds 16384 bytes.")
+    if len(slide_css.encode("utf-8")) > 8 * 1024:
+        raise _authoring_failure(f"slides[{index}].slide_css exceeds 8192 bytes.")
+
+
+def _fragment_contains_document_tag(body: str) -> bool:
+    lowered = body.lower()
+    return any(tag in lowered for tag in ("<html", "</html", "<head", "</head", "<body", "</body", "<style", "</style"))
 
 
 def _now() -> str:

@@ -61,11 +61,7 @@ def _runtime(outputs: Path, *, user_request: str = "Build a visual 3 slide deck"
 
 
 def _slide_html(index: int, title: str, narrative: str, *, include_asset: bool = False) -> str:
-    asset = (
-        f'<figure class="asset"><img src="../assets/slide-{index:02d}.png" alt="" /></figure>'
-        if include_asset
-        else ""
-    )
+    asset = f'<figure class="asset"><img src="../assets/slide-{index:02d}.png" alt="" /></figure>' if include_asset else ""
     return f"""<!doctype html>
 <html><head><meta charset="utf-8"><style>
 html, body {{ margin: 0; padding: 0; width: 1920px; height: 1080px; background: #0A0E14; }}
@@ -93,15 +89,17 @@ def _slides(count: int = 3, *, include_asset: bool = True) -> list[dict]:
     for index in range(1, count + 1):
         title = f"Slide {index} System Story"
         narrative = "A concise technical narrative explains the point with calm professional framing."
-        slides.append({
-            "title": f"Slide {index} System Story",
-            "narrative": narrative,
-            "role": roles[index - 1],
-            "layout_kind": layouts[index - 1],
-            "visual_prompt": f"Professional technical visual metaphor for slide {index}",
-            "speaker_notes": "Optional notes.",
-            "html_source": _slide_html(index, title, narrative, include_asset=include_asset and index == 1),
-        })
+        slides.append(
+            {
+                "title": f"Slide {index} System Story",
+                "narrative": narrative,
+                "role": roles[index - 1],
+                "layout_kind": layouts[index - 1],
+                "visual_prompt": f"Professional technical visual metaphor for slide {index}",
+                "speaker_notes": "Optional notes.",
+                "html_source": _slide_html(index, title, narrative, include_asset=include_asset and index == 1),
+            }
+        )
     return slides
 
 
@@ -941,10 +939,7 @@ def test_deck_build_service_terminal_provider_error_does_not_unlock_serial_repai
             "requested": len(manifest["items"]),
             "images_generated": 0,
             "failed": len(manifest["items"]),
-            "items": [
-                {"output_file": item["output_file"], "success": False, "error_class": "auth_invalid"}
-                for item in manifest["items"]
-            ],
+            "items": [{"output_file": item["output_file"], "success": False, "error_class": "auth_invalid"} for item in manifest["items"]],
             "error_class_histogram": {"auth_invalid": len(manifest["items"])},
         }
 
@@ -1306,6 +1301,47 @@ def test_prepare_deck_build_schema_failure_gets_one_bounded_retry(tmp_path: Path
     assert diagnostics["prepare_result_count"] == 1
     assert "prepare_service_call_count" not in diagnostics
     assert diagnostics["deck_root_failure_code"] == "deck_prepare_argument_invalid"
+
+
+def test_prepare_deck_build_execution_error_is_terminal_without_repair(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state["builder_pptx_diagnostics"] = {
+        "prepare_emitted_call_count": 1,
+        "prepare_call_count": 1,
+    }
+    request = SimpleNamespace(
+        tool_call={"id": "tc-runtime", "name": "prepare_deck_build", "args": {}},
+        state=runtime.state,
+        runtime=runtime,
+    )
+    result = ToolMessage(
+        content="The authoritative deck build tool failed during execution.",
+        tool_call_id="tc-runtime",
+        name="prepare_deck_build",
+        status="error",
+        additional_kwargs={
+            "tool_error": {
+                "error_class": "TypeError",
+                "retryable": False,
+                "stage": "tool_execution",
+            }
+        },
+    )
+    monkeypatch.setattr(BuilderArtifactMiddleware, "_upload_fallback_and_fire", lambda *args, **kwargs: None)
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_result_command(request, result)
+
+    assert isinstance(command, Command)
+    assert command.goto == "end"
+    assert command.update["builder_deck_prepare_phase"] == "terminal"
+    assert command.update["builder_result"]["failure_code"] == "deck_prepare_execution_error"
+    diagnostics = command.update["builder_pptx_diagnostics"]
+    assert diagnostics["prepare_execution_count"] == 1
+    assert diagnostics["prepare_result_count"] == 1
+    assert "prepare_schema_failure_count" not in diagnostics
 
 
 def test_prepare_deck_build_second_schema_failure_preserves_root_cause(

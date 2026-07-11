@@ -55,9 +55,7 @@ _WEBHOOK_TIMEOUT_SECONDS = 2.0
 # the gateway-side terminal-edit retry backoff. 4xx is a contract bug and is
 # NOT retried. Runs on a daemon thread so the sleeps never block the executor.
 _WEBHOOK_RETRY_BACKOFFS_SECONDS = (2.0, 5.0, 15.0)
-_INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
-    {"ledger", "uploads", ".builder", "assets", "slides", "sources", "source_artifact"}
-)
+_INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset({"ledger", "uploads", ".builder", "assets", "slides", "sources", "source_artifact"})
 
 
 # Process-local LRU cache of task_id/run_id pairs that have already had
@@ -144,10 +142,7 @@ def _warn_if_misconfigured(payload: dict[str, Any]) -> None:
         # Operator set the URL explicitly — assume they know what they did.
         return
 
-    looks_deployed = any(
-        os.environ.get(var)
-        for var in ("RENDER", "RENDER_EXTERNAL_URL", "FLY_APP_NAME", "K_SERVICE")
-    )
+    looks_deployed = any(os.environ.get(var) for var in ("RENDER", "RENDER_EXTERNAL_URL", "FLY_APP_NAME", "K_SERVICE"))
     if not looks_deployed:
         return
 
@@ -201,11 +196,7 @@ def _storage_object_addresses_internal_keyspace(relative_object_path: str) -> bo
     if any(segment in _INTERNAL_STORAGE_OBJECT_SEGMENTS for segment in segments):
         return True
     name = segments[-1].lower() if segments else ""
-    return (
-        name.endswith((".source.md", ".source.html", ".plan.json", ".manifest.json", ".preview.pdf"))
-        or (name.startswith("_") and name.endswith(".py"))
-        or (name.startswith("test_") and name.endswith((".py", ".sh")))
-    )
+    return name.endswith((".source.md", ".source.html", ".plan.json", ".manifest.json", ".preview.pdf")) or (name.startswith("_") and name.endswith(".py")) or (name.startswith("test_") and name.endswith((".py", ".sh")))
 
 
 def _validated_storage_object_path_for_signing(
@@ -561,11 +552,7 @@ def _parent_thread_id(delegation: dict[str, Any], cfg: dict[str, Any]) -> Any:
 
 
 def _parent_user_id(delegation: dict[str, Any], cfg: dict[str, Any]) -> str | None:
-    user_id = (
-        delegation.get("parent_user_id")
-        or cfg.get("parent_user_id")
-        or cfg.get("user_id")
-    )
+    user_id = delegation.get("parent_user_id") or cfg.get("parent_user_id") or cfg.get("user_id")
     return user_id if isinstance(user_id, str) and user_id else None
 
 
@@ -667,24 +654,16 @@ def _coerce_phantom_success(
     ):
         return mapped_status, error_message
     logger.warning(
-        "Builder-events: coercing phantom-success to error for task_id=%s "
-        "confidence=%s artifact_path=%r — builder reported success but "
-        "produced no deliverable.",
+        "Builder-events: coercing phantom-success to error for task_id=%s confidence=%s artifact_path=%r — builder reported success but produced no deliverable.",
         builder_thread_id,
         artifact.get("confidence"),
         artifact_path,
     )
-    return "error", error_message or (
-        "Builder finished but couldn't produce a deliverable. "
-        "Want me to try again?"
-    )
+    return "error", error_message or ("Builder finished but couldn't produce a deliverable. Want me to try again?")
 
 
 def _has_deliverable(artifact_path: str | None, artifact_url: str | None) -> bool:
-    return bool(
-        (isinstance(artifact_path, str) and artifact_path.strip())
-        or (isinstance(artifact_url, str) and artifact_url.strip())
-    )
+    return bool((isinstance(artifact_path, str) and artifact_path.strip()) or (isinstance(artifact_url, str) and artifact_url.strip()))
 
 
 def _combined_supabase_result(current: Any, signed_url_result: str) -> str:
@@ -743,9 +722,7 @@ def _completion_failure_diagnostics(
             runtime=runtime,
             artifact_args=artifact,
             failure_stage="storage_mirror",
-            failure_reason=(
-                "Supabase signing did not create a URL, but the local artifact path remains available."
-            ),
+            failure_reason=("Supabase signing did not create a URL, but the local artifact path remains available."),
             failure_code=None,
             emit_attempted=True,
             emit_tool_call_seen=True,
@@ -847,6 +824,7 @@ def _artifact_completion_fields(
         "first_prepare_turn": artifact.get("first_prepare_turn"),
         "prepare_call_count": artifact.get("prepare_call_count"),
         "prepare_emitted_call_count": artifact.get("prepare_emitted_call_count"),
+        "prepare_execution_count": artifact.get("prepare_execution_count"),
         "prepare_normalized_call_count": artifact.get("prepare_normalized_call_count"),
         "prepare_schema_failure_count": artifact.get("prepare_schema_failure_count"),
         "prepare_parallel_call_count": artifact.get("prepare_parallel_call_count"),
@@ -856,6 +834,9 @@ def _artifact_completion_fields(
         "prepare_retry_executed": artifact.get("prepare_retry_executed"),
         "dangling_prepare_call_count": artifact.get("dangling_prepare_call_count"),
         "creative_plan_accepted": artifact.get("creative_plan_accepted"),
+        "deck_authoring_contract": artifact.get("deck_authoring_contract"),
+        "deck_authoring_elapsed_ms": artifact.get("deck_authoring_elapsed_ms"),
+        "prepare_force_reason": artifact.get("prepare_force_reason"),
     }
 
 
@@ -931,9 +912,7 @@ def build_completion_payload_from_artifact(
     user_id = _parent_user_id(delegation, cfg)
     trace_id = _trace_id(runtime_config)
 
-    artifact_path = _canonical_artifact_path(
-        artifact_dict.get("artifact_path")
-    )
+    artifact_path = _canonical_artifact_path(artifact_dict.get("artifact_path"))
     artifact_storage_path = _relative_output_artifact_path(artifact_path)
     artifact_filename = _artifact_filename(artifact_path)
     storage_object_path = artifact_dict.get("storage_object_path")
@@ -1037,10 +1016,7 @@ def fire_completion_webhook_from_artifact(
     task_id = _resolve_runtime_thread_id(runtime)
     if not task_id:
         logger.warning(
-            "[Builder] fire_completion_webhook: missing builder thread_id "
-            "in runtime.execution_info AND runtime.context AND "
-            "runtime.config.configurable; cannot dispatch webhook. "
-            "(runtime=%s)",
+            "[Builder] fire_completion_webhook: missing builder thread_id in runtime.execution_info AND runtime.context AND runtime.config.configurable; cannot dispatch webhook. (runtime=%s)",
             "missing" if runtime is None else "present but no thread_id",
         )
         return False
@@ -1078,9 +1054,7 @@ def fire_completion_webhook_from_artifact(
     # checking whether THIS log line appeared on the builder side and then
     # whether the gateway saw the matching POST.
     logger.info(
-        "[Builder] fire_completion_webhook: dispatching task_id=%s "
-        "run_id=%s parent_thread_id=%s status=%s artifact_path=%r artifact_filename=%r "
-        "artifact_url_present=%s image_generation_status=%s image_generation_reason=%s",
+        "[Builder] fire_completion_webhook: dispatching task_id=%s run_id=%s parent_thread_id=%s status=%s artifact_path=%r artifact_filename=%r artifact_url_present=%s image_generation_status=%s image_generation_reason=%s",
         task_id,
         payload.get("run_id"),
         payload.get("thread_id"),

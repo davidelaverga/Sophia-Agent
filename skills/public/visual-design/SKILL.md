@@ -23,7 +23,7 @@ be generated locally under `/mnt/user-data/outputs/`.
    `/mnt/user-data/outputs/`; do not use `generate_chart`,
    chart-visualization, remote chart URLs, or browser-only chart scripts.
 4. For PPTX decks, read the deck craft guidance and submit creative_plan plus
-   slide html_source through `prepare_deck_build`. The harness sanitizes HTML,
+   shared deck_stylesheet and slide html_body through `prepare_deck_build`. The harness assembles and sanitizes HTML,
    generates selected asset-only images only when useful, compiles the native
    `.pptx`, and evaluates mechanical gates.
 5. Embed or reference the local visual evidence in the final HTML, PDF source,
@@ -60,8 +60,8 @@ be generated locally under `/mnt/user-data/outputs/`.
 - PDF: prefer visible inline static SVG figures in the HTML source before
   rendering; local SVG/PNG assets are acceptable when they are under outputs.
   Do not rely on browser-only scripts.
-- PPTX: use `prepare_deck_build` with complete creative_plan and slide
-  html_source. DeckBuildService owns sanitization, planned assets, native
+- PPTX: use `prepare_deck_build` with complete creative_plan, shared
+  deck_stylesheet, and slide html_body. DeckBuildService owns assembly, sanitization, planned assets, native
   PowerPoint compilation, inspection, mechanical gates, and terminal failure.
   Generated images, when used, are supporting assets only; titles and
   narratives remain native slide text.

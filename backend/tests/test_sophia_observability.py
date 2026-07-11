@@ -28,12 +28,18 @@ class _FakeRunTree:
     def __init__(self) -> None:
         self.metadata: dict[str, Any] = {}
         self.tags: list[str] = []
+        self.parent_run: _FakeRunTree | None = None
+        self.patch_calls = 0
 
     def add_metadata(self, metadata: dict[str, Any]) -> None:
         self.metadata.update(metadata)
 
     def add_tags(self, tags: list[str]) -> None:
         self.tags.extend(tags)
+
+    def patch(self, *, exclude_inputs: bool = False) -> None:
+        assert exclude_inputs is True
+        self.patch_calls += 1
 
 
 class _FakeFeedbackClient:
@@ -88,6 +94,32 @@ def test_builder_completion_adds_metadata_tags_and_qc_feedback(monkeypatch) -> N
     assert "qc_ran" in run_tree.tags
     assert [item["score"] for item in feedback_client.feedback] == [1.0, 0.0]
     assert feedback_client.feedback[1]["comment"] == '["garbled title"]'
+
+
+def test_builder_completion_targets_root_run_metadata_and_feedback(monkeypatch) -> None:
+    root = _FakeRunTree()
+    root.id = "root-run"
+    child = _FakeRunTree()
+    child.id = "child-run"
+    child.parent_run = root
+    feedback_client = _FakeFeedbackClient()
+    monkeypatch.setattr(observability, "_current_run_tree", lambda: child)
+    monkeypatch.setattr(observability, "_feedback_client", lambda: feedback_client)
+
+    artifact = {
+        "artifact_path": None,
+        "artifact_type": "presentation",
+        "artifact_ext": "pptx",
+        "terminal_status": "failed",
+        "terminal_reason": "deck_prepare_execution_error",
+    }
+
+    assert observability.annotate_builder_completion({}, artifact) is True
+    assert root.metadata["terminal_status"] == "failed"
+    assert root.metadata["terminal_reason"] == "deck_prepare_execution_error"
+    assert root.patch_calls == 1
+    assert feedback_client.feedback[-1]["run_id"] == "root-run"
+    assert feedback_client.feedback[-1]["score"] == 0.0
 
 
 def test_builder_observability_preserves_zero_native_deck_metrics() -> None:
@@ -167,10 +199,13 @@ def test_builder_completion_keeps_skipped_qc_feedback_neutral(monkeypatch) -> No
         }
     }
 
-    assert observability.annotate_builder_completion(
-        state,
-        {"artifact_path": "/mnt/user-data/outputs/deck.pptx", "artifact_ext": "pptx"},
-    ) is True
+    assert (
+        observability.annotate_builder_completion(
+            state,
+            {"artifact_path": "/mnt/user-data/outputs/deck.pptx", "artifact_ext": "pptx"},
+        )
+        is True
+    )
 
     assert feedback_client.feedback == [
         {
@@ -202,10 +237,13 @@ def test_builder_completion_keeps_advisory_qc_feedback_neutral(monkeypatch) -> N
         }
     }
 
-    assert observability.annotate_builder_completion(
-        state,
-        {"artifact_path": "/mnt/user-data/outputs/deck.pptx", "artifact_ext": "pptx"},
-    ) is True
+    assert (
+        observability.annotate_builder_completion(
+            state,
+            {"artifact_path": "/mnt/user-data/outputs/deck.pptx", "artifact_ext": "pptx"},
+        )
+        is True
+    )
 
     assert feedback_client.feedback == [
         {
@@ -259,6 +297,7 @@ def test_builder_completion_attaches_prepare_terminal_metadata_and_failure_feedb
             "first_prepare_turn": 8,
             "prepare_call_count": 2,
             "prepare_emitted_call_count": 2,
+            "prepare_execution_count": 1,
             "prepare_normalized_call_count": 1,
             "prepare_schema_failure_count": 1,
             "prepare_service_call_count": 1,
@@ -267,6 +306,9 @@ def test_builder_completion_attaches_prepare_terminal_metadata_and_failure_feedb
             "prepare_retry_executed": True,
             "dangling_prepare_call_count": 1,
             "creative_plan_accepted": False,
+            "deck_authoring_contract": "compact_model_html_v1",
+            "deck_authoring_elapsed_ms": 119000,
+            "prepare_force_reason": "turn_limit",
             "deck_root_failure_code": "deck_prepare_argument_invalid",
             "deck_root_failure_summary": "The first prepare call failed schema validation.",
             "source_retention_report": {
@@ -298,6 +340,7 @@ def test_builder_completion_attaches_prepare_terminal_metadata_and_failure_feedb
     assert run_tree.metadata["first_prepare_turn"] == 8
     assert run_tree.metadata["prepare_call_count"] == 2
     assert run_tree.metadata["prepare_emitted_call_count"] == 2
+    assert run_tree.metadata["prepare_execution_count"] == 1
     assert run_tree.metadata["prepare_normalized_call_count"] == 1
     assert run_tree.metadata["prepare_schema_failure_count"] == 1
     assert run_tree.metadata["prepare_service_call_count"] == 1
@@ -305,6 +348,9 @@ def test_builder_completion_attaches_prepare_terminal_metadata_and_failure_feedb
     assert run_tree.metadata["prepare_result_count"] == 1
     assert run_tree.metadata["prepare_retry_executed"] is True
     assert run_tree.metadata["dangling_prepare_call_count"] == 1
+    assert run_tree.metadata["deck_authoring_contract"] == "compact_model_html_v1"
+    assert run_tree.metadata["deck_authoring_elapsed_ms"] == 119000
+    assert run_tree.metadata["prepare_force_reason"] == "turn_limit"
     assert run_tree.metadata["creative_plan_accepted"] is False
     assert run_tree.metadata["root_failure_code"] == "deck_prepare_argument_invalid"
     assert run_tree.metadata["source_retention_passed"] is False
@@ -414,12 +460,8 @@ def test_trace_disabled_runnable_preserves_anthropic_prompt_caching() -> None:
             clone.tools = overrides.get("tools", self.tools)
             return clone
 
-    wrapped_model = observability.disable_langsmith_tracing_for_runnable(
-        ChatAnthropic(model="claude-haiku-4-5-20251001", api_key="test-key")
-    )
-    middleware = AnthropicPromptCachingMiddleware(
-        ttl="5m", unsupported_model_behavior="raise"
-    )
+    wrapped_model = observability.disable_langsmith_tracing_for_runnable(ChatAnthropic(model="claude-haiku-4-5-20251001", api_key="test-key"))
+    middleware = AnthropicPromptCachingMiddleware(ttl="5m", unsupported_model_behavior="raise")
     captured: dict[str, Any] = {}
 
     assert isinstance(wrapped_model, ChatAnthropic)

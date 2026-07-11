@@ -41,6 +41,24 @@ def test_wrap_tool_call_returns_error_tool_message_on_exception():
     assert "network down" in result.text
 
 
+def test_prepare_tool_error_is_structured_and_does_not_expose_raw_detail():
+    middleware = ToolErrorHandlingMiddleware()
+    req = _request(name="prepare_deck_build", tool_call_id="tc-deck")
+
+    def _boom(_req):
+        raise TypeError("sensitive runtime detail")
+
+    result = middleware.wrap_tool_call(req, _boom)
+
+    assert result.status == "error"
+    assert "sensitive runtime detail" not in result.text
+    assert result.additional_kwargs["tool_error"] == {
+        "error_class": "TypeError",
+        "retryable": False,
+        "stage": "tool_execution",
+    }
+
+
 def test_wrap_tool_call_uses_fallback_tool_call_id_when_missing():
     middleware = ToolErrorHandlingMiddleware()
     req = _request(name="mcp_tool", tool_call_id=None)

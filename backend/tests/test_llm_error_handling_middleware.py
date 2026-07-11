@@ -50,6 +50,24 @@ async def test_async_transient_error_retries_then_succeeds() -> None:
     assert calls == 2
 
 
+@pytest.mark.anyio
+async def test_presentation_model_error_does_not_retry() -> None:
+    middleware = LLMErrorHandlingMiddleware(retry_max_attempts=2, retry_base_delay_ms=0)
+    request = _request()
+    request.state = {"builder_budget": {"tier": "presentation"}}
+    calls = 0
+
+    async def handler(_request):
+        nonlocal calls
+        calls += 1
+        raise ProviderError("server busy")
+
+    result = await middleware.awrap_model_call(request, handler)
+
+    assert result.additional_kwargs["deerflow_error_fallback"] is True
+    assert calls == 1
+
+
 def test_malformed_anthropic_message_history_is_classified_separately() -> None:
     middleware = LLMErrorHandlingMiddleware(retry_max_attempts=1)
 
@@ -79,9 +97,7 @@ def test_builder_artifact_diagnostics_preserve_malformed_request_reason() -> Non
     assert diagnostic == {
         "failure_stage": "model_provider",
         "failure_code": "primary_provider_malformed_request",
-        "failure_reason": (
-            "Internal model request payload was malformed before the builder produced an artifact."
-        ),
+        "failure_reason": ("Internal model request payload was malformed before the builder produced an artifact."),
         "provider_error_reason": "malformed_request",
         "retryable": False,
     }

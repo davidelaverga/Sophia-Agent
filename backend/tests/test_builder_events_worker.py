@@ -242,9 +242,7 @@ async def test_internal_post_persists_terminal_builder_state(
     assert task_update["status"] == "success"
     assert task_update["artifact_path"] == "mnt/user-data/outputs/brief.md"
     assert task_update["builder_result"]["artifact_path"] == "mnt/user-data/outputs/brief.md"
-    assert task_update["builder_result"]["source_artifact_path"] == (
-        "mnt/user-data/outputs/source.md"
-    )
+    assert task_update["builder_result"]["source_artifact_path"] == ("mnt/user-data/outputs/source.md")
     assert "artifact_url" not in task_update["builder_result"]
     assert values["last_builder_artifact"]["artifact_path"] == "mnt/user-data/outputs/brief.md"
     assert "artifact_url" not in values["last_builder_artifact"]
@@ -386,6 +384,7 @@ async def test_internal_post_persists_terminal_deck_diagnostics(
         "first_prepare_turn": 8,
         "prepare_call_count": 1,
         "prepare_emitted_call_count": 1,
+        "prepare_execution_count": 1,
         "prepare_normalized_call_count": 1,
         "prepare_schema_failure_count": 0,
         "prepare_service_call_count": 1,
@@ -394,6 +393,9 @@ async def test_internal_post_persists_terminal_deck_diagnostics(
         "prepare_retry_executed": False,
         "dangling_prepare_call_count": 0,
         "creative_plan_accepted": True,
+        "deck_authoring_contract": "compact_model_html_v1",
+        "deck_authoring_elapsed_ms": 42000,
+        "prepare_force_reason": "model_initiated",
     }
 
     async with client:
@@ -429,18 +431,20 @@ async def test_internal_post_hydrates_missing_run_id_from_parent_task(
 ):
     captured: dict = {}
     fake_threads = MagicMock()
-    fake_threads.get_state = AsyncMock(return_value={
-        "values": {
-            "async_tasks": {
-                "builder-task": {
-                    "task_id": "builder-task",
-                    "agent_name": "sophia_builder",
-                    "run_id": "run-from-parent-state",
-                    "status": "running",
+    fake_threads.get_state = AsyncMock(
+        return_value={
+            "values": {
+                "async_tasks": {
+                    "builder-task": {
+                        "task_id": "builder-task",
+                        "agent_name": "sophia_builder",
+                        "run_id": "run-from-parent-state",
+                        "status": "running",
+                    }
                 }
             }
         }
-    })
+    )
 
     async def _update_state(thread_id: str, values: dict):
         captured["thread_id"] = thread_id
@@ -466,9 +470,7 @@ async def test_internal_post_hydrates_missing_run_id_from_parent_task(
 
     assert response.status_code == 202
     assert captured["values"]["async_tasks"]["builder-task"]["run_id"] == "run-from-parent-state"
-    assert captured["values"]["async_tasks"]["builder-task"]["builder_result"]["run_id"] == (
-        "run-from-parent-state"
-    )
+    assert captured["values"]["async_tasks"]["builder-task"]["builder_result"]["run_id"] == ("run-from-parent-state")
     assert last_response.status_code == 200
     assert last_response.json()["run_id"] == "run-from-parent-state"
 
@@ -553,5 +555,5 @@ async def test_sse_format_helper_emits_data_line():
     encoded = routes._format_sse_event(payload)
     assert encoded.startswith(b"data: ")
     assert encoded.endswith(b"\n\n")
-    body = encoded[len(b"data: "):].split(b"\n\n")[0]
+    body = encoded[len(b"data: ") :].split(b"\n\n")[0]
     assert json.loads(body) == payload

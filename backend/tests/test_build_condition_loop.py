@@ -103,7 +103,7 @@ def test_builder_budget_policy_uses_presentation_tier_for_pptx(monkeypatch):
     assert deck["tier"] == "presentation"
     assert max_non_artifact_turns({"builder_budget": deck}) == 12
     assert deck["max_wall_clock_seconds"] == 480
-    assert deck["prepare_force_at_turn"] == 8
+    assert deck["prepare_force_at_turn"] == 6
     assert deck["prepare_force_after_seconds"] == 120
 
 
@@ -169,9 +169,7 @@ def test_rasterize_returns_empty_for_missing_file(monkeypatch):
 def test_repair_turn_content_falls_back_to_text(tmp_path):
     # No artifact file on disk → plain-text rejection content.
     state = _deck_state(thread_data={"outputs_path": str(tmp_path / "outputs")})
-    content = BuilderArtifactMiddleware._repair_turn_content(
-        "fix it", {"artifact_path": "/mnt/user-data/outputs/deck.pptx"}, state
-    )
+    content = BuilderArtifactMiddleware._repair_turn_content("fix it", {"artifact_path": "/mnt/user-data/outputs/deck.pptx"}, state)
     assert content == "fix it"
 
 
@@ -187,9 +185,7 @@ def test_repair_turn_content_attaches_rasters(tmp_path, monkeypatch):
             {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "ZmFrZQ=="}},
         ],
     )
-    content = BuilderArtifactMiddleware._repair_turn_content(
-        "fix it", {"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state
-    )
+    content = BuilderArtifactMiddleware._repair_turn_content("fix it", {"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state)
     assert isinstance(content, list)
     assert content[0] == {"type": "text", "text": "fix it"}
     assert any(block.get("type") == "image" for block in content)
@@ -277,17 +273,13 @@ def test_advisory_consumes_at_most_one_iteration(tmp_path, monkeypatch):
         state=state,
         runtime=SimpleNamespace(context={}, config={}),
     )
-    result = mw._visual_gate_rejection_command(
-        request, {"artifact_path": "/mnt/user-data/outputs/report.pdf"}
-    )
+    result = mw._visual_gate_rejection_command(request, {"artifact_path": "/mnt/user-data/outputs/report.pdf"})
     assert isinstance(result, Command)
     assert result.update["builder_advisory_consumed"] is True
     assert result.update["build_iterations"] == 1
 
     state["builder_advisory_consumed"] = True
-    assert mw._visual_gate_rejection_command(
-        request, {"artifact_path": "/mnt/user-data/outputs/report.pdf"}
-    ) is None
+    assert mw._visual_gate_rejection_command(request, {"artifact_path": "/mnt/user-data/outputs/report.pdf"}) is None
 
 
 def test_advisory_pass_returns_none_on_pass(tmp_path, monkeypatch):
@@ -305,9 +297,7 @@ def test_advisory_pass_returns_none_on_pass(tmp_path, monkeypatch):
         "deerflow.agents.sophia_agent.middlewares.builder_artifact.rendered_artifact_review",
         lambda _pdf: None,
     )
-    assert mw._advisory_rejection_text(
-        {"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state
-    ) is None
+    assert mw._advisory_rejection_text({"artifact_path": "/mnt/user-data/outputs/report.pdf"}, state) is None
 
 
 # ---- delivery honesty ----------------------------------------------------------
@@ -315,9 +305,7 @@ def test_advisory_pass_returns_none_on_pass(tmp_path, monkeypatch):
 
 def test_unmet_conditions_named_at_delivery():
     state = _deck_state(builder_pptx_diagnostics={})
-    unmet = _unmet_conditions_from_state(
-        {"artifact_path": "/mnt/user-data/outputs/deck.pptx"}, state
-    )
+    unmet = _unmet_conditions_from_state({"artifact_path": "/mnt/user-data/outputs/deck.pptx"}, state)
     # Service-owned PPTX planning never succeeded, so visual/hero conditions
     # are intentionally suppressed instead of reporting an irrelevant gate.
     assert "hero_missing" not in unmet
@@ -330,9 +318,7 @@ def test_unmet_conditions_empty_after_success():
             "image_generation_success_count": 1,
         }
     )
-    unmet = _unmet_conditions_from_state(
-        {"artifact_path": "/mnt/user-data/outputs/deck.pptx"}, state
-    )
+    unmet = _unmet_conditions_from_state({"artifact_path": "/mnt/user-data/outputs/deck.pptx"}, state)
     assert unmet == []
 
 
@@ -348,7 +334,5 @@ def test_iterations_used_stamped_into_artifact():
             "image_generation_success_count": 1,
         },
     )
-    artifact = _apply_artifact_request_metadata(
-        {"artifact_path": "/mnt/user-data/outputs/deck.pptx"}, state
-    )
+    artifact = _apply_artifact_request_metadata({"artifact_path": "/mnt/user-data/outputs/deck.pptx"}, state)
     assert artifact["iterations_used"] == 2

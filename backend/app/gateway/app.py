@@ -6,6 +6,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 
 from app.gateway.config import get_gateway_config
+from app.gateway.logging_security import install_gateway_logging_safety
 from app.gateway.routers import (
     agents,
     artifacts,
@@ -34,18 +35,14 @@ logging.basicConfig(
     format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     datefmt="%Y-%m-%d %H:%M:%S",
 )
+install_gateway_logging_safety()
 
 logger = logging.getLogger(__name__)
 _ARTIFACT_UPSERT_AUTH_PATCH = "artifact_upsert_auth_v2"
 
 
 def _gateway_version_metadata() -> dict[str, str | None]:
-    commit_sha = (
-        os.getenv("RENDER_GIT_COMMIT")
-        or os.getenv("RENDER_GIT_COMMIT_SHA")
-        or os.getenv("GIT_COMMIT_SHA")
-        or os.getenv("SOURCE_COMMIT")
-    )
+    commit_sha = os.getenv("RENDER_GIT_COMMIT") or os.getenv("RENDER_GIT_COMMIT_SHA") or os.getenv("GIT_COMMIT_SHA") or os.getenv("SOURCE_COMMIT")
     return {
         "commit_sha": commit_sha,
         "build_timestamp": os.getenv("RENDER_BUILD_TIMESTAMP") or os.getenv("BUILD_TIMESTAMP"),
@@ -288,6 +285,7 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Sophia API is mounted at /api/sophia
     from app.gateway.routers import sophia
+
     app.include_router(sophia.router)
     app.include_router(sophia.internal_router)
     app.include_router(builder_canvas.router)
