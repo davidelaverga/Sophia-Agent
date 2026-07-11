@@ -207,9 +207,7 @@ def test_margin_flag_is_passed(staged, monkeypatch, tmp_path):
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(render_html, "_run_html_pdf_renderer_process", _fake_run)
-    monkeypatch.setattr(
-        render_html, "_inspect_pdf_layout_with_targets", lambda host_pdf, **kw: {"page_count": 1, "image_count": 0}
-    )
+    monkeypatch.setattr(render_html, "_inspect_pdf_layout_with_targets", lambda host_pdf, **kw: {"page_count": 1, "image_count": 0})
 
     _call(
         runtime=_fake_runtime(),
@@ -341,12 +339,7 @@ def test_render_html_to_pdf_reports_vector_visual_count(staged, monkeypatch, tmp
     # The renderer counts visible inline <svg> figures in the source so the
     # visual gate has a vector signal even when chromium keeps SVG as vector
     # (image_count=0).
-    (staged / "report.html").write_text(
-        "<html><body>"
-        "<figure><svg><rect width='10' height='10'/></svg></figure>"
-        "<figure><svg><circle cx='5' cy='5' r='4'/></svg></figure>"
-        "</body></html>"
-    )
+    (staged / "report.html").write_text("<html><body><figure><svg><rect width='10' height='10'/></svg></figure><figure><svg><circle cx='5' cy='5' r='4'/></svg></figure></body></html>")
     _wire_node(monkeypatch, tmp_path)
 
     def _fake_run(cmd, **kwargs):
@@ -354,9 +347,7 @@ def test_render_html_to_pdf_reports_vector_visual_count(staged, monkeypatch, tmp
         return SimpleNamespace(returncode=0, stdout="", stderr="")
 
     monkeypatch.setattr(render_html, "_run_html_pdf_renderer_process", _fake_run)
-    monkeypatch.setattr(
-        render_html, "_inspect_pdf_layout_with_targets", lambda host_pdf, **kw: {"page_count": 3, "image_count": 0}
-    )
+    monkeypatch.setattr(render_html, "_inspect_pdf_layout_with_targets", lambda host_pdf, **kw: {"page_count": 3, "image_count": 0})
     result = _call(
         runtime=_fake_runtime(),
         html_path=f"{_OUTPUTS_PREFIX}report.html",
@@ -383,6 +374,38 @@ def test_render_html_to_pdf_ignores_hidden_comment_and_sprite_svg(staged):
     assert render_html._count_inline_svg(staged / "report.html") == 1
 
 
+def test_render_html_to_pdf_prefers_computed_svg_visibility(staged, monkeypatch, tmp_path):
+    (staged / "report.html").write_text(
+        "<style>.sprite{display:none}</style><svg class='sprite'><path d='M0 0h10v10z'/></svg>",
+        encoding="utf-8",
+    )
+    _wire_node(monkeypatch, tmp_path)
+
+    def _fake_run(cmd, **kwargs):
+        (staged / "out.pdf").write_bytes(b"%PDF-1.7 fake")
+        return SimpleNamespace(
+            returncode=0,
+            stdout="",
+            stderr="[render_html_to_pdf] wrote out.pdf bytes=12 vector_visual_count=0",
+        )
+
+    monkeypatch.setattr(render_html, "_run_html_pdf_renderer_process", _fake_run)
+    monkeypatch.setattr(
+        render_html,
+        "_inspect_pdf_layout_with_targets",
+        lambda host_pdf, **kw: {"page_count": 1, "image_count": 0},
+    )
+
+    result = _call(
+        runtime=_fake_runtime(),
+        html_path=f"{_OUTPUTS_PREFIX}report.html",
+        pdf_path=f"{_OUTPUTS_PREFIX}out.pdf",
+    )
+
+    assert result["success"] is True
+    assert result["vector_visual_count"] == 0
+
+
 def test_render_html_to_pdf_counts_semi_transparent_svg_but_not_zero_opacity(staged):
     # Codex P2 (2026-06-29): a visible semi-transparent figure (opacity:0.85) must
     # count; only EXACTLY zero opacity is hidden. The prior `"opacity:0" in style`
@@ -405,13 +428,7 @@ def test_render_html_to_pdf_counts_self_closing_svg_marks(staged):
     # handle_startendtag delegates to handle_starttag, so self-closing marks (bare
     # and inside <g>) ARE counted. Lock that behavior (the counter was refactored
     # in db74b179 for hidden-container tracking).
-    (staged / "report.html").write_text(
-        "<html><body>"
-        "<svg><path d='M0 0h10v10z'/></svg>"
-        "<svg><circle cx='5' cy='5' r='4'/></svg>"
-        "<figure><svg><g><rect width='10' height='10'/></g></svg></figure>"
-        "</body></html>"
-    )
+    (staged / "report.html").write_text("<html><body><svg><path d='M0 0h10v10z'/></svg><svg><circle cx='5' cy='5' r='4'/></svg><figure><svg><g><rect width='10' height='10'/></g></svg></figure></body></html>")
     assert render_html._count_inline_svg(staged / "report.html") == 3
 
 
@@ -440,9 +457,9 @@ def test_chromium_html_renderers_block_external_subresources():
     for script in (pdf_script, png_script):
         source = script.read_text(encoding="utf-8")
         assert "javaScriptEnabled: false" in source
-        assert "await page.route(\"**/*\"" in source
+        assert 'await page.route("**/*"' in source
         assert "blockedbyclient" in source
-        assert "url.startsWith(\"file:\")" in source
+        assert 'url.startsWith("file:")' in source
         assert "outputRootForHtml" in source
         assert "blockedSubresources" in source
         assert "blocked non-output render assets" in source
@@ -469,7 +486,7 @@ def test_slide_png_renderer_rejects_missing_images():
     source = png_script.read_text(encoding="utf-8")
 
     assert 'resourceType !== "image"' in source
-    assert 'blockedSubresources.push(`${resourceType}:${requestUrl}`)' in source
+    assert "blockedSubresources.push(`${resourceType}:${requestUrl}`)" in source
     assert 'route.abort("failed")' in source
     assert "missing local render assets" in source
     assert "fulfill({ status: 200" not in source

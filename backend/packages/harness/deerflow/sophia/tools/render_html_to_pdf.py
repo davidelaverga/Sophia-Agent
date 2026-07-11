@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import shutil
 import subprocess  # noqa: S404 — node by absolute path + fixed bundled script
 from html.parser import HTMLParser
@@ -142,13 +143,7 @@ class _VisibleInlineSvgCounter(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag_name = tag.lower()
         if tag_name == "svg":
-            parent_hidden = (
-                self._current_svg_hidden()
-                if self._stack
-                else bool(self._html_stack[-1]["hidden"])
-                if self._html_stack
-                else False
-            )
+            parent_hidden = self._current_svg_hidden() if self._stack else bool(self._html_stack[-1]["hidden"]) if self._html_stack else False
             self._stack.append(
                 {
                     "hidden": parent_hidden or _attrs_hidden(attrs),
@@ -239,17 +234,25 @@ def _render_script_path() -> Path | None:
 def _html_pdf_runtime() -> tuple[str | None, Path | None, str | None]:
     node = shutil.which("node")
     if not node:
-        return None, None, _result(
-            success=False,
-            error_type="node_unavailable",
-            error="node is not available to render HTML→PDF.",
+        return (
+            None,
+            None,
+            _result(
+                success=False,
+                error_type="node_unavailable",
+                error="node is not available to render HTML→PDF.",
+            ),
         )
     script = _render_script_path()
     if script is None:
-        return None, None, _result(
-            success=False,
-            error_type="render_script_missing",
-            error="render_html_to_pdf.mjs not found on this runtime.",
+        return (
+            None,
+            None,
+            _result(
+                success=False,
+                error_type="render_script_missing",
+                error="render_html_to_pdf.mjs not found on this runtime.",
+            ),
         )
     return node, script, None
 
@@ -291,17 +294,25 @@ def _run_html_pdf_render(
     host_pdf: Path,
     html_path: str,
     margin: str | None,
-) -> str | None:
+) -> tuple[str | None, int | None]:
     try:
         completed = _run_html_pdf_renderer_process(_html_pdf_command(node, script, host_html, host_pdf, margin))
     except subprocess.TimeoutExpired:
         logger.warning("render_html_to_pdf: chromium render timed out html=%s", html_path)
-        return _result(
-            success=False,
-            error_type="render_timeout",
-            error=f"Chromium render exceeded {_RENDER_TIMEOUT_SECONDS}s.",
+        return (
+            _result(
+                success=False,
+                error_type="render_timeout",
+                error=f"Chromium render exceeded {_RENDER_TIMEOUT_SECONDS}s.",
+            ),
+            None,
         )
-    return _html_pdf_render_failure(completed, host_pdf, html_path)
+    return _html_pdf_render_failure(completed, host_pdf, html_path), _rendered_vector_visual_count(completed)
+
+
+def _rendered_vector_visual_count(completed: subprocess.CompletedProcess[str]) -> int | None:
+    match = re.search(r"\bvector_visual_count=(\d+)\b", str(completed.stderr or ""))
+    return int(match.group(1)) if match else None
 
 
 def _run_html_pdf_renderer_process(cmd: list[str]) -> subprocess.CompletedProcess[str]:
@@ -319,21 +330,14 @@ def _html_pdf_path_error(html_path: str, pdf_path: str) -> str | None:
     # passes an existing Markdown/text source, Chromium may still produce a blank
     # or unstyled PDF instead of giving the model a useful repair signal.
     if not html_path.strip().lower().endswith((".html", ".htm")):
-        return (
-            f"html_path: must end with .html or .htm (got: {html_path.strip()!r}). "
-            "Author a self-contained HTML report before calling render_html_to_pdf."
-        )
+        return f"html_path: must end with .html or .htm (got: {html_path.strip()!r}). Author a self-contained HTML report before calling render_html_to_pdf."
     # Chromium writes PDF bytes regardless of the output filename, and the
     # authoritative PDF emit path can later stamp this file as artifact_ext=pdf —
     # so a non-.pdf name (e.g. report.html) would deliver a PDF under the wrong
     # extension. Require the .pdf suffix up front (parity with build_deck_from_slides
     # requiring .pptx). Codex P2 (2026-06-30).
     if not pdf_path.strip().lower().endswith(".pdf"):
-        return (
-            f"pdf_path: must end with .pdf (got: {pdf_path.strip()!r}). "
-            "Chromium writes PDF bytes; a non-.pdf name would deliver a PDF "
-            "under the wrong extension."
-        )
+        return f"pdf_path: must end with .pdf (got: {pdf_path.strip()!r}). Chromium writes PDF bytes; a non-.pdf name would deliver a PDF under the wrong extension."
     return None
 
 
@@ -361,10 +365,7 @@ def _resolved_host_path_error(label: str, virtual_path: str, host_path: Path) ->
     except OSError:
         resolved_path = host_path.resolve(strict=False)
     if not resolved_path.is_relative_to(resolved_root):
-        return (
-            f"{label}: resolved host path escapes the outputs directory. "
-            "Symlinks or redirected paths outside /mnt/user-data/outputs are not allowed."
-        )
+        return f"{label}: resolved host path escapes the outputs directory. Symlinks or redirected paths outside /mnt/user-data/outputs are not allowed."
     return None
 
 
@@ -437,7 +438,7 @@ def render_html_to_pdf(
     node, script, runtime_error = _html_pdf_runtime()
     if runtime_error is not None:
         return runtime_error
-    render_error = _run_html_pdf_render(
+    render_error, rendered_vector_visual_count = _run_html_pdf_render(
         node=node or "",
         script=script or Path(),
         host_html=host_html,
@@ -459,11 +460,10 @@ def render_html_to_pdf(
     # report (prod 2026-06-26: false "visuals not embedded" reject). Count the
     # authored inline SVG from the source so the visual-presence gate has a
     # vector signal alongside image_count. (R2-2)
-    vector_visual_count = _count_inline_svg(host_html)
+    vector_visual_count = rendered_vector_visual_count if rendered_vector_visual_count is not None else _count_inline_svg(host_html)
     size_bytes = host_pdf.stat().st_size
     logger.info(
-        "render_html_to_pdf: render_success final_artifact_ext=pdf size_bytes=%s "
-        "page_count=%s image_count=%s vector_visual_count=%s layout_quality=%s",
+        "render_html_to_pdf: render_success final_artifact_ext=pdf size_bytes=%s page_count=%s image_count=%s vector_visual_count=%s layout_quality=%s",
         size_bytes,
         layout.get("page_count"),
         layout.get("image_count"),

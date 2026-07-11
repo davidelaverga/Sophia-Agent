@@ -278,15 +278,14 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
         return error_class, fallback_model
 
     @staticmethod
-    def _bounded_presentation_authoring(request: Any) -> bool:
+    def _terminal_presentation_authoring(request: Any) -> bool:
         state = request.state if isinstance(getattr(request, "state", None), dict) else {}
         budget = state.get("builder_budget")
-        diagnostics = state.get("builder_pptx_diagnostics")
-        return bool(isinstance(budget, dict) and budget.get("tier") == "presentation" and (not isinstance(diagnostics, dict) or int(diagnostics.get("prepare_emitted_call_count", 0) or 0) == 0))
+        return bool(isinstance(budget, dict) and budget.get("tier") == "presentation" and (state.get("builder_graph_halted") is True or state.get("builder_deck_prepare_phase") == "terminal"))
 
     def wrap_model_call(self, request, handler):  # type: ignore[override]
         request = self._forced_provider_request(request)
-        if self._bounded_presentation_authoring(request):
+        if self._terminal_presentation_authoring(request):
             return handler(request)
         cooldown = self._cooldown_fallback_model_or_none()
         if cooldown is not None:
@@ -324,7 +323,7 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
 
     async def awrap_model_call(self, request, handler):  # type: ignore[override]
         request = self._forced_provider_request(request)
-        if self._bounded_presentation_authoring(request):
+        if self._terminal_presentation_authoring(request):
             return await handler(request)
         cooldown = self._cooldown_fallback_model_or_none()
         if cooldown is not None:

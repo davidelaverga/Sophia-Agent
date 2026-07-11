@@ -141,6 +141,7 @@ async function main() {
     executablePath: process.env.SOPHIA_CHROMIUM_PATH || "/usr/bin/chromium",
     args: ["--no-sandbox", "--disable-dev-shm-usage"],
   });
+  let vectorVisualCount = 0;
   try {
     const context = await browser.newContext({ javaScriptEnabled: false });
     const page = await context.newPage();
@@ -157,6 +158,25 @@ async function main() {
       const uniqueMissing = [...new Set(missingLocalResources)];
       throw new Error(`missing local render assets: ${uniqueMissing.slice(0, 8).join(", ")}`);
     }
+    vectorVisualCount = await page.evaluate(() => {
+      const marks = "path,rect,circle,ellipse,line,polyline,polygon,text,image,use,foreignObject";
+      const visiblyRendered = (element) => {
+        const style = window.getComputedStyle(element);
+        if (
+          style.display === "none" ||
+          style.visibility === "hidden" ||
+          style.visibility === "collapse" ||
+          Number.parseFloat(style.opacity || "1") === 0
+        ) {
+          return false;
+        }
+        const rect = element.getBoundingClientRect();
+        return element.getClientRects().length > 0 && rect.width > 0 && rect.height > 0;
+      };
+      return [...document.querySelectorAll("svg")].filter(
+        (svg) => visiblyRendered(svg) && [...svg.querySelectorAll(marks)].some(visiblyRendered),
+      ).length;
+    });
     await page.pdf({
       path: args.pdfFile,
       format: "A4",
@@ -174,7 +194,9 @@ async function main() {
   if (bytes <= 0) {
     throw new Error(`render produced no bytes at ${args.pdfFile}`);
   }
-  console.error(`[render_html_to_pdf] wrote ${args.pdfFile} bytes=${bytes}`);
+  console.error(
+    `[render_html_to_pdf] wrote ${args.pdfFile} bytes=${bytes} vector_visual_count=${vectorVisualCount}`,
+  );
 }
 
 if (import.meta.url === `file://${process.argv[1]}`) {
