@@ -149,3 +149,36 @@ html, body { width: 1920px; height: 1080px; background: #0A0E14; }
 
     assert result.valid is False
     assert any("CSS url(...)" in error for error in result.errors)
+
+
+def test_accepts_direct_planned_asset_reference() -> None:
+    html = """<!doctype html><html><head><style>
+html, body { width: 1920px; height: 1080px; background: #0A0E14; }
+</style></head><body><main><img src="../assets/slide-01.png"></main></body></html>"""
+
+    _sanitized, result = validate_and_sanitize_slide_html(
+        _slide(html),
+        allowed_asset_refs={"slide-01.png"},
+    )
+
+    assert result.valid is True
+
+
+def test_rejects_traversal_in_planned_asset_reference() -> None:
+    for ref in (
+        "../assets/../../uploads/slide-01.png",
+        "../assets/%2e%2e%2fuploads%2fslide-01.png",
+        "..\\assets\\..\\..\\uploads\\slide-01.png",
+        "http://[malformed",
+    ):
+        html = f"""<!doctype html><html><head><style>
+html, body {{ width: 1920px; height: 1080px; background: #0A0E14; }}
+</style></head><body><main><img src="{ref}"></main></body></html>"""
+
+        _sanitized, result = validate_and_sanitize_slide_html(
+            _slide(html),
+            allowed_asset_refs={"slide-01.png"},
+        )
+
+        assert result.valid is False
+        assert any("unplanned image asset reference" in error for error in result.errors)

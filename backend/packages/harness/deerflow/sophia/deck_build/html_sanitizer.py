@@ -4,6 +4,7 @@ import re
 from dataclasses import asdict, dataclass, field
 from html.parser import HTMLParser
 from typing import Any
+from urllib.parse import unquote, urlsplit
 
 from deerflow.sophia.deck_build.compiler_capabilities import (
     lossy_css_in_html,
@@ -257,12 +258,30 @@ def _validate_source_elements(elements: list[dict[str, Any]], validation: HtmlSo
 
 def _validate_image_refs(refs: list[str], allowed_asset_refs: set[str], validation: HtmlSourceValidation) -> None:
     for ref in refs:
-        normalized = ref.replace("\\", "/").strip()
-        if normalized.startswith("../assets/"):
-            basename = normalized.rsplit("/", 1)[-1]
+        normalized = _canonical_planned_asset_ref(ref)
+        if normalized is not None:
+            basename = normalized.removeprefix("../assets/")
             if basename in allowed_asset_refs or normalized in allowed_asset_refs:
                 continue
+        normalized = ref.replace("\\", "/").strip()
         validation.errors.append(f"unplanned image asset reference: {safe_excerpt(normalized, limit=120)}")
+
+
+def _canonical_planned_asset_ref(ref: str) -> str | None:
+    try:
+        parsed = urlsplit(ref.strip())
+    except ValueError:
+        return None
+    if parsed.scheme or parsed.netloc or parsed.query or parsed.fragment:
+        return None
+    normalized = unquote(parsed.path).replace("\\", "/")
+    prefix = "../assets/"
+    if not normalized.startswith(prefix):
+        return None
+    basename = normalized.removeprefix(prefix)
+    if not basename or basename in {".", ".."} or "/" in basename:
+        return None
+    return f"{prefix}{basename}"
 
 
 def _sanitize_css(source: str) -> str:
