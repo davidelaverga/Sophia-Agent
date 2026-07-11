@@ -362,7 +362,7 @@ def _is_builder_support_artifact_path(relative_path: str) -> bool:
 
 def _is_builder_internal_state_artifact_path(path: str) -> bool:
     relative = _relative_output_artifact_path(path)
-    return relative is not None and _is_builder_support_artifact_path(relative)
+    return relative is not None and _is_supabase_thread_list_support_artifact_path(relative)
 
 
 def _is_supabase_thread_list_support_artifact_path(relative_path: str) -> bool:

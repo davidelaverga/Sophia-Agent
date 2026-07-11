@@ -116,6 +116,27 @@ def test_get_artifact_refuses_internal_builder_state(path, monkeypatch) -> None:
     assert exc_info.value.detail == "Artifact not found"
 
 
+def test_get_artifact_allows_root_deck_preview_pdf(tmp_path, monkeypatch) -> None:
+    preview_path = tmp_path / "deck.preview.pdf"
+    preview_path.write_bytes(b"%PDF-1.4\n%%EOF\n")
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        lambda _thread_id, _path: preview_path,
+    )
+
+    response = asyncio.run(
+        artifacts_router.get_artifact(
+            "thread-1",
+            "mnt/user-data/outputs/deck.preview.pdf",
+            http_request(),
+        )
+    )
+
+    assert response.status_code == 200
+    assert bytes(response.body) == preview_path.read_bytes()
+
+
 def test_quick_patch_html_title_creates_revision_without_overwriting_original(tmp_path, monkeypatch) -> None:
     user_data = tmp_path / "user-data"
     outputs_dir = user_data / "outputs"
