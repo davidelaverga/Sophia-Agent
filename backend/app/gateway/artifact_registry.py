@@ -62,7 +62,15 @@ _FORBIDDEN_EXTRA_KEYS = {
 }
 _OUTPUTS_PREFIX = "mnt/user-data/outputs"
 _WORKSPACE_OUTPUTS_PREFIX = "mnt/user-data/workspace/outputs"
-_SUPPORT_ARTIFACT_DIRS = {"visuals", "assets", "slides", "sources", "source_artifact", ".builder"}
+_SUPPORT_ARTIFACT_DIRS = {
+    "visuals",
+    "assets",
+    "slides",
+    "sources",
+    "source_artifact",
+    "deck_build",
+    ".builder",
+}
 _SUPPORT_ARTIFACT_SUFFIXES = (
     ".source.md",
     ".source.html",

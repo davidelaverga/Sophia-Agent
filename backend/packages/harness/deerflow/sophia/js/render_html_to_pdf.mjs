@@ -60,7 +60,7 @@ function isInsideDirectory(candidate, root) {
   return relative === "" || (relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-function isAllowedRenderRequest(url, htmlFile, outputRoot) {
+function isAllowedRenderRequest(url, htmlFile, outputRoot, resourceType) {
   if (url === pathToFileURL(path.resolve(htmlFile)).href) {
     return true;
   }
@@ -76,16 +76,20 @@ function isAllowedRenderRequest(url, htmlFile, outputRoot) {
   } catch {
     return false;
   }
+  if (resourceType !== "image") {
+    return false;
+  }
+  const visualRoot = path.join(outputRoot, "visuals");
   try {
-    // Resolve symlinks: a real existing asset must stay under the REAL outputs
-    // root, so a symlinked asset pointing outside outputs cannot smuggle an
-    // outside file into the rendered deliverable (Codex P1, 2026-06-27).
-    return isInsideDirectory(fs.realpathSync(candidate), fs.realpathSync(outputRoot));
+    // Reports may load only generated visual assets. Resolve symlinks so an
+    // apparent visuals child cannot expose a support file or outside path.
+    const expectedVisualRoot = path.join(fs.realpathSync(outputRoot), "visuals");
+    return isInsideDirectory(fs.realpathSync(candidate), expectedVisualRoot);
   } catch {
     // Missing target (or missing file): fall back to the lexical check so a
     // genuinely-absent asset is still recognized/tracked downstream — a
     // nonexistent path discloses nothing.
-    return isInsideDirectory(candidate, outputRoot);
+    return isInsideDirectory(candidate, visualRoot);
   }
 }
 
@@ -105,8 +109,10 @@ async function installRenderRequestPolicy(page, htmlFile) {
   const missingLocalResources = [];
   const blockedSubresources = [];
   await page.route("**/*", (route) => {
-    const requestUrl = route.request().url();
-    if (isAllowedRenderRequest(requestUrl, htmlFile, outputRoot)) {
+    const request = route.request();
+    const requestUrl = request.url();
+    const resourceType = request.resourceType();
+    if (isAllowedRenderRequest(requestUrl, htmlFile, outputRoot, resourceType)) {
       const localPath = localRenderPathForUrl(requestUrl);
       if (
         localPath &&
@@ -118,8 +124,6 @@ async function installRenderRequestPolicy(page, htmlFile) {
       }
       return route.continue();
     }
-    const request = route.request();
-    const resourceType = request.resourceType();
     if (requestUrl !== pathToFileURL(path.resolve(htmlFile)).href) {
       blockedSubresources.push(`${resourceType}:${requestUrl}`);
     }

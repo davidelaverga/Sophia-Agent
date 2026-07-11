@@ -649,6 +649,16 @@ def test_registry_hides_backfilled_support_and_wrapper_artifacts(tmp_path) -> No
         ),
         user_id="user-1",
     )
+    deck_build_support = registry.upsert(
+        _request(
+            source="file_library_backfill",
+            artifact_type="json",
+            renderer_kind="json",
+            title="Deck Build State",
+            local_path="outputs/deck_build/build.json",
+        ),
+        user_id="user-1",
+    )
     registry.upsert(
         _request(
             source="file_library_backfill",
@@ -669,10 +679,12 @@ def test_registry_hides_backfilled_support_and_wrapper_artifacts(tmp_path) -> No
     assert support.artifact_role == "support"
     assert asset_support.artifact_role == "support"
     assert slide_support.artifact_role == "support"
+    assert deck_build_support.artifact_role == "support"
     assert "create-a-real-markdown-artifact-file-nam.html" not in by_name
     assert "chart.png" not in by_name
     assert "slide-1.png" not in by_name
     assert "slide-1.html" not in by_name
+    assert "build.json" not in by_name
     assert by_name["readable-notes.md"].artifact_role == "primary"
 
 
