@@ -3,7 +3,8 @@ import os
 import zipfile
 from pathlib import Path
 
-from fastapi import FastAPI
+import pytest
+from fastapi import FastAPI, HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
@@ -91,6 +92,30 @@ def test_get_artifact_serves_local_html_as_text_html(tmp_path, monkeypatch) -> N
 
     assert bytes(response.body).decode("utf-8") == html
     assert response.media_type == "text/html"
+
+
+@pytest.mark.parametrize(
+    "path",
+    [
+        "mnt/user-data/outputs/deck_build/build.json",
+        "mnt/user-data/outputs/.builder/state.json",
+    ],
+)
+def test_get_artifact_refuses_internal_builder_state(path, monkeypatch) -> None:
+    def reject_resolution(_thread_id: str, _path: str) -> Path:
+        raise AssertionError("internal path resolved")
+
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        reject_resolution,
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        asyncio.run(artifacts_router.get_artifact("thread-1", path, http_request()))
+
+    assert exc_info.value.status_code == 404
+    assert exc_info.value.detail == "Artifact not found"
 
 
 def test_quick_patch_html_title_creates_revision_without_overwriting_original(tmp_path, monkeypatch) -> None:

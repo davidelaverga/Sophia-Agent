@@ -372,6 +372,14 @@ def _is_builder_support_artifact_path(relative_path: str) -> bool:
     )
 
 
+def _is_builder_internal_state_artifact_path(path: str) -> bool:
+    relative = _relative_output_artifact_path(path)
+    if relative is None:
+        return False
+    parts = [part for part in relative.replace("\\", "/").split("/") if part]
+    return bool(parts and parts[0] in {"deck_build", ".builder"})
+
+
 def _is_supabase_thread_list_support_artifact_path(relative_path: str) -> bool:
     """Return True for Supabase artifacts hidden from the thread render library.
 
@@ -1633,6 +1641,8 @@ async def get_artifact(
     """
     path = _normalize_artifact_virtual_path(path)
     _enforce_artifact_owner(authenticated_user_id, thread_id, path)
+    if _is_builder_internal_state_artifact_path(path):
+        raise HTTPException(status_code=404, detail="Artifact not found")
 
     # Check if this is a request for a file inside a .skill archive (e.g., xxx.skill/SKILL.md)
     if ".skill/" in path:
