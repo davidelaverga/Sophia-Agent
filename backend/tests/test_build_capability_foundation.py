@@ -18,9 +18,14 @@ from deerflow.sophia.build_manifest import (
 )
 from deerflow.sophia.build_mutation import BuildMutationTransaction, InMemoryBuildMutationStore
 from deerflow.sophia.build_runtime.budget import ResourceBudgetExceeded, ResourceBudgetLedger
-from deerflow.sophia.build_runtime.events import BuildOperationEvent, InMemoryBuildEventSink
+from deerflow.sophia.build_runtime.events import (
+    BuildOperationEvent,
+    InMemoryBuildEventSink,
+    configure_default_event_sink,
+)
 from deerflow.sophia.build_runtime.identity import component_id, new_build_id, new_operation_id, new_version_id
 from deerflow.sophia.build_runtime.metrics import derive_prepare_metrics
+from deerflow.sophia.build_runtime.startup import audit_build_foundation
 from deerflow.sophia.build_sources import materialize_compact_deck_sources
 
 
@@ -172,6 +177,36 @@ def test_resource_budget_reservation_and_usage() -> None:
     assert ledger.model_calls == 1
     with pytest.raises(ResourceBudgetExceeded):
         ledger.reserve("repair", tokens=40)
+
+
+def test_startup_reuses_process_event_sink(monkeypatch) -> None:
+    from deerflow.sophia.build_runtime import startup
+
+    sink = InMemoryBuildEventSink()
+    calls = 0
+
+    def store_factory():
+        nonlocal calls
+        calls += 1
+        return sink
+
+    config = SimpleNamespace(
+        build_foundation=SimpleNamespace(
+            enabled=True,
+            manifest_mode="observe",
+            persist_event_journal=True,
+        ),
+        model_routes={},
+    )
+    configure_default_event_sink(None)
+    monkeypatch.setattr(startup, "configured_build_foundation_store", store_factory)
+    try:
+        audit_build_foundation(tools=[], config=config)
+        audit_build_foundation(tools=[], config=config)
+    finally:
+        configure_default_event_sink(None)
+
+    assert calls == 1
 
 
 def test_mutation_store_requires_expected_state() -> None:

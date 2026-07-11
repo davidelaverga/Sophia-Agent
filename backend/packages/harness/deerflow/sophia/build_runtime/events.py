@@ -6,7 +6,7 @@ import threading
 from collections.abc import Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Literal, Protocol
+from typing import Any, Callable, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -14,6 +14,7 @@ from deerflow.sophia.build_runtime.identity import new_monotonic_id
 
 logger = logging.getLogger(__name__)
 _DEFAULT_EVENT_SINK: BuildEventSink | None = None
+_DEFAULT_EVENT_SINK_LOCK = threading.Lock()
 
 BuildEventType = Literal[
     "build.created",
@@ -99,7 +100,19 @@ class BuildEventSink(Protocol):
 
 def configure_default_event_sink(sink: BuildEventSink | None) -> None:
     global _DEFAULT_EVENT_SINK
-    _DEFAULT_EVENT_SINK = sink
+    with _DEFAULT_EVENT_SINK_LOCK:
+        _DEFAULT_EVENT_SINK = sink
+
+
+def configure_default_event_sink_once(
+    factory: Callable[[], BuildEventSink | None],
+) -> BuildEventSink | None:
+    """Install one process-owned sink without constructing replacements."""
+    global _DEFAULT_EVENT_SINK
+    with _DEFAULT_EVENT_SINK_LOCK:
+        if _DEFAULT_EVENT_SINK is None:
+            _DEFAULT_EVENT_SINK = factory()
+        return _DEFAULT_EVENT_SINK
 
 
 class InMemoryBuildEventSink:

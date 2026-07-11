@@ -4,7 +4,7 @@ from collections.abc import Iterable
 from typing import Any
 
 from deerflow.config.app_config import AppConfig
-from deerflow.sophia.build_runtime.events import configure_default_event_sink
+from deerflow.sophia.build_runtime.events import configure_default_event_sink_once
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.build_foundation_store import BuildFoundationStoreConfig, configured_build_foundation_store
 
@@ -33,7 +33,7 @@ def audit_build_foundation(*, tools: Iterable[Any], config: AppConfig) -> None:
         if not supabase_artifact_store.is_configured():
             raise BuildFoundationStartupError("manifest enforcement requires durable object storage")
     if foundation.persist_event_journal:
-        configure_default_event_sink(configured_build_foundation_store())
+        configure_default_event_sink_once(configured_build_foundation_store)
     enabled_routes = {
         name: route
         for name, route in config.model_routes.items()
