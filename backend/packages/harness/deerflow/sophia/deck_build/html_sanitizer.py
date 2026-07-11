@@ -67,22 +67,11 @@ class _HtmlScanner(HTMLParser):
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         clean_tag = tag.lower()
         self.tags.append(clean_tag)
-        attr_map = {name.lower(): value or "" for name, value in attrs}
+        attr_map = self._scan_attributes(clean_tag, attrs)
         if clean_tag in _FORBIDDEN_TAGS:
             self.errors.append(f"forbidden tag <{clean_tag}>")
         if clean_tag == "link" and attr_map.get("rel", "").lower() == "stylesheet":
             self.errors.append("external stylesheet links are forbidden")
-        for name, value in attr_map.items():
-            local_name = _attribute_local_name(name)
-            if local_name.startswith("on"):
-                self.errors.append(f"inline event handler {name} is forbidden")
-            self.errors.extend(_subresource_attribute_errors(local_name))
-            if local_name in _URL_ATTRIBUTE_NAMES:
-                _validate_uri(value, errors=self.errors)
-                if clean_tag == "img" and local_name == "src":
-                    self.image_refs.append(value)
-            if local_name == "style":
-                self.styles.append(value)
         if clean_tag == "body":
             self.body_attrs = attr_map
         if clean_tag == "main" and not self.main_attrs:
@@ -90,6 +79,32 @@ class _HtmlScanner(HTMLParser):
         if clean_tag == "style":
             self.in_style = True
         self._record_source_element(clean_tag, attr_map)
+
+    def _scan_attributes(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+    ) -> dict[str, str]:
+        attr_map: dict[str, str] = {}
+        seen: set[str] = set()
+        for raw_name, raw_value in attrs:
+            name = raw_name.lower()
+            value = raw_value or ""
+            local_name = _attribute_local_name(name)
+            if name in seen and local_name in _URL_ATTRIBUTE_NAMES | {"srcset"}:
+                self.errors.append(f"duplicate URL attribute {name} is forbidden")
+            seen.add(name)
+            attr_map.setdefault(name, value)
+            if local_name.startswith("on"):
+                self.errors.append(f"inline event handler {name} is forbidden")
+            self.errors.extend(_subresource_attribute_errors(local_name))
+            if local_name in _URL_ATTRIBUTE_NAMES:
+                _validate_uri(value, errors=self.errors)
+                if tag == "img" and local_name == "src":
+                    self.image_refs.append(value)
+            if local_name == "style":
+                self.styles.append(value)
+        return attr_map
 
     def _record_source_element(self, tag: str, attrs: dict[str, str]) -> None:
         source_id = attrs.get("data-deck-id", "").strip()

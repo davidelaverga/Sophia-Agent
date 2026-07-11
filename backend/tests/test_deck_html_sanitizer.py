@@ -62,6 +62,23 @@ html, body { width: 1920px; height: 1080px; background: #fff; }
     assert any("srcset subresources are forbidden" in error for error in result.errors)
 
 
+def test_rejects_duplicate_url_attributes_and_validates_every_value() -> None:
+    html = """<!doctype html><html><head><style>
+html, body { width: 1920px; height: 1080px; background: #fff; }
+</style></head><body><main><img src="https://example.com/a.png" src="../assets/slide-01.png"></main></body></html>"""
+
+    _sanitized, result = validate_and_sanitize_slide_html(
+        _slide(html),
+        allowed_asset_refs={"slide-01.png"},
+    )
+
+    assert result.valid is False
+    assert result.image_refs == ["https://example.com/a.png", "../assets/slide-01.png"]
+    assert "duplicate URL attribute src is forbidden" in result.errors
+    assert any("remote http" in error for error in result.errors)
+    assert any("unplanned image asset reference" in error for error in result.errors)
+
+
 def test_rejects_legacy_non_image_subresource_attributes() -> None:
     for name, value in (
         ("background", "../assets/../../uploads/secret.png"),
