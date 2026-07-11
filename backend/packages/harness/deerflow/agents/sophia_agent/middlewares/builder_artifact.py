@@ -10955,14 +10955,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "deck_root_failure_summary": diagnostics.get("deck_root_failure_summary") or "prepare_deck_build arguments failed typed schema validation.",
         }
         if emitted_count < 2:
+            tool_error = result.additional_kwargs.get("tool_error")
+            validation_summary = str(tool_error.get("validation_summary") or "").strip() if isinstance(tool_error, dict) else ""
+            repair_message = "Repair the prepare_deck_build arguments using the canonical typed schema, including every required creative_plan field, deck_stylesheet, and slide html_body, then call prepare_deck_build exactly once more."
+            if validation_summary:
+                repair_message += f" Fix these validation errors: {validation_summary}"
             return Command(
                 update={
                     "messages": [result],
                     "builder_pptx_diagnostics": schema_delta,
                     "builder_deck_prepare_phase": "retry_pending",
-                    "builder_deck_prepare_repair_message": (
-                        "Repair the prepare_deck_build arguments using the canonical typed schema, including every required creative_plan field, deck_stylesheet, and slide html_body, then call prepare_deck_build exactly once more."
-                    ),
+                    "builder_deck_prepare_repair_message": repair_message,
                     "builder_deck_prepare_repair_prompt_injected": False,
                     "builder_deck_prepare_expected_tool_call_id": None,
                 }

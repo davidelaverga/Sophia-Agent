@@ -14,6 +14,41 @@ from langgraph.types import Command
 logger = logging.getLogger(__name__)
 
 _MISSING_TOOL_CALL_ID = "missing_tool_call_id"
+_MAX_VALIDATION_ERRORS = 5
+_MAX_VALIDATION_SUMMARY_CHARS = 500
+
+
+def _validation_location(value: object) -> str:
+    parts: list[str] = []
+    for segment in value if isinstance(value, (list, tuple)) else ():
+        if isinstance(segment, int):
+            if parts:
+                parts[-1] = f"{parts[-1]}[{segment}]"
+            else:
+                parts.append(f"[{segment}]")
+        else:
+            parts.append(str(segment))
+    return ".".join(parts) or "arguments"
+
+
+def _validation_error_summary(exc: Exception) -> str | None:
+    errors_method = getattr(exc, "errors", None)
+    if not callable(errors_method):
+        return None
+    try:
+        errors = errors_method(
+            include_url=False,
+            include_context=False,
+            include_input=False,
+        )
+    except TypeError:
+        return None
+    except Exception:
+        return None
+    summaries = [f"{_validation_location(item.get('loc'))}: {str(item.get('msg') or 'invalid value')}" for item in errors[:_MAX_VALIDATION_ERRORS] if isinstance(item, dict)]
+    if not summaries:
+        return None
+    return "; ".join(summaries)[:_MAX_VALIDATION_SUMMARY_CHARS]
 
 
 class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
@@ -27,8 +62,13 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
             detail = detail[:497] + "..."
 
         stage = "argument_validation" if exc.__class__.__name__ in {"ValidationError", "SchemaError"} else "tool_execution"
+        validation_summary = _validation_error_summary(exc) if stage == "argument_validation" else None
         if tool_name == "prepare_deck_build":
-            content = "The authoritative deck build arguments failed typed validation." if stage == "argument_validation" else "The authoritative deck build tool failed during execution."
+            content = (
+                "The authoritative deck build arguments failed typed validation." + (f" Validation summary: {validation_summary}" if validation_summary else "")
+                if stage == "argument_validation"
+                else "The authoritative deck build tool failed during execution."
+            )
         else:
             content = f"Error: Tool '{tool_name}' failed with {exc.__class__.__name__}: {detail}. Continue with available context, or choose an alternative tool."
         return ToolMessage(
@@ -41,6 +81,7 @@ class ToolErrorHandlingMiddleware(AgentMiddleware[AgentState]):
                     "error_class": exc.__class__.__name__,
                     "retryable": stage == "argument_validation",
                     "stage": stage,
+                    **({"validation_summary": validation_summary} if validation_summary else {}),
                 }
             },
         )
