@@ -546,6 +546,22 @@ def test_source_pdf_filename_does_not_beat_later_slide_deck_request():
     assert resolution.rule == "explicit_presentation_deck"
 
 
+def test_source_pdf_phrase_does_not_beat_later_slide_deck_request():
+    for text in (
+        "Review the PDF report I uploaded and make a slide deck",
+        "Use the attached PDF document to create a presentation",
+        "Analyze this PDF summary, then build a 6-slide deck",
+    ):
+        resolution = _resolve_target_format(
+            current_user_text=text,
+            description=None,
+            task_type="presentation",
+        )
+
+        assert resolution.final_ext == "pptx", (text, resolution)
+        assert resolution.rule == "explicit_presentation_deck"
+
+
 def test_source_pdf_filename_does_not_beat_later_explicit_deliverable():
     cases = {
         "Use report.pdf to create a CSV file": "csv",
