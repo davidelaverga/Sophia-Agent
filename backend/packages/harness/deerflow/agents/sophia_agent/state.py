@@ -334,6 +334,10 @@ class SophiaState(AgentState):
     builder_task_kickoff_ms: NotRequired[int]
     builder_timeout_seconds: NotRequired[int]
     builder_deadline_epoch_ms: NotRequired[int]
+    builder_build_id: NotRequired[str]
+    builder_operation_id: NotRequired[str]
+    builder_boundary_sequence: NotRequired[int]
+    builder_boundary_resume: NotRequired[object]
 
     # Planning
     todos: NotRequired[list | None]

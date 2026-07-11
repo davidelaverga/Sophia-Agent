@@ -40,8 +40,10 @@ from deerflow.agents.middlewares.anthropic_content_block_sanitizer import Anthro
 from deerflow.agents.middlewares.dangling_tool_call_middleware import DanglingToolCallMiddleware
 from deerflow.agents.middlewares.tool_error_handling_middleware import build_subagent_runtime_middlewares
 from deerflow.agents.sophia_agent.builder_chain_support import (
+    BuildDeadlineMiddleware,
     BuilderBudgetMiddleware,
     BuilderProgressMiddleware,
+    BuildSafeBoundaryMiddleware,
     LoopDetectionMiddleware,
     create_builder_todo_middleware,
     log_builder_tracing_startup_status,
@@ -123,6 +125,9 @@ def build_builder_middleware_chain(
     """
     middlewares = build_subagent_runtime_middlewares(lazy_init=True)
     chain_tail: list[AgentMiddleware] = [
+        # The local cancellation scope must wrap provider fallback so an
+        # exhausted build deadline can never trigger a second provider call.
+        BuildDeadlineMiddleware(),
         # Provider fallback (Anthropic primary → optional OpenAI retry).
         # Uses ONLY wrap_model_call/awrap_model_call, so its position among
         # the before/after-hook middlewares below is behavior-neutral; it
@@ -174,6 +179,7 @@ def build_builder_middleware_chain(
         chain_tail.append(ClearOnInjectViewImageMiddleware())
     chain_tail.extend(
         [
+            BuildSafeBoundaryMiddleware(),
             PromptAssemblyMiddleware(),
             DanglingToolCallMiddleware(),
             AnthropicContentBlockSanitizerMiddleware(),

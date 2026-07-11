@@ -8,7 +8,6 @@ import re
 import subprocess  # noqa: S404 - fixed Python script path with sanitized args.
 import sys
 import time
-import uuid
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -17,6 +16,7 @@ from typing import Any
 from langchain.tools import ToolRuntime
 
 from deerflow.sandbox.tools import get_thread_data, replace_virtual_path
+from deerflow.sophia.build_runtime.identity import new_build_id
 from deerflow.sophia.deck_build.asset_policy import (
     generated_asset_slides,
     normalize_visual_policy,
@@ -29,6 +29,7 @@ from deerflow.sophia.deck_build.creative_plan import (
 )
 from deerflow.sophia.deck_build.design_plan import write_design_plan
 from deerflow.sophia.deck_build.evaluator import DeckEvaluator
+from deerflow.sophia.deck_build.foundation import BuildFoundationPersistenceError, materialize_deck_foundation_safely
 from deerflow.sophia.deck_build.html_sanitizer import (
     assemble_compact_slide_html,
     validate_and_sanitize_slide_html,
@@ -167,7 +168,10 @@ class DeckBuildService:
         design_plan: dict[str, Any] | None = None,
         creative_plan: dict[str, Any] | None = None,
     ) -> DeckBuildResult:
-        build_id = f"deck-{uuid.uuid4().hex[:12]}"
+        # Fresh production builds receive this at dispatch so identity survives
+        # retries, resume, revision, and thread handoff. The fallback is kept
+        # only for direct service callers and legacy queued payloads.
+        build_id = str(_state_value(runtime, "builder_build_id") or _state_value(runtime, "build_id") or new_build_id())
         now = _now()
         resolved_visual_policy = normalize_visual_policy(visual_policy)
         deck = DeckBuild(
@@ -257,6 +261,10 @@ class DeckBuildService:
             deck.status = "evaluated"
             _finalize_image_generation_status(deck, success=True)
             self._assert_deck_success_allowed(deck, runtime)
+            try:
+                materialize_deck_foundation_safely(deck, runtime)
+            except BuildFoundationPersistenceError as exc:
+                raise DeckBuildFailure("build_manifest_persistence_failed", str(exc), retryable=False) from exc
             deck.updated_at = _now()
             deck_path = save_deck_build(deck, runtime)
             return self._success_result(deck, deck_path, runtime, success_allowed_checked=True)
@@ -1548,6 +1556,12 @@ class DeckBuildService:
             source_retention_report=deck.source_retention_report,
             native_contrast_report=deck.native_contrast_report,
             repair_instruction=None,
+            source_bundle_path=deck.source_bundle_path,
+            manifest_path=deck.manifest_path,
+            manifest_revision=deck.manifest_revision,
+            logical_artifact_id=deck.logical_artifact_id,
+            current_artifact_version_id=deck.current_artifact_version_id,
+            foundation_status=deck.foundation_status,
         )
 
     def _assert_deck_success_allowed(self, deck: DeckBuild, runtime: ToolRuntime | None = None) -> None:
@@ -1674,6 +1688,12 @@ class DeckBuildService:
             root_failure_code=exc.code,
             root_failure_summary=exc.summary,
             repair_instruction=_repair_instruction_for_failure(exc),
+            source_bundle_path=deck.source_bundle_path,
+            manifest_path=deck.manifest_path,
+            manifest_revision=deck.manifest_revision,
+            logical_artifact_id=deck.logical_artifact_id,
+            current_artifact_version_id=deck.current_artifact_version_id,
+            foundation_status=deck.foundation_status,
         )
 
     def _run_image_batch_subprocess(self, manifest_path: str, runtime: ToolRuntime) -> dict[str, Any]:

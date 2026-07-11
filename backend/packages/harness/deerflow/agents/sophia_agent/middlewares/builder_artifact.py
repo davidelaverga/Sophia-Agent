@@ -68,6 +68,7 @@ from deerflow.sophia.build_condition import (
     preview_review_blocks,
     rendered_artifact_review,
 )
+from deerflow.sophia.build_runtime.events import record_runtime_event
 from deerflow.sophia.builder_events import fire_completion_webhook_from_artifact
 from deerflow.sophia.builder_failure_diagnostics import (
     build_builder_failure_diagnostics,
@@ -10783,6 +10784,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         deck_build_path = payload.get("deck_build_path")
         if isinstance(deck_build_path, str) and deck_build_path.strip():
             delta["deck_build_path"] = deck_build_path
+        for key in (
+            "source_bundle_path",
+            "manifest_path",
+            "logical_artifact_id",
+            "current_artifact_version_id",
+            "foundation_status",
+        ):
+            value = payload.get(key)
+            if isinstance(value, str) and value.strip():
+                delta[key] = value.strip()
+        manifest_revision = payload.get("manifest_revision")
+        if isinstance(manifest_revision, int) and not isinstance(manifest_revision, bool):
+            delta["manifest_revision"] = manifest_revision
         delta.update(BuilderArtifactMiddleware._prepare_deck_build_authoring_delta(payload))
         return delta
 
@@ -11067,7 +11081,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "name": PurePosixPath(artifact_path).name,
             }
         ]
-        for internal_path in (deck_build_path, creative_plan_path):
+        for internal_path in (
+            deck_build_path,
+            creative_plan_path,
+            str(payload.get("manifest_path") or "").strip(),
+        ):
             if internal_path:
                 artifact_files.append(
                     {
@@ -11142,6 +11160,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "deck_authoring_contract": diagnostics.get("deck_authoring_contract"),
             "deck_authoring_elapsed_ms": diagnostics.get("deck_authoring_elapsed_ms"),
             "prepare_force_reason": diagnostics.get("prepare_force_reason"),
+            "manifest_path": delta.get("manifest_path"),
+            "manifest_revision": delta.get("manifest_revision"),
+            "logical_artifact_id": delta.get("logical_artifact_id"),
+            "current_artifact_version_id": delta.get("current_artifact_version_id"),
+            "foundation_status": delta.get("foundation_status"),
         }
         artifact = _apply_artifact_request_metadata(artifact, final_state)
         artifact = _apply_visual_missing_quality_metadata(artifact, final_state)
@@ -11605,6 +11628,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if tool_name in _PDF_CREATION_TOOL_NAMES and isinstance(result, ToolMessage):
             return self._pdf_result_command(request, result)
         if tool_name == _PREPARE_DECK_BUILD_TOOL_NAME:
+            if isinstance(result, ToolMessage):
+                record_runtime_event(
+                    state=request.state or {},
+                    runtime=request.runtime,
+                    event_type="prepare.result_recorded",
+                    tool_call_id=str(request.tool_call.get("id") or "") or None,
+                    status="error" if str(getattr(result, "status", "")).lower() == "error" else "completed",
+                )
             return self._prepare_deck_build_result_command(request, result)
         if tool_name == _DECK_BUILD_TOOL_NAME:
             return self._deck_builder_result_command(request, result)
@@ -11900,6 +11931,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 return image_block
             self._maybe_autowire_pptx_plan_visuals(request)
             _maybe_attach_image_trace_env(request)
+            if request.tool_call.get("name") == _PREPARE_DECK_BUILD_TOOL_NAME:
+                record_runtime_event(
+                    state=request.state or {},
+                    runtime=request.runtime,
+                    event_type="prepare.execution_started",
+                    tool_call_id=str(request.tool_call.get("id") or "") or None,
+                )
             return self._tool_result_command(request, handler(request))
 
         args = request.tool_call.get("args", {})
@@ -12777,6 +12815,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 return image_block
             self._maybe_autowire_pptx_plan_visuals(request)
             _maybe_attach_image_trace_env(request)
+            if request.tool_call.get("name") == _PREPARE_DECK_BUILD_TOOL_NAME:
+                record_runtime_event(
+                    state=request.state or {},
+                    runtime=request.runtime,
+                    event_type="prepare.execution_started",
+                    tool_call_id=str(request.tool_call.get("id") or "") or None,
+                )
             return self._tool_result_command(request, await handler(request))
 
         args = request.tool_call.get("args", {})
@@ -12854,10 +12899,18 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _prepare_call_after_model_update(
         state: BuilderArtifactState,
         tool_calls: list[dict[str, Any]],
+        runtime: Runtime | None = None,
     ) -> dict[str, Any]:
         calls = [call for call in tool_calls if str(call.get("name") or "") == _PREPARE_DECK_BUILD_TOOL_NAME]
         if not calls:
             return {}
+        for call in calls:
+            record_runtime_event(
+                state=state,
+                runtime=runtime,
+                event_type="prepare.emitted",
+                tool_call_id=str(call.get("id") or "") or None,
+            )
         diagnostics: dict[str, Any] = {
             "prepare_call_count": len(calls),
             "prepare_emitted_call_count": len(calls),
@@ -12931,7 +12984,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 visual_skill_flags = _visual_skill_flags_from_tool_calls(tool_calls)
                 research_diagnostics = self._update_research_diagnostics(state, tool_names)
                 allow_web_research = self._allow_web_research(state)
-                prepare_call_update = self._prepare_call_after_model_update(state, tool_calls)
+                prepare_call_update = self._prepare_call_after_model_update(state, tool_calls, runtime)
 
                 if _only_artifact_tool_calls(artifact_calls, tool_calls):
                     args = artifact_calls[-1].get("args", {})

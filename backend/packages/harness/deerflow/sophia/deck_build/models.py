@@ -321,6 +321,15 @@ class DeckBuild:
     batch_timeout_count: int = 0
     partial_batch_salvaged: bool = False
     langsmith_trace_ids: list[str] = field(default_factory=list)
+    source_bundle_path: str | None = None
+    manifest_path: str | None = None
+    manifest_revision: int | None = None
+    manifest_hash: str | None = None
+    logical_artifact_id: str | None = None
+    current_artifact_version_id: str | None = None
+    foundation_status: str | None = None
+    foundation_warning: str | None = None
+    foundation_source_bytes: int = 0
     created_at: str = ""
     updated_at: str = ""
 
@@ -413,6 +422,12 @@ class DeckBuildResult:
     root_failure_code: str | None = None
     root_failure_summary: str | None = None
     repair_instruction: dict[str, Any] | None = None
+    source_bundle_path: str | None = None
+    manifest_path: str | None = None
+    manifest_revision: int | None = None
+    logical_artifact_id: str | None = None
+    current_artifact_version_id: str | None = None
+    foundation_status: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)

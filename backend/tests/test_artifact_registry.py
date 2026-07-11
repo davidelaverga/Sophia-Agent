@@ -45,6 +45,26 @@ def _request(**overrides) -> ArtifactUpsertRequest:
     return ArtifactUpsertRequest(**base)
 
 
+def test_builder_completion_preserves_foundation_identity() -> None:
+    resolved = artifact_registry_module.builder_completion_upsert_request(
+        {
+            "status": "completed",
+            "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+            "artifact_type": "presentation",
+            "artifact_title": "Deck",
+            "thread_id": "thread-1",
+            "user_id": "user-1",
+            "logical_artifact_id": "artifact-stable",
+            "current_artifact_version_id": "artifact-version-2",
+        }
+    )
+    assert resolved is not None
+    user_id, request = resolved
+    assert user_id == "user-1"
+    assert request.logical_artifact_id == "artifact-stable"
+    assert request.version_id == "artifact-version-2"
+
+
 def _owned_app(tmp_path, monkeypatch) -> tuple[TestClient, LocalArtifactRegistry]:
     registry = LocalArtifactRegistry(tmp_path / "artifact-registry")
     store = SessionStore(tmp_path / "users")

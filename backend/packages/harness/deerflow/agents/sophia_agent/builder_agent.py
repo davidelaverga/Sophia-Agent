@@ -36,6 +36,7 @@ from deerflow.agents.sophia_agent.state import SophiaState
 from deerflow.agents.sophia_agent.utils import validate_user_id
 from deerflow.agents.sophia_agent.vision_gate import supports_vision
 from deerflow.config.app_config import get_app_config
+from deerflow.sophia.build_runtime.startup import audit_build_foundation
 
 logger = logging.getLogger(__name__)
 DEFAULT_BUILDER_MODEL = "claude-sonnet-5"
@@ -184,6 +185,16 @@ def _create_builder_agent(
         task_type=task_type,
         artifact_target_ext=artifact_target_ext,
     )
+    try:
+        app_config = get_app_config()
+    except Exception:
+        production = (os.getenv("SOPHIA_ENV") or os.getenv("APP_ENV") or "").strip().lower() in {"prod", "production", "staging"}
+        if production:
+            raise
+        logger.debug("Skipping build-foundation startup audit for isolated agent construction", exc_info=True)
+    else:
+        if hasattr(app_config, "build_foundation"):
+            audit_build_foundation(tools=tools, config=app_config)
     if deck_tool_contract:
         log_payload = {
             key: deck_tool_contract.get(key)

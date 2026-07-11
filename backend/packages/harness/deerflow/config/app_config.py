@@ -7,10 +7,12 @@ import yaml
 from dotenv import load_dotenv
 from pydantic import BaseModel, ConfigDict, Field
 
+from deerflow.config.build_foundation_config import BuildFoundationConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict, set_checkpointer_config
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.memory_config import load_memory_config_from_dict
 from deerflow.config.model_config import ModelConfig
+from deerflow.config.model_route_config import HarnessProfileConfig, ModelRouteConfig
 from deerflow.config.sandbox_config import SandboxConfig
 from deerflow.config.skills_config import SkillsConfig
 from deerflow.config.subagents_config import load_subagents_config_from_dict
@@ -33,6 +35,9 @@ class AppConfig(BaseModel):
     """Config for the DeerFlow application"""
 
     models: list[ModelConfig] = Field(default_factory=list, description="Available models")
+    model_routes: dict[str, ModelRouteConfig] = Field(default_factory=dict, description="Provider-neutral model routes")
+    harness_profiles: dict[str, HarnessProfileConfig] = Field(default_factory=dict, description="Provider request profiles")
+    build_foundation: BuildFoundationConfig = Field(default_factory=BuildFoundationConfig)
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")

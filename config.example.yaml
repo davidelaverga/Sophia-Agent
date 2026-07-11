@@ -12,7 +12,7 @@
 # ============================================================================
 # Bump this number when the config schema changes.
 # Run `make config-upgrade` to merge new fields into your local config.yaml.
-config_version: 3
+config_version: 4
 
 # ============================================================================
 # Models Configuration
@@ -484,3 +484,37 @@ checkpointer:
 #   # deleted in Phase 4C of the v3 streaming migration. Builds now route
 #   # through the companion (``@Sophia_EI_bot``) only. ``@Sophia_Work_bot``
 #   # can be deactivated in BotFather.
+
+# ============================================================================
+# Sophia Build Foundation (P-2)
+# ============================================================================
+# Shadow mode writes and compares foundation records but never changes artifact
+# delivery. Enable enforce only after the database migration and shadow parity
+# checks pass.
+build_foundation:
+  enabled: true
+  manifest_mode: shadow
+  enforce_absolute_deadline: true
+  terminal_reserve_seconds: 45
+  persist_event_journal: true
+  require_manifest_cas: true
+  enable_safe_boundary_hooks: true
+  enable_mutation_transactions: false
+  mirror_sources: true
+  verify_durable_objects: true
+
+# Provider-neutral routes are optional until their consumers are enabled.
+# model_routes:
+#   deck.judge.visual:
+#     primary: claude-sonnet
+#     fallbacks: []
+#     profile: structured-visual-v1
+#     required_capabilities: [image_input, strict_structured_output]
+#     max_failovers: 1
+# harness_profiles:
+#   structured-visual-v1:
+#     version: v1
+#     timeout_seconds: 120
+#     max_retries: 0
+#     model_overrides:
+#       max_tokens: 8192

@@ -12,6 +12,8 @@ class ModelConfig(BaseModel):
         description="Class path of the model provider(e.g. langchain_openai.ChatOpenAI)",
     )
     model: str = Field(..., description="Model name")
+    provider: str | None = Field(default=None, description="Validated provider metadata; never passed to the model constructor")
+    capabilities: set[str] = Field(default_factory=set, description="Stable application-level model capabilities")
     model_config = ConfigDict(extra="allow")
     supports_thinking: bool = Field(default_factory=lambda: False, description="Whether the model supports thinking")
     supports_reasoning_effort: bool = Field(default_factory=lambda: False, description="Whether the model supports reasoning effort")

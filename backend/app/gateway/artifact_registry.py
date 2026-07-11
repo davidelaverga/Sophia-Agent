@@ -1653,6 +1653,11 @@ def builder_completion_upsert_request(
         task_id=_normalize_token(payload.get("task_id")),
         run_id=_normalize_token(payload.get("run_id")),
         trace_id=_normalize_token(payload.get("trace_id")),
+        logical_artifact_id=_normalize_token(payload.get("logical_artifact_id")),
+        version_id=(
+            _normalize_token(payload.get("current_artifact_version_id"))
+            or _normalize_token(payload.get("artifact_version_id"))
+        ),
         title=_normalize_token(payload.get("artifact_title")) or _normalize_token(payload.get("artifact_filename")),
         filename=filename,
         artifact_type=artifact_type,

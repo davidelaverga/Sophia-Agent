@@ -5,6 +5,7 @@ from typing import Any
 
 from langchain.tools import ToolRuntime, tool
 
+from deerflow.sophia.build_runtime.events import record_runtime_event
 from deerflow.sophia.deck_build.ir_repair import deck_ir_repair_instruction_from_failure
 from deerflow.sophia.deck_build.service import DeckBuildService
 from deerflow.sophia.deck_build.tool_contract import (
@@ -65,6 +66,15 @@ def prepare_deck_build(
     """
     normalized_slides = [slide.model_dump() if isinstance(slide, DeckSlideInput) else slide for slide in slides]
     normalized_plan = creative_plan.model_dump() if isinstance(creative_plan, DeckCreativePlanInput) else creative_plan
+    state = runtime.state if isinstance(getattr(runtime, "state", None), dict) else {}
+    tool_call_id = str(getattr(runtime, "tool_call_id", "") or "") or None
+    record_runtime_event(
+        state=state,
+        runtime=runtime,
+        event_type="prepare.service_started",
+        tool_call_id=tool_call_id,
+        metrics={"slide_count": len(normalized_slides)},
+    )
     result = DeckBuildService().prepare_and_build(
         runtime=runtime,
         deck_title=deck_title,
@@ -76,6 +86,15 @@ def prepare_deck_build(
         style_profile=style_profile,
         design_plan=design_plan,
         creative_plan=normalized_plan,
+    )
+    record_runtime_event(
+        state=state,
+        runtime=runtime,
+        event_type="prepare.service_finished",
+        tool_call_id=tool_call_id,
+        status="completed" if result.success else "failed",
+        failure_code=result.failure_code,
+        metrics={"slide_count": len(normalized_slides), "success": result.success},
     )
     payload = result.to_dict()
     if payload.get("repair_instruction") is None:

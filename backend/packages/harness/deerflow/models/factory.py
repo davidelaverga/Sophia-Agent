@@ -36,6 +36,8 @@ def create_chat_model(name: str | None = None, thinking_enabled: bool = False, *
             "when_thinking_enabled",
             "thinking",
             "supports_vision",
+            "provider",
+            "capabilities",
         },
     )
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.

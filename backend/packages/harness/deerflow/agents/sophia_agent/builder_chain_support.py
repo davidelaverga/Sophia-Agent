@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from deerflow.agents.middlewares.loop_detection_middleware import LoopDetectionMiddleware
 from deerflow.agents.middlewares.todo_middleware import TodoMiddleware
+from deerflow.agents.sophia_agent.middlewares.build_deadline import BuildDeadlineMiddleware
+from deerflow.agents.sophia_agent.middlewares.build_safe_boundary import BuildSafeBoundaryMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_budget import BuilderBudgetMiddleware
 from deerflow.agents.sophia_agent.middlewares.builder_progress import BuilderProgressMiddleware
 from deerflow.sophia.observability import (
@@ -21,6 +23,8 @@ from deerflow.sophia.observability import (
 
 __all__ = [
     "BuilderBudgetMiddleware",
+    "BuildDeadlineMiddleware",
+    "BuildSafeBoundaryMiddleware",
     "BuilderProgressMiddleware",
     "LoopDetectionMiddleware",
     "create_builder_todo_middleware",

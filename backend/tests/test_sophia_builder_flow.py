@@ -159,6 +159,14 @@ def test_middleware_parity_in_companion_and_builder_chains(monkeypatch):
         builder_types.index("LLMErrorHandlingMiddleware")
         < builder_types.index("BuilderProviderFallbackMiddleware")
     )
+    assert (
+        builder_types.index("BuildDeadlineMiddleware")
+        < builder_types.index("BuilderProviderFallbackMiddleware")
+    )
+    assert (
+        builder_types.index("BuildSafeBoundaryMiddleware")
+        < builder_types.index("PromptAssemblyMiddleware")
+    )
     assert "LoopDetectionMiddleware" in builder_types
     assert "TodoMiddleware" in builder_types
     assert "BuilderResearchPolicyMiddleware" in builder_types

@@ -52,6 +52,7 @@ from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
 from langgraph.typing import ContextT
 
+from deerflow.sophia.build_runtime.identity import new_build_id, new_operation_id
 from deerflow.sophia.builder_memory_filter import filter_builder_memory_snippets
 from deerflow.sophia.builder_web_policy import (
     extract_explicit_user_urls,
@@ -1963,6 +1964,10 @@ async def _dispatch_via_asgi(
         if max_wall_clock_seconds > 0
         else 0
     )
+    build_id = new_build_id()
+    operation_id = new_operation_id()
+    delegation_with_parent["build_id"] = build_id
+    delegation_with_parent["operation_id"] = operation_id
 
     run_input: dict[str, Any] = {
         "messages": [{"role": "user", "content": description}],
@@ -1978,6 +1983,8 @@ async def _dispatch_via_asgi(
         "builder_task_kickoff_ms": kickoff_ms,
         "builder_timeout_seconds": max_wall_clock_seconds,
         "builder_deadline_epoch_ms": deadline_epoch_ms,
+        "builder_build_id": build_id,
+        "builder_operation_id": operation_id,
         "builder_artifact_target_path": delegation_context.get("artifact_target_path"),
     }
     if materialized_edit_context is not None:
@@ -2008,6 +2015,8 @@ async def _dispatch_via_asgi(
             "graph_id": _ASYNC_BUILDER_AGENT_NAME,
             "task_type": task_type,
             "artifact_target_ext": Path(str(delegation_context.get("artifact_target_path") or "")).suffix.lower(),
+            "build_id": build_id,
+            "operation_id": operation_id,
         }
     }
     if parent_model:
