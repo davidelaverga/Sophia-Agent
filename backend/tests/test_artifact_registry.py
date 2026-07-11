@@ -1445,6 +1445,7 @@ def test_upsert_endpoint_uses_authenticated_user_when_client_user_id_absent(tmp_
         "thread-1/.builder/state.json",
         "thread-1/assets/slide-1.png",
         "thread-1/slides/slide-1.html",
+        "thread-1/deck_build/build.json",
         "thread-1/outputs/report.plan.json",
         "thread-1/outputs/deck.preview.pdf",
     ],
@@ -1470,7 +1471,15 @@ def test_upsert_endpoint_rejects_internal_keyspace_object_path(tmp_path, monkeyp
     assert registry.list(user_id="user-1").artifacts == []
 
 
-def test_content_endpoint_refuses_internal_keyspace_storage_object(tmp_path, monkeypatch) -> None:
+@pytest.mark.parametrize(
+    "internal_path",
+    ["thread-1/ledger/session.jsonl", "thread-1/deck_build/build.json"],
+)
+def test_content_endpoint_refuses_internal_keyspace_storage_object(
+    tmp_path,
+    monkeypatch,
+    internal_path,
+) -> None:
     """Serve-time defense-in-depth: a record whose storage_object_path was
     injected outside the validated write path (server-side / migrated / legacy)
     must never serve an internal keyspace object through the service-role key."""
@@ -1500,7 +1509,7 @@ def test_content_endpoint_refuses_internal_keyspace_storage_object(tmp_path, mon
     )
     # Bypass the validated write path to plant an internal-keyspace object path.
     registry.upsert_record(
-        artifact.model_copy(update={"storage_object_path": "thread-1/ledger/session.jsonl"}),
+        artifact.model_copy(update={"storage_object_path": internal_path}),
         user_id="user-1",
     )
 

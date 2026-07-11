@@ -200,7 +200,16 @@ def normalize_artifact_storage_object_path(path: str | None) -> str | None:
 # the list-side ``_is_builder_support_artifact_path`` so every read surface
 # excludes the same keyspaces.
 _INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
-    {"ledger", "uploads", ".builder", "assets", "slides", "sources", "source_artifact"}
+    {
+        "ledger",
+        "uploads",
+        ".builder",
+        "assets",
+        "slides",
+        "sources",
+        "source_artifact",
+        "deck_build",
+    }
 )
 
 
