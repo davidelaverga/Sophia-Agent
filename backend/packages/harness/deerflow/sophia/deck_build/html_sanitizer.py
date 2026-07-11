@@ -29,6 +29,7 @@ _DATA_URI_RE = re.compile(r"^data:", re.I)
 _FILE_URI_RE = re.compile(r"^file:", re.I)
 _CSS_URL_RE = re.compile(r"\burl\s*\(", re.I)
 _URL_ATTRIBUTE_NAMES = {"src", "href", "poster", "background", "data"}
+_LEGACY_SUBRESOURCE_ATTRIBUTE_NAMES = {"poster", "background", "data"}
 _DECK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
 
 
@@ -205,6 +206,8 @@ def _attribute_local_name(name: str) -> str:
 def _subresource_attribute_errors(name: str) -> list[str]:
     if name == "srcset":
         return ["srcset subresources are forbidden; use one planned src asset"]
+    if name in _LEGACY_SUBRESOURCE_ATTRIBUTE_NAMES:
+        return [f"{name} subresource attributes are forbidden; use a planned img src asset"]
     return []
 
 

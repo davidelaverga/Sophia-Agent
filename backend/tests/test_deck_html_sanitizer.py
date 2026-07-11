@@ -62,6 +62,26 @@ html, body { width: 1920px; height: 1080px; background: #fff; }
     assert any("srcset subresources are forbidden" in error for error in result.errors)
 
 
+def test_rejects_legacy_non_image_subresource_attributes() -> None:
+    for name, value in (
+        ("background", "../assets/../../uploads/secret.png"),
+        ("background", "../assets/slide-01.png"),
+        ("poster", "../assets/slide-01.png"),
+        ("data", "../assets/slide-01.png"),
+    ):
+        html = f"""<!doctype html><html><head><style>
+html, body {{ width: 1920px; height: 1080px; background: #fff; }}
+</style></head><body {name}="{value}"><main><h1>Title</h1></main></body></html>"""
+
+        _sanitized, result = validate_and_sanitize_slide_html(
+            _slide(html),
+            allowed_asset_refs={"slide-01.png"},
+        )
+
+        assert result.valid is False
+        assert any(f"{name} subresource attributes are forbidden" in error for error in result.errors)
+
+
 def test_rejects_remote_and_file_svg_xlink_subresources() -> None:
     for uri, expected_error in (
         ("https://example.com/visual.svg", "remote http"),
