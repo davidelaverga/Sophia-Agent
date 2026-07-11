@@ -43,15 +43,9 @@ def http_request(query_string: bytes = b"") -> Request:
 
 
 def test_normalize_artifact_virtual_path_accepts_safe_output_forms() -> None:
-    assert artifacts_router._normalize_artifact_virtual_path(
-        "/mnt/user-data/outputs/builder-demo.md"
-    ) == "mnt/user-data/outputs/builder-demo.md"
-    assert artifacts_router._normalize_artifact_virtual_path(
-        "user-data/outputs/builder-demo.md"
-    ) == "mnt/user-data/outputs/builder-demo.md"
-    assert artifacts_router._normalize_artifact_virtual_path(
-        "outputs/builder-demo.md"
-    ) == "mnt/user-data/outputs/builder-demo.md"
+    assert artifacts_router._normalize_artifact_virtual_path("/mnt/user-data/outputs/builder-demo.md") == "mnt/user-data/outputs/builder-demo.md"
+    assert artifacts_router._normalize_artifact_virtual_path("user-data/outputs/builder-demo.md") == "mnt/user-data/outputs/builder-demo.md"
+    assert artifacts_router._normalize_artifact_virtual_path("outputs/builder-demo.md") == "mnt/user-data/outputs/builder-demo.md"
 
 
 def test_get_artifact_reads_utf8_text_file_on_windows_locale(tmp_path, monkeypatch) -> None:
@@ -99,6 +93,10 @@ def test_get_artifact_serves_local_html_as_text_html(tmp_path, monkeypatch) -> N
     [
         "mnt/user-data/outputs/deck_build/build.json",
         "mnt/user-data/outputs/.builder/state.json",
+        "mnt/user-data/outputs/assets/prompts/slide-01.json",
+        "mnt/user-data/outputs/slides/slide-01.html",
+        "mnt/user-data/outputs/sources/research.md",
+        "mnt/user-data/outputs/visuals/hero.png",
     ],
 )
 def test_get_artifact_refuses_internal_builder_state(path, monkeypatch) -> None:
@@ -123,10 +121,7 @@ def test_quick_patch_html_title_creates_revision_without_overwriting_original(tm
     outputs_dir = user_data / "outputs"
     outputs_dir.mkdir(parents=True)
     source_path = outputs_dir / "site.html"
-    original_html = (
-        "<!doctype html><html><head><title>Original Title</title></head>"
-        "<body><main><h1>Original Title</h1></main></body></html>"
-    )
+    original_html = "<!doctype html><html><head><title>Original Title</title></head><body><main><h1>Original Title</h1></main></body></html>"
     source_path.write_text(original_html, encoding="utf-8")
 
     monkeypatch.setattr(
@@ -210,11 +205,7 @@ def test_quick_patch_html_darkens_card_css_when_card_class_exists(tmp_path, monk
     outputs_dir.mkdir(parents=True)
     source_path = outputs_dir / "site.html"
     source_path.write_text(
-        (
-            "<!doctype html><html><head><style>"
-            ".feature-card { background: #ffffff; border-color: #eeeeee; }"
-            "</style></head><body><div class=\"feature-card\">One</div></body></html>"
-        ),
+        ('<!doctype html><html><head><style>.feature-card { background: #ffffff; border-color: #eeeeee; }</style></head><body><div class="feature-card">One</div></body></html>'),
         encoding="utf-8",
     )
 
@@ -242,9 +233,7 @@ def test_quick_patch_html_darkens_card_css_when_card_class_exists(tmp_path, monk
 
     assert response.ok is True
     assert response.revision_artifact_path is not None
-    revision_html = (user_data / response.revision_artifact_path.removeprefix("mnt/user-data/")).read_text(
-        encoding="utf-8"
-    )
+    revision_html = (user_data / response.revision_artifact_path.removeprefix("mnt/user-data/")).read_text(encoding="utf-8")
     assert "background: #151821;" in revision_html
     assert "border-color: #2b3446;" in revision_html
     assert "<html>" in revision_html
@@ -305,10 +294,7 @@ def test_quick_patch_builder_task_source_homes_revision_under_parent_thread(tmp_
     (task_data / "outputs").mkdir(parents=True)
     # Source HTML lives ONLY under the builder-task thread's outputs dir.
     source_path = task_data / "outputs" / "site.html"
-    original_html = (
-        "<!doctype html><html><head><title>Original Title</title></head>"
-        "<body><main><h1>Original Title</h1></main></body></html>"
-    )
+    original_html = "<!doctype html><html><head><title>Original Title</title></head><body><main><h1>Original Title</h1></main></body></html>"
     source_path.write_text(original_html, encoding="utf-8")
 
     monkeypatch.setattr(
@@ -374,13 +360,9 @@ def test_supabase_fallback_refuses_delegation_ledger_keyspace(monkeypatch) -> No
     def _must_not_download(**_kwargs):
         raise AssertionError("ledger keyspace must never be downloaded via the artifact proxy")
 
-    monkeypatch.setattr(
-        artifacts_router.supabase_artifact_store, "download_artifact", _must_not_download
-    )
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact", _must_not_download)
 
-    response = artifacts_router._try_serve_from_supabase(
-        "thread-1", "mnt/user-data/outputs/ledger/session.jsonl", http_request()
-    )
+    response = artifacts_router._try_serve_from_supabase("thread-1", "mnt/user-data/outputs/ledger/session.jsonl", http_request())
     assert response is None
 
     # Sibling names outside the keyspace still reach the download path.
@@ -389,9 +371,7 @@ def test_supabase_fallback_refuses_delegation_ledger_keyspace(monkeypatch) -> No
         "download_artifact",
         lambda **_kwargs: (b"content", "text/markdown"),
     )
-    served = artifacts_router._try_serve_from_supabase(
-        "thread-1", "mnt/user-data/outputs/ledgers-overview.md", http_request()
-    )
+    served = artifacts_router._try_serve_from_supabase("thread-1", "mnt/user-data/outputs/ledgers-overview.md", http_request())
     assert served is not None
 
 
@@ -402,9 +382,7 @@ def test_get_artifact_serves_local_pptx_as_attachment(tmp_path, monkeypatch) -> 
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: artifact_path)
 
     request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
-    response = asyncio.run(
-        artifacts_router.get_artifact("thread-1", "mnt/user-data/outputs/deck.pptx", request)
-    )
+    response = asyncio.run(artifacts_router.get_artifact("thread-1", "mnt/user-data/outputs/deck.pptx", request))
 
     assert response.headers["content-disposition"].startswith("attachment;")
     assert "deck.pptx" in response.headers["content-disposition"]
@@ -429,9 +407,7 @@ def test_get_artifact_serves_supabase_pptx_as_attachment(tmp_path, monkeypatch) 
     )
 
     request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
-    response = asyncio.run(
-        artifacts_router.get_artifact("thread-1", "mnt/user-data/outputs/deck.pptx", request)
-    )
+    response = asyncio.run(artifacts_router.get_artifact("thread-1", "mnt/user-data/outputs/deck.pptx", request))
 
     assert bytes(response.body) == b"pptx-bytes"
     assert response.headers["content-disposition"].startswith("attachment;")
@@ -724,17 +700,17 @@ def test_list_artifacts_includes_associated_builder_task_outputs(tmp_path, monke
     monkeypatch.setattr(
         artifacts_router,
         "resolve_thread_virtual_path",
-        thread_user_data_resolver({
-            "parent-thread": parent_user_data,
-            "task-thread": task_user_data,
-        }),
+        thread_user_data_resolver(
+            {
+                "parent-thread": parent_user_data,
+                "task-thread": task_user_data,
+            }
+        ),
     )
     monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
     monkeypatch.setattr(artifacts_router.supabase_artifact_store, "list_artifacts", lambda *, thread_id: [])
 
-    response = asyncio.run(
-        artifacts_router.list_artifacts("parent-thread", authenticated_user_id="user-1")
-    )
+    response = asyncio.run(artifacts_router.list_artifacts("parent-thread", authenticated_user_id="user-1"))
 
     assert response.thread_id == "parent-thread"
     # `.preview.pdf` is the deck's canvas render aid (a support artifact), so it
@@ -770,18 +746,18 @@ def test_list_artifacts_prefers_newest_duplicate_associated_builder_output(tmp_p
     monkeypatch.setattr(
         artifacts_router,
         "resolve_thread_virtual_path",
-        thread_user_data_resolver({
-            "parent-thread": parent_user_data,
-            "old-task-thread": old_task_user_data,
-            "new-task-thread": new_task_user_data,
-        }),
+        thread_user_data_resolver(
+            {
+                "parent-thread": parent_user_data,
+                "old-task-thread": old_task_user_data,
+                "new-task-thread": new_task_user_data,
+            }
+        ),
     )
     monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
     monkeypatch.setattr(artifacts_router.supabase_artifact_store, "list_artifacts", lambda *, thread_id: [])
 
-    response = asyncio.run(
-        artifacts_router.list_artifacts("parent-thread", authenticated_user_id="user-1")
-    )
+    response = asyncio.run(artifacts_router.list_artifacts("parent-thread", authenticated_user_id="user-1"))
 
     assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/report.pdf"]
     assert response.artifacts[0].size_bytes == len(b"newer artifact")
@@ -803,10 +779,12 @@ def test_get_artifact_resolves_associated_builder_task_output(tmp_path, monkeypa
     monkeypatch.setattr(
         artifacts_router,
         "resolve_thread_virtual_path",
-        thread_user_data_resolver({
-            "parent-thread": parent_user_data,
-            "task-thread": task_user_data,
-        }),
+        thread_user_data_resolver(
+            {
+                "parent-thread": parent_user_data,
+                "task-thread": task_user_data,
+            }
+        ),
     )
     monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
     monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact", lambda *, thread_id, filename: None)
@@ -847,11 +825,13 @@ def test_get_artifact_prefers_newest_duplicate_associated_builder_output(tmp_pat
     monkeypatch.setattr(
         artifacts_router,
         "resolve_thread_virtual_path",
-        thread_user_data_resolver({
-            "parent-thread": parent_user_data,
-            "old-task-thread": old_task_user_data,
-            "new-task-thread": new_task_user_data,
-        }),
+        thread_user_data_resolver(
+            {
+                "parent-thread": parent_user_data,
+                "old-task-thread": old_task_user_data,
+                "new-task-thread": new_task_user_data,
+            }
+        ),
     )
     monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
     monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact", lambda *, thread_id, filename: None)
@@ -886,10 +866,12 @@ def test_get_skill_archive_member_resolves_associated_builder_task_output(tmp_pa
     monkeypatch.setattr(
         artifacts_router,
         "resolve_thread_virtual_path",
-        thread_user_data_resolver({
-            "parent-thread": parent_user_data,
-            "task-thread": task_user_data,
-        }),
+        thread_user_data_resolver(
+            {
+                "parent-thread": parent_user_data,
+                "task-thread": task_user_data,
+            }
+        ),
     )
     monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
 
@@ -922,21 +904,19 @@ def test_list_artifacts_includes_builder_task_pdf_with_mime_type(tmp_path, monke
     monkeypatch.setattr(
         artifacts_router,
         "resolve_thread_virtual_path",
-        thread_user_data_resolver({
-            "parent-thread": parent_user_data,
-            "task-thread": task_user_data,
-        }),
+        thread_user_data_resolver(
+            {
+                "parent-thread": parent_user_data,
+                "task-thread": task_user_data,
+            }
+        ),
     )
     monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
     monkeypatch.setattr(artifacts_router.supabase_artifact_store, "list_artifacts", lambda *, thread_id: [])
 
-    response = asyncio.run(
-        artifacts_router.list_artifacts("parent-thread", authenticated_user_id="user-1")
-    )
+    response = asyncio.run(artifacts_router.list_artifacts("parent-thread", authenticated_user_id="user-1"))
 
-    assert [item.path for item in response.artifacts] == [
-        "mnt/user-data/outputs/simple-product-review.pdf"
-    ]
+    assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/simple-product-review.pdf"]
     assert response.artifacts[0].mime_type == "application/pdf"
 
 
@@ -956,10 +936,12 @@ def test_get_artifact_serves_associated_builder_task_pdf_inline(tmp_path, monkey
     monkeypatch.setattr(
         artifacts_router,
         "resolve_thread_virtual_path",
-        thread_user_data_resolver({
-            "parent-thread": parent_user_data,
-            "task-thread": task_user_data,
-        }),
+        thread_user_data_resolver(
+            {
+                "parent-thread": parent_user_data,
+                "task-thread": task_user_data,
+            }
+        ),
     )
     monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
     monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact", lambda *, thread_id, filename: None)
@@ -993,10 +975,12 @@ def test_get_artifact_download_resolves_leading_slash_builder_task_output(tmp_pa
     monkeypatch.setattr(
         artifacts_router,
         "resolve_thread_virtual_path",
-        thread_user_data_resolver({
-            "parent-thread": parent_user_data,
-            "task-thread": task_user_data,
-        }),
+        thread_user_data_resolver(
+            {
+                "parent-thread": parent_user_data,
+                "task-thread": task_user_data,
+            }
+        ),
     )
     monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
     monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact", lambda *, thread_id, filename: None)
@@ -1026,10 +1010,12 @@ def test_get_artifact_returns_safe_detail_when_parent_and_builder_task_outputs_m
     monkeypatch.setattr(
         artifacts_router,
         "resolve_thread_virtual_path",
-        thread_user_data_resolver({
-            "parent-thread": parent_user_data,
-            "task-thread": task_user_data,
-        }),
+        thread_user_data_resolver(
+            {
+                "parent-thread": parent_user_data,
+                "task-thread": task_user_data,
+            }
+        ),
     )
     monkeypatch.setattr(artifacts_router, "_associated_builder_task_thread_ids", associated)
     monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact", lambda *, thread_id, filename: None)
@@ -1110,9 +1096,7 @@ def test_list_artifacts_preserves_local_non_sophia_outputs_without_supabase_look
         lambda *, thread_id: supabase_calls.append(thread_id) or [],
     )
 
-    response = asyncio.run(
-        artifacts_router.list_artifacts("legacy-thread", authenticated_user_id="user-1")
-    )
+    response = asyncio.run(artifacts_router.list_artifacts("legacy-thread", authenticated_user_id="user-1"))
 
     assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/legacy-report.md"]
     assert supabase_calls == []
@@ -1148,9 +1132,7 @@ def test_get_artifact_preserves_listed_local_non_sophia_output(tmp_path, monkeyp
         lambda *, thread_id: [],
     )
 
-    listed = asyncio.run(
-        artifacts_router.list_artifacts("legacy-thread", authenticated_user_id="user-1")
-    )
+    listed = asyncio.run(artifacts_router.list_artifacts("legacy-thread", authenticated_user_id="user-1"))
     assert [item.path for item in listed.artifacts] == ["mnt/user-data/outputs/legacy-report.md"]
 
     request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
@@ -1569,9 +1551,7 @@ def test_get_artifact_falls_back_to_supabase_when_local_and_workspace_copies_mis
     )
 
     request = Request({"type": "http", "method": "GET", "path": "/", "headers": [], "query_string": b""})
-    response = asyncio.run(
-        artifacts_router.get_artifact("thread-z", "mnt/user-data/outputs/report.md", request)
-    )
+    response = asyncio.run(artifacts_router.get_artifact("thread-z", "mnt/user-data/outputs/report.md", request))
 
     assert bytes(response.body).decode("utf-8") == "supabase copy"
     assert response.media_type == "text/markdown"

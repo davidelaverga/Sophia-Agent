@@ -55,7 +55,19 @@ _WEBHOOK_TIMEOUT_SECONDS = 2.0
 # the gateway-side terminal-edit retry backoff. 4xx is a contract bug and is
 # NOT retried. Runs on a daemon thread so the sleeps never block the executor.
 _WEBHOOK_RETRY_BACKOFFS_SECONDS = (2.0, 5.0, 15.0)
-_INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset({"ledger", "uploads", ".builder", "assets", "slides", "sources", "source_artifact"})
+_INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
+    {
+        "ledger",
+        "uploads",
+        ".builder",
+        "assets",
+        "deck_build",
+        "slides",
+        "sources",
+        "source_artifact",
+        "visuals",
+    }
+)
 
 
 # Process-local LRU cache of task_id/run_id pairs that have already had
@@ -259,6 +271,8 @@ def _signed_artifact_url(
 ) -> str | None:
     """Mint a signed Supabase URL for the artifact, or None on any failure."""
     raw_object_path = _storage_object_path_for_signing(artifact_path, storage_object_path)
+    if not raw_object_path and _artifact_path_addresses_internal_keyspace(artifact_path):
+        return None
     object_path = _validated_storage_object_path_for_signing(
         thread_id=thread_id,
         artifact_path=artifact_path,
@@ -309,6 +323,14 @@ def _relative_output_artifact_path(path: str | None) -> str | None:
         return None
     relative = path[len(prefix) :].strip("/")
     return relative or None
+
+
+def _artifact_path_addresses_internal_keyspace(path: str | None) -> bool:
+    canonical = _canonical_artifact_path(path)
+    if canonical is None:
+        return False
+    relative = _relative_output_artifact_path(canonical) or canonical
+    return _storage_object_addresses_internal_keyspace(relative)
 
 
 # PR-A: phantom-success detection thresholds.
@@ -634,7 +656,7 @@ def _skip_artifact_signing(
     signing_path: str | None,
     storage_object_path: str | None,
 ) -> bool:
-    return not storage_object_path and (not signing_thread_id or not signing_path)
+    return not storage_object_path and (not signing_thread_id or not signing_path or _artifact_path_addresses_internal_keyspace(signing_path))
 
 
 def _coerce_phantom_success(

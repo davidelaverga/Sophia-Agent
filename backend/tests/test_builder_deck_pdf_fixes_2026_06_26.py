@@ -17,6 +17,8 @@ import zipfile
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
 _OUTPUTS = "/mnt/user-data/outputs/"
@@ -160,6 +162,48 @@ def test_webhook_retries_transport_error_bounded(monkeypatch):
     be._post_webhook({"thread_id": "t", "task_id": "x"})
     # max_attempts = len(backoffs)+1 = 4
     assert len(calls) == 4
+
+
+@pytest.mark.parametrize(
+    "artifact_path",
+    [
+        "/mnt/user-data/outputs/deck_build/build.json",
+        "mnt/user-data/outputs/assets/prompts/slide-01.json",
+        "assets/prompts/slide-01.json",
+        "outputs/slides/slide-01.html",
+        "mnt/user-data/outputs/visuals/hero.png",
+    ],
+)
+def test_signed_artifact_url_refuses_internal_fallback_paths(monkeypatch, artifact_path):
+    import deerflow.sophia.builder_events as be
+
+    monkeypatch.setattr(
+        be,
+        "_call_create_signed_url",
+        lambda **_kwargs: pytest.fail("internal path reached URL signer"),
+    )
+
+    assert be._signed_artifact_url("thread-1", artifact_path) is None
+    assert be._artifact_signed_url_with_result(
+        parent_thread_id="thread-1",
+        builder_thread_id="builder-1",
+        artifact_storage_path=artifact_path,
+        artifact_filename=None,
+        storage_object_path=None,
+        authenticated_user_id="user-1",
+    ) == (None, "skipped")
+
+
+def test_signed_artifact_url_allows_deliverable_fallback_path(monkeypatch):
+    import deerflow.sophia.builder_events as be
+
+    monkeypatch.setattr(
+        be,
+        "_call_create_signed_url",
+        lambda **_kwargs: "https://signed.example/deck.pptx",
+    )
+
+    assert be._signed_artifact_url("thread-1", "mnt/user-data/outputs/deck.pptx") == "https://signed.example/deck.pptx"
 
 
 # ---- B: report.css render-fidelity rules -----------------------------------

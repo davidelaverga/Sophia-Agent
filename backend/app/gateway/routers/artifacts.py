@@ -239,12 +239,7 @@ def _get_visible_user_artifact(artifact_id: str, authenticated_user_id: str) -> 
 
 
 def _is_visible_primary_artifact(record: ArtifactRecord) -> bool:
-    return (
-        record.deleted_at is None
-        and record.is_library_visible is True
-        and record.artifact_role == "primary"
-        and record.storage_status == "available"
-    )
+    return record.deleted_at is None and record.is_library_visible is True and record.artifact_role == "primary" and record.storage_status == "available"
 
 
 async def _serve_registry_artifact(
@@ -253,11 +248,7 @@ async def _serve_registry_artifact(
     *,
     force_download: bool,
 ) -> Response:
-    if (
-        supabase_artifact_store.requires_durable_artifact_upload()
-        and record.storage_provider in {"supabase", "hybrid"}
-        and record.storage_object_path
-    ):
+    if supabase_artifact_store.requires_durable_artifact_upload() and record.storage_provider in {"supabase", "hybrid"} and record.storage_object_path:
         object_response = _try_serve_registry_storage_object(record, request, force_download=force_download)
         if object_response is not None:
             return object_response
@@ -346,10 +337,7 @@ def _thread_id_from_storage_object_path(storage_object_path: str | None) -> str 
 def _is_builder_internal(name: str) -> bool:
     # Builder generator/helper scripts are byproducts, not deliverables.
     lowered = name.lower()
-    return (
-        name.startswith("_") and lowered.endswith(".py")
-        or lowered.startswith("test_") and lowered.endswith((".py", ".sh"))
-    )
+    return name.startswith("_") and lowered.endswith(".py") or lowered.startswith("test_") and lowered.endswith((".py", ".sh"))
 
 
 def _is_builder_support_artifact_path(relative_path: str) -> bool:
@@ -374,10 +362,7 @@ def _is_builder_support_artifact_path(relative_path: str) -> bool:
 
 def _is_builder_internal_state_artifact_path(path: str) -> bool:
     relative = _relative_output_artifact_path(path)
-    if relative is None:
-        return False
-    parts = [part for part in relative.replace("\\", "/").split("/") if part]
-    return bool(parts and parts[0] in {"deck_build", ".builder"})
+    return relative is not None and _is_builder_support_artifact_path(relative)
 
 
 def _is_supabase_thread_list_support_artifact_path(relative_path: str) -> bool:
@@ -512,17 +497,11 @@ async def _authorize_artifact_upsert_thread_references(
     authorized_thread_ids: set[str] = set()
     if target_thread_id:
         authorized_thread_ids.add(target_thread_id)
-        authorized_thread_ids.update(
-            await _builder_task_thread_ids_to_check(target_thread_id)
-        )
+        authorized_thread_ids.update(await _builder_task_thread_ids_to_check(target_thread_id))
 
     def _thread_reference_ok(value: str | None) -> bool:
         candidate = (value or "").strip()
-        return (
-            not candidate
-            or candidate in authorized_thread_ids
-            or _is_thread_owner(authenticated_user_id, candidate)
-        )
+        return not candidate or candidate in authorized_thread_ids or _is_thread_owner(authenticated_user_id, candidate)
 
     for field_name, value in (
         ("parent_thread_id", request_body.parent_thread_id),
@@ -534,9 +513,7 @@ async def _authorize_artifact_upsert_thread_references(
                 authenticated_user_id,
                 branch=f"artifact_upsert_denied_unauthorized_{field_name}",
             )
-            raise HTTPException(
-                status_code=403, detail="Artifact references an unauthorized thread"
-            )
+            raise HTTPException(status_code=403, detail="Artifact references an unauthorized thread")
     if (request_body.run_id or "").strip():
         logger.info(
             "Artifact upsert accepted run_id as metadata: %s",
@@ -630,12 +607,7 @@ def _relative_output_artifact_path(path: str) -> str | None:
 
 def _requires_thread_owner_for_artifact(path: str) -> bool:
     normalized = path.lstrip("/")
-    return (
-        normalized == _OUTPUTS_VIRTUAL_PATH
-        or normalized.startswith(_OUTPUTS_VIRTUAL_PATH + "/")
-        or normalized == _WORKSPACE_OUTPUTS_VIRTUAL_PATH
-        or normalized.startswith(_WORKSPACE_OUTPUTS_VIRTUAL_PATH + "/")
-    )
+    return normalized == _OUTPUTS_VIRTUAL_PATH or normalized.startswith(_OUTPUTS_VIRTUAL_PATH + "/") or normalized == _WORKSPACE_OUTPUTS_VIRTUAL_PATH or normalized.startswith(_WORKSPACE_OUTPUTS_VIRTUAL_PATH + "/")
 
 
 def _artifact_container_path(path: str) -> str:
@@ -660,7 +632,7 @@ def _canonicalize_output_virtual_path(path: str) -> str:
     if path == "outputs":
         return _OUTPUTS_VIRTUAL_PATH
     if path.startswith("outputs/"):
-        return f"{_OUTPUTS_VIRTUAL_PATH}/{path[len('outputs/'):]}"
+        return f"{_OUTPUTS_VIRTUAL_PATH}/{path[len('outputs/') :]}"
     if path == "user-data/outputs":
         return _OUTPUTS_VIRTUAL_PATH
     if path.startswith("user-data/outputs/"):
@@ -712,12 +684,7 @@ def _resolve_artifact_path(thread_id: str, path: str) -> Path:
 
 
 def _langgraph_url() -> str:
-    return (
-        os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
-        or os.getenv("LANGGRAPH_URL")
-        or os.getenv("SOPHIA_BACKEND_BASE_URL")
-        or "http://127.0.0.1:2024"
-    ).strip().rstrip("/")
+    return (os.getenv("SOPHIA_LANGGRAPH_BASE_URL") or os.getenv("LANGGRAPH_URL") or os.getenv("SOPHIA_BACKEND_BASE_URL") or "http://127.0.0.1:2024").strip().rstrip("/")
 
 
 def _builder_task_thread_id(task: dict[str, Any]) -> str | None:
@@ -875,9 +842,7 @@ def _log_artifact_resolution(
     failure_reason: str | None = None,
 ) -> None:
     logger.info(
-        "Artifact resolution: requested_path=%s normalized_path=%s resolution_scope=%s "
-        "requested_thread_id=%s resolved_task_thread_id=%s checked_builder_task_count=%d "
-        "artifact_exists=%s failure_reason=%s actual_path=%s",
+        "Artifact resolution: requested_path=%s normalized_path=%s resolution_scope=%s requested_thread_id=%s resolved_task_thread_id=%s checked_builder_task_count=%d artifact_exists=%s failure_reason=%s actual_path=%s",
         resolution.requested_path,
         resolution.normalized_path,
         resolution.resolution_scope,
@@ -899,11 +864,7 @@ def _artifact_not_found_detail(thread_id: str, path: str, resolution: ArtifactPa
         "checked_parent_thread": thread_id,
         "checked_builder_task_outputs": checked_builder_task_outputs,
         "checked_builder_task_thread_ids": list(resolution.checked_builder_task_thread_ids),
-        "failure_reason": (
-            "not_found_in_parent_or_associated_builder_tasks"
-            if checked_builder_task_outputs
-            else "not_found_in_parent_thread"
-        ),
+        "failure_reason": ("not_found_in_parent_or_associated_builder_tasks" if checked_builder_task_outputs else "not_found_in_parent_thread"),
     }
 
 
@@ -916,10 +877,7 @@ def _add_output_artifacts_from_dir(
     files_with_stat = [
         (candidate, candidate.stat(), candidate.relative_to(outputs_path).as_posix())
         for candidate in outputs_path.rglob("*")
-        if (
-            candidate.is_file()
-            and not _is_builder_support_artifact_path(candidate.relative_to(outputs_path).as_posix())
-        )
+        if (candidate.is_file() and not _is_builder_support_artifact_path(candidate.relative_to(outputs_path).as_posix()))
     ]
     for file_path, stat_result, relative_path in files_with_stat:
         mime_type, _ = mimetypes.guess_type(file_path.name)
@@ -1053,9 +1011,7 @@ def _try_serve_from_supabase(
             filename=relative,
         )
     except Exception:  # noqa: BLE001 — network/transport failure
-        logger.exception(
-            "Supabase download failed: thread_id=%s requested_path=%s", thread_id, path
-        )
+        logger.exception("Supabase download failed: thread_id=%s requested_path=%s", thread_id, path)
         return None
     if result is None:
         return None
@@ -1242,8 +1198,7 @@ async def list_artifacts(
     )
 
     logger.info(
-        "Artifact list resolved: thread_id=%s local_count=%d builder_task_local_count=%d "
-        "builder_task_thread_count=%d supabase_count=%d merged_count=%d",
+        "Artifact list resolved: thread_id=%s local_count=%d builder_task_local_count=%d builder_task_thread_count=%d supabase_count=%d merged_count=%d",
         thread_id,
         local_count,
         builder_task_local_count,
@@ -1369,9 +1324,7 @@ def _quick_patch_response(
         result=result,
         fallback_reason=fallback_reason,
         quick_edit_kind=request.quick_edit_kind,
-        requested_change_summary=_safe_quick_patch_summary(
-            request.requested_change_summary or request.user_update_request
-        ),
+        requested_change_summary=_safe_quick_patch_summary(request.requested_change_summary or request.user_update_request),
         original_artifact_path=original_artifact_path,
         revision_artifact_path=revision_path,
         source_artifact_path=original_artifact_path,
