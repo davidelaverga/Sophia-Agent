@@ -667,6 +667,11 @@ def test_completion_payload_preserves_terminal_and_prepare_metadata():
         "deck_authoring_contract": "compact_model_html_v1",
         "deck_authoring_elapsed_ms": 119000,
         "prepare_force_reason": "authoring_deadline",
+        "manifest_path": "/mnt/user-data/outputs/.builder/builds/build-1/manifest.json",
+        "manifest_revision": 2,
+        "logical_artifact_id": "logical-1",
+        "current_artifact_version_id": "version-2",
+        "foundation_status": "committed",
         "root_failure_code": "deck_prepare_argument_invalid",
         "root_failure_summary": "The first prepare call failed schema validation.",
         "source_retention_report": {"passed": False, "missing_required_count": 1},
@@ -700,6 +705,10 @@ def test_completion_payload_preserves_terminal_and_prepare_metadata():
     assert parsed.deck_authoring_contract == "compact_model_html_v1"
     assert parsed.deck_authoring_elapsed_ms == 119000
     assert parsed.prepare_force_reason == "authoring_deadline"
+    assert parsed.manifest_revision == 2
+    assert parsed.logical_artifact_id == "logical-1"
+    assert parsed.current_artifact_version_id == "version-2"
+    assert parsed.foundation_status == "committed"
     assert parsed.root_failure_code == "deck_prepare_argument_invalid"
     assert parsed.source_retention_report == {"passed": False, "missing_required_count": 1}
     assert parsed.native_contrast_report == {"passed": False, "required_issue_count": 1}

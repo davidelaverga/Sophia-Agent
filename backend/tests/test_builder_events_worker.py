@@ -396,6 +396,11 @@ async def test_internal_post_persists_terminal_deck_diagnostics(
         "deck_authoring_contract": "compact_model_html_v1",
         "deck_authoring_elapsed_ms": 42000,
         "prepare_force_reason": "model_initiated",
+        "manifest_path": "/mnt/user-data/outputs/.builder/builds/build-1/manifest.json",
+        "manifest_revision": 2,
+        "logical_artifact_id": "logical-1",
+        "current_artifact_version_id": "version-2",
+        "foundation_status": "committed",
     }
 
     async with client:

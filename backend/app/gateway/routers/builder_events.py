@@ -53,6 +53,11 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "storage_bucket",
     "storage_object_path",
     "storage_status",
+    "manifest_path",
+    "manifest_revision",
+    "logical_artifact_id",
+    "current_artifact_version_id",
+    "foundation_status",
     "artifact_is_fallback",
     "fallback_reason",
     "format_conflict_resolved",
@@ -149,6 +154,11 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "storage_bucket",
         "storage_object_path",
         "storage_status",
+        "manifest_path",
+        "manifest_revision",
+        "logical_artifact_id",
+        "current_artifact_version_id",
+        "foundation_status",
         "requested_artifact_ext",
         "artifact_ext",
         "artifact_is_fallback",
@@ -394,6 +404,11 @@ class BuilderCompletionEvent(BaseModel):
     storage_bucket: str | None = None
     storage_object_path: str | None = None
     storage_status: str | None = None
+    manifest_path: str | None = None
+    manifest_revision: int | None = None
+    logical_artifact_id: str | None = None
+    current_artifact_version_id: str | None = None
+    foundation_status: str | None = None
     requested_artifact_ext: str | None = None
     artifact_ext: str | None = None
     artifact_is_fallback: bool | None = None

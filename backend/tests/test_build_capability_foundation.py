@@ -116,8 +116,9 @@ def test_prepare_metrics_are_exact_call_id_sets() -> None:
     assert metrics["prepare_service_call_count"] == 1
 
 
-def test_deadline_cancels_model_without_provider_retry() -> None:
+def test_deadline_cancels_model_without_provider_retry(monkeypatch) -> None:
     calls = 0
+    webhook_calls: list[dict] = []
 
     async def handler(_request):
         nonlocal calls
@@ -126,15 +127,26 @@ def test_deadline_cancels_model_without_provider_retry() -> None:
         return AIMessage(content="late")
 
     request = SimpleNamespace(
+        runtime=SimpleNamespace(context={"thread_id": "builder-thread"}),
         state={
             "builder_budget": {"tier": "presentation", "terminal_reserve_seconds": 0},
             "builder_task_kickoff_ms": int(time.time() * 1000) - 100,
             "builder_deadline_epoch_ms": int(time.time() * 1000) + 20,
         }
     )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.build_deadline.fire_completion_webhook_from_artifact",
+        lambda **kwargs: webhook_calls.append(kwargs) or True,
+    )
+    monkeypatch.setattr(
+        "deerflow.agents.sophia_agent.middlewares.build_deadline.annotate_builder_completion",
+        lambda *_args, **_kwargs: True,
+    )
     result = __import__("anyio").run(BuildDeadlineMiddleware().awrap_model_call, request, handler)
     assert calls == 1
     assert result.command.update["builder_result"]["failure_code"] == "deck_authoring_deadline_exceeded"
+    assert webhook_calls[0]["status"] == "timed_out"
+    assert webhook_calls[0]["artifact"]["terminal_reason"] == "deck_authoring_deadline_exceeded"
 
 
 class _RouteConfig:
