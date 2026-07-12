@@ -146,10 +146,14 @@ class _TagScanner(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.tags: list[str] = []
         self.namespaced_attributes: list[str] = []
+        self.active_meta_directive = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
-        self.tags.append(tag.lower())
+        clean_tag = tag.lower()
+        self.tags.append(clean_tag)
         self.namespaced_attributes.extend(name.lower() for name, _ in attrs if ":" in name)
+        if clean_tag == "meta" and not meta_attributes_are_inert(dict(attrs)):
+            self.active_meta_directive = True
 
     def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         self.handle_starttag(tag, attrs)
@@ -161,7 +165,7 @@ def compiler_capability_prompt_excerpt() -> str:
     lossy = ", ".join(sorted(LOSSY_CSS_PROPERTIES))
     return (
         f"Use only native PPTX-compatible HTML/CSS: {supported}. "
-        f"Rejected tags include: {rejected}. Inline SVG is unsupported. "
+        f"Rejected tags include: {rejected}. Inline SVG is unsupported. Meta tags may declare UTF-8 charset only. "
         f"Lossy CSS that must not carry semantics: {lossy}. "
         "The Sophia canvas is 1920x1080 CSS px with an opaque background."
     )
@@ -180,7 +184,14 @@ def unsupported_tags_in_html(source: str) -> list[str]:
     }
     if any(name.startswith(("xlink:", "svg:")) for name in scanner.namespaced_attributes):
         unsupported.add("svg_namespace")
+    if scanner.active_meta_directive:
+        unsupported.add("meta-directive")
     return sorted(unsupported)
+
+
+def meta_attributes_are_inert(attrs: dict[str, str | None]) -> bool:
+    normalized = {str(name).strip().lower(): str(value or "").strip().lower() for name, value in attrs.items()}
+    return set(normalized) == {"charset"} and normalized["charset"] in {"utf-8", "utf8"}
 
 
 def rejected_css_in_html(source: str) -> list[str]:

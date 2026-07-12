@@ -47,6 +47,36 @@ html, body { width: 1920px; height: 1080px; background: #fff; }
     assert any("remote http" in error for error in result.errors)
 
 
+def test_allows_inert_utf8_charset_meta() -> None:
+    html = """<!doctype html><html><head><meta charset="utf-8"><style>
+html, body { width: 1920px; height: 1080px; background: #fff; }
+</style></head><body><main><h1>Title</h1></main></body></html>"""
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+    assert "meta-directive" not in result.unsupported_tags
+
+
+def test_rejects_active_or_content_meta_directives() -> None:
+    directives = (
+        '<meta http-equiv="refresh" content="0; url=https://example.com/secret">',
+        '<meta http-equiv="refresh" content="0; url=file:///etc/passwd">',
+        '<meta name="viewport" content="width=device-width">',
+        '<meta charset="utf-8" http-equiv="refresh" content="0; url=https://example.com">',
+    )
+    for directive in directives:
+        html = f"""<!doctype html><html><head>{directive}<style>
+html, body {{ width: 1920px; height: 1080px; background: #fff; }}
+</style></head><body><main><h1>Title</h1></main></body></html>"""
+
+        _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+        assert result.valid is False
+        assert "meta-directive" in result.unsupported_tags
+        assert any("meta directives are forbidden" in error for error in result.errors)
+
+
 def test_rejects_remote_srcset_with_planned_local_src() -> None:
     html = """<!doctype html><html><head><style>
 html, body { width: 1920px; height: 1080px; background: #fff; }

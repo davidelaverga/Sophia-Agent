@@ -8,6 +8,7 @@ from urllib.parse import unquote, urlsplit
 
 from deerflow.sophia.deck_build.compiler_capabilities import (
     lossy_css_in_html,
+    meta_attributes_are_inert,
     unsupported_css_in_html,
     unsupported_tags_in_html,
 )
@@ -101,6 +102,8 @@ class _HtmlScanner(HTMLParser):
             self.errors.append(f"forbidden tag <{clean_tag}>")
         if clean_tag == "link" and attr_map.get("rel", "").lower() == "stylesheet":
             self.errors.append("external stylesheet links are forbidden")
+        if clean_tag == "meta" and not meta_attributes_are_inert(attr_map):
+            self.errors.append("meta directives are forbidden; only <meta charset=\"utf-8\"> is allowed")
         if clean_tag == "body":
             self.body_attrs = attr_map
         if clean_tag == "main" and not self.main_attrs:
