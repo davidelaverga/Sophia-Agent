@@ -163,7 +163,7 @@ def record_runtime_event(
     """Record an event through an injected sink without coupling to storage."""
     context = _runtime_context(runtime)
     sink = context.get("build_event_sink") or _DEFAULT_EVENT_SINK
-    scope = _runtime_event_scope(state, context)
+    scope = _runtime_event_scope(state, runtime, context)
     if sink is None or scope is None or not callable(getattr(sink, "append", None)):
         return None
     sequence = _next_sequence(sink, build_id=scope["build_id"], event_type=event_type)
@@ -191,13 +191,55 @@ def _runtime_context(runtime: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
 
 
-def _runtime_event_scope(state: dict[str, Any], context: dict[str, Any]) -> dict[str, str] | None:
+def _runtime_event_scope(
+    state: dict[str, Any],
+    runtime: Any,
+    context: dict[str, Any],
+) -> dict[str, str] | None:
     scope = {
-        "build_id": str(state.get("builder_build_id") or state.get("build_id") or "").strip(),
-        "user_id": str(state.get("user_id") or context.get("user_id") or "").strip(),
-        "thread_id": str(state.get("thread_id") or context.get("thread_id") or "").strip(),
+        "build_id": _runtime_identity_value(state, runtime, context, "builder_build_id", "build_id"),
+        "user_id": _runtime_identity_value(state, runtime, context, "user_id"),
+        "thread_id": _runtime_identity_value(state, runtime, context, "thread_id"),
     }
     return scope if all(scope.values()) else None
+
+
+def _runtime_identity_value(
+    state: dict[str, Any],
+    runtime: Any,
+    context: dict[str, Any],
+    *keys: str,
+) -> str:
+    for source in (state, state.get("builder_task"), state.get("delegation_context")):
+        if not isinstance(source, dict):
+            continue
+        for key in keys:
+            value = source.get(key)
+            if value not in (None, ""):
+                return str(value).strip()
+
+    execution_info = getattr(runtime, "execution_info", None) if runtime is not None else None
+    for key in keys:
+        value = getattr(execution_info, key, None) if execution_info is not None else None
+        if value not in (None, ""):
+            return str(value).strip()
+
+    for key in keys:
+        value = context.get(key)
+        if value not in (None, ""):
+            return str(value).strip()
+
+    config = getattr(runtime, "config", None) if runtime is not None else None
+    if isinstance(config, dict):
+        for source_name in ("configurable", "metadata"):
+            source = config.get(source_name)
+            if not isinstance(source, dict):
+                continue
+            for key in keys:
+                value = source.get(key)
+                if value not in (None, ""):
+                    return str(value).strip()
+    return ""
 
 
 def _next_sequence(sink: Any, *, build_id: str, event_type: str) -> int | None:

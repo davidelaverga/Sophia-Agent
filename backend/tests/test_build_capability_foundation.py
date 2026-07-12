@@ -23,6 +23,7 @@ from deerflow.sophia.build_runtime.events import (
     BuildOperationEvent,
     InMemoryBuildEventSink,
     configure_default_event_sink,
+    record_runtime_event,
 )
 from deerflow.sophia.build_runtime.identity import component_id, new_build_id, new_operation_id, new_version_id
 from deerflow.sophia.build_runtime.metrics import derive_prepare_metrics
@@ -114,6 +115,32 @@ def test_prepare_metrics_are_exact_call_id_sets() -> None:
     assert metrics["prepare_result_count"] == 1
     assert metrics["dangling_prepare_call_ids"] == ["b"]
     assert metrics["prepare_service_call_count"] == 1
+
+
+def test_runtime_event_scope_uses_configurable_and_metadata_without_context() -> None:
+    sink = InMemoryBuildEventSink()
+    runtime = SimpleNamespace(
+        context=None,
+        config={
+            "configurable": {"thread_id": "thread-config"},
+            "metadata": {"user_id": "user-metadata"},
+        },
+    )
+    configure_default_event_sink(sink)
+    try:
+        event = record_runtime_event(
+            state={"builder_build_id": "build-config-scope"},
+            runtime=runtime,
+            event_type="prepare.emitted",
+            tool_call_id="call-1",
+        )
+    finally:
+        configure_default_event_sink(None)
+
+    assert event is not None
+    assert event.thread_id == "thread-config"
+    assert event.user_id == "user-metadata"
+    assert sink.replay(build_id="build-config-scope") == [event]
 
 
 def test_deadline_cancels_model_without_provider_retry(monkeypatch) -> None:
