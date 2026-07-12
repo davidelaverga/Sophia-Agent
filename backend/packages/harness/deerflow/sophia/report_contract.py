@@ -35,6 +35,12 @@ class _VisibilityRule:
     order: int
 
 
+@dataclass(frozen=True)
+class _VisibilityStylesheet:
+    rules: list[_VisibilityRule]
+    unsupported_selectors: set[str]
+
+
 class _ReportStyleParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -58,25 +64,32 @@ class _ReportStyleParser(HTMLParser):
             self._parts.append(data)
 
 
-def _stylesheet_visibility_rules(source: str) -> list[_VisibilityRule]:
+def _stylesheet_visibility_rules(source: str) -> _VisibilityStylesheet:
     collector = _ReportStyleParser()
     collector.feed(source)
     collector.close()
     rules: list[_VisibilityRule] = []
+    unsupported_selectors: set[str] = set()
     order = 0
     for stylesheet in collector.stylesheets:
         parsed = tinycss2.parse_stylesheet(stylesheet, skip_comments=True, skip_whitespace=True)
         for rule in _print_visibility_rules(parsed):
             selectors = [item.strip().lower() for item in tinycss2.serialize(rule.prelude).split(",")]
             declarations = tinycss2.parse_declaration_list(rule.content, skip_comments=True, skip_whitespace=True)
+            visibility_declarations = [
+                declaration
+                for declaration in declarations
+                if getattr(declaration, "type", None) == "declaration"
+                and str(getattr(declaration, "lower_name", "")) in {"display", "visibility"}
+            ]
             for selector in selectors:
-                specificity = _simple_selector_specificity(selector)
+                specificity = _selector_specificity(selector)
                 if specificity is None:
+                    if visibility_declarations:
+                        unsupported_selectors.add(selector)
                     continue
-                for declaration in declarations:
+                for declaration in visibility_declarations:
                     property_name = str(getattr(declaration, "lower_name", ""))
-                    if getattr(declaration, "type", None) != "declaration" or property_name not in {"display", "visibility"}:
-                        continue
                     rules.append(
                         _VisibilityRule(
                             selector=selector,
@@ -88,7 +101,7 @@ def _stylesheet_visibility_rules(source: str) -> list[_VisibilityRule]:
                         )
                     )
                 order += 1
-    return rules
+    return _VisibilityStylesheet(rules=rules, unsupported_selectors=unsupported_selectors)
 
 
 def _print_visibility_rules(rules: list[object]) -> list[object]:
@@ -119,15 +132,29 @@ def _media_query_applies_to_print(media_query: str) -> bool:
     return False
 
 
-def _simple_selector_specificity(selector: str) -> int | None:
-    match = _SIMPLE_SELECTOR_RE.fullmatch(selector)
-    if not match:
+def _selector_compounds(selector: str) -> list[str] | None:
+    if any(character in selector for character in ">+~[]:"):
         return None
-    qualifiers = match.group("qualifiers") or ""
-    return 100 * qualifiers.count("#") + 10 * qualifiers.count(".") + (1 if match.group("tag") not in {None, "*"} else 0)
+    compounds = selector.split()
+    if not compounds or any(_SIMPLE_SELECTOR_RE.fullmatch(compound) is None for compound in compounds):
+        return None
+    return compounds
 
 
-def _simple_selector_matches(selector: str, tag_name: str, attr_map: dict[str, str]) -> bool:
+def _selector_specificity(selector: str) -> int | None:
+    compounds = _selector_compounds(selector)
+    if compounds is None:
+        return None
+    specificity = 0
+    for compound in compounds:
+        match = _SIMPLE_SELECTOR_RE.fullmatch(compound)
+        assert match is not None
+        qualifiers = match.group("qualifiers") or ""
+        specificity += 100 * qualifiers.count("#") + 10 * qualifiers.count(".") + (1 if match.group("tag") not in {None, "*"} else 0)
+    return specificity
+
+
+def _compound_selector_matches(selector: str, tag_name: str, attr_map: dict[str, str]) -> bool:
     match = _SIMPLE_SELECTOR_RE.fullmatch(selector)
     if not match:
         return False
@@ -140,6 +167,27 @@ def _simple_selector_matches(selector: str, tag_name: str, attr_map: dict[str, s
         if prefix == "#" and element_id != name.lower():
             return False
         if prefix == "." and name.lower() not in classes:
+            return False
+    return True
+
+
+def _selector_matches(
+    selector: str,
+    tag_name: str,
+    attr_map: dict[str, str],
+    ancestors: list[tuple[str, dict[str, str], bool]],
+) -> bool:
+    compounds = _selector_compounds(selector)
+    if compounds is None or not _compound_selector_matches(compounds[-1], tag_name, attr_map):
+        return False
+    ancestor_index = len(ancestors) - 1
+    for compound in reversed(compounds[:-1]):
+        while ancestor_index >= 0:
+            ancestor_tag, ancestor_attrs, _hidden = ancestors[ancestor_index]
+            ancestor_index -= 1
+            if _compound_selector_matches(compound, ancestor_tag, ancestor_attrs):
+                break
+        else:
             return False
     return True
 
@@ -206,9 +254,11 @@ class ReportBuildManifest(BaseModel):
 
 
 class _ReportSourceParser(HTMLParser):
-    def __init__(self, visibility_rules: list[_VisibilityRule] | None = None) -> None:
+    def __init__(self, visibility_stylesheet: _VisibilityStylesheet | None = None) -> None:
         super().__init__(convert_charrefs=True)
-        self._visibility_rules = visibility_rules or []
+        stylesheet = visibility_stylesheet or _VisibilityStylesheet(rules=[], unsupported_selectors=set())
+        self._visibility_rules = stylesheet.rules
+        self.unsupported_visibility_selectors = stylesheet.unsupported_selectors
         self.ids: set[str] = set()
         self.duplicate_ids: set[str] = set()
         self.section_ids: set[str] = set()
@@ -223,7 +273,7 @@ class _ReportSourceParser(HTMLParser):
         self.body_section_count = 0
         self.figure_count = 0
         self._ignored_depth = 0
-        self._tag_visibility_stack: list[tuple[str, bool]] = []
+        self._tag_visibility_stack: list[tuple[str, dict[str, str], bool]] = []
         self._text_parts: list[str] = []
 
     @staticmethod
@@ -272,7 +322,7 @@ class _ReportSourceParser(HTMLParser):
 
         winners: dict[str, tuple[bool, int, int, str]] = {}
         for rule in self._visibility_rules:
-            if not _simple_selector_matches(rule.selector, tag_name, attr_map):
+            if not _selector_matches(rule.selector, tag_name, attr_map, self._tag_visibility_stack):
                 continue
             candidate = (rule.important, rule.specificity, rule.order, rule.value)
             if rule.property_name not in winners or candidate[:3] >= winners[rule.property_name][:3]:
@@ -290,7 +340,7 @@ class _ReportSourceParser(HTMLParser):
     def _enter_element(self, tag_name: str, attr_map: dict[str, str]) -> bool:
         element_hidden = self._element_is_hidden(tag_name, attr_map)
         if tag_name not in _VOID_HTML_TAGS:
-            self._tag_visibility_stack.append((tag_name, element_hidden))
+            self._tag_visibility_stack.append((tag_name, attr_map, element_hidden))
             if element_hidden:
                 self._ignored_depth += 1
         return element_hidden or self._ignored_depth > 0
@@ -301,7 +351,7 @@ class _ReportSourceParser(HTMLParser):
             return
         closing = self._tag_visibility_stack[matching_index:]
         del self._tag_visibility_stack[matching_index:]
-        self._ignored_depth = max(0, self._ignored_depth - sum(1 for _tag, hidden in closing if hidden))
+        self._ignored_depth = max(0, self._ignored_depth - sum(1 for _tag, _attrs, hidden in closing if hidden))
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag_name = tag.lower()
@@ -382,6 +432,8 @@ def _structural_problems(
     unresolved_toc_targets: list[str],
 ) -> list[str]:
     problems: list[str] = []
+    if parser.unsupported_visibility_selectors:
+        problems.append("report_manifest.stylesheet_visibility_selector")
     if parser.body_section_count < expected_body_count:
         problems.append("report_manifest.sections:body_section_count")
     if len(parser.visual_ids) < expected_visual_count:
@@ -468,5 +520,6 @@ def inspect_report_source(
         "references_present": parser.references_present,
         "duplicate_html_ids": sorted(parser.duplicate_ids),
         "unresolved_toc_targets": unresolved_toc_targets,
+        "unsupported_visibility_selectors": sorted(parser.unsupported_visibility_selectors),
         "report_contract_problems": problems,
     }

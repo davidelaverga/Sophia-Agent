@@ -337,10 +337,11 @@ def test_report_contract_excludes_print_media_hidden_semantics_and_text(staged, 
     hidden_prose = " ".join(["invisible"] * 350)
     (staged / "report.html").write_text(
         "<html><head><style>@media screen { .screen-only { display: none; } }"
-        "@media print, speech { .pad { visibility: hidden; } }</style></head><body>"
+        "@media print, speech { .report .pad { visibility: hidden; } }</style></head><body>"
+        "<main class='report'>"
         f"<section id='architecture' class='pad' data-report-role='body'><p>{hidden_prose}</p></section>"
         "<section id='visible' class='screen-only' data-report-role='body'>Visible in print.</section>"
-        "</body></html>"
+        "</main></body></html>"
     )
     monkeypatch.setattr(render_html, "_html_pdf_runtime", lambda: pytest.fail("Chromium must not run for print-hidden content"))
 
@@ -369,6 +370,37 @@ def test_report_contract_excludes_print_media_hidden_semantics_and_text(staged, 
     assert result["found_body_section_count"] == 1
     assert result["source_word_count"] < 10
     assert "report_manifest.minimum_word_count" in result["report_contract_problems"]
+
+
+def test_report_contract_rejects_unmodeled_visibility_selectors(staged, monkeypatch):
+    prose = " ".join(["analysis"] * 350)
+    (staged / "report.html").write_text(
+        "<html><head><style>@media print { .pad:first-child { display: none; } }</style></head><body>"
+        f"<section id='architecture' class='pad' data-report-role='body'><p>{prose}</p></section>"
+        "</body></html>"
+    )
+    monkeypatch.setattr(render_html, "_html_pdf_runtime", lambda: pytest.fail("Chromium must not run for unmodeled visibility selectors"))
+
+    result = _call(
+        runtime=_fake_runtime(
+            {
+                "builder_artifact_target_path": f"{_OUTPUTS_PREFIX}out.pdf",
+                "delegation_context": {"task_type": "visual_report"},
+                "builder_pdf_required_body_section_count": 1,
+                "builder_pdf_required_min_word_count": 300,
+            }
+        ),
+        html_path=f"{_OUTPUTS_PREFIX}report.html",
+        pdf_path=f"{_OUTPUTS_PREFIX}out.pdf",
+        report_manifest={
+            "sections": [{"id": "architecture", "title": "Architecture", "role": "body"}],
+            "minimum_word_count": 300,
+        },
+    )
+
+    assert result["success"] is False
+    assert result["unsupported_visibility_selectors"] == [".pad:first-child"]
+    assert "report_manifest.stylesheet_visibility_selector" in result["report_contract_problems"]
 
 
 def test_complete_report_contract_renders_with_state_page_targets(staged, monkeypatch, tmp_path):
