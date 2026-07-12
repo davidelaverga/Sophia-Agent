@@ -2732,6 +2732,37 @@ class TestBuilderArtifactMiddleware:
         assert "error_detail" not in diagnostic
         assert "Overloaded" not in repr(diagnostic)
 
+    def test_model_request_configuration_error_has_specific_terminal_reason(self, monkeypatch):
+        from deerflow.agents.sophia_agent.middlewares import builder_artifact
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        monkeypatch.setattr(builder_artifact, "annotate_builder_completion", lambda *_args, **_kwargs: None)
+        monkeypatch.setattr(builder_artifact, "fire_completion_webhook_from_artifact", lambda **_kwargs: None)
+        msg = MagicMock()
+        msg.type = "ai"
+        msg.tool_calls = []
+        msg.additional_kwargs = {
+            "deerflow_error_fallback": True,
+            "error_type": "TypeError",
+            "error_reason": "generic",
+            "error_detail": "unexpected keyword argument",
+        }
+
+        result = BuilderArtifactMiddleware().after_model(
+            {
+                "messages": [msg],
+                "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+                "delegation_context": {"task": "Build a deck", "task_type": "presentation"},
+            },
+            _make_runtime(thread_id="builder-thread"),
+        )
+
+        assert result is not None
+        artifact = result["builder_result"]
+        assert artifact["terminal_reason"] == "deck_authoring_model_invocation_error"
+        assert artifact["root_failure_code"] == "deck_authoring_model_invocation_error"
+        assert "budget" not in artifact["root_failure_summary"].lower()
+
     def test_uploads_to_parent_thread_id_when_delegation_context_has_it(self, monkeypatch):
         """Phase-1-async-migration regression (2026-05-06).
 
@@ -3639,10 +3670,9 @@ class TestBuilderArtifactMiddleware:
         assert _pdf_page_count_off_target({"requested_page_count": 10, "page_count": 9}) is False
         assert _pdf_page_count_off_target({"requested_page_count": 10, "page_count": 13}) is True
 
-    def test_pdf_page_count_off_target_after_repair_ships_with_quality_warning(self, tmp_path):
+    def test_pdf_page_count_off_target_after_repairs_is_rejected(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
-            BuilderArtifactMiddleware,
-            _apply_pdf_page_count_quality_metadata,
+            _pdf_render_page_count_failed_after_repairs,
         )
 
         outputs_dir = tmp_path / "outputs"
@@ -3652,7 +3682,7 @@ class TestBuilderArtifactMiddleware:
         state = {
             "thread_data": {"outputs_path": str(outputs_dir)},
             "builder_artifact_target_path": "/mnt/user-data/outputs/report.pdf",
-            "builder_pdf_layout_repair_attempts": 1,
+            "builder_pdf_layout_repair_attempts": 2,
             "builder_pdf_layout_repair_requested": True,
             "builder_pdf_render_result": {
                 "success": True,
@@ -3664,23 +3694,7 @@ class TestBuilderArtifactMiddleware:
             },
         }
 
-        # Never terminal: the off-target PDF is not rejected at emit ...
-        assert (
-            BuilderArtifactMiddleware._format_specific_rejection(
-                "/mnt/user-data/outputs/report.pdf",
-                state,
-                _make_runtime(thread_id="thread-x"),
-            )
-            is None
-        )
-        # ... it ships with a quality_warning instead of artifact_path=null.
-        emitted = _apply_pdf_page_count_quality_metadata(
-            {"artifact_path": "/mnt/user-data/outputs/report.pdf", "confidence": 0.9},
-            state,
-        )
-        assert emitted["quality_warning"] == "page_count_off_target"
-        assert emitted["confidence"] <= 0.65
-        assert emitted["page_count_delta"] == 7
+        assert _pdf_render_page_count_failed_after_repairs(state) is True
 
     def test_recover_emit_args_prefers_successful_pdf_render(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware

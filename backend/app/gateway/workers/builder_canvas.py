@@ -281,8 +281,37 @@ def _completion_has_deliverable(completion: dict[str, Any]) -> bool:
     return _completion_has(completion, "artifact_path") or _completion_has(completion, "artifact_url")
 
 
+def _completion_failure_reason(payload: dict[str, Any]) -> str | None:
+    terminal_status = str(payload.get("terminal_status") or "").strip().lower()
+    reason = str(payload.get("terminal_reason") or payload.get("failure_code") or "").strip().lower()
+    if terminal_status in {"failed", "timed_out"}:
+        return reason or terminal_status
+    if reason.endswith(("_failed", "_failure", "_incomplete", "_not_completed")) or reason in {
+        "pdf_generation_failed",
+        "pdf_page_count_off_target",
+        "pdf_report_contract_failed",
+        "pdf_report_manifest_invalid",
+    }:
+        return reason
+    return None
+
+
 def _normalize_completion_payload(payload: dict[str, Any]) -> dict[str, Any]:
     status = str(payload.get("status") or "").lower()
+    failure_reason = _completion_failure_reason(payload)
+    if status in {"success", "completed"} and failure_reason is not None:
+        logger.warning(
+            "Builder canvas: contradictory terminal success coerced to failed reason=%s parent_thread_id=%s task_id=%s run_id=%s",
+            failure_reason,
+            payload.get("thread_id"),
+            payload.get("task_id"),
+            payload.get("run_id"),
+        )
+        return {
+            **payload,
+            "status": "timeout" if str(payload.get("terminal_status") or "").lower() == "timed_out" else "error",
+            "error_message": payload.get("error_message") or "The builder did not complete the requested artifact successfully.",
+        }
     if status in {"success", "completed"} and not _completion_has_deliverable(payload):
         logger.warning(
             "Builder canvas: terminal success coerced to failed reason=missing_deliverable parent_thread_id=%s task_id=%s run_id=%s",

@@ -46,10 +46,10 @@ def _call(**kwargs) -> dict:
     return parsed
 
 
-def _fake_runtime() -> SimpleNamespace:
+def _fake_runtime(state: dict | None = None) -> SimpleNamespace:
     # get_thread_data reads runtime.state["thread_data"]; content is irrelevant
     # because we monkeypatch the host-path resolver in every test.
-    return SimpleNamespace(state={"thread_data": {}}, context={}, config={})
+    return SimpleNamespace(state={"thread_data": {}, **(state or {})}, context={}, config={})
 
 
 @pytest.fixture
@@ -148,6 +148,150 @@ def test_render_script_missing(staged, monkeypatch):
     )
     assert result["success"] is False
     assert result["error_type"] == "render_script_missing"
+
+
+def test_visual_report_requires_manifest_before_chromium(staged, monkeypatch):
+    (staged / "report.html").write_text("<html><body><section>Draft</section></body></html>")
+    called = False
+
+    def _unexpected_runtime():
+        nonlocal called
+        called = True
+        return None, None, None
+
+    monkeypatch.setattr(render_html, "_html_pdf_runtime", _unexpected_runtime)
+    result = _call(
+        runtime=_fake_runtime(
+            {
+                "builder_artifact_target_path": f"{_OUTPUTS_PREFIX}out.pdf",
+                "delegation_context": {"task_type": "visual_report"},
+            }
+        ),
+        html_path=f"{_OUTPUTS_PREFIX}report.html",
+        pdf_path=f"{_OUTPUTS_PREFIX}out.pdf",
+    )
+
+    assert result["success"] is False
+    assert result["error_type"] == "report_manifest_required"
+    assert result["retryable"] is True
+    assert called is False
+
+
+def test_report_manifest_is_model_visible_but_runtime_is_injected() -> None:
+    tool = render_html.render_html_to_pdf
+    schema = tool.tool_call_schema.model_json_schema()
+
+    assert tool._injected_args_keys == frozenset({"runtime"})
+    assert "report_manifest" in schema["properties"]
+    assert "runtime" not in schema["properties"]
+
+
+def test_report_contract_rejects_missing_sections_and_visuals_before_render(staged, monkeypatch):
+    (staged / "report.html").write_text(
+        "<html><body><section id='cover' class='cover' data-report-role='cover'>Cover</section>"
+        "<nav id='toc' class='toc'><a href='#architecture'>Architecture</a></nav>"
+        "<section id='summary' data-report-role='summary'>Summary only</section></body></html>"
+    )
+    monkeypatch.setattr(render_html, "_html_pdf_runtime", lambda: pytest.fail("Chromium must not run for an incomplete source"))
+    result = _call(
+        runtime=_fake_runtime(
+            {
+                "builder_artifact_target_path": f"{_OUTPUTS_PREFIX}out.pdf",
+                "delegation_context": {"task_type": "visual_report"},
+                "builder_pdf_required_body_section_count": 2,
+                "builder_pdf_required_visual_count": 1,
+                "builder_pdf_required_min_word_count": 300,
+                "builder_pdf_cover_required": True,
+                "builder_pdf_toc_required": True,
+            }
+        ),
+        html_path=f"{_OUTPUTS_PREFIX}report.html",
+        pdf_path=f"{_OUTPUTS_PREFIX}out.pdf",
+        report_manifest={
+            "sections": [
+                {"id": "cover", "title": "Cover", "role": "cover"},
+                {"id": "architecture", "title": "Architecture", "role": "body"},
+                {"id": "trade-offs", "title": "Trade-offs", "role": "body"},
+            ],
+            "visuals": [{"id": "memory-pipeline", "title": "Memory pipeline", "kind": "diagram"}],
+            "cover_required": True,
+            "toc_required": True,
+            "minimum_word_count": 300,
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error_type"] == "report_contract_failed"
+    assert result["missing_section_ids"] == ["architecture", "trade-offs"]
+    assert result["missing_visual_ids"] == ["memory-pipeline"]
+    assert "report_manifest.minimum_word_count" in result["report_contract_problems"]
+
+
+def test_complete_report_contract_renders_with_state_page_targets(staged, monkeypatch, tmp_path):
+    prose = " ".join(["analysis"] * 340)
+    (staged / "report.html").write_text(
+        "<html><body>"
+        "<section id='cover' class='cover' data-report-role='cover'>Cover</section>"
+        "<nav id='toc' class='toc'><a href='#architecture'>Architecture</a><a href='#conclusion'>Conclusion</a></nav>"
+        f"<section id='architecture' data-report-role='body'><h2>Architecture</h2><p>{prose}</p>"
+        "<figure data-visual-id='memory-pipeline'><svg><rect width='10' height='10'/></svg></figure></section>"
+        "<section id='conclusion' data-report-role='conclusion'>Conclusion</section>"
+        "<section id='references' data-report-role='references'>References</section>"
+        "</body></html>"
+    )
+    _wire_node(monkeypatch, tmp_path)
+
+    def _fake_run(_cmd, **_kwargs):
+        (staged / "out.pdf").write_bytes(b"%PDF-1.7 fake")
+        return SimpleNamespace(returncode=0, stdout="", stderr="vector_visual_count=1")
+
+    captured = {}
+    monkeypatch.setattr(render_html, "_run_html_pdf_renderer_process", _fake_run)
+    monkeypatch.setattr(
+        render_html,
+        "_inspect_pdf_layout_with_targets",
+        lambda _host_pdf, **kwargs: captured.update(kwargs) or {"page_count": 12, "image_count": 0, "layout_quality": "ok"},
+    )
+    result = _call(
+        runtime=_fake_runtime(
+            {
+                "builder_artifact_target_path": f"{_OUTPUTS_PREFIX}out.pdf",
+                "delegation_context": {"task_type": "visual_report"},
+                "builder_pdf_requested_min_pages": 12,
+                "builder_pdf_requested_max_pages": 16,
+                "builder_pdf_required_body_section_count": 1,
+                "builder_pdf_required_visual_count": 1,
+                "builder_pdf_required_min_word_count": 300,
+                "builder_pdf_cover_required": True,
+                "builder_pdf_toc_required": True,
+                "builder_pdf_conclusion_required": True,
+                "builder_pdf_references_required": True,
+            }
+        ),
+        html_path=f"{_OUTPUTS_PREFIX}report.html",
+        pdf_path=f"{_OUTPUTS_PREFIX}out.pdf",
+        report_manifest={
+            "sections": [
+                {"id": "cover", "title": "Cover", "role": "cover"},
+                {"id": "architecture", "title": "Architecture", "role": "body"},
+                {"id": "conclusion", "title": "Conclusion", "role": "conclusion"},
+                {"id": "references", "title": "References", "role": "references"},
+            ],
+            "visuals": [{"id": "memory-pipeline", "title": "Memory pipeline", "kind": "diagram"}],
+            "cover_required": True,
+            "toc_required": True,
+            "conclusion_required": True,
+            "references_required": True,
+            "minimum_word_count": 300,
+        },
+    )
+
+    assert result["success"] is True
+    assert result["report_contract_status"] == "accepted"
+    assert result["cover_present"] is True
+    assert result["found_visual_count"] == 1
+    assert captured["requested_min_pages"] == 12
+    assert captured["requested_max_pages"] == 16
 
 
 # ---- Subprocess invocation + result shaping --------------------------------

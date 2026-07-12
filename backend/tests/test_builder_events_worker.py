@@ -429,6 +429,68 @@ async def test_internal_post_persists_terminal_deck_diagnostics(
 
 
 @pytest.mark.anyio
+async def test_internal_post_persists_report_contract_diagnostics(
+    app: FastAPI,
+    client: httpx.AsyncClient,
+    monkeypatch,
+):
+    captured: dict = {}
+    fake_threads = MagicMock()
+
+    async def _update_state(thread_id: str, values: dict):
+        captured["thread_id"] = thread_id
+        captured["values"] = values
+
+    fake_threads.update_state = AsyncMock(side_effect=_update_state)
+    fake_client = MagicMock()
+    fake_client.threads = fake_threads
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    report_fields = {
+        "report_contract_status": "rejected",
+        "report_contract_version": "report_manifest_v1",
+        "expected_section_count": 9,
+        "found_section_count": 5,
+        "expected_body_section_count": 6,
+        "found_body_section_count": 2,
+        "expected_visual_count": 4,
+        "found_visual_count": 1,
+        "missing_section_ids": ["architecture", "conclusion"],
+        "missing_visual_ids": ["read-path", "write-path"],
+        "minimum_word_count": 1200,
+        "source_word_count": 458,
+        "cover_present": True,
+        "toc_present": True,
+        "conclusion_present": False,
+        "references_present": False,
+        "report_contract_problems": ["report_manifest.sections[3].id:architecture"],
+    }
+
+    async with client:
+        response = await client.post(
+            "/internal/builder-events",
+            json={
+                "thread_id": "parent-thread",
+                "task_id": "builder-task",
+                "run_id": "run-1",
+                "status": "error",
+                "agent_name": "sophia_builder",
+                "terminal_status": "failed",
+                "terminal_reason": "pdf_report_contract_failed",
+                **report_fields,
+            },
+        )
+        last_response = await client.get("/api/threads/parent-thread/builder-events/last")
+
+    assert response.status_code == 202
+    task_update = captured["values"]["async_tasks"]["builder-task"]
+    for key, value in report_fields.items():
+        assert task_update[key] == value
+        assert task_update["builder_result"][key] == value
+        assert last_response.json()[key] == value
+
+
+@pytest.mark.anyio
 async def test_internal_post_hydrates_missing_run_id_from_parent_task(
     app: FastAPI,
     client: httpx.AsyncClient,

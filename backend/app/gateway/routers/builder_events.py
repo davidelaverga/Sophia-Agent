@@ -107,6 +107,23 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "budget_stop_reason",
     "terminal_status",
     "terminal_reason",
+    "report_contract_status",
+    "report_contract_version",
+    "expected_section_count",
+    "found_section_count",
+    "expected_body_section_count",
+    "found_body_section_count",
+    "missing_section_ids",
+    "expected_visual_count",
+    "found_visual_count",
+    "missing_visual_ids",
+    "minimum_word_count",
+    "source_word_count",
+    "cover_present",
+    "toc_present",
+    "conclusion_present",
+    "references_present",
+    "report_contract_problems",
     "first_prepare_turn",
     "prepare_call_count",
     "prepare_emitted_call_count",
@@ -210,6 +227,23 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "budget_stop_reason",
         "terminal_status",
         "terminal_reason",
+        "report_contract_status",
+        "report_contract_version",
+        "expected_section_count",
+        "found_section_count",
+        "expected_body_section_count",
+        "found_body_section_count",
+        "missing_section_ids",
+        "expected_visual_count",
+        "found_visual_count",
+        "missing_visual_ids",
+        "minimum_word_count",
+        "source_word_count",
+        "cover_present",
+        "toc_present",
+        "conclusion_present",
+        "references_present",
+        "report_contract_problems",
         "first_prepare_turn",
         "prepare_call_count",
         "prepare_emitted_call_count",
@@ -474,6 +508,23 @@ class BuilderCompletionEvent(BaseModel):
         description="Internal builder status: completed | failed | timed_out.",
     )
     terminal_reason: str | None = None
+    report_contract_status: str | None = None
+    report_contract_version: str | None = None
+    expected_section_count: int | None = None
+    found_section_count: int | None = None
+    expected_body_section_count: int | None = None
+    found_body_section_count: int | None = None
+    missing_section_ids: list[str] | None = None
+    expected_visual_count: int | None = None
+    found_visual_count: int | None = None
+    missing_visual_ids: list[str] | None = None
+    minimum_word_count: int | None = None
+    source_word_count: int | None = None
+    cover_present: bool | None = None
+    toc_present: bool | None = None
+    conclusion_present: bool | None = None
+    references_present: bool | None = None
+    report_contract_problems: list[str] | None = None
     first_prepare_turn: int | None = None
     prepare_call_count: int | None = None
     prepare_emitted_call_count: int | None = None

@@ -17,8 +17,6 @@ Deployment: ``node`` + a chromium executable on the langgraph image
 resolves beside the .mjs). Override the browser via ``SOPHIA_CHROMIUM_PATH``.
 """
 
-from __future__ import annotations
-
 import logging
 import os
 import re
@@ -27,11 +25,14 @@ import subprocess  # noqa: S404 — node by absolute path + fixed bundled script
 from html.parser import HTMLParser
 from pathlib import Path
 from posixpath import normpath
+from typing import Any
 
 from langchain.tools import ToolRuntime, tool
+from pydantic import ValidationError
 
 from deerflow.sandbox.tools import get_thread_data
 from deerflow.sophia.process_group import run_process_group
+from deerflow.sophia.report_contract import ReportBuildManifest, inspect_report_source
 from deerflow.sophia.tools.render_markdown_to_pdf import (
     _ensure_relative_to_outputs,
     _host_path_for_virtual_output,
@@ -392,6 +393,52 @@ def _missing_html_result(host_html: Path, html_path: str) -> str | None:
     )
 
 
+def _runtime_state(runtime: ToolRuntime) -> dict[str, Any]:
+    state = getattr(runtime, "state", None)
+    return state if isinstance(state, dict) else {}
+
+
+def _report_requirements_from_state(state: dict[str, Any]) -> dict[str, Any]:
+    return {
+        "required_body_section_count": state.get("builder_pdf_required_body_section_count"),
+        "required_visual_count": state.get("builder_pdf_required_visual_count"),
+        "required_min_word_count": state.get("builder_pdf_required_min_word_count"),
+        "cover_required": state.get("builder_pdf_cover_required"),
+        "toc_required": state.get("builder_pdf_toc_required"),
+        "conclusion_required": state.get("builder_pdf_conclusion_required"),
+        "references_required": state.get("builder_pdf_references_required"),
+    }
+
+
+def _report_manifest_required(state: dict[str, Any]) -> bool:
+    delegation = state.get("delegation_context")
+    task_type = str(delegation.get("task_type") or "").strip().lower() if isinstance(delegation, dict) else ""
+    return task_type == "visual_report" and str(state.get("builder_artifact_target_path") or "").lower().endswith(".pdf")
+
+
+def _validated_report_manifest(value: ReportBuildManifest | dict[str, Any] | None) -> ReportBuildManifest | None:
+    if value is None or isinstance(value, ReportBuildManifest):
+        return value
+    return ReportBuildManifest.model_validate(value)
+
+
+def _resolved_page_targets(
+    state: dict[str, Any],
+    *,
+    requested_pages: int | None,
+    requested_min_pages: int | None,
+    requested_max_pages: int | None,
+) -> tuple[int | None, int | None, int | None]:
+    exact = requested_pages or state.get("builder_pdf_requested_page_count")
+    low = requested_min_pages or state.get("builder_pdf_requested_min_pages")
+    high = requested_max_pages or state.get("builder_pdf_requested_max_pages")
+    return (
+        exact if isinstance(exact, int) and exact > 0 else None,
+        low if isinstance(low, int) and low > 0 else None,
+        high if isinstance(high, int) and high > 0 else None,
+    )
+
+
 @tool("render_html_to_pdf", parse_docstring=True)
 def render_html_to_pdf(
     runtime: ToolRuntime,
@@ -400,6 +447,7 @@ def render_html_to_pdf(
     requested_pages: int | None = None,
     requested_min_pages: int | None = None,
     requested_max_pages: int | None = None,
+    report_manifest: ReportBuildManifest | None = None,
     margin: str | None = None,
 ) -> str:
     """Render a self-contained HTML report file to PDF via headless Chromium.
@@ -415,6 +463,7 @@ def render_html_to_pdf(
         requested_pages: Exact requested page count when the user asked for a length.
         requested_min_pages: Minimum requested pages (range mode).
         requested_max_pages: Maximum requested pages (range mode).
+        report_manifest: Final report section/visual contract. Required for visual-report builder runs.
         margin: Optional CSS page margin (e.g. "16mm"); defaults to 16mm.
     """
     path_error = _html_pdf_path_error(html_path, pdf_path)
@@ -434,6 +483,50 @@ def render_html_to_pdf(
     missing_html = _missing_html_result(host_html, html_path)
     if missing_html is not None:
         return missing_html
+
+    state = _runtime_state(runtime)
+    try:
+        manifest = _validated_report_manifest(report_manifest)
+    except ValidationError as exc:
+        return _result(
+            success=False,
+            retryable=True,
+            error_type="report_manifest_invalid",
+            error="The report manifest failed typed validation.",
+            validation_error_count=exc.error_count(),
+        )
+    if manifest is None and _report_manifest_required(state):
+        return _result(
+            success=False,
+            retryable=True,
+            error_type="report_manifest_required",
+            error="Visual PDF reports require report_manifest before rendering.",
+            report_contract_status="rejected",
+            report_contract_version="report_manifest_v1",
+            report_contract_problems=["report_manifest"],
+        )
+    contract: dict[str, Any] = {}
+    if manifest is not None:
+        contract = inspect_report_source(
+            host_html,
+            manifest,
+            requirements=_report_requirements_from_state(state),
+        )
+        if contract.get("report_contract_status") != "accepted":
+            return _result(
+                success=False,
+                retryable=True,
+                error_type="report_contract_failed",
+                error="The final HTML source is missing required report sections, visuals, or structure.",
+                **contract,
+            )
+
+    requested_pages, requested_min_pages, requested_max_pages = _resolved_page_targets(
+        state,
+        requested_pages=requested_pages,
+        requested_min_pages=requested_min_pages,
+        requested_max_pages=requested_max_pages,
+    )
 
     node, script, runtime_error = _html_pdf_runtime()
     if runtime_error is not None:
@@ -477,5 +570,6 @@ def render_html_to_pdf(
         engine="chromium",
         engine_message="rendered via headless chromium (playwright-core)",
         vector_visual_count=vector_visual_count,
+        **contract,
         **layout,
     )

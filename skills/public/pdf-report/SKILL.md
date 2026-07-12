@@ -37,10 +37,16 @@ final artifact unless explicitly requested.
    theme-matched palette. Reference them as `<img src="visuals/<name>.png">`.
    All DATA and STRUCTURE stays inline `<svg>`; generated images are conceptual
    only.
-6. Render with `render_html_to_pdf(html_path=..., pdf_path=..., requested_pages=...)`,
-   passing the page-count parameters when the user asked for a length.
-7. Inspect the render result. Repair a missing figure or page-count drift once.
-8. Emit the `.pdf` as the primary artifact.
+6. Build `report_manifest_v1` for the FINAL source. List every section's exact
+   HTML id/title/role and every requested visual's exact `data-visual-id`, title,
+   and kind. Do not render while a body/visual todo remains incomplete.
+7. Render with `render_html_to_pdf(html_path=..., pdf_path=...,
+   report_manifest=..., requested_pages=...)`, passing page-count parameters
+   when the user asked for a length. The tool validates the manifest against
+   the HTML before Chromium runs.
+8. Inspect the render result. Repair a missing contract item, figure, or page
+   drift once. A second semantic miss is a truthful failure, not a partial PDF.
+9. Emit the `.pdf` as the primary artifact.
 
 ## Document skeleton
 
@@ -55,24 +61,24 @@ final artifact unless explicitly requested.
 </style>
 </head>
 <body>
-  <section class="cover">
+  <section id="cover" class="cover" data-report-role="cover">
     <h1>Report Title</h1>
     <p class="subtitle">One-line subtitle or scope</p>
     <p class="meta">Prepared for … · 2026</p>
   </section>
 
-  <section class="toc">
+  <nav id="toc" class="toc" data-report-role="toc">
     <h2>Contents</h2>
     <ol>
-      <li><span>1. Section one</span><span>3</span></li>
-      <li><span>2. Section two</span><span>5</span></li>
+      <li><a href="#section-one">1. Section one</a><span>3</span></li>
+      <li><a href="#section-two">2. Section two</a><span>5</span></li>
     </ol>
-  </section>
+  </nav>
 
-  <section>
+  <section id="section-one" data-report-role="body">
     <h2>1. Section one</h2>
     <p>Prose…</p>
-    <figure>
+    <figure data-visual-id="section-one-figure">
       <p class="figure-title">Figure 1. Title</p>
       <!-- inline <svg> here -->
       <figcaption>Source-aware caption.</figcaption>
@@ -80,6 +86,26 @@ final artifact unless explicitly requested.
   </section>
 </body>
 </html>
+```
+
+The matching final tool argument is typed data, not prose:
+
+```json
+{
+  "schema_version": "report_manifest_v1",
+  "sections": [
+    {"id": "cover", "title": "Report title", "role": "cover"},
+    {"id": "section-one", "title": "Section one", "role": "body"}
+  ],
+  "visuals": [
+    {"id": "section-one-figure", "title": "Figure 1", "kind": "diagram"}
+  ],
+  "cover_required": true,
+  "toc_required": true,
+  "conclusion_required": false,
+  "references_required": false,
+  "minimum_word_count": 600
+}
 ```
 
 ## Pattern library (inline SVG)
@@ -214,6 +240,7 @@ acceptable only when repeated measurement is the actual analytic point.
   `<img src="visuals/<name>.png">`). No remote image URLs, no `<script>`,
   no external chart libraries.
 - Wrap each figure in `<figure>` with a `.figure-title` and a `<figcaption>`.
+- Put a unique `data-visual-id` on every manifest-listed `<figure>`.
 - Keep captions specific and source-aware.
 
 ## Length and figure sizing
@@ -240,6 +267,9 @@ request).
 - Do NOT add your own `@page` margin or page-number footer — `render_html_to_pdf`
   supplies them.
 - Use clean heading levels (`h1`/`h2`/`h3`) so the document reads coherently.
+- Give every final report section a unique lowercase `id` and
+  `data-report-role` (`cover`, `toc`, `summary`, `body`, `conclusion`, or
+  `references`). TOC links must target those exact ids.
 - Cite researched claims inline.
 - Prefer prose over unnecessary graphics.
 - Use HTML `<table>` for tabular comparisons.
@@ -260,6 +290,8 @@ request).
 - Page count is near the requested target, or the render result explains the
   bounded drift.
 - Headings and (if present) TOC are coherent.
+- `report_contract_status=accepted`; expected/found section and visual counts
+  match, and all TOC anchors resolve.
 - Citations are present where factual claims require them.
 - Figures are inline SVG, render with real series/labels (not empty frames),
   legible, varied when appropriate, and not repeated from one generic template.

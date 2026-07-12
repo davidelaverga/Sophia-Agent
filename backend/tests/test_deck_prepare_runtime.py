@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import inspect
 import json
 import time
 from collections.abc import Sequence
@@ -7,10 +8,12 @@ from pathlib import Path
 from typing import Any, NotRequired, override
 
 import pytest
+from anthropic.resources.messages import AsyncMessages
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import hook_config
 from langchain.chat_models.base import BaseChatModel
+from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import BaseTool, tool
@@ -286,7 +289,37 @@ def test_presentation_model_request_is_bounded_by_authoring_deadline() -> None:
 
     assert request.model_settings["max_tokens"] == 16_384
     assert 88 <= request.model_settings["timeout"] <= 90
-    assert request.model_settings["max_retries"] == 0
+    assert "max_retries" not in request.model_settings
+
+
+def test_presentation_model_settings_are_valid_anthropic_message_parameters() -> None:
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation"},
+        "builder_task_kickoff_ms": int(time.time() * 1000) - 10_000,
+        "builder_budget": {
+            "tier": "presentation",
+            "prepare_force_after_seconds": 120,
+            "authoring_max_tokens": 16_384,
+            "authoring_timeout_seconds": 110,
+        },
+    }
+    request = BuilderArtifactMiddleware._bounded_presentation_model_request(_ModelRequest(state))
+    model = ChatAnthropic(
+        model="claude-sonnet-4-5",
+        api_key="test-anthropic-key",
+        max_tokens=16_384,
+        streaming=False,
+    )
+
+    payload = model._get_request_payload(
+        [HumanMessage(content="Create the deck.")],
+        **request.model_settings,
+    )
+    provider_parameters = set(inspect.signature(AsyncMessages.create).parameters)
+
+    assert set(payload).issubset(provider_parameters)
+    assert "max_retries" not in payload
 
 
 def test_presentation_authoring_disables_provider_fallback() -> None:

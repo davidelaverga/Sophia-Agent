@@ -497,12 +497,7 @@ def _active_pregel_run_tree(state: dict[str, Any], artifact: dict[str, Any]) -> 
         except (AttributeError, RuntimeError):
             continue
         run_ids = {str(getattr(run, "id", "")) for run in runs}
-        candidates.extend(
-            run
-            for run in runs
-            if not getattr(run, "parent_run_id", None)
-            or str(getattr(run, "parent_run_id", "")) not in run_ids
-        )
+        candidates.extend(run for run in runs if not getattr(run, "parent_run_id", None) or str(getattr(run, "parent_run_id", "")) not in run_ids)
     if not candidates:
         return None
 
@@ -889,7 +884,28 @@ def _add_pdf_layout_metadata(
     artifact: dict[str, Any],
 ) -> None:
     pdf_result = _as_dict(state.get("builder_pdf_render_result"))
-    for key in ("requested_page_count", "page_count", "layout_quality", "layout_warning"):
+    for key in (
+        "requested_page_count",
+        "requested_min_pages",
+        "requested_max_pages",
+        "page_count",
+        "layout_quality",
+        "layout_warning",
+        "report_contract_status",
+        "report_contract_version",
+        "expected_section_count",
+        "found_section_count",
+        "expected_body_section_count",
+        "found_body_section_count",
+        "expected_visual_count",
+        "found_visual_count",
+        "minimum_word_count",
+        "source_word_count",
+        "cover_present",
+        "toc_present",
+        "conclusion_present",
+        "references_present",
+    ):
         _merge_safe_metadata(metadata, f"pdf_{key}", pdf_result.get(key))
     requested = pdf_result.get("requested_page_count") or artifact.get("requested_pages")
     actual = pdf_result.get("page_count") or artifact.get("actual_pages")
@@ -925,6 +941,20 @@ def _add_artifact_acceptance_metadata(metadata: dict[str, Any], artifact: dict[s
         "prepare_force_reason",
         "root_failure_code",
         "root_failure_summary",
+        "report_contract_status",
+        "report_contract_version",
+        "expected_section_count",
+        "found_section_count",
+        "expected_body_section_count",
+        "found_body_section_count",
+        "expected_visual_count",
+        "found_visual_count",
+        "minimum_word_count",
+        "source_word_count",
+        "cover_present",
+        "toc_present",
+        "conclusion_present",
+        "references_present",
         "source_retention_report",
         "native_contrast_report",
     ):

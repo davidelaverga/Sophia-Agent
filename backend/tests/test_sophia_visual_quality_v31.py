@@ -17,6 +17,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
     BuilderTaskMiddleware,
     _pdf_page_target_updates,
+    _pdf_report_requirement_updates,
 )
 
 
@@ -521,3 +522,68 @@ def test_pdf_page_target_still_accepts_output_n_page_pdf_compound() -> None:
             artifact_target_path="/mnt/user-data/outputs/retrieval-quality.pdf",
         )
         assert updates["builder_pdf_requested_page_count"] == expected
+
+
+def test_pdf_page_target_accepts_detached_length_field_in_long_incident_briefs() -> None:
+    cases = [
+        (
+            "Convert the source into a professional PDF report. Structure: title page, executive summary, "
+            "6 main content sections with architecture, trade-offs, implementation, pitfalls, and best practices. "
+            "Include diagrams and charts throughout. Design: professional dark background for software engineers. "
+            "Length: 12-16 pages.",
+            (12, 16),
+        ),
+        (
+            "Create a complete professional academic PDF report with abstract, table of contents, executive summary, "
+            "six substantive sections, conclusion, references, diagrams, charts, and benchmark tables. Design: light "
+            "academic typography with purposeful color. Audience: engineers and researchers. Length: 14-18 pages.",
+            (14, 18),
+        ),
+    ]
+    for task, expected in cases:
+        updates = _pdf_page_target_updates(
+            {"task_type": "visual_report", "task": task},
+            companion_artifact={},
+            artifact_target_path="/mnt/user-data/outputs/report.pdf",
+        )
+        assert (updates["builder_pdf_requested_min_pages"], updates["builder_pdf_requested_max_pages"]) == expected
+
+
+def test_visual_report_requirements_capture_explicit_sections_visuals_and_front_matter() -> None:
+    task = (
+        "Create a report with title page, table of contents, executive summary, and 6 main content sections. "
+        "Include diagrams and charts: (1) architecture pipeline diagram, (2) latency chart, "
+        "(3) storage quadrant chart, (4) read/write flow diagram. Include conclusion and references. "
+        "Length: 12-16 pages."
+    )
+    page_updates = _pdf_page_target_updates(
+        {"task_type": "visual_report", "task": task},
+        companion_artifact={},
+        artifact_target_path="/mnt/user-data/outputs/report.pdf",
+    )
+    requirements = _pdf_report_requirement_updates(
+        {"task_type": "visual_report", "task": task},
+        companion_artifact={},
+        page_updates=page_updates,
+    )
+
+    assert requirements["builder_pdf_required_body_section_count"] == 6
+    assert requirements["builder_pdf_required_visual_count"] == 4
+    assert requirements["builder_pdf_required_min_word_count"] >= 900
+    assert requirements["builder_pdf_cover_required"] is True
+    assert requirements["builder_pdf_toc_required"] is True
+    assert requirements["builder_pdf_conclusion_required"] is True
+    assert requirements["builder_pdf_references_required"] is True
+
+
+def test_pdf_page_target_source_veto_still_wins_with_detached_output_length() -> None:
+    updates = _pdf_page_target_updates(
+        {
+            "task_type": "visual_report",
+            "task": "Summarize this 12-page PDF into a concise report. Length: 3 pages.",
+        },
+        companion_artifact={},
+        artifact_target_path="/mnt/user-data/outputs/summary.pdf",
+    )
+
+    assert updates == {"builder_pdf_requested_page_count": 3}

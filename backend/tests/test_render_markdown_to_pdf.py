@@ -422,7 +422,7 @@ def test_pdf_layout_inspection_flags_sparse_long_documents(tmp_path, monkeypatch
         def __init__(self, _path: str):
             self.pages = [
                 _Page("normal " * 120),
-                _Page("11"),
+                _Page("2 / 18"),
                 *[_Page("short " * 20) for _ in range(16)],
             ]
 

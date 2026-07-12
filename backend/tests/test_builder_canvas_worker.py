@@ -184,6 +184,45 @@ async def test_success_completion_without_deliverable_is_coerced_to_failure() ->
 
 
 @pytest.mark.anyio
+async def test_success_completion_with_failed_terminal_reason_is_coerced_to_failure() -> None:
+    worker = BuilderCanvasWorker()
+    await worker.publish_progress(
+        {
+            "parent_thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "sequence": 1,
+            "event_name": "custom",
+            "data": {"name": "phase", "phase": "finalizing"},
+        }
+    )
+
+    await worker.publish_completion(
+        {
+            "thread_id": "parent-1",
+            "task_id": "task-1",
+            "run_id": "run-1",
+            "status": "success",
+            "artifact_path": "mnt/user-data/outputs/incomplete-report.pdf",
+            "terminal_status": "failed",
+            "terminal_reason": "pdf_report_contract_failed",
+            "report_contract_status": "rejected",
+            "expected_body_section_count": 6,
+            "found_body_section_count": 3,
+        }
+    )
+
+    events = await worker.recent_events("parent-1")
+    completion = events[-1]["completion"]
+    assert events[-1]["status"] == "failed"
+    assert completion["status"] == "error"
+    assert completion["terminal_reason"] == "pdf_report_contract_failed"
+    assert completion["report_contract_status"] == "rejected"
+    assert completion["expected_body_section_count"] == 6
+    assert completion["found_body_section_count"] == 3
+
+
+@pytest.mark.anyio
 async def test_timeout_completion_preserves_timed_out_canvas_status() -> None:
     worker = BuilderCanvasWorker()
     await worker.publish_progress(

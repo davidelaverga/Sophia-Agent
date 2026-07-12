@@ -3382,6 +3382,47 @@ def _apply_edit_context_metadata(artifact: dict[str, Any], state: dict[str, Any]
     artifact.setdefault("revision_of_artifact_path", source_path)
 
 
+def _terminal_reason_is_failure(value: object) -> bool:
+    reason = str(value or "").strip().lower()
+    if not reason:
+        return False
+    return reason.endswith(("_failed", "_failure", "_incomplete", "_not_completed")) or reason in {
+        "pdf_generation_failed",
+        "pdf_page_count_off_target",
+        "pdf_report_contract_failed",
+        "pdf_report_manifest_invalid",
+        "no_deliverable",
+    }
+
+
+def _apply_pdf_contract_metadata(artifact: dict[str, Any], state: dict[str, Any]) -> None:
+    result = state.get("builder_pdf_render_result")
+    if not isinstance(result, dict):
+        return
+    for key in (
+        "report_contract_status",
+        "report_contract_version",
+        "expected_section_count",
+        "found_section_count",
+        "expected_body_section_count",
+        "found_body_section_count",
+        "missing_section_ids",
+        "expected_visual_count",
+        "found_visual_count",
+        "missing_visual_ids",
+        "minimum_word_count",
+        "source_word_count",
+        "cover_present",
+        "toc_present",
+        "conclusion_present",
+        "references_present",
+        "report_contract_problems",
+    ):
+        value = result.get(key)
+        if value is not None:
+            artifact.setdefault(key, value)
+
+
 def _apply_artifact_request_metadata(
     artifact: dict[str, Any],
     state: dict[str, Any],
@@ -3391,6 +3432,7 @@ def _apply_artifact_request_metadata(
     requested_ext = _requested_artifact_ext(state)
     artifact_ext = _artifact_ext_from_path(artifact.get("artifact_path"))
     _apply_edit_context_metadata(artifact, state)
+    _apply_pdf_contract_metadata(artifact, state)
     _apply_artifact_format_metadata(artifact, requested_ext, artifact_ext, fallback_reason)
     raw_status = str(artifact.get("status") or "").strip().lower()
     if raw_status in {"timed_out", "timeout"} or artifact.get("budget_stop_reason"):
@@ -3399,12 +3441,16 @@ def _apply_artifact_request_metadata(
         terminal_status = "failed"
     else:
         terminal_status = "completed"
+    terminal_reason = artifact.get("budget_stop_reason") or artifact.get("failure_code") or artifact.get("terminal_reason") or fallback_reason
+    if terminal_status == "completed" and _terminal_reason_is_failure(terminal_reason):
+        terminal_status = "failed"
+    if terminal_status == "completed":
+        terminal_reason = terminal_reason if str(terminal_reason or "").strip().lower() in {"artifact_emitted", "pdf_render_succeeded", "deck_build_succeeded"} else "artifact_emitted"
+    elif not terminal_reason:
+        terminal_reason = "no_deliverable"
     artifact["status"] = terminal_status
     artifact["terminal_status"] = terminal_status
-    artifact.setdefault(
-        "terminal_reason",
-        artifact.get("budget_stop_reason") or artifact.get("failure_code") or fallback_reason or ("artifact_emitted" if terminal_status == "completed" else "no_deliverable"),
-    )
+    artifact["terminal_reason"] = terminal_reason
     diagnostics = _pptx_diagnostics(state)
     for key in (
         "first_prepare_turn",
@@ -3473,6 +3519,12 @@ def _hero_or_cover_unmet_condition(state: dict[str, Any]) -> str | None:
     requested_ext = _requested_artifact_ext(state)
     if not _hero_cover_gate_applies(state, requested_ext):
         return None
+    if requested_ext == "pdf":
+        if state.get("builder_pdf_cover_required") is False:
+            return None
+        render_result = state.get("builder_pdf_render_result")
+        if isinstance(render_result, dict) and render_result.get("cover_present") is True:
+            return None
     diagnostics = _pptx_diagnostics(state)
     succeeded = int(diagnostics.get("image_generation_success_count", 0) or 0)
     if succeeded > 0 or _hero_cover_honest_skip(diagnostics):
@@ -3676,6 +3728,23 @@ def _pdf_layout_repair_attempts(state: dict[str, Any]) -> int:
     return int(state.get("builder_pdf_layout_repair_attempts", 0) or 0)
 
 
+_PDF_REPORT_CONTRACT_ERROR_TYPES = {
+    "report_manifest_required",
+    "report_manifest_invalid",
+    "report_contract_failed",
+}
+
+
+def _pdf_contract_repair_attempts(state: dict[str, Any]) -> int:
+    return int(state.get("builder_pdf_contract_repair_attempts", 0) or 0)
+
+
+def _visual_report_contract_required(state: dict[str, Any]) -> bool:
+    delegation = state.get("delegation_context")
+    task_type = str(delegation.get("task_type") or "").strip().lower() if isinstance(delegation, dict) else ""
+    return task_type == "visual_report" and _requested_artifact_ext(state) == "pdf"
+
+
 def _pdf_layout_repair_needed(state: dict[str, Any]) -> bool:
     result = _successful_pdf_render_result(state)
     if result is None:
@@ -3713,13 +3782,14 @@ def _successful_pdf_ready_to_emit(state: dict[str, Any]) -> bool:
     result = _successful_pdf_render_result(state)
     if result is None:
         return False
+    if _visual_report_contract_required(state) and result.get("report_contract_status") != "accepted":
+        return False
     if _pdf_layout_repair_needed(state):
         return False
     if _pdf_render_unusable_after_repair(state):
         return False
-    # Page count never blocks emit: an off-target-after-repair PDF ships with a
-    # quality_warning (see _apply_pdf_page_count_quality_metadata), never a
-    # terminal failure.
+    if _pdf_render_page_count_failed_after_repairs(state):
+        return False
     return _canonical_outputs_artifact_path(result.get("pdf_path")) is not None
 
 
@@ -4697,6 +4767,10 @@ def _pdf_contains_visual_evidence(path: Path, state: dict[str, Any]) -> bool:
         try:
             image_count = int(render_result.get("image_count", 0) or 0)
             vector_count = int(render_result.get("vector_visual_count", 0) or 0)
+            expected_count = int(render_result.get("expected_visual_count", 0) or 0)
+            found_count = int(render_result.get("found_visual_count", 0) or 0)
+            if expected_count > 0:
+                return found_count >= expected_count
             return image_count > 0 or vector_count > 0
         except (TypeError, ValueError):
             pass
@@ -5993,8 +6067,9 @@ def _pdf_render_correction_message(source_path: str, pdf_path: str) -> str:
     return (
         "[Sophia/PDF render correction]\n"
         "A requested PDF has an HTML source document on disk, but the PDF renderer "
-        "has not been attempted. Your next action must be:\n"
-        f"`render_html_to_pdf(html_path='{source_path}', pdf_path='{pdf_path}')`.\n"
+        "has not been attempted and the completion window is active. Your next action must be "
+        "a final render with report_manifest listing every section and requested visual:\n"
+        f"`render_html_to_pdf(html_path='{source_path}', pdf_path='{pdf_path}', report_manifest={{...}})`.\n"
         "If rendering succeeds, immediately emit that `.pdf`. If rendering "
         "genuinely cannot complete, emit artifact_path=null with an honest summary."
     )
@@ -6108,6 +6183,17 @@ class BuilderArtifactState(AgentState):
     builder_pdf_requested_page_count: NotRequired[int]
     builder_pdf_requested_min_pages: NotRequired[int]
     builder_pdf_requested_max_pages: NotRequired[int]
+    builder_pdf_required_body_section_count: NotRequired[int]
+    builder_pdf_required_visual_count: NotRequired[int]
+    builder_pdf_required_min_word_count: NotRequired[int]
+    builder_pdf_cover_required: NotRequired[bool]
+    builder_pdf_toc_required: NotRequired[bool]
+    builder_pdf_conclusion_required: NotRequired[bool]
+    builder_pdf_references_required: NotRequired[bool]
+    builder_pdf_report_contract_version: NotRequired[str]
+    builder_pdf_phase: NotRequired[str]
+    builder_pdf_contract_repair_attempts: NotRequired[int]
+    builder_pdf_contract_repair_pending: NotRequired[bool]
     builder_pdf_layout_repair_attempts: NotRequired[int]
     builder_pdf_layout_repair_requested: NotRequired[bool]
     builder_pdf_layout_repair_pending: NotRequired[bool]
@@ -7992,7 +8078,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         _apply_artifact_request_metadata(
             artifact_args,
             state,
-            fallback_reason="pdf_generation_failed",
+            fallback_reason=None if PurePosixPath(canonical_primary).suffix.lower() == ".pdf" else "pdf_generation_failed",
         )
         return True
 
@@ -8749,7 +8835,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _pdf_render_source_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_pdf_artifact(state):
             return None
-        if self._has_requested_pdf_binary(state) or _pdf_render_attempted(state):
+        if self._has_requested_pdf_binary(state):
+            return None
+        # A closed HTML file is only a draft until the model deliberately calls
+        # render_html_to_pdf. Force rendering solely in the completion window;
+        # this prevents an early write from becoming the final report.
+        if not self._should_force_emit(state):
+            return None
+        if _pdf_render_attempted(state) and state.get("builder_pdf_phase") != "ready_to_render":
             return None
         source_path = _preferred_pdf_render_source_path(state)
         if not source_path:
@@ -9322,7 +9415,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         if state.get("builder_pdf_render_correction_emitted"):
             return None
-        if self._has_requested_pdf_binary(state) or _pdf_render_attempted(state):
+        if self._has_requested_pdf_binary(state):
+            return None
+        if not self._should_force_emit(state):
+            return None
+        if _pdf_render_attempted(state) and state.get("builder_pdf_phase") != "ready_to_render":
             return None
         source_path = _preferred_pdf_render_source_path(state)
         if not source_path:
@@ -9655,20 +9752,30 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if int(diagnostics.get("prepare_emitted_call_count", 0) or 0) > 0:
             return None
         elapsed_ms = _elapsed_since_builder_start_ms(state)
+        if failure_code == "deck_authoring_output_truncated":
+            failure_summary = "The presentation authoring step exceeded its bounded output budget."
+            root_summary = failure_summary
+            force_reason = "output_truncated"
+        elif failure_code == "deck_authoring_model_invocation_error":
+            failure_summary = "The presentation model request could not be invoked because its local request configuration was invalid."
+            root_summary = failure_summary
+            force_reason = "model_invocation_error"
+        elif failure_code == "deck_authoring_model_failed":
+            failure_summary = "The presentation authoring model failed before a valid deck build call was available."
+            root_summary = failure_summary
+            force_reason = "model_error"
+        else:
+            failure_summary = "The presentation authoring step exceeded its 120-second deadline."
+            root_summary = failure_summary
+            force_reason = "authoring_deadline"
         delta = {
             "deck_status": "failed_terminal",
             "deck_failure_code": failure_code,
             "deck_root_failure_code": failure_code,
-            "deck_root_failure_summary": ("Presentation authoring exceeded its bounded model budget before prepare_deck_build."),
+            "deck_root_failure_summary": root_summary,
             "deck_authoring_elapsed_ms": elapsed_ms,
-            "prepare_force_reason": ("output_truncated" if failure_code == "deck_authoring_output_truncated" else "model_error" if failure_code == "deck_authoring_model_failed" else "authoring_deadline"),
+            "prepare_force_reason": force_reason,
         }
-        if failure_code == "deck_authoring_output_truncated":
-            failure_summary = "The presentation authoring step exceeded its bounded output budget."
-        elif failure_code == "deck_authoring_model_failed":
-            failure_summary = "The presentation authoring model failed before a valid deck build call was available."
-        else:
-            failure_summary = "The presentation authoring step exceeded its 120-second deadline."
         payload = {
             "success": False,
             "failure_code": failure_code,
@@ -9708,9 +9815,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         additional_kwargs = getattr(latest_ai, "additional_kwargs", {})
         if additional_kwargs.get("deerflow_error_fallback"):
             error_type = str(additional_kwargs.get("error_type") or "")
+            error_reason = str(additional_kwargs.get("error_reason") or "")
             elapsed_ms = _elapsed_since_builder_start_ms(state) or 0
             deadline_ms = prepare_force_after_seconds(state) * 1_000
-            failure_code = "deck_authoring_deadline_exceeded" if "timeout" in error_type.lower() or (deadline_ms > 0 and elapsed_ms >= deadline_ms) else "deck_authoring_model_failed"
+            if "timeout" in error_type.lower() or (deadline_ms > 0 and elapsed_ms >= deadline_ms):
+                failure_code = "deck_authoring_deadline_exceeded"
+            elif error_reason == "malformed_request" or error_type in {"TypeError", "ValidationError", "SchemaError", "ValueError"}:
+                failure_code = "deck_authoring_model_invocation_error"
+            else:
+                failure_code = "deck_authoring_model_failed"
             return self._deck_authoring_terminal_update(
                 state,
                 runtime,
@@ -9847,7 +9960,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             **request.model_settings,
             "max_tokens": presentation_authoring_max_tokens(state),
             "timeout": float(timeout_seconds),
-            "max_retries": 0,
         }
         return request.override(model_settings=settings)
 
@@ -10072,6 +10184,27 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         pure = PurePosixPath(relative)
         return pure.suffix.lower() in {".html", ".htm"} and len(pure.parts) == 2 and pure.parts[0] == "slides"
 
+    @staticmethod
+    def _is_pdf_html_edit(request: ToolCallRequest) -> bool:
+        if not _requested_pdf_artifact(request.state or {}):
+            return False
+        args = request.tool_call.get("args")
+        if not isinstance(args, dict):
+            return False
+        raw = str(args.get("path") or args.get("file_path") or "").strip().replace("\\", "/")
+        relative = _extract_output_relative_path(raw) if raw else None
+        return bool(relative and PurePosixPath(relative).suffix.lower() in {".html", ".htm"})
+
+    @staticmethod
+    def _pdf_edit_phase_update(request: ToolCallRequest) -> dict[str, Any]:
+        if not BuilderArtifactMiddleware._is_pdf_html_edit(request):
+            return {}
+        repairing = bool((request.state or {}).get("builder_pdf_contract_repair_pending"))
+        return {
+            "builder_pdf_phase": "ready_to_render" if repairing else "drafting",
+            **({"builder_pdf_contract_repair_pending": False} if repairing else {}),
+        }
+
     def _write_result_command(
         self,
         request: ToolCallRequest,
@@ -10099,6 +10232,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 # (Codex P2 4601126059) — a scratch/manifest write must not unlock a
                 # recompile of unchanged slides past the spent quality gate.
                 **({"builder_pptx_compile_repair_pending": False} if delta["last_status"] == "success" and self._is_slide_html_edit(request) else {}),
+                **(self._pdf_edit_phase_update(request) if delta["last_status"] == "success" else {}),
             }
         )
 
@@ -10120,6 +10254,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "messages": [result],
                 # Same slide-HTML-only latch clear as _write_result_command.
                 **({"builder_pptx_compile_repair_pending": False} if self._is_slide_html_edit(request) else {}),
+                **self._pdf_edit_phase_update(request),
             }
         )
 
@@ -10143,6 +10278,110 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             payload.get("layout_warning"),
         )
         return {"builder_pdf_render_result": payload}
+
+    @staticmethod
+    def _pdf_contract_failure_fallback(
+        *,
+        steps_completed: int,
+        state: dict[str, Any],
+        payload: dict[str, Any],
+    ) -> dict[str, Any]:
+        error_type = str(payload.get("error_type") or "report_contract_failed")
+        failure_code = "pdf_report_manifest_invalid" if error_type in {"report_manifest_required", "report_manifest_invalid"} else "pdf_report_contract_failed"
+        problems = [str(item) for item in (payload.get("report_contract_problems") or []) if str(item).strip()]
+        artifact = {
+            "artifact_path": None,
+            "artifact_type": "pdf",
+            "artifact_title": "PDF report did not satisfy its completion contract",
+            "steps_completed": steps_completed,
+            "decisions_made": [],
+            "companion_summary": "The PDF report stopped because required sections, visuals, or report structure were still incomplete after one targeted repair.",
+            "companion_tone_hint": "Direct and apologetic; explain that an incomplete draft was not delivered as a finished report.",
+            "user_next_action": "Ask me to retry the report build.",
+            "confidence": 0.0,
+            "failure_code": failure_code,
+            "root_failure_code": failure_code,
+            "root_failure_summary": "The final HTML source failed the typed report completion contract.",
+            "artifact_acceptance_status": "failed",
+            "report_contract_status": payload.get("report_contract_status") or "rejected",
+            "report_contract_version": payload.get("report_contract_version") or "report_manifest_v1",
+            "report_contract_problems": problems[:12],
+            "missing_section_ids": payload.get("missing_section_ids") or [],
+            "missing_visual_ids": payload.get("missing_visual_ids") or [],
+            "expected_section_count": payload.get("expected_section_count"),
+            "found_section_count": payload.get("found_section_count"),
+            "expected_visual_count": payload.get("expected_visual_count"),
+            "found_visual_count": payload.get("found_visual_count"),
+        }
+        return _apply_artifact_request_metadata(artifact, state, fallback_reason=failure_code)
+
+    def _pdf_contract_result_command(
+        self,
+        request: ToolCallRequest,
+        result: ToolMessage,
+        payload: dict[str, Any],
+    ) -> Command:
+        attempts = _pdf_contract_repair_attempts(request.state)
+        problems = [str(item) for item in (payload.get("report_contract_problems") or []) if str(item).strip()]
+        if attempts < 1 and payload.get("retryable") is not False:
+            logger.warning(
+                "BuilderArtifact: requesting PDF contract repair attempt=1/1 error_type=%s problem_count=%d",
+                payload.get("error_type"),
+                len(problems),
+            )
+            problem_lines = "\n".join(f"- {item}" for item in problems[:10]) or "- report_manifest is required and must match the final HTML."
+            return Command(
+                update={
+                    "messages": [
+                        result,
+                        HumanMessage(
+                            content=(
+                                "[Sophia/PDF contract repair]\n"
+                                "The report was not rendered because its final HTML is still incomplete. "
+                                "Make one targeted source edit, preserving completed content, then call "
+                                "render_html_to_pdf again with the complete report_manifest. Missing requirements:\n"
+                                f"{problem_lines}"
+                            )
+                        ),
+                    ],
+                    "builder_pdf_render_result": payload,
+                    "builder_pdf_contract_repair_attempts": 1,
+                    "builder_pdf_contract_repair_pending": True,
+                    "builder_pdf_phase": "repair_pending",
+                },
+                goto="model",
+            )
+
+        fallback = self._pdf_contract_failure_fallback(
+            steps_completed=int(request.state.get("builder_non_artifact_turns", 0) or 0) + 1,
+            state=request.state,
+            payload=payload,
+        )
+        logger.error(
+            "BuilderArtifact: terminal PDF contract failure error_type=%s problem_count=%d",
+            payload.get("error_type"),
+            len(problems),
+        )
+        self._upload_fallback_and_fire(
+            state=request.state,
+            runtime=request.runtime,
+            fallback=fallback,
+            status="failed",
+        )
+        return Command(
+            update={
+                "messages": [result],
+                "builder_pdf_render_result": payload,
+                "builder_pdf_contract_repair_pending": False,
+                "builder_pdf_phase": "terminal",
+                "builder_result": fallback,
+                "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
+                "builder_non_artifact_turns": 0,
+                "builder_task_started_at_ms": 0,
+                **_terminal_halt_fields(request.state, str(fallback.get("failure_code") or "pdf_report_contract_failed")),
+            },
+            goto="end",
+        )
 
     @staticmethod
     def _pdf_generation_failed_fallback(
@@ -10235,10 +10474,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         result: ToolMessage,
         payload: dict[str, Any],
     ) -> Command:
-        fallback = self._pdf_page_count_failure_fallback(
-            steps_completed=int(request.state.get("builder_non_artifact_turns", 0) or 0) + 1,
-            state=request.state,
-            payload=payload,
+        fallback = _apply_artifact_request_metadata(
+            self._pdf_page_count_failure_fallback(
+                steps_completed=int(request.state.get("builder_non_artifact_turns", 0) or 0) + 1,
+                state=request.state,
+                payload=payload,
+            ),
+            request.state,
+            fallback_reason="pdf_page_count_off_target",
         )
         logger.warning(
             "BuilderArtifact: terminal PDF page-count failure requested_pages=%s actual_pages=%s page_delta=%s repair_attempts=%d",
@@ -10258,6 +10501,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "messages": [result],
                 "builder_pdf_render_result": payload,
                 "builder_pdf_layout_repair_pending": False,
+                "builder_pdf_phase": "terminal",
                 "builder_result": fallback,
                 "builder_non_artifact_turns": 0,
                 "builder_task_started_at_ms": 0,
@@ -10283,11 +10527,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         delta["builder_pdf_render_result"] = payload
         delta["builder_pdf_layout_repair_pending"] = False
+        error_type = str(payload.get("error_type") or "")
+        if error_type in _PDF_REPORT_CONTRACT_ERROR_TYPES:
+            return self._pdf_contract_result_command(request, result, payload)
         if request.tool_call.get("name") == _SIMPLE_PDF_TOOL_NAME and payload.get("success") is False and payload.get("error_type") == "pdf_generation_failed":
             return self._pdf_generation_failure_command(request, result, payload)
-        # Page count never fires a terminal failure: a rendered PDF off the
-        # requested length ships with a quality_warning at emit time
-        # (_apply_pdf_page_count_quality_metadata), never artifact_path=null.
+        if payload.get("success") is True:
+            delta["builder_pdf_phase"] = "rendered"
+            delta["builder_pdf_contract_repair_pending"] = False
+            terminal_state = {**request.state, "builder_pdf_render_result": payload}
+            if _pdf_render_page_count_failed_after_repairs(terminal_state):
+                return self._pdf_page_count_failure_command(request, result, payload)
         return Command(update={"messages": [result], **delta})
 
     @staticmethod

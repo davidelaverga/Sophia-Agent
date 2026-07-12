@@ -203,9 +203,16 @@ def _resolve_pdf_engine(explicit: str | None) -> tuple[str | None, str]:
     return None, "no preferred PDF engine on PATH; using pandoc's default"
 
 
+_PAGE_NUMBER_LINE_RE = re.compile(
+    r"^\s*(?:page\s*)?\d+(?:\s*(?:/|of)\s*\d+)?\s*$",
+    re.IGNORECASE,
+)
+
+
 def _page_word_count(page: Any) -> int:
     text = page.extract_text() or ""
-    return len([word for word in text.split() if word.strip()])
+    content_lines = [line for line in text.splitlines() if not _PAGE_NUMBER_LINE_RE.fullmatch(line)]
+    return len([word for word in " ".join(content_lines).split() if word.strip()])
 
 
 def _pdf_object(value: Any) -> Any:

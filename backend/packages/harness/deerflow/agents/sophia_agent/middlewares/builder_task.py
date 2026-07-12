@@ -355,6 +355,10 @@ def _artifact_target_extension(artifact_target_path: object) -> str:
 
 _PAGE_RANGE_RE = re.compile(r"(?<!\d)(\d+)\s*(?:-|to)\s*(\d+)\s*pages?\b", re.IGNORECASE)
 _PAGE_COUNT_RE = re.compile(r"(?<!\d)(\d+)\s*(?:-| )?\s*pages?\b", re.IGNORECASE)
+_PAGE_TARGET_LENGTH_FIELD_BEFORE_RE = re.compile(
+    r"(?:^|[\n.;])\s*(?:requested\s+)?length\s*:\s*$",
+    re.IGNORECASE,
+)
 _PAGE_TARGET_OUTPUT_BEFORE_RE = re.compile(
     r"\b(?:pdf|report|document|summary|brief|article|explainer|deliverable|output)\b.{0,80}"
     r"\b(?:exactly|length|target|make|create|generate|produce|render|write|deliver|should|must|needs?)\b",
@@ -434,6 +438,16 @@ _SLIDE_TARGET_BUILD_VERB_ADJACENT_RE = re.compile(
 )
 _MAX_SUPPORTED_PPTX_SLIDES = 30
 _MAX_SUPPORTED_PDF_PAGES = 60
+_REPORT_BODY_SECTION_COUNT_RE = re.compile(
+    r"\b(\d+)\s+(?:(?:main|major|content)\s+){0,2}sections?\b",
+    re.IGNORECASE,
+)
+_REPORT_VISUAL_LIST_RE = re.compile(
+    r"\binclude(?:\s+throughout)?\s+(?:diagrams?\s+and\s+charts?|charts?\s+and\s+diagrams?|visuals?)\s*:\s*"
+    r"(.+?)(?=\b(?:design|tone|audience|sources?|length)\s*:|$)",
+    re.IGNORECASE | re.DOTALL,
+)
+_REPORT_VISUAL_NOUN_RE = re.compile(r"\b(?:diagram|chart|quadrant|table|figure|image)s?\b", re.IGNORECASE)
 
 
 def _valid_page_count(value: str) -> int | None:
@@ -451,7 +465,7 @@ def _page_target_is_output_context(text: str, match: re.Match[str]) -> bool:
     after_pdf = _PAGE_TARGET_OUTPUT_AFTER_RE.search(after)
     after_targets_pdf = bool(after_pdf and len(re.findall(r"\w+", after[: after_pdf.start()])) <= 4 and not _PAGE_TARGET_SOURCE_NOUN_RE.search(after[: after_pdf.start()]) and not source_context_before)
     after_targets_output_noun = bool((_PAGE_TARGET_OUTPUT_VERB_BEFORE_RE.search(before) or _PAGE_TARGET_OUTPUT_TRANSITION_BEFORE_RE.search(before)) and _PAGE_TARGET_OUTPUT_NOUN_AFTER_RE.search(after))
-    return bool(after_targets_pdf or after_targets_output_noun or _PAGE_TARGET_OUTPUT_NOUN_BEFORE_COUNT_RE.search(before) or _PAGE_TARGET_OUTPUT_BEFORE_RE.search(before))
+    return bool(after_targets_pdf or after_targets_output_noun or _PAGE_TARGET_OUTPUT_NOUN_BEFORE_COUNT_RE.search(before) or _PAGE_TARGET_OUTPUT_BEFORE_RE.search(before) or _PAGE_TARGET_LENGTH_FIELD_BEFORE_RE.search(before))
 
 
 def _page_range_target(combined: str) -> tuple[int, int] | None:
@@ -561,6 +575,74 @@ def _pdf_page_target_updates(
     return {}
 
 
+def _report_visual_list_count(combined: str) -> int | None:
+    match = _REPORT_VISUAL_LIST_RE.search(combined)
+    if match is None:
+        return None
+    segment = match.group(1)
+    numbered = [int(value) for value in re.findall(r"\((\d+)\)", segment)]
+    if numbered:
+        return max(numbered)
+    count = 0
+    for item in (part.strip() for part in segment.split(",")):
+        if not item or not _REPORT_VISUAL_NOUN_RE.search(item):
+            continue
+        multiplier = 2 if " and " in item.lower() and re.search(r"\bdiagrams?\b", item, re.IGNORECASE) else 1
+        count += multiplier
+    return count or None
+
+
+def _pdf_report_requirement_updates(
+    delegation_context: dict[str, Any],
+    *,
+    companion_artifact: dict[str, Any],
+    page_updates: dict[str, Any],
+) -> dict[str, Any]:
+    if str(delegation_context.get("task_type") or "").strip().lower() != "visual_report":
+        return {}
+    text_parts: list[str] = []
+    for source in (delegation_context, companion_artifact):
+        for key in ("task", "description", "artifact_brief", "original_task"):
+            value = source.get(key) if isinstance(source, dict) else None
+            if isinstance(value, str) and value.strip():
+                text_parts.append(value)
+    combined = "\n".join(text_parts)
+    explicit = delegation_context.get("report_requirements")
+    explicit_requirements = explicit if isinstance(explicit, dict) else {}
+
+    section_match = _REPORT_BODY_SECTION_COUNT_RE.search(combined)
+    body_count = explicit_requirements.get("required_body_section_count")
+    if not isinstance(body_count, int) or body_count <= 0:
+        body_count = int(section_match.group(1)) if section_match else 1
+    visual_count = explicit_requirements.get("required_visual_count")
+    if not isinstance(visual_count, int) or visual_count < 0:
+        visual_count = _report_visual_list_count(combined)
+    if visual_count is None:
+        visual_count = 1 if any(marker in combined.lower() for marker in _VISUAL_REQUEST_MARKERS) else 0
+
+    exact = page_updates.get("builder_pdf_requested_page_count")
+    low = page_updates.get("builder_pdf_requested_min_pages")
+    page_floor = exact if isinstance(exact, int) else low if isinstance(low, int) else 0
+    explicit_min_words = explicit_requirements.get("required_min_word_count")
+    required_min_words = max(
+        explicit_min_words if isinstance(explicit_min_words, int) else 0,
+        body_count * 120,
+        page_floor * 75,
+        300,
+    )
+    lower = combined.lower()
+    return {
+        "builder_pdf_required_body_section_count": body_count,
+        "builder_pdf_required_visual_count": visual_count,
+        "builder_pdf_required_min_word_count": required_min_words,
+        "builder_pdf_cover_required": bool(explicit_requirements.get("cover_required", "title page" in lower or "cover" in lower)),
+        "builder_pdf_toc_required": bool(explicit_requirements.get("toc_required", "table of contents" in lower)),
+        "builder_pdf_conclusion_required": bool(explicit_requirements.get("conclusion_required", "conclusion" in lower)),
+        "builder_pdf_references_required": bool(explicit_requirements.get("references_required", "references" in lower or "bibliography" in lower)),
+        "builder_pdf_report_contract_version": "report_manifest_v1",
+    }
+
+
 def _pdf_page_target_section(page_updates: dict[str, Any]) -> str | None:
     count = page_updates.get("builder_pdf_requested_page_count")
     if isinstance(count, int):
@@ -583,6 +665,26 @@ def _pdf_page_target_section(page_updates: dict[str, Any]) -> str | None:
             "</pdf_length_target>"
         )
     return None
+
+
+def _pdf_report_contract_section(requirements: dict[str, Any]) -> str | None:
+    if not requirements:
+        return None
+    return (
+        "<pdf_report_contract>\n"
+        "- This visual report uses report_manifest_v1. The HTML is not final merely because it has closing tags.\n"
+        f"- Required body sections: at least {requirements.get('builder_pdf_required_body_section_count', 1)}.\n"
+        f"- Required named figures/charts/tables: at least {requirements.get('builder_pdf_required_visual_count', 0)}.\n"
+        f"- Minimum substantive source words: {requirements.get('builder_pdf_required_min_word_count', 300)}.\n"
+        f"- Cover required: {str(bool(requirements.get('builder_pdf_cover_required'))).lower()}; "
+        f"TOC required: {str(bool(requirements.get('builder_pdf_toc_required'))).lower()}; "
+        f"conclusion required: {str(bool(requirements.get('builder_pdf_conclusion_required'))).lower()}; "
+        f"references required: {str(bool(requirements.get('builder_pdf_references_required'))).lower()}.\n"
+        "- Give every final section a stable lowercase id and data-report-role. Give every requested visual's containing <figure> a stable data-visual-id.\n"
+        "- On the final render_html_to_pdf call, pass report_manifest with every section id/title/role and every requested visual id/title/kind. The manifest is checked against the HTML before Chromium runs.\n"
+        "- Do not call render_html_to_pdf while todo items for report body sections or visuals remain incomplete. One targeted contract repair is allowed; a second semantic miss fails cleanly.\n"
+        "</pdf_report_contract>"
+    )
 
 
 _IMAGE_OUTPUT_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
@@ -944,6 +1046,14 @@ class BuilderTaskState(AgentState):
     builder_pdf_requested_page_count: NotRequired[int]
     builder_pdf_requested_min_pages: NotRequired[int]
     builder_pdf_requested_max_pages: NotRequired[int]
+    builder_pdf_required_body_section_count: NotRequired[int]
+    builder_pdf_required_visual_count: NotRequired[int]
+    builder_pdf_required_min_word_count: NotRequired[int]
+    builder_pdf_cover_required: NotRequired[bool]
+    builder_pdf_toc_required: NotRequired[bool]
+    builder_pdf_conclusion_required: NotRequired[bool]
+    builder_pdf_references_required: NotRequired[bool]
+    builder_pdf_report_contract_version: NotRequired[str]
     builder_pptx_requested_slide_count: NotRequired[int]
     # Spec D D-4: read_session_context's self-enforced call counter — the
     # tool's Command update persists only because the key is declared here.
@@ -1013,6 +1123,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         artifact_target_path = state.get("builder_artifact_target_path") or delegation_context.get("artifact_target_path")
         artifact_target_ext = _artifact_target_extension(artifact_target_path)
         page_target_updates: dict[str, Any] = {}
+        report_requirement_updates: dict[str, Any] = {}
         slide_target_updates: dict[str, Any] = {}
         if artifact_target_ext == ".pdf":
             for key in (
@@ -1029,6 +1140,11 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
                     companion_artifact=companion_artifact,
                     artifact_target_path=artifact_target_path,
                 )
+            report_requirement_updates = _pdf_report_requirement_updates(
+                delegation_context,
+                companion_artifact=companion_artifact,
+                page_updates=page_target_updates,
+            )
         is_presentation_task = _is_presentation_task_type(task_type)
         is_pdf_presentation_target = artifact_target_ext == ".pdf" and is_presentation_task
         if artifact_target_ext == ".pptx" or is_pdf_presentation_target or (not artifact_target_ext and is_presentation_task):
@@ -1152,6 +1268,8 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
 
         if page_target_section := _pdf_page_target_section(page_target_updates):
             sections.append(page_target_section)
+        if report_contract_section := _pdf_report_contract_section(report_requirement_updates):
+            sections.append(report_contract_section)
         if slide_target_section := _pptx_slide_target_section(slide_target_updates):
             sections.append(slide_target_section)
 
@@ -1452,6 +1570,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             "system_prompt_blocks": blocks,
             **boundary_state_updates,
             **page_target_updates,
+            **report_requirement_updates,
             **slide_target_updates,
         }
 
