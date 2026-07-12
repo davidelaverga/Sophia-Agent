@@ -4406,6 +4406,30 @@ class TestBuilderArtifactMiddleware:
         assert args["artifact_is_fallback"] is True
         assert args["fallback_reason"] == "pptx_generation_not_completed"
 
+    def test_pptx_fallback_ignores_native_scratch_base(self, tmp_path):
+        from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
+
+        outputs_dir = tmp_path / "outputs"
+        scratch_dir = outputs_dir / ".builder" / "deck_native"
+        scratch_dir.mkdir(parents=True)
+        _write_minimal_pptx(scratch_dir / "base.pptx")
+        (outputs_dir / "deck.md").write_text("# Deck fallback after native failure")
+        runtime = _make_runtime(thread_id="thread-x")
+        state = {
+            "thread_data": {"outputs_path": str(outputs_dir)},
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "builder_pptx_diagnostics": {
+                "pptx_generator_attempt_count": 1,
+                "pptx_generator_success_count": 0,
+                "pptx_generator_error_class": "pptx_generation_error",
+            },
+        }
+        args = {"artifact_path": "/mnt/user-data/outputs/deck.md"}
+
+        assert BuilderArtifactMiddleware._has_valid_pptx_output(state) is False
+        assert BuilderArtifactMiddleware._artifact_files_exist(args, state, runtime) is True
+        assert args["artifact_is_fallback"] is True
+
     def test_pptx_artifact_files_exist_accepts_marked_valid_html_fallback(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 

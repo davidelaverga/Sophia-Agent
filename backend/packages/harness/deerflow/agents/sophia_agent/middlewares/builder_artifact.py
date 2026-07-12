@@ -2806,11 +2806,7 @@ def _is_promotable_candidate_path(
     requested_pptx: bool,
     requested_html: bool,
 ) -> bool:
-    try:
-        relative_parts = path.relative_to(outputs_root).parts
-    except ValueError:
-        return False
-    if relative_parts and relative_parts[0].lower() in _PROMOTION_SUPPORT_DIR_NAMES:
+    if _is_support_output_path(path, outputs_root):
         return False
     if not _is_recent_promotable_path(path, min_mtime):
         return False
@@ -2825,6 +2821,14 @@ def _is_promotable_candidate_path(
     if requested_pptx and path.suffix.lower() in {".html", ".htm"}:
         return _html_fallback_integrity_error_for_file(path) is None
     return True
+
+
+def _is_support_output_path(path: Path, outputs_root: Path) -> bool:
+    try:
+        relative_parts = path.relative_to(outputs_root).parts
+    except ValueError:
+        return True
+    return bool(relative_parts and relative_parts[0].lower() in _PROMOTION_SUPPORT_DIR_NAMES)
 
 
 def _is_recent_promotable_path(path: Path, min_mtime: float | None) -> bool:
@@ -6980,6 +6984,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         try:
             for entry in outputs_root.rglob("*.pptx"):
                 if not _is_public_output_file(entry):
+                    continue
+                if _is_support_output_path(entry, outputs_root):
                     continue
                 if min_mtime is not None and entry.stat().st_mtime < min_mtime:
                     continue
