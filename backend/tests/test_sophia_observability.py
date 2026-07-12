@@ -648,3 +648,35 @@ def test_builder_completion_logs_missing_run_tree_when_tracing_expected(monkeypa
     assert observability.annotate_builder_completion({}, {"artifact_path": "deck.pptx"}) is False
 
     assert "no active run tree" in caplog.text
+
+
+def test_builder_completion_uses_active_pregel_tracer_root(monkeypatch) -> None:
+    class _FakeTracer:
+        pass
+
+    root = _FakeRunTree()
+    root.id = "pregel-root"
+    root.parent_run_id = None
+    root.metadata = {"thread_id": "thread-1"}
+    tracer = _FakeTracer()
+    tracer.run_map = {root.id: root}
+    feedback_client = _FakeFeedbackClient()
+
+    observability._ACTIVE_BUILDER_TRACERS.add(tracer)
+    monkeypatch.setattr(observability, "_current_run_tree", lambda: None)
+    monkeypatch.setattr(observability, "_feedback_client", lambda: feedback_client)
+    try:
+        assert observability.annotate_builder_completion(
+            {"thread_id": "thread-1"},
+            {
+                "artifact_path": "deck.pptx",
+                "terminal_status": "completed",
+                "terminal_reason": "artifact_emitted",
+            },
+        ) is True
+    finally:
+        observability._ACTIVE_BUILDER_TRACERS.discard(tracer)
+
+    assert root.metadata["terminal_status"] == "completed"
+    assert root.patch_calls == 1
+    assert feedback_client.feedback[-1]["run_id"] == "pregel-root"

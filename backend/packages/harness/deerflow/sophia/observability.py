@@ -9,6 +9,7 @@ from collections import Counter
 from contextlib import nullcontext
 from typing import Any
 from urllib.parse import urlparse
+from weakref import WeakSet
 
 from langchain_core.runnables import Runnable
 
@@ -20,6 +21,7 @@ _BUILDER_RUN_NAME = "Sophia Builder"
 _BUILDER_BASE_TAG = "sophia_builder"
 _BUILDER_TRACING_ENV = "SOPHIA_BUILDER_LANGSMITH_TRACING"
 _startup_status_logged = False
+_ACTIVE_BUILDER_TRACERS: WeakSet[Any] = WeakSet()
 
 
 def _tracing_context_factory() -> Any | None:
@@ -223,12 +225,14 @@ def _builder_langsmith_tracer(
 
         tracing_config = get_tracing_config()
         client = _langsmith_client(tracing_config)
-        return LangChainTracer(
+        tracer = LangChainTracer(
             project_name=tracing_config.project,
             client=client,
             tags=tags,
             metadata=metadata,
         )
+        _ACTIVE_BUILDER_TRACERS.add(tracer)
+        return tracer
     except Exception:  # noqa: BLE001 - tracing must not break builder creation.
         logger.warning(
             "Sophia builder LangSmith tracer creation failed: %s",
@@ -459,6 +463,63 @@ def _current_run_tree() -> Any | None:
             return get_current_run_tree()
         except Exception:  # noqa: BLE001
             return None
+
+
+def _completion_identity(state: dict[str, Any], artifact: dict[str, Any]) -> dict[str, str]:
+    identity: dict[str, str] = {}
+    nested_sources = (
+        _as_dict(state.get("builder_task")),
+        _as_dict(state.get("delegation_context")),
+    )
+    for key in ("thread_id", "task_id", "run_id", "parent_thread_id"):
+        for source in (artifact, state, *nested_sources):
+            value = source.get(key)
+            if isinstance(value, str) and value.strip():
+                identity[key] = value.strip()
+                break
+    return identity
+
+
+def _run_metadata(run: Any) -> dict[str, Any]:
+    metadata = _as_dict(getattr(run, "metadata", None))
+    if metadata:
+        return metadata
+    return _as_dict(_as_dict(getattr(run, "extra", None)).get("metadata"))
+
+
+def _active_pregel_run_tree(state: dict[str, Any], artifact: dict[str, Any]) -> Any | None:
+    """Find the concrete active root captured by Pregel's LangChain tracer."""
+
+    candidates: list[Any] = []
+    for tracer in list(_ACTIVE_BUILDER_TRACERS):
+        try:
+            runs = list(getattr(tracer, "run_map", {}).values())
+        except (AttributeError, RuntimeError):
+            continue
+        run_ids = {str(getattr(run, "id", "")) for run in runs}
+        candidates.extend(
+            run
+            for run in runs
+            if not getattr(run, "parent_run_id", None)
+            or str(getattr(run, "parent_run_id", "")) not in run_ids
+        )
+    if not candidates:
+        return None
+
+    identity = _completion_identity(state, artifact)
+    if identity:
+        scored = [
+            (
+                sum(_run_metadata(run).get(key) == value for key, value in identity.items()),
+                run,
+            )
+            for run in candidates
+        ]
+        best_score = max(score for score, _run in scored)
+        best = [run for score, run in scored if score == best_score and score > 0]
+        if len(best) == 1:
+            return best[0]
+    return candidates[0] if len(candidates) == 1 else None
 
 
 def _feedback_client() -> Any:
@@ -1204,7 +1265,7 @@ def _create_terminal_feedback(run_tree: Any, artifact: dict[str, Any]) -> None:
 def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any]) -> bool:
     """Attach builder completion metadata/tags/feedback to the active run."""
 
-    run_tree = _current_run_tree()
+    run_tree = _current_run_tree() or _active_pregel_run_tree(state, artifact)
     if run_tree is None:
         if langsmith_builder_tracing_enabled():
             logger.warning(
