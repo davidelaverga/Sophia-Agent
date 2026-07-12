@@ -793,6 +793,14 @@ def test_html_pdf_renderer_rejects_missing_local_subresources():
     assert "!fs.existsSync(localPath)" in source
 
 
+def test_html_pdf_renderer_encodes_entry_document_file_url():
+    pdf_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_pdf.mjs"
+    source = pdf_script.read_text(encoding="utf-8")
+
+    assert "page.goto(pathToFileURL(path.resolve(args.htmlFile)).href" in source
+    assert "page.goto(`file://${path.resolve(args.htmlFile)}`" not in source
+
+
 def test_html_pdf_renderer_allows_only_generated_visual_images():
     pdf_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_pdf.mjs"
     source = pdf_script.read_text(encoding="utf-8")
