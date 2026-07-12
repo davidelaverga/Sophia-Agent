@@ -11,6 +11,11 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 _REPORT_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
 _WORD_RE = re.compile(r"\b[\w'-]+\b")
+_HIDDEN_STYLE_RE = re.compile(
+    r"(?:^|;)\s*(?:display\s*:\s*none|visibility\s*:\s*hidden)\s*(?:!important\s*)?(?:;|$)",
+    re.IGNORECASE,
+)
+_VOID_HTML_TAGS = {"area", "base", "br", "col", "embed", "hr", "img", "input", "link", "meta", "param", "source", "track", "wbr"}
 _COVER_IDS = {"cover", "title-page", "title_page"}
 _TOC_IDS = {"toc", "table-of-contents", "table_of_contents"}
 _CONCLUSION_IDS = {"conclusion", "conclusions"}
@@ -95,6 +100,7 @@ class _ReportSourceParser(HTMLParser):
         self.body_section_count = 0
         self.figure_count = 0
         self._ignored_depth = 0
+        self._tag_visibility_stack: list[tuple[str, bool]] = []
         self._text_parts: list[str] = []
 
     @staticmethod
@@ -136,11 +142,32 @@ class _ReportSourceParser(HTMLParser):
         self.conclusion_present = self.conclusion_present or role == "conclusion" or element_id in _CONCLUSION_IDS
         self.references_present = self.references_present or role == "references" or element_id in _REFERENCES_IDS
 
+    @staticmethod
+    def _element_is_hidden(tag_name: str, attr_map: dict[str, str]) -> bool:
+        aria_hidden = attr_map.get("aria-hidden", "").strip().lower()
+        return tag_name in {"script", "style", "template"} or "hidden" in attr_map or aria_hidden in {"true", "1"} or bool(_HIDDEN_STYLE_RE.search(attr_map.get("style", "")))
+
+    def _enter_element(self, tag_name: str, attr_map: dict[str, str]) -> bool:
+        element_hidden = self._element_is_hidden(tag_name, attr_map)
+        if tag_name not in _VOID_HTML_TAGS:
+            self._tag_visibility_stack.append((tag_name, element_hidden))
+            if element_hidden:
+                self._ignored_depth += 1
+        return element_hidden or self._ignored_depth > 0
+
+    def _leave_element(self, tag_name: str) -> None:
+        matching_index = next((index for index in range(len(self._tag_visibility_stack) - 1, -1, -1) if self._tag_visibility_stack[index][0] == tag_name), None)
+        if matching_index is None:
+            return
+        closing = self._tag_visibility_stack[matching_index:]
+        del self._tag_visibility_stack[matching_index:]
+        self._ignored_depth = max(0, self._ignored_depth - sum(1 for _tag, hidden in closing if hidden))
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag_name = tag.lower()
         attr_map = {str(key).lower(): str(value or "").strip() for key, value in attrs}
-        if tag_name in {"script", "style", "template"}:
-            self._ignored_depth += 1
+        if self._enter_element(tag_name, attr_map):
+            return
 
         element_id = attr_map.get("id", "").lower()
         role = attr_map.get("data-report-role", "").lower()
@@ -154,8 +181,7 @@ class _ReportSourceParser(HTMLParser):
         self._record_landmarks(element_id, role, classes)
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() in {"script", "style", "template"} and self._ignored_depth > 0:
-            self._ignored_depth -= 1
+        self._leave_element(tag.lower())
 
     def handle_data(self, data: str) -> None:
         if self._ignored_depth <= 0 and data.strip():

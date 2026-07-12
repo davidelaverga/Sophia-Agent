@@ -260,6 +260,41 @@ def test_report_contract_requires_manifest_ids_on_semantic_sections(staged, monk
     assert "report_manifest.sections[0].id:architecture" in result["report_contract_problems"]
 
 
+@pytest.mark.parametrize("hidden_attribute", ["hidden", "aria-hidden='true'", "style='display:none'", "style='visibility: hidden !important'"])
+def test_report_contract_excludes_hidden_text_from_minimum_word_count(staged, monkeypatch, hidden_attribute):
+    hidden_prose = " ".join(["invisible"] * 350)
+    (staged / "report.html").write_text(
+        "<html><body>"
+        "<section id='architecture' data-report-role='body'><h2>Architecture</h2>"
+        f"<div {hidden_attribute}><p>{hidden_prose}</p></div>"
+        "<p>Visible summary.</p></section>"
+        "</body></html>"
+    )
+    monkeypatch.setattr(render_html, "_html_pdf_runtime", lambda: pytest.fail("Chromium must not run when visible prose is incomplete"))
+
+    result = _call(
+        runtime=_fake_runtime(
+            {
+                "builder_artifact_target_path": f"{_OUTPUTS_PREFIX}out.pdf",
+                "delegation_context": {"task_type": "visual_report"},
+                "builder_pdf_required_body_section_count": 1,
+                "builder_pdf_required_min_word_count": 300,
+            }
+        ),
+        html_path=f"{_OUTPUTS_PREFIX}report.html",
+        pdf_path=f"{_OUTPUTS_PREFIX}out.pdf",
+        report_manifest={
+            "sections": [{"id": "architecture", "title": "Architecture", "role": "body"}],
+            "minimum_word_count": 300,
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error_type"] == "report_contract_failed"
+    assert result["source_word_count"] < 20
+    assert "report_manifest.minimum_word_count" in result["report_contract_problems"]
+
+
 def test_complete_report_contract_renders_with_state_page_targets(staged, monkeypatch, tmp_path):
     prose = " ".join(["analysis"] * 340)
     (staged / "report.html").write_text(
