@@ -465,6 +465,39 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert loaded.slides[0].selector == "slide:1"
 
 
+def test_deck_build_service_resolves_manifest_owner_from_runtime_config(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state.pop("thread_id")
+    runtime.state.pop("user_id")
+    runtime.state.pop("parent_thread_id")
+    runtime.context = {}
+    runtime.config = {
+        "configurable": {
+            "thread_id": "configured-builder-thread",
+            "user_id": "configured-user",
+            "parent_thread_id": "configured-companion-thread",
+        }
+    }
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        native_service=_FakeNativeService([]),
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Configured Identity Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
+    )
+
+    assert result.success is True
+    build = json.loads((tmp_path / "outputs" / "deck_build" / "build.json").read_text(encoding="utf-8"))
+    assert build["thread_id"] == "configured-builder-thread"
+    assert build["user_id"] == "configured-user"
+    assert build["parent_thread_id"] == "configured-companion-thread"
+
+
 def test_deck_build_service_contrast_analyzer_failure_is_clean_terminal_result(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     result = DeckBuildService(

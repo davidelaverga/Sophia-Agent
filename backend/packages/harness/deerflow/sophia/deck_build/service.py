@@ -177,11 +177,11 @@ class DeckBuildService:
         deck = DeckBuild(
             build_id=build_id,
             schema_version=_SCHEMA,
-            user_id=_state_value(runtime, "user_id"),
-            thread_id=str(_state_value(runtime, "thread_id") or ""),
-            parent_thread_id=_state_value(runtime, "parent_thread_id"),
-            run_id=_state_value(runtime, "run_id"),
-            task_id=_state_value(runtime, "task_id"),
+            user_id=_runtime_identity_value(runtime, "user_id"),
+            thread_id=str(_runtime_identity_value(runtime, "thread_id") or ""),
+            parent_thread_id=_runtime_identity_value(runtime, "parent_thread_id"),
+            run_id=_runtime_identity_value(runtime, "run_id"),
+            task_id=_runtime_identity_value(runtime, "task_id"),
             requested_slide_count=len(slides),
             status="planned",
             register=register,
@@ -1808,6 +1808,35 @@ class DeckBuildFailure(Exception):
 def _state_value(runtime: Any, key: str) -> Any:
     state = getattr(runtime, "state", None)
     return state.get(key) if isinstance(state, dict) else None
+
+
+def _runtime_identity_value(runtime: Any, key: str) -> Any:
+    state = getattr(runtime, "state", None)
+    if isinstance(state, dict):
+        for source in (
+            state,
+            state.get("builder_task"),
+            state.get("delegation_context"),
+        ):
+            if isinstance(source, dict) and source.get(key) not in (None, ""):
+                return source[key]
+
+    execution_info = getattr(runtime, "execution_info", None)
+    value = getattr(execution_info, key, None) if execution_info is not None else None
+    if value not in (None, ""):
+        return value
+
+    context = getattr(runtime, "context", None)
+    if isinstance(context, dict) and context.get(key) not in (None, ""):
+        return context[key]
+
+    config = getattr(runtime, "config", None)
+    if isinstance(config, dict):
+        for source_name in ("configurable", "metadata"):
+            source = config.get(source_name)
+            if isinstance(source, dict) and source.get(key) not in (None, ""):
+                return source[key]
+    return None
 
 
 def _builder_deadline_epoch_ms(runtime: Any) -> int | None:
