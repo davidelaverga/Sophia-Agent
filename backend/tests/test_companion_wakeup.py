@@ -13,7 +13,7 @@ Locks:
   timeout}`` and skips ``cancelled`` (no proactive announcement on
   cancel).
 - ``wake()`` skips when ``thread_id`` is missing.
-- ``wake()`` deduplicates the same ``task_id`` across retried webhooks.
+- ``wake()`` deduplicates the same ``(task_id, run_id)`` across retried webhooks.
 - ``wake()`` swallows exceptions from ``client.runs.create`` so the
   webhook path never fails on a wakeup error.
 - ``runs.create`` is invoked with the right shape: empty
@@ -192,6 +192,21 @@ async def test_wake_dedup_does_not_block_other_task_ids():
 
 
 @pytest.mark.anyio
+async def test_wake_dedup_allows_updated_run_for_same_task_id():
+    wakeup, runs = _make_wakeup_with_fake_client()
+
+    await wakeup.wake(
+        {"thread_id": "thread-A", "task_id": "task-1", "run_id": "run-1", "status": "success"}
+    )
+    fired = await wakeup.wake(
+        {"thread_id": "thread-A", "task_id": "task-1", "run_id": "run-2", "status": "success"}
+    )
+
+    assert fired is True
+    assert len(runs.calls) == 2
+
+
+@pytest.mark.anyio
 async def test_wake_swallows_client_errors():
     """An exception from ``runs.create`` must NOT propagate.
 
@@ -231,13 +246,14 @@ def test_dedup_set_evicts_oldest_when_full():
 
     wakeup = CompanionWakeup()
     for i in range(_DEDUP_MAX_ENTRIES + 5):
-        wakeup._remember(f"task-{i}")
+        wakeup._remember(f"task-{i}", f"run-{i}")
 
     # First few should be evicted; last few retained.
-    assert "task-0" not in wakeup._seen_task_ids
-    assert "task-4" not in wakeup._seen_task_ids
-    assert f"task-{_DEDUP_MAX_ENTRIES + 4}" in wakeup._seen_task_ids
-    assert len(wakeup._seen_task_ids) == _DEDUP_MAX_ENTRIES
+    assert ("task-0", "run-0") not in wakeup._seen_run_keys
+    assert ("task-4", "run-4") not in wakeup._seen_run_keys
+    newest = (f"task-{_DEDUP_MAX_ENTRIES + 4}", f"run-{_DEDUP_MAX_ENTRIES + 4}")
+    assert newest in wakeup._seen_run_keys
+    assert len(wakeup._seen_run_keys) == _DEDUP_MAX_ENTRIES
 
 
 def test_langgraph_url_uses_env_fallback(monkeypatch):

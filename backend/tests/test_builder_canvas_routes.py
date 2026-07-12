@@ -314,7 +314,16 @@ async def test_snapshot_resigns_durable_artifact_with_storage_object_path(app: F
                 "last_updated_at": RECENT_TASK_TIMESTAMP,
                 "builder_result": {
                     "artifact_path": "mnt/user-data/outputs/report.md",
+                    "artifact_id": "artifact-123",
+                    "storage_provider": "supabase",
+                    "storage_bucket": "sophia_builder",
                     "storage_object_path": "artifacts/user-1/parent-1/artifact_123/report.md",
+                    "storage_status": "available",
+                    "manifest_path": "artifacts/user-1/parent-1/foundation/.builder/builds/build-1/manifest.json",
+                    "manifest_revision": 2,
+                    "logical_artifact_id": "logical-1",
+                    "current_artifact_version_id": "version-2",
+                    "foundation_status": "committed",
                     "artifact_title": "Report",
                     "artifact_type": "document",
                 },
@@ -346,6 +355,15 @@ async def test_snapshot_resigns_durable_artifact_with_storage_object_path(app: F
     assert response.status_code == 200
     completion = response.json()["active_task"]["completion"]
     assert completion["artifact_url"] == "https://signed.example/artifacts/user-1/parent-1/artifact_123/report.md"
+    assert completion["artifact_id"] == "artifact-123"
+    assert completion["storage_provider"] == "supabase"
+    assert completion["storage_bucket"] == "sophia_builder"
+    assert completion["storage_object_path"] == "artifacts/user-1/parent-1/artifact_123/report.md"
+    assert completion["storage_status"] == "available"
+    assert completion["manifest_revision"] == 2
+    assert completion["logical_artifact_id"] == "logical-1"
+    assert completion["current_artifact_version_id"] == "version-2"
+    assert completion["foundation_status"] == "committed"
     assert signed_calls == [
         (
             "parent-1",

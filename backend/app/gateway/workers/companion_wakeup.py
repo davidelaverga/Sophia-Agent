@@ -42,7 +42,7 @@ Design notes:
   swallowed: the builder result is already in state, the user can ask
   Sophia for status as a fallback (the existing turn-driven adoption
   still works).
-- **Idempotent.** A bounded recent-task-id set deduplicates retried
+- **Idempotent.** A bounded recent-task/run-id set deduplicates retried
   webhooks (the LangGraph process publishes once per terminal transition,
   but we guard against the rare double-publish under e.g. retries on
   the publisher side).
@@ -69,7 +69,7 @@ logger = logging.getLogger(__name__)
 # ``cancelled`` is intentionally excluded — see module docstring.
 _WAKEUP_STATUSES = frozenset({"success", "error", "timeout"})
 
-# Bounded recent-task-id memory for idempotency. Sized for ~1 day of
+# Bounded recent task/run memory for idempotency. Sized for ~1 day of
 # normal usage at ~10 builders/hour; an in-process LRU is sufficient
 # because retries arrive within seconds of the first publish.
 _DEDUP_MAX_ENTRIES = 256
@@ -99,7 +99,7 @@ class CompanionWakeup:
             or _DEFAULT_LANGGRAPH_URL
         )
         self._client: Any = None
-        self._seen_task_ids: OrderedDict[str, None] = OrderedDict()
+        self._seen_run_keys: OrderedDict[tuple[str, str | None], None] = OrderedDict()
 
     @property
     def langgraph_url(self) -> str:
@@ -135,18 +135,20 @@ class CompanionWakeup:
             # mainly defensive.
             return False, None
 
-        # Idempotency: skip if we've already woken on this task.
-        if task_id in self._seen_task_ids:
-            return True, f"task_id={task_id} already triggered wakeup"
+        run_id = event.get("run_id")
+        dedupe_key = (task_id, run_id if isinstance(run_id, str) and run_id else None)
+        if dedupe_key in self._seen_run_keys:
+            return True, f"task_id={task_id} run_id={dedupe_key[1]} already triggered wakeup"
         return False, None
 
-    def _remember(self, task_id: str | None) -> None:
-        """Add ``task_id`` to the recent set, evicting oldest if over cap."""
+    def _remember(self, task_id: str | None, run_id: str | None = None) -> None:
+        """Add a task/run terminal to the recent set, evicting the oldest."""
         if not isinstance(task_id, str) or not task_id:
             return
-        self._seen_task_ids[task_id] = None
-        while len(self._seen_task_ids) > _DEDUP_MAX_ENTRIES:
-            self._seen_task_ids.popitem(last=False)
+        key = (task_id, run_id if isinstance(run_id, str) and run_id else None)
+        self._seen_run_keys[key] = None
+        while len(self._seen_run_keys) > _DEDUP_MAX_ENTRIES:
+            self._seen_run_keys.popitem(last=False)
 
     async def wake(self, event: dict[str, Any]) -> bool:
         """Best-effort wakeup. Returns True iff a run was queued.
@@ -167,6 +169,7 @@ class CompanionWakeup:
 
         thread_id = event["thread_id"]
         task_id = event.get("task_id")
+        run_id = event.get("run_id")
         try:
             client = self._get_client()
             # Empty input.messages — the existing companion middlewares
@@ -214,7 +217,7 @@ class CompanionWakeup:
                 context=context,
                 multitask_strategy="enqueue",
             )
-            self._remember(task_id)
+            self._remember(task_id, run_id)
             logger.info(
                 "Companion wakeup: queued thread_id=%s task_id=%s status=%s",
                 thread_id,
