@@ -93,6 +93,22 @@ def test_pptx_terminal_latch_accepts_valid_deck_without_preview(tmp_path: Path, 
     assert state["builder_presentation_terminal_ready"] is True
 
 
+def test_pptx_terminal_latch_ignores_native_scratch_base(tmp_path: Path, monkeypatch) -> None:
+    monkeypatch.setattr(builder_artifact_module, "_pptx_integrity_error_for_file", lambda _path: None)
+    state = _pptx_state(tmp_path, qc_results=[_presence_qc(index) for index in range(1, 5)])
+    outputs = Path(state["thread_data"]["outputs_path"])
+    (outputs / "deck.pptx").unlink()
+    scratch = outputs / ".builder" / "deck_native"
+    scratch.mkdir(parents=True)
+    (scratch / "base.pptx").write_bytes(b"valid-looking-scratch")
+    state["builder_pptx_diagnostics"]["pptx_output_paths"] = [
+        "/mnt/user-data/outputs/.builder/deck_native/base.pptx"
+    ]
+
+    assert _presentation_completion_ready(state) is False
+    assert "builder_presentation_terminal_ready" not in state
+
+
 def test_pptx_terminal_latch_ignores_stale_baked_title_qc(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(builder_artifact_module, "_pptx_integrity_error_for_file", lambda _path: None)
     state = _pptx_state(

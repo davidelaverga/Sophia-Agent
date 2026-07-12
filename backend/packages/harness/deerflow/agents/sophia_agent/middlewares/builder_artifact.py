@@ -460,6 +460,8 @@ def _latest_valid_pptx_output_file(state: dict[str, Any]) -> Path | None:
         try:
             if not candidate.is_file() or not _is_public_output_file(candidate):
                 continue
+            if _is_support_output_path(candidate, outputs_root):
+                continue
             if min_mtime is not None and candidate.stat().st_mtime < min_mtime:
                 continue
         except OSError:
