@@ -743,3 +743,16 @@ def test_slide_png_renderer_rejects_missing_images():
     assert 'route.abort("failed")' in source
     assert "missing local render assets" in source
     assert "fulfill({ status: 200" not in source
+
+
+def test_slide_png_renderer_allows_only_generated_raster_assets():
+    png_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_png.mjs"
+    source = png_script.read_text(encoding="utf-8")
+
+    assert "isAllowedRenderRequest(url, htmlFile, outputRoot, resourceType)" in source
+    assert 'resourceType !== "image"' in source
+    assert 'path.join(outputRoot, "assets")' in source
+    assert "fs.realpathSync(assetRoot)" in source
+    assert "ALLOWED_ASSET_EXTENSIONS" in source
+    assert 'new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"])' in source
+    assert "fs.realpathSync(outputRoot));" not in source

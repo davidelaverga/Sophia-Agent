@@ -59,12 +59,17 @@ function isInsideDirectory(candidate, root) {
   return relative === "" || (relative && !relative.startsWith("..") && !path.isAbsolute(relative));
 }
 
-function isAllowedRenderRequest(url, htmlFile, outputRoot) {
+const ALLOWED_ASSET_EXTENSIONS = new Set([".png", ".jpg", ".jpeg", ".webp", ".gif"]);
+
+function isAllowedRenderRequest(url, htmlFile, outputRoot, resourceType) {
   if (url === pathToFileURL(path.resolve(htmlFile)).href) {
     return true;
   }
-  if (url.startsWith("data:") || url.startsWith("blob:") || url === "about:blank") {
-    return true;
+  if (url.startsWith("data:") || url.startsWith("blob:")) {
+    return resourceType === "image";
+  }
+  if (url === "about:blank") {
+    return resourceType === "document";
   }
   if (!url.startsWith("file:")) {
     return false;
@@ -75,16 +80,20 @@ function isAllowedRenderRequest(url, htmlFile, outputRoot) {
   } catch {
     return false;
   }
+  if (resourceType !== "image" || !ALLOWED_ASSET_EXTENSIONS.has(path.extname(candidate).toLowerCase())) {
+    return false;
+  }
+  const assetRoot = path.join(outputRoot, "assets");
   try {
-    // Resolve symlinks: a real existing asset must stay under the REAL outputs
-    // root, so a symlinked asset pointing outside outputs cannot smuggle an
-    // outside file into the rendered deliverable (Codex P1, 2026-06-27).
-    return isInsideDirectory(fs.realpathSync(candidate), fs.realpathSync(outputRoot));
+    // Resolve symlinks: slide subresources may load only generated raster
+    // assets under the REAL assets root. Support files elsewhere in outputs
+    // must never become Chromium-readable slide content.
+    return isInsideDirectory(fs.realpathSync(candidate), fs.realpathSync(assetRoot));
   } catch {
     // Missing target (or missing file): fall back to the lexical check so a
     // genuinely-absent asset is still recognized/tracked downstream — a
     // nonexistent path discloses nothing.
-    return isInsideDirectory(candidate, outputRoot);
+    return isInsideDirectory(candidate, assetRoot);
   }
 }
 
@@ -108,26 +117,21 @@ async function installRenderRequestPolicy(page, htmlFile) {
   const missingLocalResources = [];
   const blockedSubresources = [];
   await page.route("**/*", (route) => {
-    const requestUrl = route.request().url();
-    if (isAllowedRenderRequest(requestUrl, htmlFile, outputRoot)) {
+    const request = route.request();
+    const requestUrl = request.url();
+    const resourceType = request.resourceType();
+    if (isAllowedRenderRequest(requestUrl, htmlFile, outputRoot, resourceType)) {
       const localPath = localRenderPathForUrl(requestUrl);
       if (
         localPath &&
         requestUrl !== pathToFileURL(path.resolve(htmlFile)).href &&
         !fs.existsSync(localPath)
       ) {
-        const resourceType = route.request().resourceType();
-        if (resourceType !== "image") {
-          blockedSubresources.push(`${resourceType}:${requestUrl}`);
-          return route.abort("failed");
-        }
         missingLocalResources.push(localPath);
         return route.abort("failed");
       }
       return route.continue();
     }
-    const request = route.request();
-    const resourceType = request.resourceType();
     if (requestUrl !== pathToFileURL(path.resolve(htmlFile)).href) {
       blockedSubresources.push(`${resourceType}:${requestUrl}`);
     }
