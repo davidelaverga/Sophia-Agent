@@ -333,6 +333,44 @@ def test_report_contract_excludes_stylesheet_hidden_semantics_and_text(staged, m
     assert "report_manifest.minimum_word_count" in result["report_contract_problems"]
 
 
+def test_report_contract_excludes_print_media_hidden_semantics_and_text(staged, monkeypatch):
+    hidden_prose = " ".join(["invisible"] * 350)
+    (staged / "report.html").write_text(
+        "<html><head><style>@media screen { .screen-only { display: none; } }"
+        "@media print, speech { .pad { visibility: hidden; } }</style></head><body>"
+        f"<section id='architecture' class='pad' data-report-role='body'><p>{hidden_prose}</p></section>"
+        "<section id='visible' class='screen-only' data-report-role='body'>Visible in print.</section>"
+        "</body></html>"
+    )
+    monkeypatch.setattr(render_html, "_html_pdf_runtime", lambda: pytest.fail("Chromium must not run for print-hidden content"))
+
+    result = _call(
+        runtime=_fake_runtime(
+            {
+                "builder_artifact_target_path": f"{_OUTPUTS_PREFIX}out.pdf",
+                "delegation_context": {"task_type": "visual_report"},
+                "builder_pdf_required_body_section_count": 2,
+                "builder_pdf_required_min_word_count": 300,
+            }
+        ),
+        html_path=f"{_OUTPUTS_PREFIX}report.html",
+        pdf_path=f"{_OUTPUTS_PREFIX}out.pdf",
+        report_manifest={
+            "sections": [
+                {"id": "architecture", "title": "Architecture", "role": "body"},
+                {"id": "visible", "title": "Visible", "role": "body"},
+            ],
+            "minimum_word_count": 300,
+        },
+    )
+
+    assert result["success"] is False
+    assert result["missing_section_ids"] == ["architecture"]
+    assert result["found_body_section_count"] == 1
+    assert result["source_word_count"] < 10
+    assert "report_manifest.minimum_word_count" in result["report_contract_problems"]
+
+
 def test_complete_report_contract_renders_with_state_page_targets(staged, monkeypatch, tmp_path):
     prose = " ".join(["analysis"] * 340)
     (staged / "report.html").write_text(

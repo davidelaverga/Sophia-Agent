@@ -212,6 +212,7 @@ _INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
         "ledger",
         "uploads",
         ".builder",
+        "visuals",
         "assets",
         "slides",
         "sources",

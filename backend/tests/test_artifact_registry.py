@@ -1475,6 +1475,7 @@ def test_upsert_endpoint_uses_authenticated_user_when_client_user_id_absent(tmp_
         "thread-1/ledger/session.jsonl",
         "thread-1/uploads/secret.pdf",
         "thread-1/.builder/state.json",
+        "thread-1/visuals/chart.png",
         "thread-1/assets/slide-1.png",
         "thread-1/slides/slide-1.html",
         "thread-1/deck_build/build.json",
@@ -1505,7 +1506,7 @@ def test_upsert_endpoint_rejects_internal_keyspace_object_path(tmp_path, monkeyp
 
 @pytest.mark.parametrize(
     "internal_path",
-    ["thread-1/ledger/session.jsonl", "thread-1/deck_build/build.json"],
+    ["thread-1/ledger/session.jsonl", "thread-1/deck_build/build.json", "thread-1/visuals/chart.png"],
 )
 def test_content_endpoint_refuses_internal_keyspace_storage_object(
     tmp_path,

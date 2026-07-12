@@ -65,9 +65,8 @@ def _stylesheet_visibility_rules(source: str) -> list[_VisibilityRule]:
     rules: list[_VisibilityRule] = []
     order = 0
     for stylesheet in collector.stylesheets:
-        for rule in tinycss2.parse_stylesheet(stylesheet, skip_comments=True, skip_whitespace=True):
-            if getattr(rule, "type", None) != "qualified-rule":
-                continue
+        parsed = tinycss2.parse_stylesheet(stylesheet, skip_comments=True, skip_whitespace=True)
+        for rule in _print_visibility_rules(parsed):
             selectors = [item.strip().lower() for item in tinycss2.serialize(rule.prelude).split(",")]
             declarations = tinycss2.parse_declaration_list(rule.content, skip_comments=True, skip_whitespace=True)
             for selector in selectors:
@@ -90,6 +89,34 @@ def _stylesheet_visibility_rules(source: str) -> list[_VisibilityRule]:
                     )
                 order += 1
     return rules
+
+
+def _print_visibility_rules(rules: list[object]) -> list[object]:
+    qualified: list[object] = []
+    for rule in rules:
+        rule_type = getattr(rule, "type", None)
+        if rule_type == "qualified-rule":
+            qualified.append(rule)
+            continue
+        if rule_type != "at-rule" or str(getattr(rule, "lower_at_keyword", "")) != "media" or not getattr(rule, "content", None):
+            continue
+        media_query = tinycss2.serialize(rule.prelude).strip().lower()
+        if not _media_query_applies_to_print(media_query):
+            continue
+        nested = tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True)
+        qualified.extend(_print_visibility_rules(nested))
+    return qualified
+
+
+def _media_query_applies_to_print(media_query: str) -> bool:
+    for query in media_query.split(","):
+        identifiers = re.findall(r"[a-z][a-z0-9_-]*", query.lower())
+        negated = bool(identifiers and identifiers[0] == "not")
+        media_type = next((item for item in identifiers if item in {"all", "print", "screen", "speech"}), None)
+        applies = media_type in {None, "all", "print"}
+        if applies != negated:
+            return True
+    return False
 
 
 def _simple_selector_specificity(selector: str) -> int | None:
