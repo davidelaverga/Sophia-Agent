@@ -194,6 +194,9 @@ $$;
 REVOKE ALL ON FUNCTION public.sophia_commit_build_manifest(
     TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB
 ) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.sophia_commit_build_manifest(
+    TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB
+) TO service_role;
 
 CREATE OR REPLACE FUNCTION public.sophia_append_build_event(
     p_build_id TEXT,
@@ -227,3 +230,5 @@ END;
 $$;
 
 REVOKE ALL ON FUNCTION public.sophia_append_build_event(TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, JSONB) FROM PUBLIC;
+GRANT EXECUTE ON FUNCTION public.sophia_append_build_event(TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, JSONB)
+    TO service_role;

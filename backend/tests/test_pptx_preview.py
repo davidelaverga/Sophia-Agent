@@ -45,7 +45,7 @@ def test_successful_conversion_moves_preview_into_place(tmp_path, monkeypatch):
         (out_dir / "deck.pdf").write_bytes(b"%PDF-1.4 preview")
         return SimpleNamespace(returncode=0, stderr="", stdout="")
 
-    monkeypatch.setattr(pptx_preview.subprocess, "run", fake_run)
+    monkeypatch.setattr(pptx_preview, "run_process_group", fake_run)
 
     preview = maybe_render_pptx_preview(deck)
 
@@ -58,8 +58,8 @@ def test_failed_conversion_returns_none(tmp_path, monkeypatch):
     deck.write_bytes(b"PK fake deck")
     monkeypatch.setattr(pptx_preview.shutil, "which", lambda _binary: "/fake/soffice")
     monkeypatch.setattr(
-        pptx_preview.subprocess,
-        "run",
+        pptx_preview,
+        "run_process_group",
         lambda cmd, **kwargs: SimpleNamespace(returncode=1, stderr="boom", stdout=""),
     )
 
@@ -74,7 +74,7 @@ def test_timeout_returns_none(tmp_path, monkeypatch):
     def fake_run(cmd, **kwargs):
         raise subprocess.TimeoutExpired(cmd=cmd, timeout=1)
 
-    monkeypatch.setattr(pptx_preview.subprocess, "run", fake_run)
+    monkeypatch.setattr(pptx_preview, "run_process_group", fake_run)
 
     assert maybe_render_pptx_preview(deck) is None
 

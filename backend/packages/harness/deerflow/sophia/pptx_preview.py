@@ -22,6 +22,8 @@ import subprocess  # noqa: S404 — invoking soffice by absolute path
 import tempfile
 from pathlib import Path
 
+from deerflow.sophia.process_group import run_process_group
+
 logger = logging.getLogger(__name__)
 
 _SOFFICE_TIMEOUT_SECONDS = 120
@@ -68,7 +70,7 @@ def maybe_render_pptx_preview(
         # deliverable in outputs/.
         timeout = max(1, min(_SOFFICE_TIMEOUT_SECONDS, int(timeout_seconds or _SOFFICE_TIMEOUT_SECONDS)))
         with tempfile.TemporaryDirectory(prefix="pptx-preview-") as tmp_dir:
-            completed = subprocess.run(  # noqa: S603 — soffice path from shutil.which
+            completed = run_process_group(
                 [
                     soffice,
                     "--headless",
@@ -79,10 +81,7 @@ def maybe_render_pptx_preview(
                     tmp_dir,
                     str(pptx_path),
                 ],
-                capture_output=True,
-                text=True,
                 timeout=timeout,
-                check=False,
             )
             produced = Path(tmp_dir) / (pptx_path.stem + ".pdf")
             if completed.returncode != 0 or not produced.is_file():

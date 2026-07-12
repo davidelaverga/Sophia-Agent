@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import time
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -207,6 +208,20 @@ def test_startup_reuses_process_event_sink(monkeypatch) -> None:
         configure_default_event_sink(None)
 
     assert calls == 1
+
+
+def test_build_foundation_rpcs_grant_service_role_execution() -> None:
+    migration = Path(__file__).resolve().parents[1] / "migrations" / "2026_07_11_sophia_build_foundation.sql"
+    sql = " ".join(migration.read_text(encoding="utf-8").split())
+
+    assert (
+        "GRANT EXECUTE ON FUNCTION public.sophia_commit_build_manifest( "
+        "TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB ) TO service_role;"
+    ) in sql
+    assert (
+        "GRANT EXECUTE ON FUNCTION public.sophia_append_build_event("
+        "TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, JSONB) TO service_role;"
+    ) in sql
 
 
 def test_mutation_store_requires_expected_state() -> None:
