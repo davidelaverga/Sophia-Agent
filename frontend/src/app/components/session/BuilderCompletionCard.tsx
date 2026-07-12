@@ -448,8 +448,8 @@ function BuilderCompletionActions({
   const openHref = artifactProxyHref || event.artifact_url || null;
   const downloadHref = artifactProxyDownloadHref || event.artifact_url || null;
   const downloadFirst = isDownloadFirstArtifact(event, primaryArtifactPath);
-  const resolvedPreviewPath = previewArtifactPath || (downloadFirst ? null : primaryArtifactPath);
-  const resolvedPreviewHref = previewArtifactPath ? previewArtifactHref : (downloadFirst ? null : artifactProxyHref);
+  const resolvedPreviewPath = downloadFirst ? previewArtifactPath : primaryArtifactPath;
+  const resolvedPreviewHref = downloadFirst ? previewArtifactHref : artifactProxyHref;
   const previewEvent = useMemo(
     () => (resolvedPreviewPath && event.artifact_path !== resolvedPreviewPath ? { ...event, artifact_path: resolvedPreviewPath } : event),
     [event, resolvedPreviewPath],

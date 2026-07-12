@@ -218,9 +218,14 @@ describe("BuilderCompletionCard — success variant", () => {
       ],
     }
 
-    render(<BuilderCompletionCard event={event} onOpen={vi.fn()} />)
+    const onOpen = vi.fn()
+    render(<BuilderCompletionCard event={event} onOpen={onOpen} />)
 
-    expect(screen.queryByRole("button", { name: /view in canvas/i })).toBeNull()
+    fireEvent.click(screen.getByRole("button", { name: /view in canvas/i }))
+    expect(onOpen).toHaveBeenCalledWith({
+      ...event,
+      artifact_path: "mnt/user-data/outputs/research_deck.preview.pdf",
+    })
     expect(screen.queryByRole("link", { name: /open artifact in new tab/i })).toBeNull()
     const link = screen.getByRole("link", { name: /download/i })
     expect(link).toHaveAttribute(
