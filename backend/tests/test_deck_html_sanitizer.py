@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from deerflow.sophia.deck_build.html_sanitizer import validate_and_sanitize_slide_html
+from deerflow.sophia.deck_build.html_sanitizer import assemble_compact_slide_html, validate_and_sanitize_slide_html
 from deerflow.sophia.deck_build.models import DeckSlideSpec
 
 
@@ -192,6 +192,37 @@ html, body { width: 1920px; height: 1080px; background: #FFFFFF; }
     _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
 
     assert result.valid is True
+
+
+def test_compact_background_uses_author_css_after_harness_rule() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet="main { background: #101828; text-transform: uppercase; }",
+        html_body='<h1 data-deck-id="title" data-deck-role="title">Title</h1>',
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+    assert "transform" not in result.unsupported_css
+
+
+def test_compact_background_accepts_slide_root_and_rejects_unresolved_or_transparent_winner() -> None:
+    valid_html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background-color: #101828; }",
+        html_body="<h1>Title</h1>",
+    )
+    _sanitized, valid = validate_and_sanitize_slide_html(_slide(valid_html), allowed_asset_refs=set())
+    assert valid.valid is True
+
+    for stylesheet in (
+        ".slide-root { background: var(--missing); }",
+        ".slide-root { background: #101828; } .slide-root { background: transparent; }",
+        ".slide-root { background: rgba(10, 20, 30, .5); }",
+    ):
+        html = assemble_compact_slide_html(deck_stylesheet=stylesheet, html_body="<h1>Title</h1>")
+        _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+        assert result.valid is False
+        assert "slide background must be opaque" in result.errors
 
 
 def test_rejects_css_subresource_urls_before_rendering() -> None:

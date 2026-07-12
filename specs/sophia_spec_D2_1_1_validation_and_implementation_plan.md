@@ -32,6 +32,27 @@ DeckBuildService contributes only a fixed document shell and does not import
 or activate `html_design_renderer.py`. Legacy `html_source` is accepted only
 for transitional internal callers and is hidden from the model schema.
 
+### 1.2 July 12 production-remediation amendment
+
+The compact transport is versioned at its provider boundary. New model calls
+must submit `authoring_contract=compact_model_html_v2`, use one concise shared
+stylesheet, reuse shared classes, and keep the complete serialized tool call
+within 48 KiB. Queued/internal v1 calls retain the prior service limits. The
+120-second authoring threshold is an absolute cancellation deadline, not an
+HTTP inactivity timeout.
+
+Canvas validation must parse exact CSS declarations from author-authored style
+blocks. The fixed harness shell is excluded from the authoring requirement;
+`text-transform` is not `transform`, and the effective background may be
+declared on `main`, `.slide-root`, `main.slide-root`, the slide-canvas
+attribute, `body`, `html`, or root inline styles.
+
+Builder lifecycle status uses the persisted/child `builder_result` before the
+native LangGraph run status. A clean graph exit without a completed result and
+accepted artifact is `builder_terminal_result_missing`, never success. The
+build-foundation event table and RPCs are a deployment prerequisite and expose
+readiness/circuit-break diagnostics when absent.
+
 ## 2. Evidence Reviewed
 
 ### Local implementation

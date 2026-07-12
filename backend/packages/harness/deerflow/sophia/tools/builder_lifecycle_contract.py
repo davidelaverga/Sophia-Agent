@@ -8,7 +8,8 @@ tool implementations or deepagents middleware modules.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from typing import Any, Literal
+from datetime import UTC, datetime
+from typing import Any, Literal, NamedTuple
 
 from pydantic import BaseModel, Field
 
@@ -213,3 +214,174 @@ def validate_builder_lifecycle_tool_args(tool_name: str, args: Mapping[str, Any]
         allowed = ", ".join(BUILDER_LIFECYCLE_TOOL_ORDER)
         raise ValueError(f"Unsupported builder lifecycle tool {tool_name!r}. Allowed tools: {allowed}.")
     return model.model_validate(dict(args)).model_dump()
+
+
+def is_builder_task(task: Mapping[str, Any]) -> bool:
+    return str(task.get("agent_name") or "") == ASYNC_BUILDER_AGENT_NAME
+
+
+def authoritative_builder_result(
+    task: Mapping[str, Any],
+    thread_values: Mapping[str, Any] | None = None,
+) -> dict[str, Any] | None:
+    cached = task.get("builder_result")
+    if isinstance(cached, dict):
+        return dict(cached)
+    child = (thread_values or {}).get("builder_result")
+    return dict(child) if isinstance(child, dict) else None
+
+
+class _BuilderResolution(NamedTuple):
+    public_status: str
+    internal_status: str
+    terminal_reason: str
+    result: dict[str, Any] | None
+
+
+def _resolve_builder_status(
+    result: dict[str, Any] | None,
+    *,
+    native_status: str,
+    native_error: Any,
+) -> _BuilderResolution:
+    current = result or {}
+    terminal = _resolved_terminal_status(current, result)
+    if terminal is not None:
+        return terminal
+    if native_status == "success":
+        return _missing_terminal_result(current)
+    if native_status in {"error", "failed"}:
+        return _native_error_result(current, native_error)
+    return _BuilderResolution(native_status or "running", native_status or "running", "", result)
+
+
+def _resolved_terminal_status(
+    current: dict[str, Any],
+    result: dict[str, Any] | None,
+) -> _BuilderResolution | None:
+    terminal_status = str(current.get("terminal_status") or current.get("status") or "").strip().lower()
+    if terminal_status == "completed" and _builder_result_has_artifact(current):
+        reason = str(current.get("terminal_reason") or "artifact_emitted")
+        return _BuilderResolution("success", "completed", reason, result)
+    if terminal_status in {"failed", "error"}:
+        reason = str(current.get("terminal_reason") or current.get("failure_code") or "builder_failed")
+        return _BuilderResolution("error", "failed", reason, result)
+    if terminal_status in {"timed_out", "timeout"}:
+        reason = str(current.get("terminal_reason") or "builder_timed_out")
+        return _BuilderResolution("timeout", "timed_out", reason, result)
+    return None
+
+
+def _builder_result_has_artifact(result: dict[str, Any]) -> bool:
+    return bool(str(result.get("artifact_path") or result.get("artifact_url") or "").strip())
+
+
+def _missing_terminal_result(current: dict[str, Any]) -> _BuilderResolution:
+    reason = "builder_terminal_result_missing"
+    result = {
+        **current,
+        "status": "failed",
+        "terminal_status": "failed",
+        "terminal_reason": reason,
+        "failure_code": reason,
+        "root_failure_code": current.get("root_failure_code") or reason,
+        "summary": "The builder graph stopped without an accepted artifact result.",
+        "artifact_path": None,
+    }
+    return _BuilderResolution("error", "incomplete", reason, result)
+
+
+def _native_error_result(current: dict[str, Any], native_error: Any) -> _BuilderResolution:
+    reason = str(current.get("terminal_reason") or "builder_graph_error")
+    result = {
+        **current,
+        "status": "failed",
+        "terminal_status": "failed",
+        "terminal_reason": reason,
+        "failure_code": current.get("failure_code") or reason,
+        "summary": str(current.get("summary") or native_error or "The builder graph encountered an error."),
+        "artifact_path": None,
+    }
+    return _BuilderResolution("error", "failed", reason, result)
+
+
+def reconcile_builder_task(
+    task: Mapping[str, Any],
+    *,
+    native_status: str | None = None,
+    thread_values: Mapping[str, Any] | None = None,
+    native_error: Any = None,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """Resolve builder status without treating clean graph exit as artifact success."""
+
+    merged = dict(task)
+    result = authoritative_builder_result(task, thread_values)
+    native = str(native_status or task.get("status") or "running").strip().lower()
+    resolution = _resolve_builder_status(result, native_status=native, native_error=native_error)
+    public_status, internal_status, terminal_reason, result = resolution
+
+    now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    previous_status = str(task.get("status") or "")
+    merged["status"] = public_status
+    merged["builder_internal_status"] = internal_status
+    merged["last_checked_at"] = now
+    if public_status != previous_status:
+        merged["last_updated_at"] = now
+    _apply_builder_result_metadata(merged, result)
+    response = _builder_status_response(
+        task,
+        result=result,
+        public_status=public_status,
+        internal_status=internal_status,
+        terminal_reason=terminal_reason,
+    )
+    return merged, response
+
+
+def _apply_builder_result_metadata(merged: dict[str, Any], result: dict[str, Any] | None) -> None:
+    if result is None:
+        return
+    merged["builder_result"] = result
+    for key in (
+        "artifact_path",
+        "terminal_status",
+        "terminal_reason",
+        "failure_code",
+        "root_failure_code",
+        "root_failure_summary",
+    ):
+        if result.get(key) is not None:
+            merged[key] = result.get(key)
+
+
+def _builder_status_response(
+    task: Mapping[str, Any],
+    *,
+    result: dict[str, Any] | None,
+    public_status: str,
+    internal_status: str,
+    terminal_reason: str,
+) -> dict[str, Any]:
+    response: dict[str, Any] = {
+        "status": public_status,
+        "thread_id": str(task.get("thread_id") or task.get("task_id") or ""),
+        "terminal_status": internal_status if internal_status in {"completed", "failed", "timed_out", "incomplete"} else None,
+        "terminal_reason": terminal_reason or None,
+    }
+    if result is not None:
+        response.update(
+            {
+                key: result.get(key)
+                for key in (
+                    "artifact_path",
+                    "artifact_url",
+                    "artifact_type",
+                    "summary",
+                    "failure_code",
+                    "root_failure_code",
+                    "root_failure_summary",
+                )
+                if result.get(key) is not None
+            }
+        )
+    return response

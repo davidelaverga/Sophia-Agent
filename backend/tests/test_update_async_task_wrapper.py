@@ -28,6 +28,7 @@ from langchain.tools import ToolRuntime
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 
+from deerflow.sophia.tools.builder_lifecycle_contract import reconcile_builder_task
 from deerflow.sophia.tools.start_builder_task import _has_active_builder_task
 from deerflow.sophia.tools.update_async_task_wrapper import (
     _file_target_directive_block,
@@ -37,6 +38,58 @@ from deerflow.sophia.tools.update_async_task_wrapper import (
 )
 
 # ---- helpers ---------------------------------------------------------------
+
+
+def test_builder_result_overrides_clean_graph_success_and_preserves_diagnostics():
+    task = {
+        "task_id": "task-1",
+        "agent_name": "sophia_builder",
+        "thread_id": "thread-1",
+        "run_id": "run-1",
+        "status": "running",
+        "deck_compile_mode": "native_html2patch",
+    }
+    failed_result = {
+        "status": "failed",
+        "terminal_status": "failed",
+        "terminal_reason": "deck_slide_html_invalid",
+        "failure_code": "deck_slide_html_invalid",
+        "root_failure_code": "deck_slide_html_invalid",
+        "root_failure_summary": "The model-authored canvas failed validation.",
+        "summary": "No PPTX was delivered.",
+        "artifact_path": None,
+    }
+
+    reconciled, payload = reconcile_builder_task(
+        task,
+        native_status="success",
+        thread_values={"builder_result": failed_result},
+    )
+
+    assert reconciled["status"] == "error"
+    assert reconciled["deck_compile_mode"] == "native_html2patch"
+    assert reconciled["builder_result"] == failed_result
+    assert payload["status"] == "error"
+    assert payload["failure_code"] == "deck_slide_html_invalid"
+    assert "result" not in payload
+
+
+def test_builder_native_success_without_terminal_result_is_never_success():
+    reconciled, payload = reconcile_builder_task(
+        {
+            "task_id": "task-1",
+            "agent_name": "sophia_builder",
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "status": "running",
+        },
+        native_status="success",
+    )
+
+    assert reconciled["status"] == "error"
+    assert reconciled["builder_internal_status"] == "incomplete"
+    assert payload["terminal_status"] == "incomplete"
+    assert payload["terminal_reason"] == "builder_terminal_result_missing"
 
 
 def _make_native_tool(
@@ -1397,7 +1450,7 @@ def test_list_wrapper_backfills_missing_created_at_and_delegates_sync():
     assert runtime.state["async_tasks"]["task-1"]["created_at"] == task["created_at"]
 
 
-def test_list_wrapper_backfills_missing_update_timestamps_from_created_at():
+def test_list_wrapper_marks_legacy_native_success_without_builder_result_incomplete():
     native, sync_calls, _ = _make_native_list_tool()
     wrapped = make_list_async_tasks_wrapper(native)
     runtime = _runtime(
@@ -1417,8 +1470,9 @@ def test_list_wrapper_backfills_missing_update_timestamps_from_created_at():
 
     task = sync_calls[0]["task"]
     assert task["created_at"] == "2026-07-07T14:04:06Z"
-    assert task["last_checked_at"] == "2026-07-07T14:04:06Z"
-    assert task["last_updated_at"] == "2026-07-07T14:04:06Z"
+    assert task["status"] == "error"
+    assert task["builder_internal_status"] == "incomplete"
+    assert task["builder_result"]["failure_code"] == "builder_terminal_result_missing"
 
 
 def test_list_wrapper_model_facing_args_exclude_runtime():
@@ -1516,9 +1570,10 @@ def test_check_wrapper_preserves_deck_failure_diagnostics():
         }
     )
 
-    wrapped.func(task_id="task-1", runtime=runtime)
+    response = wrapped.func(task_id="task-1", runtime=runtime)
 
-    task = sync_calls[0]["task"]
+    assert sync_calls == []
+    task = response.update["async_tasks"]["task-1"]
     assert task["deck_compile_mode"] == "native_html2patch"
     assert task["native_editability_score"] == 1.0
     assert task["full_slide_picture_count"] == 1

@@ -11,6 +11,7 @@ Command(goto="model") so the builder gets another turn to retry instead
 of completing with a phantom artifact.
 """
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -68,7 +69,7 @@ from deerflow.sophia.build_condition import (
     preview_review_blocks,
     rendered_artifact_review,
 )
-from deerflow.sophia.build_runtime.events import record_runtime_event
+from deerflow.sophia.build_runtime.events import default_event_sink_status, record_runtime_event
 from deerflow.sophia.builder_events import fire_completion_webhook_from_artifact
 from deerflow.sophia.builder_failure_diagnostics import (
     build_builder_failure_diagnostics,
@@ -3451,6 +3452,7 @@ def _apply_artifact_request_metadata(
     artifact["status"] = terminal_status
     artifact["terminal_status"] = terminal_status
     artifact["terminal_reason"] = terminal_reason
+    artifact["build_event_store_status"] = default_event_sink_status()
     diagnostics = _pptx_diagnostics(state)
     for key in (
         "first_prepare_turn",
@@ -3472,6 +3474,8 @@ def _apply_artifact_request_metadata(
     ):
         if diagnostics.get(key) is not None:
             artifact.setdefault(key, diagnostics.get(key))
+    if artifact.get("deck_authoring_contract") is not None:
+        artifact.setdefault("authoring_contract", artifact.get("deck_authoring_contract"))
     artifact_entries = _artifact_file_entries(artifact)
     if artifact_entries:
         artifact["artifact_files"] = artifact_entries
@@ -6034,7 +6038,9 @@ def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
             "[Sophia/deck build latch]\n"
             "This is a fresh PPTX deck build. Stop authoring lower-level deck files or compiler "
             "commands. Use the injected deck-craft contract, then call `prepare_deck_build` "
-            "with the complete creative_plan, shared deck_stylesheet, and slide html_body list "
+            "with authoring_contract='compact_model_html_v2', one concise creative_plan, one shared "
+            "deck_stylesheet, and the complete slide html_body list. Reuse shared classes, keep each "
+            "html_body compact, keep slide_css exceptional, and emit no prose outside the tool call "
             f"and output_path='{target}'. DeckBuildService owns HTML sanitization, planned generated assets, "
             "native PowerPoint compilation, inspection, mechanical gates, and terminal failure. It will return either the "
             "deliverable path or a terminal failure. Keep every narrative <= 280 characters. If it "
@@ -9667,7 +9673,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         message = str(state.get("builder_deck_prepare_repair_message") or "").strip()
         if not message:
-            message = "Repair the exact prepare_deck_build validation failure and call prepare_deck_build exactly once more with the complete creative_plan and compact deck_stylesheet/html_body contract."
+            message = (
+                "Repair the exact prepare_deck_build validation failure and call prepare_deck_build exactly once more "
+                "with authoring_contract=compact_model_html_v2, the complete concise creative_plan, one shared "
+                "deck_stylesheet, and compact html_body values."
+            )
         return {
             "messages": [HumanMessage(content=f"[Sophia/PPTX D2.1 repair]\n{message}")],
             "builder_deck_prepare_repair_prompt_injected": True,
@@ -9820,11 +9830,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if not _deck_build_service_route_active(state) or latest_ai is None:
             return None
         additional_kwargs = getattr(latest_ai, "additional_kwargs", {})
+        elapsed_ms = _elapsed_since_builder_start_ms(state) or 0
+        deadline_ms = prepare_force_after_seconds(state) * 1_000
         if additional_kwargs.get("deerflow_error_fallback"):
             error_type = str(additional_kwargs.get("error_type") or "")
             error_reason = str(additional_kwargs.get("error_reason") or "")
-            elapsed_ms = _elapsed_since_builder_start_ms(state) or 0
-            deadline_ms = prepare_force_after_seconds(state) * 1_000
             if "timeout" in error_type.lower() or (deadline_ms > 0 and elapsed_ms >= deadline_ms):
                 failure_code = "deck_authoring_deadline_exceeded"
             elif error_reason == "malformed_request" or error_type in {"TypeError", "ValidationError", "SchemaError", "ValueError"}:
@@ -9835,6 +9845,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 state,
                 runtime,
                 failure_code=failure_code,
+            )
+        if deadline_ms > 0 and elapsed_ms >= deadline_ms:
+            return self._deck_authoring_terminal_update(
+                state,
+                runtime,
+                failure_code="deck_authoring_deadline_exceeded",
             )
         if self._last_ai_truncated(state):
             return self._deck_authoring_terminal_update(
@@ -9943,7 +9959,47 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if choice is not None:
             choice = self._provider_normalized_tool_choice(request.model, choice)
             request = request.override(tool_choice=choice)
-        return self._model_result_with_state_update(await handler(request), state_update)
+        remaining = self._presentation_authoring_seconds_remaining(request.state)
+        if remaining is None:
+            return self._model_result_with_state_update(await handler(request), state_update)
+        if remaining <= 0:
+            return self._model_result_with_state_update(
+                self._authoring_timeout_message(),
+                state_update,
+            )
+        try:
+            async with asyncio.timeout_at(asyncio.get_running_loop().time() + remaining):
+                result = await handler(request)
+        except TimeoutError:
+            logger.error(
+                "BuilderArtifact: presentation authoring model stream cancelled at absolute deadline elapsed_ms=%s",
+                _elapsed_since_builder_start_ms(request.state),
+            )
+            result = self._authoring_timeout_message()
+        return self._model_result_with_state_update(result, state_update)
+
+    @staticmethod
+    def _presentation_authoring_seconds_remaining(state: BuilderArtifactState) -> float | None:
+        if not _deck_build_service_route_active(state):
+            return None
+        diagnostics = _pptx_diagnostics(state)
+        if int(diagnostics.get("prepare_emitted_call_count", 0) or 0) > 0:
+            return None
+        elapsed_ms = _elapsed_since_builder_start_ms(state)
+        if elapsed_ms is None:
+            return None
+        return max(0.0, prepare_force_after_seconds(state) - (elapsed_ms / 1_000.0))
+
+    @staticmethod
+    def _authoring_timeout_message() -> AIMessage:
+        return AIMessage(
+            content="[Sophia builder stopped: presentation authoring deadline exceeded.]",
+            additional_kwargs={
+                "deerflow_error_fallback": True,
+                "error_type": "TimeoutError",
+                "error_reason": "authoring_deadline",
+            },
+        )
 
     @staticmethod
     def _bounded_presentation_model_request(request: ModelRequest) -> ModelRequest:
@@ -11501,6 +11557,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             delta,
         )
         terminal_state = {**state, "builder_pptx_diagnostics": diagnostics}
+        image_failure = "image" in failure_code.lower() or "visual" in failure_code.lower()
         fallback = {
             "artifact_path": None,
             "artifact_type": "presentation",
@@ -11509,7 +11566,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "decisions_made": [],
             "companion_summary": failure_summary,
             "companion_tone_hint": "Direct and apologetic — the deck build failed before a quality PPTX was available.",
-            "user_next_action": "Retry after correcting the deck input or production image-generation issue named in the failure metadata.",
+            "user_next_action": (
+                "Retry after correcting the production image-generation issue named in the failure metadata."
+                if image_failure
+                else "Retry after correcting the exact deck input or runtime issue named in the failure metadata."
+            ),
             "confidence": 0.0,
             "status": terminal_status,
             "terminal_status": terminal_status,
@@ -13211,7 +13272,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             diagnostics["first_prepare_turn"] = int(state.get("builder_non_artifact_turns", 0) or 0) + 1
         call_id = str(calls[-1].get("id") or "").strip()
         call_args = calls[-1].get("args") if isinstance(calls[-1].get("args"), dict) else {}
-        diagnostics["deck_authoring_contract"] = "compact_model_html_v1" if str(call_args.get("deck_stylesheet") or "").strip() else "legacy_full_html_v1"
+        diagnostics["deck_authoring_contract"] = (
+            str(call_args.get("authoring_contract") or "compact_model_html_v1")
+            if str(call_args.get("deck_stylesheet") or "").strip()
+            else "legacy_full_html_v1"
+        )
         diagnostics["deck_authoring_elapsed_ms"] = _elapsed_since_builder_start_ms(state)
         diagnostics.setdefault("prepare_force_reason", "model_initiated")
         update: dict[str, Any] = {

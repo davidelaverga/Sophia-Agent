@@ -879,6 +879,10 @@ def _artifact_completion_fields(
         "dangling_prepare_call_count": artifact.get("dangling_prepare_call_count"),
         "creative_plan_accepted": artifact.get("creative_plan_accepted"),
         "deck_authoring_contract": artifact.get("deck_authoring_contract"),
+        "authoring_contract": artifact.get("authoring_contract") or artifact.get("deck_authoring_contract"),
+        "build_event_store_status": artifact.get("build_event_store_status"),
+        "builder_trace_run_id": artifact.get("builder_trace_run_id"),
+        "builder_trace_root_run_id": artifact.get("builder_trace_root_run_id"),
         "deck_authoring_elapsed_ms": artifact.get("deck_authoring_elapsed_ms"),
         "prepare_force_reason": artifact.get("prepare_force_reason"),
     }

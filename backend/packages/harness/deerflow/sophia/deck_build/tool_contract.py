@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
@@ -157,6 +158,11 @@ _MAX_DECK_STYLESHEET_BYTES = 24 * 1024
 _MAX_SLIDE_HTML_BODY_BYTES = 16 * 1024
 _MAX_SLIDE_CSS_BYTES = 8 * 1024
 _MAX_AUTHORING_PAYLOAD_BYTES = 128 * 1024
+_V2_MAX_DECK_STYLESHEET_BYTES = 8 * 1024
+_V2_MAX_SLIDE_HTML_BODY_BYTES = 3 * 1024
+_V2_MAX_SLIDE_CSS_BYTES = 1 * 1024
+_V2_MAX_CREATIVE_PLAN_BYTES = 12 * 1024
+_V2_MAX_AUTHORING_PAYLOAD_BYTES = 48 * 1024
 _DOCUMENT_FRAGMENT_TAGS = ("<html", "</html", "<head", "</head", "<body", "</body", "<style", "</style")
 
 
@@ -171,6 +177,10 @@ def _compact_slide_json_schema(schema: dict[str, Any]) -> None:
     body_schema = schema.get("properties", {}).get("html_body")
     if isinstance(body_schema, dict):
         body_schema.pop("default", None)
+        _set_string_max_length(body_schema, _V2_MAX_SLIDE_HTML_BODY_BYTES)
+    slide_css_schema = schema.get("properties", {}).get("slide_css")
+    if isinstance(slide_css_schema, dict):
+        _set_string_max_length(slide_css_schema, _V2_MAX_SLIDE_CSS_BYTES)
 
 
 def _compact_prepare_json_schema(schema: dict[str, Any]) -> None:
@@ -180,6 +190,23 @@ def _compact_prepare_json_schema(schema: dict[str, Any]) -> None:
     stylesheet_schema = schema.get("properties", {}).get("deck_stylesheet")
     if isinstance(stylesheet_schema, dict):
         stylesheet_schema.pop("default", None)
+        _set_string_max_length(stylesheet_schema, _V2_MAX_DECK_STYLESHEET_BYTES)
+    if "authoring_contract" not in required:
+        required.append("authoring_contract")
+    schema.setdefault("properties", {})["authoring_contract"] = {
+        "const": "compact_model_html_v2",
+        "description": "Required compact authoring profile for new model-owned deck calls.",
+        "type": "string",
+    }
+
+
+def _set_string_max_length(schema: dict[str, Any], limit: int) -> None:
+    if schema.get("type") == "string":
+        schema["maxLength"] = limit
+        return
+    for variant in schema.get("anyOf", []):
+        if isinstance(variant, dict) and variant.get("type") == "string":
+            variant["maxLength"] = limit
 
 
 class DeckSlideInput(BaseModel):
@@ -240,6 +267,12 @@ class PrepareDeckBuildInput(BaseModel):
     slides: NormalizedDeckSlides
     output_path: str
     creative_plan: NormalizedDeckCreativePlan
+    authoring_contract: Literal["compact_model_html_v1", "compact_model_html_v2"] | None = Field(
+        default=None,
+        description=(
+            "New builder calls must use compact_model_html_v2. Omitted and v1 values remain accepted only for queued/internal compatibility."
+        ),
+    )
     deck_stylesheet: str | None = Field(
         default=None,
         description=("Shared compiler-supported CSS for every slide. It must style the main 1920x1080 canvas with an opaque background."),
@@ -274,4 +307,20 @@ class PrepareDeckBuildInput(BaseModel):
             total_bytes += _utf8_size(slide.html_source)
         if total_bytes > _MAX_AUTHORING_PAYLOAD_BYTES:
             raise ValueError("deck authoring payload exceeds the 131072-byte limit")
+        if self.authoring_contract == "compact_model_html_v2":
+            self._validate_v2_authoring_profile(stylesheet)
         return self
+
+    def _validate_v2_authoring_profile(self, stylesheet: str) -> None:
+        if _utf8_size(stylesheet) > _V2_MAX_DECK_STYLESHEET_BYTES:
+            raise ValueError("deck_stylesheet exceeds the compact-v2 8192-byte limit")
+        for index, slide in enumerate(self.slides):
+            if _utf8_size(slide.html_body) > _V2_MAX_SLIDE_HTML_BODY_BYTES:
+                raise ValueError(f"slides[{index}].html_body exceeds the compact-v2 3072-byte limit")
+            if _utf8_size(slide.slide_css) > _V2_MAX_SLIDE_CSS_BYTES:
+                raise ValueError(f"slides[{index}].slide_css exceeds the compact-v2 1024-byte limit")
+        plan_json = json.dumps(self.creative_plan.model_dump(mode="json"), separators=(",", ":"), ensure_ascii=False)
+        if _utf8_size(plan_json) > _V2_MAX_CREATIVE_PLAN_BYTES:
+            raise ValueError("creative_plan exceeds the compact-v2 12288-byte limit")
+        if _utf8_size(self.model_dump_json(exclude_none=True)) > _V2_MAX_AUTHORING_PAYLOAD_BYTES:
+            raise ValueError("prepare_deck_build arguments exceed the compact-v2 49152-byte limit")

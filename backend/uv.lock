@@ -943,6 +943,7 @@ dependencies = [
     { name = "readabilipy" },
     { name = "tavily-python" },
     { name = "tiktoken" },
+    { name = "tinycss2" },
 ]
 
 [package.metadata]
@@ -976,6 +977,7 @@ requires-dist = [
     { name = "readabilipy", specifier = ">=0.3.0" },
     { name = "tavily-python", specifier = ">=0.7.17" },
     { name = "tiktoken", specifier = ">=0.8.0" },
+    { name = "tinycss2", specifier = ">=1.5.1" },
 ]
 
 [[package]]

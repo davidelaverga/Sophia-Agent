@@ -18,6 +18,21 @@
 > forbidden deterministic template renderer. Transitional full `html_source`
 > intake remains internal and is omitted from the model-facing schema.
 >
+> **Post-incident runtime amendment (2026-07-12):** New model calls identify
+> `authoring_contract=compact_model_html_v2`. The provider-facing profile is
+> intentionally smaller than the transitional service profile: 8 KiB shared
+> CSS, 3 KiB `html_body` and 1 KiB `slide_css` per slide, 12 KiB creative-plan
+> JSON, and 48 KiB total serialized arguments. Omitted/v1 calls remain accepted
+> for queued and internal compatibility. CSS capability and canvas-background
+> checks parse exact declarations from model-authored styles; harness shell CSS
+> cannot satisfy or invalidate the model-owned opaque-canvas requirement.
+> Presentation authoring is cancelled at the absolute 120-second deadline.
+> Clean LangGraph termination is not artifact success: lifecycle status is
+> authoritative only when the terminal builder result proves an accepted
+> artifact. Durable event persistence requires the additive build-foundation
+> migration and reports an explicit unavailable status when its table/RPCs are
+> absent.
+>
 > **Imported source SHA-256:**
 > `efa4b260f30b4260e42c666ffe98d66a2c0f88ffdcca16b2fcb1c649867cd9eb`
 

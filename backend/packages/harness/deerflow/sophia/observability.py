@@ -840,6 +840,10 @@ def _add_pptx_terminal_metadata(metadata: dict[str, Any], diagnostics: dict[str,
         "creative_plan_accepted",
         "prepare_latch_activated_at_turn",
         "deck_authoring_contract",
+        "authoring_contract",
+        "build_event_store_status",
+        "builder_trace_run_id",
+        "builder_trace_root_run_id",
         "deck_authoring_elapsed_ms",
         "prepare_force_reason",
         "deck_html_fragment_count",
@@ -937,6 +941,8 @@ def _add_artifact_acceptance_metadata(metadata: dict[str, Any], artifact: dict[s
         "dangling_prepare_call_count",
         "creative_plan_accepted",
         "deck_authoring_contract",
+        "authoring_contract",
+        "build_event_store_status",
         "deck_authoring_elapsed_ms",
         "prepare_force_reason",
         "root_failure_code",
@@ -1235,6 +1241,37 @@ def _root_run_tree(run_tree: Any) -> Any:
     return run_tree
 
 
+def _completion_run_tree(state: dict[str, Any], artifact: dict[str, Any]) -> Any | None:
+    """Prefer the run tree whose chain carries this builder's identity."""
+
+    current = _current_run_tree()
+    active = _active_pregel_run_tree(state, artifact)
+    candidates = [candidate for candidate in (active, current) if candidate is not None]
+    if not candidates:
+        return None
+    identity = _completion_identity(state, artifact)
+    scored = [(_run_chain_identity_score(candidate, identity), index, candidate) for index, candidate in enumerate(candidates)]
+    best_score = max(score for score, _index, _candidate in scored)
+    if best_score > 0:
+        # Active Pregel is listed first and wins a tie over a detached current span.
+        return min((item for item in scored if item[0] == best_score), key=lambda item: item[1])[2]
+    return current or active
+
+
+def _run_chain_identity_score(run_tree: Any, identity: dict[str, str]) -> int:
+    if not identity:
+        return 0
+    score = 0
+    current = run_tree
+    seen: set[int] = set()
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        metadata = _run_metadata(current)
+        score = max(score, sum(str(metadata.get(key) or "") == value for key, value in identity.items()))
+        current = getattr(current, "parent_run", None)
+    return score
+
+
 def _patch_run_tree(run_tree: Any) -> None:
     try:
         run_tree.patch(exclude_inputs=True)
@@ -1295,7 +1332,7 @@ def _create_terminal_feedback(run_tree: Any, artifact: dict[str, Any]) -> None:
 def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any]) -> bool:
     """Attach builder completion metadata/tags/feedback to the active run."""
 
-    run_tree = _current_run_tree() or _active_pregel_run_tree(state, artifact)
+    run_tree = _completion_run_tree(state, artifact)
     if run_tree is None:
         if langsmith_builder_tracing_enabled():
             logger.warning(
@@ -1305,6 +1342,10 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
         return False
     metadata, tags, qc_results = builder_observability_payload(state, artifact)
     root_run = _root_run_tree(run_tree)
+    artifact.setdefault("builder_trace_run_id", str(getattr(run_tree, "id", "") or "") or None)
+    artifact.setdefault("builder_trace_root_run_id", str(getattr(root_run, "id", "") or "") or None)
+    _merge_safe_metadata(metadata, "builder_trace_run_id", artifact.get("builder_trace_run_id"))
+    _merge_safe_metadata(metadata, "builder_trace_root_run_id", artifact.get("builder_trace_root_run_id"))
     _add_run_metadata(run_tree, metadata)
     _add_run_tags(run_tree, tags)
     if root_run is not run_tree:
@@ -1314,9 +1355,10 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
     _create_qc_feedback(root_run, qc_results)
     _create_terminal_feedback(root_run, artifact)
     logger.info(
-        "Sophia builder LangSmith completion annotation attached: run_id=%s root_run_id=%s project=%s",
+        "Sophia builder LangSmith completion annotation attached: run_id=%s root_run_id=%s builder_run_id=%s project=%s",
         getattr(run_tree, "id", None),
         getattr(root_run, "id", None),
+        _completion_identity(state, artifact).get("run_id"),
         _safe_metadata_value(get_tracing_config().project),
     )
     return True

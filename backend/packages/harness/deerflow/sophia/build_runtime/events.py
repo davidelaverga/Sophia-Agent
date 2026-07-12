@@ -3,10 +3,10 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any, Callable, Literal, Protocol
+from typing import Any, Literal, Protocol
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
@@ -113,6 +113,14 @@ def configure_default_event_sink_once(
         if _DEFAULT_EVENT_SINK is None:
             _DEFAULT_EVENT_SINK = factory()
         return _DEFAULT_EVENT_SINK
+
+
+def default_event_sink_status() -> str:
+    sink = _DEFAULT_EVENT_SINK
+    if sink is None:
+        return "disabled"
+    status = getattr(sink, "availability_status", None)
+    return str(status or "available")
 
 
 class InMemoryBuildEventSink:
@@ -247,6 +255,8 @@ def _next_sequence(sink: Any, *, build_id: str, event_type: str) -> int | None:
     try:
         prior = list(replay(build_id=build_id)) if callable(replay) else []
     except Exception as exc:
+        if str(getattr(sink, "availability_status", "")) == "unavailable":
+            return None
         logger.warning(
             "[BuildEvent] replay failed event_type=%s error_class=%s payloadExcluded=true",
             event_type,
@@ -261,6 +271,8 @@ def _append_event(sink: Any, event: BuildOperationEvent) -> bool:
         sink.append(event)
         return True
     except Exception as exc:
+        if str(getattr(sink, "availability_status", "")) == "unavailable":
+            return False
         logger.warning(
             "[BuildEvent] persistence failed event_type=%s error_class=%s payloadExcluded=true",
             event.event_type,

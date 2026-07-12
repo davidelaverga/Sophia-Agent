@@ -33,6 +33,8 @@ def test_prepare_deck_build_runtime_is_injected_and_hidden_from_model_schema() -
     schema = prepare_deck_build.args_schema.model_json_schema()
     assert "runtime" not in schema["properties"]
     assert "deck_stylesheet" in schema["required"]
+    assert "authoring_contract" in schema["required"]
+    assert schema["properties"]["authoring_contract"]["const"] == "compact_model_html_v2"
     slide_schema = schema["$defs"]["DeckSlideInput"]
     assert "html_body" in slide_schema["required"]
     assert "html_source" not in slide_schema["properties"]

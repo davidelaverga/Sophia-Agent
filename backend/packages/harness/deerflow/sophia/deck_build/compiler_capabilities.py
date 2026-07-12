@@ -4,6 +4,9 @@ from __future__ import annotations
 
 import re
 from html.parser import HTMLParser
+from typing import NamedTuple
+
+import tinycss2
 
 SUPPORTED_TAGS = frozenset(
     {
@@ -135,10 +138,13 @@ LOSSY_CSS_PROPERTIES = frozenset(
     }
 )
 
-_STYLE_PROPERTY_RE = re.compile(r"(?:^|[;{])\s*([a-zA-Z-]+)\s*:", re.M)
 _STYLE_BLOCK_RE = re.compile(r"<style\b[^>]*>(.*?)</style\s*>", re.I | re.S)
 _STYLE_ATTRIBUTE_RE = re.compile(r"\bstyle\s*=\s*([\"'])(.*?)\1", re.I | re.S)
-_TRANSFORM_RE = re.compile(r"\btransform\s*:\s*([^;}{]+)", re.I)
+
+
+class _CssDeclaration(NamedTuple):
+    name: str
+    value: str
 
 
 class _TagScanner(HTMLParser):
@@ -195,32 +201,55 @@ def meta_attributes_are_inert(attrs: dict[str, str | None]) -> bool:
 
 
 def rejected_css_in_html(source: str) -> list[str]:
-    css = _css_text(source)
-    properties = set(_properties(css))
+    declarations = _css_declarations(source)
+    properties = {declaration.name for declaration in declarations}
     rejected = properties & REJECTED_CSS_PROPERTIES
-    if re.search(r"\bposition\s*:\s*fixed\b", css, re.I):
+    if any(
+        declaration.name == "position" and declaration.value.strip().lower() == "fixed"
+        for declaration in declarations
+    ):
         rejected.add("position-fixed")
-    for match in _TRANSFORM_RE.finditer(css):
-        value = match.group(1).strip().lower()
+    for declaration in declarations:
+        if declaration.name != "transform":
+            continue
+        value = declaration.value.strip().lower()
         if value != "none" and not re.fullmatch(r"rotate\(\s*-?[\d.]+(?:deg|rad|turn)\s*\)", value):
             rejected.add("transform")
     return sorted(rejected)
 
 
 def lossy_css_in_html(source: str) -> list[str]:
-    css = _css_text(source)
-    return sorted(set(_properties(css)) & LOSSY_CSS_PROPERTIES)
+    return sorted({declaration.name for declaration in _css_declarations(source)} & LOSSY_CSS_PROPERTIES)
 
 
 def unsupported_css_in_html(source: str) -> list[str]:
-    return sorted(set(rejected_css_in_html(source)) | set(lossy_css_in_html(source)))
+    return rejected_css_in_html(source)
 
 
-def _css_text(source: str) -> str:
-    blocks = _STYLE_BLOCK_RE.findall(source or "")
-    attributes = [value for _, value in _STYLE_ATTRIBUTE_RE.findall(source or "")]
-    return "\n".join([*blocks, *attributes])
+def _css_declarations(source: str) -> list[_CssDeclaration]:
+    declarations: list[_CssDeclaration] = []
+    for block in _STYLE_BLOCK_RE.findall(source or ""):
+        rules = tinycss2.parse_stylesheet(block, skip_comments=True, skip_whitespace=True)
+        for rule in rules:
+            content = getattr(rule, "content", None)
+            if content is not None:
+                declarations.extend(_parse_declaration_tokens(content))
+    for _quote, attribute in _STYLE_ATTRIBUTE_RE.findall(source or ""):
+        declarations.extend(
+            _parse_declaration_tokens(
+                tinycss2.parse_component_value_list(attribute),
+            )
+        )
+    return declarations
 
 
-def _properties(css: str) -> list[str]:
-    return [match.group(1).strip().lower() for match in _STYLE_PROPERTY_RE.finditer(css)]
+def _parse_declaration_tokens(tokens: list[object]) -> list[_CssDeclaration]:
+    parsed = tinycss2.parse_declaration_list(tokens, skip_comments=True, skip_whitespace=True)
+    return [
+        _CssDeclaration(
+            name=str(item.lower_name),
+            value=tinycss2.serialize(item.value).strip(),
+        )
+        for item in parsed
+        if getattr(item, "type", None) == "declaration"
+    ]

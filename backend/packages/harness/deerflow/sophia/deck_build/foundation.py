@@ -88,7 +88,7 @@ def materialize_deck_foundation(deck: Any, runtime: Any) -> None:
 
 
 def _materialize_source_versions(deck: Any, root: Path) -> tuple[Any, ...]:
-    if deck.deck_authoring_contract != "compact_model_html_v1" or not deck.deck_stylesheet:
+    if deck.deck_authoring_contract not in {"compact_model_html_v1", "compact_model_html_v2"} or not deck.deck_stylesheet:
         return ()
     materialized = materialize_compact_deck_sources(
         build_id=deck.build_id,

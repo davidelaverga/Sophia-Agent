@@ -333,6 +333,8 @@ def test_builder_completion_attaches_prepare_terminal_metadata_and_failure_feedb
         "terminal_status": "failed",
         "terminal_reason": "deck_prepare_tool_result_missing",
         "failure_code": "deck_prepare_tool_result_missing",
+        "authoring_contract": "compact_model_html_v2",
+        "build_event_store_status": "available",
     }
 
     assert observability.annotate_builder_completion(state, artifact) is True
@@ -349,6 +351,8 @@ def test_builder_completion_attaches_prepare_terminal_metadata_and_failure_feedb
     assert run_tree.metadata["prepare_retry_executed"] is True
     assert run_tree.metadata["dangling_prepare_call_count"] == 1
     assert run_tree.metadata["deck_authoring_contract"] == "compact_model_html_v1"
+    assert run_tree.metadata["authoring_contract"] == "compact_model_html_v2"
+    assert run_tree.metadata["build_event_store_status"] == "available"
     assert run_tree.metadata["deck_authoring_elapsed_ms"] == 119000
     assert run_tree.metadata["prepare_force_reason"] == "turn_limit"
     assert run_tree.metadata["creative_plan_accepted"] is False
@@ -680,3 +684,42 @@ def test_builder_completion_uses_active_pregel_tracer_root(monkeypatch) -> None:
     assert root.metadata["terminal_status"] == "completed"
     assert root.patch_calls == 1
     assert feedback_client.feedback[-1]["run_id"] == "pregel-root"
+
+
+def test_builder_completion_prefers_matching_pregel_root_over_detached_current_span(monkeypatch) -> None:
+    class _FakeTracer:
+        pass
+
+    detached = _FakeRunTree()
+    detached.id = "detached-span"
+    detached.metadata = {"thread_id": "unrelated-thread"}
+    root = _FakeRunTree()
+    root.id = "builder-root"
+    root.parent_run_id = None
+    root.metadata = {"thread_id": "builder-thread", "run_id": "builder-run"}
+    tracer = _FakeTracer()
+    tracer.run_map = {root.id: root}
+    feedback_client = _FakeFeedbackClient()
+
+    observability._ACTIVE_BUILDER_TRACERS.add(tracer)
+    monkeypatch.setattr(observability, "_current_run_tree", lambda: detached)
+    monkeypatch.setattr(observability, "_feedback_client", lambda: feedback_client)
+    artifact = {
+        "artifact_path": None,
+        "terminal_status": "failed",
+        "terminal_reason": "deck_slide_html_invalid",
+        "run_id": "builder-run",
+    }
+    try:
+        assert observability.annotate_builder_completion(
+            {"thread_id": "builder-thread", "run_id": "builder-run"},
+            artifact,
+        ) is True
+    finally:
+        observability._ACTIVE_BUILDER_TRACERS.discard(tracer)
+
+    assert root.metadata["terminal_reason"] == "deck_slide_html_invalid"
+    assert "terminal_reason" not in detached.metadata
+    assert artifact["builder_trace_run_id"] == "builder-root"
+    assert artifact["builder_trace_root_run_id"] == "builder-root"
+    assert feedback_client.feedback[-1]["run_id"] == "builder-root"

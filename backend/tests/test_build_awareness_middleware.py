@@ -217,6 +217,19 @@ def test_async_refresh_updates_terminal_status(monkeypatch):
     fake_client = MagicMock()
     fake_client.runs = MagicMock()
     fake_client.runs.get = AsyncMock(return_value={"status": "success"})
+    fake_client.threads = MagicMock()
+    fake_client.threads.get = AsyncMock(
+        return_value={
+            "values": {
+                "builder_result": {
+                    "status": "completed",
+                    "terminal_status": "completed",
+                    "terminal_reason": "artifact_emitted",
+                    "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+                }
+            }
+        }
+    )
     monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
 
     state = {"async_tasks": {"t-async": task}}

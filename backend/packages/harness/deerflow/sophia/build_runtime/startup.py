@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from collections.abc import Iterable
 from typing import Any
 
@@ -7,6 +8,8 @@ from deerflow.config.app_config import AppConfig
 from deerflow.sophia.build_runtime.events import configure_default_event_sink_once
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.build_foundation_store import BuildFoundationStoreConfig, configured_build_foundation_store
+
+logger = logging.getLogger(__name__)
 
 
 class BuildFoundationStartupError(RuntimeError):
@@ -33,7 +36,12 @@ def audit_build_foundation(*, tools: Iterable[Any], config: AppConfig) -> None:
         if not supabase_artifact_store.is_configured():
             raise BuildFoundationStartupError("manifest enforcement requires durable object storage")
     if foundation.persist_event_journal:
-        configure_default_event_sink_once(configured_build_foundation_store)
+        sink = configure_default_event_sink_once(configured_build_foundation_store)
+        probe = getattr(sink, "probe", None)
+        if callable(probe) and not probe():
+            logger.error(
+                "Build foundation startup readiness degraded: durable event table/RPC unavailable payloadExcluded=true"
+            )
     enabled_routes = {
         name: route
         for name, route in config.model_routes.items()

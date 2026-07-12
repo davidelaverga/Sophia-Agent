@@ -137,6 +137,51 @@ def test_compiler_capabilities_reject_svg_and_lossy_semantic_css() -> None:
     assert {"grid", "rotate-transform", "solid-fill"}.issubset(SUPPORTED_CSS_FEATURES)
 
 
+def test_compiler_capabilities_do_not_confuse_text_transform_with_transform() -> None:
+    source = """<html><style>
+    main { background: #101828; text-transform: uppercase; }
+    </style><body><main style="width:1920px;height:1080px"></main></body></html>"""
+
+    assert rejected_css_in_html(source) == []
+    assert lossy_css_in_html(source) == []
+
+
+def test_compact_v2_profile_is_required_in_model_schema_and_bounded() -> None:
+    schema = PrepareDeckBuildInput.model_json_schema()
+    assert "authoring_contract" in schema["required"]
+    assert schema["properties"]["authoring_contract"]["const"] == "compact_model_html_v2"
+    body = schema["$defs"]["DeckSlideInput"]["properties"]["html_body"]
+    string_variant = next(item for item in body["anyOf"] if item.get("type") == "string")
+    assert string_variant["maxLength"] == 3 * 1024
+
+    slide = _compact_slide()
+    slide["html_body"] = "x" * (3 * 1024 + 1)
+    with pytest.raises(ValidationError, match="compact-v2 3072-byte limit"):
+        PrepareDeckBuildInput.model_validate(
+            {
+                "deck_title": "Technical Deck",
+                "slides": [slide],
+                "output_path": "/mnt/user-data/outputs/deck.pptx",
+                "creative_plan": _creative_plan(),
+                "authoring_contract": "compact_model_html_v2",
+                "deck_stylesheet": "main { background: #101828; }",
+            }
+        )
+
+    # Queued/internal compact-v1 payloads retain the previous 16 KiB body limit.
+    model = PrepareDeckBuildInput.model_validate(
+        {
+            "deck_title": "Technical Deck",
+            "slides": [slide],
+            "output_path": "/mnt/user-data/outputs/deck.pptx",
+            "creative_plan": _creative_plan(),
+            "authoring_contract": "compact_model_html_v1",
+            "deck_stylesheet": "main { background: #101828; }",
+        }
+    )
+    assert model.authoring_contract == "compact_model_html_v1"
+
+
 def test_source_retention_reports_missing_required_ids() -> None:
     composition = DeckSlideCompositionPlan(
         selector="slide:1",

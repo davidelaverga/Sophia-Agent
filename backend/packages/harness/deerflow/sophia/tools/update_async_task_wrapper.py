@@ -38,6 +38,7 @@ its place. The wrapped name is identical (``update_async_task``) so the
 model's tool-selection from PR #129 remains valid.
 """
 
+import json
 import logging
 import re
 from datetime import UTC, datetime
@@ -52,6 +53,11 @@ from langgraph.types import Command
 
 from deerflow.agents.sophia_agent.builder_tools import deck_route_for_task
 from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
+from deerflow.sophia.tools.builder_lifecycle_contract import (
+    authoritative_builder_result,
+    is_builder_task,
+    reconcile_builder_task,
+)
 from deerflow.sophia.tools.start_builder_task import _TERMINAL_TASK_STATUSES
 
 # NOTE: this module deliberately does NOT use `from __future__ import
@@ -113,6 +119,18 @@ def _updated_task_entry(
     now = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
     task_id = str(tracked.get("task_id") or tracked.get("thread_id") or "")
     task = dict(tracked)
+    for terminal_key in (
+        "builder_result",
+        "builder_internal_status",
+        "artifact_path",
+        "artifact_url",
+        "terminal_status",
+        "terminal_reason",
+        "failure_code",
+        "root_failure_code",
+        "root_failure_summary",
+    ):
+        task.pop(terminal_key, None)
     task.update({
         "task_id": task_id,
         "agent_name": tracked["agent_name"],
@@ -169,6 +187,11 @@ def _normalize_list_task_entry(key: Any, value: Any, now: str) -> tuple[dict[str
         "last_checked_at": str(_first_nonempty(source.get("last_checked_at"), timestamp)),
         "last_updated_at": str(_first_nonempty(source.get("last_updated_at"), timestamp)),
     })
+    if is_builder_task(normalized) and str(normalized.get("status") or "").lower() in _TERMINAL_TASK_STATUSES:
+        normalized, _payload = reconcile_builder_task(
+            normalized,
+            native_status=str(normalized.get("status") or ""),
+        )
     changed = normalized != value or task_id != key
     return normalized, changed
 
@@ -319,31 +342,8 @@ def make_check_async_task_wrapper(native_tool: StructuredTool) -> StructuredTool
             f"{native_tool.name!r}."
         )
 
-    native_func = native_tool.func
-    native_coroutine = native_tool.coroutine
-
-    def check_async_task(
-        task_id: str,
-        runtime: ToolRuntime,
-    ):
-        if native_func is None:
-            raise ToolException(
-                "Native check_async_task sync func is unavailable; call this "
-                "tool from the async path or upgrade deepagents."
-            )
-        _normalize_runtime_async_tasks_for_check(runtime)
-        return native_func(task_id=task_id, runtime=runtime)
-
-    async def acheck_async_task(
-        task_id: str,
-        runtime: ToolRuntime,
-    ):
-        if native_coroutine is None:
-            raise ToolException(
-                "Native check_async_task coroutine is unavailable."
-            )
-        _normalize_runtime_async_tasks_for_check(runtime)
-        return await native_coroutine(task_id=task_id, runtime=runtime)
+    check_async_task = _check_sync_wrapper(native_tool.func)
+    acheck_async_task = _check_async_wrapper(native_tool.coroutine)
 
     return StructuredTool.from_function(
         name=native_tool.name,
@@ -352,6 +352,154 @@ def make_check_async_task_wrapper(native_tool: StructuredTool) -> StructuredTool
         description=native_tool.description,
         infer_schema=False,
         args_schema=native_tool.args_schema,
+    )
+
+
+def _check_sync_wrapper(native_func: Any) -> Any:
+    def check_async_task(task_id: str, runtime: ToolRuntime) -> Any:
+        return _check_async_task_sync(task_id, runtime, native_func=native_func)
+
+    return check_async_task
+
+
+def _check_async_wrapper(native_coroutine: Any) -> Any:
+    async def acheck_async_task(task_id: str, runtime: ToolRuntime) -> Any:
+        return await _check_async_task_async(task_id, runtime, native_coroutine=native_coroutine)
+
+    return acheck_async_task
+
+
+def _check_async_task_sync(
+    task_id: str,
+    runtime: ToolRuntime,
+    *,
+    native_func: Any,
+) -> Any:
+    if native_func is None:
+        raise ToolException(
+            "Native check_async_task sync func is unavailable; call this tool from the async path or upgrade deepagents."
+        )
+    _normalize_runtime_async_tasks_for_check(runtime)
+    tracked = _tracked_builder_task(runtime, task_id)
+    if tracked is None:
+        return native_func(task_id=task_id, runtime=runtime)
+    cached = _authoritative_cached_check(tracked, runtime.tool_call_id)
+    if cached is not None:
+        return cached
+    clients = _native_clients(native_func)
+    if clients is None:
+        return native_func(task_id=task_id, runtime=runtime)
+    return _fetch_builder_check_sync(clients.get_sync(tracked["agent_name"]), tracked, runtime.tool_call_id)
+
+
+async def _check_async_task_async(
+    task_id: str,
+    runtime: ToolRuntime,
+    *,
+    native_coroutine: Any,
+) -> Any:
+    if native_coroutine is None:
+        raise ToolException("Native check_async_task coroutine is unavailable.")
+    _normalize_runtime_async_tasks_for_check(runtime)
+    tracked = _tracked_builder_task(runtime, task_id)
+    if tracked is None:
+        return await native_coroutine(task_id=task_id, runtime=runtime)
+    cached = _authoritative_cached_check(tracked, runtime.tool_call_id)
+    if cached is not None:
+        return cached
+    clients = _native_clients(native_coroutine)
+    if clients is None:
+        return await native_coroutine(task_id=task_id, runtime=runtime)
+    return await _fetch_builder_check_async(clients.get_async(tracked["agent_name"]), tracked, runtime.tool_call_id)
+
+
+def _tracked_builder_task(runtime: ToolRuntime, task_id: str) -> dict[str, Any] | None:
+    state = runtime.state if isinstance(getattr(runtime, "state", None), dict) else {}
+    tracked = _resolve_tracked(state, task_id)
+    return tracked if tracked is not None and is_builder_task(tracked) else None
+
+
+def _fetch_builder_check_sync(client: Any, tracked: dict[str, Any], tool_call_id: str | None) -> Any:
+    try:
+        run = client.runs.get(thread_id=tracked["thread_id"], run_id=tracked["run_id"])
+        thread_values = _sync_thread_values(client, tracked, run)
+    except Exception as exc:  # noqa: BLE001
+        return f"Failed to get builder run status: {type(exc).__name__}"
+    return _resolved_builder_check(tracked, run, thread_values, tool_call_id)
+
+
+async def _fetch_builder_check_async(client: Any, tracked: dict[str, Any], tool_call_id: str | None) -> Any:
+    try:
+        run = await client.runs.get(thread_id=tracked["thread_id"], run_id=tracked["run_id"])
+        thread_values = await _async_thread_values(client, tracked, run)
+    except Exception as exc:  # noqa: BLE001
+        return f"Failed to get builder run status: {type(exc).__name__}"
+    return _resolved_builder_check(tracked, run, thread_values, tool_call_id)
+
+
+def _sync_thread_values(client: Any, tracked: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
+    if str(run.get("status") or "") != "success":
+        return {}
+    thread = client.threads.get(thread_id=tracked["thread_id"])
+    return thread.get("values") or {}
+
+
+async def _async_thread_values(client: Any, tracked: dict[str, Any], run: dict[str, Any]) -> dict[str, Any]:
+    if str(run.get("status") or "") != "success":
+        return {}
+    thread = await client.threads.get(thread_id=tracked["thread_id"])
+    return thread.get("values") or {}
+
+
+def _resolved_builder_check(
+    tracked: dict[str, Any],
+    run: dict[str, Any],
+    thread_values: dict[str, Any],
+    tool_call_id: str | None,
+) -> Command:
+    reconciled, payload = reconcile_builder_task(
+        tracked,
+        native_status=str(run.get("status") or ""),
+        thread_values=thread_values,
+        native_error=run.get("error"),
+    )
+    return _builder_check_command(reconciled, payload, tool_call_id)
+
+
+def _native_clients(native_callable: Any) -> Any | None:
+    closure = getattr(native_callable, "__closure__", None)
+    names = getattr(getattr(native_callable, "__code__", None), "co_freevars", ())
+    if not closure or not names:
+        return None
+    nonlocals = {name: cell.cell_contents for name, cell in zip(names, closure, strict=False)}
+    return nonlocals.get("clients")
+
+
+def _authoritative_cached_check(tracked: dict[str, Any], tool_call_id: str | None) -> Command | None:
+    status = str(tracked.get("status") or "").lower()
+    if status not in _TERMINAL_TASK_STATUSES and authoritative_builder_result(tracked) is None:
+        return None
+    reconciled, payload = reconcile_builder_task(tracked, native_status=status)
+    return _builder_check_command(reconciled, payload, tool_call_id)
+
+
+def _builder_check_command(
+    task: dict[str, Any],
+    payload: dict[str, Any],
+    tool_call_id: str | None,
+) -> Command:
+    task_id = str(task.get("task_id") or task.get("thread_id") or "")
+    return Command(
+        update={
+            "messages": [
+                ToolMessage(
+                    json.dumps(payload, ensure_ascii=False, separators=(",", ":")),
+                    tool_call_id=tool_call_id,
+                    name="check_async_task",
+                )
+            ],
+            "async_tasks": {task_id: task},
+        }
     )
 
 

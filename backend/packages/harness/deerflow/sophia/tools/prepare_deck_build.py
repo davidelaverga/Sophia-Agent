@@ -1,7 +1,7 @@
 """Model-facing P-1 deck build tool."""
 
 import json
-from typing import Any
+from typing import Any, Literal
 
 from langchain.tools import ToolRuntime, tool
 
@@ -29,6 +29,7 @@ def prepare_deck_build(
     slides: NormalizedDeckSlides,
     output_path: str,
     creative_plan: NormalizedDeckCreativePlan,
+    authoring_contract: Literal["compact_model_html_v1", "compact_model_html_v2"] | None = None,
     deck_stylesheet: str | None = None,
     register: str = "professional_technical",
     visual_policy: str = "auto",
@@ -53,6 +54,8 @@ def prepare_deck_build(
             slide_compositions item requires selector, slide_role,
             headline_intent, layout_name, composition_rationale,
             native_elements, and image_asset_ids.
+        authoring_contract: Required compact_model_html_v2 for new model calls.
+            Omit only for queued/internal compact-v1 compatibility.
 
     Fresh PPTX rules:
         Call this tool once with the complete creative_plan, deck_stylesheet,
@@ -83,6 +86,7 @@ def prepare_deck_build(
         register=register,
         visual_policy=visual_policy,
         deck_stylesheet=deck_stylesheet,
+        authoring_contract=authoring_contract,
         style_profile=style_profile,
         design_plan=design_plan,
         creative_plan=normalized_plan,
@@ -116,6 +120,10 @@ def prepare_deck_build(
                 "should_retry": True,
                 "max_retry_count": 1,
                 "message": ("Repair the creative_plan, deck_stylesheet, and slide html_body values, then call prepare_deck_build exactly once more."),
-                "repair_message": ("Repair the D2.1 deck input and call prepare_deck_build exactly once more. Include creative_plan, deck_stylesheet, and html_body for every slide."),
+                "repair_message": (
+                    "Repair the D2.1 deck input and call prepare_deck_build exactly once more. Include "
+                    "authoring_contract=compact_model_html_v2, one concise creative_plan, one shared deck_stylesheet, "
+                    "and html_body for every slide; use slide_css only for a small per-slide override."
+                ),
             }
     return json.dumps(payload)

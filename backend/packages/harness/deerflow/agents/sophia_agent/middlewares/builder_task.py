@@ -960,9 +960,11 @@ def _pptx_visual_guidance(*, deck_service_enabled: bool, image_generation_enable
     if deck_service_enabled:
         return (
             "Decks are built by prepare_deck_build using the injected compact deck-craft contract. "
-            "Submit a complete creative_plan, one shared deck_stylesheet, and slide entries with title, narrative, "
+            "Submit authoring_contract='compact_model_html_v2', a concise complete creative_plan, one shared "
+            "deck_stylesheet, and slide entries with title, narrative, "
             "role, layout_kind, speaker_notes, html_body, and optional slide_css; every narrative "
-            "must be <= 280 characters. The harness owns HTML sanitization, planned generated assets, native PowerPoint compilation, inspection, "
+            "must be <= 280 characters. Reuse shared classes, keep each html_body compact, use slide_css only "
+            "for a small override, and emit no prose outside the prepare call. The harness owns HTML sanitization, planned generated assets, native PowerPoint compilation, inspection, "
             "validation, and terminal failure. Screenshot-backed PPTX is not an acceptable fallback; if native "
             "deck generation fails, prepare_deck_build returns failure and you emit artifact_path=null. "
             "If prepare_deck_build returns retryable=true, repair the exact creative/html/mechanical field and retry once. "
@@ -1397,7 +1399,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             image_generation_enabled=image_generation_enabled,
         )
         pptx_delivery_line = (
-            "For fresh decks, call prepare_deck_build once with the complete creative_plan, shared deck_stylesheet, and slide html_body list "
+            "For fresh decks, call prepare_deck_build once with authoring_contract='compact_model_html_v2', the concise complete creative_plan, shared deck_stylesheet, and slide html_body list "
             "(or one repair retry when retryable=true); "
             "emit the returned native PPTX or a clean null-artifact failure if native generation "
             "fails. Screenshot-backed PPTX is not an acceptable fallback. Never write lower-level "

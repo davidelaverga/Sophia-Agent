@@ -138,6 +138,10 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "dangling_prepare_call_count",
     "creative_plan_accepted",
     "deck_authoring_contract",
+    "authoring_contract",
+    "build_event_store_status",
+    "builder_trace_run_id",
+    "builder_trace_root_run_id",
     "deck_authoring_elapsed_ms",
     "prepare_force_reason",
     "error_message",
@@ -258,6 +262,10 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "dangling_prepare_call_count",
         "creative_plan_accepted",
         "deck_authoring_contract",
+        "authoring_contract",
+        "build_event_store_status",
+        "builder_trace_run_id",
+        "builder_trace_root_run_id",
         "deck_authoring_elapsed_ms",
         "prepare_force_reason",
         "source_artifact_path",
@@ -539,6 +547,10 @@ class BuilderCompletionEvent(BaseModel):
     dangling_prepare_call_count: int | None = None
     creative_plan_accepted: bool | None = None
     deck_authoring_contract: str | None = None
+    authoring_contract: str | None = None
+    build_event_store_status: str | None = None
+    builder_trace_run_id: str | None = None
+    builder_trace_root_run_id: str | None = None
     deck_authoring_elapsed_ms: int | None = None
     prepare_force_reason: str | None = None
     source_retention_report: dict[str, Any] | None = None

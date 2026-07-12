@@ -95,7 +95,9 @@ The compatibility aliases `slide`, `role`, and `layout` map only to
 
 ## Compact HTML Rules
 
+- New calls use `authoring_contract="compact_model_html_v2"`: shared CSS <= 8 KiB, each `html_body` <= 3 KiB, each `slide_css` <= 1 KiB, creative-plan JSON <= 12 KiB, and complete serialized arguments <= 48 KiB.
 - Put shared CSS in `deck_stylesheet`; use `slide_css` only for real slide-specific variation.
+- Reuse shared classes and emit no explanatory prose around the `prepare_deck_build` call.
 - Each `html_body` is markup inside the service-owned 1920x1080 document shell. Do not include html, head, body, or style tags.
 - Style the `main` canvas with an opaque background in the shared stylesheet.
 - No scripts, external URLs, remote fonts, data URIs, iframes, objects, embeds, or inline event handlers.

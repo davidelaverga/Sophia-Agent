@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import inspect
 import json
 import time
@@ -84,6 +85,7 @@ class _ModelRequest:
         self.state = state
         self.model_settings = model_settings or {}
         self.model = object()
+        self.runtime = None
 
     def override(self, **overrides: Any) -> _ModelRequest:
         return _ModelRequest(
@@ -290,6 +292,65 @@ def test_presentation_model_request_is_bounded_by_authoring_deadline() -> None:
     assert request.model_settings["max_tokens"] == 16_384
     assert 88 <= request.model_settings["timeout"] <= 90
     assert "max_retries" not in request.model_settings
+
+
+def test_presentation_authoring_stream_is_cancelled_at_absolute_deadline() -> None:
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation"},
+        "builder_task_kickoff_ms": int(time.time() * 1000) - 950,
+        "builder_budget": {
+            "tier": "presentation",
+            "prepare_force_after_seconds": 1,
+            "authoring_max_tokens": 16_384,
+            "authoring_timeout_seconds": 110,
+        },
+    }
+    calls = 0
+
+    async def slow_handler(_request):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.5)
+        return AIMessage(content="late")
+
+    started = time.monotonic()
+    result = asyncio.run(
+        BuilderArtifactMiddleware().awrap_model_call(
+            _ModelRequest(state),
+            slow_handler,
+        )
+    )
+
+    assert calls == 1
+    assert time.monotonic() - started < 0.35
+    messages = result.update["messages"] if hasattr(result, "update") else [result]
+    timeout_message = messages[-1]
+    assert timeout_message.additional_kwargs["error_reason"] == "authoring_deadline"
+
+
+def test_authoring_deadline_takes_precedence_over_output_truncation(monkeypatch) -> None:
+    latest = AIMessage(content="partial", response_metadata={"stop_reason": "max_tokens"})
+    state = {
+        "messages": [latest],
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation"},
+        "builder_task_kickoff_ms": int(time.time() * 1000) - 121_000,
+        "builder_budget": {"tier": "presentation", "prepare_force_after_seconds": 120},
+    }
+    captured: dict[str, str] = {}
+
+    def terminal(_state, _runtime, *, failure_code):
+        captured["failure_code"] = failure_code
+        return {"failure_code": failure_code}
+
+    middleware = BuilderArtifactMiddleware()
+    monkeypatch.setattr(middleware, "_deck_authoring_terminal_update", terminal)
+
+    update = middleware._deck_authoring_message_failure_update(state, object(), latest)
+
+    assert update == {"failure_code": "deck_authoring_deadline_exceeded"}
+    assert captured["failure_code"] == "deck_authoring_deadline_exceeded"
 
 
 def test_presentation_model_settings_are_valid_anthropic_message_parameters() -> None:

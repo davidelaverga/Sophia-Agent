@@ -4,6 +4,7 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from langchain_core.messages import AIMessage
 
@@ -29,6 +30,11 @@ from deerflow.sophia.build_runtime.identity import component_id, new_build_id, n
 from deerflow.sophia.build_runtime.metrics import derive_prepare_metrics
 from deerflow.sophia.build_runtime.startup import audit_build_foundation
 from deerflow.sophia.build_sources import materialize_compact_deck_sources
+from deerflow.sophia.storage.build_foundation_store import (
+    BuildFoundationStoreConfig,
+    BuildFoundationStoreError,
+    SupabaseBuildFoundationStore,
+)
 
 
 def test_identity_is_sortable_and_component_identity_is_selector_stable() -> None:
@@ -261,6 +267,59 @@ def test_build_foundation_rpcs_grant_service_role_execution() -> None:
         "GRANT EXECUTE ON FUNCTION public.sophia_append_build_event("
         "TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, JSONB) TO service_role;"
     ) in sql
+
+
+def test_build_foundation_store_opens_circuit_after_missing_event_table(caplog) -> None:
+    requests = 0
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        nonlocal requests
+        requests += 1
+        return httpx.Response(404, request=request, json={"message": "not found"})
+
+    client = httpx.Client(transport=httpx.MockTransport(handler))
+    store = SupabaseBuildFoundationStore(
+        BuildFoundationStoreConfig("https://example.supabase.co", "service-role"),
+        client=client,
+    )
+
+    with pytest.raises(BuildFoundationStoreError):
+        store.replay(build_id="build-1")
+    with pytest.raises(BuildFoundationStoreError):
+        store.replay(build_id="build-1")
+
+    configure_default_event_sink(store)
+    runtime = SimpleNamespace(
+        context={"build_id": "build-1", "user_id": "user-1", "thread_id": "thread-1"},
+        config={},
+    )
+    try:
+        assert record_runtime_event(state={}, runtime=runtime, event_type="build.created") is None
+        assert record_runtime_event(state={}, runtime=runtime, event_type="build.created") is None
+    finally:
+        configure_default_event_sink(None)
+
+    assert requests == 1
+    assert store.availability_status == "unavailable"
+    assert caplog.text.count("Build foundation event store unavailable") == 1
+    assert "[BuildEvent] persistence failed" not in caplog.text
+
+
+def test_build_foundation_probe_requires_event_table_and_rpcs() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(
+            200,
+            request=request,
+            json={"paths": {"/sophia_build_operation_events": {}}},
+        )
+
+    store = SupabaseBuildFoundationStore(
+        BuildFoundationStoreConfig("https://example.supabase.co", "service-role"),
+        client=httpx.Client(transport=httpx.MockTransport(handler)),
+    )
+
+    assert store.probe() is False
+    assert store.availability_status == "unavailable"
 
 
 def test_mutation_store_requires_expected_state() -> None:

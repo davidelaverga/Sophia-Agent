@@ -6,6 +6,8 @@ from html.parser import HTMLParser
 from typing import Any
 from urllib.parse import unquote, urlsplit
 
+import tinycss2
+
 from deerflow.sophia.deck_build.compiler_capabilities import (
     lossy_css_in_html,
     meta_attributes_are_inert,
@@ -47,15 +49,17 @@ def assemble_compact_slide_html(
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<style>
+<style data-deck-harness="true">
 html, body {{ margin: 0; padding: 0; width: 1920px; height: 1080px; overflow: hidden; }}
 main {{ width: 1920px; height: 1080px; box-sizing: border-box; overflow: hidden; }}
+</style>
+<style data-deck-author="true">
 {deck_stylesheet}
 {slide_css or ""}
 </style>
 </head>
 <body>
-<main class="slide-root" style="width: 1920px; height: 1080px;">
+<main class="slide-root" data-slide-canvas="true" style="width: 1920px; height: 1080px;">
 {html_body}
 </main>
 </body>
@@ -89,10 +93,12 @@ class _HtmlScanner(HTMLParser):
         self.warnings: list[str] = []
         self.image_refs: list[str] = []
         self.styles: list[str] = []
+        self.author_styles: list[str] = []
         self.body_attrs: dict[str, str] = {}
         self.main_attrs: dict[str, str] = {}
         self.source_elements: list[dict[str, Any]] = []
         self.in_style = False
+        self.in_harness_style = False
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         clean_tag = tag.lower()
@@ -110,6 +116,7 @@ class _HtmlScanner(HTMLParser):
             self.main_attrs = attr_map
         if clean_tag == "style":
             self.in_style = True
+            self.in_harness_style = attr_map.get("data-deck-harness", "").lower() == "true"
         self._record_source_element(clean_tag, attr_map)
 
     def _scan_attributes(
@@ -155,10 +162,13 @@ class _HtmlScanner(HTMLParser):
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() == "style":
             self.in_style = False
+            self.in_harness_style = False
 
     def handle_data(self, data: str) -> None:
         if self.in_style:
             self.styles.append(data)
+            if not self.in_harness_style:
+                self.author_styles.append(data)
 
 
 def validate_and_sanitize_slide_html(
@@ -346,33 +356,111 @@ def _canvas_style_candidates(scanner: _HtmlScanner) -> list[str]:
     return [
         scanner.main_attrs.get("style", ""),
         scanner.body_attrs.get("style", ""),
-        *(_selector_rule_body(css, "main") for css in scanner.styles),
-        *(_selector_rule_body(css, ".canvas") for css in scanner.styles),
-        *(_selector_rule_body(css, "body") for css in scanner.styles),
-        *(_selector_rule_body(css, "html, body") for css in scanner.styles),
-        *(_selector_rule_body(css, "html") for css in scanner.styles),
+        *(_selector_rule_bodies(scanner.styles, _CANVAS_SELECTORS)),
     ]
 
 
 def _canvas_backgrounds(scanner: _HtmlScanner) -> list[str]:
-    values: list[str] = []
-    for candidate in _canvas_style_candidates(scanner):
-        match = re.search(r"\bbackground(?:-color)?\s*:\s*([^;{}]+)", candidate, re.I)
-        if match:
-            values.append(match.group(1).strip().lower())
+    values = _effective_canvas_backgrounds(scanner.author_styles)
+    for candidate in (
+        scanner.body_attrs.get("style", ""),
+        scanner.main_attrs.get("style", ""),
+    ):
+        inline_value = _last_background_declaration(candidate)
+        if inline_value:
+            values.append(inline_value)
     return values
 
 
 def _background_is_opaque(value: str) -> bool:
-    if "transparent" in value:
+    normalized = value.strip().lower()
+    if not normalized or "transparent" in normalized or "var(" in normalized:
         return False
-    return not ("rgba(" in value and re.search(r"rgba\([^)]*,\s*0(?:\.0+)?\s*\)", value))
+    rgba = re.search(r"rgba\([^)]*,\s*(0|0?\.\d+|1(?:\.0+)?)\s*\)", normalized)
+    if rgba and float(rgba.group(1)) < 1:
+        return False
+    modern_rgb = re.search(r"rgba?\([^)]*?/\s*(0|0?\.\d+|1(?:\.0+)?|\d+(?:\.\d+)?%)\s*\)", normalized)
+    if modern_rgb:
+        alpha = modern_rgb.group(1)
+        if alpha.endswith("%"):
+            return float(alpha[:-1]) >= 100
+        return float(alpha) >= 1
+    hex_match = re.fullmatch(r"#(?:[0-9a-f]{4}|[0-9a-f]{8})", normalized)
+    if hex_match:
+        alpha_hex = normalized[-1] * 2 if len(normalized) == 5 else normalized[-2:]
+        return int(alpha_hex, 16) == 255
+    return True
 
 
-def _selector_rule_body(css: str, selector: str) -> str:
-    selector_pattern = re.escape(selector).replace(r"\ ", r"\s*")
-    match = re.search(rf"(^|[}}])\s*{selector_pattern}\s*\{{([^}}]+)\}}", css, re.I | re.S)
-    return match.group(2) if match else ""
+_CANVAS_SELECTORS = frozenset(
+    {
+        "html",
+        "body",
+        "main",
+        ".canvas",
+        ".slide-root",
+        "main.slide-root",
+        "[data-slide-canvas]",
+        '[data-slide-canvas="true"]',
+    }
+)
+
+
+def _normalized_selector(selector: str) -> str:
+    return re.sub(r"\s+", " ", selector.strip().lower())
+
+
+def _selector_rule_bodies(styles: list[str], selectors: frozenset[str]) -> list[str]:
+    bodies: list[str] = []
+    for css in styles:
+        for rule in tinycss2.parse_stylesheet(css, skip_comments=True, skip_whitespace=True):
+            if getattr(rule, "type", None) != "qualified-rule":
+                continue
+            selector_text = tinycss2.serialize(rule.prelude)
+            rule_selectors = {_normalized_selector(item) for item in selector_text.split(",")}
+            if rule_selectors & selectors:
+                bodies.append(tinycss2.serialize(rule.content))
+    return bodies
+
+
+def _effective_canvas_backgrounds(styles: list[str]) -> list[str]:
+    winners: dict[str, tuple[int, int, str]] = {}
+    order = 0
+    for css in styles:
+        for rule in tinycss2.parse_stylesheet(css, skip_comments=True, skip_whitespace=True):
+            if getattr(rule, "type", None) != "qualified-rule":
+                continue
+            value = _last_background_declaration(rule.content)
+            if not value:
+                continue
+            selector_text = tinycss2.serialize(rule.prelude)
+            for raw_selector in selector_text.split(","):
+                selector = _normalized_selector(raw_selector)
+                if selector not in _CANVAS_SELECTORS:
+                    continue
+                target = "main" if selector in {"main", ".canvas", ".slide-root", "main.slide-root", "[data-slide-canvas]", '[data-slide-canvas="true"]'} else selector
+                specificity = _canvas_selector_specificity(selector)
+                current = winners.get(target)
+                if current is None or (specificity, order) >= current[:2]:
+                    winners[target] = (specificity, order, value)
+            order += 1
+    return [winner[2] for winner in winners.values()]
+
+
+def _canvas_selector_specificity(selector: str) -> int:
+    return 10 * selector.count(".") + 10 * selector.count("[") + (1 if selector.startswith(("main", "body", "html")) else 0)
+
+
+def _last_background_declaration(css: str | list[object]) -> str | None:
+    tokens = tinycss2.parse_component_value_list(css) if isinstance(css, str) else css
+    winner: str | None = None
+    for declaration in tinycss2.parse_declaration_list(tokens, skip_comments=True, skip_whitespace=True):
+        if getattr(declaration, "type", None) != "declaration":
+            continue
+        if str(declaration.lower_name) not in {"background", "background-color"}:
+            continue
+        winner = tinycss2.serialize(declaration.value).strip().lower()
+    return winner
 
 
 def _validate_css_urls(css: str, validation: HtmlSourceValidation) -> None:

@@ -164,6 +164,7 @@ class DeckBuildService:
         register: str = "professional_technical",
         visual_policy: str = "auto",
         deck_stylesheet: str | None = None,
+        authoring_contract: str | None = None,
         style_profile: dict[str, Any] | None = None,
         design_plan: dict[str, Any] | None = None,
         creative_plan: dict[str, Any] | None = None,
@@ -193,7 +194,11 @@ class DeckBuildService:
             slides=[],
             expected_visual_count=0,
             deck_stylesheet=(deck_stylesheet or "").strip() or None,
-            deck_authoring_contract=("compact_model_html_v1" if (deck_stylesheet or "").strip() else "legacy_full_html_v1"),
+            deck_authoring_contract=(
+                str(authoring_contract or "compact_model_html_v1")
+                if (deck_stylesheet or "").strip()
+                else "legacy_full_html_v1"
+            ),
             deck_stylesheet_hash=(hashlib.sha256((deck_stylesheet or "").encode("utf-8")).hexdigest() if (deck_stylesheet or "").strip() else None),
             deck_route=DEFAULT_DECK_ROUTE,
             deck_compile_mode=DEFAULT_DECK_COMPILE_MODE,
@@ -2076,11 +2081,12 @@ def _repair_instruction_for_failure(exc: DeckBuildFailure) -> dict[str, Any] | N
         "should_retry": True,
         "max_retry_count": 1,
         "failure_scope": "creative_deck_plan" if exc.code.startswith("deck_creative") else "slide_html_or_mechanical_gate",
-        "message": ("Create or repair the subject-derived DeckCreativePlan and every slide.html_source, using planned generated images only as assets, then call prepare_deck_build exactly once more."),
+        "message": ("Create or repair the subject-derived DeckCreativePlan, shared deck_stylesheet, and every slide.html_body, using planned generated images only as assets, then call prepare_deck_build exactly once more."),
         "repair_message": (
             "Repair the D2.1 deck input and call prepare_deck_build exactly once more. "
-            "Include creative_plan with design_plan, image_assets, slide_compositions, and one html_source "
-            "per slide. Keep the slide canvas 1920x1080, use an opaque background, no scripts/external URLs, "
+            "Include authoring_contract=compact_model_html_v2, creative_plan with design_plan, image_assets, "
+            "slide_compositions, one concise shared deck_stylesheet, and one html_body per slide. Use slide_css "
+            "only for a small per-slide override. Keep the slide canvas 1920x1080, use an opaque background, no scripts/external URLs, "
             "and reference only planned assets as ../assets/slide-XX.png. "
             f"Previous failure: {exc.code}: {safe_excerpt(exc.summary, limit=400)}"
         ),
@@ -2390,6 +2396,21 @@ def _validate_authoring_inputs(deck: DeckBuild, slides: list[dict[str, Any]]) ->
         )
     if total_bytes > 128 * 1024:
         raise _authoring_failure("Deck authoring payload exceeds 131072 bytes.")
+    if deck.deck_authoring_contract == "compact_model_html_v2":
+        _validate_v2_authoring_sizes(deck, slides)
+
+
+def _validate_v2_authoring_sizes(deck: DeckBuild, slides: list[dict[str, Any]]) -> None:
+    stylesheet = deck.deck_stylesheet or ""
+    if len(stylesheet.encode("utf-8")) > 8 * 1024:
+        raise _authoring_failure("deck_stylesheet exceeds the compact-v2 8192-byte limit.")
+    for index, raw in enumerate(slides):
+        body = str(raw.get("html_body") or "").strip()
+        slide_css = str(raw.get("slide_css") or "").strip()
+        if len(body.encode("utf-8")) > 3 * 1024:
+            raise _authoring_failure(f"slides[{index}].html_body exceeds the compact-v2 3072-byte limit.")
+        if len(slide_css.encode("utf-8")) > 1024:
+            raise _authoring_failure(f"slides[{index}].slide_css exceeds the compact-v2 1024-byte limit.")
 
 
 def _slide_authoring_sources(raw: dict[str, Any]) -> dict[str, str | None]:

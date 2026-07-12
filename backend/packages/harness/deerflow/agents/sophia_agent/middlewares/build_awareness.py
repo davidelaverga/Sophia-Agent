@@ -38,6 +38,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.sophia.tools.builder_lifecycle_contract import reconcile_builder_task
 
 logger = logging.getLogger(__name__)
 
@@ -195,15 +196,27 @@ class BuildAwarenessMiddleware(AgentMiddleware[BuildAwarenessState]):
                 exc_info=True,
             )
             return None
+        thread_values: dict[str, Any] = {}
+        if isinstance(run, dict) and str(run.get("status") or "") == "success":
+            try:
+                thread = await client.threads.get(thread_id=thread_id)
+                thread_values = thread.get("values") or {}
+            except Exception:  # noqa: BLE001
+                logger.warning(
+                    "BuildAwareness: child state unavailable for completed builder task_id=%s; treating native success as incomplete",
+                    task.get("task_id"),
+                    exc_info=True,
+                )
 
         new_status = run.get("status") if isinstance(run, dict) else None
-        if not new_status or new_status == task.get("status"):
+        if not new_status or (new_status == task.get("status") and not thread_values):
             return None  # no change; preserve existing entry as-is
-
-        merged = dict(task)
-        merged["status"] = new_status
-        merged["last_checked_at"] = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-        merged["last_updated_at"] = merged["last_checked_at"]
+        merged, _payload = reconcile_builder_task(
+            task,
+            native_status=str(new_status),
+            thread_values=thread_values,
+            native_error=run.get("error") if isinstance(run, dict) else None,
+        )
         return merged
 
     def _build_prompt_block(self, async_tasks: dict[str, dict]) -> str | None:
