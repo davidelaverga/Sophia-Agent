@@ -161,6 +161,31 @@ def test_ceiling_fallback_pptx_promotes_valid_powerpoint(tmp_path: Path) -> None
     assert fallback["artifact_type"] == "pptx"
 
 
+def test_ceiling_fallback_pptx_rejects_native_scratch_base(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    scratch = outputs / ".builder" / "deck_native"
+    scratch.mkdir(parents=True)
+    _write_minimal_pptx(scratch / "base.pptx")
+
+    started_ms = int((time.time() - 10) * 1000)
+    state = _state_with_outputs(outputs, started_ms=started_ms)
+    state["builder_artifact_target_path"] = "/mnt/user-data/outputs/deck.pptx"
+    state["builder_pptx_diagnostics"] = {
+        "pptx_generator_attempt_count": 1,
+        "pptx_generator_success_count": 0,
+        "pptx_generator_error_class": "deck_native_patch_failed",
+    }
+
+    fallback = BuilderArtifactMiddleware._build_ceiling_fallback(
+        state, steps_completed=12, reason="hard_ceiling"
+    )
+
+    assert fallback["artifact_path"] is None
+    assert fallback["requested_artifact_ext"] == "pptx"
+    assert fallback["fallback_reason"] == "hard_ceiling"
+    assert fallback["confidence"] == 0.2
+
+
 def test_ceiling_fallback_pptx_rejects_tiny_deck_and_refuses_markdown_swap(tmp_path: Path) -> None:
     """Format-swapped promotion is disabled: a pptx request never completes
     with a .md artifact — the build reports an honest failure instead."""

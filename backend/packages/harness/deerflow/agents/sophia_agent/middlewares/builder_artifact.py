@@ -1765,6 +1765,17 @@ _PROMOTABLE_DELIVERABLE_EXTENSIONS = frozenset(
         ".css",
     }
 )
+_PROMOTION_SUPPORT_DIR_NAMES = frozenset(
+    {
+        ".builder",
+        "assets",
+        "deck_build",
+        "slides",
+        "source_artifact",
+        "sources",
+        "visuals",
+    }
+)
 _PDF_FALLBACK_EXTENSIONS = frozenset({".md", ".html"})
 _PDF_RENDER_SOURCE_EXTENSIONS = frozenset({".md", ".markdown", ".html", ".htm"})
 _PDF_RENDERABLE_HTML_SOURCE_EXTENSIONS = frozenset({".html", ".htm"})
@@ -2789,11 +2800,18 @@ def _output_suffix_allowed_for_request(suffix: str, state: dict[str, Any]) -> bo
 def _is_promotable_candidate_path(
     path: Path,
     *,
+    outputs_root: Path,
     min_mtime: float | None,
     requested_pdf: bool = False,
     requested_pptx: bool,
     requested_html: bool,
 ) -> bool:
+    try:
+        relative_parts = path.relative_to(outputs_root).parts
+    except ValueError:
+        return False
+    if relative_parts and relative_parts[0].lower() in _PROMOTION_SUPPORT_DIR_NAMES:
+        return False
     if not _is_recent_promotable_path(path, min_mtime):
         return False
     if requested_html:
@@ -6996,6 +7014,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             for p in outputs_root.rglob("*")
             if _is_promotable_candidate_path(
                 p,
+                outputs_root=outputs_root,
                 min_mtime=min_mtime,
                 requested_pdf=requested_pdf,
                 requested_pptx=requested_pptx,
