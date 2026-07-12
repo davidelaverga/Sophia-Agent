@@ -269,6 +269,23 @@ html, body {{ width: 1920px; height: 1080px; background: #0A0E14; }}
         assert any("CSS image-set(...)" in error for error in result.errors)
 
 
+def test_rejects_escaped_css_subresource_identifiers_before_rendering() -> None:
+    for stylesheet, expected in (
+        (r".canvas { background-image: u\72l(https://example.com/bg.png); }", "CSS url(...)"),
+        (r'.canvas { background-image: image\2d set("https://example.com/bg.png" 1x); }', "CSS image-set(...)"),
+        (r'@\69mport "https://example.com/deck.css";', "CSS @import"),
+    ):
+        html = f"""<!doctype html><html><head><style>
+html, body {{ width: 1920px; height: 1080px; background: #0A0E14; }}
+{stylesheet}
+</style></head><body><main class="canvas"><h1>Title</h1></main></body></html>"""
+
+        _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+        assert result.valid is False
+        assert any(expected in error for error in result.errors)
+
+
 def test_accepts_direct_planned_asset_reference() -> None:
     html = """<!doctype html><html><head><style>
 html, body { width: 1920px; height: 1080px; background: #0A0E14; }

@@ -30,8 +30,6 @@ _WARN_STYLE_RE = re.compile(r"(box-shadow\s*:|text-shadow\s*:|letter-spacing\s*:
 _REMOTE_URI_RE = re.compile(r"^(?:https?:)?//|^https?:", re.I)
 _DATA_URI_RE = re.compile(r"^data:", re.I)
 _FILE_URI_RE = re.compile(r"^file:", re.I)
-_CSS_URL_RE = re.compile(r"\burl\s*\(", re.I)
-_CSS_IMAGE_SET_RE = re.compile(r"\b(?:-webkit-)?image-set\s*\(", re.I)
 _URL_ATTRIBUTE_NAMES = {"src", "href", "poster", "background", "data"}
 _LEGACY_SUBRESOURCE_ATTRIBUTE_NAMES = {"poster", "background", "data"}
 _DECK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
@@ -464,7 +462,38 @@ def _last_background_declaration(css: str | list[object]) -> str | None:
 
 
 def _validate_css_urls(css: str, validation: HtmlSourceValidation) -> None:
-    if _CSS_URL_RE.search(css):
+    subresources = _css_subresource_kinds(css)
+    if "url" in subresources:
         validation.errors.append("CSS url(...) subresources are forbidden; use planned <img> assets")
-    if _CSS_IMAGE_SET_RE.search(css):
+    if "image-set" in subresources:
         validation.errors.append("CSS image-set(...) subresources are forbidden; use planned <img> assets")
+    if "import" in subresources:
+        validation.errors.append("CSS @import subresources are forbidden; author styles inline")
+
+
+def _css_subresource_kinds(css: str) -> set[str]:
+    """Return decoded CSS subresource constructs, including escaped identifiers."""
+
+    found: set[str] = set()
+
+    def visit(tokens: list[object]) -> None:
+        for token in tokens:
+            token_type = str(getattr(token, "type", ""))
+            if token_type == "url":
+                found.add("url")
+            elif token_type == "function":
+                name = str(getattr(token, "lower_name", getattr(token, "name", ""))).lower()
+                if name == "url":
+                    found.add("url")
+                elif name in {"image-set", "-webkit-image-set"}:
+                    found.add("image-set")
+            elif token_type == "at-keyword" and str(getattr(token, "value", "")).lower() == "import":
+                found.add("import")
+
+            for child_name in ("arguments", "content"):
+                children = getattr(token, child_name, None)
+                if children:
+                    visit(list(children))
+
+    visit(list(tinycss2.parse_component_value_list(css, skip_comments=True)))
+    return found

@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any, Literal
 
+import tinycss2
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 _REPORT_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{1,63}$")
@@ -20,6 +22,99 @@ _COVER_IDS = {"cover", "title-page", "title_page"}
 _TOC_IDS = {"toc", "table-of-contents", "table_of_contents"}
 _CONCLUSION_IDS = {"conclusion", "conclusions"}
 _REFERENCES_IDS = {"references", "bibliography", "sources"}
+_SIMPLE_SELECTOR_RE = re.compile(r"^(?P<tag>\*|[a-z][a-z0-9_-]*)?(?P<qualifiers>(?:[.#][a-z_][a-z0-9_-]*)*)$", re.IGNORECASE)
+
+
+@dataclass(frozen=True)
+class _VisibilityRule:
+    selector: str
+    property_name: str
+    value: str
+    important: bool
+    specificity: int
+    order: int
+
+
+class _ReportStyleParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self._in_style = False
+        self._parts: list[str] = []
+        self.stylesheets: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.lower() == "style":
+            self._in_style = True
+            self._parts = []
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() == "style" and self._in_style:
+            self.stylesheets.append("".join(self._parts))
+            self._in_style = False
+            self._parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._in_style:
+            self._parts.append(data)
+
+
+def _stylesheet_visibility_rules(source: str) -> list[_VisibilityRule]:
+    collector = _ReportStyleParser()
+    collector.feed(source)
+    collector.close()
+    rules: list[_VisibilityRule] = []
+    order = 0
+    for stylesheet in collector.stylesheets:
+        for rule in tinycss2.parse_stylesheet(stylesheet, skip_comments=True, skip_whitespace=True):
+            if getattr(rule, "type", None) != "qualified-rule":
+                continue
+            selectors = [item.strip().lower() for item in tinycss2.serialize(rule.prelude).split(",")]
+            declarations = tinycss2.parse_declaration_list(rule.content, skip_comments=True, skip_whitespace=True)
+            for selector in selectors:
+                specificity = _simple_selector_specificity(selector)
+                if specificity is None:
+                    continue
+                for declaration in declarations:
+                    property_name = str(getattr(declaration, "lower_name", ""))
+                    if getattr(declaration, "type", None) != "declaration" or property_name not in {"display", "visibility"}:
+                        continue
+                    rules.append(
+                        _VisibilityRule(
+                            selector=selector,
+                            property_name=property_name,
+                            value=tinycss2.serialize(declaration.value).strip().lower(),
+                            important=bool(declaration.important),
+                            specificity=specificity,
+                            order=order,
+                        )
+                    )
+                order += 1
+    return rules
+
+
+def _simple_selector_specificity(selector: str) -> int | None:
+    match = _SIMPLE_SELECTOR_RE.fullmatch(selector)
+    if not match:
+        return None
+    qualifiers = match.group("qualifiers") or ""
+    return 100 * qualifiers.count("#") + 10 * qualifiers.count(".") + (1 if match.group("tag") not in {None, "*"} else 0)
+
+
+def _simple_selector_matches(selector: str, tag_name: str, attr_map: dict[str, str]) -> bool:
+    match = _SIMPLE_SELECTOR_RE.fullmatch(selector)
+    if not match:
+        return False
+    tag = (match.group("tag") or "").lower()
+    if tag not in {"", "*", tag_name}:
+        return False
+    element_id = attr_map.get("id", "").lower()
+    classes = {item.lower() for item in attr_map.get("class", "").split()}
+    for prefix, name in re.findall(r"([.#])([a-z_][a-z0-9_-]*)", match.group("qualifiers") or "", re.IGNORECASE):
+        if prefix == "#" and element_id != name.lower():
+            return False
+        if prefix == "." and name.lower() not in classes:
+            return False
+    return True
 
 
 class ReportSectionRequirement(BaseModel):
@@ -84,8 +179,9 @@ class ReportBuildManifest(BaseModel):
 
 
 class _ReportSourceParser(HTMLParser):
-    def __init__(self) -> None:
+    def __init__(self, visibility_rules: list[_VisibilityRule] | None = None) -> None:
         super().__init__(convert_charrefs=True)
+        self._visibility_rules = visibility_rules or []
         self.ids: set[str] = set()
         self.duplicate_ids: set[str] = set()
         self.section_ids: set[str] = set()
@@ -142,10 +238,27 @@ class _ReportSourceParser(HTMLParser):
         self.conclusion_present = self.conclusion_present or role == "conclusion" or element_id in _CONCLUSION_IDS
         self.references_present = self.references_present or role == "references" or element_id in _REFERENCES_IDS
 
-    @staticmethod
-    def _element_is_hidden(tag_name: str, attr_map: dict[str, str]) -> bool:
+    def _element_is_hidden(self, tag_name: str, attr_map: dict[str, str]) -> bool:
         aria_hidden = attr_map.get("aria-hidden", "").strip().lower()
-        return tag_name in {"script", "style", "template"} or "hidden" in attr_map or aria_hidden in {"true", "1"} or bool(_HIDDEN_STYLE_RE.search(attr_map.get("style", "")))
+        if tag_name in {"script", "style", "template"} or "hidden" in attr_map or aria_hidden in {"true", "1"}:
+            return True
+
+        winners: dict[str, tuple[bool, int, int, str]] = {}
+        for rule in self._visibility_rules:
+            if not _simple_selector_matches(rule.selector, tag_name, attr_map):
+                continue
+            candidate = (rule.important, rule.specificity, rule.order, rule.value)
+            if rule.property_name not in winners or candidate[:3] >= winners[rule.property_name][:3]:
+                winners[rule.property_name] = candidate
+        inline_order = len(self._visibility_rules) + 1
+        for declaration in tinycss2.parse_declaration_list(attr_map.get("style", ""), skip_comments=True, skip_whitespace=True):
+            property_name = str(getattr(declaration, "lower_name", ""))
+            if getattr(declaration, "type", None) != "declaration" or property_name not in {"display", "visibility"}:
+                continue
+            candidate = (bool(declaration.important), 1_000, inline_order, tinycss2.serialize(declaration.value).strip().lower())
+            if property_name not in winners or candidate[:3] >= winners[property_name][:3]:
+                winners[property_name] = candidate
+        return winners.get("display", (False, 0, 0, ""))[3] == "none" or winners.get("visibility", (False, 0, 0, ""))[3] in {"hidden", "collapse"}
 
     def _enter_element(self, tag_name: str, attr_map: dict[str, str]) -> bool:
         element_hidden = self._element_is_hidden(tag_name, attr_map)
@@ -206,7 +319,7 @@ def _parse_report_source(html_path: Path) -> _ReportSourceParser:
         source = html_path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
         source = ""
-    parser = _ReportSourceParser()
+    parser = _ReportSourceParser(_stylesheet_visibility_rules(source))
     try:
         parser.feed(source)
         parser.close()
