@@ -4757,6 +4757,20 @@ def _pdf_page_image_count(page: Any) -> int:
     return count
 
 
+def _render_result_has_required_visual_evidence(render_result: dict[str, Any]) -> bool | None:
+    try:
+        image_count = int(render_result.get("image_count", 0) or 0)
+        vector_count = int(render_result.get("vector_visual_count", 0) or 0)
+        expected_count = int(render_result.get("expected_visual_count", 0) or 0)
+        found_count = int(render_result.get("found_visual_count", 0) or 0)
+    except (TypeError, ValueError):
+        return None
+    rendered_count = image_count + vector_count
+    if expected_count > 0:
+        return found_count >= expected_count and rendered_count >= expected_count
+    return rendered_count > 0
+
+
 def _pdf_contains_visual_evidence(path: Path, state: dict[str, Any]) -> bool:
     render_result = state.get("builder_pdf_render_result")
     if isinstance(render_result, dict):
@@ -4764,16 +4778,9 @@ def _pdf_contains_visual_evidence(path: Path, state: dict[str, Any]) -> bool:
         # fully-illustrated HTML→PDF report reads image_count=0. Honor the
         # renderer's vector_visual_count so we don't false-reject it (R2-2,
         # prod 2026-06-26). Either rasterized images OR vector figures count.
-        try:
-            image_count = int(render_result.get("image_count", 0) or 0)
-            vector_count = int(render_result.get("vector_visual_count", 0) or 0)
-            expected_count = int(render_result.get("expected_visual_count", 0) or 0)
-            found_count = int(render_result.get("found_visual_count", 0) or 0)
-            if expected_count > 0:
-                return found_count >= expected_count
-            return image_count > 0 or vector_count > 0
-        except (TypeError, ValueError):
-            pass
+        render_evidence = _render_result_has_required_visual_evidence(render_result)
+        if render_evidence is not None:
+            return render_evidence
     if PdfReader is None:
         return False
     try:

@@ -227,6 +227,39 @@ def test_report_contract_rejects_missing_sections_and_visuals_before_render(stag
     assert "report_manifest.minimum_word_count" in result["report_contract_problems"]
 
 
+def test_report_contract_requires_manifest_ids_on_semantic_sections(staged, monkeypatch):
+    prose = " ".join(["analysis"] * 320)
+    (staged / "report.html").write_text(
+        "<html><body>"
+        "<div id='architecture'>Wrapper with the required id</div>"
+        f"<section id='unrelated' data-report-role='body'><p>{prose}</p></section>"
+        "</body></html>"
+    )
+    monkeypatch.setattr(render_html, "_html_pdf_runtime", lambda: pytest.fail("Chromium must not run for an invalid section contract"))
+
+    result = _call(
+        runtime=_fake_runtime(
+            {
+                "builder_artifact_target_path": f"{_OUTPUTS_PREFIX}out.pdf",
+                "delegation_context": {"task_type": "visual_report"},
+                "builder_pdf_required_body_section_count": 1,
+                "builder_pdf_required_min_word_count": 300,
+            }
+        ),
+        html_path=f"{_OUTPUTS_PREFIX}report.html",
+        pdf_path=f"{_OUTPUTS_PREFIX}out.pdf",
+        report_manifest={
+            "sections": [{"id": "architecture", "title": "Architecture", "role": "body"}],
+            "minimum_word_count": 300,
+        },
+    )
+
+    assert result["success"] is False
+    assert result["error_type"] == "report_contract_failed"
+    assert result["missing_section_ids"] == ["architecture"]
+    assert "report_manifest.sections[0].id:architecture" in result["report_contract_problems"]
+
+
 def test_complete_report_contract_renders_with_state_page_targets(staged, monkeypatch, tmp_path):
     prose = " ".join(["analysis"] * 340)
     (staged / "report.html").write_text(
@@ -477,6 +510,38 @@ def test_html_pdf_visual_evidence_accepts_image_or_vector(tmp_path):
     assert _pdf_contains_visual_evidence(pdf, by_image) is True
     assert _pdf_contains_visual_evidence(pdf, by_vector) is True  # R2-2: no false reject
     assert _pdf_contains_visual_evidence(pdf, neither) is False
+
+
+def test_html_pdf_visual_evidence_requires_rendered_count_for_manifest_visuals(tmp_path):
+    pdf = tmp_path / "out.pdf"
+    marker_only = {
+        "builder_pdf_render_result": {
+            "expected_visual_count": 2,
+            "found_visual_count": 2,
+            "image_count": 0,
+            "vector_visual_count": 0,
+        }
+    }
+    partially_rendered = {
+        "builder_pdf_render_result": {
+            "expected_visual_count": 2,
+            "found_visual_count": 2,
+            "image_count": 0,
+            "vector_visual_count": 1,
+        }
+    }
+    fully_rendered = {
+        "builder_pdf_render_result": {
+            "expected_visual_count": 2,
+            "found_visual_count": 2,
+            "image_count": 1,
+            "vector_visual_count": 1,
+        }
+    }
+
+    assert _pdf_contains_visual_evidence(pdf, marker_only) is False
+    assert _pdf_contains_visual_evidence(pdf, partially_rendered) is False
+    assert _pdf_contains_visual_evidence(pdf, fully_rendered) is True
 
 
 def test_render_html_to_pdf_reports_vector_visual_count(staged, monkeypatch, tmp_path):

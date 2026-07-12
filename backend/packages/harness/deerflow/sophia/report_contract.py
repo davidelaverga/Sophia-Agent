@@ -101,6 +101,41 @@ class _ReportSourceParser(HTMLParser):
     def _classes(attrs: dict[str, str]) -> set[str]:
         return {item.strip().lower() for item in attrs.get("class", "").split() if item.strip()}
 
+    def _record_element_id(self, element_id: str) -> None:
+        if not element_id:
+            return
+        if element_id in self.ids:
+            self.duplicate_ids.add(element_id)
+        self.ids.add(element_id)
+
+    def _record_section(self, tag_name: str, element_id: str, role: str, classes: set[str]) -> None:
+        if tag_name not in {"section", "article"}:
+            return
+        self.section_count += 1
+        if element_id:
+            self.section_ids.add(element_id)
+        non_body = role in {"cover", "toc", "summary", "conclusion", "references"} or bool(classes & {"cover", "toc", "executive-summary", "conclusion", "references"})
+        if not non_body:
+            self.body_section_count += 1
+
+    def _record_visual(self, tag_name: str, attr_map: dict[str, str]) -> None:
+        visual_id = attr_map.get("data-visual-id", "").lower()
+        if visual_id:
+            self.visual_ids.add(visual_id)
+        if tag_name == "figure":
+            self.figure_count += 1
+
+    def _record_internal_link(self, attr_map: dict[str, str]) -> None:
+        href = attr_map.get("href", "")
+        if href.startswith("#") and len(href) > 1:
+            self.internal_links.add(href[1:].lower())
+
+    def _record_landmarks(self, element_id: str, role: str, classes: set[str]) -> None:
+        self.cover_present = self.cover_present or role == "cover" or "cover" in classes or element_id in _COVER_IDS
+        self.toc_present = self.toc_present or role == "toc" or "toc" in classes or element_id in _TOC_IDS
+        self.conclusion_present = self.conclusion_present or role == "conclusion" or element_id in _CONCLUSION_IDS
+        self.references_present = self.references_present or role == "references" or element_id in _REFERENCES_IDS
+
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         tag_name = tag.lower()
         attr_map = {str(key).lower(): str(value or "").strip() for key, value in attrs}
@@ -108,38 +143,15 @@ class _ReportSourceParser(HTMLParser):
             self._ignored_depth += 1
 
         element_id = attr_map.get("id", "").lower()
-        if element_id:
-            if element_id in self.ids:
-                self.duplicate_ids.add(element_id)
-            self.ids.add(element_id)
-
         role = attr_map.get("data-report-role", "").lower()
         if role:
             self.roles.add(role)
         classes = self._classes(attr_map)
-
-        if tag_name in {"section", "article"}:
-            self.section_count += 1
-            if element_id:
-                self.section_ids.add(element_id)
-            non_body = role in {"cover", "toc", "summary", "conclusion", "references"} or bool(classes & {"cover", "toc", "executive-summary", "conclusion", "references"})
-            if not non_body:
-                self.body_section_count += 1
-
-        visual_id = attr_map.get("data-visual-id", "").lower()
-        if visual_id:
-            self.visual_ids.add(visual_id)
-        if tag_name == "figure":
-            self.figure_count += 1
-
-        href = attr_map.get("href", "")
-        if href.startswith("#") and len(href) > 1:
-            self.internal_links.add(href[1:].lower())
-
-        self.cover_present = self.cover_present or role == "cover" or "cover" in classes or element_id in _COVER_IDS
-        self.toc_present = self.toc_present or role == "toc" or "toc" in classes or element_id in _TOC_IDS
-        self.conclusion_present = self.conclusion_present or role == "conclusion" or element_id in _CONCLUSION_IDS
-        self.references_present = self.references_present or role == "references" or element_id in _REFERENCES_IDS
+        self._record_element_id(element_id)
+        self._record_section(tag_name, element_id, role, classes)
+        self._record_visual(tag_name, attr_map)
+        self._record_internal_link(attr_map)
+        self._record_landmarks(element_id, role, classes)
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() in {"script", "style", "template"} and self._ignored_depth > 0:
@@ -163,15 +175,7 @@ def _required_minimum_word_count(manifest: ReportBuildManifest, requirements: di
     return max(candidates)
 
 
-def inspect_report_source(
-    html_path: Path,
-    manifest: ReportBuildManifest,
-    *,
-    requirements: dict[str, Any] | None = None,
-) -> dict[str, Any]:
-    """Validate a model-authored report manifest against its final HTML source."""
-
-    requirement_map = requirements or {}
+def _parse_report_source(html_path: Path) -> _ReportSourceParser:
     try:
         source = html_path.read_text(encoding="utf-8", errors="ignore")
     except OSError:
@@ -182,10 +186,63 @@ def inspect_report_source(
         parser.close()
     except Exception:  # noqa: BLE001 - malformed HTML is reported as an incomplete contract.
         pass
+    return parser
+
+
+def _presence_problems(
+    *,
+    parser: _ReportSourceParser,
+    cover_required: bool,
+    toc_required: bool,
+    conclusion_required: bool,
+    references_required: bool,
+) -> list[str]:
+    checks = (
+        (cover_required, parser.cover_present, "report_manifest.cover_required"),
+        (toc_required, parser.toc_present, "report_manifest.toc_required"),
+        (conclusion_required, parser.conclusion_present, "report_manifest.conclusion_required"),
+        (references_required, parser.references_present, "report_manifest.references_required"),
+    )
+    return [code for required, present, code in checks if required and not present]
+
+
+def _structural_problems(
+    *,
+    parser: _ReportSourceParser,
+    expected_body_count: int,
+    expected_visual_count: int,
+    minimum_word_count: int,
+    toc_required: bool,
+    unresolved_toc_targets: list[str],
+) -> list[str]:
+    problems: list[str] = []
+    if parser.body_section_count < expected_body_count:
+        problems.append("report_manifest.sections:body_section_count")
+    if len(parser.visual_ids) < expected_visual_count:
+        problems.append("report_manifest.visuals:visual_count")
+    if minimum_word_count > 0 and parser.word_count < minimum_word_count:
+        problems.append("report_manifest.minimum_word_count")
+    if parser.duplicate_ids:
+        problems.append("report_manifest.sections:duplicate_html_ids")
+    if toc_required and unresolved_toc_targets:
+        problems.append("report_manifest.toc_required:unresolved_targets")
+    return problems
+
+
+def inspect_report_source(
+    html_path: Path,
+    manifest: ReportBuildManifest,
+    *,
+    requirements: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    """Validate a model-authored report manifest against its final HTML source."""
+
+    requirement_map = requirements or {}
+    parser = _parse_report_source(html_path)
 
     expected_section_ids = [item.id for item in manifest.sections]
     expected_visual_ids = [item.id for item in manifest.visuals]
-    missing_section_ids = [item for item in expected_section_ids if item not in parser.ids]
+    missing_section_ids = [item for item in expected_section_ids if item not in parser.section_ids]
     missing_visual_ids = [item for item in expected_visual_ids if item not in parser.visual_ids]
     unresolved_toc_targets = sorted(item for item in parser.internal_links if item not in parser.ids)
 
@@ -206,24 +263,25 @@ def inspect_report_source(
     problems: list[str] = []
     problems.extend(f"report_manifest.sections[{index}].id:{section_id}" for index, section_id in enumerate(expected_section_ids) if section_id in missing_section_ids)
     problems.extend(f"report_manifest.visuals[{index}].id:{visual_id}" for index, visual_id in enumerate(expected_visual_ids) if visual_id in missing_visual_ids)
-    if parser.body_section_count < expected_body_count:
-        problems.append("report_manifest.sections:body_section_count")
-    if len(parser.visual_ids) < expected_visual_count:
-        problems.append("report_manifest.visuals:visual_count")
-    if cover_required and not parser.cover_present:
-        problems.append("report_manifest.cover_required")
-    if toc_required and not parser.toc_present:
-        problems.append("report_manifest.toc_required")
-    if conclusion_required and not parser.conclusion_present:
-        problems.append("report_manifest.conclusion_required")
-    if references_required and not parser.references_present:
-        problems.append("report_manifest.references_required")
-    if minimum_word_count > 0 and parser.word_count < minimum_word_count:
-        problems.append("report_manifest.minimum_word_count")
-    if parser.duplicate_ids:
-        problems.append("report_manifest.sections:duplicate_html_ids")
-    if toc_required and unresolved_toc_targets:
-        problems.append("report_manifest.toc_required:unresolved_targets")
+    problems.extend(
+        _presence_problems(
+            parser=parser,
+            cover_required=cover_required,
+            toc_required=toc_required,
+            conclusion_required=conclusion_required,
+            references_required=references_required,
+        )
+    )
+    problems.extend(
+        _structural_problems(
+            parser=parser,
+            expected_body_count=expected_body_count,
+            expected_visual_count=expected_visual_count,
+            minimum_word_count=minimum_word_count,
+            toc_required=toc_required,
+            unresolved_toc_targets=unresolved_toc_targets,
+        )
+    )
 
     return {
         "report_contract_status": "accepted" if not problems else "rejected",
