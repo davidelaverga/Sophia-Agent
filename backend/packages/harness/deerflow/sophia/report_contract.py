@@ -46,18 +46,22 @@ class _ReportStyleParser(HTMLParser):
         super().__init__(convert_charrefs=True)
         self._in_style = False
         self._parts: list[str] = []
-        self.stylesheets: list[str] = []
+        self._media: str | None = None
+        self.stylesheets: list[tuple[str, str | None]] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         if tag.lower() == "style":
             self._in_style = True
             self._parts = []
+            attr_map = {str(name).lower(): str(value or "").strip() for name, value in attrs}
+            self._media = attr_map.get("media") or None
 
     def handle_endtag(self, tag: str) -> None:
         if tag.lower() == "style" and self._in_style:
-            self.stylesheets.append("".join(self._parts))
+            self.stylesheets.append(("".join(self._parts), self._media))
             self._in_style = False
             self._parts = []
+            self._media = None
 
     def handle_data(self, data: str) -> None:
         if self._in_style:
@@ -71,7 +75,9 @@ def _stylesheet_visibility_rules(source: str) -> _VisibilityStylesheet:
     rules: list[_VisibilityRule] = []
     unsupported_selectors: set[str] = set()
     order = 0
-    for stylesheet in collector.stylesheets:
+    for stylesheet, media_query in collector.stylesheets:
+        if media_query and not _media_query_applies_to_print(media_query):
+            continue
         parsed = tinycss2.parse_stylesheet(stylesheet, skip_comments=True, skip_whitespace=True)
         for rule in _print_visibility_rules(parsed):
             selectors = [item.strip().lower() for item in tinycss2.serialize(rule.prelude).split(",")]

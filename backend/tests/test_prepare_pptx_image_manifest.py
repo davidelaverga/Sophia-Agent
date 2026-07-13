@@ -111,6 +111,28 @@ def test_prepare_pptx_image_manifest_writes_deterministic_schema(tmp_path) -> No
     }
 
 
+def test_prepare_pptx_image_manifest_uses_ordered_prompt_indices(tmp_path) -> None:
+    outputs = tmp_path / "outputs"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir(parents=True)
+    outputs.mkdir()
+    duplicate_index = json.dumps({"prompt": "visual", "technical": {"slide_index": 1}})
+    (workspace / "slide-a.json").write_text(duplicate_index, encoding="utf-8")
+    (workspace / "slide-b.json").write_text(duplicate_index, encoding="utf-8")
+
+    result = _call(
+        runtime=_runtime(outputs=outputs, workspace=workspace),
+        prompt_files=[f"{_WORKSPACE}slide-a.json", f"{_WORKSPACE}slide-b.json"],
+    )
+
+    assert result["success"] is True
+    assert [item["slide_index"] for item in result["items"]] == [1, 2]
+    assert [item["output_path"] for item in result["items"]] == [
+        f"{_OUTPUTS}assets/slide-01.png",
+        f"{_OUTPUTS}assets/slide-02.png",
+    ]
+
+
 def test_prepare_pptx_image_manifest_custom_manifest_keeps_outputs_in_assets(tmp_path) -> None:
     outputs = tmp_path / "outputs"
     outputs.mkdir()

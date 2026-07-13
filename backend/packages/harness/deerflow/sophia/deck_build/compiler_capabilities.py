@@ -232,16 +232,35 @@ def _css_declarations(source: str) -> list[_CssDeclaration]:
     declarations: list[_CssDeclaration] = []
     for block in _STYLE_BLOCK_RE.findall(source or ""):
         rules = tinycss2.parse_stylesheet(block, skip_comments=True, skip_whitespace=True)
-        for rule in rules:
-            content = getattr(rule, "content", None)
-            if content is not None:
-                declarations.extend(_parse_declaration_tokens(content))
+        declarations.extend(_parse_rule_declarations(rules))
     for _quote, attribute in _STYLE_ATTRIBUTE_RE.findall(source or ""):
         declarations.extend(
             _parse_declaration_tokens(
                 tinycss2.parse_component_value_list(attribute),
             )
         )
+    return declarations
+
+
+def _parse_rule_declarations(rules: list[object]) -> list[_CssDeclaration]:
+    declarations: list[_CssDeclaration] = []
+    for rule in rules:
+        content = getattr(rule, "content", None)
+        if content is None:
+            continue
+        rule_type = getattr(rule, "type", None)
+        if rule_type == "qualified-rule":
+            declarations.extend(_parse_declaration_tokens(content))
+            continue
+        if rule_type != "at-rule":
+            continue
+
+        # Grouping at-rules such as @media, @supports, and @layer contain
+        # nested rules. Declaration-bearing at-rules such as @page and
+        # @font-face are also inspected to preserve the previous behavior.
+        declarations.extend(_parse_declaration_tokens(content))
+        nested_rules = tinycss2.parse_rule_list(content, skip_comments=True, skip_whitespace=True)
+        declarations.extend(_parse_rule_declarations(nested_rules))
     return declarations
 
 

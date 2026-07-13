@@ -34,6 +34,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
     _pdf_contains_visual_evidence,
 )
+from deerflow.sophia.report_contract import ReportBuildManifest, inspect_report_source
 
 _OUTPUTS_PREFIX = "/mnt/user-data/outputs/"
 
@@ -370,6 +371,31 @@ def test_report_contract_excludes_print_media_hidden_semantics_and_text(staged, 
     assert result["found_body_section_count"] == 1
     assert result["source_word_count"] < 10
     assert "report_manifest.minimum_word_count" in result["report_contract_problems"]
+
+
+def test_report_contract_ignores_screen_only_style_elements_for_print(tmp_path):
+    report = tmp_path / "report.html"
+    prose = " ".join(["analysis"] * 120)
+    report.write_text(
+        "<html><head><style media='screen'>.pad { display: none; }</style></head><body>"
+        f"<section id='architecture' class='pad' data-report-role='body'><p>{prose}</p></section>"
+        "</body></html>",
+        encoding="utf-8",
+    )
+    manifest = ReportBuildManifest.model_validate(
+        {
+            "sections": [{"id": "architecture", "title": "Architecture", "role": "body"}],
+            "cover_required": False,
+            "minimum_word_count": 100,
+        }
+    )
+
+    result = inspect_report_source(report, manifest)
+
+    assert result["report_contract_status"] == "accepted"
+    assert result["missing_section_ids"] == []
+    assert result["found_body_section_count"] == 1
+    assert result["source_word_count"] >= 100
 
 
 def test_report_contract_rejects_unmodeled_visibility_selectors(staged, monkeypatch):

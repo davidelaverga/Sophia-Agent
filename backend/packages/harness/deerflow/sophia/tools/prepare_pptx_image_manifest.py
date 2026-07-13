@@ -109,14 +109,11 @@ def _prompt_manifest_metadata(path: Path, fallback_index: int) -> dict[str, Any]
     if not isinstance(payload, dict):
         return metadata
     technical = payload.get("technical") if isinstance(payload.get("technical"), dict) else {}
-    composition = payload.get("composition") if isinstance(payload.get("composition"), dict) else {}
-    slide_context = composition.get("slide_context") if isinstance(composition.get("slide_context"), dict) else {}
-    raw_index = technical.get("slide_index") or slide_context.get("index") or slide_context.get("slide_index")
-    try:
-        slide_index = int(raw_index)
-    except (TypeError, ValueError):
-        slide_index = fallback_index
-    metadata["slide_index"] = slide_index if slide_index > 0 else fallback_index
+    # prompt_files is an explicitly ordered list and therefore owns the
+    # machine-critical slide identity. Prompt metadata may be stale or
+    # duplicated; allowing it to choose filenames can race two generators on
+    # the same output path.
+    metadata["slide_index"] = fallback_index
     if technical.get("deck_asset") is True:
         metadata["deck_asset"] = True
         metadata["slide_visual"] = bool(technical.get("slide_visual"))

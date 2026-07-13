@@ -146,6 +146,17 @@ def test_compiler_capabilities_do_not_confuse_text_transform_with_transform() ->
     assert lossy_css_in_html(source) == []
 
 
+def test_compiler_capabilities_recurse_into_nested_css_at_rules() -> None:
+    source = """<html><style>
+    @media all { .hidden { opacity: 0; } }
+    @media screen { .shifted { transform: translateX(4px); } }
+    @supports (display: grid) { @layer deck { .blurred { filter: blur(2px); } } }
+    </style><body><main></main></body></html>"""
+
+    assert lossy_css_in_html(source) == ["opacity"]
+    assert rejected_css_in_html(source) == ["filter", "transform"]
+
+
 def test_compact_v2_profile_is_required_in_model_schema_and_bounded() -> None:
     schema = PrepareDeckBuildInput.model_json_schema()
     assert "authoring_contract" in schema["required"]
