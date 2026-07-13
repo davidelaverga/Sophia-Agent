@@ -80,7 +80,7 @@ def _stylesheet_visibility_rules(source: str) -> _VisibilityStylesheet:
                 declaration
                 for declaration in declarations
                 if getattr(declaration, "type", None) == "declaration"
-                and str(getattr(declaration, "lower_name", "")) in {"display", "visibility"}
+                and str(getattr(declaration, "lower_name", "")) in {"display", "visibility", "opacity"}
             ]
             for selector in selectors:
                 specificity = _selector_specificity(selector)
@@ -190,6 +190,16 @@ def _selector_matches(
         else:
             return False
     return True
+
+
+def _opacity_is_zero(value: str) -> bool:
+    normalized = value.strip().lower()
+    if normalized.endswith("%"):
+        normalized = normalized[:-1].strip()
+    try:
+        return float(normalized) == 0
+    except ValueError:
+        return False
 
 
 class ReportSectionRequirement(BaseModel):
@@ -330,12 +340,16 @@ class _ReportSourceParser(HTMLParser):
         inline_order = len(self._visibility_rules) + 1
         for declaration in tinycss2.parse_declaration_list(attr_map.get("style", ""), skip_comments=True, skip_whitespace=True):
             property_name = str(getattr(declaration, "lower_name", ""))
-            if getattr(declaration, "type", None) != "declaration" or property_name not in {"display", "visibility"}:
+            if getattr(declaration, "type", None) != "declaration" or property_name not in {"display", "visibility", "opacity"}:
                 continue
             candidate = (bool(declaration.important), 1_000, inline_order, tinycss2.serialize(declaration.value).strip().lower())
             if property_name not in winners or candidate[:3] >= winners[property_name][:3]:
                 winners[property_name] = candidate
-        return winners.get("display", (False, 0, 0, ""))[3] == "none" or winners.get("visibility", (False, 0, 0, ""))[3] in {"hidden", "collapse"}
+        return (
+            winners.get("display", (False, 0, 0, ""))[3] == "none"
+            or winners.get("visibility", (False, 0, 0, ""))[3] in {"hidden", "collapse"}
+            or _opacity_is_zero(winners.get("opacity", (False, 0, 0, ""))[3])
+        )
 
     def _enter_element(self, tag_name: str, attr_map: dict[str, str]) -> bool:
         element_hidden = self._element_is_hidden(tag_name, attr_map)

@@ -337,7 +337,7 @@ def test_report_contract_excludes_print_media_hidden_semantics_and_text(staged, 
     hidden_prose = " ".join(["invisible"] * 350)
     (staged / "report.html").write_text(
         "<html><head><style>@media screen { .screen-only { display: none; } }"
-        "@media print, speech { .report .pad { visibility: hidden; } }</style></head><body>"
+        "@media print, speech { .report .pad { opacity: 0%; } }</style></head><body>"
         "<main class='report'>"
         f"<section id='architecture' class='pad' data-report-role='body'><p>{hidden_prose}</p></section>"
         "<section id='visible' class='screen-only' data-report-role='body'>Visible in print.</section>"
@@ -840,6 +840,14 @@ def test_html_pdf_renderer_allows_only_generated_visual_images():
     assert 'resourceType !== "image"' in source
     assert 'path.join(outputRoot, "visuals")' in source
     assert 'path.join(fs.realpathSync(outputRoot), "visuals")' in source
+
+
+def test_html_pdf_renderer_counts_vectors_using_print_media():
+    pdf_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_pdf.mjs"
+    source = pdf_script.read_text(encoding="utf-8")
+
+    assert 'await page.emulateMedia({ media: "print" });' in source
+    assert source.index('await page.emulateMedia({ media: "print" });') < source.index("vectorVisualCount = await page.evaluate")
 
 
 def test_slide_png_renderer_sets_viewport_on_browser_context():

@@ -162,6 +162,7 @@ async function main() {
       const uniqueMissing = [...new Set(missingLocalResources)];
       throw new Error(`missing local render assets: ${uniqueMissing.slice(0, 8).join(", ")}`);
     }
+    await page.emulateMedia({ media: "print" });
     vectorVisualCount = await page.evaluate(() => {
       const marks = "path,rect,circle,ellipse,line,polyline,polygon,text,image,use,foreignObject";
       const visiblyRendered = (element) => {
