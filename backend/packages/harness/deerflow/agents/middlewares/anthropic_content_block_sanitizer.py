@@ -34,6 +34,17 @@ def _copy_message_with_content(message: Any, content: list[Any]) -> Any:
     return message
 
 
+def _message_has_tool_calls(message: Any) -> bool:
+    if isinstance(message, dict):
+        tool_calls = message.get("tool_calls")
+        additional_kwargs = message.get("additional_kwargs")
+    else:
+        tool_calls = getattr(message, "tool_calls", None)
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+    provider_tool_calls = additional_kwargs.get("tool_calls") if isinstance(additional_kwargs, dict) else None
+    return bool(tool_calls or provider_tool_calls)
+
+
 def sanitize_anthropic_content_blocks(messages: list[Any]) -> tuple[list[Any] | None, int]:
     """Drop provider-private Anthropic reasoning blocks from AI message history.
 
@@ -67,9 +78,14 @@ def sanitize_anthropic_content_blocks(messages: list[Any]) -> tuple[list[Any] | 
 
         if sanitized_messages is None:
             sanitized_messages = list(messages)
-        sanitized_messages[index] = _copy_message_with_content(message, sanitized_content)
+        if sanitized_content or _message_has_tool_calls(message):
+            sanitized_messages[index] = _copy_message_with_content(message, sanitized_content)
+        else:
+            sanitized_messages[index] = None
 
-    return sanitized_messages, dropped_count
+    if sanitized_messages is None:
+        return None, dropped_count
+    return [message for message in sanitized_messages if message is not None], dropped_count
 
 
 class AnthropicContentBlockSanitizerMiddleware(AgentMiddleware[AgentState]):

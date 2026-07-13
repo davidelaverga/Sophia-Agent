@@ -58,6 +58,20 @@ def test_sanitizer_preserves_valid_text_and_tool_content_without_copying():
     assert dropped == 0
 
 
+def test_sanitizer_preserves_private_only_assistant_when_tool_calls_remain():
+    ai = AIMessage(
+        content=[{"type": "thinking", "signature": "sig"}],
+        tool_calls=[{"id": "call-1", "name": "read_file", "args": {"path": "spec.md"}}],
+    )
+
+    sanitized, dropped = sanitize_anthropic_content_blocks([ai])
+
+    assert dropped == 1
+    assert sanitized is not None
+    assert sanitized[0].content == []
+    assert sanitized[0].tool_calls == ai.tool_calls
+
+
 def test_sync_wrapper_passes_sanitized_messages_to_handler():
     middleware = AnthropicContentBlockSanitizerMiddleware()
     ai = AIMessage(content=[{"type": "thinking", "signature": "sig"}])
@@ -70,7 +84,7 @@ def test_sync_wrapper_passes_sanitized_messages_to_handler():
     result = middleware.wrap_model_call(_Request([ai]), handler)
 
     assert result.content == "ok"
-    assert captured.request.messages[0].content == []
+    assert captured.request.messages == []
     assert ai.content == [{"type": "thinking", "signature": "sig"}]
 
 
@@ -87,5 +101,5 @@ async def test_async_wrapper_passes_sanitized_messages_to_handler():
     result = await middleware.awrap_model_call(_Request([ai]), handler)
 
     assert result.content == "ok"
-    assert captured.request.messages[0].content == []
+    assert captured.request.messages == []
     assert ai.content == [{"type": "thinking", "signature": "sig"}]
