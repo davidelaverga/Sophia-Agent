@@ -278,7 +278,7 @@ def test_build_foundation_rpcs_grant_service_role_execution() -> None:
         "sophia_build_mutation_transactions",
     ):
         assert f"CREATE TABLE IF NOT EXISTS public.{table}" in sql
-        assert f"REVOKE ALL ON TABLE public.{table} FROM PUBLIC, anon, authenticated;" in sql
+        assert f"REVOKE ALL ON TABLE public.{table} FROM PUBLIC, anon, authenticated, service_role;" in sql
     assert "GRANT SELECT ON TABLE public.sophia_build_operation_events TO service_role;" in sql
     assert "GRANT SELECT ON TABLE public.sophia_build_registry TO service_role;" not in sql
     assert "FROM PUBLIC, anon, authenticated;" in sql

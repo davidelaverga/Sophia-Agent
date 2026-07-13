@@ -236,11 +236,11 @@ REVOKE ALL ON FUNCTION public.sophia_append_build_event(TEXT, TEXT, TEXT, TEXT, 
 GRANT EXECUTE ON FUNCTION public.sophia_append_build_event(TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, JSONB)
     TO service_role;
 
-REVOKE ALL ON TABLE public.sophia_build_manifest_heads FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON TABLE public.sophia_build_registry FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON TABLE public.sophia_build_operation_events FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON TABLE public.sophia_build_acceptance_outbox FROM PUBLIC, anon, authenticated;
-REVOKE ALL ON TABLE public.sophia_build_mutation_transactions FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON TABLE public.sophia_build_manifest_heads FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON TABLE public.sophia_build_registry FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON TABLE public.sophia_build_operation_events FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON TABLE public.sophia_build_acceptance_outbox FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON TABLE public.sophia_build_mutation_transactions FROM PUBLIC, anon, authenticated, service_role;
 
 -- Event replay and readiness use a direct PostgREST SELECT. All writes and
 -- manifest mutations remain behind the SECURITY DEFINER RPCs above.
