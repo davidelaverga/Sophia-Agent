@@ -3,7 +3,8 @@
 import json
 from typing import Any, Literal
 
-from langchain.tools import ToolRuntime, tool
+from langchain.tools import ToolRuntime
+from langchain_core.tools import StructuredTool
 
 from deerflow.sophia.build_runtime.events import record_runtime_event
 from deerflow.sophia.deck_build.ir_repair import deck_ir_repair_instruction_from_failure
@@ -17,13 +18,15 @@ from deerflow.sophia.deck_build.tool_contract import (
 )
 
 
-@tool(
-    "prepare_deck_build",
-    args_schema=PrepareDeckBuildInput,
-    description="Build a fresh native PPTX deck from a typed creative plan and compiler-supported slide HTML.",
-    parse_docstring=True,
-)
-def prepare_deck_build(
+class _PrepareDeckBuildTool(StructuredTool):
+    @property
+    def tool_call_schema(self):  # type: ignore[override]
+        # Preserve the public ``register`` alias while the runtime model uses
+        # ``deck_register`` internally to avoid shadowing BaseModel.register.
+        return PrepareDeckBuildInput
+
+
+def _prepare_deck_build_impl(
     runtime: ToolRuntime,
     deck_title: str,
     slides: NormalizedDeckSlides,
@@ -31,7 +34,7 @@ def prepare_deck_build(
     creative_plan: NormalizedDeckCreativePlan,
     authoring_contract: Literal["compact_model_html_v1", "compact_model_html_v2"] | None = None,
     deck_stylesheet: str | None = None,
-    register: str = "professional_technical",
+    deck_register: str = "professional_technical",
     visual_policy: str = "auto",
     style_profile: dict[str, Any] | None = None,
     design_plan: dict[str, Any] | None = None,
@@ -44,7 +47,7 @@ def prepare_deck_build(
             layout_kind, speaker_notes, html_body, and optional slide_css.
         deck_stylesheet: Shared model-authored CSS for all slide bodies.
         output_path: Absolute /mnt/user-data/outputs/*.pptx output path.
-        register: Deck register such as professional_technical or executive.
+        deck_register: Internal name for the public ``register`` deck style.
         visual_policy: auto for normal decks, required for legacy callers where
             images are allowed but creative_plan decides, or text_only for explicit
             plain/no-visual deck requests.
@@ -83,7 +86,7 @@ def prepare_deck_build(
         deck_title=deck_title,
         slides=normalized_slides,
         output_path=output_path,
-        register=register,
+        register=deck_register,
         visual_policy=visual_policy,
         deck_stylesheet=deck_stylesheet,
         authoring_contract=authoring_contract,
@@ -127,3 +130,13 @@ def prepare_deck_build(
                 ),
             }
     return json.dumps(payload)
+
+
+prepare_deck_build = _PrepareDeckBuildTool.from_function(
+    func=_prepare_deck_build_impl,
+    name="prepare_deck_build",
+    args_schema=PrepareDeckBuildInput,
+    description="Build a fresh native PPTX deck from a typed creative plan and compiler-supported slide HTML.",
+    infer_schema=False,
+    parse_docstring=True,
+)

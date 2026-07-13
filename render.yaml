@@ -83,9 +83,13 @@ services:
       - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_MAX_WALL_CLOCK_SECONDS
         value: "480"
       - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_PREPARE_FORCE_AT_TURN
-        value: "8"
+        value: "2"
       - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_PREPARE_FORCE_AFTER_SECONDS
+        value: "8"
+      - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_AUTHORING_DEADLINE_SECONDS
         value: "120"
+      - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_PREFLIGHT_TIMEOUT_SECONDS
+        value: "8"
       # Uncomment only if the write key spans multiple LangSmith workspaces.
       # - key: LANGSMITH_WORKSPACE_ID
       #   sync: false

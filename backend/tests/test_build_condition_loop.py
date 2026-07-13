@@ -103,8 +103,10 @@ def test_builder_budget_policy_uses_presentation_tier_for_pptx(monkeypatch):
     assert deck["tier"] == "presentation"
     assert max_non_artifact_turns({"builder_budget": deck}) == 12
     assert deck["max_wall_clock_seconds"] == 480
-    assert deck["prepare_force_at_turn"] == 6
-    assert deck["prepare_force_after_seconds"] == 120
+    assert deck["prepare_force_at_turn"] == 2
+    assert deck["prepare_force_after_seconds"] == 8
+    assert deck["authoring_deadline_seconds"] == 120
+    assert deck["preflight_timeout_seconds"] == 8
 
 
 def test_iteration_available_respects_counter(monkeypatch):

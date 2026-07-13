@@ -1997,6 +1997,13 @@ async def _dispatch_via_asgi(
     # the LangGraph side; it does not propagate to the running graph's
     # ``runtime.config["configurable"]``. We populate it explicitly here.
     run_config: dict[str, Any] = {
+        "metadata": {
+            "build_id": build_id,
+            "operation_id": operation_id,
+            "builder_thread_id": thread_id,
+            "parent_thread_id": parent_thread_id,
+            "task_type": task_type,
+        },
         "configurable": {
             "thread_id": thread_id,
             "user_id": user_id,

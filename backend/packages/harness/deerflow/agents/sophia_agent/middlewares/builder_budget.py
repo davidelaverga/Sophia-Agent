@@ -106,8 +106,10 @@ PRESENTATION_BUILDER_BUDGET: dict[str, Any] = {
     "force_emit_remaining_turns": 2,
     "soft_warn_at_turn": 6,
     "max_wall_clock_seconds": 480,
-    "prepare_force_at_turn": 6,
-    "prepare_force_after_seconds": 120,
+    "prepare_force_at_turn": 2,
+    "prepare_force_after_seconds": 8,
+    "authoring_deadline_seconds": 120,
+    "preflight_timeout_seconds": 8,
     "authoring_max_tokens": 16_384,
     "authoring_timeout_seconds": 110,
 }
@@ -178,6 +180,16 @@ def _budget_with_env(defaults: dict[str, Any], prefix: str) -> dict[str, Any]:
         budget["prepare_force_after_seconds"] = _env_int(
             f"{prefix}_PREPARE_FORCE_AFTER_SECONDS",
             int(budget["prepare_force_after_seconds"]),
+        )
+    if "authoring_deadline_seconds" in budget:
+        budget["authoring_deadline_seconds"] = _env_int(
+            f"{prefix}_AUTHORING_DEADLINE_SECONDS",
+            int(budget["authoring_deadline_seconds"]),
+        )
+    if "preflight_timeout_seconds" in budget:
+        budget["preflight_timeout_seconds"] = _env_int(
+            f"{prefix}_PREFLIGHT_TIMEOUT_SECONDS",
+            int(budget["preflight_timeout_seconds"]),
         )
     if "authoring_max_tokens" in budget:
         budget["authoring_max_tokens"] = _env_int(
@@ -283,21 +295,45 @@ def max_wall_clock_seconds(state: dict[str, Any]) -> int:
 def prepare_force_at_turn(state: dict[str, Any]) -> int:
     budget = state.get("builder_budget")
     if not isinstance(budget, dict):
-        return 6
+        return 2
     try:
-        return max(1, int(budget.get("prepare_force_at_turn", 6) or 6))
+        return max(1, int(budget.get("prepare_force_at_turn", 2) or 2))
     except (TypeError, ValueError):
-        return 6
+        return 2
 
 
 def prepare_force_after_seconds(state: dict[str, Any]) -> int:
     budget = state.get("builder_budget")
     if not isinstance(budget, dict):
+        return 8
+    try:
+        return max(0, int(budget.get("prepare_force_after_seconds", 8) or 0))
+    except (TypeError, ValueError):
+        return 8
+
+
+def presentation_authoring_deadline_seconds(state: dict[str, Any]) -> int:
+    """Absolute kickoff-to-first-prepare deadline for fresh presentations."""
+
+    budget = state.get("builder_budget")
+    if not isinstance(budget, dict):
         return 120
     try:
-        return max(0, int(budget.get("prepare_force_after_seconds", 120) or 0))
+        return max(1, int(budget.get("authoring_deadline_seconds", 120) or 120))
     except (TypeError, ValueError):
         return 120
+
+
+def presentation_preflight_timeout_seconds(state: dict[str, Any]) -> int:
+    """Maximum model/tool time allocated to the one presentation preflight."""
+
+    budget = state.get("builder_budget")
+    if not isinstance(budget, dict):
+        return 8
+    try:
+        return max(1, int(budget.get("preflight_timeout_seconds", 8) or 8))
+    except (TypeError, ValueError):
+        return 8
 
 
 def presentation_authoring_max_tokens(state: dict[str, Any]) -> int:

@@ -2641,7 +2641,7 @@ class TestBuilderResearchPolicyMiddleware:
         assert result["builder_allowed_urls"] == ["https://example.com/source"]
         assert "Autonomous web research is enabled" in result["system_prompt_blocks"][-1]
 
-    def test_enables_web_policy_even_when_delegation_is_stale_false(self):
+    def test_preserves_explicit_disabled_web_policy(self):
         from deerflow.agents.sophia_agent.middlewares.builder_research_policy import BuilderResearchPolicyMiddleware
 
         mw = BuilderResearchPolicyMiddleware()
@@ -2656,8 +2656,8 @@ class TestBuilderResearchPolicyMiddleware:
 
         result = mw.before_agent(state, _make_runtime())
         assert result is not None
-        assert result["allow_web_research"] is True
-        assert "Autonomous web research is enabled" in result["system_prompt_blocks"][-1]
+        assert result["allow_web_research"] is False
+        assert "Autonomous web research is disabled" in result["system_prompt_blocks"][-1]
 
 
 # --- BuilderArtifactMiddleware ---
@@ -3450,14 +3450,14 @@ class TestBuilderArtifactMiddleware:
         mw = BuilderArtifactMiddleware()
 
         update = mw._combined_before_model_updates(state, _make_runtime(thread_id="thread-x"))
-        assert update == {"builder_pptx_route_trace_emitted": True}
+        assert update is not None
+        assert update["builder_pptx_route_trace_emitted"] is True
+        assert update["builder_presentation_phase"] == "authoring_pending"
+        assert update["builder_pptx_diagnostics"]["presentation_preflight_status"] == "skipped"
 
-    def test_complete_slide_html_latches_deck_builder(self, tmp_path):
-        # HTML-slide path + floor (2026-06-29): the compile latch fires on
-        # slide-HTML completeness, decoupled from image yield. Here 3/3 slide
-        # HTML files exist but only 1 image succeeded — the latch still fires and
-        # steers to the authoritative prepare service instead of lower-level
-        # compiler or serial image loops.
+    def test_legacy_slide_html_does_not_bypass_compact_authoring_lane(self, tmp_path):
+        # Existing scratch HTML is not authoritative for a fresh service-owned
+        # deck. The model must still enter the compact prepare lane.
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3476,15 +3476,11 @@ class TestBuilderArtifactMiddleware:
         update = mw._combined_before_model_updates(state, _make_runtime(thread_id="thread-x"))
 
         assert update is not None
-        assert update["builder_pptx_compile_latch_pending"] is True
-        content = update["messages"][0].content
-        assert "prepare_deck_build" in content
-        # deck_plan.json / image_path are image-forward residue and must be absent
-        # ("generate.py --plan-file" may still appear inside the do-NOT prohibition).
-        assert "deck_plan.json" not in content
-        assert "image_path" not in content
+        assert update["builder_presentation_phase"] == "authoring_pending"
+        assert "builder_pptx_compile_latch_pending" not in update
+        assert "messages" not in update
 
-    def test_pptx_slide_images_ready_does_not_force_removed_deck_builder_tool(self, tmp_path):
+    def test_pptx_slide_images_ready_still_forces_authoritative_prepare(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -3505,8 +3501,10 @@ class TestBuilderArtifactMiddleware:
             _make_runtime(thread_id="thread-x"),
         )
 
-        assert choice is None
-        assert update is None
+        assert choice == {"type": "tool", "name": "prepare_deck_build"}
+        assert update is not None
+        assert update["builder_deck_prepare_latch_active"] is True
+        assert update["builder_presentation_phase"] == "authoring_pending"
 
     def test_deck_builder_result_records_pptx_diagnostics(self, tmp_path):
         from langchain_core.messages import ToolMessage
@@ -4579,8 +4577,7 @@ class TestBuilderArtifactMiddleware:
         assert calls[0] == "parent-thread"
         assert "builder-thread" not in calls
 
-    def test_pptx_skill_read_alone_still_gets_deck_steering_correction(self, tmp_path):
-        # The drift/skill correction injects the authoritative service route.
+    def test_pptx_skill_read_history_does_not_reenter_legacy_correction(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 
         outputs_dir = tmp_path / "outputs"
@@ -4599,13 +4596,9 @@ class TestBuilderArtifactMiddleware:
         result = mw.before_model(state, _make_runtime(thread_id="thread-x"))
 
         assert result is not None
-        assert result["builder_pptx_skill_correction_emitted"] is True
-        content = result["messages"][0].content
-        assert "prepare_deck_build" in content
-        assert "deck_stylesheet" in content
-        assert "html_body" in content
-        assert "deck_plan.json" not in content
-        assert "image_path" not in content
+        assert result["builder_presentation_phase"] == "authoring_pending"
+        assert "builder_pptx_skill_correction_emitted" not in result
+        assert "messages" not in result
 
     def test_pptx_generator_invocation_suppresses_skill_correction(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
@@ -4623,7 +4616,10 @@ class TestBuilderArtifactMiddleware:
             ],
         }
 
-        assert mw.before_model(state, _make_runtime(thread_id="thread-x")) == {"builder_pptx_route_trace_emitted": True}
+        result = mw.before_model(state, _make_runtime(thread_id="thread-x"))
+        assert result is not None
+        assert result["builder_pptx_route_trace_emitted"] is True
+        assert result["builder_presentation_phase"] == "authoring_pending"
 
     def test_force_choice_pptx_no_output_waits_for_skill_correction(self, tmp_path):
         from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware

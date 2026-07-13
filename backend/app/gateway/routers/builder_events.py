@@ -143,6 +143,17 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "builder_trace_run_id",
     "builder_trace_root_run_id",
     "deck_authoring_elapsed_ms",
+    "presentation_preflight_status",
+    "presentation_preflight_elapsed_ms",
+    "deck_authoring_started_at_ms",
+    "deck_authoring_budget_ms",
+    "deck_authoring_remaining_ms",
+    "deck_authoring_prompt_bytes",
+    "deck_authoring_prompt_estimated_tokens",
+    "deck_authoring_tool_schema_bytes",
+    "deck_authoring_context_bytes",
+    "deck_authoring_output_bytes",
+    "authoring_tool_call_started",
     "prepare_force_reason",
     "error_message",
     "builder_failure_diagnostics",
@@ -267,6 +278,17 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "builder_trace_run_id",
         "builder_trace_root_run_id",
         "deck_authoring_elapsed_ms",
+        "presentation_preflight_status",
+        "presentation_preflight_elapsed_ms",
+        "deck_authoring_started_at_ms",
+        "deck_authoring_budget_ms",
+        "deck_authoring_remaining_ms",
+        "deck_authoring_prompt_bytes",
+        "deck_authoring_prompt_estimated_tokens",
+        "deck_authoring_tool_schema_bytes",
+        "deck_authoring_context_bytes",
+        "deck_authoring_output_bytes",
+        "authoring_tool_call_started",
         "prepare_force_reason",
         "source_artifact_path",
         "revision_of_artifact_path",
@@ -552,6 +574,17 @@ class BuilderCompletionEvent(BaseModel):
     builder_trace_run_id: str | None = None
     builder_trace_root_run_id: str | None = None
     deck_authoring_elapsed_ms: int | None = None
+    presentation_preflight_status: str | None = None
+    presentation_preflight_elapsed_ms: int | None = None
+    deck_authoring_started_at_ms: int | None = None
+    deck_authoring_budget_ms: int | None = None
+    deck_authoring_remaining_ms: int | None = None
+    deck_authoring_prompt_bytes: int | None = None
+    deck_authoring_prompt_estimated_tokens: int | None = None
+    deck_authoring_tool_schema_bytes: int | None = None
+    deck_authoring_context_bytes: int | None = None
+    deck_authoring_output_bytes: int | None = None
+    authoring_tool_call_started: bool | None = None
     prepare_force_reason: str | None = None
     source_retention_report: dict[str, Any] | None = None
     native_contrast_report: dict[str, Any] | None = None

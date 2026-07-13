@@ -29,7 +29,12 @@ class _FakeRunTree:
         self.metadata: dict[str, Any] = {}
         self.tags: list[str] = []
         self.parent_run: _FakeRunTree | None = None
+        self.parent_run_id: str | None = None
+        self.run_type = "chain"
+        self.end_time: object | None = None
+        self.error: str | None = None
         self.patch_calls = 0
+        self.end_calls = 0
 
     def add_metadata(self, metadata: dict[str, Any]) -> None:
         self.metadata.update(metadata)
@@ -40,6 +45,12 @@ class _FakeRunTree:
     def patch(self, *, exclude_inputs: bool = False) -> None:
         assert exclude_inputs is True
         self.patch_calls += 1
+
+    def end(self, *, error: str | None, metadata: dict[str, Any]) -> None:
+        self.error = error
+        self.metadata.update(metadata)
+        self.end_time = object()
+        self.end_calls += 1
 
 
 class _FakeFeedbackClient:
@@ -723,3 +734,50 @@ def test_builder_completion_prefers_matching_pregel_root_over_detached_current_s
     assert artifact["builder_trace_run_id"] == "builder-root"
     assert artifact["builder_trace_root_run_id"] == "builder-root"
     assert feedback_client.feedback[-1]["run_id"] == "builder-root"
+
+
+def test_builder_completion_matches_build_identity_and_closes_canceled_model_span(monkeypatch) -> None:
+    class _FakeTracer:
+        pass
+
+    detached = _FakeRunTree()
+    detached.id = "detached-span"
+    detached.metadata = {"build_id": "different-build"}
+    root = _FakeRunTree()
+    root.id = "builder-root"
+    root.metadata = {"build_id": "build-123", "operation_id": "operation-123"}
+    model_span = _FakeRunTree()
+    model_span.id = "authoring-model"
+    model_span.parent_run_id = root.id
+    model_span.run_type = "llm"
+    tracer = _FakeTracer()
+    tracer.run_map = {root.id: root, model_span.id: model_span}
+    feedback_client = _FakeFeedbackClient()
+
+    observability._ACTIVE_BUILDER_TRACERS.add(tracer)
+    monkeypatch.setattr(observability, "_current_run_tree", lambda: detached)
+    monkeypatch.setattr(observability, "_feedback_client", lambda: feedback_client)
+    artifact = {
+        "artifact_path": None,
+        "terminal_status": "timed_out",
+        "terminal_reason": "deck_authoring_deadline_exceeded",
+    }
+    try:
+        assert observability.annotate_builder_completion(
+            {
+                "builder_build_id": "build-123",
+                "builder_operation_id": "operation-123",
+                "builder_run_id": "native-run-123",
+            },
+            artifact,
+        ) is True
+    finally:
+        observability._ACTIVE_BUILDER_TRACERS.discard(tracer)
+
+    assert root.metadata["terminal_status"] == "timed_out"
+    assert root.metadata["builder_run_id"] == "native-run-123"
+    assert model_span.end_calls == 1
+    assert model_span.end_time is not None
+    assert model_span.error == "Builder terminated: deck_authoring_deadline_exceeded"
+    assert artifact["builder_trace_root_run_id"] == "builder-root"
+    assert artifact["builder_run_id"] == "native-run-123"

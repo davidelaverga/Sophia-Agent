@@ -147,6 +147,11 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     assert config_payload["configurable"]["task_type"] == "presentation"
     assert config_payload["configurable"]["artifact_target_ext"] == ".pptx"
     run_input = captured["run_kwargs"]["input"]
+    assert config_payload["metadata"]["build_id"] == run_input["builder_build_id"]
+    assert config_payload["metadata"]["operation_id"] == run_input["builder_operation_id"]
+    assert config_payload["metadata"]["builder_thread_id"] == "asgi-1"
+    assert config_payload["configurable"]["build_id"] == run_input["builder_build_id"]
+    assert config_payload["configurable"]["operation_id"] == run_input["builder_operation_id"]
     assert run_input["builder_budget"]["tier"] == "presentation"
     assert run_input["builder_budget"]["max_non_artifact_turns"] == 12
     assert run_input["builder_timeout_seconds"] == 480

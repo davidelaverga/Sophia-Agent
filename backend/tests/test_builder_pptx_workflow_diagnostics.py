@@ -1231,7 +1231,10 @@ def test_failed_image_generation_after_correction_does_not_force_fallback(tmp_pa
 
     result = BuilderArtifactMiddleware().before_model(state, SimpleNamespace(context={}))
 
-    assert result == {"builder_pptx_route_trace_emitted": True}
+    assert result is not None
+    assert result["builder_pptx_route_trace_emitted"] is True
+    assert result["builder_presentation_phase"] == "authoring_pending"
+    assert result["builder_pptx_diagnostics"]["presentation_preflight_status"] == "skipped"
 
 
 def test_invalid_plan_json_no_longer_injects_plan_correction(tmp_path: Path) -> None:

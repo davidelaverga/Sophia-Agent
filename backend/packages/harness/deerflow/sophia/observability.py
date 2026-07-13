@@ -471,11 +471,19 @@ def _completion_identity(state: dict[str, Any], artifact: dict[str, Any]) -> dic
         _as_dict(state.get("builder_task")),
         _as_dict(state.get("delegation_context")),
     )
-    for key in ("thread_id", "task_id", "run_id", "parent_thread_id"):
+    key_aliases = {
+        "thread_id": ("thread_id", "builder_thread_id"),
+        "task_id": ("task_id",),
+        "run_id": ("builder_run_id", "run_id"),
+        "parent_thread_id": ("parent_thread_id",),
+        "build_id": ("builder_build_id", "build_id", "deck_build_id"),
+        "operation_id": ("builder_operation_id", "operation_id"),
+    }
+    for identity_key, aliases in key_aliases.items():
         for source in (artifact, state, *nested_sources):
-            value = source.get(key)
+            value = next((source.get(alias) for alias in aliases if source.get(alias) is not None), None)
             if isinstance(value, str) and value.strip():
-                identity[key] = value.strip()
+                identity[identity_key] = value.strip()
                 break
     return identity
 
@@ -611,7 +619,7 @@ def _add_identity_metadata(
     builder_task: dict[str, Any],
     delegation_context: dict[str, Any],
 ) -> None:
-    for key in ("thread_id", "task_id", "run_id", "parent_thread_id"):
+    for key in ("thread_id", "task_id", "run_id", "builder_run_id", "parent_thread_id", "build_id", "operation_id"):
         for source in (artifact, builder_task, delegation_context):
             if key not in metadata:
                 _merge_safe_metadata(metadata, key, source.get(key))
@@ -845,6 +853,17 @@ def _add_pptx_terminal_metadata(metadata: dict[str, Any], diagnostics: dict[str,
         "builder_trace_run_id",
         "builder_trace_root_run_id",
         "deck_authoring_elapsed_ms",
+        "presentation_preflight_status",
+        "presentation_preflight_elapsed_ms",
+        "deck_authoring_started_at_ms",
+        "deck_authoring_budget_ms",
+        "deck_authoring_remaining_ms",
+        "deck_authoring_prompt_bytes",
+        "deck_authoring_prompt_estimated_tokens",
+        "deck_authoring_tool_schema_bytes",
+        "deck_authoring_context_bytes",
+        "deck_authoring_output_bytes",
+        "authoring_tool_call_started",
         "prepare_force_reason",
         "deck_html_fragment_count",
         "deck_assembled_html_bytes",
@@ -944,6 +963,17 @@ def _add_artifact_acceptance_metadata(metadata: dict[str, Any], artifact: dict[s
         "authoring_contract",
         "build_event_store_status",
         "deck_authoring_elapsed_ms",
+        "presentation_preflight_status",
+        "presentation_preflight_elapsed_ms",
+        "deck_authoring_started_at_ms",
+        "deck_authoring_budget_ms",
+        "deck_authoring_remaining_ms",
+        "deck_authoring_prompt_bytes",
+        "deck_authoring_prompt_estimated_tokens",
+        "deck_authoring_tool_schema_bytes",
+        "deck_authoring_context_bytes",
+        "deck_authoring_output_bytes",
+        "authoring_tool_call_started",
         "prepare_force_reason",
         "root_failure_code",
         "root_failure_summary",
@@ -1279,6 +1309,54 @@ def _patch_run_tree(run_tree: Any) -> None:
         logger.debug("LangSmith root patch failed", exc_info=True)
 
 
+def _run_descends_from_root(run: Any, root_id: str, by_id: dict[str, Any]) -> bool:
+    current = run
+    seen: set[str] = set()
+    while current is not None:
+        current_id = str(getattr(current, "id", "") or "")
+        if current_id == root_id:
+            return True
+        if not current_id or current_id in seen:
+            return False
+        seen.add(current_id)
+        current = by_id.get(str(getattr(current, "parent_run_id", "") or ""))
+    return False
+
+
+def _close_builder_model_run(run: Any, terminal_status: str, terminal_reason: str) -> None:
+    try:
+        run.end(
+            error=None if terminal_status == "completed" else f"Builder terminated: {terminal_reason}",
+            metadata={"builder_terminal_status": terminal_status, "builder_terminal_reason": terminal_reason},
+        )
+        run.patch(exclude_inputs=True)
+    except Exception:  # noqa: BLE001
+        logger.debug("LangSmith canceled model span closure failed", exc_info=True)
+
+
+def _close_open_builder_model_runs(root_run: Any, artifact: dict[str, Any]) -> None:
+    """Close canceled LLM descendants before publishing terminal feedback."""
+
+    root_id = str(getattr(root_run, "id", "") or "")
+    if not root_id:
+        return
+    terminal_status = str(artifact.get("terminal_status") or artifact.get("status") or "failed")
+    terminal_reason = str(artifact.get("terminal_reason") or "builder_terminal")[:256]
+    for tracer in list(_ACTIVE_BUILDER_TRACERS):
+        try:
+            runs = list(getattr(tracer, "run_map", {}).values())
+        except (AttributeError, RuntimeError):
+            continue
+        by_id = {str(getattr(run, "id", "") or ""): run for run in runs}
+        for run in runs:
+            is_open_model = (
+                str(getattr(run, "run_type", "") or "").lower() == "llm"
+                and getattr(run, "end_time", None) is None
+            )
+            if is_open_model and _run_descends_from_root(run, root_id, by_id):
+                _close_builder_model_run(run, terminal_status, terminal_reason)
+
+
 def _feedback_comment(reasons: list[str]) -> str:
     return json.dumps(reasons, ensure_ascii=False)
 
@@ -1332,6 +1410,7 @@ def _create_terminal_feedback(run_tree: Any, artifact: dict[str, Any]) -> None:
 def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any]) -> bool:
     """Attach builder completion metadata/tags/feedback to the active run."""
 
+    identity = _completion_identity(state, artifact)
     run_tree = _completion_run_tree(state, artifact)
     if run_tree is None:
         if langsmith_builder_tracing_enabled():
@@ -1340,8 +1419,15 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
                 _langsmith_log_context(),
             )
         return False
+    builder_run_id = identity.get("run_id")
+    if builder_run_id:
+        artifact.setdefault("builder_run_id", builder_run_id)
     metadata, tags, qc_results = builder_observability_payload(state, artifact)
     root_run = _root_run_tree(run_tree)
+    _merge_safe_metadata(metadata, "builder_run_id", builder_run_id)
+    _merge_safe_metadata(metadata, "build_id", identity.get("build_id"))
+    _merge_safe_metadata(metadata, "operation_id", identity.get("operation_id"))
+    _merge_safe_metadata(metadata, "builder_thread_id", identity.get("thread_id"))
     artifact.setdefault("builder_trace_run_id", str(getattr(run_tree, "id", "") or "") or None)
     artifact.setdefault("builder_trace_root_run_id", str(getattr(root_run, "id", "") or "") or None)
     _merge_safe_metadata(metadata, "builder_trace_run_id", artifact.get("builder_trace_run_id"))
@@ -1351,6 +1437,7 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
     if root_run is not run_tree:
         _add_run_metadata(root_run, metadata)
         _add_run_tags(root_run, tags)
+    _close_open_builder_model_runs(root_run, artifact)
     _patch_run_tree(root_run)
     _create_qc_feedback(root_run, qc_results)
     _create_terminal_feedback(root_run, artifact)
@@ -1358,7 +1445,7 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
         "Sophia builder LangSmith completion annotation attached: run_id=%s root_run_id=%s builder_run_id=%s project=%s",
         getattr(run_tree, "id", None),
         getattr(root_run, "id", None),
-        _completion_identity(state, artifact).get("run_id"),
+        builder_run_id,
         _safe_metadata_value(get_tracing_config().project),
     )
     return True

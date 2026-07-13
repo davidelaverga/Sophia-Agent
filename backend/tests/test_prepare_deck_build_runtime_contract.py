@@ -38,6 +38,8 @@ def test_prepare_deck_build_runtime_is_injected_and_hidden_from_model_schema() -
     slide_schema = schema["$defs"]["DeckSlideInput"]
     assert "html_body" in slide_schema["required"]
     assert "html_source" not in slide_schema["properties"]
+    assert "register" in prepare_deck_build.args
+    assert "deck_register" not in prepare_deck_build.args
 
 
 def test_real_prepare_deck_build_executes_through_tool_node_with_runtime() -> None:

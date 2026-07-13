@@ -32,6 +32,17 @@ def _merged_explicit_user_urls(
     return explicit_user_urls
 
 
+def _resolved_web_research_policy(
+    state: dict[str, Any],
+    delegation_context: dict[str, Any],
+) -> bool:
+    state_policy = state.get("allow_web_research")
+    if isinstance(state_policy, bool):
+        return state_policy
+    delegated_policy = delegation_context.get("allow_web_research")
+    return delegated_policy if isinstance(delegated_policy, bool) else True
+
+
 class BuilderResearchPolicyState(AgentState):
     system_prompt_blocks: NotRequired[list[str]]
     delegation_context: NotRequired[dict | None]
@@ -62,7 +73,7 @@ class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState
             return None
 
         task_type = str(delegation_context.get("task_type", "unknown"))
-        allow_web_research = True
+        allow_web_research = _resolved_web_research_policy(state, delegation_context)
         explicit_user_urls = _merged_explicit_user_urls(state, delegation_context)
 
         # `_merge_builder_web_budget` SUMS *_calls keys (delta semantics) so
@@ -91,31 +102,39 @@ class BuilderResearchPolicyMiddleware(AgentMiddleware[BuilderResearchPolicyState
         allowed_urls.update(explicit_user_urls)
 
         blocks = list(state.get("system_prompt_blocks", []))
-        block = (
-            "<builder_research_policy>\n"
-            "Autonomous web research is enabled for this delegated builder task, regardless of task type.\n"
-            f"- Search budget: {budget.get('search_limit', 0)} calls total.\n"
-            f"- Fetch budget: {budget.get('fetch_limit', 0)} calls total.\n"
-            "- Prefer authoritative, primary, or directly relevant sources.\n"
-            "- Use builder_web_search for discovery and builder_web_fetch only on exact approved URLs.\n"
-            "- You may call write_todos first. Before the first substantive write/edit/emit step, attempt builder_web_search or builder_web_fetch at least once.\n"
-            "- For factual documents and PDFs, if builder_web_search returns useful results, fetch at least one approved result URL before final source writing.\n"
-            "- If web tools fail or return weak results, continue the task without browsing instead of stopping.\n"
-            "- If you use external sources, emit_builder_artifact.sources_used MUST contain structured {title, url} items drawn from the sources you actually relied on.\n"
-        )
-        if task_type == "research":
+        block = "<builder_research_policy>\n"
+        if not allow_web_research:
             block += (
-                "- Research reports must include inline [citation:Title](URL) citations after factual claims and end with a Sources section.\n"
+                "Autonomous web research is disabled for this delegated builder task.\n"
+                "- Continue with the supplied brief, attachments, and memory context.\n"
+                "- Do not call builder_web_search or builder_web_fetch.\n"
+                "</builder_research_policy>"
             )
         else:
             block += (
-                "- Non-report deliverables that use external sources must include a concise Sources appendix or a sidecar markdown file.\n"
+                "Autonomous web research is enabled for this delegated builder task.\n"
+                f"- Search budget: {budget.get('search_limit', 0)} calls total.\n"
+                f"- Fetch budget: {budget.get('fetch_limit', 0)} calls total.\n"
+                "- Prefer authoritative, primary, or directly relevant sources.\n"
+                "- Use builder_web_search for discovery and builder_web_fetch only on exact approved URLs.\n"
+                "- You may call write_todos first. Before the first substantive write/edit/emit step, attempt builder_web_search or builder_web_fetch at least once.\n"
+                "- For factual documents and PDFs, if builder_web_search returns useful results, fetch at least one approved result URL before final source writing.\n"
+                "- If web tools fail or return weak results, continue the task without browsing instead of stopping.\n"
+                "- If you use external sources, emit_builder_artifact.sources_used MUST contain structured {title, url} items drawn from the sources you actually relied on.\n"
             )
-        if explicit_user_urls:
-            block += "- Explicit user URLs are approved fetch targets for this task.\n"
-        if tracked_sources:
-            block += f"- Tracked sources so far: {len(tracked_sources)}.\n"
-        block += "</builder_research_policy>"
+            if task_type == "research":
+                block += (
+                    "- Research reports must include inline [citation:Title](URL) citations after factual claims and end with a Sources section.\n"
+                )
+            else:
+                block += (
+                    "- Non-report deliverables that use external sources must include a concise Sources appendix or a sidecar markdown file.\n"
+                )
+            if explicit_user_urls:
+                block += "- Explicit user URLs are approved fetch targets for this task.\n"
+            if tracked_sources:
+                block += f"- Tracked sources so far: {len(tracked_sources)}.\n"
+            block += "</builder_research_policy>"
 
         blocks.append(block)
         log_middleware(

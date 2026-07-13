@@ -44,6 +44,21 @@ from deerflow.sophia.builder_memory_filter import filter_builder_memory_snippets
 logger = logging.getLogger(__name__)
 
 
+def _runtime_builder_run_id(runtime: Runtime | None) -> str | None:
+    if runtime is None:
+        return None
+    execution_info = getattr(runtime, "execution_info", None)
+    candidate = getattr(execution_info, "run_id", None) if execution_info is not None else None
+    if isinstance(candidate, str) and candidate.strip():
+        return candidate.strip()
+    context = getattr(runtime, "context", None)
+    if isinstance(context, dict):
+        candidate = context.get("run_id")
+        if isinstance(candidate, str) and candidate.strip():
+            return candidate.strip()
+    return None
+
+
 def _delegation_boundary_sections(
     delegation_context: dict[str, Any],
     task_type: str,
@@ -1072,6 +1087,7 @@ class BuilderTaskState(AgentState):
     # `builder_web_fetch` writes. The
     # `tests/test_sophia_state_schema_invariants.py` guard locks this.
     allow_web_research: NotRequired[bool]
+    builder_run_id: NotRequired[str]
 
 
 class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
@@ -1121,7 +1137,14 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         )
         active_ritual: str | None = delegation_context.get("active_ritual")
         ritual_phase: str | None = delegation_context.get("ritual_phase")
-        allow_web_research = True
+        state_research_policy = state.get("allow_web_research")
+        delegated_research_policy = delegation_context.get("allow_web_research")
+        if isinstance(state_research_policy, bool):
+            allow_web_research = state_research_policy
+        elif isinstance(delegated_research_policy, bool):
+            allow_web_research = delegated_research_policy
+        else:
+            allow_web_research = True
         artifact_target_path = state.get("builder_artifact_target_path") or delegation_context.get("artifact_target_path")
         artifact_target_ext = _artifact_target_extension(artifact_target_path)
         page_target_updates: dict[str, Any] = {}
@@ -1570,6 +1593,7 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         )
         return {
             "system_prompt_blocks": blocks,
+            **({"builder_run_id": builder_run_id} if (builder_run_id := _runtime_builder_run_id(runtime)) else {}),
             **boundary_state_updates,
             **page_target_updates,
             **report_requirement_updates,

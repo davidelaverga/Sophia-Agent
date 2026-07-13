@@ -169,15 +169,15 @@ class TestBuilderResearchGuidance:
         assert "`builder_web_search` or `builder_web_fetch` at least once" in briefing
         assert "write_file, str_replace, artifact-generating bash" in briefing
 
-    def test_briefing_does_not_disable_research_for_frontend(self) -> None:
+    def test_briefing_honors_disabled_research_for_frontend(self) -> None:
         state = _make_state("frontend")
         state["delegation_context"]["allow_web_research"] = False
 
         result = BuilderTaskMiddleware().before_agent(state, _make_runtime())
         briefing = _briefing(result)
 
-        assert "Web research is available for every builder task type" in briefing
-        assert "External browsing is disabled" not in briefing
+        assert "Web research is available for every builder task type" not in briefing
+        assert "`builder_web_search` or `builder_web_fetch` at least once" not in briefing
 
 
 class TestBuilderWorkflowCards:

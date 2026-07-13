@@ -267,6 +267,22 @@ def test_build_foundation_rpcs_grant_service_role_execution() -> None:
         "GRANT EXECUTE ON FUNCTION public.sophia_append_build_event("
         "TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, JSONB) TO service_role;"
     ) in sql
+    assert sql.startswith("-- Sophia P-2 build foundation.")
+    assert "BEGIN;" in sql
+    assert sql.endswith("COMMIT;")
+    for table in (
+        "sophia_build_manifest_heads",
+        "sophia_build_registry",
+        "sophia_build_operation_events",
+        "sophia_build_acceptance_outbox",
+        "sophia_build_mutation_transactions",
+    ):
+        assert f"CREATE TABLE IF NOT EXISTS public.{table}" in sql
+        assert f"REVOKE ALL ON TABLE public.{table} FROM PUBLIC, anon, authenticated;" in sql
+    assert "GRANT SELECT ON TABLE public.sophia_build_operation_events TO service_role;" in sql
+    assert "GRANT SELECT ON TABLE public.sophia_build_registry TO service_role;" not in sql
+    assert "FROM PUBLIC, anon, authenticated;" in sql
+    assert "NOTIFY pgrst, 'reload schema';" in sql
 
 
 def test_build_foundation_store_opens_circuit_after_missing_event_table(caplog) -> None:

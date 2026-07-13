@@ -184,6 +184,11 @@ def _compact_slide_json_schema(schema: dict[str, Any]) -> None:
 
 
 def _compact_prepare_json_schema(schema: dict[str, Any]) -> None:
+    properties = schema.setdefault("properties", {})
+    register_schema = properties.pop("deck_register", None)
+    if isinstance(register_schema, dict):
+        register_schema["title"] = "Register"
+        properties["register"] = register_schema
     required = schema.setdefault("required", [])
     if "deck_stylesheet" not in required:
         required.append("deck_stylesheet")
@@ -262,7 +267,10 @@ NormalizedDeckCreativePlan = Annotated[
 
 
 class PrepareDeckBuildInput(BaseModel):
-    model_config = ConfigDict(json_schema_extra=_compact_prepare_json_schema)
+    model_config = ConfigDict(
+        json_schema_extra=_compact_prepare_json_schema,
+        populate_by_name=True,
+    )
     deck_title: str
     slides: NormalizedDeckSlides
     output_path: str
@@ -277,10 +285,21 @@ class PrepareDeckBuildInput(BaseModel):
         default=None,
         description=("Shared compiler-supported CSS for every slide. It must style the main 1920x1080 canvas with an opaque background."),
     )
-    register: str = "professional_technical"
+    deck_register: str = Field(
+        default="professional_technical",
+    )
     visual_policy: str = "auto"
     style_profile: dict[str, Any] | None = None
     design_plan: dict[str, Any] | None = None
+
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_register_alias(cls, value: Any) -> Any:
+        if not isinstance(value, dict) or "deck_register" in value or "register" not in value:
+            return value
+        normalized = dict(value)
+        normalized["deck_register"] = normalized.pop("register")
+        return normalized
 
     @model_validator(mode="after")
     def _validate_authoring_mode(self) -> PrepareDeckBuildInput:

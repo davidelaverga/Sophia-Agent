@@ -120,7 +120,7 @@ def test_pptx_terminal_latch_ignores_stale_baked_title_qc(tmp_path: Path, monkey
     assert state["builder_presentation_terminal_ready"] is True
 
 
-def test_pptx_slide_count_repair_is_injected_before_latch_accepts(tmp_path: Path, monkeypatch) -> None:
+def test_pptx_slide_count_mismatch_enters_authoritative_compact_lane(tmp_path: Path, monkeypatch) -> None:
     monkeypatch.setattr(builder_artifact_module, "_pptx_integrity_error_for_file", lambda _path: None)
     state = _pptx_state(tmp_path, qc_results=[])
     state["delegation_context"] = {"task": "Create a 6-slide technical presentation."}
@@ -131,23 +131,10 @@ def test_pptx_slide_count_repair_is_injected_before_latch_accepts(tmp_path: Path
     update = BuilderArtifactMiddleware().before_model(state, None)
 
     assert update is not None
-    assert update["builder_pptx_slide_count_repair_requested"] == {
-        "requested_slide_count": 6,
-        "generated_slide_count": 4,
-    }
-    assert update["builder_pptx_slide_count_repair_pending"] is True
-    assert update["builder_pptx_slide_count_repair_directive_emitted"] is True
-    assert "exactly 6 total slides" in update["messages"][0].content
-    assert "it has 4 slides" in update["messages"][0].content
-
-    state.update({key: value for key, value in update.items() if key != "messages"})
-    assert _presentation_completion_ready(state) is False
-    state.update({
-        "builder_pptx_slide_count_repair_pending": False,
-        "builder_pptx_slide_count_repair_attempted": True,
-    })
-    assert _presentation_completion_ready(state) is True
-    assert state["builder_presentation_terminal_ready"] is True
+    assert update["builder_presentation_phase"] == "authoring_pending"
+    assert update["builder_pptx_diagnostics"]["presentation_preflight_status"] == "skipped"
+    assert "builder_pptx_slide_count_repair_requested" not in update
+    assert "messages" not in update
 
 
 def test_deck_plan_gate_only_blocks_zero_embedded_pictures() -> None:

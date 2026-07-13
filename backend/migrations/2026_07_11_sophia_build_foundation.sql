@@ -2,6 +2,8 @@
 -- Object bodies remain in the internal .builder/builds namespace. These
 -- tables own concurrency, lookup projection, event idempotency, and outbox.
 
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS public.sophia_build_manifest_heads (
     build_id                    TEXT PRIMARY KEY,
     user_id                     TEXT NOT NULL,
@@ -193,7 +195,7 @@ $$;
 
 REVOKE ALL ON FUNCTION public.sophia_commit_build_manifest(
     TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB
-) FROM PUBLIC;
+) FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.sophia_commit_build_manifest(
     TEXT, TEXT, TEXT, BIGINT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, TEXT, JSONB
 ) TO service_role;
@@ -229,6 +231,21 @@ BEGIN
 END;
 $$;
 
-REVOKE ALL ON FUNCTION public.sophia_append_build_event(TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, JSONB) FROM PUBLIC;
+REVOKE ALL ON FUNCTION public.sophia_append_build_event(TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, JSONB)
+    FROM PUBLIC, anon, authenticated;
 GRANT EXECUTE ON FUNCTION public.sophia_append_build_event(TEXT, TEXT, TEXT, TEXT, TIMESTAMPTZ, JSONB)
     TO service_role;
+
+REVOKE ALL ON TABLE public.sophia_build_manifest_heads FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON TABLE public.sophia_build_registry FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON TABLE public.sophia_build_operation_events FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON TABLE public.sophia_build_acceptance_outbox FROM PUBLIC, anon, authenticated;
+REVOKE ALL ON TABLE public.sophia_build_mutation_transactions FROM PUBLIC, anon, authenticated;
+
+-- Event replay and readiness use a direct PostgREST SELECT. All writes and
+-- manifest mutations remain behind the SECURITY DEFINER RPCs above.
+GRANT SELECT ON TABLE public.sophia_build_operation_events TO service_role;
+
+NOTIFY pgrst, 'reload schema';
+
+COMMIT;

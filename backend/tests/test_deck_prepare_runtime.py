@@ -15,7 +15,7 @@ from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import hook_config
 from langchain.chat_models.base import BaseChatModel
 from langchain_anthropic import ChatAnthropic
-from langchain_core.messages import AIMessage, HumanMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import BaseTool, tool
 from langgraph.runtime import Runtime
@@ -32,10 +32,31 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
 from deerflow.agents.sophia_agent.middlewares.builder_provider_fallback import (
     BuilderProviderFallbackMiddleware,
 )
+from deerflow.sophia.tools.prepare_deck_build import prepare_deck_build
+
+
+@tool("builder_web_search")
+def _builder_web_search(query: str) -> str:
+    """Return bounded presentation research."""
+    return query
+
+
+@tool("builder_web_fetch")
+def _builder_web_fetch(url: str) -> str:
+    """Fetch one explicit presentation source."""
+    return url
+
+
+@tool("bash")
+def _bash(command: str) -> str:
+    """Represent a forbidden general builder tool."""
+    return command
 
 
 class _DeckRuntimeState(BuilderArtifactState):
     thread_data: NotRequired[dict[str, Any]]
+    allow_web_research: NotRequired[bool]
+    explicit_user_urls: NotRequired[list[str]]
 
 
 class _SkipRetryToolsMiddleware(AgentMiddleware[AgentState]):
@@ -81,9 +102,20 @@ class _PrepareSequenceModel(BaseChatModel):
 
 
 class _ModelRequest:
-    def __init__(self, state: dict[str, Any], model_settings: dict[str, Any] | None = None) -> None:
+    def __init__(
+        self,
+        state: dict[str, Any],
+        model_settings: dict[str, Any] | None = None,
+        *,
+        tools: list[Any] | None = None,
+        messages: list[Any] | None = None,
+        system_prompt: str = "general builder prompt",
+    ) -> None:
         self.state = state
         self.model_settings = model_settings or {}
+        self.tools = tools or []
+        self.messages = messages or [HumanMessage(content="Create the requested presentation.")]
+        self.system_prompt = system_prompt
         self.model = object()
         self.runtime = None
 
@@ -91,6 +123,9 @@ class _ModelRequest:
         return _ModelRequest(
             overrides.get("state", self.state),
             overrides.get("model_settings", self.model_settings),
+            tools=overrides.get("tools", self.tools),
+            messages=overrides.get("messages", self.messages),
+            system_prompt=overrides.get("system_prompt", self.system_prompt),
         )
 
 
@@ -256,6 +291,229 @@ def test_presentation_prepare_latch_forces_turn_eight() -> None:
     assert update["builder_pptx_diagnostics"]["prepare_latch_activated_at_turn"] == 8
 
 
+def test_presentation_without_research_forces_prepare_immediately() -> None:
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation"},
+        "allow_web_research": False,
+    }
+    middleware = BuilderArtifactMiddleware()
+
+    phase_update = middleware._presentation_phase_before_model_update(state)
+    assert phase_update is not None
+    assert phase_update["builder_presentation_phase"] == "authoring_pending"
+    assert phase_update["builder_pptx_diagnostics"]["presentation_preflight_status"] == "skipped"
+
+    choice, force_update = middleware._force_choice_plan_for_state({**state, **phase_update})
+    assert choice == {"type": "tool", "name": "prepare_deck_build"}
+    assert force_update is not None
+    assert force_update["builder_pptx_diagnostics"]["prepare_force_reason"] == "research_disabled"
+
+
+@pytest.mark.parametrize(
+    ("explicit_urls", "expected_tool"),
+    [([], "builder_web_search"), (["https://example.com/source"], "builder_web_fetch")],
+)
+def test_presentation_research_uses_exactly_one_bounded_preflight(
+    explicit_urls: list[str],
+    expected_tool: str,
+) -> None:
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation"},
+        "allow_web_research": True,
+        "explicit_user_urls": explicit_urls,
+    }
+    middleware = BuilderArtifactMiddleware()
+    phase_update = middleware._presentation_phase_before_model_update(state)
+    assert phase_update is not None
+    preflight_state = {**state, **phase_update}
+
+    choice, force_update = middleware._force_choice_plan_for_state(preflight_state)
+    assert choice == {"type": "tool", "name": expected_tool}
+    assert force_update is not None
+    assert force_update["builder_presentation_phase"] == "preflight_call_emitted"
+
+    result = ToolMessage(content="bounded source context", name=expected_tool, tool_call_id="preflight-1")
+    completed_state = {
+        **preflight_state,
+        **force_update,
+        "messages": [result],
+    }
+    next_update = middleware._presentation_phase_before_model_update(completed_state)
+    assert next_update is not None
+    assert next_update["builder_presentation_phase"] == "authoring_pending"
+    next_state = {**completed_state, **next_update}
+    prepare_choice, _ = middleware._force_choice_plan_for_state(next_state)
+    assert prepare_choice == {"type": "tool", "name": "prepare_deck_build"}
+
+
+def test_forced_presentation_authoring_uses_only_compact_prepare_context() -> None:
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {
+            "task_type": "presentation",
+            "task": "Create a concise six-slide systems presentation.",
+            "relevant_memories": ["Prefer terse technical headlines."],
+            "uploaded_image_paths": ["/mnt/user-data/uploads/architecture.png"],
+        },
+        "allow_web_research": False,
+        "builder_presentation_phase": "authoring_pending",
+        "builder_task_kickoff_ms": int(time.time() * 1000),
+        "builder_budget": {
+            "tier": "presentation",
+            "prepare_force_after_seconds": 8,
+            "authoring_deadline_seconds": 120,
+            "authoring_max_tokens": 16_384,
+        },
+    }
+    request = _ModelRequest(
+        state,
+        tools=[_builder_web_search, _builder_web_fetch, _bash, prepare_deck_build],
+        messages=[
+            HumanMessage(content="Create a concise six-slide systems presentation."),
+            AIMessage(content="general-agent planning that must not be replayed"),
+        ],
+    )
+
+    bounded, update = BuilderArtifactMiddleware._presentation_request_for_choice(
+        request,
+        {"type": "tool", "name": "prepare_deck_build"},
+    )
+
+    assert [tool.name for tool in bounded.tools] == ["prepare_deck_build"]
+    assert len(bounded.messages) == 1
+    assert "general-agent planning" not in str(bounded.messages[0].content)
+    assert "architecture.png" in str(bounded.messages[0].content)
+    assert "Prefer terse technical headlines" in str(bounded.messages[0].content)
+    assert "compact_model_html_v2" in bounded.system_prompt
+    assert bounded.model_settings["max_tokens"] == 16_384
+    assert update is not None
+    diagnostics = update["builder_pptx_diagnostics"]
+    assert diagnostics["deck_authoring_context_bytes"] <= 40 * 1024
+    assert diagnostics["deck_authoring_tool_schema_bytes"] > 0
+
+
+def test_presentation_preflight_model_timeout_continues_to_authoring() -> None:
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation", "task": "Create a deck."},
+        "allow_web_research": True,
+        "builder_presentation_phase": "preflight_pending",
+        "builder_presentation_preflight_started_at_ms": int(time.time() * 1000) - 950,
+        "builder_task_kickoff_ms": int(time.time() * 1000),
+        "builder_budget": {
+            "tier": "presentation",
+            "preflight_timeout_seconds": 1,
+            "authoring_deadline_seconds": 120,
+        },
+    }
+
+    async def slow_handler(_request):
+        await asyncio.sleep(0.5)
+        return AIMessage(content="late")
+
+    started = time.monotonic()
+    result = asyncio.run(
+        BuilderArtifactMiddleware().awrap_model_call(
+            _ModelRequest(state, tools=[_builder_web_search, prepare_deck_build]),
+            slow_handler,
+        )
+    )
+
+    assert time.monotonic() - started < 0.35
+    assert result.update["builder_presentation_phase"] == "authoring_pending"
+    assert result.update["builder_pptx_diagnostics"]["presentation_preflight_status"] == "timed_out"
+
+
+def test_research_preflight_runs_once_then_prepare_finalizes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "deck.pptx").write_bytes(b"pptx")
+    search_calls: list[str] = []
+    prepare_calls: list[dict[str, Any]] = []
+
+    @tool("builder_web_search")
+    def fake_builder_web_search(query: str) -> str:
+        """Return one bounded source result."""
+        search_calls.append(query)
+        return "Primary source: https://example.com/source"
+
+    @tool("prepare_deck_build")
+    def fake_prepare_deck_build(
+        deck_title: str,
+        slides: list[dict[str, Any]],
+        output_path: str,
+        creative_plan: dict[str, Any],
+    ) -> str:
+        """Return one successful authoritative deck result."""
+        prepare_calls.append(creative_plan)
+        return json.dumps(
+            {
+                "success": True,
+                "build_id": "deck-preflight",
+                "pptx_path": output_path,
+                "deck_route": "deck_creative_html_native",
+                "deck_compile_mode": "native_html2patch",
+                "slide_count": 1,
+                "quality_status": "passed",
+                "native_editability_score": 1.0,
+                "native_text_shape_count": 2,
+                "picture_shape_count": 0,
+                "full_slide_picture_count": 0,
+            }
+        )
+
+    monkeypatch.setattr(BuilderArtifactMiddleware, "_upload_fallback_and_fire", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        BuilderArtifactMiddleware,
+        "_attach_pptx_canvas_preview",
+        staticmethod(lambda artifact, _state: artifact),
+    )
+    model = _PrepareSequenceModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "preflight-1",
+                        "name": "builder_web_search",
+                        "args": {"query": "bounded systems deck research"},
+                    }
+                ],
+            ),
+            _prepare_call("prepare-1", repaired=False),
+        ]
+    )
+    agent = create_agent(
+        model=model,
+        tools=[fake_builder_web_search, fake_prepare_deck_build],
+        middleware=[BuilderArtifactMiddleware(), DanglingToolCallMiddleware()],
+        state_schema=_DeckRuntimeState,
+    )
+
+    result = agent.invoke(
+        {
+            "messages": [HumanMessage(content="Build a one-slide researched PPTX")],
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "delegation_context": {"task_type": "presentation", "task": "Build a researched PPTX"},
+            "allow_web_research": True,
+            "thread_data": {"outputs_path": str(outputs), "workspace_path": str(tmp_path / "workspace")},
+        },
+        context={"thread_id": "builder-thread"},
+    )
+
+    assert search_calls == ["bounded systems deck research"]
+    assert prepare_calls == [{"repaired": False}]
+    assert result["builder_result"]["status"] == "completed"
+    assert result["builder_result"]["presentation_preflight_status"] == "completed"
+    assert result["builder_result"]["first_prepare_turn"] == 2
+    assert result["builder_presentation_phase"] == "terminal"
+
+
 def test_service_owned_presentation_completion_never_forces_write_file() -> None:
     state = {
         "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
@@ -301,7 +559,8 @@ def test_presentation_authoring_stream_is_cancelled_at_absolute_deadline() -> No
         "builder_task_kickoff_ms": int(time.time() * 1000) - 950,
         "builder_budget": {
             "tier": "presentation",
-            "prepare_force_after_seconds": 1,
+            "prepare_force_after_seconds": 8,
+            "authoring_deadline_seconds": 1,
             "authoring_max_tokens": 16_384,
             "authoring_timeout_seconds": 110,
         },
@@ -336,7 +595,11 @@ def test_authoring_deadline_takes_precedence_over_output_truncation(monkeypatch)
         "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
         "delegation_context": {"task_type": "presentation"},
         "builder_task_kickoff_ms": int(time.time() * 1000) - 121_000,
-        "builder_budget": {"tier": "presentation", "prepare_force_after_seconds": 120},
+        "builder_budget": {
+            "tier": "presentation",
+            "prepare_force_after_seconds": 8,
+            "authoring_deadline_seconds": 120,
+        },
     }
     captured: dict[str, str] = {}
 

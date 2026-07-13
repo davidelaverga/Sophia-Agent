@@ -44,8 +44,10 @@ from deerflow.agents.sophia_agent.middlewares.builder_budget import (
     max_non_artifact_turns,
     prepare_force_after_seconds,
     prepare_force_at_turn,
+    presentation_authoring_deadline_seconds,
     presentation_authoring_max_tokens,
     presentation_authoring_timeout_seconds,
+    presentation_preflight_timeout_seconds,
     soft_warn_at_turn,
 )
 from deerflow.agents.sophia_agent.middlewares.builder_task import (
@@ -94,6 +96,30 @@ except Exception:  # noqa: BLE001
     PdfReader = None  # type: ignore[assignment]
 
 logger = logging.getLogger(__name__)
+
+_PRESENTATION_PREFLIGHT_TOOLS = frozenset({"builder_web_search", "builder_web_fetch"})
+_PRESENTATION_PREFLIGHT_MODEL_MAX_TOKENS = 512
+_PRESENTATION_TASK_BRIEF_MAX_BYTES = 12 * 1024
+_PRESENTATION_PREFLIGHT_RESULT_MAX_BYTES = 8 * 1024
+_PRESENTATION_ATTACHMENT_MEMORY_MAX_BYTES = 8 * 1024
+_PRESENTATION_AUTHORING_PROMPT_MAX_BYTES = 24 * 1024
+_PRESENTATION_AUTHORING_SYSTEM_PROMPT = (
+    "You are Sophia's presentation authoring lane.\n"
+    "Produce exactly one prepare_deck_build tool call and no prose. You own the story, design, CSS, "
+    "and semantic slide markup. Use authoring_contract=compact_model_html_v2, one concise "
+    "creative_plan, one shared deck_stylesheet, html_body for every slide, and only small slide_css "
+    "overrides. Keep the shared stylesheet under 8 KiB, each html_body under 3 KiB, each slide_css "
+    "under 1 KiB, the creative plan under 12 KiB, and total arguments under 48 KiB. Use an opaque "
+    "model-authored canvas background, compiler-supported CSS, meaningful data-deck-id values, varied "
+    "spatial compositions, and no repeated document/style tags. Do not use deterministic templates, "
+    "screenshot slides, lower-level deck tools, or incomplete fallback output."
+)
+_PRESENTATION_PREFLIGHT_SYSTEM_PROMPT = (
+    "You are Sophia's bounded presentation research preflight. Call the single available web tool "
+    "exactly once and emit no prose. For builder_web_fetch use the exact supplied URL. For "
+    "builder_web_search use one concise query that retrieves the most decision-relevant facts for the "
+    "requested deck."
+)
 
 
 def _blocks_to_plaintext(content: Any) -> str:
@@ -3467,6 +3493,17 @@ def _apply_artifact_request_metadata(
         "creative_plan_accepted",
         "deck_authoring_contract",
         "deck_authoring_elapsed_ms",
+        "presentation_preflight_status",
+        "presentation_preflight_elapsed_ms",
+        "deck_authoring_started_at_ms",
+        "deck_authoring_budget_ms",
+        "deck_authoring_remaining_ms",
+        "deck_authoring_prompt_bytes",
+        "deck_authoring_prompt_estimated_tokens",
+        "deck_authoring_tool_schema_bytes",
+        "deck_authoring_context_bytes",
+        "deck_authoring_output_bytes",
+        "authoring_tool_call_started",
         "prepare_force_reason",
         "deck_stylesheet_hash",
         "deck_html_fragment_count",
@@ -6230,9 +6267,12 @@ class BuilderArtifactState(AgentState):
     builder_deck_prepare_repair_prompt_injected: NotRequired[bool]
     builder_deck_prepare_expected_tool_call_id: NotRequired[str | None]
     builder_deck_prepare_latch_active: NotRequired[bool]
+    builder_presentation_phase: NotRequired[str]
+    builder_presentation_preflight_started_at_ms: NotRequired[int]
     builder_task_kickoff_ms: NotRequired[int]
     builder_timeout_seconds: NotRequired[int]
     builder_deadline_epoch_ms: NotRequired[int]
+    builder_run_id: NotRequired[str]
     builder_pptx_route_trace_emitted: NotRequired[bool]
     builder_visual_design_correction_emitted: NotRequired[bool]
     builder_visual_asset_correction_emitted: NotRequired[bool]
@@ -6557,10 +6597,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
     @staticmethod
     def _allow_web_research(state: BuilderArtifactState) -> bool:
+        if "allow_web_research" in state:
+            return state.get("allow_web_research") is True
         delegation = state.get("delegation_context")
-        if "allow_web_research" in state or isinstance(delegation, dict):
-            return True
-        return False
+        return isinstance(delegation, dict) and delegation.get("allow_web_research") is True
 
     @staticmethod
     def _is_edit_existing_artifact_state(state: BuilderArtifactState) -> bool:
@@ -6615,6 +6655,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
     @classmethod
     def _is_substantive_before_research_tool(cls, state: BuilderArtifactState, tool_call: dict[str, Any]) -> bool:
+        if _deck_build_service_route_active(state) and state.get("builder_presentation_phase") in {
+            "authoring_pending",
+            "prepare_call_emitted",
+            "terminal",
+        }:
+            return False
         if not cls._research_gate_active(state):
             return False
         name = tool_call.get("name")
@@ -6806,6 +6852,75 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _forced_prepare_deck_build_tool_choice() -> dict[str, Any]:
         """Anthropic tool_choice payload for the authoritative fresh-deck service."""
         return {"type": "tool", "name": _PREPARE_DECK_BUILD_TOOL_NAME}
+
+    @staticmethod
+    def _presentation_research_enabled(state: BuilderArtifactState) -> bool:
+        return state.get("allow_web_research") is True
+
+    @staticmethod
+    def _presentation_preflight_tool_name(state: BuilderArtifactState) -> str:
+        explicit_urls = [url for url in (state.get("explicit_user_urls") or []) if str(url).strip()]
+        return "builder_web_fetch" if explicit_urls else "builder_web_search"
+
+    @staticmethod
+    def _presentation_preflight_result_message(state: BuilderArtifactState) -> ToolMessage | None:
+        for message in reversed(state.get("messages", []) or []):
+            if not isinstance(message, ToolMessage):
+                continue
+            if str(getattr(message, "name", "") or "") in _PRESENTATION_PREFLIGHT_TOOLS:
+                return message
+        return None
+
+    @classmethod
+    def _presentation_phase_before_model_update(
+        cls,
+        state: BuilderArtifactState,
+    ) -> dict[str, Any] | None:
+        """Advance the fresh-deck lane without consuming general-agent turns."""
+
+        if not _deck_build_service_route_active(state):
+            return None
+        phase = str(state.get("builder_presentation_phase") or "").strip()
+        if phase in {"terminal", "authoring_pending", "prepare_call_emitted"}:
+            return None
+        now_ms = int(time.time() * 1_000)
+        if not phase:
+            if cls._presentation_research_enabled(state):
+                return {
+                    "builder_presentation_phase": "preflight_pending",
+                    "builder_presentation_preflight_started_at_ms": now_ms,
+                    "builder_pptx_diagnostics": {
+                        "presentation_preflight_status": "pending",
+                        "presentation_preflight_elapsed_ms": 0,
+                    },
+                }
+            return {
+                "builder_presentation_phase": "authoring_pending",
+                "builder_pptx_diagnostics": {
+                    "presentation_preflight_status": "skipped",
+                    "presentation_preflight_elapsed_ms": 0,
+                    "prepare_force_reason": "research_disabled",
+                },
+            }
+        if phase == "preflight_result_received":
+            return {"builder_presentation_phase": "authoring_pending"}
+        if phase == "preflight_call_emitted":
+            result = cls._presentation_preflight_result_message(state)
+            if result is None:
+                return None
+            started_ms = int(state.get("builder_presentation_preflight_started_at_ms", now_ms) or now_ms)
+            content = cls._tool_message_text(result)
+            status = str(getattr(result, "status", "") or "").lower()
+            failed = status == "error" or content.lstrip().startswith("Error:")
+            return {
+                "builder_presentation_phase": "authoring_pending",
+                "builder_pptx_diagnostics": {
+                    "presentation_preflight_status": "failed" if failed else "completed",
+                    "presentation_preflight_elapsed_ms": max(0, now_ms - started_ms),
+                    "prepare_force_reason": "bounded_preflight_complete",
+                },
+            }
+        return None
 
     @staticmethod
     def _deck_prepare_force_due(state: BuilderArtifactState) -> bool:
@@ -8705,26 +8820,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             logger.warning("BuilderArtifact: forcing tool_choice=prepare_deck_build (reason=deck_prepare_retry_pending)")
             return self._forced_prepare_deck_build_tool_choice(), None
 
-        if self._deck_prepare_force_due(state):
-            logger.warning(
-                "BuilderArtifact: forcing tool_choice=prepare_deck_build (reason=presentation_prepare_latch turn=%d elapsed_ms=%s)",
-                _builder_current_turn_index(state),
-                _elapsed_since_builder_start_ms(state),
-            )
-            update: dict[str, Any] | None = None
-            if not state.get("builder_deck_prepare_latch_active"):
-                elapsed_ms = _elapsed_since_builder_start_ms(state)
-                force_reason = "turn_limit" if _builder_current_turn_index(state) >= prepare_force_at_turn(state) else "authoring_clock"
-                update = {
-                    "builder_deck_prepare_latch_active": True,
-                    "builder_pptx_diagnostics": {
-                        "prepare_forced_count": 1,
-                        "prepare_latch_activated_at_turn": _builder_current_turn_index(state),
-                        "prepare_force_reason": force_reason,
-                        "deck_authoring_elapsed_ms": elapsed_ms,
-                    },
-                }
-            return self._forced_prepare_deck_build_tool_choice(), update
+        presentation_plan = self._presentation_phase_force_choice_plan(state)
+        if presentation_plan is not None:
+            return presentation_plan
 
         choice = self._pdf_terminal_tool_choice_for_state(state) or self._simple_pdf_tool_choice_for_state(state) or self._research_tool_choice_for_state(state)
         if choice is not None:
@@ -8758,6 +8856,65 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 }
             return choice, update
         return None, None
+
+    def _presentation_phase_force_choice_plan(
+        self,
+        state: BuilderArtifactState,
+    ) -> tuple[dict[str, Any], dict[str, Any] | None] | None:
+        if not _deck_build_service_route_active(state):
+            return None
+        presentation_phase = str(state.get("builder_presentation_phase") or "")
+        if presentation_phase == "preflight_pending":
+            tool_name = self._presentation_preflight_tool_name(state)
+            logger.info("BuilderArtifact: forcing bounded presentation preflight tool=%s", tool_name)
+            choice = self._forced_fetch_tool_choice() if tool_name == "builder_web_fetch" else self._forced_search_tool_choice()
+            return choice, {
+                "builder_presentation_phase": "preflight_call_emitted",
+                "builder_presentation_preflight_started_at_ms": int(
+                    state.get("builder_presentation_preflight_started_at_ms") or time.time() * 1_000
+                ),
+                "builder_pptx_diagnostics": {"presentation_preflight_status": "running"},
+            }
+        if presentation_phase == "authoring_pending":
+            elapsed_ms = _elapsed_since_builder_start_ms(state)
+            force_reason = str(_pptx_diagnostics(state).get("prepare_force_reason") or "bounded_preflight_complete")
+            logger.warning(
+                "BuilderArtifact: forcing tool_choice=prepare_deck_build (reason=%s phase=%s elapsed_ms=%s)",
+                force_reason,
+                presentation_phase,
+                elapsed_ms,
+            )
+            return self._forced_prepare_deck_build_tool_choice(), {
+                "builder_deck_prepare_latch_active": True,
+                "builder_pptx_diagnostics": {
+                    "prepare_forced_count": 1,
+                    "prepare_latch_activated_at_turn": _builder_current_turn_index(state),
+                    "prepare_force_reason": force_reason,
+                    "deck_authoring_elapsed_ms": elapsed_ms,
+                },
+            }
+        if not self._deck_prepare_force_due(state):
+            return None
+        logger.warning(
+            "BuilderArtifact: forcing tool_choice=prepare_deck_build (reason=presentation_prepare_latch turn=%d elapsed_ms=%s)",
+            _builder_current_turn_index(state),
+            _elapsed_since_builder_start_ms(state),
+        )
+        update: dict[str, Any] | None = None
+        if not state.get("builder_deck_prepare_latch_active"):
+            elapsed_ms = _elapsed_since_builder_start_ms(state)
+            force_reason = "turn_limit" if _builder_current_turn_index(state) >= prepare_force_at_turn(state) else "authoring_clock"
+            update = {
+                "builder_deck_prepare_latch_active": True,
+                "builder_presentation_phase": "authoring_pending",
+                "builder_pptx_diagnostics": {
+                    "prepare_forced_count": 1,
+                    "prepare_latch_activated_at_turn": _builder_current_turn_index(state),
+                    "prepare_force_reason": force_reason,
+                    "deck_authoring_elapsed_ms": elapsed_ms,
+                },
+            }
+        return self._forced_prepare_deck_build_tool_choice(), update
 
     @staticmethod
     def _command_with_merged_update(command: Command | None, update: dict[str, Any]) -> Command:
@@ -9729,6 +9886,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 delta,
             ),
             "builder_deck_prepare_phase": "terminal",
+            "builder_presentation_phase": "terminal",
         }
         payload = {
             "success": False,
@@ -9749,6 +9907,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_non_artifact_turns": 0,
             "builder_task_started_at_ms": 0,
             "builder_deck_prepare_phase": "terminal",
+            "builder_presentation_phase": "terminal",
             "builder_deck_prepare_expected_tool_call_id": None,
             **_terminal_halt_fields(state, "deck_prepare_tool_result_missing"),
             "jump_to": "end",
@@ -9816,6 +9975,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_result": fallback,
             "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
             "builder_deck_prepare_phase": "terminal",
+            "builder_presentation_phase": "terminal",
             "builder_deck_prepare_expected_tool_call_id": None,
             **_terminal_halt_fields(state, failure_code),
             "jump_to": "end",
@@ -9831,7 +9991,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return None
         additional_kwargs = getattr(latest_ai, "additional_kwargs", {})
         elapsed_ms = _elapsed_since_builder_start_ms(state) or 0
-        deadline_ms = prepare_force_after_seconds(state) * 1_000
+        deadline_ms = presentation_authoring_deadline_seconds(state) * 1_000
         if additional_kwargs.get("deerflow_error_fallback"):
             error_type = str(additional_kwargs.get("error_type") or "")
             error_reason = str(additional_kwargs.get("error_reason") or "")
@@ -9860,13 +10020,34 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
         return None
 
+    @classmethod
+    def _presentation_preflight_model_failure_update(
+        cls,
+        state: BuilderArtifactState,
+        latest_ai: Any,
+    ) -> dict[str, Any] | None:
+        if state.get("builder_presentation_phase") != "preflight_call_emitted" or latest_ai is None:
+            return None
+        tool_calls = getattr(latest_ai, "tool_calls", []) or []
+        if any(str(call.get("name") or "") in _PRESENTATION_PREFLIGHT_TOOLS for call in tool_calls):
+            return None
+        additional_kwargs = getattr(latest_ai, "additional_kwargs", {}) or {}
+        status = "timed_out" if additional_kwargs.get("presentation_preflight_timeout") else "failed"
+        update = cls._presentation_preflight_terminal_update(state, status)
+        update["builder_non_artifact_turns"] = int(state.get("builder_non_artifact_turns", 0) or 0) + 1
+        logger.warning(
+            "BuilderArtifact: presentation preflight ended without a web tool call status=%s; forcing prepare next",
+            status,
+        )
+        return update
+
     def _authoring_deadline_terminal_update(
         self,
         state: BuilderArtifactState,
         runtime: Runtime | None,
     ) -> dict[str, Any] | None:
         elapsed_ms = _elapsed_since_builder_start_ms(state)
-        deadline_ms = prepare_force_after_seconds(state) * 1_000
+        deadline_ms = presentation_authoring_deadline_seconds(state) * 1_000
         if elapsed_ms is None or deadline_ms <= 0 or elapsed_ms < deadline_ms:
             return None
         return self._deck_authoring_terminal_update(
@@ -9893,6 +10074,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if _requested_pptx_artifact(state) and not state.get("builder_pptx_route_trace_emitted"):
             _trace_pptx_route_selected(state)
             update["builder_pptx_route_trace_emitted"] = True
+        if _deck_build_service_route_active(state):
+            self._merge_if_update(update, self._presentation_phase_before_model_update(state))
+            self._merge_if_update(update, self._maybe_inject_deck_prepare_retry(state))
+            # Fresh presentations use the compact, single-purpose lane. Generic
+            # skill, visual, todo, path, and write recovery prompts are excluded.
+            return update or None
         reset = self._maybe_reset_turn_budget(state)
         if isinstance(reset, dict):
             update.update(reset)
@@ -9934,11 +10121,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 request.state.get("builder_terminal_halt_reason"),
             )
             return AIMessage(content="[Sophia builder stopped: terminal artifact already emitted.]")
-        request = self._bounded_presentation_model_request(request)
         choice, state_update = self._force_choice_plan_for_state(request.state, request.runtime)
         if choice is not None:
             choice = self._provider_normalized_tool_choice(request.model, choice)
             request = request.override(tool_choice=choice)
+        request, request_update = self._presentation_request_for_choice(request, choice)
+        state_update = self._merged_presentation_state_update(state_update, request_update)
         return self._model_result_with_state_update(handler(request), state_update)
 
     @override
@@ -9954,29 +10142,245 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 request.state.get("builder_terminal_halt_reason"),
             )
             return AIMessage(content="[Sophia builder stopped: terminal artifact already emitted.]")
-        request = self._bounded_presentation_model_request(request)
         choice, state_update = self._force_choice_plan_for_state(request.state, request.runtime)
         if choice is not None:
             choice = self._provider_normalized_tool_choice(request.model, choice)
             request = request.override(tool_choice=choice)
-        remaining = self._presentation_authoring_seconds_remaining(request.state)
+        request, request_update = self._presentation_request_for_choice(request, choice)
+        state_update = self._merged_presentation_state_update(state_update, request_update)
+        tool_name = self._tool_choice_name(choice)
+        preflight = tool_name in _PRESENTATION_PREFLIGHT_TOOLS
+        remaining = (
+            self._presentation_preflight_seconds_remaining(request.state)
+            if preflight
+            else self._presentation_authoring_seconds_remaining(request.state)
+        )
         if remaining is None:
             return self._model_result_with_state_update(await handler(request), state_update)
         if remaining <= 0:
+            if preflight:
+                state_update = self._merged_presentation_state_update(
+                    state_update,
+                    self._presentation_preflight_terminal_update(request.state, "timed_out"),
+                )
             return self._model_result_with_state_update(
-                self._authoring_timeout_message(),
+                self._presentation_preflight_timeout_message() if preflight else self._authoring_timeout_message(),
                 state_update,
             )
         try:
             async with asyncio.timeout_at(asyncio.get_running_loop().time() + remaining):
                 result = await handler(request)
         except TimeoutError:
-            logger.error(
-                "BuilderArtifact: presentation authoring model stream cancelled at absolute deadline elapsed_ms=%s",
-                _elapsed_since_builder_start_ms(request.state),
-            )
-            result = self._authoring_timeout_message()
+            if preflight:
+                logger.warning("BuilderArtifact: bounded presentation preflight model call timed out; continuing to authoring")
+                result = self._presentation_preflight_timeout_message()
+                state_update = self._merged_presentation_state_update(
+                    state_update,
+                    self._presentation_preflight_terminal_update(request.state, "timed_out"),
+                )
+            else:
+                logger.error(
+                    "BuilderArtifact: presentation authoring model stream cancelled at absolute deadline elapsed_ms=%s",
+                    _elapsed_since_builder_start_ms(request.state),
+                )
+                result = self._authoring_timeout_message()
         return self._model_result_with_state_update(result, state_update)
+
+    @staticmethod
+    def _tool_choice_name(choice: Any) -> str | None:
+        if not isinstance(choice, dict):
+            return None
+        if isinstance(choice.get("function"), dict):
+            return str(choice["function"].get("name") or "") or None
+        return str(choice.get("name") or "") or None
+
+    @staticmethod
+    def _bound_tool_name(tool: Any) -> str | None:
+        if isinstance(tool, dict):
+            function = tool.get("function")
+            if isinstance(function, dict):
+                return str(function.get("name") or "") or None
+            return str(tool.get("name") or "") or None
+        return str(getattr(tool, "name", "") or "") or None
+
+    @classmethod
+    def _single_request_tool(cls, request: ModelRequest, name: str) -> list[Any]:
+        return [tool for tool in request.tools if cls._bound_tool_name(tool) == name]
+
+    @staticmethod
+    def _truncate_utf8(value: str, limit: int) -> str:
+        encoded = value.encode("utf-8")
+        if len(encoded) <= limit:
+            return value
+        return encoded[:limit].decode("utf-8", errors="ignore") + "\n[truncated]"
+
+    @classmethod
+    def _presentation_task_brief(cls, state: BuilderArtifactState, request: ModelRequest) -> str:
+        delegation = state.get("delegation_context")
+        if isinstance(delegation, dict):
+            task = str(delegation.get("task") or delegation.get("task_brief") or "").strip()
+            if task:
+                return cls._truncate_utf8(task, _PRESENTATION_TASK_BRIEF_MAX_BYTES)
+        for message in request.messages:
+            if isinstance(message, HumanMessage):
+                return cls._truncate_utf8(_blocks_to_plaintext(message.content), _PRESENTATION_TASK_BRIEF_MAX_BYTES)
+        return "Create the requested presentation."
+
+    @classmethod
+    def _presentation_preflight_context(cls, state: BuilderArtifactState) -> str:
+        result = cls._presentation_preflight_result_message(state)
+        if result is None:
+            return "No external preflight material was available."
+        return cls._truncate_utf8(cls._tool_message_text(result), _PRESENTATION_PREFLIGHT_RESULT_MAX_BYTES)
+
+    @staticmethod
+    def _unique_presentation_context_values(
+        sources: tuple[Any, ...],
+        *,
+        limit: int | None = None,
+    ) -> list[str]:
+        values: list[str] = []
+        seen: set[str] = set()
+        for source in sources:
+            for item in source if isinstance(source, list) else []:
+                value = str(item).strip()
+                if value and value not in seen:
+                    seen.add(value)
+                    values.append(value)
+                if limit is not None and len(values) >= limit:
+                    return values
+        return values
+
+    @classmethod
+    def _presentation_attachment_memory_context(cls, state: BuilderArtifactState) -> str:
+        delegation = state.get("delegation_context")
+        delegation = delegation if isinstance(delegation, dict) else {}
+        memories = cls._unique_presentation_context_values(
+            (
+                delegation.get("relevant_memories") or [],
+                state.get("injected_memory_contents") or [],
+            ),
+            limit=5,
+        )
+        attachments = cls._unique_presentation_context_values(
+            (
+                delegation.get("uploaded_image_paths") or [],
+                delegation.get("uploaded_file_paths") or [],
+                state.get("uploaded_image_paths") or [],
+            )
+        )
+        lines: list[str] = []
+        if attachments:
+            lines.append("Attachments:\n" + "\n".join(f"- {value}" for value in attachments))
+        if memories:
+            lines.append("Filtered memory:\n" + "\n".join(f"- {value}" for value in memories))
+        if not lines:
+            return "No attachment or memory context was supplied."
+        return cls._truncate_utf8("\n\n".join(lines), _PRESENTATION_ATTACHMENT_MEMORY_MAX_BYTES)
+
+    @staticmethod
+    def _request_tool_schema_bytes(tools: list[Any]) -> int:
+        total = 0
+        for tool in tools:
+            schema = getattr(tool, "args", None)
+            if not isinstance(schema, dict) and isinstance(tool, dict):
+                schema = tool
+            if isinstance(schema, dict):
+                total += len(json.dumps(schema, separators=(",", ":"), default=str).encode("utf-8"))
+        return total
+
+    @classmethod
+    def _presentation_request_for_choice(
+        cls,
+        request: ModelRequest,
+        choice: Any,
+    ) -> tuple[ModelRequest, dict[str, Any] | None]:
+        if not _deck_build_service_route_active(request.state):
+            return request, None
+        tool_name = cls._tool_choice_name(choice)
+        if tool_name in _PRESENTATION_PREFLIGHT_TOOLS:
+            tools = cls._single_request_tool(request, tool_name)
+            brief = cls._presentation_task_brief(request.state, request)
+            explicit_urls = [str(url) for url in (request.state.get("explicit_user_urls") or []) if str(url).strip()]
+            target = f"\nExact URL: {explicit_urls[0]}" if tool_name == "builder_web_fetch" and explicit_urls else ""
+            prompt = cls._truncate_utf8(
+                f"Presentation brief:\n{brief}{target}\n\nCall {tool_name} exactly once.",
+                _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES,
+            )
+            timeout_seconds = max(1, min(
+                presentation_preflight_timeout_seconds(request.state),
+                int(cls._presentation_preflight_seconds_remaining(request.state) or 1),
+            ))
+            settings = {
+                **request.model_settings,
+                "max_tokens": _PRESENTATION_PREFLIGHT_MODEL_MAX_TOKENS,
+                "timeout": float(timeout_seconds),
+            }
+            return request.override(
+                tools=tools,
+                messages=[HumanMessage(content=prompt)],
+                system_prompt=_PRESENTATION_PREFLIGHT_SYSTEM_PROMPT,
+                model_settings=settings,
+            ), None
+        if tool_name != _PREPARE_DECK_BUILD_TOOL_NAME:
+            return cls._bounded_presentation_model_request(request), None
+
+        tools = cls._single_request_tool(request, _PREPARE_DECK_BUILD_TOOL_NAME)
+        brief = cls._presentation_task_brief(request.state, request)
+        source_context = cls._presentation_preflight_context(request.state)
+        attachment_memory_context = cls._presentation_attachment_memory_context(request.state)
+        repair = str(request.state.get("builder_deck_prepare_repair_message") or "").strip()
+        target_path = str(request.state.get("builder_artifact_target_path") or "/mnt/user-data/outputs/presentation.pptx")
+        requested_slides = request.state.get("builder_pptx_requested_slide_count")
+        prompt = (
+            f"Presentation brief:\n{brief}\n\n"
+            f"Output path: {target_path}\nRequested slides: {requested_slides or 'infer from brief'}\n\n"
+            f"Attachments and memory:\n{attachment_memory_context}\n\n"
+            f"Bounded preflight result:\n{source_context}"
+        )
+        if repair:
+            prompt += f"\n\nRequired repair:\n{cls._truncate_utf8(repair, 4 * 1024)}"
+        prompt = cls._truncate_utf8(prompt, _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES)
+        request = cls._bounded_presentation_model_request(request).override(
+            tools=tools,
+            messages=[HumanMessage(content=prompt)],
+            system_prompt=_PRESENTATION_AUTHORING_SYSTEM_PROMPT,
+        )
+        prompt_bytes = len(prompt.encode("utf-8")) + len(_PRESENTATION_AUTHORING_SYSTEM_PROMPT.encode("utf-8"))
+        schema_bytes = cls._request_tool_schema_bytes(tools)
+        context_bytes = prompt_bytes + schema_bytes
+        if context_bytes > 40 * 1024:
+            logger.warning("BuilderArtifact: compact presentation model context exceeds target bytes=%d", context_bytes)
+        remaining = cls._presentation_authoring_seconds_remaining(request.state)
+        return request, {
+            "builder_pptx_diagnostics": {
+                "deck_authoring_started_at_ms": int(time.time() * 1_000),
+                "deck_authoring_budget_ms": presentation_authoring_deadline_seconds(request.state) * 1_000,
+                "deck_authoring_prompt_bytes": prompt_bytes,
+                "deck_authoring_prompt_estimated_tokens": (prompt_bytes + 3) // 4,
+                "deck_authoring_tool_schema_bytes": schema_bytes,
+                "deck_authoring_context_bytes": context_bytes,
+                "deck_authoring_remaining_ms": int(remaining * 1_000) if remaining is not None else None,
+                "deck_authoring_output_bytes": 0,
+                "authoring_tool_call_started": False,
+            }
+        }
+
+    @staticmethod
+    def _merged_presentation_state_update(
+        current: dict[str, Any] | None,
+        extra: dict[str, Any] | None,
+    ) -> dict[str, Any] | None:
+        if not current:
+            return extra
+        if not extra:
+            return current
+        merged = {**current, **extra}
+        current_diagnostics = current.get("builder_pptx_diagnostics")
+        extra_diagnostics = extra.get("builder_pptx_diagnostics")
+        if isinstance(current_diagnostics, dict) and isinstance(extra_diagnostics, dict):
+            merged["builder_pptx_diagnostics"] = {**current_diagnostics, **extra_diagnostics}
+        return merged
 
     @staticmethod
     def _presentation_authoring_seconds_remaining(state: BuilderArtifactState) -> float | None:
@@ -9988,7 +10392,48 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         elapsed_ms = _elapsed_since_builder_start_ms(state)
         if elapsed_ms is None:
             return None
-        return max(0.0, prepare_force_after_seconds(state) - (elapsed_ms / 1_000.0))
+        return max(0.0, presentation_authoring_deadline_seconds(state) - (elapsed_ms / 1_000.0))
+
+    @staticmethod
+    def _presentation_preflight_seconds_remaining(state: BuilderArtifactState) -> float | None:
+        if not _deck_build_service_route_active(state):
+            return None
+        started_ms = state.get("builder_presentation_preflight_started_at_ms")
+        if not isinstance(started_ms, (int, float)) or started_ms <= 0:
+            return float(presentation_preflight_timeout_seconds(state))
+        elapsed = max(0.0, (time.time() * 1_000 - float(started_ms)) / 1_000.0)
+        return max(0.0, presentation_preflight_timeout_seconds(state) - elapsed)
+
+    @staticmethod
+    def _presentation_preflight_timeout_message() -> AIMessage:
+        return AIMessage(
+            content="[Sophia builder: presentation research preflight timed out; continuing without it.]",
+            additional_kwargs={
+                "presentation_preflight_timeout": True,
+                "error_type": "TimeoutError",
+                "error_reason": "presentation_preflight_timeout",
+            },
+        )
+
+    @staticmethod
+    def _presentation_preflight_terminal_update(
+        state: BuilderArtifactState,
+        status: str,
+    ) -> dict[str, Any]:
+        started_ms = state.get("builder_presentation_preflight_started_at_ms")
+        elapsed_ms = (
+            max(0, int(time.time() * 1_000) - int(started_ms))
+            if isinstance(started_ms, (int, float)) and started_ms > 0
+            else 0
+        )
+        return {
+            "builder_presentation_phase": "authoring_pending",
+            "builder_pptx_diagnostics": {
+                "presentation_preflight_status": status,
+                "presentation_preflight_elapsed_ms": elapsed_ms,
+                "prepare_force_reason": "bounded_preflight_complete",
+            },
+        }
 
     @staticmethod
     def _authoring_timeout_message() -> AIMessage:
@@ -10013,7 +10458,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             remaining_seconds = max(1, (deadline_epoch_ms - int(time.time() * 1_000) + 999) // 1_000) if deadline_epoch_ms > 0 else presentation_authoring_timeout_seconds(state)
         else:
             elapsed_ms = _elapsed_since_builder_start_ms(state) or 0
-            authoring_deadline_ms = prepare_force_after_seconds(state) * 1_000
+            authoring_deadline_ms = presentation_authoring_deadline_seconds(state) * 1_000
             remaining_seconds = max(1, (authoring_deadline_ms - elapsed_ms + 999) // 1_000)
         timeout_seconds = min(
             presentation_authoring_timeout_seconds(state),
@@ -11285,6 +11730,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_result": fallback,
                 "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                 "builder_deck_prepare_phase": "terminal",
+                "builder_presentation_phase": "terminal",
                 "builder_deck_prepare_expected_tool_call_id": None,
                 **_terminal_halt_fields(state, "deck_prepare_execution_error"),
             },
@@ -11345,6 +11791,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_result": fallback,
                 "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                 "builder_deck_prepare_phase": "terminal",
+                "builder_presentation_phase": "terminal",
                 "builder_deck_prepare_expected_tool_call_id": None,
                 **_terminal_halt_fields(state, "deck_prepare_retry_exhausted"),
             },
@@ -11385,6 +11832,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "builder_non_artifact_turns": 0,
                     "builder_task_started_at_ms": 0,
                     "builder_deck_prepare_phase": "terminal",
+                    "builder_presentation_phase": "terminal",
                     "builder_deck_prepare_expected_tool_call_id": None,
                     **_terminal_halt_fields(request.state or {}, "deck_build_service_failed"),
                 },
@@ -11408,6 +11856,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             **state,
             "builder_pptx_diagnostics": diagnostics,
             "builder_deck_prepare_phase": "terminal",
+            "builder_presentation_phase": "terminal",
         }
         args = request.tool_call.get("args") or {}
         artifact_path = str(payload.get("pptx_path") or args.get("output_path") or "").strip()
@@ -11499,6 +11948,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "prepare_result_count": diagnostics.get("prepare_result_count"),
             "deck_authoring_contract": diagnostics.get("deck_authoring_contract"),
             "deck_authoring_elapsed_ms": diagnostics.get("deck_authoring_elapsed_ms"),
+            "presentation_preflight_status": diagnostics.get("presentation_preflight_status"),
+            "presentation_preflight_elapsed_ms": diagnostics.get("presentation_preflight_elapsed_ms"),
+            "deck_authoring_started_at_ms": diagnostics.get("deck_authoring_started_at_ms"),
+            "deck_authoring_budget_ms": diagnostics.get("deck_authoring_budget_ms"),
+            "deck_authoring_remaining_ms": diagnostics.get("deck_authoring_remaining_ms"),
+            "deck_authoring_prompt_bytes": diagnostics.get("deck_authoring_prompt_bytes"),
+            "deck_authoring_prompt_estimated_tokens": diagnostics.get("deck_authoring_prompt_estimated_tokens"),
+            "deck_authoring_tool_schema_bytes": diagnostics.get("deck_authoring_tool_schema_bytes"),
+            "deck_authoring_context_bytes": diagnostics.get("deck_authoring_context_bytes"),
+            "deck_authoring_output_bytes": diagnostics.get("deck_authoring_output_bytes"),
+            "authoring_tool_call_started": diagnostics.get("authoring_tool_call_started"),
             "prepare_force_reason": diagnostics.get("prepare_force_reason"),
             "manifest_path": delta.get("manifest_path"),
             "manifest_revision": delta.get("manifest_revision"),
@@ -11530,6 +11990,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_non_artifact_turns": 0,
                 "builder_task_started_at_ms": 0,
                 "builder_deck_prepare_phase": "terminal",
+                "builder_presentation_phase": "terminal",
                 "builder_deck_prepare_expected_tool_call_id": None,
                 "builder_pptx_compile_latch_pending": False,
                 "builder_pptx_compile_repair_pending": False,
@@ -11621,6 +12082,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "prepare_result_count": diagnostics.get("prepare_result_count"),
             "deck_authoring_contract": diagnostics.get("deck_authoring_contract"),
             "deck_authoring_elapsed_ms": diagnostics.get("deck_authoring_elapsed_ms"),
+            "presentation_preflight_status": diagnostics.get("presentation_preflight_status"),
+            "presentation_preflight_elapsed_ms": diagnostics.get("presentation_preflight_elapsed_ms"),
+            "deck_authoring_started_at_ms": diagnostics.get("deck_authoring_started_at_ms"),
+            "deck_authoring_budget_ms": diagnostics.get("deck_authoring_budget_ms"),
+            "deck_authoring_remaining_ms": diagnostics.get("deck_authoring_remaining_ms"),
+            "deck_authoring_prompt_bytes": diagnostics.get("deck_authoring_prompt_bytes"),
+            "deck_authoring_prompt_estimated_tokens": diagnostics.get("deck_authoring_prompt_estimated_tokens"),
+            "deck_authoring_tool_schema_bytes": diagnostics.get("deck_authoring_tool_schema_bytes"),
+            "deck_authoring_context_bytes": diagnostics.get("deck_authoring_context_bytes"),
+            "deck_authoring_output_bytes": diagnostics.get("deck_authoring_output_bytes"),
+            "authoring_tool_call_started": diagnostics.get("authoring_tool_call_started"),
             "prepare_force_reason": diagnostics.get("prepare_force_reason"),
         }
         deck_build_path = payload.get("deck_build_path")
@@ -11995,6 +12467,30 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return self._visual_asset_result_command(result)
         return result
 
+    @classmethod
+    def _presentation_preflight_tool_result_command(
+        cls,
+        request: ToolCallRequest,
+        result: ToolMessage | Command,
+        *,
+        status: str | None = None,
+    ) -> Command:
+        message: ToolMessage | None = result if isinstance(result, ToolMessage) else None
+        if message is None and isinstance(result, Command) and isinstance(result.update, dict):
+            message = next(
+                (item for item in reversed(result.update.get("messages", []) or []) if isinstance(item, ToolMessage)),
+                None,
+            )
+        if status is None:
+            text = cls._tool_message_text(message) if message is not None else ""
+            message_status = str(getattr(message, "status", "") or "").lower() if message is not None else ""
+            status = "failed" if message_status == "error" or text.lstrip().startswith("Error:") else "completed"
+        update = cls._presentation_preflight_terminal_update(request.state or {}, status)
+        update["builder_presentation_phase"] = "preflight_result_received"
+        if isinstance(result, Command):
+            return cls._command_with_merged_update(result, update)
+        return Command(update={"messages": [result], **update})
+
     def _prepare_deck_build_exhausted_command(
         self,
         request: ToolCallRequest,
@@ -12044,6 +12540,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_failure_diagnostics": fallback.get("builder_failure_diagnostics"),
                 "builder_non_artifact_turns": 0,
                 "builder_deck_prepare_phase": "terminal",
+                "builder_presentation_phase": "terminal",
                 **_terminal_halt_fields(request.state or {}, failure_code),
             },
             goto="end",
@@ -12249,6 +12746,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         builder graph) and instead return a ``Command(goto=\"model\")`` with an
         error ToolMessage. This lets the model see the rejection and retry.
         """
+        tool_name = str(request.tool_call.get("name") or "")
+        if (
+            tool_name in _PRESENTATION_PREFLIGHT_TOOLS
+            and _deck_build_service_route_active(request.state or {})
+            and request.state.get("builder_presentation_phase") == "preflight_call_emitted"
+        ):
+            started = time.monotonic()
+            result = handler(request)
+            allotted = float(presentation_preflight_timeout_seconds(request.state or {}))
+            status = "timed_out" if time.monotonic() - started >= allotted else None
+            return self._presentation_preflight_tool_result_command(request, result, status=status)
         exhausted = self._prepare_deck_build_exhausted_command(request)
         if exhausted is not None:
             return exhausted
@@ -12571,20 +13079,6 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         name = str(request.tool_call.get("name") or "")
         if name in {_PREPARE_DECK_BUILD_TOOL_NAME, "emit_builder_artifact"}:
             return None
-        args = request.tool_call.get("args")
-        args = args if isinstance(args, dict) else {}
-        if name in {"read_file", "read_file_tool"}:
-            path = str(args.get("file_path") or args.get("path") or "")
-            allowed_paths = (
-                "/mnt/skills/public/sophia/deck_craft.md",
-                "/mnt/skills/public/ppt-generation/SKILL.md",
-            )
-            allowed_prefixes = (
-                "/mnt/user-data/uploads/",
-                "/mnt/user-data/outputs/",
-            )
-            if path in allowed_paths or path.startswith(allowed_prefixes):
-                return None
         return Command(
             update={
                 "messages": [
@@ -13133,6 +13627,26 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         handler: Callable[[ToolCallRequest], Awaitable[ToolMessage | Command]],
     ) -> ToolMessage | Command:
         """Async variant — same logic as wrap_tool_call."""
+        tool_name = str(request.tool_call.get("name") or "")
+        if (
+            tool_name in _PRESENTATION_PREFLIGHT_TOOLS
+            and _deck_build_service_route_active(request.state or {})
+            and request.state.get("builder_presentation_phase") == "preflight_call_emitted"
+        ):
+            remaining = self._presentation_preflight_seconds_remaining(request.state or {})
+            try:
+                async with asyncio.timeout(max(0.001, remaining or 0.001)):
+                    result = await handler(request)
+            except TimeoutError:
+                logger.warning("BuilderArtifact: presentation web preflight timed out; continuing to authoring")
+                result = ToolMessage(
+                    content="Error: Presentation web preflight exceeded its bounded time budget.",
+                    tool_call_id=str(request.tool_call.get("id") or ""),
+                    name=tool_name,
+                    status="error",
+                )
+                return self._presentation_preflight_tool_result_command(request, result, status="timed_out")
+            return self._presentation_preflight_tool_result_command(request, result)
         exhausted = self._prepare_deck_build_exhausted_command(request)
         if exhausted is not None:
             return exhausted
@@ -13272,6 +13786,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             diagnostics["first_prepare_turn"] = int(state.get("builder_non_artifact_turns", 0) or 0) + 1
         call_id = str(calls[-1].get("id") or "").strip()
         call_args = calls[-1].get("args") if isinstance(calls[-1].get("args"), dict) else {}
+        diagnostics["deck_authoring_output_bytes"] = len(
+            json.dumps(call_args, separators=(",", ":"), default=str).encode("utf-8")
+        )
+        diagnostics["authoring_tool_call_started"] = True
         diagnostics["deck_authoring_contract"] = (
             str(call_args.get("authoring_contract") or "compact_model_html_v1")
             if str(call_args.get("deck_stylesheet") or "").strip()
@@ -13283,6 +13801,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "builder_pptx_diagnostics": diagnostics,
             "builder_deck_prepare_latch_active": True,
             "builder_deck_prepare_expected_tool_call_id": call_id or None,
+            "builder_presentation_phase": "prepare_call_emitted",
         }
         if state.get("builder_deck_prepare_phase") == "retry_pending":
             update.update(
@@ -13308,6 +13827,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             (message for message in reversed(messages) if getattr(message, "type", None) == "ai"),
             None,
         )
+        preflight_failure = self._presentation_preflight_model_failure_update(state, latest_ai)
+        if preflight_failure is not None:
+            return preflight_failure
         authoring_failure = self._deck_authoring_message_failure_update(state, runtime, latest_ai)
         if authoring_failure is not None:
             return authoring_failure

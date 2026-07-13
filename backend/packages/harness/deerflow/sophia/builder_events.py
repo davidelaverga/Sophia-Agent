@@ -884,6 +884,17 @@ def _artifact_completion_fields(
         "builder_trace_run_id": artifact.get("builder_trace_run_id"),
         "builder_trace_root_run_id": artifact.get("builder_trace_root_run_id"),
         "deck_authoring_elapsed_ms": artifact.get("deck_authoring_elapsed_ms"),
+        "presentation_preflight_status": artifact.get("presentation_preflight_status"),
+        "presentation_preflight_elapsed_ms": artifact.get("presentation_preflight_elapsed_ms"),
+        "deck_authoring_started_at_ms": artifact.get("deck_authoring_started_at_ms"),
+        "deck_authoring_budget_ms": artifact.get("deck_authoring_budget_ms"),
+        "deck_authoring_remaining_ms": artifact.get("deck_authoring_remaining_ms"),
+        "deck_authoring_prompt_bytes": artifact.get("deck_authoring_prompt_bytes"),
+        "deck_authoring_prompt_estimated_tokens": artifact.get("deck_authoring_prompt_estimated_tokens"),
+        "deck_authoring_tool_schema_bytes": artifact.get("deck_authoring_tool_schema_bytes"),
+        "deck_authoring_context_bytes": artifact.get("deck_authoring_context_bytes"),
+        "deck_authoring_output_bytes": artifact.get("deck_authoring_output_bytes"),
+        "authoring_tool_call_started": artifact.get("authoring_tool_call_started"),
         "prepare_force_reason": artifact.get("prepare_force_reason"),
     }
 
