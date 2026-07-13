@@ -850,6 +850,14 @@ def test_slide_png_renderer_sets_viewport_on_browser_context():
     assert "context.newPage({\n      viewport" not in source
 
 
+def test_slide_png_renderer_encodes_entry_document_file_url():
+    png_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_png.mjs"
+    source = png_script.read_text(encoding="utf-8")
+
+    assert "page.goto(pathToFileURL(path.resolve(args.htmlFile)).href" in source
+    assert "page.goto(`file://${path.resolve(args.htmlFile)}`" not in source
+
+
 def test_slide_png_renderer_rejects_missing_images():
     png_script = Path(render_html.__file__).resolve().parents[1] / "js" / "render_html_to_png.mjs"
     source = png_script.read_text(encoding="utf-8")

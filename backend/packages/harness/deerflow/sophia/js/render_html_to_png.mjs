@@ -189,7 +189,7 @@ async function main() {
     });
     const page = await context.newPage();
     const { missingLocalResources, blockedSubresources } = await installRenderRequestPolicy(page, args.htmlFile);
-    await page.goto(`file://${path.resolve(args.htmlFile)}`, {
+    await page.goto(pathToFileURL(path.resolve(args.htmlFile)).href, {
       waitUntil: "networkidle",
       timeout: 60000,
     });
