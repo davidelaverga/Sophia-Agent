@@ -2282,19 +2282,23 @@ def _current_image_trace_env(runtime: ToolRuntime) -> dict[str, str]:
             env["SOPHIA_PARENT_RUN_ID"] = str(run_id)
     except Exception:  # noqa: BLE001 - tracing env must never block generation.
         pass
-    thread_id = _state_value(runtime, "thread_id")
+    thread_id = _runtime_identity_value(runtime, "thread_id")
     if thread_id:
         env["SOPHIA_THREAD_ID"] = str(thread_id)
-    session_id = _state_value(runtime, "session_id") or _state_value(runtime, "parent_thread_id") or _state_value(runtime, "companion_session_id")
+    session_id = (
+        _runtime_identity_value(runtime, "session_id")
+        or _runtime_identity_value(runtime, "parent_thread_id")
+        or _runtime_identity_value(runtime, "companion_session_id")
+    )
     if session_id:
         env["SOPHIA_SESSION_ID"] = str(session_id)
-    task_id = _state_value(runtime, "task_id") or _state_value(runtime, "builder_task_id")
+    task_id = _runtime_identity_value(runtime, "task_id") or _runtime_identity_value(runtime, "builder_task_id")
     if task_id:
         env["SOPHIA_TASK_ID"] = str(task_id)
-    run_id = _state_value(runtime, "run_id") or _state_value(runtime, "builder_run_id")
+    run_id = _runtime_identity_value(runtime, "run_id") or _runtime_identity_value(runtime, "builder_run_id")
     if run_id:
         env["SOPHIA_RUN_ID"] = str(run_id)
-    user_id_hash = stable_hash(_state_value(runtime, "user_id"))
+    user_id_hash = stable_hash(_runtime_identity_value(runtime, "user_id"))
     if user_id_hash:
         env["SOPHIA_USER_ID_HASH"] = user_id_hash
     build_id = _state_value(runtime, "current_deck_build_id") or _state_value(runtime, "deck_build_id")

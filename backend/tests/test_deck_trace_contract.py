@@ -261,6 +261,50 @@ def test_base_metadata_uses_d0_contract_and_safe_identity(tmp_path: Path) -> Non
     assert "user-raw" not in json.dumps(metadata)
 
 
+def test_deck_trace_identity_falls_back_to_runtime_context_and_config(tmp_path: Path) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir(parents=True)
+    runtime = SimpleNamespace(
+        state={
+            "thread_data": {
+                "outputs_path": str(outputs),
+                "workspace_path": str(tmp_path / "workspace"),
+            }
+        },
+        context={"thread_id": "runtime-builder-thread"},
+        config={
+            "configurable": {
+                "parent_thread_id": "runtime-companion-thread",
+                "user_id": "runtime-user-raw",
+                "task_id": "runtime-task-1",
+                "run_id": "runtime-run-1",
+            }
+        },
+    )
+
+    metadata = base_metadata(
+        runtime=runtime,
+        build_id="deck-runtime",
+        visual_policy="required",
+        status="planned",
+        slide_count=3,
+    )
+    env = deck_service._current_image_trace_env(runtime)
+
+    assert metadata["thread_id"] == "runtime-builder-thread"
+    assert metadata["session_id"] == "runtime-companion-thread"
+    assert metadata["user_id_hash"] == stable_hash("runtime-user-raw")
+    assert metadata["task_id"] == "runtime-task-1"
+    assert metadata["run_id"] == "runtime-run-1"
+    assert metadata["parent_thread_id"] == "runtime-companion-thread"
+    assert env["SOPHIA_THREAD_ID"] == "runtime-builder-thread"
+    assert env["SOPHIA_SESSION_ID"] == "runtime-companion-thread"
+    assert env["SOPHIA_TASK_ID"] == "runtime-task-1"
+    assert env["SOPHIA_RUN_ID"] == "runtime-run-1"
+    assert env["SOPHIA_USER_ID_HASH"] == stable_hash("runtime-user-raw")
+    assert "runtime-user-raw" not in json.dumps(metadata)
+
+
 def test_deck_span_attaches_d0_metadata_to_explicit_child(tmp_path: Path, monkeypatch) -> None:
     captured: dict[str, Any] = {}
 

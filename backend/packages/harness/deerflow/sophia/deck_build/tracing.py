@@ -57,6 +57,34 @@ def _compact_metadata(payload: dict[str, Any]) -> dict[str, Any]:
     }
 
 
+def _identity_dict(value: Any) -> dict[str, Any]:
+    return value if isinstance(value, dict) else {}
+
+
+def _identity_source_value(source: dict[str, Any], keys: tuple[str, ...]) -> Any:
+    return next((source.get(key) for key in keys if source.get(key) not in (None, "")), None)
+
+
+def _runtime_identity_value(runtime: Any, *keys: str) -> Any:
+    state = _identity_dict(getattr(runtime, "state", None))
+    config = _identity_dict(getattr(runtime, "config", None))
+    execution_info = getattr(runtime, "execution_info", None)
+    execution_source = {key: getattr(execution_info, key, None) for key in keys}
+    sources = (
+        state,
+        _identity_dict(state.get("builder_task")),
+        _identity_dict(state.get("delegation_context")),
+        execution_source,
+        _identity_dict(getattr(runtime, "context", None)),
+        _identity_dict(config.get("configurable")),
+        _identity_dict(config.get("metadata")),
+    )
+    for source in sources:
+        if (value := _identity_source_value(source, keys)) is not None:
+            return value
+    return None
+
+
 def base_metadata(
     *,
     runtime: Any,
@@ -68,19 +96,19 @@ def base_metadata(
     deck_compile_mode: str | None = None,
     artifact_target_ext: str | None = None,
 ) -> dict[str, Any]:
-    raw_state = getattr(runtime, "state", None)
-    state = raw_state if isinstance(raw_state, dict) else {}
     thread_data = get_thread_data(runtime) or {}
-    thread_id = state.get("thread_id") or thread_data.get("thread_id")
-    session_id = state.get("session_id") or state.get("parent_thread_id") or state.get("companion_session_id")
-    task_id = state.get("task_id") or state.get("builder_task_id")
-    run_id = state.get("run_id") or state.get("builder_run_id")
+    thread_id = _runtime_identity_value(runtime, "thread_id", "builder_thread_id") or thread_data.get("thread_id")
+    session_id = _runtime_identity_value(runtime, "session_id", "parent_thread_id", "companion_session_id")
+    task_id = _runtime_identity_value(runtime, "task_id", "builder_task_id")
+    run_id = _runtime_identity_value(runtime, "run_id", "builder_run_id")
+    user_id = _runtime_identity_value(runtime, "user_id", "parent_user_id")
+    parent_thread_id = _runtime_identity_value(runtime, "parent_thread_id")
     return _compact_metadata(
         {
             "sophia_schema": "deck_trace_v2",
             "thread_id": thread_id,
             "session_id": session_id,
-            "user_id_hash": stable_hash(state.get("user_id")),
+            "user_id_hash": stable_hash(user_id),
             "task_id": task_id,
             "run_id": run_id,
             "build_id": build_id,
@@ -91,7 +119,7 @@ def base_metadata(
             "builder_thread_id": thread_id,
             "builder_task_id": task_id,
             "builder_run_id": run_id,
-            "parent_thread_id": state.get("parent_thread_id"),
+            "parent_thread_id": parent_thread_id,
             # Compatibility keys kept while downstream dashboards migrate to deck_trace_v2.
             "deck_build_id": build_id,
             "deck_schema_version": "sophia-deck-build/v1",
