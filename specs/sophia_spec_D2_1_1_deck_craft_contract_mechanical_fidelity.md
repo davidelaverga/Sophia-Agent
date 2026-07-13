@@ -33,6 +33,14 @@
 > migration and reports an explicit unavailable status when its table/RPCs are
 > absent.
 >
+> **Retry-integrity amendment (2026-07-13):** Compact-v2 requires
+> `creative_plan` as an object; legacy string normalization is limited to
+> omitted/v1 internal calls. Schema, creative-plan, HTML, image-plan, IR, and
+> mechanical failures share one global repair. The 120-second authoring clock
+> remains absolute through that repair. Multiple prepare calls in one model
+> turn are rejected before ToolNode with one matching policy result per call
+> and one terminal writer; they never execute in parallel.
+>
 > **Imported source SHA-256:**
 > `efa4b260f30b4260e42c666ffe98d66a2c0f88ffdcca16b2fcb1c649867cd9eb`
 
@@ -964,6 +972,9 @@ Total outer-call policy:
 
 ```text
 initial call + one input-repair retry = 2 emitted calls maximum
+all retryable failure classes share one repair counter
+legacy per-class retry state consumes the shared repair
+multiple calls in one model turn receive matching policy-error results and terminate before execution
 ```
 
 D3.1 internal repair calls do not count as outer tool calls.
@@ -1100,6 +1111,11 @@ When retries are exhausted, return:
   "root_failure_summary": "Slide 5 overflowed vertically by 19 px."
 }
 ```
+
+`root_failure_code` preserves the first authoritative input/service failure;
+`last_prepare_failure_code` records the final rejected condition. Parallel-call
+policy failure becomes the terminal reason without erasing an earlier root
+failure.
 
 Required propagation through:
 

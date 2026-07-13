@@ -130,6 +130,26 @@ def test_builder_completion_targets_root_run_metadata_and_feedback(monkeypatch) 
     assert root.metadata["terminal_reason"] == "deck_prepare_execution_error"
     assert root.patch_calls == 1
     assert feedback_client.feedback[-1]["run_id"] == "root-run"
+
+
+def test_terminal_feedback_uses_deterministic_id(monkeypatch) -> None:
+    feedback_client = _FakeFeedbackClient()
+    monkeypatch.setattr(observability, "_feedback_client", lambda: feedback_client)
+    root = _FakeRunTree()
+    root.id = "builder-root"
+    artifact = {
+        "status": "failed",
+        "terminal_status": "failed",
+        "terminal_reason": "deck_prepare_parallel_calls_forbidden",
+    }
+
+    observability._create_terminal_feedback(root, artifact)
+    observability._create_terminal_feedback(root, artifact)
+
+    assert len(feedback_client.feedback) == 2
+    first, second = feedback_client.feedback
+    assert first["feedback_id"] == second["feedback_id"]
+    assert str(first["feedback_id"])
     assert feedback_client.feedback[-1]["score"] == 0.0
 
 

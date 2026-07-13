@@ -20,6 +20,7 @@ from langchain_core.outputs import ChatGeneration, ChatResult
 from langchain_core.tools import BaseTool, tool
 from langgraph.runtime import Runtime
 from pydantic import PrivateAttr
+from test_deck_build_service import _creative_plan
 
 from deerflow.agents.middlewares.dangling_tool_call_middleware import (
     DanglingToolCallMiddleware,
@@ -145,6 +146,181 @@ def _prepare_call(call_id: str, *, repaired: bool) -> AIMessage:
             }
         ],
     )
+
+
+def _compact_prepare_args(*, creative_plan: Any) -> dict[str, Any]:
+    return {
+        "authoring_contract": "compact_model_html_v2",
+        "deck_title": "Runtime Control",
+        "slides": [
+            {
+                "title": f"Control {index}",
+                "narrative": "Bound the runtime deterministically.",
+                "html_body": (
+                    f'<main class="slide-root" data-deck-id="slide-{index}">'
+                    f'<h1 data-deck-id="headline-{index}">Control {index}</h1></main>'
+                ),
+            }
+            for index in range(1, 4)
+        ],
+        "output_path": "/mnt/user-data/outputs/deck.pptx",
+        "creative_plan": creative_plan,
+        "deck_stylesheet": (
+            ".slide-root { width: 1920px; height: 1080px; background: #101820; color: #ffffff; }"
+        ),
+    }
+
+
+def test_parallel_prepare_calls_terminalize_before_tool_node(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    executions: list[str] = []
+
+    @tool("prepare_deck_build")
+    def fake_prepare_deck_build() -> str:
+        """Must never execute when one model turn emits parallel prepare calls."""
+        executions.append("called")
+        return "{}"
+
+    model = _PrepareSequenceModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "parallel-1", "name": "prepare_deck_build", "args": {}},
+                    {"id": "parallel-2", "name": "prepare_deck_build", "args": {}},
+                ],
+            )
+        ]
+    )
+    webhook_calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        BuilderArtifactMiddleware,
+        "_upload_fallback_and_fire",
+        lambda *args, **kwargs: webhook_calls.append(kwargs),
+    )
+    agent = create_agent(
+        model=model,
+        tools=[fake_prepare_deck_build],
+        middleware=[BuilderArtifactMiddleware(), DanglingToolCallMiddleware()],
+        state_schema=_DeckRuntimeState,
+    )
+
+    result = agent.invoke(
+        {
+            "messages": [HumanMessage(content="Build a PPTX")],
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "delegation_context": {"task_type": "presentation", "task": "Build a PPTX"},
+            "allow_web_research": False,
+            "builder_pptx_diagnostics": {
+                "deck_root_failure_code": "deck_prepare_argument_invalid",
+                "deck_root_failure_summary": "The first prepare call failed schema validation.",
+                "prepare_repair_count": 1,
+                "prepare_retry_executed": True,
+            },
+            "thread_data": {
+                "outputs_path": str(tmp_path / "outputs"),
+                "workspace_path": str(tmp_path / "workspace"),
+            },
+        },
+        context={"thread_id": "builder-thread"},
+    )
+
+    assert executions == []
+    assert len(webhook_calls) == 1
+    artifact = result["builder_result"]
+    assert artifact["failure_code"] == "deck_prepare_parallel_calls_forbidden"
+    assert artifact["root_failure_code"] == "deck_prepare_argument_invalid"
+    assert artifact["last_prepare_failure_code"] == "deck_prepare_parallel_calls_forbidden"
+    assert artifact["prepare_emitted_call_count"] == 2
+    assert artifact["prepare_result_count"] == 2
+    assert artifact["prepare_policy_result_count"] == 2
+    assert artifact.get("prepare_execution_count") in {None, 0}
+    assert artifact.get("prepare_service_call_count") in {None, 0}
+    assert artifact.get("dangling_prepare_call_count") in {None, 0}
+    results = [message for message in result["messages"] if isinstance(message, ToolMessage)]
+    assert {message.tool_call_id for message in results} == {"parallel-1", "parallel-2"}
+    assert all(message.status == "error" for message in results)
+
+
+def test_schema_repair_then_service_failure_exhausts_global_retry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    class _RejectedDeckResult:
+        success = False
+        retryable = True
+        failure_code = "deck_slide_html_invalid"
+        repair_instruction = {"repair_message": "Remove opacity."}
+
+        def to_dict(self) -> dict[str, Any]:
+            return {
+                "success": False,
+                "failure_code": self.failure_code,
+                "failure_summary": "slides[0].html_body uses lossy CSS property opacity.",
+                "retryable": True,
+                "repair_instruction": self.repair_instruction,
+                "slide_count": 3,
+                "quality_status": "failed",
+            }
+
+    invalid_args = _compact_prepare_args(creative_plan="{malformed-json")
+    valid_args = _compact_prepare_args(creative_plan=_creative_plan())
+    model = _PrepareSequenceModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "schema-1", "name": "prepare_deck_build", "args": invalid_args}
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "service-2", "name": "prepare_deck_build", "args": valid_args}
+                ],
+            ),
+        ]
+    )
+    monkeypatch.setattr(BuilderArtifactMiddleware, "_upload_fallback_and_fire", lambda *args, **kwargs: None)
+    with monkeypatch.context() as patch_context:
+        service = type("Service", (), {"prepare_and_build": lambda self, **kwargs: _RejectedDeckResult()})()
+        # Keep the decorated production tool and replace only its service boundary.
+        patch_context.setattr(
+            "deerflow.sophia.tools.prepare_deck_build.DeckBuildService",
+            lambda **kwargs: service,
+        )
+        agent = create_agent(
+            model=model,
+            tools=[prepare_deck_build],
+            middleware=[BuilderArtifactMiddleware(), DanglingToolCallMiddleware()],
+            state_schema=_DeckRuntimeState,
+        )
+        result = agent.invoke(
+            {
+                "messages": [HumanMessage(content="Build a PPTX")],
+                "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+                "delegation_context": {"task_type": "presentation", "task": "Build a PPTX"},
+                "allow_web_research": False,
+                "thread_data": {
+                    "outputs_path": str(tmp_path / "outputs"),
+                    "workspace_path": str(tmp_path / "workspace"),
+                },
+            },
+            context={"thread_id": "builder-thread"},
+        )
+
+    artifact = result["builder_result"]
+    assert artifact["failure_code"] == "deck_prepare_retry_exhausted"
+    assert artifact["root_failure_code"] == "deck_prepare_argument_invalid"
+    assert artifact["last_prepare_failure_code"] == "deck_slide_html_invalid"
+    assert artifact["prepare_emitted_call_count"] == 2
+    assert artifact["prepare_execution_count"] == 2
+    assert artifact["prepare_service_call_count"] == 1
+    assert artifact["prepare_result_count"] == 2
+    assert artifact["prepare_repair_count"] == 1
+    assert artifact["prepare_retry_executed"] is True
 
 
 def test_retryable_prepare_runs_one_real_retry_then_finalizes(
@@ -387,6 +563,8 @@ def test_forced_presentation_authoring_uses_only_compact_prepare_context() -> No
     assert "architecture.png" in str(bounded.messages[0].content)
     assert "Prefer terse technical headlines" in str(bounded.messages[0].content)
     assert "compact_model_html_v2" in bounded.system_prompt
+    assert "Do not use lossy CSS properties: box-shadow, letter-spacing, opacity, text-shadow" in bounded.system_prompt
+    assert "creative_plan as a JSON object" in bounded.system_prompt
     assert bounded.model_settings["max_tokens"] == 16_384
     assert update is not None
     diagnostics = update["builder_pptx_diagnostics"]
@@ -588,6 +766,47 @@ def test_presentation_authoring_stream_is_cancelled_at_absolute_deadline() -> No
     assert timeout_message.additional_kwargs["error_reason"] == "authoring_deadline"
 
 
+def test_presentation_repair_stream_keeps_original_authoring_deadline() -> None:
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation"},
+        "builder_task_kickoff_ms": int(time.time() * 1000) - 950,
+        "builder_deck_prepare_phase": "retry_pending",
+        "builder_presentation_phase": "authoring_pending",
+        "builder_pptx_diagnostics": {
+            "prepare_emitted_call_count": 1,
+            "prepare_result_count": 1,
+        },
+        "builder_budget": {
+            "tier": "presentation",
+            "prepare_force_after_seconds": 8,
+            "authoring_deadline_seconds": 1,
+            "authoring_max_tokens": 16_384,
+            "authoring_timeout_seconds": 110,
+        },
+    }
+    calls = 0
+
+    async def slow_handler(_request):
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.5)
+        return AIMessage(content="late repair")
+
+    started = time.monotonic()
+    result = asyncio.run(
+        BuilderArtifactMiddleware().awrap_model_call(
+            _ModelRequest(state, tools=[prepare_deck_build]),
+            slow_handler,
+        )
+    )
+
+    assert calls == 1
+    assert time.monotonic() - started < 0.35
+    messages = result.update["messages"] if hasattr(result, "update") else [result]
+    assert messages[-1].additional_kwargs["error_reason"] == "authoring_deadline"
+
+
 def test_authoring_deadline_takes_precedence_over_output_truncation(monkeypatch) -> None:
     latest = AIMessage(content="partial", response_metadata={"stop_reason": "max_tokens"})
     state = {
@@ -603,7 +822,7 @@ def test_authoring_deadline_takes_precedence_over_output_truncation(monkeypatch)
     }
     captured: dict[str, str] = {}
 
-    def terminal(_state, _runtime, *, failure_code):
+    def terminal(_state, _runtime, *, failure_code, tool_calls=None):
         captured["failure_code"] = failure_code
         return {"failure_code": failure_code}
 

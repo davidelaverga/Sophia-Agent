@@ -168,11 +168,13 @@ class _TagScanner(HTMLParser):
 def compiler_capability_prompt_excerpt() -> str:
     supported = ", ".join(SUPPORTED_AUTHORING_FEATURES)
     rejected = ", ".join(sorted(REJECTED_TAGS))
+    rejected_css = ", ".join(sorted(REJECTED_CSS_PROPERTIES))
     lossy = ", ".join(sorted(LOSSY_CSS_PROPERTIES))
     return (
         f"Use only native PPTX-compatible HTML/CSS: {supported}. "
         f"Rejected tags include: {rejected}. Inline SVG is unsupported. Meta tags may declare UTF-8 charset only. "
-        f"Lossy CSS that must not carry semantics: {lossy}. "
+        f"Do not use rejected CSS properties: {rejected_css}. Do not use lossy CSS properties: {lossy}. "
+        "For transform, rotate(...) is the only supported operation; do not translate, scale, or skew. "
         "The Sophia canvas is 1920x1080 CSS px with an opaque background."
     )
 

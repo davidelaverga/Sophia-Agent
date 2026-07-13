@@ -3,11 +3,14 @@ from __future__ import annotations
 import json
 from unittest.mock import patch
 
+import pytest
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.graph import END, START, MessagesState, StateGraph
 from langgraph.prebuilt import ToolNode
+from pydantic import ValidationError
 from test_deck_build_service import _creative_plan, _slides
 
+from deerflow.sophia.deck_build.tool_contract import PrepareDeckBuildInput
 from deerflow.sophia.tools.prepare_deck_build import prepare_deck_build
 
 
@@ -40,6 +43,35 @@ def test_prepare_deck_build_runtime_is_injected_and_hidden_from_model_schema() -
     assert "html_source" not in slide_schema["properties"]
     assert "register" in prepare_deck_build.args
     assert "deck_register" not in prepare_deck_build.args
+
+
+def test_compact_v2_requires_object_creative_plan_but_v1_keeps_legacy_string() -> None:
+    slides = [
+        {
+            "title": "Runtime Contract",
+            "narrative": "The runtime has one bounded repair.",
+            "html_body": '<main class="slide-root" data-deck-id="slide-1"></main>',
+        }
+    ]
+    common = {
+        "deck_title": "Runtime Contract",
+        "slides": slides,
+        "output_path": "/mnt/user-data/outputs/deck.pptx",
+        "deck_stylesheet": ".slide-root { width: 1920px; height: 1080px; background: #101820; }",
+        "creative_plan": json.dumps(_creative_plan()),
+    }
+
+    with pytest.raises(ValidationError) as exc_info:
+        PrepareDeckBuildInput.model_validate(
+            {**common, "authoring_contract": "compact_model_html_v2"}
+        )
+
+    assert exc_info.value.errors()[0]["loc"] == ("creative_plan",)
+    assert "must be a JSON object" in exc_info.value.errors()[0]["msg"]
+    legacy = PrepareDeckBuildInput.model_validate(
+        {**common, "authoring_contract": "compact_model_html_v1"}
+    )
+    assert legacy.creative_plan.subject == "Technical Deck"
 
 
 def test_real_prepare_deck_build_executes_through_tool_node_with_runtime() -> None:

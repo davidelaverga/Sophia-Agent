@@ -135,6 +135,8 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "prepare_service_result_count",
     "prepare_result_count",
     "prepare_retry_executed",
+    "prepare_policy_result_count",
+    "prepare_repair_count",
     "dangling_prepare_call_count",
     "creative_plan_accepted",
     "deck_authoring_contract",
@@ -155,6 +157,8 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "deck_authoring_output_bytes",
     "authoring_tool_call_started",
     "prepare_force_reason",
+    "last_prepare_failure_code",
+    "last_prepare_failure_summary",
     "error_message",
     "builder_failure_diagnostics",
     "trace_id",
@@ -270,6 +274,8 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "prepare_service_result_count",
         "prepare_result_count",
         "prepare_retry_executed",
+        "prepare_policy_result_count",
+        "prepare_repair_count",
         "dangling_prepare_call_count",
         "creative_plan_accepted",
         "deck_authoring_contract",
@@ -290,6 +296,8 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "deck_authoring_output_bytes",
         "authoring_tool_call_started",
         "prepare_force_reason",
+        "last_prepare_failure_code",
+        "last_prepare_failure_summary",
         "source_artifact_path",
         "revision_of_artifact_path",
         "summary",
@@ -566,6 +574,8 @@ class BuilderCompletionEvent(BaseModel):
     prepare_service_result_count: int | None = None
     prepare_result_count: int | None = None
     prepare_retry_executed: bool | None = None
+    prepare_policy_result_count: int | None = None
+    prepare_repair_count: int | None = None
     dangling_prepare_call_count: int | None = None
     creative_plan_accepted: bool | None = None
     deck_authoring_contract: str | None = None
@@ -586,6 +596,8 @@ class BuilderCompletionEvent(BaseModel):
     deck_authoring_output_bytes: int | None = None
     authoring_tool_call_started: bool | None = None
     prepare_force_reason: str | None = None
+    last_prepare_failure_code: str | None = None
+    last_prepare_failure_summary: str | None = None
     source_retention_report: dict[str, Any] | None = None
     native_contrast_report: dict[str, Any] | None = None
     root_failure_code: str | None = None

@@ -22,6 +22,7 @@ PPTX_DIAGNOSTIC_LATEST_COUNT_KEYS = frozenset(
         "pptx_generator_slide_count",
         "pptx_plan_image_ref_count",
         "pptx_plan_slide_count",
+        "prepare_repair_count",
         "referenced_visual_count",
         "successful_generated_visual_count",
     }

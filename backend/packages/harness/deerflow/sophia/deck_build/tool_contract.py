@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 from typing import Annotated, Any, Literal
 
-from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, model_validator
+from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationInfo, field_validator, model_validator
 from pydantic.json_schema import SkipJsonSchema
 
 from deerflow.sophia.deck_build.prepare_input import (
@@ -274,13 +274,13 @@ class PrepareDeckBuildInput(BaseModel):
     deck_title: str
     slides: NormalizedDeckSlides
     output_path: str
-    creative_plan: NormalizedDeckCreativePlan
     authoring_contract: Literal["compact_model_html_v1", "compact_model_html_v2"] | None = Field(
         default=None,
         description=(
             "New builder calls must use compact_model_html_v2. Omitted and v1 values remain accepted only for queued/internal compatibility."
         ),
     )
+    creative_plan: NormalizedDeckCreativePlan
     deck_stylesheet: str | None = Field(
         default=None,
         description=("Shared compiler-supported CSS for every slide. It must style the main 1920x1080 canvas with an opaque background."),
@@ -300,6 +300,18 @@ class PrepareDeckBuildInput(BaseModel):
         normalized = dict(value)
         normalized["deck_register"] = normalized.pop("register")
         return normalized
+
+    @field_validator("creative_plan", mode="before")
+    @classmethod
+    def _require_v2_creative_plan_object(cls, value: Any, info: ValidationInfo) -> Any:
+        if info.data.get("authoring_contract") == "compact_model_html_v2" and not isinstance(
+            value,
+            (dict, DeckCreativePlanInput),
+        ):
+            raise ValueError(
+                "creative_plan must be a JSON object for compact_model_html_v2, not a JSON string"
+            )
+        return value
 
     @model_validator(mode="after")
     def _validate_authoring_mode(self) -> PrepareDeckBuildInput:

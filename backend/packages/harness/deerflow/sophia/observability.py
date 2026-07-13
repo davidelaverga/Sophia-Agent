@@ -9,6 +9,7 @@ from collections import Counter
 from contextlib import nullcontext
 from typing import Any
 from urllib.parse import urlparse
+from uuid import NAMESPACE_URL, uuid5
 from weakref import WeakSet
 
 from langchain_core.runnables import Runnable
@@ -844,6 +845,8 @@ def _add_pptx_terminal_metadata(metadata: dict[str, Any], diagnostics: dict[str,
         "prepare_service_result_count",
         "prepare_result_count",
         "prepare_retry_executed",
+        "prepare_policy_result_count",
+        "prepare_repair_count",
         "dangling_prepare_call_count",
         "creative_plan_accepted",
         "prepare_latch_activated_at_turn",
@@ -977,6 +980,8 @@ def _add_artifact_acceptance_metadata(metadata: dict[str, Any], artifact: dict[s
         "prepare_force_reason",
         "root_failure_code",
         "root_failure_summary",
+        "last_prepare_failure_code",
+        "last_prepare_failure_summary",
         "report_contract_status",
         "report_contract_version",
         "expected_section_count",
@@ -1143,6 +1148,8 @@ def _add_deck_build_metadata(
         "deck_failure_code": _first_present(diagnostics.get("deck_failure_code"), artifact.get("deck_failure_code"), artifact.get("failure_code")),
         "root_failure_code": _first_present(diagnostics.get("deck_root_failure_code"), artifact.get("root_failure_code")),
         "root_failure_summary": _first_present(diagnostics.get("deck_root_failure_summary"), artifact.get("root_failure_summary")),
+        "last_prepare_failure_code": _first_present(diagnostics.get("last_prepare_failure_code"), artifact.get("last_prepare_failure_code")),
+        "last_prepare_failure_summary": _first_present(diagnostics.get("last_prepare_failure_summary"), artifact.get("last_prepare_failure_summary")),
         "deck_template_renderer_version": _first_present(diagnostics.get("deck_template_renderer_version"), artifact.get("deck_template_renderer_version")),
         "deck_quality_status": _first_present(diagnostics.get("deck_quality_status"), artifact.get("deck_quality_status")),
         "creative_plan_path": _first_present(diagnostics.get("creative_plan_path"), artifact.get("creative_plan_path")),
@@ -1390,10 +1397,15 @@ def _create_terminal_feedback(run_tree: Any, artifact: dict[str, Any]) -> None:
     if run_id is None:
         return
     terminal_reason = str(artifact.get("terminal_reason") or "unknown")[:256]
+    feedback_id = uuid5(
+        NAMESPACE_URL,
+        f"sophia-builder-terminal:{run_id}:{terminal_reason}",
+    )
     try:
         _feedback_client().create_feedback(
             run_id=run_id,
             key="builder_terminal_success",
+            feedback_id=feedback_id,
             score=1.0 if terminal_status == "completed" else 0.0,
             comment=json.dumps(
                 {

@@ -1306,7 +1306,10 @@ def test_prepare_deck_build_retryable_ir_second_failure_is_terminal(tmp_path: Pa
 
     assert isinstance(command, Command)
     assert command.goto == "end"
-    assert command.update["builder_result"]["failure_code"] == "invalid_deck_ir"
+    artifact = command.update["builder_result"]
+    assert artifact["failure_code"] == "deck_prepare_retry_exhausted"
+    assert artifact["root_failure_code"] == "invalid_deck_ir"
+    assert artifact["last_prepare_failure_code"] == "invalid_deck_ir"
 
 
 def test_prepare_deck_build_schema_failure_gets_one_bounded_retry(tmp_path: Path) -> None:
@@ -1411,6 +1414,8 @@ def test_prepare_deck_build_second_schema_failure_preserves_root_cause(
     assert artifact["failure_code"] == "deck_prepare_retry_exhausted"
     assert artifact["root_failure_code"] == "deck_prepare_argument_invalid"
     assert artifact["root_failure_summary"] == "The first call omitted headline_intent."
+    assert artifact["last_prepare_failure_code"] == "deck_prepare_argument_invalid"
+    assert artifact["prepare_repair_count"] == 1
 
 
 def test_third_prepare_call_is_rejected_before_service_execution(tmp_path: Path, monkeypatch) -> None:

@@ -876,6 +876,8 @@ def _artifact_completion_fields(
         "prepare_service_result_count": artifact.get("prepare_service_result_count"),
         "prepare_result_count": artifact.get("prepare_result_count"),
         "prepare_retry_executed": artifact.get("prepare_retry_executed"),
+        "prepare_policy_result_count": artifact.get("prepare_policy_result_count"),
+        "prepare_repair_count": artifact.get("prepare_repair_count"),
         "dangling_prepare_call_count": artifact.get("dangling_prepare_call_count"),
         "creative_plan_accepted": artifact.get("creative_plan_accepted"),
         "deck_authoring_contract": artifact.get("deck_authoring_contract"),
@@ -896,6 +898,8 @@ def _artifact_completion_fields(
         "deck_authoring_output_bytes": artifact.get("deck_authoring_output_bytes"),
         "authoring_tool_call_started": artifact.get("authoring_tool_call_started"),
         "prepare_force_reason": artifact.get("prepare_force_reason"),
+        "last_prepare_failure_code": artifact.get("last_prepare_failure_code"),
+        "last_prepare_failure_summary": artifact.get("last_prepare_failure_summary"),
     }
 
 
