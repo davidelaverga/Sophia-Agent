@@ -103,3 +103,10 @@ def test_compose_langgraph_uses_artifact_runtime_image() -> None:
         langgraph_block = _compose_langgraph_block(compose_file)
         assert "dockerfile: backend/Dockerfile.langgraph" in langgraph_block
         assert "dockerfile: backend/Dockerfile\n" not in langgraph_block
+
+
+def test_production_compose_preserves_langgraph_worker_concurrency() -> None:
+    repo_root = Path(__file__).resolve().parents[2]
+    langgraph_block = _compose_langgraph_block(repo_root / "docker" / "docker-compose.yaml")
+
+    assert "--n-jobs-per-worker 10" in langgraph_block
