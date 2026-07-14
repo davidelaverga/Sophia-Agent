@@ -180,6 +180,12 @@ def _compact_json_size(value: Any) -> int | None:
     return _utf8_size(encoded)
 
 
+def _compact_slide_repair_target(*, index: int) -> str:
+    """Return an unambiguous identifier without echoing model-authored content."""
+
+    return f"index {index} (zero-based) = visible slide {index + 1}"
+
+
 def _compact_slide_json_schema(schema: dict[str, Any]) -> None:
     required = schema.setdefault("required", [])
     if "html_body" not in required:
@@ -398,10 +404,13 @@ def _compact_v2_size_violations(value: Any) -> list[tuple[str, str]]:
                 size = _utf8_size(html_body)
                 if size > _V2_MAX_SLIDE_HTML_BODY_BYTES:
                     field = f"slides[{index}].html_body"
+                    target = _compact_slide_repair_target(index=index)
                     violations.append(
                         (
                             field,
-                            f"{field} is {size} bytes; compact-v2 limit is {_V2_MAX_SLIDE_HTML_BODY_BYTES} bytes",
+                            f"{field} is {size} bytes; compact-v2 limit is {_V2_MAX_SLIDE_HTML_BODY_BYTES} bytes; "
+                            f"exact target: {target}; reduce by at least "
+                            f"{size - _V2_MAX_SLIDE_HTML_BODY_BYTES} bytes",
                         )
                     )
             slide_css = slide.get("slide_css")
@@ -409,10 +418,13 @@ def _compact_v2_size_violations(value: Any) -> list[tuple[str, str]]:
                 size = _utf8_size(slide_css)
                 if size > _V2_MAX_SLIDE_CSS_BYTES:
                     field = f"slides[{index}].slide_css"
+                    target = _compact_slide_repair_target(index=index)
                     violations.append(
                         (
                             field,
-                            f"{field} is {size} bytes; compact-v2 limit is {_V2_MAX_SLIDE_CSS_BYTES} bytes",
+                            f"{field} is {size} bytes; compact-v2 limit is {_V2_MAX_SLIDE_CSS_BYTES} bytes; "
+                            f"exact target: {target}; reduce by at least "
+                            f"{size - _V2_MAX_SLIDE_CSS_BYTES} bytes",
                         )
                     )
 

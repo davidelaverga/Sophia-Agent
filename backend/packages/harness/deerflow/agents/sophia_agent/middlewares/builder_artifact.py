@@ -12002,7 +12002,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             repair_message = (
                 "Repair the prepare_deck_build arguments using compact_model_html_v2 and the canonical typed schema. "
                 "Pass creative_plan as a JSON object, not a JSON-encoded string; include every required creative_plan "
-                "field, deck_stylesheet, and slide html_body, then call prepare_deck_build exactly once more."
+                "field, deck_stylesheet, and slide html_body, then call prepare_deck_build exactly once more. "
+                "Slide array references below are zero-based indexes: modify the exact index and matching visible "
+                "slide named in each target; changing a different ordinal slide does not satisfy the error."
             )
             if validation_summary:
                 repair_message += f" Fix these validation errors: {validation_summary}"
