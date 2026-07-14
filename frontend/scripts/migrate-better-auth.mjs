@@ -12,7 +12,7 @@ function getBetterAuthDatabaseUrl() {
   }
 
   const fallbackUrl = process.env.BETTER_AUTH_DATABASE_URL ? process.env.DATABASE_URL : undefined;
-  if (fallbackUrl && fallbackUrl !== databaseUrl) {
+  if (fallbackUrl && databaseTargetIdentity(fallbackUrl) !== databaseTargetIdentity(databaseUrl)) {
     throw new Error("BETTER_AUTH_DATABASE_URL and DATABASE_URL must identify the same database.");
   }
   const expectedRef = process.env.BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF?.trim().toLowerCase();
@@ -30,6 +30,27 @@ function getBetterAuthDatabaseUrl() {
   }
 
   return databaseUrl;
+}
+
+function supabaseProjectRef(databaseUrl) {
+  const parsed = new URL(databaseUrl);
+  const directMatch = parsed.hostname.toLowerCase().match(/^db\.([a-z0-9]+)\.supabase\.(?:co|com)$/);
+  if (directMatch) return directMatch[1] ?? null;
+  if (parsed.hostname.includes(".pooler.supabase.")) {
+    const username = decodeURIComponent(parsed.username);
+    return username.slice(username.lastIndexOf(".") + 1).toLowerCase();
+  }
+  return null;
+}
+
+function databaseTargetIdentity(databaseUrl) {
+  const parsed = new URL(databaseUrl);
+  const projectRef = supabaseProjectRef(databaseUrl);
+  const database = decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+  if (projectRef) return `supabase:${projectRef}:${database}`;
+  const protocol = parsed.protocol === "postgresql:" ? "postgres:" : parsed.protocol;
+  const port = parsed.port || "5432";
+  return `${protocol}//${parsed.hostname.toLowerCase()}:${port}/${database}`;
 }
 
 function getBetterAuthSslMode() {

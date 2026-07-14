@@ -74,6 +74,10 @@ Production, deploy both, run the incremental copies, then update all production
 database variables together. Keep `BETTER_AUTH_SECRET` unchanged. Do not use
 `NEXT_PUBLIC_*` for database or service-role credentials.
 
+`BETTER_AUTH_DATABASE_URL` and `DATABASE_URL` may use different roles or direct
+versus pooled endpoints, but both must resolve to the same Supabase project and
+database name. Startup rejects aliases that resolve to different targets.
+
 Readiness must pass before clearing maintenance mode: expected project refs,
 all tables, both RPCs, private bucket access, Better Auth connectivity, and
 `build_event_store_status=available`. Roll back Render and Vercel variables as

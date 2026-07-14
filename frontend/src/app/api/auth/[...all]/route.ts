@@ -16,6 +16,10 @@ function migrationMaintenanceResponse() {
 }
 
 export async function GET(request: Request) {
+	const maintenance = migrationMaintenanceResponse();
+	if (maintenance) {
+		return maintenance;
+	}
 	if (authBypassEnabled) {
 		return NextResponse.json({ error: "Auth bypass enabled" }, { status: 404 });
 	}

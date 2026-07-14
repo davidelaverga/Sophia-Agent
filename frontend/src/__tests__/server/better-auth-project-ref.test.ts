@@ -19,10 +19,21 @@ describe("Better Auth Supabase project guard", () => {
     ).toBe(target);
   });
 
-  it("rejects divergent aliases and a mismatched project", () => {
+  it("accepts direct and pooler aliases for the same database", () => {
+    const poolerUrl = `postgresql://better_auth_app.${target}:secret@aws-0-us-west-1.pooler.supabase.com:6543/postgres`;
+    const directUrl = `postgresql://postgres:secret@db.${target}.supabase.co:5432/postgres`;
+
+    expect(() => validateBetterAuthDatabaseProject(poolerUrl, directUrl, target)).not.toThrow();
+  });
+
+  it("rejects divergent database targets and a mismatched project", () => {
     const targetUrl = `postgresql://postgres.${target}:secret@aws-0-us-west-1.pooler.supabase.com:6543/postgres`;
     expect(() =>
-      validateBetterAuthDatabaseProject(targetUrl, "postgresql://different/db", target),
+      validateBetterAuthDatabaseProject(
+        targetUrl,
+        `postgresql://postgres:secret@db.${target}.supabase.co:5432/another_database`,
+        target,
+      ),
     ).toThrow(/same database/);
     expect(() =>
       validateBetterAuthDatabaseProject(

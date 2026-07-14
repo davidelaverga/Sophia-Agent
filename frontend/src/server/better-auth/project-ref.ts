@@ -13,12 +13,29 @@ export function supabaseProjectRef(databaseUrl: string): string | null {
   return null;
 }
 
+function databaseName(parsed: URL): string {
+  return decodeURIComponent(parsed.pathname.replace(/^\/+/, ""));
+}
+
+function databaseTargetIdentity(databaseUrl: string): string {
+  const parsed = new URL(databaseUrl);
+  const projectRef = supabaseProjectRef(databaseUrl);
+  const database = databaseName(parsed);
+  if (projectRef) {
+    return `supabase:${projectRef}:${database}`;
+  }
+
+  const protocol = parsed.protocol === "postgresql:" ? "postgres:" : parsed.protocol;
+  const port = parsed.port || "5432";
+  return `${protocol}//${parsed.hostname.toLowerCase()}:${port}/${database}`;
+}
+
 export function validateBetterAuthDatabaseProject(
   primaryUrl: string,
   fallbackUrl: string | undefined,
   expectedRef: string | undefined,
 ) {
-  if (fallbackUrl && fallbackUrl !== primaryUrl) {
+  if (fallbackUrl && databaseTargetIdentity(fallbackUrl) !== databaseTargetIdentity(primaryUrl)) {
     throw new Error("BETTER_AUTH_DATABASE_URL and DATABASE_URL must identify the same database.");
   }
   const expected = expectedRef?.trim().toLowerCase();
