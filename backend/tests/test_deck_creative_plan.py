@@ -65,6 +65,21 @@ def test_creative_plan_forces_native_base_canvas_size(tmp_path) -> None:
     assert plan.design_plan.grid.slide_height_px == 1080
 
 
+def test_creative_plan_normalizes_renderer_unsafe_typography(tmp_path) -> None:
+    raw = _creative_plan()
+    raw["design_plan"]["typography"] = {
+        "display": "Georgia",
+        "body": "Aptos",
+        "utility": "Trebuchet MS",
+    }
+
+    plan = normalize_creative_plan(raw, deck=_deck(tmp_path), request_context="")
+
+    assert plan.design_plan.typography.display == "Cambria"
+    assert plan.design_plan.typography.body == "Calibri"
+    assert plan.design_plan.typography.utility == "Calibri"
+
+
 def test_creative_plan_rejects_unfinished_critique_revision(tmp_path) -> None:
     raw = _creative_plan()
     raw["plan_critique"]["final_scores"]["specificity"] = 2

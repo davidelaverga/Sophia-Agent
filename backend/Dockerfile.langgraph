@@ -7,7 +7,7 @@ ARG NODE_MAJOR=22
 # comment inside a `\`-continued shell command terminates the command early
 # (the comment swallows the rest of the joined line), so the trailing packages
 # would run as bare commands and the image build would fail. Package notes:
-#   libreoffice-impress + fonts-liberation — headless PPTX→PDF conversion for the
+#   libreoffice-impress + Office-metric-compatible fonts — headless PPTX→PDF conversion for the
 #     artifact canvas preview (deerflow/sophia/pptx_preview.py). Without soffice
 #     the preview is skipped and decks stay download-only in the webapp canvas.
 #   poppler-utils — pdftoppm rasterizes preview pages for the builder's
@@ -16,7 +16,7 @@ RUN apt-get update && apt-get install -y \
     curl build-essential gnupg ca-certificates \
     pandoc texlive-xetex texlive-latex-recommended texlive-latex-extra texlive-fonts-recommended texlive-fonts-extra \
     lmodern fonts-dejavu-core libcairo2 libcairo2-dev libpango-1.0-0 libpangocairo-1.0-0 pkg-config \
-    libreoffice-impress fonts-liberation \
+    libreoffice-impress fonts-liberation fonts-crosextra-caladea fonts-crosextra-carlito \
     chromium \
     graphviz \
     poppler-utils \

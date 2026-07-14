@@ -60,6 +60,16 @@ def test_ppt_skill_requires_authoritative_prepare_route_and_design_adapters() ->
     assert "Do not call `prepare_pptx_image_manifest`" in text
 
 
+def test_injected_deck_contract_uses_renderer_safe_pptx_fonts() -> None:
+    text = (PROJECT_ROOT / "skills" / "public" / "sophia" / "deck_craft.md").read_text(encoding="utf-8")
+
+    assert '"typography": {"display": "Cambria", "body": "Calibri"}' in text
+    assert "PPTX typography is Office-safe only" in text
+    assert "Never use Aptos, Georgia" in text
+    assert '"display": "Georgia"' not in text
+    assert "explicit width and height" in text
+
+
 def test_fresh_deck_prompt_surfaces_do_not_teach_old_workflow() -> None:
     text = _surface_text().lower()
 

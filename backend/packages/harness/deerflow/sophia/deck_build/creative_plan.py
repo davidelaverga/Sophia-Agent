@@ -49,6 +49,11 @@ _GENERIC_RHYTHMS = {
     "varied layouts",
     "one idea per slide",
 }
+_CANONICAL_PPTX_FONTS = {
+    "arial": "Arial",
+    "calibri": "Calibri",
+    "cambria": "Cambria",
+}
 
 
 class CreativePlanValidationError(ValueError):
@@ -215,18 +220,27 @@ def _coerce_color_token(raw: Any, *, path: str) -> DeckColorToken:
 def _coerce_typography(raw: Any) -> DeckTypographyPlan | None:
     if not isinstance(raw, dict):
         return None
+    display = _required_text(raw, "display", limit=80, path="creative_plan.design_plan.typography")
+    body = _required_text(raw, "body", limit=80, path="creative_plan.design_plan.typography")
+    utility = _clean_text(raw.get("utility"), limit=80) or body
     return DeckTypographyPlan(
-        display=_required_text(raw, "display", limit=80, path="creative_plan.design_plan.typography"),
-        body=_required_text(raw, "body", limit=80, path="creative_plan.design_plan.typography"),
-        utility=_clean_text(raw.get("utility"), limit=80) or _required_text(
-            raw,
-            "body",
-            limit=80,
-            path="creative_plan.design_plan.typography",
-        ),
+        # Fresh native decks use a deliberately narrow Office-safe contract.
+        # Normalize non-conforming model choices instead of letting browser and
+        # LibreOffice substitutions silently diverge.
+        display=_canonical_pptx_font(display, fallback="Cambria", allow_cambria=True),
+        body=_canonical_pptx_font(body, fallback="Calibri", allow_cambria=False),
+        utility=_canonical_pptx_font(utility, fallback="Calibri", allow_cambria=False),
         display_weight=_int(raw.get("display_weight"), default=720, minimum=100, maximum=900),
         body_weight=_int(raw.get("body_weight"), default=420, minimum=100, maximum=900),
     )
+
+
+def _canonical_pptx_font(value: str, *, fallback: str, allow_cambria: bool) -> str:
+    key = re.sub(r"\s+", " ", value.strip()).lower()
+    canonical = _CANONICAL_PPTX_FONTS.get(key)
+    if canonical == "Cambria" and not allow_cambria:
+        return fallback
+    return canonical or fallback
 
 
 def _coerce_grid(raw: Any) -> DeckGridPlan:

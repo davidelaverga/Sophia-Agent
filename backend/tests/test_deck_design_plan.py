@@ -28,6 +28,8 @@ def test_dark_technical_request_resolves_dark_slide_substrate() -> None:
     assert _background(plan) == "#0A0E14"
     assert plan.grid.slide_width_px == 1920
     assert plan.grid.slide_height_px == 1080
+    assert plan.typography.display == "Cambria"
+    assert plan.typography.body == "Calibri"
 
 
 def test_explicit_light_request_overrides_stale_dark_style_hint() -> None:

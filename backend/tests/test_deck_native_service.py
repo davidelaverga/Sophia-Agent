@@ -7,9 +7,9 @@ import subprocess
 from pathlib import Path
 
 import pytest
-from PIL import Image
+from PIL import Image, ImageFont
 from pptx import Presentation
-from pptx.util import Inches
+from pptx.util import Inches, Pt
 
 from deerflow.sophia.deck_native import DeckNativeService, native_mechanical_report
 from deerflow.sophia.deck_native import service as native_service_module
@@ -245,6 +245,154 @@ def test_deck_native_lint_fix_reports_residue(tmp_path: Path) -> None:
     assert fixed.residue_count == 1
     assert fixed.residue[0]["shape"].startswith("s")
     assert fixed.residue_kinds
+
+
+def test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    """Exercise the production lint/fix subprocess with the failed canary geometry."""
+
+    # Give both macOS and Linux subprocesses the same font bytes so this
+    # regression tests geometry rather than whichever fonts the host installs.
+    home = tmp_path / "home"
+    embedded_font = ImageFont.load_default(size=12).path
+    assert hasattr(embedded_font, "getvalue")
+    for relative_dir in (Path("Library/Fonts"), Path(".fonts")):
+        font_dir = home / relative_dir
+        font_dir.mkdir(parents=True, exist_ok=True)
+        (font_dir / "CanarySerif-Bold.ttf").write_bytes(embedded_font.getvalue())
+    monkeypatch.setenv("HOME", str(home))
+
+    output = tmp_path / "canary-overflow.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    def add_textbox(
+        *,
+        name: str,
+        at: tuple[float, float],
+        size: tuple[float, float],
+        text: str,
+        font_size: float,
+        line_spacing: float,
+        bold: bool = False,
+    ):
+        shape = slide.shapes.add_textbox(
+            Inches(at[0]),
+            Inches(at[1]),
+            Inches(size[0]),
+            Inches(size[1]),
+        )
+        shape.name = name
+        frame = shape.text_frame
+        frame.margin_left = 0
+        frame.margin_right = 0
+        frame.margin_top = 0
+        frame.margin_bottom = 0
+        paragraph = frame.paragraphs[0]
+        paragraph.text = text
+        paragraph.line_spacing = Pt(line_spacing)
+        run = paragraph.runs[0]
+        run.font.name = "CanarySerif"
+        run.font.size = Pt(font_size)
+        run.font.bold = bold
+        return shape
+
+    add_textbox(
+        name="canary-headline",
+        at=(1.25, 0.85),
+        size=(7.75, 0.60),
+        text="Habitat is fragmented, not absent",
+        font_size=37.5,
+        line_spacing=43.1,
+        bold=True,
+    )
+    add_textbox(
+        name="canary-narrative",
+        at=(1.25, 1.77),
+        size=(8.07, 1.56),
+        text="Bees and butterflies forage between existing habitat patches.",
+        font_size=18.75,
+        line_spacing=25.6,
+    )
+    add_textbox(
+        name="canary-kpi",
+        at=(11.22, 6.87),
+        # The production box was 1.47in. Keep the same tight composition with
+        # a 0.02in cushion so the embedded cross-platform test font rewraps.
+        size=(1.45, 0.61),
+        text="0.9 mi",
+        font_size=39,
+        line_spacing=46.8,
+        bold=True,
+    )
+    add_textbox(
+        name="canary-kpi-label",
+        at=(11.22, 7.59),
+        size=(3.19, 0.69),
+        text="average gap between usable forage patches",
+        font_size=14.25,
+        line_spacing=17.1,
+    )
+    mixed = add_textbox(
+        name="canary-mixed-run",
+        at=(1.25, 10.40),
+        size=(4.5, 0.60),
+        text="Signal ",
+        font_size=12,
+        line_spacing=43.1,
+    )
+    emphasis = mixed.text_frame.paragraphs[0].add_run()
+    emphasis.text = "critical corridor failure"
+    emphasis.font.name = "CanarySerif"
+    emphasis.font.size = Pt(40)
+    emphasis.font.bold = True
+    presentation.save(output)
+
+    service = DeckNativeService()
+    fixed = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.lint_issue_count_before >= 2
+    assert fixed.fix_applied_count >= 2
+    assert fixed.residue_count == 0
+    # The producer counts unresolved `remaining_issue_shapes` in the first
+    # number, so equality proves none survived this repair pass.
+    assert fixed.lint_issue_count_before == fixed.fix_applied_count
+
+    clean = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+    assert clean.success is True
+    assert clean.lint_issue_count_before == 0
+    assert clean.fix_applied_count == 0
+    assert clean.residue_count == 0
+
+    repaired = Presentation(output)
+    repaired_sizes = {
+        shape.name: min(
+            run.font.size.pt
+            for paragraph in shape.text_frame.paragraphs
+            for run in paragraph.runs
+            if run.font.size is not None
+        )
+        for shape in repaired.slides[0].shapes
+        if shape.name in {"canary-headline", "canary-kpi"}
+    }
+    assert set(repaired_sizes) == {"canary-headline", "canary-kpi"}
+    assert 31 <= repaired_sizes["canary-headline"] < 37.5
+    assert 31 <= repaired_sizes["canary-kpi"] < 39
+    repaired_mixed = next(shape for shape in repaired.slides[0].shapes if shape.name == "canary-mixed-run")
+    mixed_sizes = [
+        run.font.size.pt
+        for run in repaired_mixed.text_frame.paragraphs[0].runs
+        if run.font.size is not None
+    ]
+    assert len(mixed_sizes) == 2
+    assert mixed_sizes[0] >= 10
+    assert mixed_sizes[1] >= mixed_sizes[0] * 2
+    assert mixed_sizes[1] < 40
 
 
 def test_deck_native_inspect_marks_full_slide_picture_inventory(tmp_path: Path) -> None:

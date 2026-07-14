@@ -67,6 +67,7 @@ import contextlib
 import copy
 import io
 import json
+import math
 import re
 import shutil
 import subprocess
@@ -2340,11 +2341,16 @@ def _scale_font(shape, scale, default_pt):
     for para in shape.text_frame.paragraphs:
         if not para.text.strip():
             continue
-        eff = _effective_font_pt(para, default_pt)
-        new = max(MIN_FONT_PT, round(eff * scale * 2) / 2)
+        paragraph_default = _effective_font_pt(para, default_pt)
         for run in para.runs:
+            # Preserve mixed-run hierarchy: each explicit run scales from its
+            # own size instead of inheriting the paragraph's first-run size.
+            eff = float(run.font.size.pt) if run.font.size is not None else paragraph_default
+            # Round down to the nearest half point so the saved run stays on
+            # the fitting side of the estimator's wrap threshold.
+            new = max(MIN_FONT_PT, math.floor(eff * scale * 2) / 2)
             run.font.size = Pt(new)
-        changed.append((eff, new))
+            changed.append((eff, new))
     return changed
 
 
@@ -2401,7 +2407,15 @@ def cmd_fix(args):
                 else:
                     # (b) shrink-to-fit via explicit font scaling
                     usable = max(r.height - 0.1, 0.2)
-                    scale = max(usable / (usable + ov), MIN_FONT_SCALE)
+                    if r.sd is not None:
+                        # Find the largest width-aware scale that actually
+                        # fits, then keep a small renderer-drift cushion.
+                        scale = max(
+                            MIN_FONT_SCALE,
+                            min(0.99, r.sd.font_scale_to_fit(MIN_FONT_SCALE) * 0.985),
+                        )
+                    else:
+                        scale = max(usable / (usable + ov), MIN_FONT_SCALE)
                     default_pt = (r.sd.default_font_size or r.sd._get_default_font_size()) if r.sd else 14
                     changed = _scale_font(sh, scale, default_pt)
                     if not any(abs(a - b) > 0.25 for a, b in changed):

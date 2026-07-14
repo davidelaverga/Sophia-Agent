@@ -10,9 +10,11 @@ import sys
 import time
 from collections.abc import Callable, Iterator
 from datetime import UTC, datetime
+from html.parser import HTMLParser
 from pathlib import Path
 from typing import Any
 
+import tinycss2
 from langchain.tools import ToolRuntime
 
 from deerflow.sandbox.tools import get_thread_data, replace_virtual_path
@@ -90,6 +92,21 @@ _NATIVE_BASE = f"{_NATIVE}/base.pptx"
 _NATIVE_PATCH = f"{_NATIVE}/deck.patch.json"
 _NATIVE_RENDER_DIR = f"{_NATIVE}/rendered"
 _SCHEMA = "sophia-deck-build/v1"
+_SAFE_PPTX_FONTS = {"arial", "calibri", "cambria"}
+_GENERIC_CSS_FONTS = {"cursive", "fantasy", "monospace", "sans-serif", "serif", "system-ui"}
+_FONT_SIZE_KEYWORDS = {
+    "large",
+    "larger",
+    "medium",
+    "small",
+    "smaller",
+    "x-large",
+    "x-small",
+    "xx-large",
+    "xx-small",
+    "xxx-large",
+}
+_BASE_FONT_SELECTORS = {"*", ".slide-root", "body", "html", "main", "main.slide-root"}
 _BANNED_STYLE_RE = re.compile(r"\b(chalkboard|blackboard|whiteboard|handwritten|sketch|cyberpunk|neon)\b", re.I)
 _BANNED_TEXT_RE = re.compile(r"THE TEXT READS|title reads|large readable text|paragraph text|axis labels?|formula", re.I)
 _NEGATED_BANNED_TERM_RE = re.compile(r"(?:\bno\b|\bnot\b|\bwithout\b|\bavoid\b|\bnever\b|\bdo\s+not\b)\W*$", re.I)
@@ -1097,13 +1114,17 @@ class DeckBuildService:
             slide_count=len(deck.slides),
             run_type="tool",
             deck_compile_mode=deck.deck_compile_mode,
-            inputs={"patch_file": basename(html2patch.patch_path), "output_file": basename(deck.output_path), "fix": True},
+            inputs={"patch_file": basename(html2patch.patch_path), "output_file": basename(deck.output_path), "fix": False},
         ) as run:
             applied = self._native_service.apply_patch(
                 base_deck_path=str(base_host),
                 patch_path=str(patch_host),
                 output_path=str(output_host),
-                fix=True,
+                # Lint/fix runs as the next explicit stage. Keeping apply
+                # mutation-free makes its issue/fix telemetry honest and
+                # prevents the first repair pass from disappearing before the
+                # mechanical report is assembled.
+                fix=False,
             )
             finish_span(run, _native_patch_span_outputs(applied))
         if not applied.success:
@@ -2443,6 +2464,8 @@ def _validate_authoring_inputs(deck: DeckBuild, slides: list[dict[str, Any]]) ->
         raise _authoring_failure("deck_stylesheet exceeds 24576 bytes.")
     if "</style" in stylesheet.lower():
         raise _authoring_failure("deck_stylesheet contains a forbidden closing style tag.")
+    if deck.deck_authoring_contract == "compact_model_html_v2":
+        _validate_compact_pptx_font_contract(stylesheet, slides)
     total_bytes = len(stylesheet.encode("utf-8"))
     for index, raw in enumerate(slides):
         total_bytes += _validate_slide_authoring_input(
@@ -2454,6 +2477,174 @@ def _validate_authoring_inputs(deck: DeckBuild, slides: list[dict[str, Any]]) ->
         raise _authoring_failure("Deck authoring payload exceeds 131072 bytes.")
     if deck.deck_authoring_contract == "compact_model_html_v2":
         _validate_v2_authoring_sizes(deck, slides)
+
+
+def _validate_compact_pptx_font_contract(stylesheet: str, slides: list[dict[str, Any]]) -> None:
+    base_font_declared = _validate_css_font_declarations(
+        stylesheet,
+        label="deck_stylesheet",
+        require_base=True,
+    )
+    if not base_font_declared:
+        raise _authoring_failure(
+            "deck_stylesheet must set Cambria, Calibri, or Arial on main, body, html, .slide-root, or the universal selector."
+        )
+    for index, raw in enumerate(slides):
+        _validate_css_font_declarations(
+            str(raw.get("slide_css") or ""),
+            label=f"slides[{index}].slide_css",
+            require_base=False,
+        )
+        html_body = str(raw.get("html_body") or "")
+        for inline_style in _inline_style_values(html_body):
+            _validate_font_declaration_list(
+                inline_style,
+                label=f"slides[{index}].html_body inline style",
+                base_selector=False,
+            )
+
+
+def _validate_css_font_declarations(css: str, *, label: str, require_base: bool) -> bool:
+    rules = tinycss2.parse_stylesheet(css, skip_comments=True, skip_whitespace=True)
+    return _validate_css_font_rule_nodes(
+        rules,
+        label=label,
+        allow_base=require_base,
+    )
+
+
+def _validate_css_font_rule_nodes(rules: list[Any], *, label: str, allow_base: bool) -> bool:
+    base_font_declared = False
+    for rule in rules:
+        rule_type = getattr(rule, "type", "")
+        if rule_type == "at-rule" and getattr(rule, "content", None) is not None:
+            nested = tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True)
+            _validate_css_font_rule_nodes(
+                nested,
+                label=f"{label} @{getattr(rule, 'lower_at_keyword', 'rule')}",
+                # A conditional/grouping rule cannot prove that the canvas
+                # always receives a base font, but every nested override must
+                # still satisfy the same family contract.
+                allow_base=False,
+            )
+            continue
+        if rule_type != "qualified-rule":
+            continue
+        selector = tinycss2.serialize(rule.prelude).strip()
+        is_base = bool(allow_base and _selector_declares_base_font(selector))
+        if _validate_font_declaration_list(
+            tinycss2.serialize(rule.content),
+            label=f"{label} selector {safe_excerpt(selector, limit=80)}",
+            base_selector=is_base,
+        ):
+            base_font_declared = True
+    return base_font_declared
+
+
+def _selector_declares_base_font(selector: str) -> bool:
+    return any(arm.strip().lower() in _BASE_FONT_SELECTORS for arm in selector.split(","))
+
+
+class _InlineStyleCollector(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.styles: list[str] = []
+
+    def handle_starttag(self, _tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        for name, value in attrs:
+            if name.lower() == "style" and value:
+                self.styles.append(value)
+
+
+def _inline_style_values(html: str) -> list[str]:
+    collector = _InlineStyleCollector()
+    try:
+        collector.feed(html)
+    except Exception:
+        return []
+    return collector.styles
+
+
+def _validate_font_declaration_list(css: str, *, label: str, base_selector: bool) -> bool:
+    safe_explicit_family = False
+    declarations = tinycss2.parse_declaration_list(css, skip_comments=True, skip_whitespace=True)
+    for declaration in declarations:
+        if getattr(declaration, "type", "") in {"at-rule", "error", "qualified-rule"}:
+            raise _authoring_failure(
+                f"{label} uses nested or malformed CSS rules, which are unsupported for compact PPTX font validation."
+            )
+        if getattr(declaration, "type", "") == "declaration" and declaration.lower_name == "all":
+            raise _authoring_failure(
+                f"{label} uses the CSS all shorthand, which can reset the required Office-safe font family."
+            )
+        if getattr(declaration, "type", "") != "declaration" or declaration.lower_name not in {"font", "font-family"}:
+            continue
+        family_tokens = _font_family_tokens(declaration)
+        serialized = tinycss2.serialize(declaration.value).strip()
+        if family_tokens is None and serialized.lower() == "inherit":
+            continue
+        families = _font_family_names(family_tokens or [])
+        if not families or families[0] not in _SAFE_PPTX_FONTS:
+            raise _authoring_failure(
+                f"{label} uses unsupported PPTX {declaration.lower_name} '{safe_excerpt(serialized, limit=80)}'. "
+                "Use Cambria for headings and Calibri or Arial for body and utility text."
+            )
+        if any(family not in _SAFE_PPTX_FONTS | _GENERIC_CSS_FONTS for family in families[1:]):
+            raise _authoring_failure(
+                f"{label} uses a non-portable PPTX font fallback in '{safe_excerpt(serialized, limit=80)}'. "
+                "Use only Cambria, Calibri, Arial, and generic fallback families."
+            )
+        safe_explicit_family = True
+    return bool(base_selector and safe_explicit_family)
+
+
+def _font_family_tokens(declaration: Any) -> list[Any] | None:
+    tokens = list(declaration.value)
+    if declaration.lower_name == "font-family":
+        return tokens
+    significant = [index for index, token in enumerate(tokens) if token.type not in {"comment", "whitespace"}]
+    size_position = next(
+        (
+            position
+            for position, index in enumerate(significant)
+            if _is_css_font_size_token(tokens[index])
+        ),
+        None,
+    )
+    if size_position is None:
+        return None
+    family_position = size_position + 1
+    if family_position < len(significant) and getattr(tokens[significant[family_position]], "value", None) == "/":
+        family_position += 2
+    if family_position >= len(significant):
+        return []
+    return tokens[significant[family_position] :]
+
+
+def _is_css_font_size_token(token: Any) -> bool:
+    if token.type in {"dimension", "percentage"}:
+        return True
+    return token.type == "ident" and str(token.value).lower() in _FONT_SIZE_KEYWORDS
+
+
+def _font_family_names(tokens: list[Any]) -> list[str]:
+    groups: list[list[Any]] = [[]]
+    for token in tokens:
+        if token.type == "literal" and token.value == ",":
+            groups.append([])
+        else:
+            groups[-1].append(token)
+    names: list[str] = []
+    for group in groups:
+        significant = [token for token in group if token.type not in {"comment", "whitespace"}]
+        if len(significant) == 1 and significant[0].type == "string":
+            value = str(significant[0].value)
+        else:
+            value = tinycss2.serialize(group).strip().strip("\"'")
+        normalized = re.sub(r"\s+", " ", value).strip().lower()
+        if normalized:
+            names.append(normalized)
+    return names
 
 
 def _validate_v2_authoring_sizes(deck: DeckBuild, slides: list[dict[str, Any]]) -> None:

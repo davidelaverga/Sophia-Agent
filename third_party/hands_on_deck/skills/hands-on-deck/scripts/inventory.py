@@ -25,8 +25,10 @@ Usage:
 import argparse
 import json
 import platform
+import re
 import sys
 from dataclasses import dataclass
+from functools import lru_cache
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
@@ -125,36 +127,90 @@ The output JSON includes:
         sys.exit(1)
 
 
-SERIF_HINTS = ("caslon", "georgia", "times", "serif", "lora", "playfair", "garamond", "baskerville")
-_SANS_FALLBACKS = [
-    "/System/Library/Fonts/Supplemental/Arial.ttf",
-    "/System/Library/Fonts/Helvetica.ttc",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf",
-]
-_SERIF_FALLBACKS = [
-    "/System/Library/Fonts/Supplemental/Georgia.ttf",
-    "/System/Library/Fonts/Supplemental/Times New Roman.ttf",
-    "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
-    "/usr/share/fonts/truetype/liberation/LiberationSerif-Regular.ttf",
-]
+SERIF_HINTS = (
+    "baskerville",
+    "cambria",
+    "caslon",
+    "garamond",
+    "georgia",
+    "lora",
+    "playfair",
+    "serif",
+    "times",
+)
+_FONT_EXTENSIONS = {".ttf", ".otf", ".ttc", ".dfont"}
 
 
-def load_measure_font(font_name: str, size: int):
+def _fallback_font_paths(
+    *,
+    serif: bool,
+    bold: bool,
+    italic: bool,
+    font_name: str = "",
+) -> list[str]:
+    """Return style-aware fallbacks in roughly the order office renderers use.
+
+    The production PPTX preview renderer substitutes Noto/Liberation when a
+    requested Office font is unavailable.  Measuring with a regular fallback
+    for bold text materially underestimates width, so every style combination
+    gets an explicit candidate list.
+    """
+
+    style = "BoldItalic" if bold and italic else "Bold" if bold else "Italic" if italic else "Regular"
+    spaced_style = "Bold Italic" if bold and italic else "Bold" if bold else "Italic" if italic else ""
+    oblique_style = "BoldOblique" if bold and italic else "Bold" if bold else "Oblique" if italic else ""
+    family_key = re.sub(r"[^a-z0-9]", "", font_name.lower())
+    metric_compatible: list[str] = []
+    if family_key in {"cambria", "caladea"}:
+        metric_compatible.append(f"/usr/share/fonts/truetype/crosextra/Caladea-{style}.ttf")
+    elif family_key in {"calibri", "carlito"}:
+        metric_compatible.append(f"/usr/share/fonts/truetype/crosextra/Carlito-{style}.ttf")
+    if serif:
+        return metric_compatible + [
+            f"/System/Library/Fonts/Supplemental/Georgia{(' ' + spaced_style) if spaced_style else ''}.ttf",
+            f"/System/Library/Fonts/Supplemental/Times New Roman{(' ' + spaced_style) if spaced_style else ''}.ttf",
+            f"/usr/share/fonts/truetype/noto/NotoSerif-{style}.ttf",
+            f"/usr/share/fonts/truetype/liberation2/LiberationSerif-{style}.ttf",
+            f"/usr/share/fonts/truetype/liberation/LiberationSerif-{style}.ttf",
+            f"/usr/share/fonts/truetype/dejavu/DejaVuSerif-{style}.ttf" if style != "Regular" else "/usr/share/fonts/truetype/dejavu/DejaVuSerif.ttf",
+        ]
+    return metric_compatible + [
+        f"/System/Library/Fonts/Supplemental/Arial{(' ' + spaced_style) if spaced_style else ''}.ttf",
+        f"/System/Library/Fonts/Helvetica{(' ' + spaced_style) if spaced_style else ''}.ttc",
+        f"/usr/share/fonts/truetype/noto/NotoSans-{style}.ttf",
+        f"/usr/share/fonts/truetype/liberation2/LiberationSans-{style}.ttf",
+        f"/usr/share/fonts/truetype/liberation/LiberationSans-{style}.ttf",
+        f"/usr/share/fonts/truetype/dejavu/DejaVuSans-{oblique_style}.ttf" if oblique_style else "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    ]
+
+
+def load_measure_font(font_name: str, size: int, *, bold: bool = False, italic: bool = False):
     """Load a font for text measurement at the CORRECT SIZE.
 
     Critical: PIL's bare load_default() is an ~11px bitmap font that ignores
     the requested size, which silently disables overflow detection for any
     font not installed on this machine. Always fall back to a sized system
     font instead (serif-aware so metrics stay roughly comparable)."""
-    path = ShapeData.get_font_path(font_name) if font_name else None
+    path = ShapeData.get_font_path(font_name, bold=bold, italic=italic) if font_name else None
     if path:
         try:
             return ImageFont.truetype(path, size=size)
         except Exception:
             pass
     serif = any(h in (font_name or "").lower() for h in SERIF_HINTS)
-    candidates = (_SERIF_FALLBACKS + _SANS_FALLBACKS) if serif else (_SANS_FALLBACKS + _SERIF_FALLBACKS)
+    primary = _fallback_font_paths(
+        serif=serif,
+        bold=bold,
+        italic=italic,
+        font_name=font_name,
+    )
+    secondary = _fallback_font_paths(
+        serif=not serif,
+        bold=bold,
+        italic=italic,
+        font_name=font_name,
+    )
+    candidates = primary + secondary
     for cand in candidates:
         if Path(cand).exists():
             try:
@@ -319,7 +375,8 @@ class ShapeData:
         return int(inches * dpi)
 
     @staticmethod
-    def get_font_path(font_name: str) -> Optional[str]:
+    @lru_cache(maxsize=128)
+    def get_font_path(font_name: str, *, bold: bool = False, italic: bool = False) -> Optional[str]:
         """Get the font file path for a given font name.
 
         Args:
@@ -330,14 +387,6 @@ class ShapeData:
         """
         system = platform.system()
 
-        # Common font file variations to try
-        font_variations = [
-            font_name,
-            font_name.lower(),
-            font_name.replace(" ", ""),
-            font_name.replace(" ", "-"),
-        ]
-
         # Define font directories and extensions by platform
         if system == "Darwin":  # macOS
             font_dirs = [
@@ -345,42 +394,57 @@ class ShapeData:
                 "/Library/Fonts/",
                 "~/Library/Fonts/",
             ]
-            extensions = [".ttf", ".otf", ".ttc", ".dfont"]
         else:  # Linux
             font_dirs = [
                 "/usr/share/fonts/truetype/",
                 "/usr/local/share/fonts/",
                 "~/.fonts/",
             ]
-            extensions = [".ttf", ".otf"]
 
-        # Try to find the font file
-        from pathlib import Path
+        family_key = re.sub(r"[^a-z0-9]", "", font_name.lower())
+        if not family_key:
+            return None
+        style_tokens = {"bold", "semibold", "demibold", "black", "heavy"}
+        italic_tokens = {"italic", "oblique"}
+        best: tuple[int, str] | None = None
 
+        # Search recursively: macOS keeps common Office fonts under
+        # ``Supplemental/`` and Linux font packages use family subdirectories.
+        # The old top-level-only scan could pick ``SFGeorgian.ttf`` for
+        # ``Georgia`` and stopped before the real face was considered.
         for font_dir in font_dirs:
             font_dir_path = Path(font_dir).expanduser()
             if not font_dir_path.exists():
                 continue
-
-            # First try exact matches
-            for variant in font_variations:
-                for ext in extensions:
-                    font_path = font_dir_path / f"{variant}{ext}"
-                    if font_path.exists():
-                        return str(font_path)
-
-            # Then try fuzzy matching - find files containing the font name
             try:
-                for file_path in font_dir_path.iterdir():
-                    if file_path.is_file():
-                        file_name_lower = file_path.name.lower()
-                        font_name_lower = font_name.lower().replace(" ", "")
-                        if font_name_lower in file_name_lower and any(
-                            file_name_lower.endswith(ext) for ext in extensions
-                        ):
-                            return str(file_path)
+                candidates = font_dir_path.rglob("*")
+                for file_path in candidates:
+                    if not file_path.is_file() or file_path.suffix.lower() not in _FONT_EXTENSIONS:
+                        continue
+                    stem_key = re.sub(r"[^a-z0-9]", "", file_path.stem.lower())
+                    if not stem_key.startswith(family_key):
+                        continue
+                    suffix = stem_key[len(family_key) :]
+                    has_bold = any(token in suffix for token in style_tokens)
+                    has_italic = any(token in suffix for token in italic_tokens)
+                    family_exact = suffix == "" or all(
+                        token in style_tokens | italic_tokens | {"regular", "roman"}
+                        for token in re.findall(r"[a-z]+", suffix)
+                    )
+                    score = 100 if family_exact else 60
+                    score += 20 if has_bold == bold else -30
+                    score += 15 if has_italic == italic else -25
+                    candidate = (score, str(file_path))
+                    if best is None or candidate > best:
+                        best = candidate
             except (OSError, PermissionError):
                 continue
+
+        # Reject loose substring matches with a style mismatch. Falling back
+        # to the correct serif/sans weight is safer than measuring the wrong
+        # family or a regular face for bold text.
+        if best is not None and best[0] >= 90:
+            return best[1]
 
         return None
 
@@ -617,19 +681,126 @@ class ShapeData:
 
         return wrapped
 
-    def _estimate_frame_overflow(self) -> None:
-        """Estimate if text overflows the shape bounds using PIL text measurement."""
+    def _paragraph_line_font_sizes(
+        self,
+        paragraph: Any,
+        para_data: ParagraphData,
+        *,
+        max_width_px: int,
+        draw: Any,
+        default_font_size: float,
+        font_scale: float,
+    ) -> list[float]:
+        """Wrap a paragraph using each run's actual font metrics.
+
+        ``html2patch`` preserves mixed inline runs, so measuring the entire
+        paragraph with the first run can miss a later bold or larger span.
+        This lightweight token wrapper keeps run-specific widths and records
+        the largest point size on every resulting line.
+        """
+
+        fallback_name = para_data.font_name or "Arial"
+        fallback_size = float(para_data.font_size or default_font_size)
+        styled_runs: list[tuple[str, str, float, bool, bool]] = []
+        for run in paragraph.runs:
+            text = str(run.text or "")
+            if not text:
+                continue
+            font = run.font
+            size_pt = float(font.size.pt) if font.size is not None else fallback_size
+            styled_runs.append(
+                (
+                    text,
+                    str(font.name or fallback_name),
+                    max(1.0, size_pt * max(0.01, font_scale)),
+                    bool(font.bold if font.bold is not None else para_data.bold),
+                    bool(font.italic if font.italic is not None else para_data.italic),
+                )
+            )
+        if not styled_runs:
+            styled_runs.append(
+                (
+                    str(paragraph.text or ""),
+                    fallback_name,
+                    max(1.0, fallback_size * max(0.01, font_scale)),
+                    bool(para_data.bold),
+                    bool(para_data.italic),
+                )
+            )
+
+        font_cache: dict[tuple[str, int, bool, bool], Any] = {}
+        line_sizes: list[float] = []
+        line_width = 0.0
+        line_size = 0.0
+        line_has_text = False
+        pending_space_width = 0.0
+        pending_space_size = 0.0
+
+        def measured_width(text: str, name: str, size_pt: float, bold: bool, italic: bool) -> float:
+            size_px = max(1, round(size_pt * 96 / 72))
+            key = (name, size_px, bold, italic)
+            font = font_cache.get(key)
+            if font is None:
+                font = load_measure_font(name, size_px, bold=bold, italic=italic)
+                font_cache[key] = font
+            return float(draw.textlength(text, font=font))
+
+        def finish_line(*, force: bool = False, fallback_line_size: float = fallback_size) -> None:
+            nonlocal line_width, line_size, line_has_text, pending_space_width, pending_space_size
+            if line_has_text or force:
+                line_sizes.append(max(line_size, fallback_line_size * max(0.01, font_scale), 1.0))
+            line_width = 0.0
+            line_size = 0.0
+            line_has_text = False
+            pending_space_width = 0.0
+            pending_space_size = 0.0
+
+        for text, name, size_pt, bold, italic in styled_runs:
+            for token in re.findall(r"\n|[^\S\n]+|[^\s]+", text):
+                if token == "\n":
+                    finish_line(force=True, fallback_line_size=size_pt)
+                    continue
+                token_width = measured_width(token, name, size_pt, bold, italic)
+                if token.isspace():
+                    if line_has_text:
+                        pending_space_width += token_width
+                        pending_space_size = max(pending_space_size, size_pt)
+                    continue
+                candidate_width = line_width + pending_space_width + token_width
+                if line_has_text and candidate_width > max_width_px:
+                    finish_line()
+                else:
+                    line_width += pending_space_width
+                    line_size = max(line_size, pending_space_size)
+                line_width += token_width
+                line_size = max(line_size, size_pt)
+                line_has_text = True
+                pending_space_width = 0.0
+                pending_space_size = 0.0
+
+        finish_line()
+        return line_sizes
+
+    def _frame_overflow_inches(self, *, font_scale: float = 1.0) -> Optional[float]:
+        """Estimate frame overflow at ``font_scale`` using 96-DPI text metrics.
+
+        PowerPoint run sizes are points while Pillow expects pixel sizes.  The
+        previous implementation passed the point value straight to Pillow,
+        making every measured glyph about 25% too narrow at 96 DPI.  That was
+        enough for a one-line HTML title to rewrap under LibreOffice without
+        the native lint seeing it.
+        """
         if not self.shape or not hasattr(self.shape, "text_frame"):
-            return
+            return None
 
         text_frame = self.shape.text_frame  # type: ignore
         if not text_frame or not text_frame.paragraphs:
-            return
+            return None
 
         # Get usable dimensions after accounting for margins
         usable_width_px, usable_height_px = self._get_usable_dimensions(text_frame)
         if usable_width_px <= 0 or usable_height_px <= 0:
-            return
+            return None
 
         # Set up PIL for text measurement
         dummy_img = Image.new("RGB", (1, 1))
@@ -647,33 +818,35 @@ class ShapeData:
 
             para_data = ParagraphData(paragraph)
 
-            # Load font for this paragraph (sized fallback when not installed —
-            # a bare load_default() ignores size and breaks overflow detection)
-            font_name = para_data.font_name or "Arial"
-            font_size = int(para_data.font_size or default_font_size)
-            font = load_measure_font(font_name, font_size)
+            line_font_sizes = self._paragraph_line_font_sizes(
+                paragraph,
+                para_data,
+                max_width_px=usable_width_px,
+                draw=draw,
+                default_font_size=default_font_size,
+                font_scale=font_scale,
+            )
 
-            # Wrap all lines in this paragraph
-            all_wrapped_lines = []
-            for line in paragraph.text.split("\n"):
-                wrapped = self._wrap_text_line(line, usable_width_px, draw, font)
-                all_wrapped_lines.extend(wrapped)
-
-            if all_wrapped_lines:
+            if line_font_sizes:
                 # Calculate line height
                 if para_data.line_spacing:
-                    # Custom line spacing explicitly set
-                    line_height_px = para_data.line_spacing * 96 / 72
+                    # A fixed line spacing smaller than a later inline run does
+                    # not make that glyph shorter; keep the larger contribution.
+                    paragraph_height_px = sum(
+                        max(para_data.line_spacing, size_pt) * 96 / 72
+                        for size_pt in line_font_sizes
+                    )
                 else:
-                    # PowerPoint default single spacing (1.0x font size)
-                    line_height_px = font_size * 96 / 72
+                    # PowerPoint default single spacing follows the tallest
+                    # run on each line, not merely the paragraph's first run.
+                    paragraph_height_px = sum(size_pt * 96 / 72 for size_pt in line_font_sizes)
 
                 # Add space_before (except first paragraph)
                 if para_idx > 0 and para_data.space_before:
                     total_height_px += para_data.space_before * 96 / 72
 
                 # Add paragraph text height
-                total_height_px += len(all_wrapped_lines) * line_height_px
+                total_height_px += paragraph_height_px
 
                 # Add space_after
                 if para_data.space_after:
@@ -684,7 +857,35 @@ class ShapeData:
             overflow_px = total_height_px - usable_height_px
             overflow_inches = round(overflow_px / 96.0, 2)
             if overflow_inches > 0.05:  # Only report significant overflows
-                self.frame_overflow_bottom = overflow_inches
+                return overflow_inches
+        return None
+
+    def _estimate_frame_overflow(self) -> None:
+        """Estimate if text overflows the shape bounds using PIL text measurement."""
+        self.frame_overflow_bottom = self._frame_overflow_inches()
+
+    def font_scale_to_fit(self, minimum_scale: float = 0.6) -> float:
+        """Largest uniform font scale whose estimated text fits this frame.
+
+        The deterministic fixer uses this instead of deriving a scale from
+        overflow *height*.  A single extra wrapped line previously forced the
+        global 0.6 floor even when a small width adjustment (for example 0.86)
+        was sufficient to keep a headline on one line.
+        """
+
+        floor = min(1.0, max(0.05, float(minimum_scale)))
+        if self._frame_overflow_inches(font_scale=1.0) is None:
+            return 1.0
+        if self._frame_overflow_inches(font_scale=floor) is not None:
+            return floor
+        low, high = floor, 1.0
+        for _ in range(14):
+            midpoint = (low + high) / 2
+            if self._frame_overflow_inches(font_scale=midpoint) is None:
+                low = midpoint
+            else:
+                high = midpoint
+        return round(low, 4)
 
     def _calculate_slide_overflow(self) -> None:
         """Calculate if shape overflows the slide boundaries."""

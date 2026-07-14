@@ -49,6 +49,8 @@ def test_langgraph_dockerfile_installs_pdf_runtime() -> None:
         "graphviz",
         "lmodern",
         "fonts-dejavu-core",
+        "fonts-crosextra-caladea",
+        "fonts-crosextra-carlito",
         "chromium",
     ):
         assert package in contents

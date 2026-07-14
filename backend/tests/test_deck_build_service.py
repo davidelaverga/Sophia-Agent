@@ -5,6 +5,7 @@ import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
 from langchain_core.messages import ToolMessage
 from langgraph.types import Command
 from pptx import Presentation
@@ -456,6 +457,7 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert result.native_html_slide_count == 2
     assert result.hybrid_slide_count == 1
     assert native_calls[0]["html_basenames"] == ["01-cover.html", "02-architecture.html", "03-closing.html"]
+    assert next(call for call in native_calls if call["stage"] == "apply_patch")["fix"] is False
     outputs = tmp_path / "outputs"
     prompt_files = sorted((outputs / "assets" / "prompts").glob("slide-*.json"))
     assert len(prompt_files) == 1
@@ -673,7 +675,7 @@ def test_deck_build_service_ignores_hidden_unused_eyebrow_selector(tmp_path: Pat
         slides=_compact_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
         deck_stylesheet=(
-            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926}"
+            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Calibri,Arial,sans-serif}"
             ".eyebrow-none{display:none}"
             "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
         ),
@@ -697,7 +699,7 @@ def test_deck_build_service_still_rejects_visible_eyebrow_chrome(tmp_path: Path)
         slides=_compact_slides(visible_eyebrow_on_slide=2),
         output_path=f"{_OUTPUTS}deck.pptx",
         deck_stylesheet=(
-            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926}"
+            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Calibri,Arial,sans-serif}"
             "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
         ),
         authoring_contract="compact_model_html_v2",
@@ -707,6 +709,89 @@ def test_deck_build_service_still_rejects_visible_eyebrow_chrome(tmp_path: Path)
     assert result.success is False
     assert result.failure_code == "deck_quality_failed"
     assert "chrome" in str(result.failure_summary).lower()
+
+
+def test_deck_build_service_rejects_renderer_unsafe_compact_fonts(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        native_service=_FakeNativeService(),
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_compact_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        deck_stylesheet=(
+            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Georgia,serif}"
+            "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
+        ),
+        authoring_contract="compact_model_html_v2",
+        creative_plan=_creative_plan(include_asset=False),
+    )
+
+    assert result.success is False
+    assert result.failure_code == "invalid_deck_ir"
+    assert "Cambria" in str(result.failure_summary)
+
+
+@pytest.mark.parametrize(
+    "stylesheet",
+    [
+        "main{font-family:Calibri,Arial,sans-serif}h1{font:700 60px/1.1 Georgia,serif}",
+        ".unused{font-family:Calibri,Arial,sans-serif}main{color:#1F2A37}",
+        "main h1{font-family:Calibri,Arial,sans-serif}",
+        "body .unused{font-family:Calibri,Arial,sans-serif}",
+        "main{font-family:'Arial Black',sans-serif}",
+        "main{font-family:Calibri,Arial,sans-serif}@media all{h1{font-family:Georgia,serif}}",
+        "main{font-family:Calibri,Arial,sans-serif}@supports(display:grid){h1{font:700 60px Georgia,serif}}",
+        "main{font-family:Calibri,Arial,sans-serif;h1{font-family:Georgia,serif}}",
+        "main{font-family:Calibri,Arial,sans-serif}h1{all:initial}",
+    ],
+)
+def test_compact_font_contract_rejects_shorthand_fake_and_unused_safe_families(stylesheet: str) -> None:
+    with pytest.raises(deck_service.DeckBuildFailure) as exc:
+        deck_service._validate_compact_pptx_font_contract(stylesheet, _compact_slides())
+
+    assert exc.value.code == "invalid_deck_ir"
+    assert any(token in exc.value.summary for token in ("Cambria", "nested", "Office-safe"))
+
+
+def test_compact_font_contract_rejects_unsafe_inline_font_shorthand() -> None:
+    slides = _compact_slides()
+    slides[0]["html_body"] += '<span style="font:700 40px Georgia,serif">Unsafe</span>'
+
+    with pytest.raises(deck_service.DeckBuildFailure) as exc:
+        deck_service._validate_compact_pptx_font_contract(
+            "main{font-family:Calibri,Arial,sans-serif}",
+            slides,
+        )
+
+    assert "inline style" in exc.value.summary
+
+
+def test_compact_font_contract_rejects_unquoted_inline_font_family() -> None:
+    slides = _compact_slides()
+    slides[0]["html_body"] += "<span style=font-family:Georgia>Unsafe</span>"
+
+    with pytest.raises(deck_service.DeckBuildFailure) as exc:
+        deck_service._validate_compact_pptx_font_contract(
+            "main{font-family:Calibri,Arial,sans-serif}",
+            slides,
+        )
+
+    assert "inline style" in exc.value.summary
+
+
+def test_compact_font_contract_accepts_safe_font_shorthand() -> None:
+    deck_service._validate_compact_pptx_font_contract(
+        (
+            "main{font:400 24px/1.2 Calibri,Arial,sans-serif}"
+            "h1{font:700 60px/1.1 Cambria,serif}"
+        ),
+        _compact_slides(),
+    )
 
 
 def test_deck_build_service_allows_explicitly_requested_visual_style(tmp_path: Path) -> None:

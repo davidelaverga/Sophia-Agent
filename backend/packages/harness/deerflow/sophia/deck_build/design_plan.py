@@ -62,25 +62,25 @@ def resolve_deck_design_plan(
     if dark_requested:
         style_lane = "technical_blueprint"
         palette = _dark_technical_palette()
-        typography = DeckTypographyPlan(display="Aptos Display", body="Aptos", utility="Courier New")
+        typography = DeckTypographyPlan(display="Cambria", body="Calibri", utility="Calibri")
         signature = "dark substrate, precise cyan accents, native linework"
         rhythm = "high-contrast claims with disciplined diagram bands"
     elif executive_requested:
         style_lane = "executive_editorial"
         palette = _executive_palette()
-        typography = DeckTypographyPlan(display="Aptos Display", body="Aptos")
+        typography = DeckTypographyPlan(display="Cambria", body="Calibri")
         signature = "quiet editorial substrate, strong headline hierarchy"
         rhythm = "wide margins, evidence blocks, decisive synthesis"
     elif expressive_requested:
         style_lane = "expressive_keynote"
         palette = _expressive_palette()
-        typography = DeckTypographyPlan(display="Aptos Display", body="Aptos")
+        typography = DeckTypographyPlan(display="Cambria", body="Calibri")
         signature = "confident color accents with native editorial shapes"
         rhythm = "alternating hero, proof, and synthesis moments"
     else:
         style_lane = "calm_technical"
         palette = _calm_technical_palette()
-        typography = DeckTypographyPlan(display="Aptos Display", body="Aptos")
+        typography = DeckTypographyPlan(display="Cambria", body="Calibri")
         signature = "clean technical substrate with restrained accent geometry"
         rhythm = "claim-first slides with native diagrams and measured whitespace"
 
