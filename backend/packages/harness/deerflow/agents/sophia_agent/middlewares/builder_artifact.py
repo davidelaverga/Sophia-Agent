@@ -104,6 +104,10 @@ _PRESENTATION_TASK_BRIEF_MAX_BYTES = 12 * 1024
 _PRESENTATION_PREFLIGHT_RESULT_MAX_BYTES = 8 * 1024
 _PRESENTATION_ATTACHMENT_MEMORY_MAX_BYTES = 8 * 1024
 _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES = 24 * 1024
+_PRESENTATION_REPAIR_INSTRUCTION_MAX_BYTES = 8 * 1024
+_PRESENTATION_PREVIOUS_ARGS_MARKER = (
+    "Previous complete prepare_deck_build arguments (JSON; preserve unchanged values except the exact repairs):\n"
+)
 _PRESENTATION_AUTHORING_SYSTEM_PROMPT = (
     "You are Sophia's presentation authoring lane.\n"
     "Produce exactly one prepare_deck_build tool call and no prose. You own the story, design, CSS, "
@@ -114,7 +118,9 @@ _PRESENTATION_AUTHORING_SYSTEM_PROMPT = (
     "model-authored canvas background, meaningful data-deck-id values, varied "
     "spatial compositions, and no repeated document/style tags. Do not use deterministic templates, "
     "screenshot slides, lower-level deck tools, or incomplete fallback output. Pass creative_plan as "
-    "a JSON object, never as a JSON-encoded string. "
+    "a JSON object, never as a JSON-encoded string. Required body text must reach 4.5:1 contrast and "
+    "qualifying large text 3.0:1 against an opaque solid underlay; do not use accent colors for text "
+    "unless the exact foreground/background pair passes. "
     + compiler_capability_prompt_excerpt()
 )
 _PRESENTATION_PREFLIGHT_SYSTEM_PROMPT = (
@@ -10384,6 +10390,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 total += len(json.dumps(schema, separators=(",", ":"), default=str).encode("utf-8"))
         return total
 
+    @staticmethod
+    def _latest_prepare_deck_build_args(messages: list[Any]) -> dict[str, Any] | None:
+        for message in reversed(messages):
+            if not isinstance(message, AIMessage):
+                continue
+            calls = getattr(message, "tool_calls", None) or []
+            for call in reversed(calls):
+                if not isinstance(call, dict) or str(call.get("name") or "") != _PREPARE_DECK_BUILD_TOOL_NAME:
+                    continue
+                args = call.get("args")
+                if isinstance(args, dict):
+                    return args
+        return None
+
     @classmethod
     def _presentation_request_for_choice(
         cls,
@@ -10422,20 +10442,56 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         tools = cls._single_request_tool(request, _PREPARE_DECK_BUILD_TOOL_NAME)
         brief = cls._presentation_task_brief(request.state, request)
-        source_context = cls._presentation_preflight_context(request.state)
-        attachment_memory_context = cls._presentation_attachment_memory_context(request.state)
         repair = str(request.state.get("builder_deck_prepare_repair_message") or "").strip()
         target_path = str(request.state.get("builder_artifact_target_path") or "/mnt/user-data/outputs/presentation.pptx")
         requested_slides = request.state.get("builder_pptx_requested_slide_count")
-        prompt = (
-            f"Presentation brief:\n{brief}\n\n"
-            f"Output path: {target_path}\nRequested slides: {requested_slides or 'infer from brief'}\n\n"
-            f"Attachments and memory:\n{attachment_memory_context}\n\n"
-            f"Bounded preflight result:\n{source_context}"
-        )
+        previous_args_included = False
+        previous_args_bytes = 0
+        previous_args_omitted_reason: str | None = None
         if repair:
-            prompt += f"\n\nRequired repair:\n{cls._truncate_utf8(repair, 4 * 1024)}"
-        prompt = cls._truncate_utf8(prompt, _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES)
+            # The first prepare call already contains the approved story and markup.
+            # Drop preflight/memory on the one repair turn and reuse that complete IR
+            # whenever it fits. Never truncate JSON: partial args are worse than an
+            # explicit full-reauthor fallback.
+            prompt = (
+                f"Presentation brief:\n{brief}\n\n"
+                f"Output path: {target_path}\nRequested slides: {requested_slides or 'infer from brief'}\n\n"
+                f"Required repair:\n{cls._truncate_utf8(repair, _PRESENTATION_REPAIR_INSTRUCTION_MAX_BYTES)}"
+            )
+            previous_args = cls._latest_prepare_deck_build_args(request.messages)
+            if previous_args is not None:
+                previous_args_json = json.dumps(
+                    previous_args,
+                    ensure_ascii=False,
+                    separators=(",", ":"),
+                    default=str,
+                )
+                previous_args_bytes = len(previous_args_json.encode("utf-8"))
+                candidate = f"{prompt}\n\n{_PRESENTATION_PREVIOUS_ARGS_MARKER}{previous_args_json}"
+                if len(candidate.encode("utf-8")) <= _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES:
+                    prompt = candidate
+                    previous_args_included = True
+                else:
+                    previous_args_omitted_reason = "complete_args_exceed_prompt_budget"
+                    prompt += (
+                        "\n\nThe prior prepare arguments were too large to include completely. Recreate the complete deck "
+                        "input from the brief and repair targets; no partial prior JSON is supplied."
+                    )
+            else:
+                previous_args_omitted_reason = "prior_prepare_args_unavailable"
+            prompt = cls._truncate_utf8(prompt, _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES)
+        else:
+            source_context = cls._presentation_preflight_context(request.state)
+            attachment_memory_context = cls._presentation_attachment_memory_context(request.state)
+            prompt = cls._truncate_utf8(
+                (
+                    f"Presentation brief:\n{brief}\n\n"
+                    f"Output path: {target_path}\nRequested slides: {requested_slides or 'infer from brief'}\n\n"
+                    f"Attachments and memory:\n{attachment_memory_context}\n\n"
+                    f"Bounded preflight result:\n{source_context}"
+                ),
+                _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES,
+            )
         request = cls._bounded_presentation_model_request(request).override(
             tools=tools,
             messages=[HumanMessage(content=prompt)],
@@ -10461,6 +10517,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "deck_authoring_remaining_ms": int(remaining * 1_000) if remaining is not None else None,
                 "deck_authoring_output_bytes": 0,
                 "authoring_tool_call_started": False,
+                "deck_repair_previous_args_included": previous_args_included,
+                "deck_repair_previous_args_bytes": previous_args_bytes,
+                "deck_repair_previous_args_omitted_reason": previous_args_omitted_reason,
             }
         }
 

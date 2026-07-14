@@ -572,6 +572,128 @@ def test_forced_presentation_authoring_uses_only_compact_prepare_context() -> No
     assert diagnostics["deck_authoring_tool_schema_bytes"] > 0
 
 
+def test_forced_presentation_repair_preserves_complete_previous_prepare_args() -> None:
+    previous_args = _compact_prepare_args(creative_plan=_creative_plan())
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "builder_pptx_requested_slide_count": 3,
+        "delegation_context": {
+            "task_type": "presentation",
+            "task": "Create a concise three-slide systems presentation.",
+            "relevant_memories": ["MUST NOT REPLAY MEMORY ON REPAIR"],
+        },
+        "builder_deck_prepare_phase": "retry_pending",
+        "builder_deck_prepare_repair_message": (
+            "On slide:2, change the exact failing text from #6B8E23 on #F5E6D3 to #000000 on #F5E6D3."
+        ),
+        "builder_presentation_phase": "authoring_pending",
+        "builder_task_kickoff_ms": int(time.time() * 1000),
+        "builder_budget": {
+            "tier": "presentation",
+            "authoring_deadline_seconds": 120,
+            "authoring_max_tokens": 16_384,
+        },
+    }
+    request = _ModelRequest(
+        state,
+        tools=[_builder_web_search, prepare_deck_build],
+        messages=[
+            HumanMessage(content="Create a concise three-slide systems presentation."),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "prepare-1",
+                        "name": "prepare_deck_build",
+                        "args": previous_args,
+                    }
+                ],
+            ),
+            ToolMessage(
+                content='{"success":false,"failure_code":"deck_mechanical_gate_failed"}',
+                name="prepare_deck_build",
+                tool_call_id="prepare-1",
+            ),
+        ],
+    )
+
+    bounded, update = BuilderArtifactMiddleware._presentation_request_for_choice(
+        request,
+        {"type": "tool", "name": "prepare_deck_build"},
+    )
+
+    prompt = str(bounded.messages[0].content)
+    assert "MUST NOT REPLAY MEMORY ON REPAIR" not in prompt
+    assert "Bounded preflight result" not in prompt
+    marker = artifact_module._PRESENTATION_PREVIOUS_ARGS_MARKER
+    assert marker in prompt
+    assert json.loads(prompt.split(marker, 1)[1]) == previous_args
+    assert "#6B8E23 on #F5E6D3" in prompt
+    assert update is not None
+    diagnostics = update["builder_pptx_diagnostics"]
+    assert diagnostics["deck_repair_previous_args_included"] is True
+    assert diagnostics["deck_repair_previous_args_bytes"] > 0
+    assert diagnostics["deck_repair_previous_args_omitted_reason"] is None
+
+
+def test_forced_presentation_repair_omits_oversize_args_without_partial_json() -> None:
+    oversized_sentinel = "OVERSIZED-STYLESHEET-SENTINEL"
+    previous_args = _compact_prepare_args(creative_plan=_creative_plan())
+    previous_args["deck_stylesheet"] = oversized_sentinel + ("x" * (30 * 1024))
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {
+            "task_type": "presentation",
+            "task": "Create a concise three-slide systems presentation.",
+        },
+        "builder_deck_prepare_phase": "retry_pending",
+        "builder_deck_prepare_repair_message": "Fix the exact contrast failures and retry once.",
+        "builder_presentation_phase": "authoring_pending",
+        "builder_task_kickoff_ms": int(time.time() * 1000),
+        "builder_budget": {
+            "tier": "presentation",
+            "authoring_deadline_seconds": 120,
+        },
+    }
+    request = _ModelRequest(
+        state,
+        tools=[prepare_deck_build],
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "prepare-1",
+                        "name": "prepare_deck_build",
+                        "args": previous_args,
+                    }
+                ],
+            ),
+            ToolMessage(
+                content='{"success":false,"failure_code":"deck_mechanical_gate_failed"}',
+                name="prepare_deck_build",
+                tool_call_id="prepare-1",
+            ),
+        ],
+    )
+
+    bounded, update = BuilderArtifactMiddleware._presentation_request_for_choice(
+        request,
+        {"type": "tool", "name": "prepare_deck_build"},
+    )
+
+    prompt = str(bounded.messages[0].content)
+    assert len(prompt.encode("utf-8")) <= artifact_module._PRESENTATION_AUTHORING_PROMPT_MAX_BYTES
+    assert artifact_module._PRESENTATION_PREVIOUS_ARGS_MARKER not in prompt
+    assert oversized_sentinel not in prompt
+    assert "no partial prior JSON is supplied" in prompt
+    assert update is not None
+    diagnostics = update["builder_pptx_diagnostics"]
+    assert diagnostics["deck_repair_previous_args_included"] is False
+    assert diagnostics["deck_repair_previous_args_bytes"] > 30 * 1024
+    assert diagnostics["deck_repair_previous_args_omitted_reason"] == "complete_args_exceed_prompt_budget"
+
+
 def test_presentation_preflight_model_timeout_continues_to_authoring() -> None:
     state = {
         "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",

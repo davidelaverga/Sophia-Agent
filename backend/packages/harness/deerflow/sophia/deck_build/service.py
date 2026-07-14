@@ -40,6 +40,7 @@ from deerflow.sophia.deck_build.image_assets import (
     planned_asset_ref_basenames,
 )
 from deerflow.sophia.deck_build.image_prompting import deck_asset_prompt_payload
+from deerflow.sophia.deck_build.ir_repair import deck_mechanical_repair_instruction_from_reports
 from deerflow.sophia.deck_build.mechanical_gates import evaluate_mechanical_gates
 from deerflow.sophia.deck_build.models import DeckBuild, DeckBuildResult, DeckSlideSpec
 from deerflow.sophia.deck_build.native_contrast import evaluate_native_contrast
@@ -1708,7 +1709,7 @@ class DeckBuildService:
             native_contrast_report=deck.native_contrast_report,
             root_failure_code=exc.code,
             root_failure_summary=exc.summary,
-            repair_instruction=_repair_instruction_for_failure(exc),
+            repair_instruction=_repair_instruction_for_failure(exc, deck=deck),
             source_bundle_path=deck.source_bundle_path,
             manifest_path=deck.manifest_path,
             manifest_revision=deck.manifest_revision,
@@ -2100,7 +2101,11 @@ def _referenced_planned_asset_count(deck: DeckBuild, validations: list[Any]) -> 
     return count
 
 
-def _repair_instruction_for_failure(exc: DeckBuildFailure) -> dict[str, Any] | None:
+def _repair_instruction_for_failure(
+    exc: DeckBuildFailure,
+    *,
+    deck: DeckBuild | None = None,
+) -> dict[str, Any] | None:
     if not exc.retryable:
         return None
     if exc.code not in {
@@ -2113,7 +2118,7 @@ def _repair_instruction_for_failure(exc: DeckBuildFailure) -> dict[str, Any] | N
         "invalid_deck_ir",
     }:
         return None
-    return {
+    instruction = {
         "should_retry": True,
         "max_retry_count": 1,
         "failure_scope": "creative_deck_plan" if exc.code.startswith("deck_creative") else "slide_html_or_mechanical_gate",
@@ -2127,6 +2132,14 @@ def _repair_instruction_for_failure(exc: DeckBuildFailure) -> dict[str, Any] | N
             f"Previous failure: {exc.code}: {safe_excerpt(exc.summary, limit=400)}"
         ),
     }
+    if exc.code == "deck_mechanical_gate_failed" and deck is not None:
+        targeted = deck_mechanical_repair_instruction_from_reports(
+            native_contrast_report=deck.native_contrast_report,
+            source_element_map=deck.source_element_map,
+        )
+        if targeted is not None:
+            instruction.update(targeted)
+    return instruction
 
 
 @contextlib.contextmanager
