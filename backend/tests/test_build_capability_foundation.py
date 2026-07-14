@@ -177,9 +177,10 @@ def test_deadline_cancels_model_without_provider_retry(monkeypatch) -> None:
     )
     result = __import__("anyio").run(BuildDeadlineMiddleware().awrap_model_call, request, handler)
     assert calls == 1
-    assert result.command.update["builder_result"]["failure_code"] == "deck_authoring_deadline_exceeded"
+    assert result.command.update["builder_result"]["failure_code"] == "deck_deadline_exceeded"
+    assert result.model_response.result[0].content == "[Sophia builder stopped at its execution deadline.]"
     assert webhook_calls[0]["status"] == "timed_out"
-    assert webhook_calls[0]["artifact"]["terminal_reason"] == "deck_authoring_deadline_exceeded"
+    assert webhook_calls[0]["artifact"]["terminal_reason"] == "deck_deadline_exceeded"
 
 
 class _RouteConfig:

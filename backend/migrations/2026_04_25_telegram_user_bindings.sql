@@ -7,6 +7,8 @@
 -- Run this once in the Supabase SQL editor before relying on the
 -- /api/sophia/{user_id}/telegram/link flow in production.
 
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS public.telegram_user_bindings (
     channel             TEXT        NOT NULL,
     chat_id             TEXT        NOT NULL,
@@ -27,7 +29,9 @@ CREATE TABLE IF NOT EXISTS public.telegram_user_bindings (
 CREATE INDEX IF NOT EXISTS telegram_user_bindings_user_id_idx
     ON public.telegram_user_bindings (user_id);
 
--- The gateway uses the service-role key (bypasses RLS) so we don't enable
--- row-level security here. If you do enable it later, allow only the
--- service role to read/write — never expose this table to anon clients.
--- ALTER TABLE public.telegram_user_bindings ENABLE ROW LEVEL SECURITY;
+REVOKE ALL ON TABLE public.telegram_user_bindings FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.telegram_user_bindings TO service_role;
+
+NOTIFY pgrst, 'reload schema';
+
+COMMIT;

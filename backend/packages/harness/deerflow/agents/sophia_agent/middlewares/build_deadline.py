@@ -9,12 +9,12 @@ from typing import Any, NotRequired
 import anyio
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import ExtendedModelResponse
+from langchain.agents.middleware.types import ExtendedModelResponse, ModelResponse
 from langchain_core.messages import AIMessage
 from langgraph.types import Command
 
-from deerflow.sophia.builder_events import fire_completion_webhook_from_artifact
 from deerflow.sophia.build_runtime.deadline import BuildDeadlineExceeded, ExecutionEnvelope
+from deerflow.sophia.builder_events import fire_completion_webhook_from_artifact
 from deerflow.sophia.observability import annotate_builder_completion
 
 logger = logging.getLogger(__name__)
@@ -34,17 +34,12 @@ def _is_presentation(state: dict[str, Any]) -> bool:
     return isinstance(budget, dict) and budget.get("tier") == "presentation"
 
 
-def _prepare_emitted(state: dict[str, Any]) -> bool:
-    diagnostics = state.get("builder_pptx_diagnostics")
-    return isinstance(diagnostics, dict) and int(diagnostics.get("prepare_emitted_call_count", 0) or 0) > 0
-
-
 def _terminal_failure(state: dict[str, Any], runtime: Any, exc: BuildDeadlineExceeded) -> ExtendedModelResponse:
-    authoring = _is_presentation(state) and not _prepare_emitted(state)
-    failure_code = "deck_authoring_deadline_exceeded" if authoring else "build_deadline_exceeded"
+    presentation = _is_presentation(state)
+    failure_code = "deck_deadline_exceeded" if presentation else "build_deadline_exceeded"
     artifact = {
         "artifact_path": None,
-        "artifact_type": "presentation" if _is_presentation(state) else "unknown",
+        "artifact_type": "presentation" if presentation else "unknown",
         "artifact_title": "Builder task did not complete",
         "status": "timed_out",
         "terminal_status": "timed_out",
@@ -72,15 +67,17 @@ def _terminal_failure(state: dict[str, Any], runtime: Any, exc: BuildDeadlineExc
             artifact=artifact,
             status="timed_out",
             error_message=(
-                "Presentation authoring exceeded its execution deadline."
-                if authoring
+                "Presentation building exceeded its execution deadline."
+                if presentation
                 else "Builder execution exceeded its deadline."
             ),
         )
     except Exception:  # noqa: BLE001 - deadline termination must always complete.
         logger.warning("[BuildDeadline] terminal observability dispatch failed", exc_info=True)
     return ExtendedModelResponse(
-        model_response=AIMessage(content="[Sophia builder stopped at its execution deadline.]"),
+        model_response=ModelResponse(
+            result=[AIMessage(content="[Sophia builder stopped at its execution deadline.]")]
+        ),
         command=Command(
             update={
                 "builder_result": artifact,

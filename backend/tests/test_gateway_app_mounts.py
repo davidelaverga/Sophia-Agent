@@ -82,3 +82,17 @@ def test_gateway_app_mounts_voice_connect_route(monkeypatch):
     assert payload["api_key"] == "test-api-key"
     assert payload["session_id"] == "test-session-id"
     assert payload["call_type"] == "default"
+
+
+def test_gateway_migration_maintenance_mode_blocks_mutations(monkeypatch):
+    from app.gateway.app import create_app
+
+    monkeypatch.setenv("SOPHIA_MIGRATION_MAINTENANCE_MODE", "true")
+    app = create_app()
+    with TestClient(app) as client:
+        blocked = client.post("/api/maintenance-probe")
+        readable = client.get("/health")
+
+    assert blocked.status_code == 503
+    assert blocked.headers["retry-after"] == "60"
+    assert readable.status_code == 200

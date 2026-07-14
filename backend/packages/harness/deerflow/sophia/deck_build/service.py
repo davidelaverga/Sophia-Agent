@@ -169,6 +169,7 @@ class DeckBuildService:
         design_plan: dict[str, Any] | None = None,
         creative_plan: dict[str, Any] | None = None,
     ) -> DeckBuildResult:
+        service_started = time.perf_counter()
         # Fresh production builds receive this at dispatch so identity survives
         # retries, resume, revision, and thread handoff. The fallback is kept
         # only for direct service callers and legacy queued payloads.
@@ -211,7 +212,7 @@ class DeckBuildService:
         try:
             deadline_setter = getattr(self._native_service, "set_deadline_epoch_ms", None)
             if callable(deadline_setter):
-                deadline_setter(_builder_deadline_epoch_ms(runtime))
+                deadline_setter(_service_deadline_epoch_ms(runtime))
             _assert_deck_deadline(runtime, stage="input_validation")
             self._validate_inputs(deck, slides, output_path, runtime)
             deck.slides = self._build_slide_specs(
@@ -247,7 +248,7 @@ class DeckBuildService:
             if deck.expected_visual_count > 0:
                 self._write_prompt_files(deck, runtime)
                 self._prepare_manifest(deck, runtime)
-                _assert_deck_deadline(runtime, stage="image_batch", reserve_seconds=90)
+                _assert_deck_deadline(runtime, stage="image_batch")
                 with _deck_trace_runtime_context(runtime, deck):
                     summary = self._run_visual_batch(deck, runtime)
                     self._apply_batch_summary(deck, runtime, summary)
@@ -272,7 +273,13 @@ class DeckBuildService:
                 raise DeckBuildFailure("build_manifest_persistence_failed", str(exc), retryable=False) from exc
             deck.updated_at = _now()
             deck_path = save_deck_build(deck, runtime)
-            return self._success_result(deck, deck_path, runtime, success_allowed_checked=True)
+            return self._success_result(
+                deck,
+                deck_path,
+                runtime,
+                success_allowed_checked=True,
+                service_elapsed_ms=int((time.perf_counter() - service_started) * 1000),
+            )
         except DeckBuildFailure as exc:
             deck.status = "failed_terminal"
             deck.failure_code = exc.code
@@ -283,7 +290,13 @@ class DeckBuildService:
             deck.updated_at = _now()
             deck_path = save_deck_build(deck, runtime)
             self._trace_terminal(deck, runtime, success=False, deck_path=deck_path, retryable=exc.retryable)
-            return self._failure_result(deck, deck_path, exc, runtime)
+            return self._failure_result(
+                deck,
+                deck_path,
+                exc,
+                runtime,
+                service_elapsed_ms=int((time.perf_counter() - service_started) * 1000),
+            )
 
     def _validate_inputs(self, deck: DeckBuild, slides: list[dict[str, Any]], output_path: str, runtime: ToolRuntime) -> None:
         if not 1 <= len(slides) <= 30:
@@ -741,7 +754,6 @@ class DeckBuildService:
                     _assert_deck_deadline(
                         runtime,
                         stage="serial_image_repair",
-                        reserve_seconds=60,
                     )
                     attempts += 1
                     result = self._image_single_runner(slide, runtime, attempt_no)
@@ -1509,6 +1521,7 @@ class DeckBuildService:
         runtime: ToolRuntime,
         *,
         success_allowed_checked: bool = False,
+        service_elapsed_ms: int = 0,
     ) -> DeckBuildResult:
         if not success_allowed_checked:
             self._assert_deck_success_allowed(deck, runtime)
@@ -1567,6 +1580,7 @@ class DeckBuildService:
             logical_artifact_id=deck.logical_artifact_id,
             current_artifact_version_id=deck.current_artifact_version_id,
             foundation_status=deck.foundation_status,
+            service_elapsed_ms=max(0, service_elapsed_ms),
         )
 
     def _assert_deck_success_allowed(self, deck: DeckBuild, runtime: ToolRuntime | None = None) -> None:
@@ -1641,6 +1655,8 @@ class DeckBuildService:
         deck_path: str,
         exc: DeckBuildFailure,
         runtime: ToolRuntime,
+        *,
+        service_elapsed_ms: int = 0,
     ) -> DeckBuildResult:
         self._trace_emit_decision(deck, runtime, success=False, retryable=exc.retryable)
         return DeckBuildResult(
@@ -1699,6 +1715,7 @@ class DeckBuildService:
             logical_artifact_id=deck.logical_artifact_id,
             current_artifact_version_id=deck.current_artifact_version_id,
             foundation_status=deck.foundation_status,
+            service_elapsed_ms=max(0, service_elapsed_ms),
         )
 
     def _run_image_batch_subprocess(self, manifest_path: str, runtime: ToolRuntime) -> dict[str, Any]:
@@ -1750,7 +1767,7 @@ class DeckBuildService:
         if not slide.visual_prompt_path or not slide.visual_asset_path:
             return {"success": False, "error_class": "missing_prompt_or_output"}
         started = time.perf_counter()
-        remaining = _remaining_deadline_seconds(runtime, reserve_seconds=60)
+        remaining = _remaining_deadline_seconds(runtime)
         if remaining is not None and remaining <= 0:
             return {
                 "success": False,
@@ -1855,14 +1872,33 @@ def _builder_deadline_epoch_ms(runtime: Any) -> int | None:
     return None
 
 
+def _terminal_reserve_seconds(runtime: Any) -> int:
+    budget = _state_value(runtime, "builder_budget")
+    if not isinstance(budget, dict):
+        return 0
+    try:
+        return max(0, int(budget.get("terminal_reserve_seconds", 0) or 0))
+    except (TypeError, ValueError):
+        return 0
+
+
+def _service_deadline_epoch_ms(runtime: Any) -> int | None:
+    deadline = _builder_deadline_epoch_ms(runtime)
+    if deadline is None:
+        return None
+    return max(1, deadline - _terminal_reserve_seconds(runtime) * 1_000)
+
+
 def _remaining_deadline_seconds(
     runtime: Any,
     *,
-    reserve_seconds: int = 0,
+    reserve_seconds: int | None = None,
 ) -> int | None:
     deadline = _builder_deadline_epoch_ms(runtime)
     if deadline is None:
         return None
+    if reserve_seconds is None:
+        reserve_seconds = _terminal_reserve_seconds(runtime)
     return max(
         0,
         int((deadline - int(time.time() * 1000)) / 1000) - max(0, reserve_seconds),
@@ -1873,7 +1909,7 @@ def _assert_deck_deadline(
     runtime: Any,
     *,
     stage: str,
-    reserve_seconds: int = 0,
+    reserve_seconds: int | None = None,
 ) -> None:
     remaining = _remaining_deadline_seconds(runtime, reserve_seconds=reserve_seconds)
     if remaining is not None and remaining <= 0:
@@ -2362,7 +2398,7 @@ def _deck_image_batch_timeout_seconds(manifest_path: str, runtime: ToolRuntime) 
             _image_single_timeout_seconds(),
             waves * per_image_timeout * (max_retries + 1) + 60,
         )
-    remaining = _remaining_deadline_seconds(runtime, reserve_seconds=90)
+    remaining = _remaining_deadline_seconds(runtime)
     return min(calculated, max(1, remaining)) if remaining is not None else calculated
 
 

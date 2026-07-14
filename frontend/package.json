@@ -7,6 +7,7 @@
     "dev": "next dev",
     "dev:mobile": "dotenv -e .env.dev -- next dev -H 0.0.0.0",
     "auth:migrate": "dotenv -e .env -- node ./scripts/migrate-better-auth.mjs",
+    "auth:migrate-data": "dotenv -e .env -- node ./scripts/migrate-better-auth-data.mjs",
     "build": "next build",
     "build:dev": "dotenv -e .env.dev -- next build",
     "start": "next start",

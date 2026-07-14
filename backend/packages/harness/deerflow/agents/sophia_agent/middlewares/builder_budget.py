@@ -70,7 +70,7 @@ _DEFAULT_PRICE: dict[str, float] = {"in": 3.0, "out": 15.0}
 
 USER_BUDGET_TIMEOUT_MESSAGE = "Sorry, we hit the token limit for this task. Please let me know if you want to try again."
 USER_BUDGET_COST_MESSAGE = "Sorry, we hit the cost limit for this task. Please let me know if you want to try again."
-USER_BUDGET_WALL_CLOCK_MESSAGE = "Sorry, the presentation builder reached its 8-minute time limit before a complete deck was ready."
+USER_BUDGET_WALL_CLOCK_MESSAGE = "Sorry, the presentation builder reached its 20-minute time limit before a complete deck was ready."
 USER_BUDGET_TURN_MESSAGE = "Sorry, the builder reached its turn limit before a complete artifact was ready."
 
 # Default per-run caps. ``0`` / ``0.0`` disables a cap. ``start_builder_task``
@@ -105,13 +105,14 @@ PRESENTATION_BUILDER_BUDGET: dict[str, Any] = {
     "max_non_artifact_turns": 12,
     "force_emit_remaining_turns": 2,
     "soft_warn_at_turn": 6,
-    "max_wall_clock_seconds": 480,
+    "max_wall_clock_seconds": 1_200,
     "prepare_force_at_turn": 2,
-    "prepare_force_after_seconds": 8,
-    "authoring_deadline_seconds": 120,
-    "preflight_timeout_seconds": 8,
+    "prepare_force_after_seconds": 15,
+    "authoring_deadline_seconds": 720,
+    "preflight_timeout_seconds": 15,
     "authoring_max_tokens": 16_384,
-    "authoring_timeout_seconds": 110,
+    "authoring_timeout_seconds": 360,
+    "terminal_reserve_seconds": 30,
 }
 
 # Flat estimate per gpt-image-2 call (image-generation skill, enrichment-by-
@@ -200,6 +201,20 @@ def _budget_with_env(defaults: dict[str, Any], prefix: str) -> dict[str, Any]:
         budget["authoring_timeout_seconds"] = _env_int(
             f"{prefix}_AUTHORING_TIMEOUT_SECONDS",
             int(budget["authoring_timeout_seconds"]),
+        )
+        # The first production rollout documented this shorter alias. Accept
+        # it for compatibility while keeping the tiered BUDGET name canonical.
+        if prefix == "SOPHIA_BUILDER_PRESENTATION_BUDGET" and os.environ.get(
+            "SOPHIA_BUILDER_PRESENTATION_AUTHORING_TIMEOUT_SECONDS"
+        ):
+            budget["authoring_timeout_seconds"] = _env_int(
+                "SOPHIA_BUILDER_PRESENTATION_AUTHORING_TIMEOUT_SECONDS",
+                int(budget["authoring_timeout_seconds"]),
+            )
+    if "terminal_reserve_seconds" in budget:
+        budget["terminal_reserve_seconds"] = _env_int(
+            f"{prefix}_TERMINAL_RESERVE_SECONDS",
+            int(budget["terminal_reserve_seconds"]),
         )
     return budget
 
@@ -305,23 +320,23 @@ def prepare_force_at_turn(state: dict[str, Any]) -> int:
 def prepare_force_after_seconds(state: dict[str, Any]) -> int:
     budget = state.get("builder_budget")
     if not isinstance(budget, dict):
-        return 8
+        return 15
     try:
-        return max(0, int(budget.get("prepare_force_after_seconds", 8) or 0))
+        return max(0, int(budget.get("prepare_force_after_seconds", 15) or 0))
     except (TypeError, ValueError):
-        return 8
+        return 15
 
 
 def presentation_authoring_deadline_seconds(state: dict[str, Any]) -> int:
-    """Absolute kickoff-to-first-prepare deadline for fresh presentations."""
+    """Cumulative initial-authoring and repair deadline."""
 
     budget = state.get("builder_budget")
     if not isinstance(budget, dict):
-        return 120
+        return 720
     try:
-        return max(1, int(budget.get("authoring_deadline_seconds", 120) or 120))
+        return max(1, int(budget.get("authoring_deadline_seconds", 720) or 720))
     except (TypeError, ValueError):
-        return 120
+        return 720
 
 
 def presentation_preflight_timeout_seconds(state: dict[str, Any]) -> int:
@@ -329,11 +344,11 @@ def presentation_preflight_timeout_seconds(state: dict[str, Any]) -> int:
 
     budget = state.get("builder_budget")
     if not isinstance(budget, dict):
-        return 8
+        return 15
     try:
-        return max(1, int(budget.get("preflight_timeout_seconds", 8) or 8))
+        return max(1, int(budget.get("preflight_timeout_seconds", 15) or 15))
     except (TypeError, ValueError):
-        return 8
+        return 15
 
 
 def presentation_authoring_max_tokens(state: dict[str, Any]) -> int:
@@ -349,11 +364,11 @@ def presentation_authoring_max_tokens(state: dict[str, Any]) -> int:
 def presentation_authoring_timeout_seconds(state: dict[str, Any]) -> int:
     budget = state.get("builder_budget")
     if not isinstance(budget, dict):
-        return 110
+        return 360
     try:
-        return max(1, int(budget.get("authoring_timeout_seconds", 110) or 110))
+        return max(1, int(budget.get("authoring_timeout_seconds", 360) or 360))
     except (TypeError, ValueError):
-        return 110
+        return 360
 
 
 def estimate_run_cost_usd(state: dict) -> float:

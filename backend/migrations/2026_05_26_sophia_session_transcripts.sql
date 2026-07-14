@@ -8,6 +8,8 @@
 -- session ids for new web sessions, but keeping TEXT preserves legacy and
 -- channel-originated sessions without lossy rewriting.
 
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS public.sophia_sessions (
     id                       TEXT PRIMARY KEY,
     user_id                  TEXT NOT NULL,
@@ -90,7 +92,11 @@ CREATE INDEX IF NOT EXISTS sophia_session_messages_provider_event_idx
     ON public.sophia_session_messages (provider_event_id)
     WHERE provider_event_id IS NOT NULL;
 
--- The gateway uses SUPABASE_SERVICE_ROLE_KEY and PostgREST, so RLS is not
--- required for backend-only access. If RLS is enabled later, policies must
--- allow only trusted backend/service-role access; do not expose these tables
--- directly to anon or browser clients.
+REVOKE ALL ON TABLE public.sophia_sessions FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON TABLE public.sophia_session_messages FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.sophia_sessions TO service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.sophia_session_messages TO service_role;
+
+NOTIFY pgrst, 'reload schema';
+
+COMMIT;

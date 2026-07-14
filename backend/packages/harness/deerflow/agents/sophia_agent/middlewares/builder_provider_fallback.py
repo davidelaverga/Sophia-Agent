@@ -10,6 +10,10 @@ agent's model node binds the tool set to whatever model the request
 carries, so ``emit_builder_artifact`` and the sandbox/web tools remain
 available verbatim on the OpenAI path).
 
+Presentation runs are deliberately excluded from this middleware. Their
+model-owned authoring contract has one provider, no SDK retry, and no provider
+fallback so cancellation and truncation retain deterministic terminal causes.
+
 Decision table on a primary-model exception:
 
 1. Not a provider-availability error (see
@@ -278,15 +282,15 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
         return error_class, fallback_model
 
     @staticmethod
-    def _terminal_presentation_authoring(request: Any) -> bool:
+    def _presentation_request(request: Any) -> bool:
         state = request.state if isinstance(getattr(request, "state", None), dict) else {}
         budget = state.get("builder_budget")
-        return bool(isinstance(budget, dict) and budget.get("tier") == "presentation" and (state.get("builder_graph_halted") is True or state.get("builder_deck_prepare_phase") == "terminal"))
+        return bool(isinstance(budget, dict) and budget.get("tier") == "presentation")
 
     def wrap_model_call(self, request, handler):  # type: ignore[override]
-        request = self._forced_provider_request(request)
-        if self._terminal_presentation_authoring(request):
+        if self._presentation_request(request):
             return handler(request)
+        request = self._forced_provider_request(request)
         cooldown = self._cooldown_fallback_model_or_none()
         if cooldown is not None:
             error_class, fallback_model = cooldown
@@ -322,9 +326,9 @@ class BuilderProviderFallbackMiddleware(AgentMiddleware[BuilderProviderFallbackS
             return self._success_response(response, error_class)
 
     async def awrap_model_call(self, request, handler):  # type: ignore[override]
-        request = self._forced_provider_request(request)
-        if self._terminal_presentation_authoring(request):
+        if self._presentation_request(request):
             return await handler(request)
+        request = self._forced_provider_request(request)
         cooldown = self._cooldown_fallback_model_or_none()
         if cooldown is not None:
             error_class, fallback_model = cooldown

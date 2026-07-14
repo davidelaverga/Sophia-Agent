@@ -24,6 +24,7 @@ from app.gateway.routers import (
     uploads,
     voice,
 )
+from app.gateway.supabase_project import validate_expected_supabase_project
 from app.gateway.workers.builder_canvas import install_builder_canvas_worker
 from app.gateway.workers.builder_events import install_builder_events_worker
 from app.gateway.workers.companion_wakeup import install_companion_wakeup
@@ -57,6 +58,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # Load config and check necessary environment variables at startup
     try:
         get_app_config()
+        validate_expected_supabase_project()
         logger.info("Configuration loaded successfully")
     except Exception as e:
         error_msg = f"Failed to load configuration during gateway startup: {e}"
@@ -242,6 +244,24 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+    @app.middleware("http")
+    async def migration_maintenance_mode(request, call_next):
+        enabled = os.getenv("SOPHIA_MIGRATION_MAINTENANCE_MODE", "").strip().lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }
+        if enabled and request.method.upper() not in {"GET", "HEAD", "OPTIONS"}:
+            from fastapi.responses import JSONResponse
+
+            return JSONResponse(
+                status_code=503,
+                content={"detail": "Sophia is temporarily read-only during a database migration."},
+                headers={"Retry-After": "60"},
+            )
+        return await call_next(request)
 
     # Include routers
     # Models API is mounted at /api/models

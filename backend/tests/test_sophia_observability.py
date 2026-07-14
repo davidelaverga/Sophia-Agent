@@ -339,6 +339,9 @@ def test_builder_completion_attaches_prepare_terminal_metadata_and_failure_feedb
             "creative_plan_accepted": False,
             "deck_authoring_contract": "compact_model_html_v1",
             "deck_authoring_elapsed_ms": 119000,
+            "deck_repair_elapsed_ms": 12000,
+            "deck_service_elapsed_ms": 480000,
+            "terminal_cleanup_elapsed_ms": 800,
             "prepare_force_reason": "turn_limit",
             "deck_root_failure_code": "deck_prepare_argument_invalid",
             "deck_root_failure_summary": "The first prepare call failed schema validation.",
@@ -385,6 +388,9 @@ def test_builder_completion_attaches_prepare_terminal_metadata_and_failure_feedb
     assert run_tree.metadata["authoring_contract"] == "compact_model_html_v2"
     assert run_tree.metadata["build_event_store_status"] == "available"
     assert run_tree.metadata["deck_authoring_elapsed_ms"] == 119000
+    assert run_tree.metadata["deck_repair_elapsed_ms"] == 12000
+    assert run_tree.metadata["deck_service_elapsed_ms"] == 480000
+    assert run_tree.metadata["terminal_cleanup_elapsed_ms"] == 800
     assert run_tree.metadata["prepare_force_reason"] == "turn_limit"
     assert run_tree.metadata["creative_plan_accepted"] is False
     assert run_tree.metadata["root_failure_code"] == "deck_prepare_argument_invalid"

@@ -38,6 +38,8 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: SOPHIA_EXPECTED_SUPABASE_PROJECT_REF
+        value: vlxnwmyvhchwbousrdzc
       # Builder durably uploads artifacts to Supabase in production; the gateway
       # artifact registry reads from the SAME bucket. Pin both (non-secret
       # public values) so the two services agree instead of each silently
@@ -81,15 +83,21 @@ services:
       - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_SOFT_WARN_AT_TURN
         value: "6"
       - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_MAX_WALL_CLOCK_SECONDS
-        value: "480"
+        value: "1200"
       - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_PREPARE_FORCE_AT_TURN
         value: "2"
       - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_PREPARE_FORCE_AFTER_SECONDS
-        value: "8"
+        value: "15"
       - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_AUTHORING_DEADLINE_SECONDS
-        value: "120"
+        value: "720"
       - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_PREFLIGHT_TIMEOUT_SECONDS
-        value: "8"
+        value: "15"
+      - key: SOPHIA_BUILDER_PRESENTATION_AUTHORING_TIMEOUT_SECONDS
+        value: "360"
+      - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_AUTHORING_MAX_TOKENS
+        value: "16384"
+      - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_TERMINAL_RESERVE_SECONDS
+        value: "30"
       # Uncomment only if the write key spans multiple LangSmith workspaces.
       # - key: LANGSMITH_WORKSPACE_ID
       #   sync: false
@@ -121,6 +129,8 @@ services:
         sync: false
       - key: SUPABASE_SERVICE_ROLE_KEY
         sync: false
+      - key: SOPHIA_EXPECTED_SUPABASE_PROJECT_REF
+        value: vlxnwmyvhchwbousrdzc
       # Artifact registry runs in supabase mode in production. `ArtifactRegistry()`
       # is built at gateway router import and FAIL-FASTS in a production runtime
       # unless this is set; the supabase store also requires the bucket name.

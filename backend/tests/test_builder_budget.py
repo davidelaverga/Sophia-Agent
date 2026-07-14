@@ -10,6 +10,7 @@ double-counting of cache tokens, which langchain-anthropic folds into
 from __future__ import annotations
 
 import asyncio
+import os
 from types import SimpleNamespace
 
 import pytest
@@ -17,6 +18,7 @@ from langchain_core.messages import AIMessage
 
 from deerflow.agents.sophia_agent.middlewares import builder_budget as bb_mod
 from deerflow.agents.sophia_agent.middlewares.builder_budget import (
+    PRESENTATION_BUILDER_BUDGET,
     USER_BUDGET_COST_MESSAGE,
     USER_BUDGET_TIMEOUT_MESSAGE,
     USER_BUDGET_WALL_CLOCK_MESSAGE,
@@ -24,6 +26,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_budget import (
     _estimate_cost_usd,
     _price_for,
     _sum_usage,
+    builder_budget_for_task,
 )
 
 
@@ -78,6 +81,31 @@ def test_pricing_does_not_double_count_cache_tokens():
 def test_price_for_unknown_model_falls_back_to_sonnet():
     assert _price_for("some-future-model") == _price_for("claude-sonnet-5")
     assert _price_for(None) == {"in": 3.0, "out": 15.0}
+
+
+def test_presentation_budget_defaults_reserve_extended_runtime(monkeypatch):
+    for name in tuple(os.environ):
+        if name.startswith("SOPHIA_BUILDER_PRESENTATION_"):
+            monkeypatch.delenv(name, raising=False)
+
+    budget = builder_budget_for_task(task_type="presentation", artifact_ext="pptx")
+
+    assert budget["max_wall_clock_seconds"] == 1_200
+    assert budget["authoring_deadline_seconds"] == 720
+    assert budget["authoring_timeout_seconds"] == 360
+    assert budget["preflight_timeout_seconds"] == 15
+    assert budget["prepare_force_after_seconds"] == 15
+    assert budget["prepare_force_at_turn"] == 2
+    assert budget["terminal_reserve_seconds"] == 30
+    assert budget["max_non_artifact_turns"] == 12
+    assert budget["authoring_max_tokens"] == 16_384
+    assert PRESENTATION_BUILDER_BUDGET["max_wall_clock_seconds"] == 1_200
+
+
+def test_presentation_authoring_timeout_compatibility_alias(monkeypatch):
+    monkeypatch.setenv("SOPHIA_BUILDER_PRESENTATION_AUTHORING_TIMEOUT_SECONDS", "240")
+    budget = builder_budget_for_task(task_type="presentation", artifact_ext="pptx")
+    assert budget["authoring_timeout_seconds"] == 240
 
 
 def test_sum_usage_accumulates_across_ai_messages():

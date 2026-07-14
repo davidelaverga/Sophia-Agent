@@ -711,23 +711,45 @@ def test_service_owned_presentation_completion_never_forces_write_file() -> None
 
 
 def test_presentation_model_request_is_bounded_by_authoring_deadline() -> None:
+    authoring_started_ms = int(time.time() * 1000) - 30_000
     state = {
         "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
         "delegation_context": {"task_type": "presentation"},
-        "builder_task_kickoff_ms": int(time.time() * 1000) - 30_000,
+        "builder_task_kickoff_ms": int(time.time() * 1000) - 90_000,
+        "builder_presentation_authoring_started_at_ms": authoring_started_ms,
         "builder_budget": {
             "tier": "presentation",
-            "prepare_force_after_seconds": 120,
+            "prepare_force_after_seconds": 15,
+            "authoring_deadline_seconds": 720,
             "authoring_max_tokens": 16_384,
-            "authoring_timeout_seconds": 110,
+            "authoring_timeout_seconds": 360,
         },
     }
 
     request = BuilderArtifactMiddleware._bounded_presentation_model_request(_ModelRequest(state))
 
     assert request.model_settings["max_tokens"] == 16_384
-    assert 88 <= request.model_settings["timeout"] <= 90
+    assert request.model_settings["timeout"] == 360
     assert "max_retries" not in request.model_settings
+
+
+def test_presentation_authoring_budget_starts_after_preflight() -> None:
+    now_ms = int(time.time() * 1000)
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation"},
+        "builder_task_kickoff_ms": now_ms - 300_000,
+        "builder_presentation_authoring_started_at_ms": now_ms - 60_000,
+        "builder_budget": {
+            "tier": "presentation",
+            "authoring_deadline_seconds": 720,
+            "authoring_timeout_seconds": 700,
+        },
+    }
+
+    request = BuilderArtifactMiddleware._bounded_presentation_model_request(_ModelRequest(state))
+
+    assert 659 <= request.model_settings["timeout"] <= 660
 
 
 def test_presentation_authoring_stream_is_cancelled_at_absolute_deadline() -> None:

@@ -53,6 +53,24 @@ def test_successful_conversion_moves_preview_into_place(tmp_path, monkeypatch):
     assert preview.read_bytes() == b"%PDF-1.4 preview"
 
 
+def test_preview_default_timeout_supports_long_decks(tmp_path, monkeypatch):
+    deck = tmp_path / "deck.pptx"
+    deck.write_bytes(b"PK fake deck")
+    monkeypatch.setattr(pptx_preview.shutil, "which", lambda _binary: "/fake/soffice")
+    captured: dict = {}
+
+    def fake_run(cmd, **kwargs):
+        captured.update(kwargs)
+        out_dir = Path(cmd[cmd.index("--outdir") + 1])
+        (out_dir / "deck.pdf").write_bytes(b"%PDF-1.4 preview")
+        return SimpleNamespace(returncode=0, stderr="", stdout="")
+
+    monkeypatch.setattr(pptx_preview, "run_process_group", fake_run)
+
+    assert maybe_render_pptx_preview(deck) is not None
+    assert captured["timeout"] == 300
+
+
 def test_failed_conversion_returns_none(tmp_path, monkeypatch):
     deck = tmp_path / "deck.pptx"
     deck.write_bytes(b"PK fake deck")

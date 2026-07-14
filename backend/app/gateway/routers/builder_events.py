@@ -145,6 +145,9 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "builder_trace_run_id",
     "builder_trace_root_run_id",
     "deck_authoring_elapsed_ms",
+    "deck_repair_elapsed_ms",
+    "deck_service_elapsed_ms",
+    "terminal_cleanup_elapsed_ms",
     "presentation_preflight_status",
     "presentation_preflight_elapsed_ms",
     "deck_authoring_started_at_ms",
@@ -284,6 +287,9 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "builder_trace_run_id",
         "builder_trace_root_run_id",
         "deck_authoring_elapsed_ms",
+        "deck_repair_elapsed_ms",
+        "deck_service_elapsed_ms",
+        "terminal_cleanup_elapsed_ms",
         "presentation_preflight_status",
         "presentation_preflight_elapsed_ms",
         "deck_authoring_started_at_ms",
@@ -584,6 +590,9 @@ class BuilderCompletionEvent(BaseModel):
     builder_trace_run_id: str | None = None
     builder_trace_root_run_id: str | None = None
     deck_authoring_elapsed_ms: int | None = None
+    deck_repair_elapsed_ms: int | None = None
+    deck_service_elapsed_ms: int | None = None
+    terminal_cleanup_elapsed_ms: int | None = None
     presentation_preflight_status: str | None = None
     presentation_preflight_elapsed_ms: int | None = None
     deck_authoring_started_at_ms: int | None = None

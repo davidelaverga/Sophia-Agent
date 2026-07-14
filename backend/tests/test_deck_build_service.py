@@ -60,6 +60,21 @@ def _runtime(outputs: Path, *, user_request: str = "Build a visual 3 slide deck"
     )
 
 
+def test_deck_service_reserves_terminal_cleanup_from_shared_deadline(monkeypatch) -> None:
+    runtime = SimpleNamespace(
+        state={
+            "builder_deadline_epoch_ms": 1_300_000,
+            "builder_budget": {"terminal_reserve_seconds": 30},
+        },
+        context={},
+        config={},
+    )
+    monkeypatch.setattr(deck_service.time, "time", lambda: 1_000.0)
+
+    assert deck_service._service_deadline_epoch_ms(runtime) == 1_270_000
+    assert deck_service._remaining_deadline_seconds(runtime) == 270
+
+
 def _slide_html(index: int, title: str, narrative: str, *, include_asset: bool = False) -> str:
     asset = f'<figure class="asset"><img src="../assets/slide-{index:02d}.png" alt="" /></figure>' if include_asset else ""
     return f"""<!doctype html>
@@ -885,6 +900,7 @@ def test_deck_image_batch_timeout_is_capped_by_shared_deadline(
 ) -> None:
     runtime = _runtime(tmp_path / "outputs")
     runtime.state["builder_deadline_epoch_ms"] = 111_000
+    runtime.state["builder_budget"] = {"terminal_reserve_seconds": 30}
     monkeypatch.setattr(deck_service.time, "time", lambda: 1.0)
     manifest_host = tmp_path / "outputs" / "assets" / "slide-visuals.manifest.json"
     manifest_host.parent.mkdir(parents=True, exist_ok=True)
@@ -898,7 +914,7 @@ def test_deck_image_batch_timeout_is_capped_by_shared_deadline(
         runtime,
     )
 
-    assert timeout == 20
+    assert timeout == 80
 
 
 def test_expired_shared_deadline_returns_non_retryable_failure(

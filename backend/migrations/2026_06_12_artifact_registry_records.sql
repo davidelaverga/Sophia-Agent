@@ -7,6 +7,8 @@
 -- clients must continue using /api/artifacts; do not expose this table for
 -- direct anon/client writes.
 
+BEGIN;
+
 CREATE TABLE IF NOT EXISTS public.artifact_registry_records (
     artifact_id          TEXT PRIMARY KEY,
     user_id              TEXT NOT NULL,
@@ -68,3 +70,10 @@ CREATE INDEX IF NOT EXISTS artifact_registry_user_visibility_idx
 
 CREATE INDEX IF NOT EXISTS artifact_registry_user_logical_version_idx
     ON public.artifact_registry_records (user_id, logical_artifact_id, version_id);
+
+REVOKE ALL ON TABLE public.artifact_registry_records FROM PUBLIC, anon, authenticated, service_role;
+GRANT SELECT, INSERT, UPDATE, DELETE ON TABLE public.artifact_registry_records TO service_role;
+
+NOTIFY pgrst, 'reload schema';
+
+COMMIT;

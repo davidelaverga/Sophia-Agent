@@ -666,6 +666,9 @@ def test_completion_payload_preserves_terminal_and_prepare_metadata():
         "creative_plan_accepted": False,
         "deck_authoring_contract": "compact_model_html_v1",
         "deck_authoring_elapsed_ms": 119000,
+        "deck_repair_elapsed_ms": 12000,
+        "deck_service_elapsed_ms": 480000,
+        "terminal_cleanup_elapsed_ms": 800,
         "prepare_force_reason": "authoring_deadline",
         "manifest_path": "/mnt/user-data/outputs/.builder/builds/build-1/manifest.json",
         "manifest_revision": 2,
@@ -704,6 +707,9 @@ def test_completion_payload_preserves_terminal_and_prepare_metadata():
     assert parsed.creative_plan_accepted is False
     assert parsed.deck_authoring_contract == "compact_model_html_v1"
     assert parsed.deck_authoring_elapsed_ms == 119000
+    assert parsed.deck_repair_elapsed_ms == 12000
+    assert parsed.deck_service_elapsed_ms == 480000
+    assert parsed.terminal_cleanup_elapsed_ms == 800
     assert parsed.prepare_force_reason == "authoring_deadline"
     assert parsed.manifest_revision == 2
     assert parsed.logical_artifact_id == "logical-1"

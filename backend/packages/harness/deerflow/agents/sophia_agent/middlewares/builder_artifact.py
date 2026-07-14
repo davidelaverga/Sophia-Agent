@@ -545,6 +545,19 @@ def _elapsed_since_builder_start_ms(state: dict[str, Any]) -> int | None:
     return max(0, int(time.time() * 1000) - int(started))
 
 
+def _elapsed_since_presentation_authoring_start_ms(state: dict[str, Any]) -> int | None:
+    """Return one stable authoring clock shared by initial and repair turns.
+
+    Older queued runs do not carry the phase timestamp, so they retain their
+    historical kickoff-based behavior instead of receiving a fresh budget.
+    """
+
+    started = state.get("builder_presentation_authoring_started_at_ms")
+    if not isinstance(started, (int, float)) or started <= 0:
+        return _elapsed_since_builder_start_ms(state)
+    return max(0, int(time.time() * 1000) - int(started))
+
+
 def _builder_start_ms_or_now(state: dict[str, Any]) -> int:
     started = state.get("builder_task_started_at_ms")
     return int(started) if isinstance(started, (int, float)) and started > 0 else int(time.time() * 1000)
@@ -3498,6 +3511,9 @@ def _apply_artifact_request_metadata(
         "creative_plan_accepted",
         "deck_authoring_contract",
         "deck_authoring_elapsed_ms",
+        "deck_repair_elapsed_ms",
+        "deck_service_elapsed_ms",
+        "terminal_cleanup_elapsed_ms",
         "presentation_preflight_status",
         "presentation_preflight_elapsed_ms",
         "deck_authoring_started_at_ms",
@@ -6270,6 +6286,7 @@ class BuilderArtifactState(AgentState):
     builder_deck_creative_repair_attempt_count: NotRequired[int]
     builder_last_deck_creative_failure: NotRequired[dict | None]
     builder_deck_prepare_repair_attempt_count: NotRequired[int]
+    builder_deck_prepare_repair_started_at_ms: NotRequired[int]
     builder_deck_prepare_phase: NotRequired[str]
     builder_deck_prepare_repair_message: NotRequired[str | None]
     builder_deck_prepare_repair_prompt_injected: NotRequired[bool]
@@ -6277,6 +6294,7 @@ class BuilderArtifactState(AgentState):
     builder_deck_prepare_latch_active: NotRequired[bool]
     builder_presentation_phase: NotRequired[str]
     builder_presentation_preflight_started_at_ms: NotRequired[int]
+    builder_presentation_authoring_started_at_ms: NotRequired[int]
     builder_task_kickoff_ms: NotRequired[int]
     builder_timeout_seconds: NotRequired[int]
     builder_deadline_epoch_ms: NotRequired[int]
@@ -6904,6 +6922,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 }
             return {
                 "builder_presentation_phase": "authoring_pending",
+                "builder_presentation_authoring_started_at_ms": now_ms,
                 "builder_pptx_diagnostics": {
                     "presentation_preflight_status": "skipped",
                     "presentation_preflight_elapsed_ms": 0,
@@ -6911,7 +6930,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 },
             }
         if phase == "preflight_result_received":
-            return {"builder_presentation_phase": "authoring_pending"}
+            return {
+                "builder_presentation_phase": "authoring_pending",
+                "builder_presentation_authoring_started_at_ms": int(
+                    state.get("builder_presentation_authoring_started_at_ms") or now_ms
+                ),
+            }
         if phase == "preflight_call_emitted":
             result = cls._presentation_preflight_result_message(state)
             if result is None:
@@ -6922,6 +6946,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             failed = status == "error" or content.lstrip().startswith("Error:")
             return {
                 "builder_presentation_phase": "authoring_pending",
+                "builder_presentation_authoring_started_at_ms": int(
+                    state.get("builder_presentation_authoring_started_at_ms") or now_ms
+                ),
                 "builder_pptx_diagnostics": {
                     "presentation_preflight_status": "failed" if failed else "completed",
                     "presentation_preflight_elapsed_ms": max(0, now_ms - started_ms),
@@ -6943,7 +6970,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if state.get("builder_deck_prepare_latch_active"):
             return True
         turn_due = _builder_current_turn_index(state) >= prepare_force_at_turn(state)
-        elapsed_ms = _elapsed_since_builder_start_ms(state)
+        elapsed_ms = _elapsed_since_presentation_authoring_start_ms(state)
         force_after_ms = prepare_force_after_seconds(state) * 1000
         clock_due = bool(force_after_ms > 0 and elapsed_ms is not None and elapsed_ms >= force_after_ms)
         return turn_due or clock_due
@@ -7751,6 +7778,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         runtime: Runtime,
         fallback: dict[str, Any],
         status: str,
+        *,
+        cleanup_started: float | None = None,
     ) -> None:
         """Mirror the ceiling-fallback file to Supabase BEFORE firing the
         completion webhook.
@@ -7769,6 +7798,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         mode emits a failed completion if the artifact bytes cannot be
         uploaded and verified.
         """
+        cleanup_started = cleanup_started or time.perf_counter()
         thread_data = state.get("thread_data") or {}
         outputs_host_path = thread_data.get("outputs_path") if isinstance(thread_data, dict) else None
         delegation = state.get("delegation_context")
@@ -7806,6 +7836,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     supabase_mirror_attempted=mirror_result not in {"skipped", "not_configured"},
                     supabase_mirror_result=mirror_result,
                 )
+        fallback["terminal_cleanup_elapsed_ms"] = int(
+            (time.perf_counter() - cleanup_started) * 1000
+        )
         annotate_builder_completion(state, fallback)
         if _is_required_supabase_failure(mirror_result):
             fire_completion_webhook_from_artifact(
@@ -8884,7 +8917,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "builder_pptx_diagnostics": {"presentation_preflight_status": "running"},
             }
         if presentation_phase == "authoring_pending":
-            elapsed_ms = _elapsed_since_builder_start_ms(state)
+            elapsed_ms = _elapsed_since_presentation_authoring_start_ms(state)
             force_reason = str(_pptx_diagnostics(state).get("prepare_force_reason") or "bounded_preflight_complete")
             logger.warning(
                 "BuilderArtifact: forcing tool_choice=prepare_deck_build (reason=%s phase=%s elapsed_ms=%s)",
@@ -8906,11 +8939,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         logger.warning(
             "BuilderArtifact: forcing tool_choice=prepare_deck_build (reason=presentation_prepare_latch turn=%d elapsed_ms=%s)",
             _builder_current_turn_index(state),
-            _elapsed_since_builder_start_ms(state),
+            _elapsed_since_presentation_authoring_start_ms(state),
         )
         update: dict[str, Any] | None = None
         if not state.get("builder_deck_prepare_latch_active"):
-            elapsed_ms = _elapsed_since_builder_start_ms(state)
+            elapsed_ms = _elapsed_since_presentation_authoring_start_ms(state)
             force_reason = "turn_limit" if _builder_current_turn_index(state) >= prepare_force_at_turn(state) else "authoring_clock"
             update = {
                 "builder_deck_prepare_latch_active": True,
@@ -9948,7 +9981,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             root_summary = failure_summary
             force_reason = "model_error"
         else:
-            failure_summary = "The presentation authoring step exceeded its 120-second deadline."
+            failure_summary = (
+                "The presentation authoring step exceeded its configured cumulative deadline."
+            )
             root_summary = failure_summary
             force_reason = "authoring_deadline"
         root_failure_code = diagnostics.get("deck_root_failure_code") or failure_code
@@ -10044,7 +10079,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if not _deck_build_service_route_active(state) or latest_ai is None:
             return None
         additional_kwargs = getattr(latest_ai, "additional_kwargs", {})
-        elapsed_ms = _elapsed_since_builder_start_ms(state) or 0
+        elapsed_ms = _elapsed_since_presentation_authoring_start_ms(state) or 0
         deadline_ms = presentation_authoring_deadline_seconds(state) * 1_000
         if additional_kwargs.get("deerflow_error_fallback"):
             error_type = str(additional_kwargs.get("error_type") or "")
@@ -10103,7 +10138,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state: BuilderArtifactState,
         runtime: Runtime | None,
     ) -> dict[str, Any] | None:
-        elapsed_ms = _elapsed_since_builder_start_ms(state)
+        elapsed_ms = _elapsed_since_presentation_authoring_start_ms(state)
         deadline_ms = presentation_authoring_deadline_seconds(state) * 1_000
         if elapsed_ms is None or deadline_ms <= 0 or elapsed_ms < deadline_ms:
             return None
@@ -10238,7 +10273,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             else:
                 logger.error(
                     "BuilderArtifact: presentation authoring model stream cancelled at absolute deadline elapsed_ms=%s",
-                    _elapsed_since_builder_start_ms(request.state),
+                    _elapsed_since_presentation_authoring_start_ms(request.state),
                 )
                 result = self._authoring_timeout_message()
         return self._model_result_with_state_update(result, state_update)
@@ -10411,7 +10446,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         remaining = cls._presentation_authoring_seconds_remaining(request.state)
         return request, {
             "builder_pptx_diagnostics": {
-                "deck_authoring_started_at_ms": int(time.time() * 1_000),
+                "deck_authoring_started_at_ms": int(
+                    request.state.get("builder_presentation_authoring_started_at_ms")
+                    or time.time() * 1_000
+                ),
                 "deck_authoring_budget_ms": presentation_authoring_deadline_seconds(request.state) * 1_000,
                 "deck_authoring_prompt_bytes": prompt_bytes,
                 "deck_authoring_prompt_estimated_tokens": (prompt_bytes + 3) // 4,
@@ -10443,7 +10481,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     def _presentation_authoring_seconds_remaining(state: BuilderArtifactState) -> float | None:
         if not _deck_build_service_route_active(state):
             return None
-        elapsed_ms = _elapsed_since_builder_start_ms(state)
+        elapsed_ms = _elapsed_since_presentation_authoring_start_ms(state)
         if elapsed_ms is None:
             return None
         return max(0.0, presentation_authoring_deadline_seconds(state) - (elapsed_ms / 1_000.0))
@@ -10482,6 +10520,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
         return {
             "builder_presentation_phase": "authoring_pending",
+            "builder_presentation_authoring_started_at_ms": int(
+                state.get("builder_presentation_authoring_started_at_ms") or time.time() * 1_000
+            ),
             "builder_pptx_diagnostics": {
                 "presentation_preflight_status": status,
                 "presentation_preflight_elapsed_ms": elapsed_ms,
@@ -10505,7 +10546,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state = request.state
         if not _deck_build_service_route_active(state):
             return request
-        elapsed_ms = _elapsed_since_builder_start_ms(state) or 0
+        elapsed_ms = _elapsed_since_presentation_authoring_start_ms(state) or 0
         authoring_deadline_ms = presentation_authoring_deadline_seconds(state) * 1_000
         remaining_seconds = max(1, (authoring_deadline_ms - elapsed_ms + 999) // 1_000)
         timeout_seconds = min(
@@ -11224,7 +11265,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         preview = (
             maybe_render_pptx_preview(
                 host_file,
-                timeout_seconds=min(120, remaining - 2),
+                timeout_seconds=min(300, remaining - 2),
             )
             if remaining is not None
             else maybe_render_pptx_preview(host_file)
@@ -11579,6 +11620,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "pptx_generator_bytes_total": bytes_count if success else 0,
             "pptx_generator_error_class": None if success else failure_code,
         }
+        service_elapsed_ms = payload.get("service_elapsed_ms")
+        if isinstance(service_elapsed_ms, int) and not isinstance(service_elapsed_ms, bool):
+            delta["deck_service_elapsed_ms"] = max(0, service_elapsed_ms)
+        repair_started_ms = (request.state or {}).get("builder_deck_prepare_repair_started_at_ms")
+        if isinstance(repair_started_ms, (int, float)) and repair_started_ms > 0:
+            delta["deck_repair_elapsed_ms"] = max(
+                0,
+                int(time.time() * 1000) - int(repair_started_ms),
+            )
         delta.update(
             BuilderArtifactMiddleware._prepare_deck_build_optional_delta(
                 payload=payload,
@@ -11745,6 +11795,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "prepare_repair_count": 1,
                 },
                 "builder_deck_prepare_repair_attempt_count": 1,
+                "builder_deck_prepare_repair_started_at_ms": int(time.time() * 1000),
                 counter_key: 1,
                 last_failure_key: {
                     "failure_code": failure_code,
@@ -12001,6 +12052,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         payload: dict[str, Any],
         delta: dict[str, Any],
     ) -> Command:
+        cleanup_started = time.perf_counter()
         state = request.state or {}
         diagnostics = _merge_builder_pptx_diagnostics(
             _pptx_diagnostics(state),
@@ -12106,6 +12158,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "prepare_repair_count": diagnostics.get("prepare_repair_count"),
             "deck_authoring_contract": diagnostics.get("deck_authoring_contract"),
             "deck_authoring_elapsed_ms": diagnostics.get("deck_authoring_elapsed_ms"),
+            "deck_repair_elapsed_ms": diagnostics.get("deck_repair_elapsed_ms"),
+            "deck_service_elapsed_ms": diagnostics.get("deck_service_elapsed_ms"),
             "presentation_preflight_status": diagnostics.get("presentation_preflight_status"),
             "presentation_preflight_elapsed_ms": diagnostics.get("presentation_preflight_elapsed_ms"),
             "deck_authoring_started_at_ms": diagnostics.get("deck_authoring_started_at_ms"),
@@ -12139,6 +12193,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             runtime=request.runtime,
             fallback=artifact,
             status="completed",
+            cleanup_started=cleanup_started,
         )
         return Command(
             update={
@@ -12244,6 +12299,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "prepare_repair_count": diagnostics.get("prepare_repair_count"),
             "deck_authoring_contract": diagnostics.get("deck_authoring_contract"),
             "deck_authoring_elapsed_ms": diagnostics.get("deck_authoring_elapsed_ms"),
+            "deck_repair_elapsed_ms": diagnostics.get("deck_repair_elapsed_ms"),
+            "deck_service_elapsed_ms": diagnostics.get("deck_service_elapsed_ms"),
             "presentation_preflight_status": diagnostics.get("presentation_preflight_status"),
             "presentation_preflight_elapsed_ms": diagnostics.get("presentation_preflight_elapsed_ms"),
             "deck_authoring_started_at_ms": diagnostics.get("deck_authoring_started_at_ms"),
@@ -13721,7 +13778,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return (
                 maybe_render_pptx_preview(
                     host_file,
-                    timeout_seconds=min(120, remaining - 2),
+                    timeout_seconds=min(300, remaining - 2),
                 )
                 if remaining is not None
                 else maybe_render_pptx_preview(host_file)
@@ -13955,7 +14012,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if str(call_args.get("deck_stylesheet") or "").strip()
             else "legacy_full_html_v1"
         )
-        diagnostics["deck_authoring_elapsed_ms"] = _elapsed_since_builder_start_ms(state)
+        diagnostics["deck_authoring_elapsed_ms"] = _elapsed_since_presentation_authoring_start_ms(state)
         diagnostics.setdefault("prepare_force_reason", "model_initiated")
         update: dict[str, Any] = {
             "builder_pptx_diagnostics": diagnostics,

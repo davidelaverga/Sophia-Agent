@@ -262,9 +262,13 @@ class TestFallbackEnabledAndConfigured:
         assert update["provider_error_class"] == "provider_unavailable"
         assert update["final_provider"] == "openai"
 
-    def test_initial_presentation_call_uses_provider_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
+    def test_initial_presentation_call_does_not_use_provider_fallback(
+        self,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
         _enable_fallback(monkeypatch)
-        handler = _Handler(_ProviderStatusError(529, "Overloaded"), response="fallback-ok")
+        primary = _ProviderStatusError(529, "Overloaded")
+        handler = _Handler(primary, response="fallback-ok")
         request = _FakeRequest(
             state={
                 "builder_budget": {"tier": "presentation"},
@@ -272,11 +276,11 @@ class TestFallbackEnabledAndConfigured:
             }
         )
 
-        result = BuilderProviderFallbackMiddleware().wrap_model_call(request, handler)
+        with pytest.raises(_ProviderStatusError) as exc_info:
+            BuilderProviderFallbackMiddleware().wrap_model_call(request, handler)
 
-        assert len(handler.calls) == 2
-        assert handler.calls[1].model is _FALLBACK_MODEL_SENTINEL
-        assert result.model_response == "fallback-ok"
+        assert exc_info.value is primary
+        assert len(handler.calls) == 1
 
     def test_terminal_presentation_authoring_does_not_fallback(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _enable_fallback(monkeypatch)

@@ -66,6 +66,26 @@ def test_deck_native_subprocess_timeout_uses_process_group_runner(
     assert "hung child" in result.stderr
 
 
+def test_deck_native_default_subprocess_timeout_supports_long_decks(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    script = tmp_path / "deck.py"
+    script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    captured: dict = {}
+
+    def _complete(command, *, timeout, cwd):
+        captured.update(command=command, timeout=timeout, cwd=cwd)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(native_service_module, "run_process_group", _complete)
+
+    result = DeckNativeService(scripts_dir=tmp_path)._run(["python", str(script)])
+
+    assert result.returncode == 0
+    assert captured["timeout"] == 600
+
+
 def test_deck_native_render_clears_stale_images_before_counting_success(
     tmp_path: Path,
     monkeypatch,

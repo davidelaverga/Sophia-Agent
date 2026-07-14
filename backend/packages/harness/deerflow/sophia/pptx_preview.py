@@ -26,7 +26,7 @@ from deerflow.sophia.process_group import run_process_group
 
 logger = logging.getLogger(__name__)
 
-_SOFFICE_TIMEOUT_SECONDS = 120
+_SOFFICE_TIMEOUT_SECONDS = 300
 PREVIEW_SUFFIX = ".preview.pdf"
 
 

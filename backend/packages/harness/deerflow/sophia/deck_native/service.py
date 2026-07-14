@@ -19,8 +19,8 @@ from deerflow.sophia.deck_native.models import (
 from deerflow.sophia.deck_native.paths import hands_on_deck_scripts_dir
 from deerflow.sophia.process_group import run_process_group
 
-_CLI_TIMEOUT_SECONDS = 180
-_RENDER_TIMEOUT_SECONDS = 240
+_CLI_TIMEOUT_SECONDS = 600
+_RENDER_TIMEOUT_SECONDS = 600
 _ERROR_TEXT_LIMIT = 1200
 
 

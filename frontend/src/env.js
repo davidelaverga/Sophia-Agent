@@ -18,6 +18,7 @@ export const env = createEnv({
       .enum(["auto", "disable", "require", "no-verify"])
       .optional(),
     BETTER_AUTH_DATABASE_POOL_MAX: z.coerce.number().int().positive().optional(),
+    BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF: z.string().min(10).optional(),
     BACKEND_API_URL: z.string().url().optional(),
     DATABASE_URL: z.string().url().optional(),
     GOOGLE_CLIENT_ID: z.string().optional(),
@@ -28,6 +29,7 @@ export const env = createEnv({
     RENDER_BACKEND_URL: z.string().url().optional(),
     SOPHIA_AUTH_BACKEND_URL: z.string().url().optional(),
     SOPHIA_BACKEND_TOKEN_SECRET: z.string().optional(),
+    SOPHIA_MIGRATION_MAINTENANCE_MODE: z.string().optional(),
   },
 
   /**
@@ -58,6 +60,7 @@ export const env = createEnv({
     BETTER_AUTH_DATABASE_URL: process.env.BETTER_AUTH_DATABASE_URL,
     BETTER_AUTH_DATABASE_SSL_MODE: process.env.BETTER_AUTH_DATABASE_SSL_MODE,
     BETTER_AUTH_DATABASE_POOL_MAX: process.env.BETTER_AUTH_DATABASE_POOL_MAX,
+    BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF: process.env.BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF,
     BACKEND_API_URL: process.env.BACKEND_API_URL,
     DATABASE_URL: process.env.DATABASE_URL,
     GOOGLE_CLIENT_ID: process.env.GOOGLE_CLIENT_ID,
@@ -66,6 +69,7 @@ export const env = createEnv({
     RENDER_BACKEND_URL: process.env.RENDER_BACKEND_URL,
     SOPHIA_AUTH_BACKEND_URL: process.env.SOPHIA_AUTH_BACKEND_URL,
     SOPHIA_BACKEND_TOKEN_SECRET: process.env.SOPHIA_BACKEND_TOKEN_SECRET,
+    SOPHIA_MIGRATION_MAINTENANCE_MODE: process.env.SOPHIA_MIGRATION_MAINTENANCE_MODE,
     NEXT_PUBLIC_API_URL: process.env.NEXT_PUBLIC_API_URL,
     NEXT_PUBLIC_GATEWAY_URL: process.env.NEXT_PUBLIC_GATEWAY_URL,
     NEXT_PUBLIC_LANGGRAPH_BASE_URL: process.env.NEXT_PUBLIC_LANGGRAPH_BASE_URL,

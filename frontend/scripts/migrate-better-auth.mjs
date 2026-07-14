@@ -11,6 +11,24 @@ function getBetterAuthDatabaseUrl() {
     );
   }
 
+  const fallbackUrl = process.env.BETTER_AUTH_DATABASE_URL ? process.env.DATABASE_URL : undefined;
+  if (fallbackUrl && fallbackUrl !== databaseUrl) {
+    throw new Error("BETTER_AUTH_DATABASE_URL and DATABASE_URL must identify the same database.");
+  }
+  const expectedRef = process.env.BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF?.trim().toLowerCase();
+  if (expectedRef) {
+    const parsed = new URL(databaseUrl);
+    const directMatch = parsed.hostname.toLowerCase().match(/^db\.([a-z0-9]+)\.supabase\.(?:co|com)$/);
+    const username = decodeURIComponent(parsed.username);
+    const poolerRef = parsed.hostname.includes(".pooler.supabase.")
+      ? username.slice(username.lastIndexOf(".") + 1).toLowerCase()
+      : null;
+    const actualRef = directMatch?.[1] ?? poolerRef;
+    if (actualRef !== expectedRef) {
+      throw new Error("Better Auth migration target does not match the expected Supabase project.");
+    }
+  }
+
   return databaseUrl;
 }
 

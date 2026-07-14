@@ -1,5 +1,7 @@
 import { Pool, type PoolConfig } from "pg";
 
+import { validateBetterAuthDatabaseProject } from "./project-ref";
+
 type BetterAuthSslMode = "auto" | "disable" | "require" | "no-verify";
 
 declare global {
@@ -14,6 +16,12 @@ function getBetterAuthDatabaseUrl() {
       "Better Auth requires BETTER_AUTH_DATABASE_URL or DATABASE_URL when auth bypass is disabled.",
     );
   }
+
+  validateBetterAuthDatabaseProject(
+    databaseUrl,
+    process.env.BETTER_AUTH_DATABASE_URL ? process.env.DATABASE_URL : undefined,
+    process.env.BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF,
+  );
 
   return databaseUrl;
 }

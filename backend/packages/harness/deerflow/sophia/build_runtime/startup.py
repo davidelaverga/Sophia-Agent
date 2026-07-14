@@ -8,6 +8,7 @@ from deerflow.config.app_config import AppConfig
 from deerflow.sophia.build_runtime.events import configure_default_event_sink_once
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.build_foundation_store import BuildFoundationStoreConfig, configured_build_foundation_store
+from deerflow.sophia.supabase_project import validate_expected_supabase_project
 
 logger = logging.getLogger(__name__)
 
@@ -17,6 +18,7 @@ class BuildFoundationStartupError(RuntimeError):
 
 
 def audit_build_foundation(*, tools: Iterable[Any], config: AppConfig) -> None:
+    validate_expected_supabase_project()
     foundation = config.build_foundation
     if not foundation.enabled:
         return

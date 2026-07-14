@@ -428,6 +428,7 @@ class DeckBuildResult:
     logical_artifact_id: str | None = None
     current_artifact_version_id: str | None = None
     foundation_status: str | None = None
+    service_elapsed_ms: int = 0
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
