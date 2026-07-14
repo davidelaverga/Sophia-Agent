@@ -1420,6 +1420,60 @@ def test_prepare_deck_build_schema_failure_gets_one_bounded_retry(tmp_path: Path
     assert diagnostics["deck_root_failure_code"] == "deck_prepare_argument_invalid"
 
 
+def test_prepare_schema_retry_recovers_all_size_targets_without_tool_metadata(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state["builder_pptx_diagnostics"] = {
+        "prepare_emitted_call_count": 1,
+        "prepare_call_count": 1,
+    }
+    body_sizes = [1173, 3220, 2896, 3442, 2625]
+    template = _compact_slides()[0]
+    slides = [
+        {
+            **template,
+            "title": f"Compact {index}",
+            "html_body": "x" * body_size,
+        }
+        for index, body_size in enumerate(body_sizes, start=1)
+    ]
+    args = {
+        "deck_title": "Compact Limit Diagnostics",
+        "slides": slides,
+        "output_path": "/mnt/user-data/outputs/deck.pptx",
+        "creative_plan": _creative_plan(),
+        "authoring_contract": "compact_model_html_v2",
+        "deck_stylesheet": "main { background: #101828; }",
+    }
+    request = SimpleNamespace(
+        tool_call={"id": "tc-schema-sizes", "name": "prepare_deck_build", "args": args},
+        state=runtime.state,
+        runtime=runtime,
+    )
+    result = ToolMessage(
+        content="Generic LangChain tool validation failure.",
+        tool_call_id="tc-schema-sizes",
+        name="prepare_deck_build",
+        status="error",
+    )
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_result_command(request, result)
+
+    assert isinstance(command, Command)
+    assert not command.goto
+    assert command.update["builder_deck_prepare_phase"] == "retry_pending"
+    slide_two = "slides[1].html_body is 3220 bytes; compact-v2 limit is 3072 bytes"
+    slide_four = "slides[3].html_body is 3442 bytes; compact-v2 limit is 3072 bytes"
+    repair_message = command.update["builder_deck_prepare_repair_message"]
+    diagnostics = command.update["builder_pptx_diagnostics"]
+    for target in (slide_two, slide_four):
+        assert target in repair_message
+        assert target in diagnostics["deck_root_failure_summary"]
+        assert target in diagnostics["last_prepare_failure_summary"]
+    assert "Generic LangChain" not in repair_message
+
+
 def test_prepare_deck_build_execution_error_is_terminal_without_repair(
     tmp_path: Path,
     monkeypatch,

@@ -6,6 +6,7 @@ import json
 import time
 from collections.abc import Sequence
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, NotRequired, override
 
 import pytest
@@ -634,6 +635,110 @@ def test_forced_presentation_repair_preserves_complete_previous_prepare_args() -
     diagnostics = update["builder_pptx_diagnostics"]
     assert diagnostics["deck_repair_previous_args_included"] is True
     assert diagnostics["deck_repair_previous_args_bytes"] > 0
+    assert diagnostics["deck_repair_previous_args_omitted_reason"] is None
+
+
+def test_production_sized_schema_repair_keeps_prior_args_and_all_size_targets() -> None:
+    previous_args = _compact_prepare_args(creative_plan=_creative_plan())
+    body_sizes = [1173, 3220, 2896, 3442, 2625]
+    template = previous_args["slides"][0]
+    previous_args["slides"] = [
+        {
+            **template,
+            "title": f"Compact {index}",
+            "html_body": "x" * body_size,
+        }
+        for index, body_size in enumerate(body_sizes, start=1)
+    ]
+    previous_args["style_profile"] = {"prompt_budget_fixture": ""}
+    target_args_bytes = 22_960
+    initial_bytes = len(
+        json.dumps(previous_args, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    )
+    assert initial_bytes < target_args_bytes
+    previous_args["style_profile"]["prompt_budget_fixture"] = "x" * (
+        target_args_bytes - initial_bytes
+    )
+    assert (
+        len(json.dumps(previous_args, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+        == target_args_bytes
+    )
+
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "builder_pptx_requested_slide_count": 5,
+        "delegation_context": {
+            "task_type": "presentation",
+            "task": "Create a concise five-slide systems presentation.",
+        },
+        "builder_presentation_phase": "authoring_pending",
+        "builder_task_kickoff_ms": int(time.time() * 1000),
+        "builder_budget": {
+            "tier": "presentation",
+            "authoring_deadline_seconds": 120,
+            "authoring_max_tokens": 16_384,
+        },
+        "builder_pptx_diagnostics": {
+            "prepare_emitted_call_count": 1,
+            "prepare_call_count": 1,
+        },
+    }
+    result = ToolMessage(
+        content="Generic LangChain tool validation failure.",
+        name="prepare_deck_build",
+        tool_call_id="prepare-schema-1",
+        status="error",
+    )
+    middleware = BuilderArtifactMiddleware()
+    command = middleware._prepare_deck_build_result_command(
+        SimpleNamespace(
+            tool_call={
+                "id": "prepare-schema-1",
+                "name": "prepare_deck_build",
+                "args": previous_args,
+            },
+            state=state,
+            runtime=None,
+        ),
+        result,
+    )
+    retry_state = {**state, **command.update}
+    request = _ModelRequest(
+        retry_state,
+        tools=[prepare_deck_build],
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {
+                        "id": "prepare-schema-1",
+                        "name": "prepare_deck_build",
+                        "args": previous_args,
+                    }
+                ],
+            ),
+            result,
+        ],
+    )
+
+    bounded, update = middleware._presentation_request_for_choice(
+        request,
+        {"type": "tool", "name": "prepare_deck_build"},
+    )
+
+    prompt = str(bounded.messages[0].content)
+    marker = artifact_module._PRESENTATION_PREVIOUS_ARGS_MARKER
+    slide_two = "slides[1].html_body is 3220 bytes; compact-v2 limit is 3072 bytes"
+    slide_four = "slides[3].html_body is 3442 bytes; compact-v2 limit is 3072 bytes"
+    assert len(prompt.encode("utf-8")) <= artifact_module._PRESENTATION_AUTHORING_PROMPT_MAX_BYTES
+    assert slide_two in prompt
+    assert slide_four in prompt
+    assert marker in prompt
+    assert json.loads(prompt.split(marker, 1)[1]) == previous_args
+    assert update is not None
+    diagnostics = update["builder_pptx_diagnostics"]
+    assert diagnostics["deck_repair_previous_args_included"] is True
+    assert diagnostics["deck_repair_previous_args_bytes"] == target_args_bytes
     assert diagnostics["deck_repair_previous_args_omitted_reason"] is None
 
 

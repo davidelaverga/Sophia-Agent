@@ -23,7 +23,11 @@ from deerflow.sophia.deck_build.compiler_capabilities import (
 from deerflow.sophia.deck_build.models import DeckSlideCompositionPlan, DeckSlideSpec
 from deerflow.sophia.deck_build.native_contrast import evaluate_native_contrast
 from deerflow.sophia.deck_build.source_retention import evaluate_source_retention, retention_summary
-from deerflow.sophia.deck_build.tool_contract import PrepareDeckBuildInput
+from deerflow.sophia.deck_build.tool_contract import (
+    DeckCreativePlanInput,
+    PrepareDeckBuildInput,
+    prepare_deck_build_validation_summary,
+)
 
 
 def test_prepare_contract_normalizes_exactly_one_json_layer() -> None:
@@ -191,6 +195,63 @@ def test_compact_v2_profile_is_required_in_model_schema_and_bounded() -> None:
         }
     )
     assert model.authoring_contract == "compact_model_html_v1"
+
+
+def _compact_v2_args(*, body_sizes: list[int] | None = None) -> dict:
+    slides = []
+    for index, body_size in enumerate(body_sizes or [256], start=1):
+        slide = _compact_slide()
+        slide["title"] = f"Compact {index}"
+        slide["html_body"] = "x" * body_size
+        slides.append(slide)
+    return {
+        "deck_title": "Compact Limit Diagnostics",
+        "slides": slides,
+        "output_path": "/mnt/user-data/outputs/deck.pptx",
+        "creative_plan": _creative_plan(),
+        "authoring_contract": "compact_model_html_v2",
+        "deck_stylesheet": "main { background: #101828; }",
+    }
+
+
+def test_prepare_validation_summary_enumerates_all_compact_v2_body_limits() -> None:
+    args = _compact_v2_args(body_sizes=[1173, 3220, 2896, 3442, 2625])
+
+    summary = prepare_deck_build_validation_summary(args)
+
+    slide_two = "slides[1].html_body is 3220 bytes; compact-v2 limit is 3072 bytes"
+    slide_four = "slides[3].html_body is 3442 bytes; compact-v2 limit is 3072 bytes"
+    assert summary.count(slide_two) == 1
+    assert summary.count(slide_four) == 1
+    assert summary.index(slide_two) < summary.index(slide_four)
+    assert "xxxxxxxx" not in summary
+    assert len(summary) <= 1200
+
+
+def test_prepare_validation_summary_matches_size_semantics_and_deduplicates() -> None:
+    whitespace_args = _compact_v2_args()
+    whitespace_args["deck_stylesheet"] = (" " * 200) + ("x" * 8000)
+    assert prepare_deck_build_validation_summary(whitespace_args) == ""
+
+    unicode_args = _compact_v2_args()
+    unicode_args["slides"][0]["slide_css"] = "é" * 513
+    unicode_summary = prepare_deck_build_validation_summary(unicode_args)
+    assert unicode_summary == "slides[0].slide_css is 1026 bytes; compact-v2 limit is 1024 bytes"
+
+    plan_args = _compact_v2_args()
+    plan_args["creative_plan"]["story_arc"] = "x" * 13_000
+    normalized_plan = DeckCreativePlanInput.model_validate(plan_args["creative_plan"]).model_dump(mode="json")
+    plan_bytes = len(json.dumps(normalized_plan, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    plan_summary = prepare_deck_build_validation_summary(plan_args)
+    assert f"creative_plan is {plan_bytes} bytes; compact-v2 limit is 12288 bytes" in plan_summary
+
+    total_args = _compact_v2_args()
+    total_args["style_profile"] = {"padding": "x" * 50_000}
+    raw_bytes = len(json.dumps(total_args, separators=(",", ":"), ensure_ascii=False).encode("utf-8"))
+    total_summary = prepare_deck_build_validation_summary(total_args)
+    total_target = f"prepare_deck_build arguments are {raw_bytes} bytes; compact-v2 limit is 49152 bytes"
+    assert total_summary.count(total_target) == 1
+    assert total_summary.count("prepare_deck_build arguments") == 1
 
 
 def test_source_retention_reports_missing_required_ids() -> None:

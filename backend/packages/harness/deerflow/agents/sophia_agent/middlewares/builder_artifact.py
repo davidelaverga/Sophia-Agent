@@ -86,6 +86,7 @@ from deerflow.sophia.builder_provider_fallback import (
 from deerflow.sophia.builder_web_policy import extract_explicit_user_urls
 from deerflow.sophia.deck_build.compiler_capabilities import compiler_capability_prompt_excerpt
 from deerflow.sophia.deck_build.ir_repair import deck_ir_repair_instruction_from_failure
+from deerflow.sophia.deck_build.tool_contract import prepare_deck_build_validation_summary
 from deerflow.sophia.observability import annotate_builder_completion
 from deerflow.sophia.pptx_preview import maybe_render_pptx_preview
 from deerflow.sophia.storage import supabase_artifact_store
@@ -11975,10 +11976,15 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state = request.state or {}
         diagnostics = _pptx_diagnostics(state)
         repair_attempt_count = self._prepare_repair_attempt_count(state)
-        validation_summary = ""
+        tool_call = getattr(request, "tool_call", {})
+        raw_args = tool_call.get("args") if isinstance(tool_call, dict) else None
+        validation_summary = (
+            prepare_deck_build_validation_summary(raw_args) if raw_args is not None else ""
+        )
         tool_error = result.additional_kwargs.get("tool_error")
-        if isinstance(tool_error, dict):
+        if not validation_summary and isinstance(tool_error, dict):
             validation_summary = str(tool_error.get("validation_summary") or "").strip()
+        default_summary = "prepare_deck_build arguments failed typed schema validation."
         schema_delta = {
             "prepare_execution_count": 1,
             "prepare_result_count": 1,
@@ -11986,9 +11992,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "deck_status": "failed_terminal" if repair_attempt_count >= 1 else "repair_pending",
             "deck_failure_code": "deck_prepare_argument_invalid",
             "deck_root_failure_code": diagnostics.get("deck_root_failure_code") or "deck_prepare_argument_invalid",
-            "deck_root_failure_summary": diagnostics.get("deck_root_failure_summary") or "prepare_deck_build arguments failed typed schema validation.",
+            "deck_root_failure_summary": diagnostics.get("deck_root_failure_summary") or validation_summary or default_summary,
             "last_prepare_failure_code": "deck_prepare_argument_invalid",
-            "last_prepare_failure_summary": validation_summary or "prepare_deck_build arguments failed typed schema validation.",
+            "last_prepare_failure_summary": validation_summary or default_summary,
             "prepare_repair_count": repair_attempt_count,
             "prepare_retry_executed": repair_attempt_count > 0,
         }

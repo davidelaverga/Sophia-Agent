@@ -163,11 +163,21 @@ _V2_MAX_SLIDE_HTML_BODY_BYTES = 3 * 1024
 _V2_MAX_SLIDE_CSS_BYTES = 1 * 1024
 _V2_MAX_CREATIVE_PLAN_BYTES = 12 * 1024
 _V2_MAX_AUTHORING_PAYLOAD_BYTES = 48 * 1024
+_MAX_PREPARE_VALIDATION_ERRORS = 8
+_MAX_PREPARE_VALIDATION_SUMMARY_CHARS = 1200
 _DOCUMENT_FRAGMENT_TAGS = ("<html", "</html", "<head", "</head", "<body", "</body", "<style", "</style")
 
 
 def _utf8_size(value: str | None) -> int:
     return len((value or "").encode("utf-8"))
+
+
+def _compact_json_size(value: Any) -> int | None:
+    try:
+        encoded = json.dumps(value, separators=(",", ":"), ensure_ascii=False)
+    except (TypeError, ValueError):
+        return None
+    return _utf8_size(encoded)
 
 
 def _compact_slide_json_schema(schema: dict[str, Any]) -> None:
@@ -355,3 +365,176 @@ class PrepareDeckBuildInput(BaseModel):
             raise ValueError("creative_plan exceeds the compact-v2 12288-byte limit")
         if _utf8_size(self.model_dump_json(exclude_none=True)) > _V2_MAX_AUTHORING_PAYLOAD_BYTES:
             raise ValueError("prepare_deck_build arguments exceed the compact-v2 49152-byte limit")
+
+
+def _compact_v2_size_violations(value: Any) -> list[tuple[str, str]]:
+    if not isinstance(value, dict) or value.get("authoring_contract") != "compact_model_html_v2":
+        return []
+
+    violations: list[tuple[str, str]] = []
+    stylesheet = value.get("deck_stylesheet")
+    if isinstance(stylesheet, str):
+        size = _utf8_size(stylesheet.strip())
+        if size > _V2_MAX_DECK_STYLESHEET_BYTES:
+            violations.append(
+                (
+                    "deck_stylesheet",
+                    f"deck_stylesheet is {size} bytes; compact-v2 limit is {_V2_MAX_DECK_STYLESHEET_BYTES} bytes",
+                )
+            )
+
+    slides = value.get("slides")
+    if isinstance(slides, str):
+        try:
+            slides = normalize_slides_value(slides)
+        except (TypeError, ValueError):
+            pass
+    if isinstance(slides, list):
+        for index, slide in enumerate(slides):
+            if not isinstance(slide, dict):
+                continue
+            html_body = slide.get("html_body")
+            if isinstance(html_body, str):
+                size = _utf8_size(html_body)
+                if size > _V2_MAX_SLIDE_HTML_BODY_BYTES:
+                    field = f"slides[{index}].html_body"
+                    violations.append(
+                        (
+                            field,
+                            f"{field} is {size} bytes; compact-v2 limit is {_V2_MAX_SLIDE_HTML_BODY_BYTES} bytes",
+                        )
+                    )
+            slide_css = slide.get("slide_css")
+            if isinstance(slide_css, str):
+                size = _utf8_size(slide_css)
+                if size > _V2_MAX_SLIDE_CSS_BYTES:
+                    field = f"slides[{index}].slide_css"
+                    violations.append(
+                        (
+                            field,
+                            f"{field} is {size} bytes; compact-v2 limit is {_V2_MAX_SLIDE_CSS_BYTES} bytes",
+                        )
+                    )
+
+    creative_plan = value.get("creative_plan")
+    if isinstance(creative_plan, dict):
+        plan_for_size: Any = creative_plan
+        try:
+            plan_for_size = DeckCreativePlanInput.model_validate(creative_plan).model_dump(mode="json")
+        except (TypeError, ValueError):
+            pass
+        size = _compact_json_size(plan_for_size)
+        if size is not None and size > _V2_MAX_CREATIVE_PLAN_BYTES:
+            violations.append(
+                (
+                    "creative_plan",
+                    f"creative_plan is {size} bytes; compact-v2 limit is {_V2_MAX_CREATIVE_PLAN_BYTES} bytes",
+                )
+            )
+
+    size = _compact_json_size(value)
+    if size is not None and size > _V2_MAX_AUTHORING_PAYLOAD_BYTES:
+        violations.append(
+            (
+                "prepare_deck_build arguments",
+                f"prepare_deck_build arguments are {size} bytes; compact-v2 limit is {_V2_MAX_AUTHORING_PAYLOAD_BYTES} bytes",
+            )
+        )
+    return violations
+
+
+def _prepare_validation_location(value: object) -> str:
+    parts: list[str] = []
+    for segment in value if isinstance(value, (list, tuple)) else ():
+        if isinstance(segment, int):
+            if parts:
+                parts[-1] = f"{parts[-1]}[{segment}]"
+            else:
+                parts.append(f"[{segment}]")
+        else:
+            parts.append(str(segment))
+    return ".".join(parts) or "arguments"
+
+
+def _duplicates_size_violation(*, location: str, message: str, size_fields: set[str]) -> bool:
+    if not any(token in message for token in ("byte limit", "compact-v2", "exceeds")):
+        return False
+    combined = f"{location}: {message}"
+    for field in size_fields:
+        if field in combined:
+            return True
+        parent, _, leaf = field.rpartition(".")
+        if location == parent and leaf in message:
+            return True
+    return False
+
+
+def _bounded_prepare_validation_summary(
+    errors: list[str],
+    *,
+    max_errors: int,
+    max_chars: int,
+) -> str:
+    error_limit = max(1, max_errors)
+    char_limit = max(64, max_chars)
+    normalized = [" ".join(item.split()) for item in errors if item.strip()]
+    selected: list[str] = []
+    for item in normalized[:error_limit]:
+        candidate = "; ".join([*selected, item])
+        if len(candidate) > char_limit:
+            break
+        selected.append(item)
+
+    omitted = len(normalized) - len(selected)
+    if omitted:
+        suffix = f"{omitted} additional validation error{'s' if omitted != 1 else ''} omitted"
+        while selected and len("; ".join([*selected, suffix])) > char_limit:
+            selected.pop()
+            omitted += 1
+            suffix = f"{omitted} additional validation errors omitted"
+        if len(suffix) <= char_limit:
+            selected.append(suffix)
+    return "; ".join(selected)
+
+
+def prepare_deck_build_validation_summary(
+    value: Any,
+    *,
+    max_errors: int = _MAX_PREPARE_VALIDATION_ERRORS,
+    max_chars: int = _MAX_PREPARE_VALIDATION_SUMMARY_CHARS,
+) -> str:
+    """Return bounded, input-safe repair targets for invalid deck arguments."""
+
+    size_violations = _compact_v2_size_violations(value)
+    errors = [message for _, message in size_violations]
+    size_fields = {field for field, _ in size_violations}
+    try:
+        PrepareDeckBuildInput.model_validate(value)
+    except Exception as exc:  # Pydantic exposes safe structured errors below.
+        errors_method = getattr(exc, "errors", None)
+        if callable(errors_method):
+            try:
+                validation_errors = errors_method(
+                    include_url=False,
+                    include_context=False,
+                    include_input=False,
+                )
+            except Exception:
+                validation_errors = []
+            for item in validation_errors:
+                if not isinstance(item, dict):
+                    continue
+                location = _prepare_validation_location(item.get("loc"))
+                message = str(item.get("msg") or "invalid value").strip()
+                if _duplicates_size_violation(
+                    location=location,
+                    message=message,
+                    size_fields=size_fields,
+                ):
+                    continue
+                errors.append(f"{location}: {message}")
+    return _bounded_prepare_validation_summary(
+        errors,
+        max_errors=max_errors,
+        max_chars=max_chars,
+    )
