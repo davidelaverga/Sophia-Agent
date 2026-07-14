@@ -118,6 +118,22 @@ def _slides(count: int = 3, *, include_asset: bool = True) -> list[dict]:
     return slides
 
 
+def _compact_slides(*, visible_eyebrow_on_slide: int | None = None) -> list[dict]:
+    slides = _slides(include_asset=False)
+    for index, slide in enumerate(slides, start=1):
+        eyebrow = '<div class="eyebrow">SECTION</div>' if visible_eyebrow_on_slide == index else ""
+        slide.pop("html_source")
+        slide["visual_prompt"] = ""
+        slide["html_body"] = (
+            f'{eyebrow}<h1 data-deck-id="title-{index}" data-deck-role="title" '
+            f'data-deck-required="true">{slide["title"]}</h1>'
+            f'<section class="diagram" data-deck-id="diagram-{index}" data-deck-role="diagram"></section>'
+            f'<p class="narrative" data-deck-id="narrative-{index}" data-deck-role="narrative" '
+            f'data-deck-required="true">{slide["narrative"]}</p>'
+        )
+    return slides
+
+
 def _creative_plan(*, include_asset: bool = True) -> dict:
     image_assets = []
     if include_asset:
@@ -642,6 +658,55 @@ def test_deck_build_service_allows_negated_visual_prompt_guardrails(tmp_path: Pa
     )
 
     assert result.success is True
+
+
+def test_deck_build_service_ignores_hidden_unused_eyebrow_selector(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        native_service=_FakeNativeService(),
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_compact_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        deck_stylesheet=(
+            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926}"
+            ".eyebrow-none{display:none}"
+            "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
+        ),
+        authoring_contract="compact_model_html_v2",
+        creative_plan=_creative_plan(include_asset=False),
+    )
+
+    assert result.success is True
+
+
+def test_deck_build_service_still_rejects_visible_eyebrow_chrome(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        native_service=_FakeNativeService(),
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_compact_slides(visible_eyebrow_on_slide=2),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        deck_stylesheet=(
+            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926}"
+            "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
+        ),
+        authoring_contract="compact_model_html_v2",
+        creative_plan=_creative_plan(include_asset=False),
+    )
+
+    assert result.success is False
+    assert result.failure_code == "deck_quality_failed"
+    assert "chrome" in str(result.failure_summary).lower()
 
 
 def test_deck_build_service_allows_explicitly_requested_visual_style(tmp_path: Path) -> None:

@@ -28,9 +28,13 @@ DESIGN_RULES = [
     DesignRule("deck_chalkboard_unrequested", r"\b(chalkboard|blackboard|whiteboard|handwritten|sketch)\b", "visual_style", "hard", "unrequested classroom/sketch styling"),
     DesignRule("deck_tiny_text", r"font-size\s*:\s*(?:[0-9]|1[0-9]|2[0-3])px\b", "density", "soft", "text smaller than the P-1 floor"),
     DesignRule("deck_nested_cards", r"\bcard[^<]{0,160}\bcard\b", "visual_style", "soft", "nested card-like structure"),
-    DesignRule("deck_repeated_eyebrow", r"\beyebrow\b", "chrome", "hard", "repeated eyebrow chrome"),
     DesignRule("deck_gradient_text", r"background-clip\s*:\s*text", "visual_style", "soft", "gradient text styling"),
 ]
+
+# Eyebrow/navigation/footer chrome is checked structurally by
+# ``SlideQualityInspector.chrome_check``. Keep it out of the lexical design
+# rules: compact slide sources repeat shared CSS, so an unused hidden selector
+# such as ``.eyebrow-none { display: none }`` must not become a hard failure.
 
 
 class DeckEvaluator:
