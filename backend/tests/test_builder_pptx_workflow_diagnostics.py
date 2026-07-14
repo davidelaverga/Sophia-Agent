@@ -1342,11 +1342,25 @@ def test_visual_skill_force_count_persists_from_wrap_model_call_update() -> None
 
     result = middleware.wrap_model_call(request, lambda _request: AIMessage(content="reading"))
 
-    assert isinstance(result, Command)
+    assert isinstance(result, ExtendedModelResponse)
+    assert isinstance(result.model_response, ModelResponse)
+    assert result.model_response.result[0].content == "reading"
+    assert result.command is not None
     assert captured["tool_choice"] == {"type": "tool", "name": "read_file"}
-    assert result.update["builder_visual_force_count"] == 1
-    assert result.update["messages"][0].content == "reading"
+    assert result.command.update["builder_visual_force_count"] == 1
     assert "builder_visual_force_count" not in state
+
+
+def test_model_result_state_update_preserves_command_results() -> None:
+    command = Command(update={"existing": True})
+
+    result = BuilderArtifactMiddleware._model_result_with_state_update(
+        command,
+        {"added": True},
+    )
+
+    assert isinstance(result, Command)
+    assert result.update == {"existing": True, "added": True}
 
 
 def test_visual_skill_force_count_persists_for_model_response() -> None:

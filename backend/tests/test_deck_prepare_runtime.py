@@ -12,7 +12,7 @@ import pytest
 from anthropic.resources.messages import AsyncMessages
 from langchain.agents import AgentState, create_agent
 from langchain.agents.middleware import AgentMiddleware
-from langchain.agents.middleware.types import hook_config
+from langchain.agents.middleware.types import ExtendedModelResponse, ModelResponse, hook_config
 from langchain.chat_models.base import BaseChatModel
 from langchain_anthropic import ChatAnthropic
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
@@ -600,8 +600,58 @@ def test_presentation_preflight_model_timeout_continues_to_authoring() -> None:
     )
 
     assert time.monotonic() - started < 0.35
-    assert result.update["builder_presentation_phase"] == "authoring_pending"
-    assert result.update["builder_pptx_diagnostics"]["presentation_preflight_status"] == "timed_out"
+    assert isinstance(result, ExtendedModelResponse)
+    assert isinstance(result.model_response, ModelResponse)
+    assert result.model_response.result[0].additional_kwargs["error_reason"] == "presentation_preflight_timeout"
+    assert result.command is not None
+    assert result.command.update["builder_presentation_phase"] == "authoring_pending"
+    assert result.command.update["builder_pptx_diagnostics"]["presentation_preflight_status"] == "timed_out"
+
+
+def test_expired_preflight_timeout_flows_through_async_agent_middleware(tmp_path: Path) -> None:
+    model = _PrepareSequenceModel([])
+    agent = create_agent(
+        model=model,
+        tools=[_builder_web_search, prepare_deck_build],
+        middleware=[BuilderArtifactMiddleware()],
+        state_schema=_DeckRuntimeState,
+    )
+
+    result = asyncio.run(
+        agent.ainvoke(
+            {
+                "messages": [HumanMessage(content="Build a researched PPTX")],
+                "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+                "delegation_context": {
+                    "task_type": "presentation",
+                    "task": "Build a researched PPTX",
+                },
+                "allow_web_research": True,
+                "builder_presentation_phase": "preflight_pending",
+                "builder_presentation_preflight_started_at_ms": int(time.time() * 1000) - 30_000,
+                "builder_task_kickoff_ms": int(time.time() * 1000),
+                "builder_budget": {
+                    "tier": "presentation",
+                    "preflight_timeout_seconds": 1,
+                    "authoring_deadline_seconds": 120,
+                },
+                "thread_data": {
+                    "outputs_path": str(tmp_path / "outputs"),
+                    "workspace_path": str(tmp_path / "workspace"),
+                },
+            },
+            context={"thread_id": "builder-thread"},
+        )
+    )
+
+    assert result["builder_presentation_phase"] == "authoring_pending"
+    timeout_messages = [
+        message
+        for message in result["messages"]
+        if isinstance(message, AIMessage)
+        and message.additional_kwargs.get("error_reason") == "presentation_preflight_timeout"
+    ]
+    assert len(timeout_messages) == 1
 
 
 def test_research_preflight_runs_once_then_prepare_finalizes(
@@ -783,9 +833,8 @@ def test_presentation_authoring_stream_is_cancelled_at_absolute_deadline() -> No
 
     assert calls == 1
     assert time.monotonic() - started < 0.35
-    messages = result.update["messages"] if hasattr(result, "update") else [result]
-    timeout_message = messages[-1]
-    assert timeout_message.additional_kwargs["error_reason"] == "authoring_deadline"
+    assert isinstance(result, AIMessage)
+    assert result.additional_kwargs["error_reason"] == "authoring_deadline"
 
 
 def test_presentation_repair_stream_keeps_original_authoring_deadline() -> None:
@@ -825,8 +874,10 @@ def test_presentation_repair_stream_keeps_original_authoring_deadline() -> None:
 
     assert calls == 1
     assert time.monotonic() - started < 0.35
-    messages = result.update["messages"] if hasattr(result, "update") else [result]
-    assert messages[-1].additional_kwargs["error_reason"] == "authoring_deadline"
+    assert isinstance(result, ExtendedModelResponse)
+    assert isinstance(result.model_response, ModelResponse)
+    assert result.command is not None
+    assert result.model_response.result[-1].additional_kwargs["error_reason"] == "authoring_deadline"
 
 
 def test_authoring_deadline_takes_precedence_over_output_truncation(monkeypatch) -> None:

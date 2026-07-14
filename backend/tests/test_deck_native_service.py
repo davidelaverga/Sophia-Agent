@@ -351,3 +351,155 @@ def test_deck_native_html_to_patch_compiles_when_playwright_available(tmp_path: 
     assert applied.success is True
     assert inspected.native_text_shape_count >= 2
     assert inspected.full_slide_picture_count == 0
+
+
+def test_deck_native_html_to_patch_retains_transparent_required_wrapper(tmp_path: Path) -> None:
+    if importlib.util.find_spec("playwright") is None:
+        pytest.skip("Python Playwright is not installed in this backend env")
+    base = tmp_path / "base.pptx"
+    html = tmp_path / "transparent-wrapper.html"
+    patch = tmp_path / "transparent-wrapper.patch.json"
+    output = tmp_path / "transparent-wrapper.pptx"
+    _wide_base_deck(base)
+    html.write_text(
+        """<!doctype html><html><body style="margin:0;width:1920px;height:1080px;background:#0A0E14;color:#EEF4FB">
+        <section data-deck-id="system" data-deck-role="architecture" data-deck-required="true"
+                 style="position:absolute;left:96px;top:90px;width:1500px;height:700px">
+          <h1 style="position:absolute;left:0;top:0;width:1200px;font-size:72px">Transparent semantic wrapper</h1>
+          <p style="position:absolute;left:0;top:180px;width:1100px;font-size:36px">Its native descendants retain the wrapper identity.</p>
+        </section>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    service = DeckNativeService()
+
+    patched = service.html_to_patch(
+        html_paths=[str(html)],
+        base_deck_path=str(base),
+        output_patch_path=str(patch),
+    )
+    if not patched.success and any(
+        "browser" in error.lower() or "chromium" in error.lower()
+        for error in patched.errors
+    ):
+        pytest.skip("Python Playwright is installed but Chromium is unavailable")
+    applied = service.apply_patch(
+        base_deck_path=str(base),
+        patch_path=str(patch),
+        output_path=str(output),
+        fix=True,
+    )
+    inspected = service.inspect(str(output))
+
+    assert patched.success is True
+    source_map = json.loads(Path(patched.source_map_path or "").read_text(encoding="utf-8"))
+    system = source_map["slides"]["slide:1"]["elements"]["system"]
+    assert system["source_role"] == "architecture"
+    assert system["source_required"] is True
+    assert len(system["shape_names"]) == 2
+    assert applied.success is True
+    assert inspected.success is True
+    inventory = json.loads(Path(inspected.shape_inventory_path or "").read_text(encoding="utf-8"))
+    native_names = {
+        shape["name"]
+        for shape in inventory["slides"]["slide:1"]["shapes"]
+        if shape.get("name")
+    }
+    assert set(system["shape_names"]).issubset(native_names)
+
+
+def test_deck_native_html_to_patch_retains_nested_semantic_ids(tmp_path: Path) -> None:
+    if importlib.util.find_spec("playwright") is None:
+        pytest.skip("Python Playwright is not installed in this backend env")
+    base = tmp_path / "base.pptx"
+    html = tmp_path / "nested-semantic-ids.html"
+    patch = tmp_path / "nested-semantic-ids.patch.json"
+    output = tmp_path / "nested-semantic-ids.pptx"
+    _wide_base_deck(base)
+    html.write_text(
+        """<!doctype html><html><body style="margin:0;width:1920px;height:1080px;background:#0A0E14;color:#EEF4FB">
+        <section data-deck-id="system" data-deck-role="architecture" data-deck-required="true"
+                 style="position:absolute;left:96px;top:90px;width:1500px;height:700px">
+          <div data-deck-id="cluster" data-deck-role="diagram" data-deck-required="true"
+               style="position:absolute;left:0;top:0;width:1300px;height:600px">
+            <h1 data-deck-id="title" data-deck-role="title" data-deck-required="true"
+                style="position:absolute;left:0;top:0;width:1200px;font-size:72px">Nested semantic identities</h1>
+            <p data-deck-id="detail" data-deck-role="narrative" data-deck-required="true"
+               style="position:absolute;left:0;top:180px;width:1100px;font-size:36px">One native shape satisfies its leaf and container identities.</p>
+          </div>
+        </section>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    service = DeckNativeService()
+
+    patched = service.html_to_patch(
+        html_paths=[str(html)],
+        base_deck_path=str(base),
+        output_patch_path=str(patch),
+    )
+    if not patched.success and any(
+        "browser" in error.lower() or "chromium" in error.lower()
+        for error in patched.errors
+    ):
+        pytest.skip("Python Playwright is installed but Chromium is unavailable")
+    applied = service.apply_patch(
+        base_deck_path=str(base),
+        patch_path=str(patch),
+        output_path=str(output),
+        fix=True,
+    )
+    inspected = service.inspect(str(output))
+
+    assert patched.success is True
+    source_map = json.loads(Path(patched.source_map_path or "").read_text(encoding="utf-8"))
+    elements = source_map["slides"]["slide:1"]["elements"]
+    assert set(elements) == {"system", "cluster", "title", "detail"}
+    title_names = set(elements["title"]["shape_names"])
+    detail_names = set(elements["detail"]["shape_names"])
+    assert title_names
+    assert detail_names
+    assert title_names.isdisjoint(detail_names)
+    assert set(elements["cluster"]["shape_names"]) == title_names | detail_names
+    assert set(elements["system"]["shape_names"]) == title_names | detail_names
+    assert applied.success is True
+    assert inspected.success is True
+    inventory = json.loads(Path(inspected.shape_inventory_path or "").read_text(encoding="utf-8"))
+    native_names = {
+        shape["name"]
+        for shape in inventory["slides"]["slide:1"]["shapes"]
+        if shape.get("name")
+    }
+    assert title_names | detail_names <= native_names
+
+
+def test_deck_native_html_to_patch_still_rejects_duplicate_semantic_ids(tmp_path: Path) -> None:
+    if importlib.util.find_spec("playwright") is None:
+        pytest.skip("Python Playwright is not installed in this backend env")
+    base = tmp_path / "base.pptx"
+    html = tmp_path / "duplicate-semantic-ids.html"
+    patch = tmp_path / "duplicate-semantic-ids.patch.json"
+    _wide_base_deck(base)
+    html.write_text(
+        """<!doctype html><html><body style="margin:0;width:1920px;height:1080px;background:#0A0E14;color:#EEF4FB">
+        <h1 data-deck-id="duplicate" style="position:absolute;left:96px;top:90px;font-size:72px">First</h1>
+        <p data-deck-id="duplicate" style="position:absolute;left:96px;top:220px;font-size:36px">Second</p>
+        </body></html>""",
+        encoding="utf-8",
+    )
+    service = DeckNativeService()
+
+    patched = service.html_to_patch(
+        html_paths=[str(html)],
+        base_deck_path=str(base),
+        output_patch_path=str(patch),
+    )
+    if not patched.success and any(
+        "browser" in error.lower() or "chromium" in error.lower()
+        for error in patched.errors
+    ):
+        pytest.skip("Python Playwright is installed but Chromium is unavailable")
+
+    assert patched.success is False
+    assert patched.patch_path is None
+    assert "duplicate data-deck-id: duplicate" in "\n".join(patched.errors)

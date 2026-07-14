@@ -8992,7 +8992,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if isinstance(result, Command):
             return cls._command_with_merged_update(result, update)
         if isinstance(result, AIMessage):
-            return Command(update={"messages": [result], **update})
+            return ExtendedModelResponse(
+                model_response=ModelResponse(result=[result]),
+                command=Command(update=update),
+            )
         return result
 
     def _simple_pdf_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:

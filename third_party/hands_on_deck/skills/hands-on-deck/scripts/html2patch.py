@@ -38,11 +38,20 @@ EXTRACT_JS = r"""
   const TEXT_TAGS = new Set(['P','H1','H2','H3','H4','H5','H6']);
   const SINGLE_WEIGHT = new Set(['impact']);  // faux-bold widens text in PPT
 
-  const sourceMeta = (el) => ({
+  const ownSourceMeta = (el) => ({
     sourceId: el.getAttribute('data-deck-id') || null,
     sourceRole: el.getAttribute('data-deck-role') || null,
     sourceRequired: el.getAttribute('data-deck-required') === 'true',
   });
+  const sourceMeta = (el) => {
+    const direct = ownSourceMeta(el);
+    const sourceRefs = [];
+    for (let current = el; current; current = current.parentElement) {
+      const ref = ownSourceMeta(current);
+      if (ref.sourceId) sourceRefs.push(ref);
+    }
+    return { ...direct, sourceRefs };
+  };
   const seenSourceIds = new Set();
   document.querySelectorAll('[data-deck-id]').forEach(el => {
     const sourceId = el.getAttribute('data-deck-id');
@@ -752,24 +761,54 @@ def compile_page(extract, slide_ref, html_path, tmpdir, prefix, warnings, source
         source_seq[key] = source_seq.get(key, 0) + 1
         return "%s-%s-%s-%d" % (prefix, source_id, kind, source_seq[key])
 
+    def source_refs(item):
+        refs = [ref for ref in item.get("sourceRefs") or [] if isinstance(ref, dict)]
+        direct_id = item.get("sourceId")
+        if direct_id and not any(ref.get("sourceId") == direct_id for ref in refs):
+            refs.insert(0, {
+                "sourceId": direct_id,
+                "sourceRole": item.get("sourceRole"),
+                "sourceRequired": item.get("sourceRequired"),
+            })
+        unique = []
+        seen = set()
+        for ref in refs:
+            source_id = ref.get("sourceId")
+            if not source_id or source_id in seen:
+                continue
+            seen.add(source_id)
+            unique.append(ref)
+        return unique
+
     def record_source(item, emitted):
-        source_id = item.get("sourceId")
-        if not source_id:
+        refs = source_refs(item)
+        if not refs:
             return
         selector = "slide:%d" % (slide_ref + 1)
         slide_map = source_map.setdefault("slides", {}).setdefault(selector, {"elements": {}})
-        element = slide_map["elements"].setdefault(source_id, {
-            "source_role": item.get("sourceRole"),
-            "source_required": bool(item.get("sourceRequired")),
-            "shape_names": [],
-        })
+        shape_names = []
         for index, op in enumerate(emitted, start=1):
             if op.get("op") not in ("add-shape", "add-picture", "add-table"):
                 continue
             if not op.get("name"):
                 op["name"] = "%s-part-%d" % (item_name(item, op.get("kind", "shape")), index)
-            if op["name"] not in element["shape_names"]:
-                element["shape_names"].append(op["name"])
+            if op["name"] not in shape_names:
+                shape_names.append(op["name"])
+        for ref in refs:
+            source_id = ref["sourceId"]
+            element = slide_map["elements"].setdefault(source_id, {
+                "source_role": ref.get("sourceRole"),
+                "source_required": bool(ref.get("sourceRequired")),
+                "shape_names": [],
+            })
+            if not element.get("source_role") and ref.get("sourceRole"):
+                element["source_role"] = ref["sourceRole"]
+            element["source_required"] = bool(
+                element.get("source_required") or ref.get("sourceRequired")
+            )
+            for name in shape_names:
+                if name not in element["shape_names"]:
+                    element["shape_names"].append(name)
 
     # the body's own paint arrives as the first item(s) from the extractor
     for item in extract["items"]:
