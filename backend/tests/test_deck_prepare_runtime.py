@@ -33,6 +33,7 @@ from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
 from deerflow.agents.sophia_agent.middlewares.builder_provider_fallback import (
     BuilderProviderFallbackMiddleware,
 )
+from deerflow.sophia.deck_build.ir_repair import deck_mechanical_repair_instruction_from_reports
 from deerflow.sophia.tools.prepare_deck_build import prepare_deck_build
 
 
@@ -634,6 +635,212 @@ def test_forced_presentation_repair_preserves_complete_previous_prepare_args() -
     assert diagnostics["deck_repair_previous_args_included"] is True
     assert diagnostics["deck_repair_previous_args_bytes"] > 0
     assert diagnostics["deck_repair_previous_args_omitted_reason"] is None
+
+
+def test_production_sized_mechanical_repair_keeps_complete_previous_args_and_all_targets() -> None:
+    contrast_issues = [
+        {
+            "selector": f"slide:{slide}",
+            "shape_name": f"contrast-{slide}",
+            "text_excerpt": f"Required contrast text {slide}",
+            "foreground": "6B8E23",
+            "background": "F5E6D3",
+            "contrast_ratio": 3.106,
+            "required_ratio": 4.5,
+            "required_semantic": True,
+        }
+        for slide in (2, 3, 4)
+    ]
+    overlap_pairs = [("s5", "s8", 0.2), ("s10", "s19", 0.4), ("s13", "s19", 0.41), ("s16", "s19", 0.41)]
+    shape_specs = {
+        "s5": ("narrative-shape", "problem-narrative", "City parks hold enough flowering plants.", [1.25, 2.4], [8.23, 2.62]),
+        "s8": ("chart-title-shape", "problem-chart", "Share of species at extinction risk", [9.04, 2.42], [9.56, 0.47]),
+        "s10": ("bees-shape", "problem-chart", "Bees", [9.63, 8.46], [1.95, 0.33]),
+        "s13": ("butterflies-shape", "problem-chart", "Butterflies", [12.03, 8.46], [1.95, 0.33]),
+        "s16": ("moths-shape", "problem-chart", "Moths", [14.42, 8.46], [1.95, 0.33]),
+        "s19": ("citation-shape", "problem-chart", "Source: Yale E360 / IPBES", [9.67, 8.25], [8.45, 0.66]),
+    }
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={"issues": contrast_issues},
+        native_mechanical_report={
+            "lint_residue": [
+                {
+                    "slide": 1,
+                    "shape": first,
+                    "kind": "overlap",
+                    "overlap_area": area,
+                    "issue": f"overlaps {second} by {area:.2f} sq in (needs judgment)",
+                    "suggest": f"move {second} by [0, 0.26]",
+                }
+                for first, second, area in overlap_pairs
+            ]
+        },
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_text_contrast_failed",
+                    "selector": "slide:2",
+                    "summary": "Required text contrast is too low.",
+                    "repair_hint": "Use a compliant text color.",
+                },
+                {
+                    "code": "native_lint_severe_overlap",
+                    "selector": "slide:2",
+                    "summary": "Native lint/fix left a material shape overlap.",
+                    "repair_hint": "Separate the semantic elements.",
+                },
+            ]
+        },
+        native_shape_inventory={
+            "slide:2": {
+                "shapes": [
+                    {
+                        "id": shape_id,
+                        "name": name,
+                        "text_preview": text,
+                        "pos": pos,
+                        "size": size,
+                    }
+                    for shape_id, (name, _source_id, text, pos, size) in shape_specs.items()
+                ]
+            }
+        },
+        source_element_map={
+            "slides": {
+                "slide:2": {
+                    "elements": {
+                        source_id: {
+                            "shape_names": [
+                                name
+                                for name, candidate_source_id, _text, _pos, _size in shape_specs.values()
+                                if candidate_source_id == source_id
+                            ]
+                        }
+                        for source_id in {spec[1] for spec in shape_specs.values()}
+                    }
+                }
+            }
+        },
+    )
+    assert instruction is not None
+    assert instruction["repair_target_count"] == 7
+    repair = instruction["repair_message"]
+    assert len(repair.encode("utf-8")) < 3 * 1024
+
+    previous_args = _compact_prepare_args(creative_plan=_creative_plan())
+    previous_args["creative_plan"]["prompt_budget_fixture"] = ""
+    initial_bytes = len(json.dumps(previous_args, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    previous_args["creative_plan"]["prompt_budget_fixture"] = "x" * (19_408 - initial_bytes)
+    previous_args_bytes = len(json.dumps(previous_args, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    assert previous_args_bytes == 19_408
+
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "builder_pptx_requested_slide_count": 5,
+        "delegation_context": {
+            "task_type": "presentation",
+            "task": "PRODUCTION-BRIEF-MUST-NOT-DISPLACE-PRIOR-ARGS " + ("context " * 400),
+        },
+        "builder_deck_prepare_phase": "retry_pending",
+        "builder_deck_prepare_repair_message": repair,
+        "builder_presentation_phase": "authoring_pending",
+        "builder_task_kickoff_ms": int(time.time() * 1000),
+        "builder_budget": {"tier": "presentation", "authoring_deadline_seconds": 120},
+    }
+    request = _ModelRequest(
+        state,
+        tools=[prepare_deck_build],
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "prepare-1", "name": "prepare_deck_build", "args": previous_args},
+                ],
+            ),
+            ToolMessage(
+                content='{"success":false,"failure_code":"deck_mechanical_gate_failed"}',
+                name="prepare_deck_build",
+                tool_call_id="prepare-1",
+            ),
+        ],
+    )
+
+    bounded, update = BuilderArtifactMiddleware._presentation_request_for_choice(
+        request,
+        {"type": "tool", "name": "prepare_deck_build"},
+    )
+
+    prompt = str(bounded.messages[0].content)
+    marker = artifact_module._PRESENTATION_PREVIOUS_ARGS_MARKER
+    assert len(prompt.encode("utf-8")) <= artifact_module._PRESENTATION_AUTHORING_PROMPT_MAX_BYTES
+    assert marker in prompt
+    assert json.loads(prompt.split(marker, 1)[1]) == previous_args
+    assert "PRODUCTION-BRIEF-MUST-NOT-DISPLACE-PRIOR-ARGS" not in prompt
+    assert prompt.count("CONTRAST ") == 3
+    assert prompt.count("OVERLAP slide:2") == 4
+    for shape_id in ("s5", "s8", "s10", "s13", "s16", "s19"):
+        assert shape_id in prompt
+    assert update is not None
+    diagnostics = update["builder_pptx_diagnostics"]
+    assert diagnostics["deck_repair_previous_args_included"] is True
+    assert diagnostics["deck_repair_previous_args_bytes"] == 19_408
+    assert diagnostics["deck_repair_instruction_truncated"] is False
+
+
+def test_repair_prompt_budget_keeps_only_complete_lines() -> None:
+    lines = ["Repair header.", *[f"{index}. TARGET-{index} " + ("x" * 600) for index in range(1, 30)]]
+    original = "\n".join(lines)
+
+    fitted = BuilderArtifactMiddleware._fit_complete_repair_lines(original, 8 * 1024)
+
+    assert len(fitted.encode("utf-8")) <= 8 * 1024
+    assert "Additional repair targets omitted by the prompt budget" in fitted
+    for line in fitted.splitlines()[1:-1]:
+        assert line in lines
+
+
+def test_repair_does_not_include_prior_args_without_one_complete_action() -> None:
+    previous_args = _compact_prepare_args(creative_plan=_creative_plan())
+    previous_args["creative_plan"]["prompt_budget_fixture"] = ""
+    prefix_bytes = len(b"Required repair:\n")
+    marker_bytes = len(("\n\n" + artifact_module._PRESENTATION_PREVIOUS_ARGS_MARKER).encode("utf-8"))
+    target_args_bytes = artifact_module._PRESENTATION_AUTHORING_PROMPT_MAX_BYTES - prefix_bytes - marker_bytes - 32
+    initial_bytes = len(json.dumps(previous_args, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    previous_args["creative_plan"]["prompt_budget_fixture"] = "x" * (target_args_bytes - initial_bytes)
+    repair = "Repair header.\n1. TARGET Keep this complete actionable instruction."
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation", "task": "Repair the deck."},
+        "builder_deck_prepare_phase": "retry_pending",
+        "builder_deck_prepare_repair_message": repair,
+        "builder_presentation_phase": "authoring_pending",
+        "builder_task_kickoff_ms": int(time.time() * 1000),
+        "builder_budget": {"tier": "presentation", "authoring_deadline_seconds": 120},
+    }
+    request = _ModelRequest(
+        state,
+        tools=[prepare_deck_build],
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "prepare-1", "name": "prepare_deck_build", "args": previous_args}],
+            )
+        ],
+    )
+
+    bounded, update = BuilderArtifactMiddleware._presentation_request_for_choice(
+        request,
+        {"type": "tool", "name": "prepare_deck_build"},
+    )
+
+    prompt = str(bounded.messages[0].content)
+    assert artifact_module._PRESENTATION_PREVIOUS_ARGS_MARKER not in prompt
+    assert "1. TARGET Keep this complete actionable instruction." in prompt
+    assert update is not None
+    diagnostics = update["builder_pptx_diagnostics"]
+    assert diagnostics["deck_repair_previous_args_included"] is False
+    assert diagnostics["deck_repair_previous_args_omitted_reason"] == "complete_args_exceed_prompt_budget"
+    assert diagnostics["deck_repair_instruction_bytes"] == len(repair.encode("utf-8"))
 
 
 def test_forced_presentation_repair_omits_oversize_args_without_partial_json() -> None:

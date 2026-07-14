@@ -10315,6 +10315,25 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return value
         return encoded[:limit].decode("utf-8", errors="ignore") + "\n[truncated]"
 
+    @staticmethod
+    def _fit_complete_repair_lines(value: str, limit: int) -> str:
+        """Fit repair context without cutting a numbered target in half."""
+
+        if limit <= 0:
+            return ""
+        if len(value.encode("utf-8")) <= limit:
+            return value
+        notice = "[Additional repair targets omitted by the prompt budget; fix every remaining reported issue.]"
+        if len(notice.encode("utf-8")) > limit:
+            return notice.encode("utf-8")[:limit].decode("utf-8", errors="ignore")
+        lines: list[str] = []
+        for line in value.splitlines():
+            candidate = "\n".join([*lines, line, notice])
+            if len(candidate.encode("utf-8")) > limit:
+                break
+            lines.append(line)
+        return "\n".join([*lines, notice])
+
     @classmethod
     def _presentation_task_brief(cls, state: BuilderArtifactState, request: ModelRequest) -> str:
         delegation = state.get("delegation_context")
@@ -10448,16 +10467,19 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         previous_args_included = False
         previous_args_bytes = 0
         previous_args_omitted_reason: str | None = None
+        repair_prompt = ""
+        repair_prompt_sent = ""
+        repair_instruction_truncated = False
         if repair:
             # The first prepare call already contains the approved story and markup.
-            # Drop preflight/memory on the one repair turn and reuse that complete IR
-            # whenever it fits. Never truncate JSON: partial args are worse than an
-            # explicit full-reauthor fallback.
-            prompt = (
-                f"Presentation brief:\n{brief}\n\n"
-                f"Output path: {target_path}\nRequested slides: {requested_slides or 'infer from brief'}\n\n"
-                f"Required repair:\n{cls._truncate_utf8(repair, _PRESENTATION_REPAIR_INSTRUCTION_MAX_BYTES)}"
+            # Prefer that complete IR over replaying the brief. Never truncate its
+            # JSON: partial args are worse than an explicit full-reauthor fallback.
+            repair_prompt = cls._fit_complete_repair_lines(
+                repair,
+                _PRESENTATION_REPAIR_INSTRUCTION_MAX_BYTES,
             )
+            repair_instruction_truncated = repair_prompt != repair
+            repair_prompt_sent = repair_prompt
             previous_args = cls._latest_prepare_deck_build_args(request.messages)
             if previous_args is not None:
                 previous_args_json = json.dumps(
@@ -10467,19 +10489,43 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     default=str,
                 )
                 previous_args_bytes = len(previous_args_json.encode("utf-8"))
-                candidate = f"{prompt}\n\n{_PRESENTATION_PREVIOUS_ARGS_MARKER}{previous_args_json}"
-                if len(candidate.encode("utf-8")) <= _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES:
+                prefix = "Required repair:\n"
+                args_block = f"\n\n{_PRESENTATION_PREVIOUS_ARGS_MARKER}{previous_args_json}"
+                available_repair_bytes = (
+                    _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES
+                    - len(prefix.encode("utf-8"))
+                    - len(args_block.encode("utf-8"))
+                )
+                repair_with_args = cls._fit_complete_repair_lines(repair_prompt, available_repair_bytes)
+                candidate = f"{prefix}{repair_with_args}{args_block}"
+                has_complete_target = repair_with_args == repair_prompt or any(
+                    line.split(".", 1)[0].isdigit() for line in repair_with_args.splitlines()
+                )
+                if (
+                    repair_with_args
+                    and has_complete_target
+                    and len(candidate.encode("utf-8")) <= _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES
+                ):
                     prompt = candidate
                     previous_args_included = True
+                    repair_prompt_sent = repair_with_args
+                    repair_instruction_truncated = repair_instruction_truncated or repair_with_args != repair_prompt
                 else:
                     previous_args_omitted_reason = "complete_args_exceed_prompt_budget"
+            else:
+                previous_args_omitted_reason = "prior_prepare_args_unavailable"
+            if not previous_args_included:
+                prompt = (
+                    f"Presentation brief:\n{brief}\n\n"
+                    f"Output path: {target_path}\nRequested slides: {requested_slides or 'infer from brief'}\n\n"
+                    f"Required repair:\n{repair_prompt}"
+                )
+                if previous_args is not None:
                     prompt += (
                         "\n\nThe prior prepare arguments were too large to include completely. Recreate the complete deck "
                         "input from the brief and repair targets; no partial prior JSON is supplied."
                     )
-            else:
-                previous_args_omitted_reason = "prior_prepare_args_unavailable"
-            prompt = cls._truncate_utf8(prompt, _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES)
+                prompt = cls._truncate_utf8(prompt, _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES)
         else:
             source_context = cls._presentation_preflight_context(request.state)
             attachment_memory_context = cls._presentation_attachment_memory_context(request.state)
@@ -10520,6 +10566,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "deck_repair_previous_args_included": previous_args_included,
                 "deck_repair_previous_args_bytes": previous_args_bytes,
                 "deck_repair_previous_args_omitted_reason": previous_args_omitted_reason,
+                "deck_repair_instruction_bytes": len(repair_prompt_sent.encode("utf-8")),
+                "deck_repair_instruction_truncated": repair_instruction_truncated,
             }
         }
 

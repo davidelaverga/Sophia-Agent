@@ -2136,6 +2136,9 @@ def _repair_instruction_for_failure(
         targeted = deck_mechanical_repair_instruction_from_reports(
             native_contrast_report=deck.native_contrast_report,
             source_element_map=deck.source_element_map,
+            native_mechanical_report=deck.native_mechanical_report,
+            mechanical_gate_results=deck.mechanical_gate_results,
+            native_shape_inventory=deck.native_shape_inventory,
         )
         if targeted is not None:
             instruction.update(targeted)
