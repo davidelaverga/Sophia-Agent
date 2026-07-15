@@ -41,6 +41,40 @@ _DOCUMENT_NOUN_RE = re.compile(
 )
 _TOPIC_RE = re.compile(r"\b(?:about|on)\s+(.+?)(?:[.?!]\s*)?$", re.IGNORECASE)
 _DUMMY_RE = re.compile(r"\bdummy\b", re.IGNORECASE)
+_EXPLICIT_PDF_TARGET_RE = re.compile(
+    r"\b(?:"
+    r"pdf\s+(?:document|file|report|brief|deliverable|output)"
+    r"|(?:document|file|report|brief|deliverable|output)\s+(?:as|in|to)\s+(?:an?\s+)?pdf"
+    r"|(?:create|make|generate|produce|write|render|export)\s+(?:an?\s+)?pdf\b"
+    r"|(?:save|export|deliver|render|output)\b[^.?!\n]{0,48}\.pdf\b"
+    r")",
+    re.IGNORECASE,
+)
+_TRAILING_OUTPUT_CLAUSE_RE = re.compile(
+    r"(?:\band\b|\bthen\b|[.;])\s*"
+    r"(?:deliver|export|save|render|provide|return|output|convert)\b"
+    r"(?P<prefix>[^.?!\n]{0,80}?)\b(?:as|to|in|into)\s+(?:an?\s+)?"
+    r"(?:(?:editable|native|downloadable|final|single)\s+){0,3}"
+    r"(?P<format>pdf|pptx|power\s*point|docx|word\s+document|xlsx|excel(?:\s+workbook)?|"
+    r"html|web\s*page|csv|json|markdown|md)\b",
+    re.IGNORECASE,
+)
+_TRAILING_DIRECT_DELIVERY_RE = re.compile(
+    r"(?:\band\b|\bthen\b|[.;])\s*deliver\s+(?:an?\s+|the\s+)?(?:editable\s+)?"
+    r"(?P<format>pdf|pptx|power\s*point|docx|word\s+document|xlsx|excel(?:\s+workbook)?|"
+    r"html|web\s*page|csv|json|markdown|md)\b",
+    re.IGNORECASE,
+)
+_TRAILING_FILE_DELIVERY_RE = re.compile(
+    r"(?:\band\b|\bthen\b|[.;])\s*"
+    r"(?:deliver|export|save|render|provide|return|output|convert)\b[^.?!\n]{0,80}?"
+    r"(?P<format>\.pdf|\.pptx|\.docx|\.xlsx|\.html|\.csv|\.json|\.md)\b",
+    re.IGNORECASE,
+)
+_OUTPUT_CLAUSE_NEGATION_RE = re.compile(
+    r"\b(?:not|no|without|avoid|do\s+not|don't|instead\s+of|rather\s+than)\b",
+    re.IGNORECASE,
+)
 
 
 class BuilderCommandMiddleware(AgentMiddleware[AgentState]):
@@ -129,6 +163,40 @@ def _build_direct_document_task(user_text: str) -> str | None:
     if topic_match is None:
         return None
 
+    # This middleware always synthesizes a Markdown document. Resolve only the
+    # requested object before ``about``/``on`` and defer an explicit
+    # non-Markdown target to the canonical current-turn router. Scoping the
+    # check is important: format-like words in the topic (for example,
+    # "a document about websites" or "a brief on Excel spreadsheets") are
+    # subject matter, not requested output formats. Conversely, a PowerPoint
+    # target followed by incidental document language such as "page numbers"
+    # must not be stolen by this Markdown fast path.
+    #
+    # Import lazily to keep agent middleware initialization free of the
+    # start_builder_task module's dispatch dependencies.
+    from deerflow.sophia.tools.start_builder_task import (
+        _requested_output_extension_match_with_vetoes,
+    )
+
+    target_scope = cleaned[: topic_match.start()].strip()
+    requested_ext, _rule, _vetoed_rules = (
+        _requested_output_extension_match_with_vetoes(target_scope)
+    )
+    # The canonical resolver intentionally defaults a bare ``create a report``
+    # object to PDF. That is not an explicit format choice and must not change
+    # this legacy Markdown fast path; a real PDF veto always contains ``PDF``
+    # in the target-object scope.
+    generic_report_pdf = requested_ext == "pdf" and not _has_affirmative_explicit_pdf_target(target_scope)
+    if (
+        requested_ext is not None
+        and requested_ext not in {"md", "markdown"}
+        and not generic_report_pdf
+    ):
+        return None
+
+    if _suffix_requests_non_markdown_output(cleaned[topic_match.start():]):
+        return None
+
     topic = topic_match.group(1).strip(" \t\r\n.?!")
     if not topic:
         return None
@@ -165,6 +233,31 @@ def _build_direct_document_task(user_text: str) -> str | None:
         "user_next_action='Open or download the document and tell me what to revise next.', "
         "confidence=0.86."
     )
+
+
+def _suffix_requests_non_markdown_output(suffix: str) -> bool:
+    for pattern in (
+        _TRAILING_OUTPUT_CLAUSE_RE,
+        _TRAILING_DIRECT_DELIVERY_RE,
+        _TRAILING_FILE_DELIVERY_RE,
+    ):
+        for match in pattern.finditer(suffix):
+            prefix = str(match.groupdict().get("prefix") or "")
+            if _OUTPUT_CLAUSE_NEGATION_RE.search(prefix):
+                continue
+            requested_format = str(match.group("format") or "").lower().lstrip(".")
+            if requested_format not in {"md", "markdown"}:
+                return True
+    return False
+
+
+def _has_affirmative_explicit_pdf_target(target_scope: str) -> bool:
+    for match in _EXPLICIT_PDF_TARGET_RE.finditer(target_scope):
+        local_prefix = target_scope[max(0, match.start() - 24) : match.start()]
+        if _OUTPUT_CLAUSE_NEGATION_RE.search(local_prefix):
+            continue
+        return True
+    return False
 
 
 def _slugify(value: str) -> str:

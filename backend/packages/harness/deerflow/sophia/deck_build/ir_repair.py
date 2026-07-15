@@ -36,16 +36,36 @@ class DeckIRRepairInstruction:
 _SLIDE_FIELD_RE = re.compile(r"\bSlide\s+(?P<slide>\d+)\s+(?P<field>[A-Za-z_][\w-]*)\b")
 _HEX_COLOR_RE = re.compile(r"^#?(?P<hex>[0-9A-Fa-f]{6})$")
 _OVERLAP_PAIR_RE = re.compile(r"\boverlaps\s+(?P<other>[^\s,;:]+)", re.I)
+_NATIVE_SHAPE_ID_RE = re.compile(r"\bs\d+(?:-\d+)?\b", re.I)
+_ALIGNMENT_ROLE_RE = re.compile(
+    r"\b(?P<role>left|right|top|bottom|hcenter|vcenter)\b",
+    re.I,
+)
+_TYPOGRAPHY_SUMMARY_RE = re.compile(
+    r"^(?P<kind>Required/body|Compact) text '(?P<label>.+)' compiles at "
+    r"(?P<actual_pt>[\d.]+)pt \((?P<actual_px>[\d.]+)px\), below the "
+    r"(?P<minimum_pt>[\d.]+)pt \((?P<minimum_px>[\d.]+)px\) floor\.?$",
+    re.I,
+)
+_TYPOGRAPHY_GATE_CODES = {
+    "native_required_text_too_small",
+    "native_compact_text_too_small",
+}
 _MAX_MECHANICAL_REPAIR_TARGETS = 24
 _MAX_MECHANICAL_REPAIR_MESSAGE_BYTES = 8 * 1024
+_MAX_TYPOGRAPHY_REPAIR_LINE_BYTES = 1024
+_MAX_TYPOGRAPHY_SOURCE_IDS = 3
+_MAX_TYPOGRAPHY_SOURCE_ID_BYTES = 72
 _MATERIAL_OVERLAP_MIN_AREA = 0.08
 _MECHANICAL_REPAIR_PREAMBLE = (
     "Repair every listed source-quality and mechanical issue in the complete prior input; preserve "
-    "copy, structure, and slides not named by a target. QUALITY: update the matching slide HTML/CSS, "
-    "shared stylesheet, or creative_plan image prompt/asset record and remove the exact prohibited "
-    "pattern from every named selector. CONTRAST: use the supplied explicit safe colors. OVERLAP: "
-    "change source geometry; move hints are directional, not literal coordinates. Then call "
-    "prepare_deck_build once with the complete prior input."
+    "copy, structure, and unnamed slides. Edit the exact named HTML/CSS, shared CSS, or creative_plan "
+    "image prompt/asset record. TYPE includes nested visible descendants. ALIGN native gridline C_in "
+    "to CSS px with Cpx=96*C_in; for source width Wpx/height Hpx: left-edge left=Cpx; "
+    "right-edge left=Cpx-Wpx; hcenter left=Cpx-Wpx/2; top-edge top=Cpx; "
+    "bottom-edge top=Cpx-Hpx; vcenter top=Cpx-Hpx/2. "
+    "Use supplied contrast colors and move overlap source geometry. Then call prepare_deck_build "
+    "once with the complete prior input."
 )
 
 
@@ -114,9 +134,9 @@ def deck_mechanical_repair_instruction_from_reports(
 ) -> dict[str, Any] | None:
     """Build one bounded repair instruction from source and mechanical reports.
 
-    Native contrast and lint reports are intentionally richer than the mechanical
-    gate summary.  Preserve exact contrast colors and exact overlap geometry in the
-    one-retry prompt, while retaining unrelated mechanical gate issues.
+    Native contrast, lint, and shape reports are intentionally richer than the
+    mechanical gate summary. Preserve exact colors and source-addressable geometry
+    in the one-retry prompt, while retaining unrelated mechanical gate issues.
     """
 
     report = native_contrast_report if isinstance(native_contrast_report, dict) else {}
@@ -132,17 +152,37 @@ def deck_mechanical_repair_instruction_from_reports(
         source_element_map=source_element_map,
         native_shape_inventory=native_shape_inventory,
     )
+    alignment_targets = _alignment_repair_targets(
+        native_mechanical_report=native_mechanical_report,
+        mechanical_gate_results=mechanical_gate_results,
+        source_element_map=source_element_map,
+        native_shape_inventory=native_shape_inventory,
+    )
     generic_targets = _generic_mechanical_repair_targets(
         mechanical_gate_results=mechanical_gate_results,
         has_contrast_targets=bool(contrast_targets),
         overlap_target_selectors={str(target.get("selector") or "") for target in overlap_targets},
+        alignment_target_selectors={str(target.get("selector") or "") for target in alignment_targets},
+        source_element_map=source_element_map,
     )
     source_quality_targets, source_quality_issue_count = _source_quality_repair_targets(source_quality_report)
-    all_targets = [*source_quality_targets, *contrast_targets, *overlap_targets, *generic_targets]
+    all_targets = [
+        *source_quality_targets,
+        *contrast_targets,
+        *overlap_targets,
+        *alignment_targets,
+        *generic_targets,
+    ]
     if not all_targets:
         return None
 
-    targets = _bounded_mechanical_targets(source_quality_targets, contrast_targets, overlap_targets, generic_targets)
+    targets = _bounded_mechanical_targets(
+        source_quality_targets,
+        contrast_targets,
+        overlap_targets,
+        alignment_targets,
+        generic_targets,
+    )
     targets, repair_message = _fit_mechanical_repair_message(
         targets=targets,
         total_target_count=len(all_targets),
@@ -155,11 +195,13 @@ def deck_mechanical_repair_instruction_from_reports(
         "omitted_repair_target_count": omitted_count,
         "contrast_repair_target_count": len(contrast_targets),
         "overlap_repair_target_count": len(overlap_targets),
+        "alignment_repair_target_count": len(alignment_targets),
         "generic_repair_target_count": len(generic_targets),
         "source_quality_repair_target_count": len(source_quality_targets),
         "source_quality_issue_count": source_quality_issue_count,
         "included_contrast_repair_target_count": included_by_type.get("contrast", 0),
         "included_overlap_repair_target_count": included_by_type.get("overlap", 0),
+        "included_alignment_repair_target_count": included_by_type.get("alignment", 0),
         "included_generic_repair_target_count": included_by_type.get("generic", 0),
         "included_source_quality_repair_target_count": included_by_type.get("quality", 0),
         "repair_targets": targets,
@@ -292,6 +334,105 @@ def _overlap_repair_targets(
     return targets
 
 
+def _alignment_repair_targets(
+    *,
+    native_mechanical_report: dict[str, Any] | None,
+    mechanical_gate_results: dict[str, Any] | None,
+    source_element_map: dict[str, Any] | None,
+    native_shape_inventory: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Promote post-fix alignment residue to source-addressable repair targets."""
+
+    report = native_mechanical_report if isinstance(native_mechanical_report, dict) else {}
+    residues = report.get("lint_residue") if isinstance(report.get("lint_residue"), list) else []
+    gate_selectors = {
+        str(item.get("selector") or "")
+        for item in _mechanical_gate_issues(mechanical_gate_results)
+        if str(item.get("code") or "") == "native_lint_misaligned"
+    }
+    targets: list[dict[str, Any]] = []
+    seen: set[tuple[str, str, str]] = set()
+    for item in residues:
+        if not isinstance(item, dict) or str(item.get("kind") or "") != "misaligned":
+            continue
+        selector = _selector_for_native_slide(item.get("slide"))
+        if gate_selectors and selector not in gate_selectors:
+            continue
+        shape_id = _compact_excerpt(item.get("shape"), limit=80)
+        if not shape_id:
+            continue
+        raw_details = item.get("details") if isinstance(item.get("details"), list) else []
+        details = [
+            _compact_excerpt(value, limit=180)
+            for value in raw_details
+            if str(value).strip()
+        ]
+        issue = _compact_excerpt(item.get("issue"), limit=220)
+        if issue and issue not in details:
+            details.insert(0, issue)
+        peer_ids: list[str] = []
+        for peer_id in _NATIVE_SHAPE_ID_RE.findall(" ".join(details)):
+            if peer_id.casefold() != shape_id.casefold() and peer_id not in peer_ids:
+                peer_ids.append(peer_id)
+        shape_detail = _overlap_shape_target(
+            shape_id=shape_id,
+            selector=selector,
+            native_shape_inventory=native_shape_inventory,
+            source_element_map=source_element_map,
+        ) or {
+            "id": shape_id,
+            "name": "",
+            "source_ids": [],
+            "text_excerpt": "",
+            "pos": [],
+            "size": [],
+        }
+        peer_shapes: list[dict[str, Any]] = []
+        for peer_id in peer_ids:
+            peer_detail = _overlap_shape_target(
+                shape_id=peer_id,
+                selector=selector,
+                native_shape_inventory=native_shape_inventory,
+                source_element_map=source_element_map,
+            )
+            if peer_detail is not None:
+                peer_shapes.append(peer_detail)
+        for alignment_role in _alignment_roles(details):
+            key = (selector, shape_id, alignment_role)
+            if key in seen:
+                continue
+            seen.add(key)
+            targets.append(
+                {
+                    "target_type": "alignment",
+                    "code": "native_lint_misaligned",
+                    "selector": selector,
+                    "shape": shape_id,
+                    "shape_detail": shape_detail,
+                    "source_ids": shape_detail.get("source_ids") or [],
+                    "peer_ids": peer_ids,
+                    "peer_shapes": peer_shapes,
+                    "details": details,
+                    "alignment_role": alignment_role,
+                    "suggest": _compact_excerpt(
+                        item.get("suggest") or "Align the source element to the reported peer gridline.",
+                        limit=180,
+                    ),
+                }
+            )
+    return targets
+
+
+def _alignment_roles(details: list[str]) -> list[str]:
+    roles = list(
+        dict.fromkeys(
+            match.group("role").lower()
+            for match in _ALIGNMENT_ROLE_RE.finditer(" ".join(details))
+        )
+    )
+    return roles or ["gridline"]
+
+
 def _overlap_shape_target(
     *,
     shape_id: str,
@@ -355,9 +496,12 @@ def _generic_mechanical_repair_targets(
     mechanical_gate_results: dict[str, Any] | None,
     has_contrast_targets: bool,
     overlap_target_selectors: set[str],
+    alignment_target_selectors: set[str],
+    source_element_map: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
     targets: list[dict[str, Any]] = []
     seen: set[tuple[str, str, str, str]] = set()
+    typography_groups: dict[tuple[str, float], dict[str, Any]] = {}
     for item in _mechanical_gate_issues(mechanical_gate_results):
         code = _compact_excerpt(item.get("code"), limit=80)
         selector = _compact_excerpt(item.get("selector") or "deck", limit=80)
@@ -368,8 +512,37 @@ def _generic_mechanical_repair_targets(
             continue
         if code == "native_lint_severe_overlap" and selector in overlap_target_selectors:
             continue
+        if code == "native_lint_misaligned" and selector in alignment_target_selectors:
+            continue
         summary = _compact_excerpt(item.get("summary"), limit=220)
         repair_hint = _compact_excerpt(item.get("repair_hint"), limit=220)
+        if code in _TYPOGRAPHY_GATE_CODES:
+            occurrence, minimum_px = _typography_repair_occurrence(
+                item,
+                selector=selector,
+                source_element_map=source_element_map,
+            )
+            key = (code, minimum_px)
+            target = typography_groups.get(key)
+            if target is None:
+                target = {
+                    "target_type": "generic",
+                    "code": code,
+                    "selector": selector,
+                    "selectors": [],
+                    "summary": summary,
+                    "repair_hint": repair_hint,
+                    "typography_minimum_px": minimum_px,
+                    "typography_required": code == "native_required_text_too_small",
+                    "typography_occurrences": [],
+                }
+                typography_groups[key] = target
+            if selector not in target["selectors"]:
+                target["selectors"].append(selector)
+                target["selector"] = ", ".join(target["selectors"])
+            if occurrence not in target["typography_occurrences"]:
+                target["typography_occurrences"].append(occurrence)
+            continue
         key = (code, selector, summary, repair_hint)
         if key in seen:
             continue
@@ -383,7 +556,116 @@ def _generic_mechanical_repair_targets(
                 "repair_hint": repair_hint,
             }
         )
+    for target in typography_groups.values():
+        targets.extend(_chunk_typography_target(target))
     return targets
+
+
+def _chunk_typography_target(target: dict[str, Any]) -> list[dict[str, Any]]:
+    """Keep each typography target indivisible but small enough to survive bounds."""
+
+    chunks: list[dict[str, Any]] = []
+    current: list[dict[str, Any]] = []
+    for occurrence in target.get("typography_occurrences") or []:
+        if not isinstance(occurrence, dict):
+            continue
+        candidate = [*current, occurrence]
+        candidate_target = _typography_target_with_occurrences(target, candidate)
+        if current and len(_typography_repair_line(1, candidate_target).encode("utf-8")) > (
+            _MAX_TYPOGRAPHY_REPAIR_LINE_BYTES
+        ):
+            chunks.append(_typography_target_with_occurrences(target, current))
+            current = [occurrence]
+        else:
+            current = candidate
+    if current:
+        chunks.append(_typography_target_with_occurrences(target, current))
+    return chunks
+
+
+def _typography_target_with_occurrences(
+    target: dict[str, Any],
+    occurrences: list[dict[str, Any]],
+) -> dict[str, Any]:
+    chunk = dict(target)
+    chunk["typography_occurrences"] = occurrences
+    selectors = list(dict.fromkeys(str(item.get("selector") or "deck") for item in occurrences))
+    chunk["selectors"] = selectors
+    chunk["selector"] = ", ".join(selectors)
+    return chunk
+
+
+def _typography_repair_occurrence(
+    item: dict[str, Any],
+    *,
+    selector: str,
+    source_element_map: dict[str, Any] | None,
+) -> tuple[dict[str, Any], float]:
+    summary = str(item.get("summary") or "").strip()
+    match = _TYPOGRAPHY_SUMMARY_RE.match(summary)
+    code = str(item.get("code") or "")
+    minimum_px = 24.0 if code == "native_required_text_too_small" else 20.0
+    source_label = ""
+    source_lookup_label = ""
+    actual_px: float | None = None
+    if match:
+        source_lookup_label = str(match.group("label") or "").strip()
+        source_label = _compact_excerpt(source_lookup_label, limit=140)
+        minimum_px = _finite_float(match.group("minimum_px")) or minimum_px
+        actual_px = _finite_float(match.group("actual_px"))
+    explicit_ids = item.get("source_ids") if isinstance(item.get("source_ids"), list) else []
+    raw_source_ids = [str(value).strip() for value in explicit_ids if str(value).strip()]
+    if not raw_source_ids:
+        raw_source_ids = _source_ids_from_typography_label(
+            source_element_map=source_element_map,
+            selector=selector,
+            source_label=source_lookup_label or source_label,
+        )
+    bounded_source_ids = [
+        _bounded_typography_source_id(value)
+        for value in raw_source_ids[:_MAX_TYPOGRAPHY_SOURCE_IDS]
+    ]
+    source_ids = [value for value, _truncated in bounded_source_ids]
+    return {
+        "selector": selector,
+        "source_ids": source_ids,
+        "source_ids_truncated": any(truncated for _value, truncated in bounded_source_ids),
+        "source_id_omitted_count": max(0, len(raw_source_ids) - len(source_ids)),
+        "source_label": source_label,
+        "actual_px": round(actual_px, 3) if actual_px is not None else None,
+    }, minimum_px
+
+
+def _bounded_typography_source_id(value: str) -> tuple[str, bool]:
+    compact = " ".join(str(value).split())
+    encoded = compact.encode("utf-8")
+    if len(encoded) <= _MAX_TYPOGRAPHY_SOURCE_ID_BYTES:
+        return compact, False
+    head_bytes = (_MAX_TYPOGRAPHY_SOURCE_ID_BYTES * 2) // 3
+    tail_bytes = _MAX_TYPOGRAPHY_SOURCE_ID_BYTES - head_bytes - 3
+    head = encoded[:head_bytes].decode("utf-8", errors="ignore")
+    tail = encoded[-tail_bytes:].decode("utf-8", errors="ignore")
+    return f"{head}…{tail}", True
+
+
+def _source_ids_from_typography_label(
+    *,
+    source_element_map: dict[str, Any] | None,
+    selector: str,
+    source_label: str,
+) -> list[str]:
+    slides = source_element_map.get("slides") if isinstance(source_element_map, dict) else None
+    slide = slides.get(selector) if isinstance(slides, dict) else None
+    elements = slide.get("elements") if isinstance(slide, dict) else None
+    if not isinstance(elements, dict) or not source_label:
+        return []
+    if source_label in elements:
+        return [source_label]
+    return [
+        candidate
+        for candidate in (value.strip() for value in source_label.split(","))
+        if candidate in elements
+    ]
 
 
 def _mechanical_gate_issues(mechanical_gate_results: dict[str, Any] | None) -> list[dict[str, Any]]:
@@ -469,6 +751,8 @@ def _mechanical_repair_line(index: int, target: dict[str, Any]) -> str:
         return _contrast_repair_line(index, target)
     if target_type == "overlap":
         return _overlap_repair_line(index, target)
+    if target_type == "alignment":
+        return _alignment_repair_line(index, target)
     return _generic_repair_line(index, target)
 
 
@@ -537,13 +821,102 @@ def _overlap_shape_detail(detail: dict[str, Any]) -> str:
     return f"{shape_id}{source} {text}{geometry}"
 
 
+def _alignment_repair_line(index: int, target: dict[str, Any]) -> str:
+    shape_detail = target.get("shape_detail")
+    if not isinstance(shape_detail, dict):
+        shape_detail = {"id": target.get("shape") or "unknown", "source_ids": []}
+    primary = _alignment_shape_detail(shape_detail)
+    peer_details = [
+        _alignment_shape_detail(detail, include_geometry=False)
+        for detail in target.get("peer_shapes") or []
+        if isinstance(detail, dict)
+    ]
+    described_peers = peer_details or [str(value) for value in target.get("peer_ids") or []]
+    peers = ", ".join(described_peers) or "the named inferred peers"
+    detail = json.dumps("; ".join(str(value) for value in target.get("details") or []), ensure_ascii=False)
+    role = str(target.get("alignment_role") or "gridline")
+    guidance = (
+        f"the preamble's exact {role} formula"
+        if role != "gridline"
+        else "the reported peer edge or centerline"
+    )
+    return (
+        f"{index}. ALIGN {target.get('selector') or 'deck'} role={role} {primary}; detail {detail}; "
+        f"peers {peers}. Edit that data-deck-id geometry with {guidance}."
+    )
+
+
+def _alignment_shape_detail(
+    detail: dict[str, Any],
+    *,
+    include_geometry: bool = True,
+) -> str:
+    shape_id = str(detail.get("id") or "unknown")
+    source_ids = detail.get("source_ids") or []
+    source = (
+        "/data-deck-id=" + ",".join(json.dumps(source_id, ensure_ascii=False) for source_id in source_ids)
+        if source_ids
+        else ""
+    )
+    pos = detail.get("pos") or []
+    size = detail.get("size") or []
+    geometry = (
+        f" native-in-box={pos or '?'}+{size or '?'}"
+        if include_geometry and (pos or size)
+        else ""
+    )
+    return f"{shape_id}{source}{geometry}"
+
+
 def _generic_repair_line(index: int, target: dict[str, Any]) -> str:
+    if target.get("typography_occurrences"):
+        return _typography_repair_line(index, target)
     summary = json.dumps(target.get("summary") or "Mechanical gate failed.", ensure_ascii=False)
     repair_hint = json.dumps(target.get("repair_hint") or "Repair the affected source element.", ensure_ascii=False)
     return (
         f"{index}. GATE {target.get('selector') or 'deck'} "
         f"[{target.get('code') or 'deck_mechanical_gate_failed'}]: {summary}; {repair_hint}."
     )
+
+
+def _typography_repair_line(index: int, target: dict[str, Any]) -> str:
+    minimum_px = _finite_float(target.get("typography_minimum_px")) or 20.0
+    required = bool(target.get("typography_required"))
+    occurrences = "; ".join(
+        _typography_occurrence_detail(item)
+        for item in target.get("typography_occurrences") or []
+        if isinstance(item, dict)
+    )
+    if required:
+        scope = "REQUIRED descendants"
+        tail = (
+            "Every visible descendant of data-deck-required=true inherits required status; set nested "
+            f"spans/labels in each exact source selector to >={minimum_px:g}px. 20-23px is allowed only "
+            "inside optional elements; cut copy instead of shrinking."
+        )
+    else:
+        scope = "OPTIONAL labels/captions"
+        tail = f"Set each exact source selector and its visible descendants to >={minimum_px:g}px."
+    return f"{index}. TYPE {scope} >={minimum_px:g}px: {occurrences}. {tail}"
+
+
+def _typography_occurrence_detail(item: dict[str, Any]) -> str:
+    selector = str(item.get("selector") or "deck")
+    source_ids = item.get("source_ids") or []
+    if source_ids:
+        operator = "≈" if item.get("source_ids_truncated") else "="
+        source = f"/data-deck-id{operator}" + ",".join(
+            json.dumps(source_id, ensure_ascii=False) for source_id in source_ids
+        )
+    else:
+        source_label = str(item.get("source_label") or "unknown source")
+        source = "/source=" + json.dumps(source_label, ensure_ascii=False)
+    omitted_count = int(item.get("source_id_omitted_count") or 0)
+    if omitted_count:
+        source += f"(+{omitted_count} ids)"
+    actual_px = _finite_float(item.get("actual_px"))
+    actual = f" @{actual_px:g}px" if actual_px is not None else ""
+    return f"{selector}{source}{actual}"
 
 
 def _source_ids_for_shape(

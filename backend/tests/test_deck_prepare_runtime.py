@@ -899,6 +899,189 @@ def test_production_sized_mechanical_repair_keeps_complete_previous_args_and_all
     assert diagnostics["deck_repair_instruction_truncated"] is False
 
 
+def test_canary_repair_keeps_all_type_and_alignment_sources_beside_near_limit_args() -> None:
+    label_sources = [
+        ("slide:2", "perception-label"),
+        ("slide:2", "appraisal-label"),
+        ("slide:2", "motives-label"),
+        ("slide:2", "action-label"),
+        ("slide:2", "feedback-label"),
+        ("slide:3", "scenario-label"),
+        ("slide:3", "motive-row-curiosity"),
+        ("slide:3", "motive-row-certainty"),
+        ("slide:3", "motive-row-affiliation"),
+    ]
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        native_mechanical_report={
+            "lint_residue": [
+                {
+                    "slide": 0,
+                    "shape": "s7-2",
+                    "kind": "misaligned",
+                    "details": ['right edge 0.04" off gridline 18.75" (3 shapes: s4-2,s8,s7-2)'],
+                    "issue": 'right edge 0.04" off gridline 18.75" (3 shapes: s4-2,s8,s7-2)',
+                },
+                {
+                    "slide": 1,
+                    "shape": "s14",
+                    "kind": "misaligned",
+                    "details": ['hcenter edge 0.03" off gridline 4.17" (3 shapes: s13,s15,s14)'],
+                    "issue": 'hcenter edge 0.03" off gridline 4.17" (3 shapes: s13,s15,s14)',
+                }
+            ]
+        },
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_lint_misaligned",
+                    "selector": "slide:1",
+                    "summary": "Native shape alignment remains inconsistent: right edge is off gridline.",
+                    "repair_hint": "Align the source rule to its right edge.",
+                },
+                {
+                    "code": "native_lint_misaligned",
+                    "selector": "slide:2",
+                    "summary": "Native shape alignment remains inconsistent: hcenter 0.03in off gridline.",
+                    "repair_hint": "Align the source connector to its peer centerline.",
+                },
+                *[
+                    {
+                        "code": "native_required_text_too_small",
+                        "selector": selector,
+                        "summary": (
+                            f"Required/body text '{source_id}' compiles at 15.75pt (21px), "
+                            "below the 18pt (24px) floor."
+                        ),
+                        "repair_hint": "Use at least 24px for required text.",
+                    }
+                    for selector, source_id in label_sources
+                ],
+            ]
+        },
+        native_shape_inventory={
+            "slide:1": {
+                "shapes": [
+                    {
+                        "id": "s4-2",
+                        "name": "h2p-1-cover-anchor-box-1",
+                        "pos": [1.25, 6.0],
+                        "size": [0.1, 0.1],
+                    },
+                    {
+                        "id": "s7-2",
+                        "name": "h2p-1-cover-rule-box-1",
+                        "pos": [1.25, 6.2],
+                        "size": [17.46, 0.06],
+                    },
+                    {
+                        "id": "s8",
+                        "name": "h2p-1-cover-title-box-1",
+                        "pos": [1.25, 2.0],
+                        "size": [17.5, 1.0],
+                    },
+                ]
+            },
+            "slide:2": {
+                "shapes": [
+                    {
+                        "id": "s14",
+                        "name": "h2p-2-conn-4-box-1",
+                        "pos": [4.0, 2.5],
+                        "size": [0.06, 1.5],
+                    }
+                ]
+            }
+        },
+        source_element_map={
+            "slides": {
+                "slide:1": {
+                    "elements": {
+                        "cover-anchor": {"shape_names": ["h2p-1-cover-anchor-box-1"]},
+                        "cover-rule": {"shape_names": ["h2p-1-cover-rule-box-1"]},
+                        "cover-title": {"shape_names": ["h2p-1-cover-title-box-1"]},
+                    }
+                },
+                "slide:2": {
+                    "elements": {
+                        "perception-label": {},
+                        "appraisal-label": {},
+                        "motives-label": {},
+                        "action-label": {},
+                        "feedback-label": {},
+                        "conn-4": {"shape_names": ["h2p-2-conn-4-box-1"]},
+                    }
+                },
+                "slide:3": {
+                    "elements": {
+                        "scenario-label": {},
+                        "motive-row-curiosity": {},
+                        "motive-row-certainty": {},
+                        "motive-row-affiliation": {},
+                    }
+                },
+            }
+        },
+    )
+    assert instruction is not None
+    repair = instruction["repair_message"]
+    assert len(repair.encode("utf-8")) < 2_200
+
+    previous_args = _compact_prepare_args(creative_plan=_creative_plan())
+    previous_args["creative_plan"]["prompt_budget_fixture"] = ""
+    prefix_bytes = len(b"Required repair:\n")
+    marker_bytes = len(("\n\n" + artifact_module._PRESENTATION_PREVIOUS_ARGS_MARKER).encode("utf-8"))
+    target_args_bytes = 21_942
+    initial_bytes = len(json.dumps(previous_args, ensure_ascii=False, separators=(",", ":")).encode("utf-8"))
+    previous_args["creative_plan"]["prompt_budget_fixture"] = "x" * (target_args_bytes - initial_bytes)
+    assert len(json.dumps(previous_args, ensure_ascii=False, separators=(",", ":")).encode("utf-8")) == target_args_bytes
+    assert prefix_bytes + marker_bytes + target_args_bytes + len(repair.encode("utf-8")) <= (
+        artifact_module._PRESENTATION_AUTHORING_PROMPT_MAX_BYTES
+    )
+    state = {
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "builder_pptx_requested_slide_count": 5,
+        "delegation_context": {"task_type": "presentation", "task": "Build the canary deck."},
+        "builder_deck_prepare_phase": "retry_pending",
+        "builder_deck_prepare_repair_message": repair,
+        "builder_presentation_phase": "authoring_pending",
+        "builder_task_kickoff_ms": int(time.time() * 1000),
+        "builder_budget": {"tier": "presentation", "authoring_deadline_seconds": 120},
+    }
+    request = _ModelRequest(
+        state,
+        tools=[prepare_deck_build],
+        messages=[
+            AIMessage(
+                content="",
+                tool_calls=[{"id": "prepare-1", "name": "prepare_deck_build", "args": previous_args}],
+            )
+        ],
+    )
+
+    bounded, update = BuilderArtifactMiddleware._presentation_request_for_choice(
+        request,
+        {"type": "tool", "name": "prepare_deck_build"},
+    )
+
+    prompt = str(bounded.messages[0].content)
+    marker = artifact_module._PRESENTATION_PREVIOUS_ARGS_MARKER
+    assert marker in prompt
+    assert json.loads(prompt.split(marker, 1)[1]) == previous_args
+    for selector, source_id in label_sources:
+        assert f'{selector}/data-deck-id="{source_id}"' in prompt
+    assert 's14/data-deck-id="conn-4"' in prompt
+    assert 's7-2/data-deck-id="cover-rule"' in prompt
+    assert "Cpx=96*C_in" in prompt
+    assert "right-edge left=Cpx-Wpx" in prompt
+    assert "hcenter left=Cpx-Wpx/2" in prompt
+    assert update is not None
+    diagnostics = update["builder_pptx_diagnostics"]
+    assert diagnostics["deck_repair_previous_args_included"] is True
+    assert diagnostics["deck_repair_instruction_bytes"] == len(repair.encode("utf-8"))
+    assert diagnostics["deck_repair_instruction_truncated"] is False
+
+
 def test_repair_prompt_budget_keeps_only_complete_lines() -> None:
     lines = ["Repair header.", *[f"{index}. TARGET-{index} " + ("x" * 600) for index in range(1, 30)]]
     original = "\n".join(lines)

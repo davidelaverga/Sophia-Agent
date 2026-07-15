@@ -407,6 +407,332 @@ def test_repeated_quality_issues_group_all_thirty_slide_selectors() -> None:
         assert f"slide:{index}" in instruction["repair_message"]
 
 
+def test_canary_typography_and_alignment_repair_is_compact_and_source_addressable() -> None:
+    typography_sources = [
+        ("slide:2", "perception-label"),
+        ("slide:2", "appraisal-label"),
+        ("slide:2", "motives-label"),
+        ("slide:2", "action-label"),
+        ("slide:2", "feedback-label"),
+        ("slide:3", "scenario-label"),
+        ("slide:3", "motive-row-curiosity"),
+        ("slide:3", "motive-row-certainty"),
+        ("slide:3", "motive-row-affiliation"),
+    ]
+    source_element_map = {
+        "slides": {
+            "slide:1": {
+                "elements": {
+                    "cover-rule": {"shape_names": ["h2p-1-cover-rule-box-1"]},
+                    "cover-anchor": {"shape_names": ["h2p-1-cover-anchor-box-1"]},
+                    "cover-title": {"shape_names": ["h2p-1-cover-title-box-1"]},
+                }
+            },
+            "slide:2": {
+                "elements": {
+                    "perception-label": {},
+                    "appraisal-label": {},
+                    "motives-label": {},
+                    "action-label": {},
+                    "feedback-label": {},
+                    "conn-4": {"shape_names": ["h2p-2-conn-4-box-1"]},
+                    "node-3": {"shape_names": ["h2p-2-node-3-box-1"]},
+                    "node-5": {"shape_names": ["h2p-2-node-5-box-1"]},
+                }
+            },
+            "slide:3": {
+                "elements": {
+                    "scenario-label": {},
+                    "motive-row-curiosity": {},
+                    "motive-row-certainty": {},
+                    "motive-row-affiliation": {},
+                }
+            },
+        }
+    }
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        native_mechanical_report={
+            "lint_residue": [
+                {
+                    "slide": 0,
+                    "shape": "s7-2",
+                    "kind": "misaligned",
+                    "details": ['right edge 0.04" off gridline 18.75" (3 shapes: s4-2,s8,s7-2)'],
+                    "issue": 'right edge 0.04" off gridline 18.75" (3 shapes: s4-2,s8,s7-2)',
+                    "suggest": "align the rule's right edge to the reported gridline",
+                },
+                {
+                    "slide": 1,
+                    "shape": "s14",
+                    "kind": "misaligned",
+                    "details": ['hcenter edge 0.03" off gridline 4.17" (3 shapes: s13,s15,s14)'],
+                    "issue": 'hcenter edge 0.03" off gridline 4.17" (3 shapes: s13,s15,s14)',
+                    "suggest": "align the source connector to the peer centerline",
+                }
+            ]
+        },
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_lint_misaligned",
+                    "selector": "slide:1",
+                    "summary": "Native shape alignment remains inconsistent: right edge is off gridline.",
+                    "repair_hint": "Align the matching source shape to its intended right edge.",
+                },
+                {
+                    "code": "native_lint_misaligned",
+                    "selector": "slide:2",
+                    "summary": "Native shape alignment remains inconsistent: hcenter 0.03in off gridline.",
+                    "repair_hint": "Align the matching source connector to its intended centerline.",
+                },
+                *[
+                    {
+                        "code": "native_required_text_too_small",
+                        "selector": selector,
+                        "summary": (
+                            f"Required/body text '{source_id}' compiles at 15.75pt (21px), "
+                            "below the 18pt (24px) floor."
+                        ),
+                        "repair_hint": "Use at least 24px for required body/narrative text.",
+                    }
+                    for selector, source_id in typography_sources
+                ],
+            ]
+        },
+        native_shape_inventory={
+            "slide:1": {
+                "shapes": [
+                    {
+                        "id": "s4-2",
+                        "name": "h2p-1-cover-anchor-box-1",
+                        "pos": [1.25, 6.0],
+                        "size": [0.1, 0.1],
+                    },
+                    {
+                        "id": "s7-2",
+                        "name": "h2p-1-cover-rule-box-1",
+                        "pos": [1.25, 6.2],
+                        "size": [17.46, 0.06],
+                    },
+                    {
+                        "id": "s8",
+                        "name": "h2p-1-cover-title-box-1",
+                        "pos": [1.25, 2.0],
+                        "size": [17.5, 1.0],
+                    },
+                ]
+            },
+            "slide:2": {
+                "shapes": [
+                    {
+                        "id": "s13",
+                        "name": "h2p-2-node-3-box-1",
+                        "pos": [3.0, 2.0],
+                        "size": [1.0, 1.0],
+                    },
+                    {
+                        "id": "s14",
+                        "name": "h2p-2-conn-4-box-1",
+                        "pos": [4.0, 2.5],
+                        "size": [0.06, 1.5],
+                    },
+                    {
+                        "id": "s15",
+                        "name": "h2p-2-node-5-box-1",
+                        "pos": [4.5, 3.0],
+                        "size": [1.0, 1.0],
+                    },
+                ]
+            }
+        },
+        source_element_map=source_element_map,
+    )
+
+    assert instruction is not None
+    assert instruction["repair_target_count"] == 3
+    assert instruction["alignment_repair_target_count"] == 2
+    assert instruction["generic_repair_target_count"] == 1
+    alignments = [
+        target for target in instruction["repair_targets"] if target["target_type"] == "alignment"
+    ]
+    assert [(target["shape"], target["alignment_role"]) for target in alignments] == [
+        ("s7-2", "right"),
+        ("s14", "hcenter"),
+    ]
+    assert alignments[0]["source_ids"] == ["cover-rule"]
+    assert alignments[0]["peer_ids"] == ["s4-2", "s8"]
+    assert alignments[1]["source_ids"] == ["conn-4"]
+    assert alignments[1]["peer_ids"] == ["s13", "s15"]
+    typography = next(
+        target
+        for target in instruction["repair_targets"]
+        if target.get("typography_occurrences")
+    )
+    assert [
+        (item["selector"], item["source_ids"])
+        for item in typography["typography_occurrences"]
+    ] == [(selector, [source_id]) for selector, source_id in typography_sources]
+    message = instruction["repair_message"]
+    assert len(message.encode("utf-8")) < 2_200
+    assert message.count("TYPE REQUIRED descendants") == 1
+    for selector, source_id in typography_sources:
+        assert f'{selector}/data-deck-id="{source_id}"' in message
+    assert 's14/data-deck-id="conn-4" native-in-box=[4.0, 2.5]+[0.06, 1.5]' in message
+    assert 's7-2/data-deck-id="cover-rule" native-in-box=[1.25, 6.2]+[17.46, 0.06]' in message
+    assert 's4-2/data-deck-id="cover-anchor"' in message
+    assert "role=right" in message
+    assert "role=hcenter" in message
+    assert "Cpx=96*C_in" in message
+    assert "right-edge left=Cpx-Wpx" in message
+    assert "hcenter left=Cpx-Wpx/2" in message
+    assert "vcenter top=Cpx-Hpx/2" in message
+
+
+def test_large_typography_failure_set_is_chunked_before_message_bounding() -> None:
+    issues = [
+        {
+            "code": "native_required_text_too_small",
+            "selector": f"slide:{(index % 64) + 1}",
+            "source_ids": [f"required-label-{index}-" + ("x" * 40)],
+            "summary": (
+                f"Required/body text 'required-label-{index}' compiles at 15.75pt (21px), "
+                "below the 18pt (24px) floor."
+            ),
+            "repair_hint": "Use at least 24px for required text.",
+        }
+        for index in range(200)
+    ]
+
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        source_element_map={},
+        mechanical_gate_results={"issues": issues},
+    )
+
+    assert instruction is not None
+    assert instruction["generic_repair_target_count"] > 1
+    assert instruction["included_repair_target_count"] > 0
+    assert instruction["included_generic_repair_target_count"] > 0
+    assert 'data-deck-id="required-label-0-' in instruction["repair_message"]
+    assert len(instruction["repair_message"].encode("utf-8")) <= 8 * 1024
+    for line in instruction["repair_message"].splitlines():
+        if ". TYPE " in line:
+            assert len(line.encode("utf-8")) <= 1024
+
+
+def test_alignment_repair_preserves_both_axes_for_one_shape() -> None:
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        native_mechanical_report={
+            "lint_residue": [
+                {
+                    "slide": 1,
+                    "shape": "s14",
+                    "kind": "misaligned",
+                    "details": [
+                        'right edge 0.03" off gridline 8.0" (peers s13,s14)',
+                        'bottom edge 0.04" off gridline 6.0" (peers s15,s14)',
+                    ],
+                }
+            ]
+        },
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_lint_misaligned",
+                    "selector": "slide:2",
+                    "summary": "Native shape alignment remains inconsistent on two axes.",
+                    "repair_hint": "Align both reported edges.",
+                }
+            ]
+        },
+        source_element_map={},
+        native_shape_inventory={},
+    )
+
+    assert instruction is not None
+    assert instruction["alignment_repair_target_count"] == 2
+    assert [target["alignment_role"] for target in instruction["repair_targets"]] == [
+        "right",
+        "bottom",
+    ]
+    assert "role=right" in instruction["repair_message"]
+    assert "role=bottom" in instruction["repair_message"]
+
+
+def test_single_oversized_typography_source_id_remains_a_bounded_target() -> None:
+    oversized_id = "required-" + ('quote-\\-"-🙂-' * 2_000)
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        source_element_map={},
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_required_text_too_small",
+                    "selector": "slide:2",
+                    "source_ids": [oversized_id],
+                    "summary": (
+                        "Required/body text 'oversized-label' compiles at 15.75pt (21px), "
+                        "below the 18pt (24px) floor."
+                    ),
+                    "repair_hint": "Use at least 24px for required text.",
+                }
+            ]
+        },
+    )
+
+    assert instruction is not None
+    assert instruction["included_repair_target_count"] == 1
+    occurrence = instruction["repair_targets"][0]["typography_occurrences"][0]
+    assert occurrence["source_ids_truncated"] is True
+    assert len(occurrence["source_ids"][0].encode("utf-8")) <= 72
+    assert "data-deck-id≈" in instruction["repair_message"]
+    type_line = next(line for line in instruction["repair_message"].splitlines() if ". TYPE " in line)
+    assert len(type_line.encode("utf-8")) <= 1024
+
+
+def test_typography_lookup_retains_all_three_source_ancestors_from_long_summary() -> None:
+    source_ids = [
+        "required-ancestor-one-" + ("a" * 32),
+        "required-ancestor-two-" + ("b" * 32),
+        "exact-visible-descendant-" + ("c" * 32),
+    ]
+    source_label = ", ".join(source_ids)
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        source_element_map={
+            "slides": {
+                "slide:2": {
+                    "elements": {source_id: {} for source_id in source_ids},
+                }
+            }
+        },
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_required_text_too_small",
+                    "selector": "slide:2",
+                    "summary": (
+                        f"Required/body text '{source_label}' compiles at 15.75pt (21px), "
+                        "below the 18pt (24px) floor."
+                    ),
+                    "repair_hint": "Use at least 24px for required text.",
+                }
+            ]
+        },
+    )
+
+    assert len(source_label) > 140
+    assert instruction is not None
+    occurrence = instruction["repair_targets"][0]["typography_occurrences"][0]
+    assert occurrence["source_ids"] == source_ids
+    assert occurrence["source_id_omitted_count"] == 0
+    assert occurrence["source_ids_truncated"] is False
+    for source_id in source_ids:
+        assert json.dumps(source_id) in instruction["repair_message"]
+
+
 def test_visual_contract_repair_can_update_creative_plan_image_prompt() -> None:
     instruction = deck_mechanical_repair_instruction_from_reports(
         native_contrast_report={},

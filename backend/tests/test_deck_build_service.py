@@ -765,7 +765,9 @@ def test_deck_build_service_routes_compiled_required_tiny_text_to_mechanical_rep
         for issue in result.mechanical_gate_results["issues"]
     )
     assert result.repair_instruction is not None
-    assert result.repair_instruction["generic_repair_target_count"] == 3
+    assert result.repair_instruction["generic_repair_target_count"] == 1
+    typography_target = result.repair_instruction["repair_targets"][0]
+    assert len(typography_target["typography_occurrences"]) == 3
     assert "24px" in result.repair_instruction["repair_message"]
 
 
@@ -1461,10 +1463,15 @@ def test_presentation_authoring_prompt_sets_role_aware_font_floors() -> None:
     prompt = builder_artifact_module._PRESENTATION_AUTHORING_SYSTEM_PROMPT
 
     assert "required body and narrative text must be at least 24px" in prompt
-    assert "optional labels and captions may use 20-23px" in prompt
-    assert "no visible text may be below 20px" in prompt
+    assert "Every visible text descendant inside an element marked data-deck-required=true" in prompt
+    assert "including nested spans and labels" in prompt
+    assert "20-23px is allowed only inside optional elements" in prompt
+    assert "No visible text may be below 20px" in prompt
     assert "vertical slack beyond its computed line height" in prompt
     assert "connector bars to exact shared edges or centerlines" in prompt
+    assert "Offset connector bars by half their thickness" in prompt
+    assert "left=C-W/2" in prompt
+    assert "top=C-H/2" in prompt
 
 
 def test_creative_plan_validation_reports_indexed_nested_path(tmp_path: Path) -> None:
