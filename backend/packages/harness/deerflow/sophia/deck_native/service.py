@@ -237,13 +237,16 @@ class DeckNativeService:
             payload = {}
         fixed = payload.get("fixed") if isinstance(payload.get("fixed"), list) else []
         residue = payload.get("residue") if isinstance(payload.get("residue"), list) else []
-        remaining = payload.get("remaining_issue_shapes") if isinstance(payload.get("remaining_issue_shapes"), list) else []
-        residue_items = [item for item in residue if isinstance(item, dict)]
+        structured_remaining = payload.get("remaining_issues") if isinstance(payload.get("remaining_issues"), list) else []
+        residue_items = _merge_lint_residue(
+            [item for item in residue if isinstance(item, dict)],
+            _remaining_issue_residue(structured_remaining),
+        )
         return NativeDeckLintFixResult(
             success=True,
-            lint_issue_count_before=len(fixed) + len(residue) + len(remaining),
+            lint_issue_count_before=len(fixed) + len(residue_items),
             fix_applied_count=len(fixed),
-            residue_count=len(residue),
+            residue_count=len(residue_items),
             touched_slide_count=len(touched),
             residue=residue_items,
             errors=[],
@@ -560,3 +563,129 @@ def _kind_counts(items: list[Any], key: str) -> dict[str, int]:
         normalized = value.strip().split(":", 1)[0][:80]
         counts[normalized] = counts.get(normalized, 0) + 1
     return counts
+
+
+def _remaining_issue_residue(items: list[Any]) -> list[dict[str, Any]]:
+    """Normalize the fix command's authoritative post-fix issue map.
+
+    ``deck.py fix`` historically emitted small frame overflows and alignment
+    defects only under ``remaining_issue_shapes``.  They were visible to a
+    subsequent inspect but absent from ``residue_count``, allowing acceptance
+    to report a mechanically clean deck.  The structured producer field lets
+    this adapter preserve exact slide/shape attribution without parsing reprs.
+    """
+
+    normalized: list[dict[str, Any]] = []
+    for item in items:
+        if not isinstance(item, dict):
+            continue
+        try:
+            slide = int(item.get("slide"))
+        except (TypeError, ValueError):
+            continue
+        shape = str(item.get("shape") or "").strip()
+        issues = item.get("issues") if isinstance(item.get("issues"), dict) else {}
+        if not shape or not issues:
+            continue
+        if "frame_overflow_bottom" in issues:
+            overflow = _finite_number(issues.get("frame_overflow_bottom"))
+            normalized.append(
+                {
+                    "slide": slide,
+                    "shape": shape,
+                    "kind": "frame_overflow",
+                    "overflow_bottom": overflow,
+                    "issue": f'text frame still overflows by {overflow or 0:g}" after native repair',
+                    "suggest": "increase the source box height or shorten the source copy",
+                }
+            )
+        if "misaligned" in issues:
+            details = [str(value) for value in issues.get("misaligned") or []]
+            normalized.append(
+                {
+                    "slide": slide,
+                    "shape": shape,
+                    "kind": "misaligned",
+                    "details": details,
+                    "issue": details[0] if details else "shape remains off its inferred alignment grid",
+                    "suggest": "align the source element to the intended peer edge or centerline",
+                }
+            )
+        for key in ("slide_overflow_right", "slide_overflow_bottom"):
+            if key not in issues:
+                continue
+            overflow = _finite_number(issues.get(key))
+            normalized.append(
+                {
+                    "slide": slide,
+                    "shape": shape,
+                    "kind": "slide_overflow_text",
+                    "overflow": overflow,
+                    "issue": f'text shape still extends {overflow or 0:g}" beyond the slide',
+                    "suggest": "move or resize the source text box inside the slide boundary",
+                }
+            )
+        overlaps = issues.get("overlaps") if isinstance(issues.get("overlaps"), dict) else {}
+        for other_shape, area_value in overlaps.items():
+            area = _finite_number(area_value)
+            normalized.append(
+                {
+                    "slide": slide,
+                    "shape": shape,
+                    "kind": "overlap",
+                    "overlap_area": area,
+                    "issue": f"overlaps {other_shape} by {area or 0:g} sq in",
+                    "suggest": "separate the source elements or make their stacking intent explicit",
+                }
+            )
+        covered = issues.get("covered_by") if isinstance(issues.get("covered_by"), dict) else {}
+        for picture_shape, area_value in covered.items():
+            area = _finite_number(area_value)
+            normalized.append(
+                {
+                    "slide": slide,
+                    "shape": shape,
+                    "kind": "covered_by_picture",
+                    "covered_area": area,
+                    "issue": f"text remains covered by {picture_shape} by {area or 0:g} sq in",
+                    "suggest": "move the elements apart or place required text above the picture",
+                }
+            )
+    return normalized
+
+
+def _merge_lint_residue(
+    classified: list[dict[str, Any]],
+    remaining: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    merged = list(classified)
+    exact = {
+        (item.get("slide"), str(item.get("shape") or ""), str(item.get("kind") or ""))
+        for item in merged
+    }
+    locations = {
+        (item.get("slide"), str(item.get("shape") or "")): str(item.get("kind") or "")
+        for item in merged
+    }
+    for item in remaining:
+        location = (item.get("slide"), str(item.get("shape") or ""))
+        kind = str(item.get("kind") or "")
+        if (*location, kind) in exact:
+            continue
+        existing_kind = locations.get(location)
+        if kind == "frame_overflow" and existing_kind in {"frame_overflow", "repair_still_failing"}:
+            continue
+        if kind == "slide_overflow_text" and existing_kind == "slide_overflow_non_text":
+            continue
+        merged.append(item)
+        exact.add((*location, kind))
+        locations.setdefault(location, kind)
+    return merged
+
+
+def _finite_number(value: Any) -> float | None:
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if number == number and number not in {float("inf"), float("-inf")} else None

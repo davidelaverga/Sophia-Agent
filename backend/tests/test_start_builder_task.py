@@ -1012,6 +1012,104 @@ def test_start_builder_task_normalizes_demo_request(monkeypatch):
     assert response.update["async_tasks"][task_id]["demo_mode"] is True
 
 
+def test_explicit_pptx_bypasses_stale_demo_and_canonicalizes_presentation(monkeypatch):
+    """Prod regression: a stale demo goal must not rewrite a live deck brief."""
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    fake_client, captured = _make_fake_sdk_client()
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    live_brief = (
+        "Create a new editable 5-slide PowerPoint about cognitive AI systems, "
+        "using the PSI agent architecture as the central example."
+    )
+    runtime = _make_runtime(
+        {
+            "user_id": "alice",
+            "messages": [{"role": "user", "content": live_brief}],
+            "current_artifact": {
+                "session_goal": "Testing builder mode",
+                "active_goal": "Show me builder working",
+                "takeaway": "User is in test/exploration mode for builder functionality",
+            },
+        }
+    )
+
+    response = asyncio.run(
+        module.start_builder_task.coroutine(
+            description=live_brief,
+            # The model selected the generic enum in the production incident.
+            task_type="document",
+            runtime=runtime,
+        )
+    )
+
+    assert isinstance(response, Command)
+    task_id = next(iter(response.update["async_tasks"]))
+    task = response.update["async_tasks"][task_id]
+    assert task["demo_mode"] is False
+    assert task["task_type"] == "presentation"
+    assert task["artifact_target_path"].endswith(".pptx")
+    assert "create-exactly-one-markdown-file" not in task["artifact_target_path"]
+
+    run_kwargs = captured["run_kwargs"]
+    run_input = run_kwargs["input"]
+    body = run_input["messages"][0]["content"]
+    assert body.startswith("[presentation]")
+    assert "cognitive AI systems" in body
+    assert "builder-demo.md" not in body
+    assert run_input["delegation_context"]["task_type"] == "presentation"
+    assert run_input["delegation_context"]["user_requested_ext"] == "pptx"
+    assert run_input["builder_budget"]["tier"] == "presentation"
+    assert run_kwargs["config"]["configurable"]["task_type"] == "presentation"
+    assert run_kwargs["config"]["configurable"]["artifact_target_ext"] == ".pptx"
+
+
+def test_stale_demo_context_alone_does_not_rewrite_a_real_brief():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    description, task_type, demo_mode = module._normalize_request(
+        "Draft a concise executive brief about quarterly retention.",
+        "document",
+        {
+            "session_goal": "Testing builder mode",
+            "takeaway": "Show me builder working",
+        },
+    )
+
+    assert description == "Draft a concise executive brief about quarterly retention."
+    assert task_type == "document"
+    assert demo_mode is False
+
+
+def test_explicit_formats_never_enter_generic_demo_mode():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    for ext, live_request in (
+        ("md", "Test builder by creating a Markdown brief."),
+        ("pdf", "Test builder by creating a PDF report."),
+        ("html", "Test builder by creating an HTML page."),
+    ):
+        description, task_type, demo_mode = module._normalize_request(
+            live_request,
+            "document",
+            {"active_goal": "builder demo"},
+            current_user_text=live_request,
+            explicit_output_ext=ext,
+        )
+        assert description == live_request
+        assert task_type == "document"
+        assert demo_mode is False
+
+
+def test_only_powerpoint_canonicalizes_task_type():
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+
+    assert module._canonical_task_type_for_target("document", "pptx") == "presentation"
+    assert module._canonical_task_type_for_target("document", ".PPTX") == "presentation"
+    assert module._canonical_task_type_for_target("document", "pdf") == "document"
+    assert module._canonical_task_type_for_target("visual_report", "pdf") == "visual_report"
+
+
 def test_start_builder_task_keeps_web_research_available_for_frontend(monkeypatch):
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client()

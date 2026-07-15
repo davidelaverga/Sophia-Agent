@@ -2512,8 +2512,21 @@ def cmd_fix(args):
             confirmed.append(f)
     fixed = confirmed
 
-    report = {"saved": str(out_path), "fixed": fixed, "residue": residue,
-              "remaining_issue_shapes": ["slide %d %s: %s" % (k[0], k[1], v) for k, v in remaining.items()]}
+    report = {
+        "saved": str(out_path),
+        "fixed": fixed,
+        "residue": residue,
+        # Keep the legacy strings for CLI consumers, and expose the same
+        # post-fix truth structurally so callers cannot accidentally accept a
+        # deck merely because an issue was not classified into ``residue``.
+        "remaining_issue_shapes": [
+            "slide %d %s: %s" % (k[0], k[1], v) for k, v in remaining.items()
+        ],
+        "remaining_issues": [
+            {"slide": k[0], "shape": k[1], "issues": v}
+            for k, v in remaining.items()
+        ],
+    }
     if args.json:
         print(json.dumps(report, indent=2, ensure_ascii=False))
     else:

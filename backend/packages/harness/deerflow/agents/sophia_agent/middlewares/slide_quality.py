@@ -81,7 +81,6 @@ _UNREQUESTED_STYLE_RE = re.compile(
     r"hand[-\s]?written|hand[-\s]?drawn|sketch|sketched)\b",
     re.IGNORECASE,
 )
-_TINY_FONT_RE = re.compile(r"font-size\s*:\s*(?:[0-9]|1[0-5])px\b", re.IGNORECASE)
 _CARD_CLASS_RE = re.compile(r"\b(?:class|id)\s*=\s*['\"][^'\"]*\bcard\b", re.IGNORECASE)
 
 
@@ -267,8 +266,6 @@ def visual_style_check(signals: SlideSignals) -> list[QualityGap]:
         )
         if style_match is not None:
             reasons.append(f"unrequested {style_match.group(1)} aesthetic")
-        if _TINY_FONT_RE.search(html):
-            reasons.append("font-size below 16px")
         card_count = len(_CARD_CLASS_RE.findall(html))
         if card_count > 4:
             reasons.append(f"{card_count} card-style panels")

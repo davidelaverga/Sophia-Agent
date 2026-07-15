@@ -1304,7 +1304,11 @@ class DeckBuildService:
                 "native_editability_score": deck.native_editability_score,
             },
         ) as run:
-            gate_result = evaluate_mechanical_gates(deck, rendered_dir=render_host)
+            gate_result = evaluate_mechanical_gates(
+                deck,
+                rendered_dir=render_host,
+                native_pptx_path=output_host,
+            )
             deck.mechanical_gate_results = gate_result.to_dict()
             finish_span(run, deck.mechanical_gate_results)
         if not deck.mechanical_gate_results.get("passed"):

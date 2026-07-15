@@ -5,6 +5,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from pptx import Presentation
+
 from deerflow.sophia.deck_build.models import DeckBuild
 
 try:  # pragma: no cover - Pillow is present in the backend image, optional in tiny test envs.
@@ -22,12 +24,30 @@ _OLD_RENDERER_MARKERS = (
 )
 _HARD_RESIDUE_KINDS = {
     "frame_overflow",
+    "misaligned",
     "slide_overflow_text",
     "covered_by_picture",
     "repair_still_failing",
 }
 _ADVISORY_RESIDUE_KINDS = {"overlap", "slide_overflow_non_text"}
 _KNOWN_RESIDUE_KINDS = _HARD_RESIDUE_KINDS | _ADVISORY_RESIDUE_KINDS
+_POINTS_PER_CSS_PX = 0.75
+_REQUIRED_TEXT_MIN_CSS_PX = 24.0
+_COMPACT_TEXT_MIN_CSS_PX = 20.0
+_REQUIRED_TEXT_MIN_PT = _REQUIRED_TEXT_MIN_CSS_PX * _POINTS_PER_CSS_PX
+_COMPACT_TEXT_MIN_PT = _COMPACT_TEXT_MIN_CSS_PX * _POINTS_PER_CSS_PX
+_REQUIRED_TEXT_ROLES = {
+    "body",
+    "callout",
+    "content",
+    "description",
+    "evidence",
+    "heading",
+    "headline",
+    "narrative",
+    "paragraph",
+    "title",
+}
 
 
 @dataclass
@@ -61,7 +81,12 @@ class MechanicalGateResult:
         }
 
 
-def evaluate_mechanical_gates(deck: DeckBuild, *, rendered_dir: Path | None) -> MechanicalGateResult:
+def evaluate_mechanical_gates(
+    deck: DeckBuild,
+    *,
+    rendered_dir: Path | None,
+    native_pptx_path: Path | None = None,
+) -> MechanicalGateResult:
     issues: list[MechanicalGateIssue] = []
     warnings: list[str] = []
     metrics = _render_metrics(rendered_dir)
@@ -72,6 +97,12 @@ def evaluate_mechanical_gates(deck: DeckBuild, *, rendered_dir: Path | None) -> 
     warnings.extend(residue_warnings)
     issues.extend(_source_retention_issues(deck))
     issues.extend(_native_contrast_issues(deck))
+    issues.extend(
+        _compiled_typography_issues(
+            deck,
+            native_pptx_path=native_pptx_path,
+        )
+    )
     issues.extend(_sparse_render_issues(metrics))
     issues.extend(_dark_request_light_render_issues(deck, metrics))
     passed = not issues
@@ -83,6 +114,135 @@ def evaluate_mechanical_gates(deck: DeckBuild, *, rendered_dir: Path | None) -> 
         warnings=warnings,
         slide_render_metrics=metrics,
     )
+
+
+def _compiled_typography_issues(
+    deck: DeckBuild,
+    *,
+    native_pptx_path: Path | None,
+) -> list[MechanicalGateIssue]:
+    """Evaluate final native text, never declarations in repeated shared CSS."""
+
+    if native_pptx_path is None or not native_pptx_path.is_file():
+        return []
+    try:
+        presentation = Presentation(str(native_pptx_path))
+    except (OSError, ValueError):
+        return []
+
+    issues: list[MechanicalGateIssue] = []
+    for slide_index, slide in enumerate(presentation.slides, start=1):
+        selector = f"slide:{slide_index}"
+        for shape in _native_shapes(slide.shapes):
+            text, font_sizes = _native_shape_text_and_sizes(shape)
+            if not text or not font_sizes:
+                continue
+            shape_name = str(getattr(shape, "name", "") or "").strip()
+            source_ids, roles, source_required = _typography_source_context(
+                deck,
+                selector=selector,
+                shape_name=shape_name,
+            )
+            required = bool(
+                source_required
+                or roles & _REQUIRED_TEXT_ROLES
+                or _matches_required_slide_copy(deck, selector=selector, text=text)
+            )
+            minimum_pt = _REQUIRED_TEXT_MIN_PT if required else _COMPACT_TEXT_MIN_PT
+            actual_pt = min(font_sizes)
+            if actual_pt + 0.05 >= minimum_pt:
+                continue
+            actual_px = actual_pt / _POINTS_PER_CSS_PX
+            minimum_px = minimum_pt / _POINTS_PER_CSS_PX
+            source_label = ", ".join(source_ids[:3]) or shape_name
+            code = "native_required_text_too_small" if required else "native_compact_text_too_small"
+            kind = "Required/body" if required else "Compact"
+            issues.append(
+                MechanicalGateIssue(
+                    code=code,
+                    selector=selector,
+                    summary=(
+                        f"{kind} text '{source_label}' compiles at {actual_pt:g}pt "
+                        f"({actual_px:g}px), below the {minimum_pt:g}pt ({minimum_px:g}px) floor."
+                    ),
+                    repair_hint=(
+                        "Use at least 24px for required body/narrative text and at least 20px for optional "
+                        "labels/captions; cut copy instead of shrinking type."
+                    ),
+                )
+            )
+    return issues
+
+
+def _native_shapes(shapes: Any) -> list[Any]:
+    flattened: list[Any] = []
+    for shape in shapes:
+        flattened.append(shape)
+        children = getattr(shape, "shapes", None)
+        if children is not None:
+            flattened.extend(_native_shapes(children))
+    return flattened
+
+
+def _native_shape_text_and_sizes(shape: Any) -> tuple[str, list[float]]:
+    frames: list[Any] = []
+    if bool(getattr(shape, "has_text_frame", False)):
+        frames.append(shape.text_frame)
+    if bool(getattr(shape, "has_table", False)):
+        frames.extend(cell.text_frame for row in shape.table.rows for cell in row.cells)
+    text_parts: list[str] = []
+    sizes: list[float] = []
+    for frame in frames:
+        for paragraph in frame.paragraphs:
+            for run in paragraph.runs:
+                text = str(run.text or "").strip()
+                if not text:
+                    continue
+                text_parts.append(text)
+                if run.font.size is not None:
+                    sizes.append(float(run.font.size.pt))
+    return _normalize_visible_text(" ".join(text_parts)), sizes
+
+
+def _typography_source_context(
+    deck: DeckBuild,
+    *,
+    selector: str,
+    shape_name: str,
+) -> tuple[list[str], set[str], bool]:
+    slides = deck.source_element_map.get("slides") if isinstance(deck.source_element_map, dict) else None
+    slide_map = slides.get(selector) if isinstance(slides, dict) else None
+    elements = slide_map.get("elements") if isinstance(slide_map, dict) else None
+    source_ids: list[str] = []
+    roles: set[str] = set()
+    required = False
+    for source_id, record in (elements or {}).items():
+        if not isinstance(record, dict) or shape_name not in _record_shape_names(record):
+            continue
+        source_ids.append(str(source_id))
+        role = str(record.get("source_role") or "").strip().lower()
+        if role:
+            roles.add(role)
+        required = bool(required or record.get("source_required"))
+    return source_ids, roles, required
+
+
+def _matches_required_slide_copy(deck: DeckBuild, *, selector: str, text: str) -> bool:
+    if not text:
+        return False
+    for slide in deck.slides:
+        if slide.selector != selector:
+            continue
+        required_copy = {
+            _normalize_visible_text(slide.title),
+            _normalize_visible_text(slide.narrative),
+        }
+        return text in required_copy
+    return False
+
+
+def _normalize_visible_text(value: Any) -> str:
+    return re.sub(r"\s+", " ", str(value or "")).strip()
 
 
 def _old_renderer_issues(deck: DeckBuild) -> list[MechanicalGateIssue]:
@@ -129,10 +289,15 @@ def _native_residue_findings(deck: DeckBuild) -> tuple[list[MechanicalGateIssue]
         return [], []
     residue_kinds = report.get("lint_residue_kinds")
     kinds = set(str(key) for key in residue_kinds) if isinstance(residue_kinds, dict) else set()
-    issues = _residue_kind_issues(kinds)
+    residue = report.get("lint_residue") if isinstance(report.get("lint_residue"), list) else []
+    item_kinds = {
+        str(item.get("kind") or "")
+        for item in residue
+        if isinstance(item, dict) and item.get("kind")
+    }
+    issues = _residue_kind_issues(kinds, item_kinds=item_kinds)
     warnings: list[str] = []
 
-    residue = report.get("lint_residue") if isinstance(report.get("lint_residue"), list) else []
     for item in residue:
         if not isinstance(item, dict):
             continue
@@ -142,7 +307,11 @@ def _native_residue_findings(deck: DeckBuild) -> tuple[list[MechanicalGateIssue]
     return issues, sorted(set(warnings))
 
 
-def _residue_kind_issues(kinds: set[str]) -> list[MechanicalGateIssue]:
+def _residue_kind_issues(
+    kinds: set[str],
+    *,
+    item_kinds: set[str] | None = None,
+) -> list[MechanicalGateIssue]:
     unknown = sorted(kind for kind in kinds if kind not in _KNOWN_RESIDUE_KINDS)
     issues: list[MechanicalGateIssue] = []
     if unknown:
@@ -171,7 +340,7 @@ def _residue_kind_issues(kinds: set[str]) -> list[MechanicalGateIssue]:
                 summary=f"Native lint/fix left blocking residue: {kind}.",
                 repair_hint="Repair the exact affected source element and re-run prepare_deck_build once.",
             )
-            for kind in sorted(kinds & _HARD_RESIDUE_KINDS)
+            for kind in sorted((kinds & _HARD_RESIDUE_KINDS) - (item_kinds or set()))
         ]
     )
     return issues
@@ -183,6 +352,35 @@ def _residue_item_findings(
 ) -> tuple[list[MechanicalGateIssue], list[str]]:
     kind = str(item.get("kind") or "")
     selector = f"slide:{int(item.get('slide') or 0) + 1}"
+    if kind == "frame_overflow":
+        overflow = float(item.get("overflow_bottom") or 0.0)
+        return [
+            MechanicalGateIssue(
+                code="native_lint_frame_overflow",
+                selector=selector,
+                summary=f'Native text frame still overflows by {overflow:g}" after repair.',
+                repair_hint="Increase the matching source box height or shorten the copy without shrinking below the type floor.",
+            )
+        ], []
+    if kind == "misaligned":
+        detail = str(item.get("issue") or "Shape remains off its inferred alignment grid.")
+        return [
+            MechanicalGateIssue(
+                code="native_lint_misaligned",
+                selector=selector,
+                summary=f"Native shape alignment remains inconsistent: {detail}",
+                repair_hint="Align the matching source connector or shape to its intended peer edge or centerline.",
+            )
+        ], []
+    if kind in {"slide_overflow_text", "covered_by_picture", "repair_still_failing"}:
+        return [
+            MechanicalGateIssue(
+                code=f"native_lint_{kind}",
+                selector=selector,
+                summary=str(item.get("issue") or f"Native lint/fix left blocking residue: {kind}."),
+                repair_hint=str(item.get("suggest") or "Repair the matching source element and re-run native compilation."),
+            )
+        ], []
     if kind == "overlap" and float(item.get("overlap_area") or 0.0) >= 0.08:
         return [
             MechanicalGateIssue(

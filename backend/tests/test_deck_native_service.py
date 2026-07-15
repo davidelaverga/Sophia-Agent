@@ -247,6 +247,57 @@ def test_deck_native_lint_fix_reports_residue(tmp_path: Path) -> None:
     assert fixed.residue_kinds
 
 
+def test_deck_native_lint_fix_promotes_every_remaining_issue_to_residue(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output = tmp_path / "remaining-issues.pptx"
+    Presentation().save(output)
+    payload = {
+        "fixed": [],
+        "residue": [],
+        "remaining_issue_shapes": [
+            "slide 1 s7: {'frame_overflow_bottom': 0.47}",
+            "slide 2 s11: {'misaligned': ['vcenter edge 0.09 off gridline']}",
+        ],
+        "remaining_issues": [
+            {
+                "slide": 1,
+                "shape": "s7",
+                "issues": {"frame_overflow_bottom": 0.47},
+            },
+            {
+                "slide": 2,
+                "shape": "s11",
+                "issues": {"misaligned": ["vcenter edge 0.09 off gridline"]},
+            },
+        ],
+    }
+    service = DeckNativeService()
+    monkeypatch.setattr(
+        service,
+        "_run",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [],
+            0,
+            stdout=json.dumps(payload),
+            stderr="",
+        ),
+    )
+
+    result = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert result.success is True
+    assert result.lint_issue_count_before == 2
+    assert result.fix_applied_count == 0
+    assert result.residue_count == 2
+    assert result.residue_kinds == {"frame_overflow": 1, "misaligned": 1}
+    assert {(item["slide"], item["shape"]) for item in result.residue} == {
+        (1, "s7"),
+        (2, "s11"),
+    }
+
+
 def test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow(
     tmp_path: Path,
     monkeypatch,

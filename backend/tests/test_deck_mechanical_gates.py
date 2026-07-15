@@ -2,7 +2,10 @@ from __future__ import annotations
 
 from pathlib import Path
 
+import pytest
 from PIL import Image, ImageDraw
+from pptx import Presentation
+from pptx.util import Inches, Pt
 from test_deck_build_service import _creative_plan, _runtime, _slides
 
 from deerflow.sophia.deck_build.creative_plan import normalize_creative_plan
@@ -63,6 +66,19 @@ def _render_dir(tmp_path: Path, *, light: bool = False, blank: bool = False) -> 
             draw.rectangle((60, 70, 120, 110), fill="#38BDF8")
         image.save(render_dir / f"slide-{index}.jpg")
     return render_dir
+
+
+def _native_pptx(tmp_path: Path, *, shape_name: str, text: str, font_size: float) -> Path:
+    path = tmp_path / "deck.pptx"
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    textbox = slide.shapes.add_textbox(Inches(1), Inches(1), Inches(8), Inches(1))
+    textbox.name = shape_name
+    paragraph = textbox.text_frame.paragraphs[0]
+    paragraph.text = text
+    paragraph.runs[0].font.size = Pt(font_size)
+    presentation.save(path)
+    return path
 
 
 def test_mechanical_gates_pass_for_nonblank_dark_native_deck(tmp_path) -> None:
@@ -134,3 +150,153 @@ def test_non_text_overflow_requires_explicit_bleed_source_role(tmp_path) -> None
     allowed = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(allowed_root))
     assert allowed.passed is True
     assert "native_lint_advisory:slide_overflow_non_text" in allowed.warnings
+
+
+def test_post_fix_frame_overflow_and_misalignment_are_blocking_and_attributed(tmp_path) -> None:
+    deck = _built_deck(tmp_path)
+    deck.native_mechanical_report = {
+        "lint_residue_count": 2,
+        "lint_residue_kinds": {"frame_overflow": 1, "misaligned": 1},
+        "lint_residue": [
+            {
+                "slide": 1,
+                "shape": "s7",
+                "kind": "frame_overflow",
+                "overflow_bottom": 0.47,
+            },
+            {
+                "slide": 2,
+                "shape": "s11",
+                "kind": "misaligned",
+                "issue": 'vcenter edge 0.09" off gridline',
+            },
+        ],
+    }
+
+    result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path))
+
+    assert result.passed is False
+    issues = {(issue.code, issue.selector) for issue in result.issues}
+    assert ("native_lint_frame_overflow", "slide:2") in issues
+    assert ("native_lint_misaligned", "slide:3") in issues
+    assert not any(issue.selector == "deck" for issue in result.issues)
+
+
+@pytest.mark.parametrize(
+    ("font_size", "expected_passed"),
+    [
+        (17.9, False),
+        (18.0, True),
+    ],
+)
+def test_required_body_uses_computed_24px_floor(
+    tmp_path: Path,
+    font_size: float,
+    expected_passed: bool,
+) -> None:
+    deck = _built_deck(tmp_path)
+    deck.source_element_map = {
+        "slides": {
+            "slide:1": {
+                "elements": {
+                    "narrative-1": {
+                        "source_role": "narrative",
+                        "source_required": True,
+                        "shape_names": ["s1-narrative-text"],
+                    }
+                }
+            }
+        }
+    }
+    pptx = _native_pptx(
+        tmp_path,
+        shape_name="s1-narrative-text",
+        text="Rendered body copy",
+        font_size=font_size,
+    )
+
+    result = evaluate_mechanical_gates(
+        deck,
+        rendered_dir=_render_dir(tmp_path),
+        native_pptx_path=pptx,
+    )
+
+    assert result.passed is expected_passed
+    codes = {issue.code for issue in result.issues}
+    if expected_passed:
+        assert "native_required_text_too_small" not in codes
+    else:
+        assert "native_required_text_too_small" in codes
+        assert "24px" in result.failure_summary
+
+
+@pytest.mark.parametrize(
+    ("font_size", "expected_passed"),
+    [
+        (14.9, False),
+        (15.0, True),
+        (16.5, True),
+    ],
+)
+def test_optional_compact_labels_use_computed_20px_floor(
+    tmp_path: Path,
+    font_size: float,
+    expected_passed: bool,
+) -> None:
+    deck = _built_deck(tmp_path)
+    deck.source_element_map = {
+        "slides": {
+            "slide:1": {
+                "elements": {
+                    "status-label": {
+                        "source_role": "label",
+                        "source_required": False,
+                        "shape_names": ["s1-status-label-text"],
+                    }
+                }
+            }
+        }
+    }
+    pptx = _native_pptx(
+        tmp_path,
+        shape_name="s1-status-label-text",
+        text="Success measure",
+        font_size=font_size,
+    )
+
+    result = evaluate_mechanical_gates(
+        deck,
+        rendered_dir=_render_dir(tmp_path),
+        native_pptx_path=pptx,
+    )
+
+    assert result.passed is expected_passed
+    codes = {issue.code for issue in result.issues}
+    if expected_passed:
+        assert "native_compact_text_too_small" not in codes
+    else:
+        assert "native_compact_text_too_small" in codes
+        assert "20px" in result.failure_summary
+
+
+def test_compiled_typography_checks_only_emitted_text(tmp_path: Path) -> None:
+    deck = _built_deck(tmp_path)
+    deck.slides[0].html_source = (
+        (deck.slides[0].html_source or "")
+        + "<style>.unused-utility{font-size:12px}</style>"
+    )
+    pptx = _native_pptx(
+        tmp_path,
+        shape_name="s1-visible-label-text",
+        text="Visible compact label",
+        font_size=15.0,
+    )
+
+    result = evaluate_mechanical_gates(
+        deck,
+        rendered_dir=_render_dir(tmp_path),
+        native_pptx_path=pptx,
+    )
+
+    assert result.passed is True
+    assert not any("text_too_small" in issue.code for issue in result.issues)

@@ -273,9 +273,18 @@ def _fake_batch(runtime: SimpleNamespace, *, create_outputs: bool = True, comple
 
 
 class _FakeNativeService:
-    def __init__(self, calls: list[dict] | None = None, *, full_slide_picture_count: int = 0) -> None:
+    def __init__(
+        self,
+        calls: list[dict] | None = None,
+        *,
+        full_slide_picture_count: int = 0,
+        narrative_font_pt: float = 20.0,
+        compact_label_font_pt: float | None = None,
+    ) -> None:
         self.calls = calls if calls is not None else []
         self.full_slide_picture_count = full_slide_picture_count
+        self.narrative_font_pt = narrative_font_pt
+        self.compact_label_font_pt = compact_label_font_pt
         self.slide_count = 0
         self.source_map_path: str | None = None
         self.inventory_path: str | None = None
@@ -362,8 +371,15 @@ class _FakeNativeService:
             narrative.name = f"s{index}-narrative-{index}-text"
             narrative.text_frame.paragraphs[0].text = "A concise technical narrative explains the point."
             narrative_run = narrative.text_frame.paragraphs[0].runs[0]
-            narrative_run.font.size = Pt(20)
+            narrative_run.font.size = Pt(self.narrative_font_pt)
             narrative_run.font.color.rgb = RGBColor(0xEE, 0xF4, 0xFB)
+            if index == 1 and self.compact_label_font_pt is not None:
+                label = slide.shapes.add_textbox(Inches(0.8), Inches(5.1), Inches(4), Inches(0.4))
+                label.name = "s1-status-label-text"
+                label.text_frame.paragraphs[0].text = "Success measure"
+                label_run = label.text_frame.paragraphs[0].runs[0]
+                label_run.font.size = Pt(self.compact_label_font_pt)
+                label_run.font.color.rgb = RGBColor(0xEE, 0xF4, 0xFB)
             inventory[f"slide:{index}"] = {
                 "native_slide_index": index - 1,
                 "title": title.name,
@@ -687,6 +703,72 @@ def test_deck_build_service_ignores_hidden_unused_eyebrow_selector(tmp_path: Pat
     assert result.success is True
 
 
+def test_deck_build_service_allows_emitted_20px_label_and_ignores_unused_tiny_rule(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    native_service = _FakeNativeService(
+        compact_label_font_pt=15.0,
+    )
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        native_service=native_service,
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_compact_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        deck_stylesheet=(
+            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Calibri,Arial,sans-serif}"
+            ".unused-utility{font-size:12px}.status-label{font-size:20px}"
+            "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
+        ),
+        authoring_contract="compact_model_html_v2",
+        creative_plan=_creative_plan(include_asset=False),
+    )
+
+    assert result.success is True
+    assert result.quality_status == "passed"
+    assert result.quality_warning is None
+    assert result.source_quality_report["soft_warnings"] == []
+
+
+def test_deck_build_service_routes_compiled_required_tiny_text_to_mechanical_repair(tmp_path: Path) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    native_service = _FakeNativeService(
+        narrative_font_pt=17.25,
+    )
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        native_service=native_service,
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_compact_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        deck_stylesheet=(
+            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Calibri,Arial,sans-serif}"
+            "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:23px}"
+        ),
+        authoring_contract="compact_model_html_v2",
+        creative_plan=_creative_plan(include_asset=False),
+    )
+
+    assert result.success is False
+    assert result.failure_code == "deck_mechanical_gate_failed"
+    assert result.retryable is True
+    assert result.source_quality_report["passed"] is True
+    assert any(
+        issue["code"] == "native_required_text_too_small"
+        for issue in result.mechanical_gate_results["issues"]
+    )
+    assert result.repair_instruction is not None
+    assert result.repair_instruction["generic_repair_target_count"] == 3
+    assert "24px" in result.repair_instruction["repair_message"]
+
+
 def test_deck_build_service_still_rejects_visible_eyebrow_chrome(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     native_calls: list[dict] = []
@@ -730,8 +812,9 @@ def test_deck_build_service_combines_source_and_mechanical_targets_for_one_repai
 
     mechanical_attempt = 0
 
-    def evaluate_gates(_deck, *, rendered_dir):
+    def evaluate_gates(_deck, *, rendered_dir, native_pptx_path=None):
         nonlocal mechanical_attempt
+        del rendered_dir, native_pptx_path
         mechanical_attempt += 1
         if mechanical_attempt > 1:
             return MechanicalGateResult(passed=True)
@@ -1372,6 +1455,16 @@ def test_presentation_authoring_prompt_forbids_recurring_page_chrome() -> None:
     assert "Do not add eyebrow or kicker labels" in prompt
     assert "footer_policy" in prompt
     assert "eyebrow_policy must both be 'none'" in prompt
+
+
+def test_presentation_authoring_prompt_sets_role_aware_font_floors() -> None:
+    prompt = builder_artifact_module._PRESENTATION_AUTHORING_SYSTEM_PROMPT
+
+    assert "required body and narrative text must be at least 24px" in prompt
+    assert "optional labels and captions may use 20-23px" in prompt
+    assert "no visible text may be below 20px" in prompt
+    assert "vertical slack beyond its computed line height" in prompt
+    assert "connector bars to exact shared edges or centerlines" in prompt
 
 
 def test_creative_plan_validation_reports_indexed_nested_path(tmp_path: Path) -> None:

@@ -1261,13 +1261,27 @@ def _is_demo_request(
     description: str,
     task_type: str,
     companion_artifact: dict,
+    *,
+    current_user_text: str | None = None,
+    explicit_output_ext: str | None = None,
 ) -> bool:
-    """Detect explicit Builder smoke-test turns that should avoid open-ended work."""
+    """Detect an explicit *live-turn* Builder smoke test.
+
+    Persisted companion-artifact goals are intentionally excluded from the
+    decision.  They can describe an earlier smoke test long after the user has
+    moved on to a concrete deliverable, and historically caused a real PPTX
+    brief to be replaced by ``builder-demo.md``.  A format-bearing current
+    request is never a generic demo, even when it also contains words such as
+    "test" or "builder".
+    """
     if task_type not in {"frontend", "research", "document"}:
         return False
 
-    artifact_text = " ".join(str(companion_artifact.get(field, "")) for field in ("session_goal", "active_goal", "takeaway"))
-    combined = f"{description} {artifact_text}".lower()
+    del companion_artifact  # Kept in the signature for call-site compatibility.
+    if explicit_output_ext:
+        return False
+
+    combined = f"{current_user_text or ''} {description}".lower()
 
     if any(marker in combined for marker in _BUILDER_DEMO_MARKERS):
         return True
@@ -1296,11 +1310,33 @@ def _normalize_request(
     description: str,
     task_type: str,
     companion_artifact: dict,
+    *,
+    current_user_text: str | None = None,
+    explicit_output_ext: str | None = None,
 ) -> tuple[str, str, bool]:
     """Coerce underspecified Builder demo requests into a deterministic task."""
-    if not _is_demo_request(description, task_type, companion_artifact):
+    if not _is_demo_request(
+        description,
+        task_type,
+        companion_artifact,
+        current_user_text=current_user_text,
+        explicit_output_ext=explicit_output_ext,
+    ):
         return description, task_type, False
     return _build_demo_builder_task(), "document", True
+
+
+def _canonical_task_type_for_target(task_type: str, target_ext: str | None) -> str:
+    """Make the execution policy agree with an unambiguous output format.
+
+    PowerPoint is always a presentation workload: it needs the presentation
+    budget, authoring prompt, visual policy, and deck compiler even when the
+    model supplied the generic ``document`` tool enum.  PDF remains unchanged
+    because it can represent either a report or an exported deck.
+    """
+    if str(target_ext or "").strip().lower().lstrip(".") == "pptx":
+        return "presentation"
+    return task_type
 
 
 def _build_enriched_description(
@@ -2074,10 +2110,18 @@ def _normalize_launch_request(
     task_type: str,
     edit_context: dict[str, Any] | None,
     companion_artifact: dict[str, Any],
+    current_user_text: str | None = None,
+    explicit_output_ext: str | None = None,
 ) -> tuple[str, str, bool]:
     if edit_context is not None:
         return description, task_type, False
-    return _normalize_request(description, task_type, companion_artifact)
+    return _normalize_request(
+        description,
+        task_type,
+        companion_artifact,
+        current_user_text=current_user_text,
+        explicit_output_ext=explicit_output_ext,
+    )
 
 
 def _attach_edit_context(
@@ -2225,11 +2269,38 @@ async def _start_builder_task_impl(
     ritual_phase = state.get("ritual_phase")
     memory_snippets = _resolve_memory_snippets(state)
 
+    # Resolve the literal current turn before demo normalization.  Stale
+    # companion state must never replace a concrete deliverable brief, and an
+    # explicit PowerPoint request must select presentation policy before we
+    # compute research limits, budgets, enrichment, or dispatch metadata.
+    from deerflow.agents.sophia_agent.utils import extract_last_human_text
+
+    current_user_text = extract_last_human_text(state.get("messages", []) or [])
+    live_format_resolution = _resolve_target_format(
+        current_user_text=current_user_text,
+        description=description,
+        task_type=task_type,
+    )
+
     description, task_type, demo_mode = _normalize_launch_request(
         description=description,
         task_type=task_type,
         edit_context=edit_context,
         companion_artifact=companion_artifact,
+        current_user_text=current_user_text,
+        explicit_output_ext=(
+            live_format_resolution.user_requested_ext
+            or live_format_resolution.context_inferred_ext
+        ),
+    )
+    format_resolution = _resolve_target_format(
+        current_user_text=current_user_text,
+        description=description,
+        task_type=task_type,
+    )
+    task_type = _canonical_task_type_for_target(
+        task_type,
+        format_resolution.final_ext,
     )
     memory_snippets = filter_builder_memory_snippets(
         memory_snippets,
@@ -2243,20 +2314,9 @@ async def _start_builder_task_impl(
     builder_web_budget = make_builder_web_budget(task_type)
 
     # Correction wave 2026-06-12: output-format truth is current-turn-first.
-    # The companion-authored description carries prior artifact context
-    # (deck words, old filenames) that misrouted "an actual PDF report
-    # (not a presentation)" to target_ext=pptx in prod. The user's literal
-    # current turn now has absolute precedence; description-derived context
-    # fills in only when the turn is silent about format. Lazy import:
-    # same circular-import dodge as _validate_user_id above.
-    from deerflow.agents.sophia_agent.utils import extract_last_human_text
-
-    current_user_text = extract_last_human_text(state.get("messages", []) or [])
-    format_resolution = _resolve_target_format(
-        current_user_text=current_user_text,
-        description=description,
-        task_type=task_type,
-    )
+    # ``format_resolution`` was intentionally computed above, before demo
+    # normalization and policy/budget derivation, so every downstream surface
+    # agrees on the same live-request truth.
     override_path = _canonical_output_artifact_path(artifact_target_path_override)
     if (
         override_path

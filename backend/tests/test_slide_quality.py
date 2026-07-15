@@ -163,10 +163,9 @@ def test_visual_contract_check_requires_negation_to_anchor_to_banned_term():
     assert "render text" in gaps[0].detail
 
 
-def test_visual_style_check_flags_neon_tiny_text_and_card_overload():
+def test_visual_style_check_flags_neon_and_card_overload():
     html = (
         "<html><body><section class='neon matrix'>"
-        "<style>.tiny{font-size:12px}</style>"
         + "".join("<div class='card'>x</div>" for _ in range(5))
         + "</section></body></html>"
     )
@@ -174,16 +173,25 @@ def test_visual_style_check_flags_neon_tiny_text_and_card_overload():
     assert len(gaps) == 1
     assert gaps[0].check == "visual_style"
     assert "neon" in gaps[0].detail
-    assert "font-size" in gaps[0].detail
     assert "card-style" in gaps[0].detail
 
 
 def test_visual_style_check_allows_explicit_style_terms_but_keeps_layout_gaps():
-    html = "<html><body><section class='neon cyberpunk'><style>.tiny{font-size:12px}</style></section></body></html>"
+    html = (
+        "<html><body><section class='neon cyberpunk'>"
+        + "".join("<div class='card'>x</div>" for _ in range(5))
+        + "</section></body></html>"
+    )
     gaps = visual_style_check(SlideSignals(slide_sources=[("ok.html", html)], allowed_style_terms={"neon", "cyberpunk"}))
     assert len(gaps) == 1
     assert "neon" not in gaps[0].detail
-    assert "font-size" in gaps[0].detail
+    assert "card-style" in gaps[0].detail
+
+
+def test_visual_style_check_does_not_attribute_unused_tiny_css_to_slide():
+    html = "<html><head><style>.unused-caption{font-size:12px}</style></head><body><h1>Visible title</h1></body></html>"
+
+    assert visual_style_check(SlideSignals(slide_sources=[("ok.html", html)])) == []
 
 
 def test_enabled_grader_uses_mocked_judge():
