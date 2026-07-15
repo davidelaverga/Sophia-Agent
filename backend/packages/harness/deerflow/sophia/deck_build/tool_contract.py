@@ -177,7 +177,7 @@ _MAX_SLIDE_HTML_BODY_BYTES = 16 * 1024
 _MAX_SLIDE_CSS_BYTES = 8 * 1024
 _MAX_AUTHORING_PAYLOAD_BYTES = 128 * 1024
 _V2_MAX_DECK_STYLESHEET_BYTES = 8 * 1024
-_V2_MAX_SLIDE_HTML_BODY_BYTES = 3 * 1024
+COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES = 4 * 1024
 _V2_MAX_SLIDE_CSS_BYTES = 1 * 1024
 _V2_MAX_CREATIVE_PLAN_BYTES = 12 * 1024
 _V2_MAX_AUTHORING_PAYLOAD_BYTES = 48 * 1024
@@ -211,7 +211,11 @@ def _compact_slide_json_schema(schema: dict[str, Any]) -> None:
     body_schema = schema.get("properties", {}).get("html_body")
     if isinstance(body_schema, dict):
         body_schema.pop("default", None)
-        _set_string_max_length(body_schema, _V2_MAX_SLIDE_HTML_BODY_BYTES)
+        body_schema["description"] = (
+            f"{str(body_schema.get('description') or '').rstrip()} "
+            f"Maximum payload is {COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES} UTF-8 bytes."
+        ).strip()
+        _set_string_max_length(body_schema, COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES)
     slide_css_schema = schema.get("properties", {}).get("slide_css")
     if isinstance(slide_css_schema, dict):
         _set_string_max_length(slide_css_schema, _V2_MAX_SLIDE_CSS_BYTES)
@@ -380,8 +384,11 @@ class PrepareDeckBuildInput(BaseModel):
         if _utf8_size(stylesheet) > _V2_MAX_DECK_STYLESHEET_BYTES:
             raise ValueError("deck_stylesheet exceeds the compact-v2 8192-byte limit")
         for index, slide in enumerate(self.slides):
-            if _utf8_size(slide.html_body) > _V2_MAX_SLIDE_HTML_BODY_BYTES:
-                raise ValueError(f"slides[{index}].html_body exceeds the compact-v2 3072-byte limit")
+            if _utf8_size(slide.html_body) > COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES:
+                raise ValueError(
+                    f"slides[{index}].html_body exceeds the compact-v2 "
+                    f"{COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES}-byte limit"
+                )
             if _utf8_size(slide.slide_css) > _V2_MAX_SLIDE_CSS_BYTES:
                 raise ValueError(f"slides[{index}].slide_css exceeds the compact-v2 1024-byte limit")
         plan_json = json.dumps(self.creative_plan.model_dump(mode="json"), separators=(",", ":"), ensure_ascii=False)
@@ -420,15 +427,16 @@ def _compact_v2_size_violations(value: Any) -> list[tuple[str, str]]:
             html_body = slide.get("html_body")
             if isinstance(html_body, str):
                 size = _utf8_size(html_body)
-                if size > _V2_MAX_SLIDE_HTML_BODY_BYTES:
+                if size > COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES:
                     field = f"slides[{index}].html_body"
                     target = _compact_slide_repair_target(index=index)
                     violations.append(
                         (
                             field,
-                            f"{field} is {size} bytes; compact-v2 limit is {_V2_MAX_SLIDE_HTML_BODY_BYTES} bytes; "
+                            f"{field} is {size} bytes; compact-v2 limit is "
+                            f"{COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES} bytes; "
                             f"exact target: {target}; reduce by at least "
-                            f"{size - _V2_MAX_SLIDE_HTML_BODY_BYTES} bytes",
+                            f"{size - COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES} bytes",
                         )
                     )
             slide_css = slide.get("slide_css")

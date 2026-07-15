@@ -101,3 +101,42 @@ def test_real_prepare_deck_build_executes_through_tool_node_with_runtime() -> No
     call = service_type.return_value.prepare_and_build.call_args.kwargs
     assert call["runtime"] is not None
     assert call["deck_title"] == "Runtime Contract"
+
+
+def test_real_prepare_deck_build_normalizes_production_shaped_wrapped_slides_through_tool_node() -> None:
+    production_body_sizes = [1334, 3802, 2243, 3089, 2912]
+    slides = []
+    for index, body_size in enumerate(production_body_sizes, start=1):
+        slide = dict(_slides()[0])
+        slide.pop("html_source")
+        slide["title"] = f"Production slide {index}"
+        slide["html_body"] = "x" * body_size
+        slides.append(slide)
+    tool_call = {
+        "id": "prepare-runtime-wrapped",
+        "name": "prepare_deck_build",
+        "args": {
+            "deck_title": "Wrapped Runtime Contract",
+            "slides": '<parameter name="_arr">\n' + json.dumps(slides),
+            "output_path": "/mnt/user-data/outputs/deck.pptx",
+            "creative_plan": _creative_plan(),
+            "authoring_contract": "compact_model_html_v2",
+            "deck_stylesheet": ".slide-root { width: 1920px; height: 1080px; background: #101820; }",
+        },
+    }
+    node = ToolNode([prepare_deck_build])
+    builder = StateGraph(MessagesState)
+    builder.add_node("tools", node)
+    builder.add_edge(START, "tools")
+    builder.add_edge("tools", END)
+    graph = builder.compile()
+    with patch("deerflow.sophia.tools.prepare_deck_build.DeckBuildService") as service_type:
+        service_type.return_value.prepare_and_build.return_value = _SuccessfulDeckResult()
+        result = graph.invoke({"messages": [AIMessage(content="", tool_calls=[tool_call])]})
+
+    message = result["messages"][-1]
+    assert isinstance(message, ToolMessage)
+    assert json.loads(message.content)["success"] is True
+    call = service_type.return_value.prepare_and_build.call_args.kwargs
+    assert len(call["slides"]) == 5
+    assert [len(slide["html_body"].encode("utf-8")) for slide in call["slides"]] == production_body_sizes

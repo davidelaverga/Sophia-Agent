@@ -51,6 +51,7 @@ from deerflow.sophia.deck_build.source_retention import (
     retention_summary,
 )
 from deerflow.sophia.deck_build.storage import save_deck_build
+from deerflow.sophia.deck_build.tool_contract import COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES
 from deerflow.sophia.deck_build.tracing import (
     DEFAULT_ARTIFACT_TARGET_EXT,
     DEFAULT_DECK_COMPILE_MODE,
@@ -2734,8 +2735,11 @@ def _validate_v2_authoring_sizes(deck: DeckBuild, slides: list[dict[str, Any]]) 
     for index, raw in enumerate(slides):
         body = str(raw.get("html_body") or "").strip()
         slide_css = str(raw.get("slide_css") or "").strip()
-        if len(body.encode("utf-8")) > 3 * 1024:
-            raise _authoring_failure(f"slides[{index}].html_body exceeds the compact-v2 3072-byte limit.")
+        if len(body.encode("utf-8")) > COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES:
+            raise _authoring_failure(
+                f"slides[{index}].html_body exceeds the compact-v2 "
+                f"{COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES}-byte limit."
+            )
         if len(slide_css.encode("utf-8")) > 1024:
             raise _authoring_failure(f"slides[{index}].slide_css exceeds the compact-v2 1024-byte limit.")
 

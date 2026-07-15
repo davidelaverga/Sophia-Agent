@@ -104,7 +104,7 @@ _PRESENTATION_PREFLIGHT_MODEL_MAX_TOKENS = 512
 _PRESENTATION_TASK_BRIEF_MAX_BYTES = 12 * 1024
 _PRESENTATION_PREFLIGHT_RESULT_MAX_BYTES = 8 * 1024
 _PRESENTATION_ATTACHMENT_MEMORY_MAX_BYTES = 8 * 1024
-_PRESENTATION_AUTHORING_PROMPT_MAX_BYTES = 24 * 1024
+_PRESENTATION_AUTHORING_PROMPT_MAX_BYTES = 32 * 1024
 _PRESENTATION_REPAIR_INSTRUCTION_MAX_BYTES = 8 * 1024
 _PRESENTATION_PREVIOUS_ARGS_MARKER = (
     "Previous complete prepare_deck_build arguments (JSON; preserve unchanged values except the exact repairs):\n"
@@ -114,7 +114,7 @@ _PRESENTATION_AUTHORING_SYSTEM_PROMPT = (
     "Produce exactly one prepare_deck_build tool call and no prose. You own the story, design, CSS, "
     "and semantic slide markup. Use authoring_contract=compact_model_html_v2, one concise "
     "creative_plan, one shared deck_stylesheet, html_body for every slide, and only small slide_css "
-    "overrides. Keep the shared stylesheet under 8 KiB, each html_body under 3 KiB, each slide_css "
+    "overrides. Keep the shared stylesheet under 8 KiB, each html_body under 4 KiB, each slide_css "
     "under 1 KiB, the creative plan under 12 KiB, and total arguments under 48 KiB. Use an opaque "
     "model-authored canvas background, meaningful data-deck-id values, varied "
     "spatial compositions, and no repeated document/style tags. Do not use deterministic templates, "
@@ -10325,7 +10325,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         encoded = value.encode("utf-8")
         if len(encoded) <= limit:
             return value
-        return encoded[:limit].decode("utf-8", errors="ignore") + "\n[truncated]"
+        if limit <= 0:
+            return ""
+        notice = b"\n[truncated]"
+        if limit <= len(notice):
+            return notice[:limit].decode("utf-8", errors="ignore")
+        prefix = encoded[: limit - len(notice)].decode("utf-8", errors="ignore")
+        return prefix + notice.decode("ascii")
 
     @staticmethod
     def _fit_complete_repair_lines(value: str, limit: int) -> str:

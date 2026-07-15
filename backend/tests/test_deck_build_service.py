@@ -1459,6 +1459,13 @@ def test_presentation_authoring_prompt_forbids_recurring_page_chrome() -> None:
     assert "eyebrow_policy must both be 'none'" in prompt
 
 
+def test_presentation_authoring_prompt_matches_compact_v2_body_limit() -> None:
+    prompt = builder_artifact_module._PRESENTATION_AUTHORING_SYSTEM_PROMPT
+
+    assert "each html_body under 4 KiB" in prompt
+    assert "each html_body under 3 KiB" not in prompt
+
+
 def test_presentation_authoring_prompt_sets_role_aware_font_floors() -> None:
     prompt = builder_artifact_module._PRESENTATION_AUTHORING_SYSTEM_PROMPT
 
@@ -1806,7 +1813,7 @@ def test_prepare_schema_retry_recovers_all_size_targets_without_tool_metadata(
         "prepare_emitted_call_count": 1,
         "prepare_call_count": 1,
     }
-    body_sizes = [1173, 3220, 2896, 3442, 2625]
+    body_sizes = [1173, 4244, 2896, 4466, 2625]
     template = _compact_slides()[0]
     slides = [
         {
@@ -1818,7 +1825,7 @@ def test_prepare_schema_retry_recovers_all_size_targets_without_tool_metadata(
     ]
     args = {
         "deck_title": "Compact Limit Diagnostics",
-        "slides": slides,
+        "slides": '<parameter name="_arr">\n' + json.dumps(slides),
         "output_path": "/mnt/user-data/outputs/deck.pptx",
         "creative_plan": _creative_plan(),
         "authoring_contract": "compact_model_html_v2",
@@ -1841,8 +1848,8 @@ def test_prepare_schema_retry_recovers_all_size_targets_without_tool_metadata(
     assert isinstance(command, Command)
     assert not command.goto
     assert command.update["builder_deck_prepare_phase"] == "retry_pending"
-    slide_two = "slides[1].html_body is 3220 bytes; compact-v2 limit is 3072 bytes"
-    slide_four = "slides[3].html_body is 3442 bytes; compact-v2 limit is 3072 bytes"
+    slide_two = "slides[1].html_body is 4244 bytes; compact-v2 limit is 4096 bytes"
+    slide_four = "slides[3].html_body is 4466 bytes; compact-v2 limit is 4096 bytes"
     repair_message = command.update["builder_deck_prepare_repair_message"]
     diagnostics = command.update["builder_pptx_diagnostics"]
     for target in (slide_two, slide_four):

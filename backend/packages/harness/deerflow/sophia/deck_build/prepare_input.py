@@ -10,6 +10,8 @@ MAX_PREPARE_DEPTH = 32
 MAX_PREPARE_NODES = 25_000
 MAX_SLIDES = 64
 MAX_STRING_LENGTH = 300_000
+_PROVIDER_ARRAY_PARAMETER_PREFIX = '<parameter name="_arr">'
+_PROVIDER_PARAMETER_SUFFIX = "</parameter>"
 
 
 class PrepareDeckInputError(ValueError):
@@ -62,8 +64,20 @@ def _parse_one_json_layer(value: Any, *, expected: str, field: str) -> Any:
     encoded = value.encode("utf-8")
     if len(encoded) > MAX_PREPARE_JSON_BYTES:
         raise ValueError(f"{field} exceeds the {MAX_PREPARE_JSON_BYTES}-byte limit")
+    json_value = value
+    # Anthropic can occasionally serialize a nested array argument through its
+    # internal XML parameter sentinel while still returning that argument as a
+    # string. Accept only the exact provider-owned array wrapper observed in
+    # production; the decoded value must still pass the normal one-layer list
+    # and shape validation below.
+    if expected == "list":
+        stripped = value.lstrip()
+        if stripped.startswith(_PROVIDER_ARRAY_PARAMETER_PREFIX):
+            json_value = stripped[len(_PROVIDER_ARRAY_PARAMETER_PREFIX) :].strip()
+            if json_value.endswith(_PROVIDER_PARAMETER_SUFFIX):
+                json_value = json_value[: -len(_PROVIDER_PARAMETER_SUFFIX)].rstrip()
     try:
-        parsed = json.loads(value)
+        parsed = json.loads(json_value)
     except json.JSONDecodeError as exc:
         raise ValueError(f"{field} contains malformed JSON: {exc.msg}") from exc
     if expected == "list" and not isinstance(parsed, list):

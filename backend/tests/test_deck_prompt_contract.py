@@ -60,6 +60,20 @@ def test_ppt_skill_requires_authoritative_prepare_route_and_design_adapters() ->
     assert "Do not call `prepare_pptx_image_manifest`" in text
 
 
+def test_compact_v2_body_limit_is_consistent_across_authoritative_prompt_surfaces() -> None:
+    ppt_skill = (PROJECT_ROOT / "skills" / "public" / "ppt-generation" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    deck_craft = (PROJECT_ROOT / "skills" / "public" / "sophia" / "deck_craft.md").read_text(
+        encoding="utf-8"
+    )
+
+    assert "each `html_body` under 4 KiB" in ppt_skill
+    assert "each `html_body` <= 4 KiB" in deck_craft
+    assert "3 KiB" not in ppt_skill
+    assert "3 KiB" not in deck_craft
+
+
 def test_injected_deck_contract_uses_renderer_safe_pptx_fonts() -> None:
     text = (PROJECT_ROOT / "skills" / "public" / "sophia" / "deck_craft.md").read_text(encoding="utf-8")
 
