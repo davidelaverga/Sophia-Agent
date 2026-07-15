@@ -1479,6 +1479,9 @@ def test_presentation_authoring_prompt_sets_role_aware_font_floors() -> None:
     assert "Offset connector bars by half their thickness" in prompt
     assert "left=C-W/2" in prompt
     assert "top=C-H/2" in prompt
+    assert "Keep every non-bleed shape inside the 1920x1080 canvas" in prompt
+    assert "parent-local left/top coordinates" in prompt
+    assert "never repeat the parent's slide-global offset on a nested child" in prompt
 
 
 def test_creative_plan_validation_reports_indexed_nested_path(tmp_path: Path) -> None:

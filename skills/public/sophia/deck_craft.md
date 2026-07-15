@@ -100,6 +100,7 @@ The compatibility aliases `slide`, `role`, and `layout` map only to
 - Reuse shared classes and emit no explanatory prose around the `prepare_deck_build` call.
 - Each `html_body` is markup inside the service-owned 1920x1080 document shell. Do not include html, head, body, or style tags.
 - Style the `main` canvas with an opaque background in the shared stylesheet.
+- Keep non-bleed geometry inside the 1920x1080 canvas. Absolutely positioned descendants inside a positioned parent use parent-local `left`/`top`; never repeat the parent's slide-global offset on a nested child.
 - PPTX typography is Office-safe only: use Cambria for headings and Calibri or Arial for body and utility text. Never use Aptos, Georgia, remote fonts, or custom webfonts; renderer substitution changes metrics and can break layout.
 - Give every large headline and metric an explicit width and height with enough room for its intended line count. Do not rely on browser-tight auto-sized text geometry because PowerPoint and LibreOffice reflow independently.
 - No scripts, external URLs, remote fonts, data URIs, iframes, objects, embeds, or inline event handlers.

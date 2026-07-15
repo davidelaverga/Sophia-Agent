@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import math
 import re
+from collections import Counter
 from dataclasses import asdict, dataclass
 from typing import Any
 
@@ -39,6 +40,10 @@ _OVERLAP_PAIR_RE = re.compile(r"\boverlaps\s+(?P<other>[^\s,;:]+)", re.I)
 _NATIVE_SHAPE_ID_RE = re.compile(r"\bs\d+(?:-\d+)?\b", re.I)
 _ALIGNMENT_ROLE_RE = re.compile(
     r"\b(?P<role>left|right|top|bottom|hcenter|vcenter)\b",
+    re.I,
+)
+_ALIGNMENT_GRIDLINE_RE = re.compile(
+    r"\bgridline\s+(?P<gridline>-?(?:\d+(?:\.\d+)?|\.\d+))(?:(?:\")|(?:in\b))",
     re.I,
 )
 _TYPOGRAPHY_SUMMARY_RE = re.compile(
@@ -152,6 +157,12 @@ def deck_mechanical_repair_instruction_from_reports(
         source_element_map=source_element_map,
         native_shape_inventory=native_shape_inventory,
     )
+    overflow_targets = _overflow_repair_targets(
+        native_mechanical_report=native_mechanical_report,
+        mechanical_gate_results=mechanical_gate_results,
+        source_element_map=source_element_map,
+        native_shape_inventory=native_shape_inventory,
+    )
     alignment_targets = _alignment_repair_targets(
         native_mechanical_report=native_mechanical_report,
         mechanical_gate_results=mechanical_gate_results,
@@ -162,6 +173,10 @@ def deck_mechanical_repair_instruction_from_reports(
         mechanical_gate_results=mechanical_gate_results,
         has_contrast_targets=bool(contrast_targets),
         overlap_target_selectors={str(target.get("selector") or "") for target in overlap_targets},
+        overflow_target_selectors=_fully_addressed_overflow_selectors(
+            overflow_targets=overflow_targets,
+            mechanical_gate_results=mechanical_gate_results,
+        ),
         alignment_target_selectors={str(target.get("selector") or "") for target in alignment_targets},
         source_element_map=source_element_map,
     )
@@ -170,6 +185,7 @@ def deck_mechanical_repair_instruction_from_reports(
         *source_quality_targets,
         *contrast_targets,
         *overlap_targets,
+        *overflow_targets,
         *alignment_targets,
         *generic_targets,
     ]
@@ -180,6 +196,7 @@ def deck_mechanical_repair_instruction_from_reports(
         source_quality_targets,
         contrast_targets,
         overlap_targets,
+        overflow_targets,
         alignment_targets,
         generic_targets,
     )
@@ -195,12 +212,14 @@ def deck_mechanical_repair_instruction_from_reports(
         "omitted_repair_target_count": omitted_count,
         "contrast_repair_target_count": len(contrast_targets),
         "overlap_repair_target_count": len(overlap_targets),
+        "overflow_repair_target_count": len(overflow_targets),
         "alignment_repair_target_count": len(alignment_targets),
         "generic_repair_target_count": len(generic_targets),
         "source_quality_repair_target_count": len(source_quality_targets),
         "source_quality_issue_count": source_quality_issue_count,
         "included_contrast_repair_target_count": included_by_type.get("contrast", 0),
         "included_overlap_repair_target_count": included_by_type.get("overlap", 0),
+        "included_overflow_repair_target_count": included_by_type.get("overflow", 0),
         "included_alignment_repair_target_count": included_by_type.get("alignment", 0),
         "included_generic_repair_target_count": included_by_type.get("generic", 0),
         "included_source_quality_repair_target_count": included_by_type.get("quality", 0),
@@ -293,6 +312,7 @@ def _overlap_repair_targets(
         if str(item.get("code") or "") == "native_lint_severe_overlap"
     }
     targets: list[dict[str, Any]] = []
+    seen_pairs: set[tuple[str, tuple[str, ...]]] = set()
     for item in residues:
         if not isinstance(item, dict) or str(item.get("kind") or "") != "overlap":
             continue
@@ -307,6 +327,12 @@ def _overlap_repair_targets(
         match = _OVERLAP_PAIR_RE.search(issue)
         other_shape = _compact_excerpt(match.group("other") if match else "", limit=80).rstrip(".)]")
         pair = [name for name in (shape, other_shape) if name]
+        normalized_pair = tuple(sorted(name.casefold() for name in pair))
+        pair_key = (selector, normalized_pair)
+        if len(normalized_pair) > 1 and pair_key in seen_pairs:
+            continue
+        if len(normalized_pair) > 1:
+            seen_pairs.add(pair_key)
         pair_shapes: list[dict[str, Any]] = []
         for shape_id in pair:
             detail = _overlap_shape_target(
@@ -329,6 +355,74 @@ def _overlap_repair_targets(
                 "suggest": _compact_excerpt(item.get("suggest"), limit=160),
                 "issue": issue,
                 "source_ids": source_ids,
+            }
+        )
+    return targets
+
+
+def _overflow_repair_targets(
+    *,
+    native_mechanical_report: dict[str, Any] | None,
+    mechanical_gate_results: dict[str, Any] | None,
+    source_element_map: dict[str, Any] | None,
+    native_shape_inventory: dict[str, Any] | None,
+) -> list[dict[str, Any]]:
+    """Promote unapproved overflow residue to exact source-addressable targets."""
+
+    report = native_mechanical_report if isinstance(native_mechanical_report, dict) else {}
+    residues = report.get("lint_residue") if isinstance(report.get("lint_residue"), list) else []
+    gate_selectors = {
+        str(item.get("selector") or "")
+        for item in _mechanical_gate_issues(mechanical_gate_results)
+        if str(item.get("code") or "") == "native_lint_unapproved_bleed"
+    }
+    targets: list[dict[str, Any]] = []
+    seen: set[tuple[str, str]] = set()
+    for item in residues:
+        if not isinstance(item, dict) or str(item.get("kind") or "") != "slide_overflow_non_text":
+            continue
+        selector = _selector_for_native_slide(item.get("slide"))
+        if selector not in gate_selectors:
+            continue
+        shape_id = _compact_excerpt(item.get("shape"), limit=80)
+        key = (selector, shape_id.casefold())
+        if not shape_id or key in seen:
+            continue
+        seen.add(key)
+        shape_detail = _overlap_shape_target(
+            shape_id=shape_id,
+            selector=selector,
+            native_shape_inventory=native_shape_inventory,
+            source_element_map=source_element_map,
+        ) or {
+            "id": shape_id,
+            "name": "",
+            "source_ids": [],
+            "text_excerpt": "",
+            "pos": [],
+            "size": [],
+        }
+        source_ids = shape_detail.get("source_ids") or []
+        if not source_ids:
+            continue
+        source_role = _direct_source_role_for_shape(
+            source_element_map=source_element_map,
+            selector=selector,
+            shape_name=str(shape_detail.get("name") or ""),
+        )
+        if source_role in {"background", "bleed", "decorative"}:
+            continue
+        targets.append(
+            {
+                "target_type": "overflow",
+                "code": "native_lint_unapproved_bleed",
+                "selector": selector,
+                "shape": shape_id,
+                "shape_detail": shape_detail,
+                "source_ids": source_ids,
+                "source_role": source_role,
+                "issue": _compact_excerpt(item.get("issue"), limit=220),
+                "suggest": _compact_excerpt(item.get("suggest"), limit=180),
             }
         )
     return targets
@@ -414,6 +508,11 @@ def _alignment_repair_targets(
                     "peer_shapes": peer_shapes,
                     "details": details,
                     "alignment_role": alignment_role,
+                    "css_target": _alignment_css_target(
+                        alignment_role=alignment_role,
+                        details=details,
+                        shape_detail=shape_detail,
+                    ),
                     "suggest": _compact_excerpt(
                         item.get("suggest") or "Align the source element to the reported peer gridline.",
                         limit=180,
@@ -431,6 +530,58 @@ def _alignment_roles(details: list[str]) -> list[str]:
         )
     )
     return roles or ["gridline"]
+
+
+def _alignment_css_target(
+    *,
+    alignment_role: str,
+    details: list[str],
+    shape_detail: dict[str, Any],
+) -> dict[str, Any] | None:
+    matching_detail = next(
+        (
+            detail
+            for detail in details
+            if alignment_role
+            in {match.group("role").lower() for match in _ALIGNMENT_ROLE_RE.finditer(detail)}
+        ),
+        "",
+    )
+    if alignment_role == "gridline" and not matching_detail:
+        matching_detail = next(
+            (detail for detail in details if _ALIGNMENT_GRIDLINE_RE.search(detail)),
+            "",
+        )
+    match = _ALIGNMENT_GRIDLINE_RE.search(matching_detail)
+    gridline_in = _finite_float(match.group("gridline") if match else None)
+    size = shape_detail.get("size") if isinstance(shape_detail.get("size"), list) else []
+    if gridline_in is None:
+        return None
+    width_in = _finite_float(size[0]) if len(size) >= 1 else None
+    height_in = _finite_float(size[1]) if len(size) >= 2 else None
+    if alignment_role == "left":
+        property_name, target_in = "left", gridline_in
+    elif alignment_role == "right" and width_in is not None:
+        property_name, target_in = "left", gridline_in - width_in
+    elif alignment_role == "hcenter" and width_in is not None:
+        property_name, target_in = "left", gridline_in - (width_in / 2)
+    elif alignment_role == "top":
+        property_name, target_in = "top", gridline_in
+    elif alignment_role == "bottom" and height_in is not None:
+        property_name, target_in = "top", gridline_in - height_in
+    elif alignment_role == "vcenter" and height_in is not None:
+        property_name, target_in = "top", gridline_in - (height_in / 2)
+    else:
+        return None
+    extent_in = width_in if property_name == "left" else height_in
+    canvas_limit_in = 20.0 if property_name == "left" else 11.25
+    if extent_in is None or target_in < 0 or target_in + extent_in > canvas_limit_in:
+        return None
+    return {
+        "canvas_property": property_name,
+        "canvas_value_px": round(96 * target_in, 2),
+        "gridline_in": round(gridline_in, 3),
+    }
 
 
 def _overlap_shape_target(
@@ -496,6 +647,7 @@ def _generic_mechanical_repair_targets(
     mechanical_gate_results: dict[str, Any] | None,
     has_contrast_targets: bool,
     overlap_target_selectors: set[str],
+    overflow_target_selectors: set[str],
     alignment_target_selectors: set[str],
     source_element_map: dict[str, Any] | None,
 ) -> list[dict[str, Any]]:
@@ -511,6 +663,8 @@ def _generic_mechanical_repair_targets(
         }:
             continue
         if code == "native_lint_severe_overlap" and selector in overlap_target_selectors:
+            continue
+        if code == "native_lint_unapproved_bleed" and selector in overflow_target_selectors:
             continue
         if code == "native_lint_misaligned" and selector in alignment_target_selectors:
             continue
@@ -559,6 +713,24 @@ def _generic_mechanical_repair_targets(
     for target in typography_groups.values():
         targets.extend(_chunk_typography_target(target))
     return targets
+
+
+def _fully_addressed_overflow_selectors(
+    *,
+    overflow_targets: list[dict[str, Any]],
+    mechanical_gate_results: dict[str, Any] | None,
+) -> set[str]:
+    gate_counts = Counter(
+        str(item.get("selector") or "")
+        for item in _mechanical_gate_issues(mechanical_gate_results)
+        if str(item.get("code") or "") == "native_lint_unapproved_bleed"
+    )
+    target_counts = Counter(str(target.get("selector") or "") for target in overflow_targets)
+    return {
+        selector
+        for selector, gate_count in gate_counts.items()
+        if gate_count > 0 and target_counts.get(selector, 0) >= gate_count
+    }
 
 
 def _chunk_typography_target(target: dict[str, Any]) -> list[dict[str, Any]]:
@@ -751,6 +923,8 @@ def _mechanical_repair_line(index: int, target: dict[str, Any]) -> str:
         return _contrast_repair_line(index, target)
     if target_type == "overlap":
         return _overlap_repair_line(index, target)
+    if target_type == "overflow":
+        return _overflow_repair_line(index, target)
     if target_type == "alignment":
         return _alignment_repair_line(index, target)
     return _generic_repair_line(index, target)
@@ -821,6 +995,22 @@ def _overlap_shape_detail(detail: dict[str, Any]) -> str:
     return f"{shape_id}{source} {text}{geometry}"
 
 
+def _overflow_repair_line(index: int, target: dict[str, Any]) -> str:
+    shape_detail = target.get("shape_detail")
+    if not isinstance(shape_detail, dict):
+        shape_detail = {"id": target.get("shape") or "unknown", "source_ids": []}
+    primary = _overlap_shape_detail(shape_detail)
+    issue = json.dumps(target.get("issue") or "Shape extends beyond the slide.", ensure_ascii=False)
+    suggestion = json.dumps(target.get("suggest") or "keep the shape inside the canvas", ensure_ascii=False)
+    return (
+        f"{index}. OVERFLOW {target.get('selector') or 'deck'} {primary}; issue {issue}; hint {suggestion}. "
+        "Edit that exact data-deck-id so non-bleed geometry stays inside 1920x1080. Native/inventory "
+        "geometry is canvas-global, but child left/top inside a positioned parent are parent-local: "
+        "local_left=target_canvas_left-parent_canvas_left and local_top=target_canvas_top-parent_canvas_top. "
+        "Correct a nested child offset first; do not enlarge or reposition its parent merely to mask overflow."
+    )
+
+
 def _alignment_repair_line(index: int, target: dict[str, Any]) -> str:
     shape_detail = target.get("shape_detail")
     if not isinstance(shape_detail, dict):
@@ -840,9 +1030,24 @@ def _alignment_repair_line(index: int, target: dict[str, Any]) -> str:
         if role != "gridline"
         else "the reported peer edge or centerline"
     )
+    css_target = target.get("css_target")
+    numeric_target = ""
+    if (
+        isinstance(css_target, dict)
+        and css_target.get("canvas_property")
+        and css_target.get("canvas_value_px") is not None
+    ):
+        property_name = str(css_target["canvas_property"])
+        value_px = float(css_target["canvas_value_px"])
+        gridline_in = float(css_target["gridline_in"])
+        numeric_target = (
+            f" Target canvas {property_name}={value_px:g}px ({gridline_in:g}in); "
+            f"root CSS {property_name}={value_px:g}px; nested "
+            f"local_{property_name}=target_canvas_{property_name}-parent_canvas_{property_name}."
+        )
     return (
         f"{index}. ALIGN {target.get('selector') or 'deck'} role={role} {primary}; detail {detail}; "
-        f"peers {peers}. Edit that data-deck-id geometry with {guidance}."
+        f"peers {peers}. Edit that data-deck-id geometry with {guidance}.{numeric_target}"
     )
 
 
@@ -935,6 +1140,44 @@ def _source_ids_for_shape(
         for source_id, record in elements.items()
         if isinstance(record, dict) and shape_name in {str(name) for name in record.get("shape_names") or []}
     )
+
+
+def _direct_source_role_for_shape(
+    *,
+    source_element_map: dict[str, Any] | None,
+    selector: str,
+    shape_name: str,
+) -> str | None:
+    slides = source_element_map.get("slides") if isinstance(source_element_map, dict) else None
+    slide = slides.get(selector) if isinstance(slides, dict) else None
+    elements = slide.get("elements") if isinstance(slide, dict) else None
+    if not isinstance(elements, dict) or not shape_name:
+        return None
+    matches = [
+        (str(source_id), record)
+        for source_id, record in elements.items()
+        if isinstance(record, dict) and shape_name in {str(name) for name in record.get("shape_names") or []}
+    ]
+    direct_matches = [
+        (source_id, record)
+        for source_id, record in matches
+        if _is_direct_compiler_shape_name(shape_name=shape_name, source_id=source_id)
+    ]
+    if direct_matches:
+        _source_id, record = max(direct_matches, key=lambda item: len(item[0]))
+        return str(record.get("source_role") or "").strip().lower() or None
+    if len(matches) == 1:
+        return str(matches[0][1].get("source_role") or "").strip().lower() or None
+    return None
+
+
+def _is_direct_compiler_shape_name(*, shape_name: str, source_id: str) -> bool:
+    suffix_re = re.compile(
+        rf"-{re.escape(source_id)}-"
+        r"(?:(?:box|text|image|table)(?:-\d+)?|line-\d+(?:-part-\d+)?)$",
+        re.I,
+    )
+    return bool(suffix_re.search(shape_name))
 
 
 def _compact_excerpt(value: Any, *, limit: int = 120) -> str:

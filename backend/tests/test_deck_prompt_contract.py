@@ -74,6 +74,20 @@ def test_compact_v2_body_limit_is_consistent_across_authoritative_prompt_surface
     assert "3 KiB" not in deck_craft
 
 
+def test_authoritative_prompt_surfaces_use_parent_local_nested_coordinates() -> None:
+    ppt_skill = (PROJECT_ROOT / "skills" / "public" / "ppt-generation" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    deck_craft = (PROJECT_ROOT / "skills" / "public" / "sophia" / "deck_craft.md").read_text(
+        encoding="utf-8"
+    )
+
+    for text in (ppt_skill, deck_craft):
+        assert "parent-local `left`/`top`" in text
+        assert "never repeat the parent's slide-global offset" in text
+        assert "Keep non-bleed geometry inside" in text
+
+
 def test_injected_deck_contract_uses_renderer_safe_pptx_fonts() -> None:
     text = (PROJECT_ROOT / "skills" / "public" / "sophia" / "deck_craft.md").read_text(encoding="utf-8")
 

@@ -35,7 +35,7 @@ terminal failure. It returns either the `.pptx` path or a clean failure.
    - slide_css: optional CSS specific to this slide
    - inline SVG is unsupported; every required semantic element uses stable `data-deck-*` attributes
 
-3. Set `authoring_contract="compact_model_html_v2"`. Provide one concise `deck_stylesheet` containing shared model-authored CSS. Reuse shared classes, keep each `html_body` under 4 KiB, keep `slide_css` under 1 KiB and exceptional, and keep the complete tool arguments under 48 KiB. The stylesheet must give the 1920x1080 canvas an explicit opaque background.
+3. Set `authoring_contract="compact_model_html_v2"`. Provide one concise `deck_stylesheet` containing shared model-authored CSS. Reuse shared classes, keep each `html_body` under 4 KiB, keep `slide_css` under 1 KiB and exceptional, and keep the complete tool arguments under 48 KiB. The stylesheet must give the 1920x1080 canvas an explicit opaque background. Keep non-bleed geometry inside that canvas. Absolutely positioned descendants inside a positioned parent use parent-local `left`/`top`; never repeat the parent's slide-global offset on a nested child.
 
 4. Call `prepare_deck_build(...)` exactly once with the authoring contract, concise creative_plan, deck_stylesheet, complete slide list, and requested output path. Emit no prose outside that tool call. One explicit repair retry is allowed only when the tool returns `retryable=true`.
 

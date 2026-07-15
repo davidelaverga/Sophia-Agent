@@ -7,6 +7,10 @@ from typing import Any
 
 from pptx import Presentation
 
+from deerflow.sophia.deck_build.design_plan import (
+    classify_substrate_intent,
+    normalize_deck_style_profile,
+)
 from deerflow.sophia.deck_build.models import DeckBuild
 
 try:  # pragma: no cover - Pillow is present in the backend image, optional in tiny test envs.
@@ -15,7 +19,6 @@ except Exception:  # noqa: BLE001
     Image = None  # type: ignore[assignment]
     ImageStat = None  # type: ignore[assignment]
 
-_DARK_STYLE_RE = re.compile(r"\b(dark|charcoal|black|blueprint|terminal|night|command\s+center)\b", re.I)
 _OLD_RENDERER_MARKERS = (
     "section-label",
     "system-diagram",
@@ -105,6 +108,7 @@ def evaluate_mechanical_gates(
     )
     issues.extend(_sparse_render_issues(metrics))
     issues.extend(_dark_request_light_render_issues(deck, metrics))
+    issues.extend(_light_request_dark_render_issues(deck, metrics))
     passed = not issues
     return MechanicalGateResult(
         passed=passed,
@@ -411,18 +415,60 @@ def _residue_source_role(deck: DeckBuild, item: dict[str, Any]) -> str | None:
         selector = f"slide:{int(item.get('slide') or 0) + 1}"
     except (TypeError, ValueError):
         return None
-    shape_name = str(item.get("shape") or "")
-    for record in _source_records(deck, selector):
-        if shape_name in _record_shape_names(record):
-            return str(record.get("source_role") or "").strip().lower() or None
+    shape_name = _native_shape_name(deck, selector=selector, shape_id=str(item.get("shape") or ""))
+    matches = [
+        (source_id, record)
+        for source_id, record in _source_records_with_ids(deck, selector)
+        if shape_name in _record_shape_names(record)
+    ]
+    direct_matches = [
+        (source_id, record)
+        for source_id, record in matches
+        if _is_direct_compiler_shape_name(shape_name=shape_name, source_id=source_id)
+    ]
+    if direct_matches:
+        _source_id, record = max(direct_matches, key=lambda item: len(item[0]))
+        return str(record.get("source_role") or "").strip().lower() or None
+    if len(matches) == 1:
+        return str(matches[0][1].get("source_role") or "").strip().lower() or None
     return None
 
 
 def _source_records(deck: DeckBuild, selector: str) -> list[dict[str, Any]]:
+    return [record for _source_id, record in _source_records_with_ids(deck, selector)]
+
+
+def _source_records_with_ids(deck: DeckBuild, selector: str) -> list[tuple[str, dict[str, Any]]]:
     slides = deck.source_element_map.get("slides") if isinstance(deck.source_element_map, dict) else None
     slide_map = slides.get(selector) if isinstance(slides, dict) else None
     elements = slide_map.get("elements") if isinstance(slide_map, dict) else None
-    return [record for record in (elements or {}).values() if isinstance(record, dict)]
+    return [
+        (str(source_id), record)
+        for source_id, record in (elements or {}).items()
+        if isinstance(record, dict)
+    ]
+
+
+def _native_shape_name(deck: DeckBuild, *, selector: str, shape_id: str) -> str:
+    inventory = deck.native_shape_inventory if isinstance(deck.native_shape_inventory, dict) else {}
+    wrapped_slides = inventory.get("slides")
+    if isinstance(wrapped_slides, dict):
+        inventory = wrapped_slides
+    slide = inventory.get(selector) if isinstance(inventory, dict) else None
+    shapes = slide.get("shapes") if isinstance(slide, dict) else None
+    for record in shapes if isinstance(shapes, list) else []:
+        if isinstance(record, dict) and str(record.get("id") or "") == shape_id:
+            return str(record.get("name") or shape_id)
+    return shape_id
+
+
+def _is_direct_compiler_shape_name(*, shape_name: str, source_id: str) -> bool:
+    suffix_re = re.compile(
+        rf"-{re.escape(source_id)}-"
+        r"(?:(?:box|text|image|table)(?:-\d+)?|line-\d+(?:-part-\d+)?)$",
+        re.I,
+    )
+    return bool(suffix_re.search(shape_name))
 
 
 def _record_shape_names(record: dict[str, Any]) -> set[str]:
@@ -516,17 +562,46 @@ def _dark_request_light_render_issues(deck: DeckBuild, metrics: list[dict[str, A
     ]
 
 
+def _light_request_dark_render_issues(deck: DeckBuild, metrics: list[dict[str, Any]]) -> list[MechanicalGateIssue]:
+    if _substrate_intent(deck) != "light":
+        return []
+    readable = [metric for metric in metrics if not metric.get("unreadable")]
+    if not readable:
+        return []
+    dark_count = sum(
+        1
+        for metric in readable
+        if float(metric.get("mean_luminance") if metric.get("mean_luminance") is not None else 255.0) < 50
+    )
+    if dark_count <= len(readable) / 2:
+        return []
+    return [
+        MechanicalGateIssue(
+            code="light_request_rendered_dark",
+            selector="deck",
+            summary="Light deck request rendered as majority-dark slides.",
+            repair_hint="Use an opaque light slide substrate consistently across the deck.",
+        )
+    ]
+
+
 def _dark_requested(deck: DeckBuild) -> bool:
+    return _substrate_intent(deck) == "dark"
+
+
+def _substrate_intent(deck: DeckBuild) -> str | None:
     plan = deck.design_plan
-    haystack = " ".join(
+    intent = classify_substrate_intent(
         [
-            str(deck.style_profile),
             str(getattr(plan, "style_lane", "")),
             str(getattr(plan, "signature", "")),
-            str(getattr(plan, "requested_style_terms", "")),
         ]
     )
-    return bool(_DARK_STYLE_RE.search(haystack))
+    if intent is None:
+        intent = classify_substrate_intent(getattr(plan, "requested_style_terms", []))
+    if intent is None:
+        intent = classify_substrate_intent(normalize_deck_style_profile(deck.style_profile))
+    return intent
 
 
 def _render_metrics(rendered_dir: Path | None) -> list[dict[str, Any]]:

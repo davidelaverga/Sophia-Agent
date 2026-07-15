@@ -116,6 +116,133 @@ def test_mechanical_gates_fail_dark_request_rendered_light(tmp_path) -> None:
     assert any(issue.code == "dark_request_rendered_light" for issue in result.issues)
 
 
+def test_warm_ivory_plan_with_ink_black_text_is_not_treated_as_dark(tmp_path) -> None:
+    deck = _built_deck(tmp_path)
+    assert deck.design_plan is not None
+    deck.style_profile = {"palette": "warm ivory, ink black, muted cobalt, ember"}
+    deck.design_plan.style_lane = "executive_editorial"
+    deck.design_plan.signature = "restrained editorial on warm ivory"
+    deck.design_plan.requested_style_terms = [
+        "restrained editorial",
+        "warm ivory",
+        "ink black",
+        "muted cobalt",
+        "ember accent",
+    ]
+
+    result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path, light=True))
+
+    assert not any(issue.code == "dark_request_rendered_light" for issue in result.issues)
+
+
+def test_warm_ivory_plan_rendered_dark_fails_substrate_gate(tmp_path) -> None:
+    deck = _built_deck(tmp_path)
+    assert deck.design_plan is not None
+    deck.style_profile = {"colors": {"background": "warm ivory", "text": "ink black"}}
+    deck.design_plan.style_lane = "executive_editorial"
+    deck.design_plan.signature = "restrained editorial on warm ivory"
+    deck.design_plan.requested_style_terms = ["warm ivory", "ink black"]
+
+    result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path))
+
+    assert any(issue.code == "light_request_rendered_dark" for issue in result.issues)
+
+
+def test_requested_light_terms_override_stale_dark_style_profile(tmp_path) -> None:
+    deck = _built_deck(tmp_path)
+    assert deck.design_plan is not None
+    deck.style_profile = {"background": "dark charcoal substrate"}
+    deck.design_plan.style_lane = "executive_editorial"
+    deck.design_plan.signature = "quiet editorial substrate"
+    deck.design_plan.requested_style_terms = ["warm ivory", "ink black"]
+
+    result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path, light=True))
+
+    assert not any(issue.code == "dark_request_rendered_light" for issue in result.issues)
+
+
+def test_resolved_light_plan_overrides_stale_dark_profile_when_terms_are_neutral(tmp_path) -> None:
+    deck = _built_deck(tmp_path)
+    assert deck.design_plan is not None
+    deck.style_profile = {"background": "dark charcoal substrate"}
+    deck.design_plan.style_lane = "executive_editorial"
+    deck.design_plan.signature = "warm ivory substrate with restrained editorial geometry"
+    deck.design_plan.requested_style_terms = ["executive"]
+
+    result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path, light=True))
+
+    assert not any(issue.code == "dark_request_rendered_light" for issue in result.issues)
+
+
+def test_requested_dark_terms_override_stale_light_style_profile(tmp_path) -> None:
+    deck = _built_deck(tmp_path)
+    assert deck.design_plan is not None
+    deck.style_profile = {"colors": {"background": "white", "text": "black"}}
+    deck.design_plan.style_lane = "custom"
+    deck.design_plan.signature = "restrained technical geometry"
+    deck.design_plan.requested_style_terms = ["dark charcoal substrate", "warm ivory text"]
+
+    result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path, light=True))
+
+    assert any(issue.code == "dark_request_rendered_light" for issue in result.issues)
+
+
+@pytest.mark.parametrize(
+    ("colors", "expected_code"),
+    [
+        ({"background": "white", "text": "black"}, None),
+        ({"text": "black", "background": "white"}, None),
+        ({"background": "black", "text": "white"}, "dark_request_rendered_light"),
+        ({"text": "white", "background": "black"}, "dark_request_rendered_light"),
+    ],
+)
+def test_structured_style_profile_preserves_background_text_roles(
+    tmp_path,
+    colors: dict[str, str],
+    expected_code: str | None,
+) -> None:
+    deck = _built_deck(tmp_path)
+    assert deck.design_plan is not None
+    deck.style_profile = {"colors": colors}
+    deck.design_plan.style_lane = "custom"
+    deck.design_plan.signature = "restrained geometry"
+    deck.design_plan.requested_style_terms = []
+
+    result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path, light=True))
+
+    codes = {issue.code for issue in result.issues}
+    if expected_code is None:
+        assert "dark_request_rendered_light" not in codes
+    else:
+        assert expected_code in codes
+
+
+def test_unknown_style_profile_key_cannot_trigger_substrate_gate(tmp_path) -> None:
+    deck = _built_deck(tmp_path)
+    assert deck.design_plan is not None
+    deck.style_profile = {"custom_css": "body { background: black; }"}
+    deck.design_plan.style_lane = "custom"
+    deck.design_plan.signature = "restrained geometry"
+    deck.design_plan.requested_style_terms = []
+
+    result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path, light=True))
+
+    assert "dark_request_rendered_light" not in {issue.code for issue in result.issues}
+
+
+def test_dark_charcoal_plan_with_warm_ivory_text_is_still_treated_as_dark(tmp_path) -> None:
+    deck = _built_deck(tmp_path)
+    assert deck.design_plan is not None
+    deck.style_profile = {"palette": "dark charcoal substrate, warm ivory text"}
+    deck.design_plan.style_lane = "technical_blueprint"
+    deck.design_plan.signature = "dark charcoal substrate with warm ivory text"
+    deck.design_plan.requested_style_terms = ["dark charcoal", "warm ivory text"]
+
+    result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path, light=True))
+
+    assert any(issue.code == "dark_request_rendered_light" for issue in result.issues)
+
+
 def test_non_text_overflow_requires_explicit_bleed_source_role(tmp_path) -> None:
     deck = _built_deck(tmp_path)
     deck.native_mechanical_report = {
@@ -150,6 +277,76 @@ def test_non_text_overflow_requires_explicit_bleed_source_role(tmp_path) -> None
     allowed = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(allowed_root))
     assert allowed.passed is True
     assert "native_lint_advisory:slide_overflow_non_text" in allowed.warnings
+
+
+def test_non_text_overflow_resolves_native_inventory_id_to_direct_background_role(tmp_path) -> None:
+    deck = _built_deck(tmp_path)
+    deck.native_mechanical_report = {
+        "lint_residue_count": 1,
+        "lint_residue_kinds": {"slide_overflow_non_text": 1},
+        "lint_residue": [{"slide": 0, "shape": "s10", "kind": "slide_overflow_non_text"}],
+    }
+    deck.native_shape_inventory = {
+        "slide:1": {
+            "shapes": [
+                {"id": "s10", "name": "h2p-1-background-line-1-part-2"},
+            ]
+        }
+    }
+    deck.source_element_map = {
+        "slides": {
+            "slide:1": {
+                "elements": {
+                    "canvas": {
+                        "source_role": "diagram",
+                        "shape_names": ["h2p-1-background-line-1-part-2"],
+                    },
+                    "background": {
+                        "source_role": "background",
+                        "shape_names": ["h2p-1-background-line-1-part-2"],
+                    }
+                }
+            }
+        }
+    }
+
+    result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path))
+
+    assert result.passed is True
+    assert "native_lint_advisory:slide_overflow_non_text" in result.warnings
+
+
+def test_allowed_ancestor_role_does_not_hide_overflowing_semantic_child(tmp_path) -> None:
+    deck = _built_deck(tmp_path)
+    shape_name = "h2p-1-evidence-panel-box-1"
+    deck.native_mechanical_report = {
+        "lint_residue_count": 1,
+        "lint_residue_kinds": {"slide_overflow_non_text": 1},
+        "lint_residue": [{"slide": 0, "shape": "s10", "kind": "slide_overflow_non_text"}],
+    }
+    deck.native_shape_inventory = {
+        "slide:1": {"shapes": [{"id": "s10", "name": shape_name}]}
+    }
+    deck.source_element_map = {
+        "slides": {
+            "slide:1": {
+                "elements": {
+                    "panel": {
+                        "source_role": "background",
+                        "shape_names": [shape_name],
+                    },
+                    "evidence-panel": {
+                        "source_role": "evidence_panel",
+                        "shape_names": [shape_name],
+                    },
+                }
+            }
+        }
+    }
+
+    result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path))
+
+    assert any(issue.code == "native_lint_unapproved_bleed" for issue in result.issues)
 
 
 def test_post_fix_frame_overflow_and_misalignment_are_blocking_and_attributed(tmp_path) -> None:

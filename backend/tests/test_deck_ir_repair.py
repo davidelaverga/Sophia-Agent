@@ -562,8 +562,18 @@ def test_canary_typography_and_alignment_repair_is_compact_and_source_addressabl
     ]
     assert alignments[0]["source_ids"] == ["cover-rule"]
     assert alignments[0]["peer_ids"] == ["s4-2", "s8"]
+    assert alignments[0]["css_target"] == {
+        "canvas_property": "left",
+        "canvas_value_px": 123.84,
+        "gridline_in": 18.75,
+    }
     assert alignments[1]["source_ids"] == ["conn-4"]
     assert alignments[1]["peer_ids"] == ["s13", "s15"]
+    assert alignments[1]["css_target"] == {
+        "canvas_property": "left",
+        "canvas_value_px": 397.44,
+        "gridline_in": 4.17,
+    }
     typography = next(
         target
         for target in instruction["repair_targets"]
@@ -587,6 +597,8 @@ def test_canary_typography_and_alignment_repair_is_compact_and_source_addressabl
     assert "right-edge left=Cpx-Wpx" in message
     assert "hcenter left=Cpx-Wpx/2" in message
     assert "vcenter top=Cpx-Hpx/2" in message
+    assert "Target canvas left=123.84px" in message
+    assert "local_left=target_canvas_left-parent_canvas_left" in message
 
 
 def test_large_typography_failure_set_is_chunked_before_message_bounding() -> None:
@@ -647,8 +659,27 @@ def test_alignment_repair_preserves_both_axes_for_one_shape() -> None:
                 }
             ]
         },
-        source_element_map={},
-        native_shape_inventory={},
+        source_element_map={
+            "slides": {
+                "slide:2": {
+                    "elements": {
+                        "aligned-shape": {"shape_names": ["h2p-2-aligned-shape-box-1"]},
+                    }
+                }
+            }
+        },
+        native_shape_inventory={
+            "slide:2": {
+                "shapes": [
+                    {
+                        "id": "s14",
+                        "name": "h2p-2-aligned-shape-box-1",
+                        "pos": [6.03, 5.04],
+                        "size": [2.0, 1.0],
+                    }
+                ]
+            }
+        },
     )
 
     assert instruction is not None
@@ -657,8 +688,439 @@ def test_alignment_repair_preserves_both_axes_for_one_shape() -> None:
         "right",
         "bottom",
     ]
+    assert [target["css_target"] for target in instruction["repair_targets"]] == [
+        {"canvas_property": "left", "canvas_value_px": 576.0, "gridline_in": 8.0},
+        {"canvas_property": "top", "canvas_value_px": 480.0, "gridline_in": 6.0},
+    ]
     assert "role=right" in instruction["repair_message"]
     assert "role=bottom" in instruction["repair_message"]
+    assert "Target canvas left=576px" in instruction["repair_message"]
+    assert "Target canvas top=480px" in instruction["repair_message"]
+
+
+def test_canary_alignment_targets_include_exact_canvas_coordinates() -> None:
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        native_mechanical_report={
+            "lint_residue": [
+                {
+                    "slide": 1,
+                    "shape": "s24",
+                    "kind": "misaligned",
+                    "details": ['top edge 0.03" off gridline 4.72" (3 shapes: s23,s24,s25)'],
+                },
+                {
+                    "slide": 2,
+                    "shape": "s8",
+                    "kind": "misaligned",
+                    "details": ['hcenter edge 0.04" off gridline 10.04" (3 shapes: s7,s8,s9)'],
+                },
+                {
+                    "slide": 2,
+                    "shape": "s19",
+                    "kind": "misaligned",
+                    "details": ['bottom edge 0.04" off gridline 6.77" (3 shapes: s18,s19,s20)'],
+                },
+                {
+                    "slide": 2,
+                    "shape": "s21",
+                    "kind": "misaligned",
+                    "details": ['hcenter edge 0.04" off gridline 10.04" (3 shapes: s20,s21,s22)'],
+                },
+            ]
+        },
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_lint_misaligned",
+                    "selector": "slide:2",
+                    "summary": "Native shape alignment remains inconsistent.",
+                    "repair_hint": "Align the exact source geometry.",
+                },
+                {
+                    "code": "native_lint_misaligned",
+                    "selector": "slide:3",
+                    "summary": "Native shape alignment remains inconsistent.",
+                    "repair_hint": "Align the exact source geometry.",
+                },
+            ]
+        },
+        source_element_map={
+            "slides": {
+                "slide:2": {
+                    "elements": {"loop-return-v1": {"shape_names": ["h2p-2-loop-return-v1-box-1"]}}
+                },
+                "slide:3": {
+                    "elements": {
+                        "motive-competence": {"shape_names": ["h2p-3-motive-competence-box-1"]},
+                        "conv-bar": {"shape_names": ["h2p-3-conv-bar-box-1"]},
+                        "arbitration-result": {"shape_names": ["h2p-3-arbitration-result-box-1"]},
+                    }
+                },
+            }
+        },
+        native_shape_inventory={
+            "slide:2": {
+                "shapes": [
+                    {
+                        "id": "s24",
+                        "name": "h2p-2-loop-return-v1-box-1",
+                        "pos": [3.0, 4.75],
+                        "size": [0.08, 0.5],
+                    }
+                ]
+            },
+            "slide:3": {
+                "shapes": [
+                    {
+                        "id": "s8",
+                        "name": "h2p-3-motive-competence-box-1",
+                        "pos": [7.29, 3.0],
+                        "size": [5.42, 1.0],
+                    },
+                    {
+                        "id": "s19",
+                        "name": "h2p-3-conv-bar-box-1",
+                        "pos": [7.0, 6.73],
+                        "size": [6.0, 0.08],
+                    },
+                    {
+                        "id": "s21",
+                        "name": "h2p-3-arbitration-result-box-1",
+                        "pos": [6.88, 7.0],
+                        "size": [6.25, 1.0],
+                    },
+                ]
+            },
+        },
+    )
+
+    assert instruction is not None
+    assert [target["css_target"] for target in instruction["repair_targets"]] == [
+        {"canvas_property": "top", "canvas_value_px": 453.12, "gridline_in": 4.72},
+        {"canvas_property": "left", "canvas_value_px": 703.68, "gridline_in": 10.04},
+        {"canvas_property": "top", "canvas_value_px": 642.24, "gridline_in": 6.77},
+        {"canvas_property": "left", "canvas_value_px": 663.84, "gridline_in": 10.04},
+    ]
+    for expected in ("top=453.12px", "left=703.68px", "top=642.24px", "left=663.84px"):
+        assert f"Target canvas {expected}" in instruction["repair_message"]
+
+
+def test_alignment_target_outside_canvas_omits_unsafe_numeric_assignment() -> None:
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        native_mechanical_report={
+            "lint_residue": [
+                {
+                    "slide": 0,
+                    "shape": "s2",
+                    "kind": "misaligned",
+                    "details": ['right edge 0.04" off gridline .5in (3 shapes: s1,s2,s3)'],
+                }
+            ]
+        },
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_lint_misaligned",
+                    "selector": "slide:1",
+                    "summary": "Native shape alignment remains inconsistent.",
+                    "repair_hint": "Recompose the source geometry.",
+                }
+            ]
+        },
+        source_element_map={
+            "slides": {
+                "slide:1": {"elements": {"wide-shape": {"shape_names": ["h2p-1-wide-shape-box-1"]}}}
+            }
+        },
+        native_shape_inventory={
+            "slide:1": {
+                "shapes": [
+                    {
+                        "id": "s2",
+                        "name": "h2p-1-wide-shape-box-1",
+                        "pos": [0.54, 2.0],
+                        "size": [2.0, 1.0],
+                    }
+                ]
+            }
+        },
+    )
+
+    assert instruction is not None
+    assert instruction["repair_targets"][0]["css_target"] is None
+    assert "-144px" not in instruction["repair_message"]
+
+
+def test_gate_confirmed_overflow_is_source_addressable_and_parent_local() -> None:
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        native_mechanical_report={
+            "lint_residue": [
+                {
+                    "slide": 3,
+                    "shape": "s10",
+                    "kind": "slide_overflow_non_text",
+                    "issue": "extends 8.79in beyond the right edge",
+                    "suggest": "move the divider inside the slide",
+                }
+            ]
+        },
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_lint_unapproved_bleed",
+                    "selector": "slide:4",
+                    "summary": "A non-text shape extends off-slide.",
+                    "repair_hint": "Keep it inside the canvas.",
+                }
+            ]
+        },
+        source_element_map={
+            "slides": {
+                "slide:4": {
+                    "elements": {
+                        "compare-divider": {"shape_names": ["h2p-4-compare-divider-box-1"]},
+                        "compare-motive": {"shape_names": ["h2p-4-compare-divider-box-1"]},
+                    }
+                }
+            }
+        },
+        native_shape_inventory={
+            "slide:4": {
+                "shapes": [
+                    {
+                        "id": "s10",
+                        "name": "h2p-4-compare-divider-box-1",
+                        "pos": [19.79, 4.4],
+                        "size": [9.0, 0.04],
+                    }
+                ]
+            }
+        },
+    )
+
+    assert instruction is not None
+    assert instruction["overflow_repair_target_count"] == 1
+    assert instruction["generic_repair_target_count"] == 0
+    target = instruction["repair_targets"][0]
+    assert target["source_ids"] == ["compare-divider", "compare-motive"]
+    message = instruction["repair_message"]
+    assert "OVERFLOW slide:4" in message
+    assert 'data-deck-id="compare-divider","compare-motive"' in message
+    assert "local_left=target_canvas_left-parent_canvas_left" in message
+    assert "do not enlarge or reposition its parent" in message
+
+
+def test_allowed_ancestor_does_not_hide_direct_overflow_repair_target() -> None:
+    shape_name = "h2p-1-evidence-panel-box-1"
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        native_mechanical_report={
+            "lint_residue": [
+                {
+                    "slide": 0,
+                    "shape": "s10",
+                    "kind": "slide_overflow_non_text",
+                    "issue": "extends beyond the right edge",
+                }
+            ]
+        },
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_lint_unapproved_bleed",
+                    "selector": "slide:1",
+                    "summary": "A non-text shape extends off-slide.",
+                    "repair_hint": "Keep it inside the canvas.",
+                }
+            ]
+        },
+        source_element_map={
+            "slides": {
+                "slide:1": {
+                    "elements": {
+                        "panel": {"source_role": "background", "shape_names": [shape_name]},
+                        "evidence-panel": {
+                            "source_role": "evidence_panel",
+                            "shape_names": [shape_name],
+                        },
+                    }
+                }
+            }
+        },
+        native_shape_inventory={
+            "slide:1": {
+                "shapes": [
+                    {"id": "s10", "name": shape_name, "pos": [19.0, 2.0], "size": [2.0, 1.0]}
+                ]
+            }
+        },
+    )
+
+    assert instruction is not None
+    assert instruction["overflow_repair_target_count"] == 1
+    assert instruction["repair_targets"][0]["source_role"] == "evidence_panel"
+
+
+def test_direct_background_overflow_stays_advisory_when_same_slide_has_unapproved_gate() -> None:
+    shape_name = "h2p-1-background-line-1-part-2"
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        native_mechanical_report={
+            "lint_residue": [
+                {
+                    "slide": 0,
+                    "shape": "s10",
+                    "kind": "slide_overflow_non_text",
+                    "issue": "intentional background bleed",
+                }
+            ]
+        },
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_lint_unapproved_bleed",
+                    "selector": "slide:1",
+                    "summary": "Another non-text shape extends off-slide.",
+                    "repair_hint": "Keep the semantic shape inside the canvas.",
+                }
+            ]
+        },
+        source_element_map={
+            "slides": {
+                "slide:1": {
+                    "elements": {
+                        "canvas": {"source_role": "diagram", "shape_names": [shape_name]},
+                        "background": {"source_role": "background", "shape_names": [shape_name]},
+                    }
+                }
+            }
+        },
+        native_shape_inventory={
+            "slide:1": {
+                "shapes": [
+                    {"id": "s10", "name": shape_name, "pos": [-0.1, -0.1], "size": [20.2, 11.45]}
+                ]
+            }
+        },
+    )
+
+    assert instruction is not None
+    assert instruction["overflow_repair_target_count"] == 0
+    assert instruction["generic_repair_target_count"] == 1
+
+
+def test_overflow_without_gate_or_source_mapping_keeps_only_generic_gate() -> None:
+    residue = {
+        "slide": 0,
+        "shape": "s10",
+        "kind": "slide_overflow_non_text",
+        "issue": "extends beyond the right edge",
+    }
+    no_gate = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        native_mechanical_report={"lint_residue": [residue]},
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "sparse_rendered_slide",
+                    "selector": "slide:1",
+                    "summary": "Rendered slide is sparse.",
+                    "repair_hint": "Restore content.",
+                }
+            ]
+        },
+        source_element_map={},
+        native_shape_inventory={},
+    )
+    unresolved = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        native_mechanical_report={"lint_residue": [residue]},
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_lint_unapproved_bleed",
+                    "selector": "slide:1",
+                    "summary": "A non-text shape extends off-slide.",
+                    "repair_hint": "Keep it inside the canvas.",
+                }
+            ]
+        },
+        source_element_map={},
+        native_shape_inventory={},
+    )
+
+    assert no_gate is not None
+    assert no_gate["overflow_repair_target_count"] == 0
+    assert no_gate["generic_repair_target_count"] == 1
+    assert unresolved is not None
+    assert unresolved["overflow_repair_target_count"] == 0
+    assert unresolved["generic_repair_target_count"] == 1
+    assert "exact data-deck-id" not in unresolved["repair_message"]
+
+
+def test_reversed_overlap_residue_pair_is_deduplicated() -> None:
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        native_mechanical_report={
+            "lint_residue": [
+                {
+                    "slide": 2,
+                    "shape": "s13",
+                    "kind": "overlap",
+                    "overlap_area": 0.43,
+                    "issue": "overlaps s7 by 0.43 sq in",
+                    "suggest": "move s7 left",
+                },
+                {
+                    "slide": 2,
+                    "shape": "s7",
+                    "kind": "overlap",
+                    "overlap_area": 0.43,
+                    "issue": "overlaps s13 by 0.43 sq in",
+                    "suggest": "move s13 right",
+                },
+            ]
+        },
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_lint_severe_overlap",
+                    "selector": "slide:3",
+                    "summary": "Native lint/fix left a material shape overlap.",
+                    "repair_hint": "Separate the semantic elements.",
+                }
+            ]
+        },
+        source_element_map={
+            "slides": {
+                "slide:3": {
+                    "elements": {
+                        "compare-vs": {"shape_names": ["h2p-3-compare-vs-box-1"]},
+                        "compare-static": {"shape_names": ["h2p-3-compare-static-box-1"]},
+                    }
+                }
+            }
+        },
+        native_shape_inventory={
+            "slide:3": {
+                "shapes": [
+                    {"id": "s13", "name": "h2p-3-compare-vs-box-1", "pos": [9, 4], "size": [2, 2]},
+                    {"id": "s7", "name": "h2p-3-compare-static-box-1", "pos": [8, 4], "size": [2, 2]},
+                ]
+            }
+        },
+    )
+
+    assert instruction is not None
+    assert instruction["overlap_repair_target_count"] == 1
+    target = instruction["repair_targets"][0]
+    assert target["pair"] == ["s13", "s7"]
+    assert target["source_ids"] == ["compare-static", "compare-vs"]
+    assert instruction["repair_message"].count("OVERLAP slide:3") == 1
+    assert "move s7 left" in instruction["repair_message"]
 
 
 def test_single_oversized_typography_source_id_remains_a_bounded_target() -> None:
