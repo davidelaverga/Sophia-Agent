@@ -1338,6 +1338,17 @@ def test_prepare_deck_build_tool_schema_excludes_runtime() -> None:
     }
 
 
+def test_creative_plan_tool_contract_normalizes_legacy_chrome_policies() -> None:
+    payload = _creative_plan(include_asset=False)
+    payload["design_plan"]["grid"]["footer_policy"] = "page_numbers"
+    payload["design_plan"]["grid"]["eyebrow_policy"] = "only_when_meaningful"
+
+    parsed = DeckCreativePlanInput.model_validate(payload)
+
+    assert parsed.design_plan.grid.footer_policy == "none"
+    assert parsed.design_plan.grid.eyebrow_policy == "none"
+
+
 def test_creative_plan_tool_contract_normalizes_only_direct_aliases() -> None:
     payload = _creative_plan(include_asset=False)
     composition = payload["slide_compositions"][0]

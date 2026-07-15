@@ -57,6 +57,18 @@ class DeckGridInput(BaseModel):
         description="Fresh decks never add eyebrow, kicker, section-label, or navigation chrome.",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def _normalize_legacy_chrome_policies(cls, value: Any) -> Any:
+        """Accept queued legacy plans while preserving the strict public schema."""
+
+        if not isinstance(value, dict):
+            return value
+        normalized = dict(value)
+        normalized["footer_policy"] = "none"
+        normalized["eyebrow_policy"] = "none"
+        return normalized
+
 
 class DeckDesignPlanInput(BaseModel):
     source: str = Field(description="Origin of the creative direction, normally creative_plan.")
