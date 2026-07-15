@@ -22,6 +22,7 @@ from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 from deerflow.sandbox.tools import replace_virtual_path
 from deerflow.sophia.deck_build import service as deck_service
+from deerflow.sophia.deck_build.mechanical_gates import MechanicalGateIssue, MechanicalGateResult
 from deerflow.sophia.deck_build.service import DeckBuildService
 from deerflow.sophia.deck_build.storage import load_deck_build
 from deerflow.sophia.deck_build.tool_contract import DeckCreativePlanInput
@@ -688,9 +689,10 @@ def test_deck_build_service_ignores_hidden_unused_eyebrow_selector(tmp_path: Pat
 
 def test_deck_build_service_still_rejects_visible_eyebrow_chrome(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
+    native_calls: list[dict] = []
     service = DeckBuildService(
         image_batch_runner=_fake_batch(runtime),
-        native_service=_FakeNativeService(),
+        native_service=_FakeNativeService(native_calls),
     )
 
     result = service.prepare_and_build(
@@ -707,8 +709,97 @@ def test_deck_build_service_still_rejects_visible_eyebrow_chrome(tmp_path: Path)
     )
 
     assert result.success is False
-    assert result.failure_code == "deck_quality_failed"
+    assert result.failure_code == "deck_source_quality_failed"
+    assert result.retryable is True
     assert "chrome" in str(result.failure_summary).lower()
+    assert native_calls  # Native gates still run so one repair can receive every target.
+    assert result.source_quality_report["passed"] is False
+    assert result.repair_instruction is not None
+    assert result.repair_instruction["source_quality_repair_target_count"] == 1
+    assert result.repair_instruction["repair_targets"][0]["selector"] == "slide:2"
+
+
+def test_deck_build_service_combines_source_and_mechanical_targets_for_one_repair(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    slides = _compact_slides()
+    for slide in slides:
+        slide["html_body"] = '<div class="eyebrow">SECTION</div>' + slide["html_body"]
+
+    mechanical_attempt = 0
+
+    def evaluate_gates(_deck, *, rendered_dir):
+        nonlocal mechanical_attempt
+        mechanical_attempt += 1
+        if mechanical_attempt > 1:
+            return MechanicalGateResult(passed=True)
+        return MechanicalGateResult(
+            passed=False,
+            failure_code="deck_mechanical_gate_failed",
+            failure_summary="Slide 2 contains a material overlap.",
+            issues=[
+                MechanicalGateIssue(
+                    code="native_lint_severe_overlap",
+                    selector="slide:2",
+                    summary="Slide 2 contains a material overlap.",
+                    repair_hint="Separate the two source elements.",
+                )
+            ],
+        )
+
+    monkeypatch.setattr(deck_service, "evaluate_mechanical_gates", evaluate_gates)
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        native_service=_FakeNativeService(),
+    )
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=slides,
+        output_path=f"{_OUTPUTS}deck.pptx",
+        deck_stylesheet=(
+            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Calibri,Arial,sans-serif}"
+            "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
+        ),
+        authoring_contract="compact_model_html_v2",
+        creative_plan=_creative_plan(include_asset=False),
+    )
+
+    assert result.success is False
+    assert result.failure_code == "deck_mechanical_gate_failed"
+    assert result.retryable is True
+    assert "Source quality also failed" in str(result.failure_summary)
+    assert result.repair_instruction is not None
+    assert result.repair_instruction["source_quality_repair_target_count"] == 1
+    assert result.repair_instruction["source_quality_issue_count"] == 3
+    assert result.repair_instruction["generic_repair_target_count"] == 1
+    quality_selectors = {
+        selector
+        for target in result.repair_instruction["repair_targets"]
+        if target["target_type"] == "quality"
+        for selector in target["selectors"]
+    }
+    assert quality_selectors == {"slide:1", "slide:2", "slide:3"}
+    assert "OVERLAP" in result.repair_instruction["repair_message"] or "GATE slide:2" in result.repair_instruction["repair_message"]
+
+    repaired = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_compact_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        deck_stylesheet=(
+            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Calibri,Arial,sans-serif}"
+            "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
+        ),
+        authoring_contract="compact_model_html_v2",
+        creative_plan=_creative_plan(include_asset=False),
+    )
+
+    assert repaired.success is True
+    assert repaired.source_quality_report["passed"] is True
+    assert repaired.mechanical_gate_results["passed"] is True
 
 
 def test_deck_build_service_rejects_renderer_unsafe_compact_fonts(tmp_path: Path) -> None:
@@ -1231,6 +1322,9 @@ def test_prepare_deck_build_tool_schema_excludes_runtime() -> None:
     assert {"deck_title", "slides", "output_path", "register", "visual_policy"}.issubset(properties)
     assert "creative_plan" in schema.get("required", [])
     composition_schema = schema["$defs"]["DeckSlideCompositionInput"]
+    grid_schema = schema["$defs"]["DeckGridInput"]
+    assert grid_schema["properties"]["footer_policy"]["const"] == "none"
+    assert grid_schema["properties"]["eyebrow_policy"]["const"] == "none"
     assert set(composition_schema["required"]) == {
         "selector",
         "slide_role",
@@ -1259,6 +1353,14 @@ def test_creative_plan_tool_contract_normalizes_only_direct_aliases() -> None:
     assert normalized.slide_role == "cover"
     assert normalized.layout_name == "cover_with_texture"
     assert normalized.headline_intent == "Explain slide 1"
+
+
+def test_presentation_authoring_prompt_forbids_recurring_page_chrome() -> None:
+    prompt = builder_artifact_module._PRESENTATION_AUTHORING_SYSTEM_PROMPT
+
+    assert "Do not add eyebrow or kicker labels" in prompt
+    assert "footer_policy" in prompt
+    assert "eyebrow_policy must both be 'none'" in prompt
 
 
 def test_creative_plan_validation_reports_indexed_nested_path(tmp_path: Path) -> None:
@@ -1440,6 +1542,86 @@ def test_prepare_deck_build_retryable_ir_failure_uses_normal_graph_edge(tmp_path
     repair_update = BuilderArtifactMiddleware().before_model(state, runtime)
     assert repair_update is not None
     assert "prepare_deck_build exactly once more" in repair_update["messages"][0].content
+
+
+def test_prepare_deck_build_retryable_source_quality_failure_uses_repair_edge(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "true")
+    runtime = _runtime(tmp_path / "outputs")
+    request = SimpleNamespace(
+        tool_call={"id": "tc-deck", "name": "prepare_deck_build", "args": {}},
+        state=runtime.state,
+        runtime=runtime,
+    )
+    repair_message = (
+        "Repair every listed source-quality and mechanical issue.\n"
+        "1. QUALITY slide:1 [chrome]: remove the eyebrow."
+    )
+    payload = {
+        "success": False,
+        "build_id": "deck-1",
+        "deck_build_path": f"{_OUTPUTS}deck_build/build.json",
+        "failure_code": "deck_source_quality_failed",
+        "failure_summary": "chrome on slide:1: remove the eyebrow",
+        "retryable": True,
+        "slide_count": 3,
+        "expected_visual_count": 0,
+        "successful_visual_count": 0,
+        "referenced_visual_count": 0,
+        "missing_visual_count": 0,
+        "quality_status": "failed",
+        "repair_instruction": {"repair_message": repair_message},
+    }
+    result = ToolMessage(content=json.dumps(payload), tool_call_id="tc-deck", name="prepare_deck_build")
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_result_command(request, result)
+
+    assert isinstance(command, Command)
+    assert not command.goto
+    assert command.update["builder_deck_prepare_phase"] == "retry_pending"
+    assert command.update["builder_deck_prepare_repair_message"] == repair_message
+    assert command.update["builder_last_deck_creative_failure"]["failure_code"] == "deck_source_quality_failed"
+
+
+def test_prepare_deck_build_second_source_quality_failure_exhausts_one_repair(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "true")
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state["builder_deck_prepare_repair_attempt_count"] = 1
+    request = SimpleNamespace(
+        tool_call={"id": "tc-deck", "name": "prepare_deck_build", "args": {}},
+        state=runtime.state,
+        runtime=runtime,
+    )
+    payload = {
+        "success": False,
+        "build_id": "deck-1",
+        "deck_build_path": f"{_OUTPUTS}deck_build/build.json",
+        "failure_code": "deck_source_quality_failed",
+        "failure_summary": "chrome on slide:1: remove the eyebrow",
+        "retryable": True,
+        "slide_count": 3,
+        "expected_visual_count": 0,
+        "successful_visual_count": 0,
+        "referenced_visual_count": 0,
+        "missing_visual_count": 0,
+        "quality_status": "failed",
+    }
+    result = ToolMessage(content=json.dumps(payload), tool_call_id="tc-deck", name="prepare_deck_build")
+    monkeypatch.setattr(BuilderArtifactMiddleware, "_upload_fallback_and_fire", lambda *args, **kwargs: None)
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_result_command(request, result)
+
+    assert isinstance(command, Command)
+    assert command.goto == "end"
+    artifact = command.update["builder_result"]
+    assert artifact["failure_code"] == "deck_prepare_retry_exhausted"
+    assert artifact["root_failure_code"] == "deck_source_quality_failed"
+    assert artifact["last_prepare_failure_code"] == "deck_source_quality_failed"
 
 
 def test_prepare_deck_build_retryable_ir_second_failure_is_terminal(tmp_path: Path, monkeypatch) -> None:

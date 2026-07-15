@@ -363,6 +363,68 @@ def test_service_preserves_base_repair_context_when_adding_exact_mechanical_targ
 
     assert instruction is not None
     message = instruction["repair_message"]
-    assert message.startswith("Repair every listed mechanical issue")
+    assert message.startswith("Repair every listed source-quality and mechanical issue")
     assert "OVERLAP slide:2 area 0.2" in message
     assert "required_source_element_missing" in message
+
+
+def test_repeated_quality_issues_group_all_thirty_slide_selectors() -> None:
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        source_element_map={},
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_lint_severe_overlap",
+                    "selector": "slide:2",
+                    "summary": "Slide 2 contains a material overlap.",
+                    "repair_hint": "Separate the two source elements.",
+                }
+            ]
+        },
+        source_quality_report={
+            "hard_failures": [
+                {
+                    "id": "slide_chrome",
+                    "selector": f"slide:{index}",
+                    "check": "chrome",
+                    "detail": "remove invented chrome — chrome classes (eyebrow)",
+                    "repair_hint": "Remove the eyebrow from this slide.",
+                }
+                for index in range(1, 31)
+            ]
+        },
+    )
+
+    assert instruction is not None
+    assert instruction["source_quality_issue_count"] == 30
+    assert instruction["source_quality_repair_target_count"] == 1
+    quality_target = next(
+        target for target in instruction["repair_targets"] if target["target_type"] == "quality"
+    )
+    assert quality_target["selectors"] == [f"slide:{index}" for index in range(1, 31)]
+    for index in range(1, 31):
+        assert f"slide:{index}" in instruction["repair_message"]
+
+
+def test_visual_contract_repair_can_update_creative_plan_image_prompt() -> None:
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        source_element_map={},
+        source_quality_report={
+            "hard_failures": [
+                {
+                    "id": "slide_visual_contract",
+                    "selector": "slide:2",
+                    "check": "visual_contract",
+                    "detail": "rewrite the visual prompt without image-baked labels",
+                    "repair_hint": "Revise the planned image asset prompt.",
+                }
+            ]
+        },
+    )
+
+    assert instruction is not None
+    message = instruction["repair_message"]
+    assert "creative_plan image prompt/asset record" in message
+    assert "QUALITY slide:2 [visual_contract]" in message

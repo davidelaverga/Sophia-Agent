@@ -47,6 +47,7 @@ class DeckEvaluator:
         *,
         output_host_path: Path | None = None,
         allowed_style_terms: set[str] | None = None,
+        require_compiled_output: bool = True,
     ) -> DeckEvaluation:
         hard: list[DeckQualityIssue] = []
         soft: list[DeckQualityIssue] = []
@@ -67,7 +68,7 @@ class DeckEvaluator:
             if bool(slide.gate_results.get("chrome_detected")):
                 hard.append(self._issue("invented_chrome", slide.selector, "chrome", "slide contains invented page chrome"))
 
-        if output_host_path is not None and not output_host_path.is_file():
+        if require_compiled_output and output_host_path is not None and not output_host_path.is_file():
             hard.append(self._issue("missing_pptx", "deck", "compile", "PPTX file missing after compile"))
 
         allowed_styles = allowed_style_terms or set()

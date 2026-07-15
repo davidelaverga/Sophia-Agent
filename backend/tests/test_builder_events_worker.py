@@ -404,6 +404,11 @@ async def test_internal_post_persists_terminal_deck_diagnostics(
         "logical_artifact_id": "logical-1",
         "current_artifact_version_id": "version-2",
         "foundation_status": "committed",
+        "source_quality_report": {
+            "passed": True,
+            "hard_failures": [],
+            "soft_warnings": [],
+        },
     }
 
     async with client:

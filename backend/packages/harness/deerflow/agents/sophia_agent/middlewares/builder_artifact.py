@@ -122,6 +122,9 @@ _PRESENTATION_AUTHORING_SYSTEM_PROMPT = (
     "a JSON object, never as a JSON-encoded string. Required body text must reach 4.5:1 contrast and "
     "qualifying large text 3.0:1 against an opaque solid underlay; do not use accent colors for text "
     "unless the exact foreground/background pair passes. "
+    "Do not add eyebrow or kicker labels, section/navigation rows, footers, page or slide numbers, "
+    "icon strips, or any other recurring page chrome; creative_plan.design_plan.grid.footer_policy "
+    "and eyebrow_policy must both be 'none'. "
     + compiler_capability_prompt_excerpt()
 )
 _PRESENTATION_PREFLIGHT_SYSTEM_PROMPT = (
@@ -11783,6 +11786,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         html_validation = payload.get("html_source_validation")
         if isinstance(html_validation, dict):
             delta["html_source_validation"] = html_validation
+        source_quality = payload.get("source_quality_report")
+        if isinstance(source_quality, dict):
+            delta["source_quality_report"] = source_quality
         source_retention = payload.get("source_retention_report")
         if isinstance(source_retention, dict):
             delta["source_retention_report"] = source_retention
@@ -11843,6 +11849,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "deck_slide_html_invalid",
             "deck_image_asset_plan_invalid",
             "deck_mechanical_gate_failed",
+            "deck_source_quality_failed",
         }
         if failure_code not in retryable_codes or not retryable:
             return None
@@ -12132,6 +12139,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "deck_slide_html_invalid",
                 "deck_image_asset_plan_invalid",
                 "deck_mechanical_gate_failed",
+                "deck_source_quality_failed",
             }
             failure_code = str(payload.get("failure_code") or delta.get("deck_failure_code") or "")
             if (
@@ -12242,6 +12250,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "native_mechanical_report": delta.get("native_mechanical_report"),
             "mechanical_gate_results": delta.get("mechanical_gate_results"),
             "html_source_validation": delta.get("html_source_validation"),
+            "source_quality_report": delta.get("source_quality_report"),
             "source_retention_report": delta.get("source_retention_report"),
             "native_contrast_report": delta.get("native_contrast_report"),
             "creative_plan_path": creative_plan_path or None,
@@ -12388,6 +12397,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "native_mechanical_report": delta.get("native_mechanical_report"),
             "mechanical_gate_results": delta.get("mechanical_gate_results"),
             "html_source_validation": delta.get("html_source_validation"),
+            "source_quality_report": delta.get("source_quality_report"),
             "source_retention_report": delta.get("source_retention_report"),
             "native_contrast_report": delta.get("native_contrast_report"),
             "creative_plan_path": delta.get("creative_plan_path"),

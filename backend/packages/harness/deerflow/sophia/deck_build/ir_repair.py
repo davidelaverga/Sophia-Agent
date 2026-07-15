@@ -40,10 +40,12 @@ _MAX_MECHANICAL_REPAIR_TARGETS = 24
 _MAX_MECHANICAL_REPAIR_MESSAGE_BYTES = 8 * 1024
 _MATERIAL_OVERLAP_MIN_AREA = 0.08
 _MECHANICAL_REPAIR_PREAMBLE = (
-    "Repair every listed mechanical issue in the existing slide HTML/CSS; preserve copy, structure, "
-    "and passing slides. CONTRAST: use the supplied explicit safe colors. OVERLAP: change source "
-    "geometry; move hints are directional, not literal coordinates. Then call prepare_deck_build once "
-    "with the complete prior input."
+    "Repair every listed source-quality and mechanical issue in the complete prior input; preserve "
+    "copy, structure, and slides not named by a target. QUALITY: update the matching slide HTML/CSS, "
+    "shared stylesheet, or creative_plan image prompt/asset record and remove the exact prohibited "
+    "pattern from every named selector. CONTRAST: use the supplied explicit safe colors. OVERLAP: "
+    "change source geometry; move hints are directional, not literal coordinates. Then call "
+    "prepare_deck_build once with the complete prior input."
 )
 
 
@@ -108,8 +110,9 @@ def deck_mechanical_repair_instruction_from_reports(
     native_mechanical_report: dict[str, Any] | None = None,
     mechanical_gate_results: dict[str, Any] | None = None,
     native_shape_inventory: dict[str, Any] | None = None,
+    source_quality_report: dict[str, Any] | None = None,
 ) -> dict[str, Any] | None:
-    """Build one bounded repair instruction from deterministic mechanical reports.
+    """Build one bounded repair instruction from source and mechanical reports.
 
     Native contrast and lint reports are intentionally richer than the mechanical
     gate summary.  Preserve exact contrast colors and exact overlap geometry in the
@@ -134,11 +137,12 @@ def deck_mechanical_repair_instruction_from_reports(
         has_contrast_targets=bool(contrast_targets),
         overlap_target_selectors={str(target.get("selector") or "") for target in overlap_targets},
     )
-    all_targets = [*contrast_targets, *overlap_targets, *generic_targets]
+    source_quality_targets, source_quality_issue_count = _source_quality_repair_targets(source_quality_report)
+    all_targets = [*source_quality_targets, *contrast_targets, *overlap_targets, *generic_targets]
     if not all_targets:
         return None
 
-    targets = _bounded_mechanical_targets(contrast_targets, overlap_targets, generic_targets)
+    targets = _bounded_mechanical_targets(source_quality_targets, contrast_targets, overlap_targets, generic_targets)
     targets, repair_message = _fit_mechanical_repair_message(
         targets=targets,
         total_target_count=len(all_targets),
@@ -152,12 +156,54 @@ def deck_mechanical_repair_instruction_from_reports(
         "contrast_repair_target_count": len(contrast_targets),
         "overlap_repair_target_count": len(overlap_targets),
         "generic_repair_target_count": len(generic_targets),
+        "source_quality_repair_target_count": len(source_quality_targets),
+        "source_quality_issue_count": source_quality_issue_count,
         "included_contrast_repair_target_count": included_by_type.get("contrast", 0),
         "included_overlap_repair_target_count": included_by_type.get("overlap", 0),
         "included_generic_repair_target_count": included_by_type.get("generic", 0),
+        "included_source_quality_repair_target_count": included_by_type.get("quality", 0),
         "repair_targets": targets,
         "repair_message": repair_message,
     }
+
+
+def _source_quality_repair_targets(
+    source_quality_report: dict[str, Any] | None,
+) -> tuple[list[dict[str, Any]], int]:
+    report = source_quality_report if isinstance(source_quality_report, dict) else {}
+    grouped: dict[tuple[str, str, str, str], dict[str, Any]] = {}
+    issue_count = 0
+    for issue in report.get("hard_failures") or []:
+        if not isinstance(issue, dict):
+            continue
+        issue_count += 1
+        selector = _compact_excerpt(issue.get("selector") or "deck", limit=80)
+        check = _compact_excerpt(issue.get("check") or "quality", limit=80)
+        detail = _compact_excerpt(issue.get("detail") or "Deck source quality failed.", limit=320)
+        code = _compact_excerpt(issue.get("id") or "deck_source_quality_failed", limit=100)
+        repair_hint = _compact_excerpt(
+            issue.get("repair_hint") or "Remove the prohibited source pattern from this slide.",
+            limit=240,
+        )
+        key = (code, check, detail, repair_hint)
+        target = grouped.setdefault(
+            key,
+            {
+                "target_type": "quality",
+                "code": code,
+                "selector": "",
+                "selectors": [],
+                "check": check,
+                "summary": detail,
+                "repair_hint": repair_hint,
+            },
+        )
+        if selector not in target["selectors"]:
+            target["selectors"].append(selector)
+    targets = list(grouped.values())
+    for target in targets:
+        target["selector"] = ", ".join(target["selectors"])
+    return targets, issue_count
 
 
 def _contrast_repair_target(
@@ -417,11 +463,26 @@ def _finite_float(value: Any) -> float | None:
 
 def _mechanical_repair_line(index: int, target: dict[str, Any]) -> str:
     target_type = str(target.get("target_type") or "generic")
+    if target_type == "quality":
+        return _quality_repair_line(index, target)
     if target_type == "contrast":
         return _contrast_repair_line(index, target)
     if target_type == "overlap":
         return _overlap_repair_line(index, target)
     return _generic_repair_line(index, target)
+
+
+def _quality_repair_line(index: int, target: dict[str, Any]) -> str:
+    summary = json.dumps(target.get("summary") or "Deck source quality failed.", ensure_ascii=False)
+    repair_hint = json.dumps(
+        target.get("repair_hint") or "Remove the prohibited source pattern from this slide.",
+        ensure_ascii=False,
+    )
+    selectors = ", ".join(str(value) for value in target.get("selectors") or [])
+    return (
+        f"{index}. QUALITY {selectors or target.get('selector') or 'deck'} "
+        f"[{target.get('check') or target.get('code') or 'quality'}]: {summary}; {repair_hint}."
+    )
 
 
 def _contrast_repair_line(index: int, target: dict[str, Any]) -> str:

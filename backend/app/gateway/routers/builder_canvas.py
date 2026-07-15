@@ -607,6 +607,7 @@ def _completion_from_terminal_task(
         "native_mechanical_report": artifact.get("native_mechanical_report"),
         "mechanical_gate_results": artifact.get("mechanical_gate_results"),
         "html_source_validation": artifact.get("html_source_validation"),
+        "source_quality_report": artifact.get("source_quality_report"),
         "creative_plan_path": artifact.get("creative_plan_path"),
         "expected_generated_visual_count": artifact.get("expected_generated_visual_count"),
         "successful_generated_visual_count": artifact.get("successful_generated_visual_count"),

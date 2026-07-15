@@ -48,8 +48,14 @@ class DeckGridInput(BaseModel):
     margin_x_px: int = Field(default=120, ge=40, le=260)
     margin_y_px: int = Field(default=80, ge=30, le=180)
     title_y_px: int = Field(default=82, ge=30, le=220)
-    footer_policy: str = Field(default="none")
-    eyebrow_policy: str = Field(default="only_when_meaningful")
+    footer_policy: Literal["none"] = Field(
+        default="none",
+        description="Fresh decks never add recurring footer or page-number chrome.",
+    )
+    eyebrow_policy: Literal["none"] = Field(
+        default="none",
+        description="Fresh decks never add eyebrow, kicker, section-label, or navigation chrome.",
+    )
 
 
 class DeckDesignPlanInput(BaseModel):

@@ -65,6 +65,19 @@ def test_creative_plan_forces_native_base_canvas_size(tmp_path) -> None:
     assert plan.design_plan.grid.slide_height_px == 1080
 
 
+def test_creative_plan_normalizes_page_chrome_policies_to_none(tmp_path) -> None:
+    raw = _creative_plan()
+    raw["design_plan"]["grid"] = {
+        "footer_policy": "page_numbers",
+        "eyebrow_policy": "only_when_meaningful",
+    }
+
+    plan = normalize_creative_plan(raw, deck=_deck(tmp_path), request_context="")
+
+    assert plan.design_plan.grid.footer_policy == "none"
+    assert plan.design_plan.grid.eyebrow_policy == "none"
+
+
 def test_creative_plan_normalizes_renderer_unsafe_typography(tmp_path) -> None:
     raw = _creative_plan()
     raw["design_plan"]["typography"] = {

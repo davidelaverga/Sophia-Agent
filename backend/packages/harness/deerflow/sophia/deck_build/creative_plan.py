@@ -252,8 +252,10 @@ def _coerce_grid(raw: Any) -> DeckGridPlan:
         margin_x_px=_int(raw.get("margin_x_px"), default=120, minimum=40, maximum=260),
         margin_y_px=_int(raw.get("margin_y_px"), default=80, minimum=30, maximum=180),
         title_y_px=_int(raw.get("title_y_px"), default=82, minimum=30, maximum=220),
-        footer_policy=_clean_text(raw.get("footer_policy"), limit=80) or "none",
-        eyebrow_policy=_clean_text(raw.get("eyebrow_policy"), limit=80) or "only_when_meaningful",
+        # The terminal quality contract forbids recurring page chrome. Normalize
+        # legacy/internal payloads to the same invariant exposed by the typed tool.
+        footer_policy="none",
+        eyebrow_policy="none",
     )
 
 

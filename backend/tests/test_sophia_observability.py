@@ -345,6 +345,14 @@ def test_builder_completion_attaches_prepare_terminal_metadata_and_failure_feedb
             "prepare_force_reason": "turn_limit",
             "deck_root_failure_code": "deck_prepare_argument_invalid",
             "deck_root_failure_summary": "The first prepare call failed schema validation.",
+            "source_quality_report": {
+                "passed": False,
+                "hard_failures": [
+                    {"selector": "slide:2", "check": "chrome"},
+                    {"selector": "slide:3", "check": "chrome"},
+                ],
+                "soft_warnings": [{"selector": "slide:1", "check": "density"}],
+            },
             "source_retention_report": {
                 "passed": False,
                 "missing_required_count": 1,
@@ -394,6 +402,11 @@ def test_builder_completion_attaches_prepare_terminal_metadata_and_failure_feedb
     assert run_tree.metadata["prepare_force_reason"] == "turn_limit"
     assert run_tree.metadata["creative_plan_accepted"] is False
     assert run_tree.metadata["root_failure_code"] == "deck_prepare_argument_invalid"
+    assert run_tree.metadata["source_quality_passed"] is False
+    assert run_tree.metadata["source_quality_hard_failure_count"] == 2
+    assert run_tree.metadata["source_quality_soft_warning_count"] == 1
+    assert run_tree.metadata["source_quality_checks"] == "chrome,density"
+    assert run_tree.metadata["source_quality_affected_selectors"] == "slide:2,slide:3"
     assert run_tree.metadata["source_retention_passed"] is False
     assert run_tree.metadata["source_retention_missing_required_count"] == 1
     assert run_tree.metadata["source_retention_low_count"] == 1

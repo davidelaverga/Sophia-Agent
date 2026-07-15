@@ -812,6 +812,7 @@ def _artifact_completion_fields(
         "native_mechanical_report": artifact.get("native_mechanical_report"),
         "mechanical_gate_results": artifact.get("mechanical_gate_results"),
         "html_source_validation": artifact.get("html_source_validation"),
+        "source_quality_report": artifact.get("source_quality_report"),
         "source_retention_report": artifact.get("source_retention_report"),
         "native_contrast_report": artifact.get("native_contrast_report"),
         "creative_plan_path": artifact.get("creative_plan_path"),

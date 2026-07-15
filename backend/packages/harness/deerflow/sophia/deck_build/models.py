@@ -94,7 +94,7 @@ class DeckGridPlan:
     margin_y_px: int = 80
     title_y_px: int = 82
     footer_policy: str = "none"
-    eyebrow_policy: str = "only_when_meaningful"
+    eyebrow_policy: str = "none"
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -285,6 +285,7 @@ class DeckBuild:
     design_plan_path: str | None = None
     asset_policy_path: str | None = None
     html_source_validation: dict[str, Any] = field(default_factory=dict)
+    source_quality_report: dict[str, Any] = field(default_factory=dict)
     mechanical_gate_results: dict[str, Any] = field(default_factory=dict)
     style_warnings: list[str] = field(default_factory=list)
     generated_asset_count: int = 0
@@ -397,6 +398,7 @@ class DeckBuildResult:
     design_plan_path: str | None = None
     asset_policy_path: str | None = None
     html_source_validation: dict[str, Any] = field(default_factory=dict)
+    source_quality_report: dict[str, Any] = field(default_factory=dict)
     mechanical_gate_results: dict[str, Any] = field(default_factory=dict)
     style_warnings: list[str] = field(default_factory=list)
     generated_asset_count: int = 0

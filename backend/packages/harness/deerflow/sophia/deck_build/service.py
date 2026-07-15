@@ -44,7 +44,7 @@ from deerflow.sophia.deck_build.image_assets import (
 from deerflow.sophia.deck_build.image_prompting import deck_asset_prompt_payload
 from deerflow.sophia.deck_build.ir_repair import deck_mechanical_repair_instruction_from_reports
 from deerflow.sophia.deck_build.mechanical_gates import evaluate_mechanical_gates
-from deerflow.sophia.deck_build.models import DeckBuild, DeckBuildResult, DeckSlideSpec
+from deerflow.sophia.deck_build.models import DeckBuild, DeckBuildResult, DeckEvaluation, DeckSlideSpec
 from deerflow.sophia.deck_build.native_contrast import evaluate_native_contrast
 from deerflow.sophia.deck_build.source_retention import (
     evaluate_source_retention,
@@ -278,8 +278,27 @@ class DeckBuildService:
                     slide.visual_status = "not_required"
                 deck.image_generation_status = "not_required"
                 deck.primary_image_batch_status = "not_required"
+            _assert_deck_deadline(runtime, stage="source_quality_evaluation")
+            source_evaluation = self._evaluate_source_quality(deck, runtime)
             _assert_deck_deadline(runtime, stage="native_compile")
-            self._compile_pptx(deck, runtime)
+            try:
+                # Compile even when source quality has gaps so the single repair
+                # receives both static and native/mechanical targets together.
+                self._compile_pptx(deck, runtime)
+            except DeckBuildFailure as exc:
+                if exc.code == "deck_mechanical_gate_failed" and not source_evaluation.passed:
+                    raise DeckBuildFailure(
+                        exc.code,
+                        _combined_source_and_mechanical_summary(source_evaluation, exc.summary),
+                        retryable=exc.retryable,
+                    ) from exc
+                raise
+            if not source_evaluation.passed:
+                raise DeckBuildFailure(
+                    "deck_source_quality_failed",
+                    _quality_failure_summary(source_evaluation),
+                    retryable=True,
+                )
             _assert_deck_deadline(runtime, stage="deck_evaluation")
             self._evaluate(deck, runtime)
             deck.status = "evaluated"
@@ -1393,6 +1412,37 @@ class DeckBuildService:
                     "visual": slide_inventory.get("visual"),
                 }
 
+    def _evaluate_source_quality(self, deck: DeckBuild, runtime: ToolRuntime) -> DeckEvaluation:
+        output_host = _host_path(deck.output_path, runtime)
+        with deck_span(
+            "deck.evaluate.source",
+            runtime=runtime,
+            build_id=deck.build_id,
+            visual_policy=deck.visual_policy,
+            status=deck.status,
+            slide_count=len(deck.slides),
+            inputs={},
+        ) as run:
+            evaluation = self._evaluator.evaluate(
+                deck,
+                output_host_path=output_host,
+                allowed_style_terms=_requested_banned_style_terms(runtime, deck.style_profile),
+                require_compiled_output=False,
+            )
+            deck.source_quality_report = evaluation.to_dict()
+            finish_span(
+                run,
+                {
+                    "passed": evaluation.passed,
+                    "hard_failure_count": len(evaluation.hard_failures),
+                    "soft_warning_count": len(evaluation.soft_warnings),
+                    "checks": sorted({issue.check for issue in [*evaluation.hard_failures, *evaluation.soft_warnings]}),
+                    "affected_selectors": sorted({issue.selector for issue in evaluation.hard_failures}),
+                    "quality_warning": evaluation.quality_warning,
+                },
+            )
+        return evaluation
+
     def _evaluate(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
         output_host = _host_path(deck.output_path, runtime)
         with deck_span(
@@ -1470,6 +1520,7 @@ class DeckBuildService:
                     "native_mechanical_report": deck.native_mechanical_report,
                     "mechanical_gate_results": deck.mechanical_gate_results,
                     "html_source_validation": deck.html_source_validation,
+                    "source_quality_report": deck.source_quality_report,
                     "creative_plan_file": basename(deck.creative_plan_path),
                     "design_plan_file": basename(deck.design_plan_path),
                     "asset_policy_file": basename(deck.asset_policy_path),
@@ -1576,6 +1627,7 @@ class DeckBuildService:
             design_plan_path=deck.design_plan_path,
             asset_policy_path=deck.asset_policy_path,
             html_source_validation=deck.html_source_validation,
+            source_quality_report=deck.source_quality_report,
             mechanical_gate_results=deck.mechanical_gate_results,
             style_warnings=deck.style_warnings,
             generated_asset_count=deck.generated_asset_count,
@@ -1706,6 +1758,7 @@ class DeckBuildService:
             design_plan_path=deck.design_plan_path,
             asset_policy_path=deck.asset_policy_path,
             html_source_validation=deck.html_source_validation,
+            source_quality_report=deck.source_quality_report,
             mechanical_gate_results=deck.mechanical_gate_results,
             style_warnings=deck.style_warnings,
             generated_asset_count=deck.generated_asset_count,
@@ -1847,6 +1900,27 @@ class DeckBuildFailure(Exception):
         self.code = code
         self.summary = summary
         self.retryable = retryable
+
+
+def _quality_failure_summary(evaluation: DeckEvaluation) -> str:
+    grouped: dict[tuple[str, str], list[str]] = {}
+    for issue in evaluation.hard_failures:
+        key = (str(issue.check or "quality"), str(issue.detail or "Deck source quality failed."))
+        selectors = grouped.setdefault(key, [])
+        if issue.selector not in selectors:
+            selectors.append(issue.selector)
+    parts = [
+        f"{check} on {', '.join(selectors)}: {detail}"
+        for (check, detail), selectors in grouped.items()
+    ]
+    return safe_excerpt("; ".join(parts) or "Deck source quality gate failed.", limit=1600)
+
+
+def _combined_source_and_mechanical_summary(evaluation: DeckEvaluation, mechanical_summary: str) -> str:
+    return safe_excerpt(
+        f"{mechanical_summary} Source quality also failed: {_quality_failure_summary(evaluation)}",
+        limit=1800,
+    )
 
 
 def _state_value(runtime: Any, key: str) -> Any:
@@ -2136,6 +2210,7 @@ def _repair_instruction_for_failure(
         "deck_slide_html_invalid",
         "deck_image_asset_plan_invalid",
         "deck_mechanical_gate_failed",
+        "deck_source_quality_failed",
         "invalid_deck_ir",
     }:
         return None
@@ -2153,13 +2228,14 @@ def _repair_instruction_for_failure(
             f"Previous failure: {exc.code}: {safe_excerpt(exc.summary, limit=400)}"
         ),
     }
-    if exc.code == "deck_mechanical_gate_failed" and deck is not None:
+    if exc.code in {"deck_mechanical_gate_failed", "deck_source_quality_failed"} and deck is not None:
         targeted = deck_mechanical_repair_instruction_from_reports(
             native_contrast_report=deck.native_contrast_report,
             source_element_map=deck.source_element_map,
             native_mechanical_report=deck.native_mechanical_report,
             mechanical_gate_results=deck.mechanical_gate_results,
             native_shape_inventory=deck.native_shape_inventory,
+            source_quality_report=getattr(deck, "source_quality_report", {}),
         )
         if targeted is not None:
             instruction.update(targeted)

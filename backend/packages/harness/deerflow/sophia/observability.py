@@ -886,6 +886,7 @@ def _add_deck_fidelity_metadata(
 ) -> None:
     retention = _as_dict(diagnostics.get("source_retention_report") or artifact.get("source_retention_report"))
     contrast = _as_dict(diagnostics.get("native_contrast_report") or artifact.get("native_contrast_report"))
+    source_quality = _as_dict(diagnostics.get("source_quality_report") or artifact.get("source_quality_report"))
     for key in (
         "passed",
         "missing_required_count",
@@ -904,6 +905,21 @@ def _add_deck_fidelity_metadata(
         "indeterminate_required_count",
     ):
         _merge_safe_metadata(metadata, f"native_contrast_{key}", contrast.get(key))
+    hard_failures = [item for item in source_quality.get("hard_failures") or [] if isinstance(item, dict)]
+    soft_warnings = [item for item in source_quality.get("soft_warnings") or [] if isinstance(item, dict)]
+    _merge_safe_metadata(metadata, "source_quality_passed", source_quality.get("passed"))
+    _merge_safe_metadata(metadata, "source_quality_hard_failure_count", len(hard_failures) if source_quality else None)
+    _merge_safe_metadata(metadata, "source_quality_soft_warning_count", len(soft_warnings) if source_quality else None)
+    _merge_safe_metadata(
+        metadata,
+        "source_quality_checks",
+        ",".join(sorted({str(item.get("check")) for item in [*hard_failures, *soft_warnings] if item.get("check")})),
+    )
+    _merge_safe_metadata(
+        metadata,
+        "source_quality_affected_selectors",
+        ",".join(sorted({str(item.get("selector")) for item in hard_failures if item.get("selector")})),
+    )
 
 
 def _add_pdf_layout_metadata(

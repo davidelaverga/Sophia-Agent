@@ -85,6 +85,7 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "native_mechanical_report",
     "mechanical_gate_results",
     "html_source_validation",
+    "source_quality_report",
     "source_retention_report",
     "native_contrast_report",
     "creative_plan_path",
@@ -227,6 +228,7 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "native_mechanical_report",
         "mechanical_gate_results",
         "html_source_validation",
+        "source_quality_report",
         "source_retention_report",
         "native_contrast_report",
         "creative_plan_path",
@@ -518,6 +520,7 @@ class BuilderCompletionEvent(BaseModel):
     native_mechanical_report: dict[str, Any] | None = None
     mechanical_gate_results: dict[str, Any] | None = None
     html_source_validation: dict[str, Any] | None = None
+    source_quality_report: dict[str, Any] | None = None
     creative_plan_path: str | None = None
     deck_quality_status: str | None = None
     failure_code: str | None = None

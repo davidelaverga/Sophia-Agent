@@ -677,6 +677,10 @@ def test_completion_payload_preserves_terminal_and_prepare_metadata():
         "foundation_status": "committed",
         "root_failure_code": "deck_prepare_argument_invalid",
         "root_failure_summary": "The first prepare call failed schema validation.",
+        "source_quality_report": {
+            "passed": False,
+            "hard_failures": [{"selector": "slide:2", "check": "chrome"}],
+        },
         "source_retention_report": {"passed": False, "missing_required_count": 1},
         "native_contrast_report": {"passed": False, "required_issue_count": 1},
         "confidence": 0.0,
@@ -716,6 +720,10 @@ def test_completion_payload_preserves_terminal_and_prepare_metadata():
     assert parsed.current_artifact_version_id == "version-2"
     assert parsed.foundation_status == "committed"
     assert parsed.root_failure_code == "deck_prepare_argument_invalid"
+    assert parsed.source_quality_report == {
+        "passed": False,
+        "hard_failures": [{"selector": "slide:2", "check": "chrome"}],
+    }
     assert parsed.source_retention_report == {"passed": False, "missing_required_count": 1}
     assert parsed.native_contrast_report == {"passed": False, "required_issue_count": 1}
 
