@@ -1,0 +1,8 @@
+{
+  "criterion_count": 15,
+  "rubric_version": "deck-rubric-v2",
+  "schema_version": "deck-quality-rubric-lock/v1",
+  "sha256": "19282085698ad2594ac537ccea36bf72ac3098073674689b498fa162ceb8cabe",
+  "source_path": "skills/public/sophia/deck_rubric.yaml",
+  "source_rule_count": 21
+}

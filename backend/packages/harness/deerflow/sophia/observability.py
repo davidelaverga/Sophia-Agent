@@ -1462,8 +1462,12 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
     _merge_safe_metadata(metadata, "build_id", identity.get("build_id"))
     _merge_safe_metadata(metadata, "operation_id", identity.get("operation_id"))
     _merge_safe_metadata(metadata, "builder_thread_id", identity.get("thread_id"))
-    artifact.setdefault("builder_trace_run_id", str(getattr(run_tree, "id", "") or "") or None)
-    artifact.setdefault("builder_trace_root_run_id", str(getattr(root_run, "id", "") or "") or None)
+    # These values are provenance, not caller hints.  Always replace any
+    # pre-existing artifact fields with the concrete run tree selected above;
+    # otherwise a stale/model-supplied value could be carried into DQ-1 as the
+    # purported parent builder trace.
+    artifact["builder_trace_run_id"] = str(getattr(run_tree, "id", "") or "") or None
+    artifact["builder_trace_root_run_id"] = str(getattr(root_run, "id", "") or "") or None
     _merge_safe_metadata(metadata, "builder_trace_run_id", artifact.get("builder_trace_run_id"))
     _merge_safe_metadata(metadata, "builder_trace_root_run_id", artifact.get("builder_trace_root_run_id"))
     _add_run_metadata(run_tree, metadata)

@@ -163,6 +163,92 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     )
 
 
+def test_dispatch_runtime_completion_carries_exact_annotated_builder_trace_root(
+    monkeypatch,
+):
+    """Exercise completion with the state/config emitted by real dispatch.
+
+    The DQ parent identity is the active builder LangSmith root stamped by
+    ``annotate_builder_completion``. It is deliberately separate from the
+    companion-side diagnostic ``trace_id`` on the tool runtime.
+    """
+
+    module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
+    builder_events = importlib.import_module("deerflow.sophia.builder_events")
+    observability = importlib.import_module("deerflow.sophia.observability")
+    fake_client, captured = _make_fake_sdk_client(
+        thread_id="builder-thread-exact",
+        run_id="builder-langsmith-root-exact",
+    )
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    response = asyncio.run(
+        module.start_builder_task.coroutine(
+            description="Build a five-slide presentation.",
+            task_type="presentation",
+            runtime=_make_runtime({"user_id": "alice"}),
+        )
+    )
+    assert isinstance(response, Command)
+
+    dispatched = captured["run_kwargs"]
+    builder_state = dispatched["input"]
+    builder_runtime = SimpleNamespace(
+        context={"thread_id": dispatched["thread_id"]},
+        execution_info=SimpleNamespace(
+            thread_id=dispatched["thread_id"],
+            run_id="builder-langsmith-root-exact",
+        ),
+        config=dispatched["config"],
+    )
+
+    class _BuilderRoot:
+        def __init__(self) -> None:
+            self.id = "builder-langsmith-root-exact"
+            self.parent_run = None
+            self.parent_run_id = None
+            self.metadata = {
+                "thread_id": "builder-thread-exact",
+                "run_id": "builder-langsmith-root-exact",
+            }
+
+        def add_metadata(self, metadata):
+            self.metadata.update(metadata)
+
+        def add_tags(self, _tags):
+            return None
+
+        def patch(self, *, exclude_inputs=False):
+            assert exclude_inputs is True
+
+    artifact = {
+        "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+        "artifact_type": "presentation",
+        "artifact_ext": "pptx",
+    }
+    monkeypatch.setattr(observability, "_current_run_tree", _BuilderRoot)
+    assert observability.annotate_builder_completion(builder_state, artifact) is True
+    assert artifact["builder_trace_root_run_id"] == "builder-langsmith-root-exact"
+
+    monkeypatch.setattr(
+        builder_events,
+        "_signed_artifact_url",
+        lambda *_args, **_kwargs: None,
+    )
+    payload = builder_events.build_completion_payload_from_artifact(
+        state=builder_state,
+        runtime=builder_runtime,
+        artifact=artifact,
+        status="completed",
+    )
+
+    assert payload["run_id"] == "builder-langsmith-root-exact"
+    assert payload["builder_trace_root_run_id"] == "builder-langsmith-root-exact"
+    # The companion's short diagnostic trace is not smuggled into the builder
+    # config and cannot be mistaken for DQ provenance.
+    assert payload["trace_id"] is None
+
+
 def test_start_builder_task_dispatches_resolved_pdf_target_ext_for_pdf_deck(monkeypatch):
     module = importlib.import_module("deerflow.sophia.tools.start_builder_task")
     fake_client, captured = _make_fake_sdk_client(thread_id="asgi-pdf-deck", run_id="run-1")

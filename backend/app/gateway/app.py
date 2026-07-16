@@ -28,7 +28,24 @@ from app.gateway.supabase_project import validate_expected_supabase_project
 from app.gateway.workers.builder_canvas import install_builder_canvas_worker
 from app.gateway.workers.builder_events import install_builder_events_worker
 from app.gateway.workers.companion_wakeup import install_companion_wakeup
+from app.gateway.workers.deck_quality_dispatcher import (
+    build_configured_deck_quality_dispatcher,
+    install_deck_quality_dispatcher,
+)
+from app.gateway.workers.deck_quality_publication import (
+    install_deck_quality_publication_store,
+)
+from app.gateway.workers.deck_quality_publication_worker import (
+    build_configured_deck_quality_publication_worker,
+    install_deck_quality_publication_worker,
+    start_deck_quality_publication_worker,
+    stop_deck_quality_publication_worker,
+)
 from deerflow.config.app_config import get_app_config
+from deerflow.sophia.deck_quality.instrument import compile_runtime_instrument
+from deerflow.sophia.deck_quality.publication_persistence import (
+    configured_deck_quality_publication_store,
+)
 
 # Configure logging
 logging.basicConfig(
@@ -57,7 +74,7 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     # Load config and check necessary environment variables at startup
     try:
-        get_app_config()
+        app_config = get_app_config()
         validate_expected_supabase_project()
         logger.info("Configuration loaded successfully")
     except Exception as e:
@@ -82,6 +99,98 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     # See ``app/gateway/workers/companion_wakeup.py`` for the rationale.
     install_companion_wakeup(app)
     logger.info("Companion wakeup worker installed")
+
+    # DQ-1 publication first turns the ACKed builder handoff into an immutable
+    # pre-render input manifest. It is independently isolated from ordinary
+    # delivery and uses the same RPC-only store instance as webhook admission.
+    deck_quality_publication_worker = None
+    deck_quality_publication_store = None
+    if app_config.deck_quality.enabled:
+        candidate_publication_store = None
+        candidate_publication_worker = None
+        try:
+            runtime_instrument = compile_runtime_instrument(app_config)
+            candidate_publication_store = configured_deck_quality_publication_store()
+            if candidate_publication_store is None:
+                raise RuntimeError("enabled DQ1 publication worker requires durable persistence")
+            candidate_publication_worker = build_configured_deck_quality_publication_worker(
+                config=app_config.deck_quality,
+                instrument=runtime_instrument.lock,
+                store=candidate_publication_store,
+            )
+            if candidate_publication_worker is None:
+                raise RuntimeError("enabled DQ1 publication worker was not constructed")
+            await start_deck_quality_publication_worker(candidate_publication_worker)
+            deck_quality_publication_store = candidate_publication_store
+            deck_quality_publication_worker = candidate_publication_worker
+            logger.info("DQ1 canary shadow publication worker started contentExcluded=true")
+        except Exception as exc:  # noqa: BLE001 - shadow startup cannot take down delivery
+            logger.error(
+                "DQ1 canary shadow publication worker disabled at startup error_type=%s contentExcluded=true",
+                exc.__class__.__name__,
+                exc_info=False,
+            )
+            if candidate_publication_worker is not None:
+                try:
+                    await stop_deck_quality_publication_worker(candidate_publication_worker)
+                except Exception:
+                    logger.error(
+                        "DQ1 publication worker cleanup failed contentExcluded=true",
+                        exc_info=False,
+                    )
+            elif candidate_publication_store is not None:
+                try:
+                    await candidate_publication_store.aclose()
+                except Exception:
+                    logger.error(
+                        "DQ1 publication store cleanup failed contentExcluded=true",
+                        exc_info=False,
+                    )
+    install_deck_quality_publication_store(
+        app,
+        deck_quality_publication_store,
+    )
+    install_deck_quality_publication_worker(
+        app,
+        deck_quality_publication_worker,
+    )
+
+    # The metadata-only dispatcher claims promoted canary rows and starts the
+    # isolated quality graph. The publication worker above may read the
+    # bounded source pack and accepted PPTX solely to freeze immutable input
+    # provenance; rendering, judge payload construction, model invocation, and
+    # the OpenAI credential remain exclusively in sophia-langgraph.
+    deck_quality_dispatcher = None
+    if app_config.deck_quality.enabled:
+        candidate_dispatcher = None
+        try:
+            runtime_instrument = compile_runtime_instrument(app_config)
+            candidate_dispatcher = build_configured_deck_quality_dispatcher(
+                config=app_config.deck_quality,
+                instrument=runtime_instrument.lock,
+                langgraph_url=os.getenv("LANGGRAPH_URL") or "http://localhost:2024",
+            )
+            if candidate_dispatcher is None:
+                raise RuntimeError("enabled DQ1 dispatcher was not constructed")
+            await candidate_dispatcher.probe()
+            candidate_dispatcher.start()
+            deck_quality_dispatcher = candidate_dispatcher
+            logger.info("DQ1 canary shadow dispatcher started contentExcluded=true")
+        except Exception as exc:  # noqa: BLE001 - shadow startup cannot take down delivery
+            logger.error(
+                "DQ1 canary shadow dispatcher disabled at startup error_type=%s contentExcluded=true",
+                exc.__class__.__name__,
+                exc_info=False,
+            )
+            if candidate_dispatcher is not None:
+                try:
+                    await candidate_dispatcher.stop()
+                except Exception:
+                    logger.error(
+                        "DQ1 failed dispatcher cleanup error contentExcluded=true",
+                        exc_info=False,
+                    )
+    install_deck_quality_dispatcher(app, deck_quality_dispatcher)
 
     # NOTE: MCP tools initialization is NOT done here because:
     # 1. Gateway doesn't use MCP tools - they are used by Agents in the LangGraph Server
@@ -130,6 +239,23 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         logger.exception("Failed to start Telegram session tracker")
 
     yield
+
+    if deck_quality_publication_worker is not None:
+        try:
+            await stop_deck_quality_publication_worker(deck_quality_publication_worker)
+            logger.info("DQ1 canary shadow publication worker stopped")
+        except Exception:
+            logger.error(
+                "DQ1 publication worker shutdown failed contentExcluded=true",
+                exc_info=False,
+            )
+
+    if deck_quality_dispatcher is not None:
+        try:
+            await deck_quality_dispatcher.stop()
+            logger.info("DQ1 canary shadow dispatcher stopped")
+        except Exception:
+            logger.error("DQ1 dispatcher shutdown failed contentExcluded=true", exc_info=False)
 
     # Stop watchers
     try:

@@ -1,0 +1,29 @@
+{
+  "critical_score_floor": 3,
+  "evidence_selectors": [
+    "slide:1",
+    "slide:2",
+    "slide:3",
+    "slide:4",
+    "slide:5"
+  ],
+  "failing_criterion_ids": [],
+  "failure_codes": [
+    "default_look_gravity",
+    "weak_fingerprint_realization",
+    "weak_mechanism_visualization",
+    "weak_signature_realization",
+    "weak_spatial_tension"
+  ],
+  "mechanical_projection_hash": "75bc7ead25273ef11adcef38155228ec50175d77af2dd38768d759db298e1620",
+  "plan_assessment_hash": "ec87488b4c92d10ea823ed7d1ebf42a97de873ec1d12ec47622af9e3db3c405d",
+  "policy_hash": "571f2e77c733cccf9e6a9af2174806d506386a1d3dd3916b0d3b93374238aad8",
+  "reason_codes": [
+    "material_taste_uncertainty"
+  ],
+  "result": "needs_user_review",
+  "rubric_hash": "b508af2f547bebd7d08d8fcf3b987607ba34fdc9111b252cdf61ec42da47c472",
+  "schema_version": "deck-quality-shadow-decision/v1",
+  "visual_assessment_hash": "4af78f15e977b54c058933ddb151aa928ccf6fd113e5418150724cb0abd7db7b",
+  "weighted_score": "4.2"
+}

@@ -19,7 +19,7 @@ import re
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import PurePosixPath
-from typing import Any
+from typing import Any, Literal
 from urllib.parse import quote
 
 import httpx
@@ -31,6 +31,7 @@ DEFAULT_BUCKET = "sophia-builder-artifacts"
 _REQUEST_TIMEOUT_SECONDS = 15.0
 _MAX_LIST_DEPTH = 8
 _SAFE_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._=-]+")
+_CREATE_ONLY_CONFLICT_STATUS_CODES = frozenset({400, 409})
 
 # Keyspace separation (Codex P1 PR #132). User UPLOADS mirror under
 # ``{thread_id}/uploads/{name}``; builder OUTPUTS mirror under
@@ -69,15 +70,16 @@ class SupabaseArtifactInfo:
     content_type: str | None = None
 
 
+class ArtifactObjectSizeError(RuntimeError):
+    """A remote object exceeded an explicit pre-allocation read budget."""
+
+
 def _truthy_env(value: str | None) -> bool:
     return (value or "").strip().lower() in {"1", "true", "yes", "on"}
 
 
 def is_production_runtime() -> bool:
-    return any(
-        _truthy_env(os.getenv(name))
-        for name in ("RENDER", "VERCEL", "RAILWAY_ENVIRONMENT")
-    ) or (os.getenv("SOPHIA_ENV") or os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or "").lower() in {
+    return any(_truthy_env(os.getenv(name)) for name in ("RENDER", "VERCEL", "RAILWAY_ENVIRONMENT")) or (os.getenv("SOPHIA_ENV") or os.getenv("APP_ENV") or os.getenv("ENVIRONMENT") or "").lower() in {
         "prod",
         "production",
         "staging",
@@ -113,10 +115,7 @@ def _load_config() -> SupabaseConfig | None:
     if requires_durable_artifact_upload():
         service_role_key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
     else:
-        service_role_key = (
-            (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip()
-            or (os.getenv("SUPABASE_KEY") or "").strip()
-        )
+        service_role_key = (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip() or (os.getenv("SUPABASE_KEY") or "").strip()
     bucket = (os.getenv("SUPABASE_BUILDER_BUCKET") or "").strip()
     if requires_durable_artifact_upload() and not bucket:
         return None
@@ -248,11 +247,7 @@ def builder_artifact_object_path(
     filename: str,
 ) -> str:
     return normalize_object_path(
-        "artifacts/"
-        f"{safe_object_path_segment(user_id, default='user')}/"
-        f"{safe_object_path_segment(thread_or_session_id, default='thread')}/"
-        f"{safe_object_path_segment(artifact_id, default='artifact')}/"
-        f"{safe_filename_segment(filename)}"
+        f"artifacts/{safe_object_path_segment(user_id, default='user')}/{safe_object_path_segment(thread_or_session_id, default='thread')}/{safe_object_path_segment(artifact_id, default='artifact')}/{safe_filename_segment(filename)}"
     )
 
 
@@ -355,9 +350,7 @@ def _record_content_type(record: dict[str, Any]) -> str | None:
 
 
 def _record_modified_at(record: dict[str, Any]) -> str:
-    return _coerce_modified_at(
-        record.get("updated_at") or record.get("created_at") or record.get("last_accessed_at")
-    )
+    return _coerce_modified_at(record.get("updated_at") or record.get("created_at") or record.get("last_accessed_at"))
 
 
 def _info_from_list_record(
@@ -499,6 +492,60 @@ def upload_artifact_object(
         len(content),
     )
     return normalized_path
+
+
+def create_artifact_object_if_absent(
+    object_path: str,
+    content: bytes,
+    *,
+    content_type: str | None = None,
+    client: httpx.Client | None = None,
+) -> Literal["created", "exists"]:
+    """Create an exact object without overwriting an existing copy.
+
+    Supabase Storage has returned both 400 and 409 for create-only conflicts.
+    The response body is intentionally neither parsed nor logged. A conflict
+    status is classified as ``exists`` only after an exact-path existence
+    probe succeeds; otherwise the original HTTP failure is raised.
+    """
+    normalized_path = normalize_object_path(object_path)
+    config = _load_config()
+    if config is None:
+        raise RuntimeError("Supabase artifact store is not configured")
+
+    url = _object_url(config, normalized_path)
+    mime_type = content_type or mimetypes.guess_type(normalized_path)[0] or "application/octet-stream"
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+        "Content-Type": mime_type,
+        "x-upsert": "false",
+        "Cache-Control": "no-cache",
+    }
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        response = http.post(url, content=content, headers=headers)
+        if response.status_code in _CREATE_ONLY_CONFLICT_STATUS_CODES and check_artifact_object_exists(normalized_path, client=http):
+            logger.info(
+                "Artifact object already exists in Supabase: bucket=%s object_path=%s",
+                config.bucket,
+                normalized_path,
+            )
+            return "exists"
+        response.raise_for_status()
+    finally:
+        if owns_client:
+            http.close()
+
+    logger.info(
+        "Created immutable artifact object in Supabase: bucket=%s object_path=%s bytes=%d",
+        config.bucket,
+        normalized_path,
+        len(content),
+    )
+    return "created"
 
 
 def _list_page(
@@ -876,9 +923,7 @@ def download_artifact(
         response.raise_for_status()
         return (
             response.content,
-            response.headers.get("content-type")
-            or mimetypes.guess_type(filename)[0]
-            or "application/octet-stream",
+            response.headers.get("content-type") or mimetypes.guess_type(filename)[0] or "application/octet-stream",
         )
     finally:
         if owns_client:
@@ -911,10 +956,57 @@ def download_artifact_object(
         response.raise_for_status()
         return (
             response.content,
-            response.headers.get("content-type")
-            or mimetypes.guess_type(normalized_path)[0]
-            or "application/octet-stream",
+            response.headers.get("content-type") or mimetypes.guess_type(normalized_path)[0] or "application/octet-stream",
         )
+    finally:
+        if owns_client:
+            http.close()
+
+
+def download_artifact_object_bounded(
+    object_path: str,
+    *,
+    max_bytes: int,
+    client: httpx.Client | None = None,
+) -> tuple[bytes, str] | None:
+    """Stream an explicit object while enforcing a decoded-byte ceiling."""
+
+    if not 1 <= max_bytes <= 128 * 1024 * 1024:
+        raise ValueError("object read budget must be between 1 byte and 128 MiB")
+    normalized_path = normalize_object_path(object_path)
+    config = _load_config()
+    if config is None:
+        return None
+
+    url = _object_url(config, normalized_path)
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+    }
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        with http.stream("GET", url, headers=headers) as response:
+            if response.status_code == 404:
+                return None
+            response.raise_for_status()
+            content_length = response.headers.get("content-length")
+            if content_length is not None:
+                try:
+                    declared_size = int(content_length)
+                except ValueError:
+                    declared_size = -1
+                if declared_size < 0 or declared_size > max_bytes:
+                    raise ArtifactObjectSizeError("remote object exceeds its read budget")
+            content = bytearray()
+            for chunk in response.iter_bytes():
+                if len(content) + len(chunk) > max_bytes:
+                    raise ArtifactObjectSizeError("remote object exceeds its read budget")
+                content.extend(chunk)
+            return (
+                bytes(content),
+                response.headers.get("content-type") or mimetypes.guess_type(normalized_path)[0] or "application/octet-stream",
+            )
     finally:
         if owns_client:
             http.close()
@@ -972,6 +1064,39 @@ def check_artifact_object_exists(
     finally:
         if owns_client:
             http.close()
+
+
+class SupabaseImmutableObjectStore:
+    """Supabase-backed implementation of the deck-quality snapshot protocol."""
+
+    def __init__(self, *, client: httpx.Client | None = None) -> None:
+        self._client = client
+
+    def create_if_absent(
+        self,
+        object_path: str,
+        content: bytes,
+        *,
+        content_type: str,
+    ) -> Literal["created", "exists"]:
+        return create_artifact_object_if_absent(
+            object_path,
+            content,
+            content_type=content_type,
+            client=self._client,
+        )
+
+    def read(self, object_path: str) -> bytes | None:
+        stored = download_artifact_object(object_path, client=self._client)
+        return stored[0] if stored is not None else None
+
+    def read_bounded(self, object_path: str, *, max_bytes: int) -> bytes | None:
+        stored = download_artifact_object_bounded(
+            object_path,
+            max_bytes=max_bytes,
+            client=self._client,
+        )
+        return stored[0] if stored is not None else None
 
 
 def list_upload_filenames(

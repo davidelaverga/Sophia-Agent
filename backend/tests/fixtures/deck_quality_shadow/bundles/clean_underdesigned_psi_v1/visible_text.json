@@ -1,0 +1,27 @@
+[
+  {
+    "selector": "slide:1",
+    "source_hash": "c2b2a6b028fe754ed700752341428b5d9c4bbbb0d65b9178108eae2039c103df",
+    "text": "Motivation is the\ncontrol signal for\nautonomous agents.\nNot a mood layer bolted onto reasoning — a PSI-derived architecture where competing motives arbitrate every action an agent takes.\nPSI Agent Architecture — briefing for product & engineering leaders"
+  },
+  {
+    "selector": "slide:2",
+    "source_hash": "6a2c9298dc2dc638305dd6c23f77016bfdafba51c01c615c9d17cb40784b5f5e",
+    "text": "Perception → Appraisal → Motives → Action\nPerception\nSense the environment and prior outcomes; form situational state.\nAppraisal\nEvaluate the state against standing needs and current urgency.\nMotives\nCompeting goals are weighted; one motive gains control priority.\nAction\nThe winning motive executes; outcome becomes new perception.\nFeedback: outcomes re-enter perception on the next cycle"
+  },
+  {
+    "selector": "slide:3",
+    "source_hash": "dd2bdb7ec7a93cd7a045fc98cf5387dd9e6e9c059a76513da7d8ea5140e57fad",
+    "text": "Scenario: delete-all-records request\nA user asks the agent to delete every record in a shared workspace, right now, no confirmation.\nMotive: Helpfulness\nWeight rises from user urgency and directness of the request. Pulls toward immediate execution.\nMotive: Caution\nWeight rises sharply because the action is irreversible and destructive. Pulls toward verification.\nvs\nResolution: Caution wins on irreversibility, not on rules\nAgent asks for explicit confirmation before deleting. The action selected is the one the highest-weighted motive licenses — not a fixed policy branch."
+  },
+  {
+    "selector": "slide:4",
+    "source_hash": "e1f2c10e7226ba4053e38a303bfd933340cb720dbba23084b75935606d0199ef",
+    "text": "What changes when motives govern action\nBaseline prompt-and-tool agent\nPSI motivation-governed agent\nAction selection\nRanked by prompt heuristics or tool priority order\nArbitrated by weighted, competing motive strength\nFailure under pressure\nBrittle: one dominant instruction overrides context\nGraceful: urgency and caution rebalance dynamically\nArbitration mechanism\nNone — first satisfying output wins\nExplicit motive weights, inspectable and tunable\nDebuggability\nOpaque prompt tracing, hard to reproduce\nMotive trace log shows why an action won"
+  },
+  {
+    "selector": "slide:5",
+    "source_hash": "2de555a4bdad779326c368b0d4356e8cff7f5dc34ae5cce2d9e6cfa2ce3c27f9",
+    "text": "Four questions before you ship\n1. Can you name every motive in the agent, explicitly?\n2. Do competing motives have inspectable, tunable weights?\n3. Does the loop log which motive won, and why?\n4. Does caution outweigh helpfulness when actions are irreversible?\nGovern the motive, not just the words."
+  }
+]

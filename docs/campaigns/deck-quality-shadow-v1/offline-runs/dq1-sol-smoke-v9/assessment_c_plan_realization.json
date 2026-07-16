@@ -1,0 +1,173 @@
+{
+  "commitments": [
+    {
+      "commitment_id": "subject-materials",
+      "dimension": "subject_material",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The sequence visibly covers the motivation-control thesis, the perception–appraisal–motives–action loop, weighted motive arbitration, an irreversibility-driven caution override, and motive-trace logging for debuggability.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "signature",
+      "dimension": "signature",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "Functional rail-like emphasis appears on slides 1–3 and 5, but its form varies substantially; slide 4 relies on generic table rules, while slide 5 combines a long checklist rail with an additional separator. The motif therefore does not become an unmistakable deck-wide signature.",
+      "status": "partial"
+    },
+    {
+      "commitment_id": "rhythm",
+      "dimension": "rhythm",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The rendered sequence follows the promised progression: asymmetric cover, horizontal loop, split scenario and resolution, row-ruled comparison, then checklist and closing statement.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:1",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:1"
+      ],
+      "observation": "A tall ember rail anchors a stacked, left-aligned thesis block, and the right side remains intentionally open.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:2",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:2"
+      ],
+      "observation": "Four aligned horizontal nodes are joined by connectors, with one long feedback rail spanning beneath them.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:3",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:3"
+      ],
+      "observation": "Two competing-motive panels sit side by side above a full-width resolution band, clearly expressing tension and resolution.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:4",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:4"
+      ],
+      "observation": "The slide is a single two-column comparison organized by horizontal row rules and one central vertical divider, without a card grid or multiple charts.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:5",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:5"
+      ],
+      "observation": "Four checklist items are stacked above a large standalone close, but they are not four separately bordered rows; one continuous left rail groups the list instead.",
+      "status": "partial"
+    },
+    {
+      "commitment_id": "visual-medium",
+      "dimension": "visual_medium",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The render consistently uses labeled typography, geometric nodes, connectors, rules, and table-like structures rather than screenshots or image-baked diagrams. Native editability itself cannot be verified from renders.",
+      "status": "partial"
+    },
+    {
+      "commitment_id": "default-look-resistance",
+      "dimension": "default_look",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The deck avoids eyebrow labels, navigation chrome, page numbers, icon strips, dashboards, and repeated card grids. Its five compositions are visibly distinct while retaining the restrained ivory, ink, cobalt, and ember system.",
+      "status": "realized"
+    }
+  ],
+  "confidence": 0.96,
+  "criterion_scores": [
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "signature_realization",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The rail motif repeatedly serves emphasis or structure, especially on the cover, feedback loop, scenario resolution, and checklist. However, it is inconsistent in orientation and styling, is replaced by generic table rules on slide 4, and is supplemented by another separator on slide 5. It appears but does not unmistakably shape the deck's main visual identity.",
+      "score": 3
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "composition_plan_fidelity",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The rendered sequence closely realizes four fingerprints and preserves the planned variation and narrative rhythm. The closing slide retains the intended checklist-over-close hierarchy but dilutes the promised four bordered-row structure into a single continuously railed list, preventing complete fidelity.",
+      "score": 4
+    }
+  ],
+  "evaluated_selectors": [
+    "slide:1",
+    "slide:2",
+    "slide:3",
+    "slide:4",
+    "slide:5"
+  ],
+  "failure_codes": [
+    "weak_signature_realization",
+    "weak_fingerprint_realization"
+  ],
+  "schema_version": "deck-quality-plan-assessment/v4",
+  "uncertainties": [
+    {
+      "criterion_id": null,
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "kind": "evidence_limit",
+      "plausible_max_score": null,
+      "plausible_min_score": null,
+      "reason": "Rendered images and visible-text extraction can show a text-and-shape visual medium but cannot establish native PowerPoint editability, exact font sizes, or numerical contrast ratios."
+    }
+  ]
+}

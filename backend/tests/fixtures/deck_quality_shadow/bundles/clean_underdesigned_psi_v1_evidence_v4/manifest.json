@@ -1,0 +1,58 @@
+{
+  "artifact_id": "artifact_6726b07cedb246eb14a5eabf",
+  "artifact_version_id": "artifact_version_01KXKNV1DJ7B4ABS00FN20G1SK",
+  "build_id": "build_01KXKNNQ5Z9N198VCMJPDWSBJ0",
+  "contact_sheet_max_dimension": 2048,
+  "direct_evidence_budget_version": "dq1-direct-evidence-v2",
+  "evidence_preprocessor_version": "deck-evidence-v4",
+  "fixture_id": "clean_underdesigned_psi_v1_evidence_v4",
+  "raster_max_dimension": 2200,
+  "render_dimensions": {
+    "contact-sheet.png": [
+      2048,
+      792
+    ],
+    "slide-1.png": [
+      2200,
+      1238
+    ],
+    "slide-2.png": [
+      2200,
+      1238
+    ],
+    "slide-3.png": [
+      2200,
+      1238
+    ],
+    "slide-4.png": [
+      2200,
+      1238
+    ],
+    "slide-5.png": [
+      2200,
+      1238
+    ]
+  },
+  "render_hashes": {
+    "contact-sheet.png": "7d90a237e56d9c0a9a4c06a8f929b73825710964580201169768f5de15cd225e",
+    "slide-1.png": "47eb2785ee39d18387101bc9464a16c76b0d772ee039449126fd8474c1a1a102",
+    "slide-2.png": "0bbb24d048a69734db8f9030bc133a1f2fba48ff0ad805e8c744a4d81ddcf813",
+    "slide-3.png": "05a222c5e8cb256ed6369a2daeea5528ad98c14269e059fce7f33fdc118ed67f",
+    "slide-4.png": "59f260b0d619c8606904d249be6344dd517ee89e708d0d26c29a23cc791401b9",
+    "slide-5.png": "5cce1c28778f89cd4180735227f4c6b12a54b6ea3a15d7e3981a35b0f7772c09"
+  },
+  "schema_version": "deck-quality-fixture-bundle/v1",
+  "source": "synthetic production canary",
+  "source_fixture_id": "clean_underdesigned_psi_v1",
+  "source_hashes": {
+    "artifact.pptx": "1e9b3a8f1b6605c60388bcb0ade3cb35574428de5929553dbb4c76a7a76b2bd4",
+    "brief.json": "03bd27085bfbb8d641202ec9a52596d286bd5dc2c44b65ba95111a70921d3e1b",
+    "creative_plan.json": "43fce3c6aadd834aa58bfcb206bda770cd341b4a01afb00273abf5e2684bc351",
+    "deck_stylesheet": "6490a8a464189622d4b11c79e166feab10a3b5714dc582e3b791be6e0b09330c",
+    "design_plan.json": "c2e430c3d01a324d8e7e703d5db21738402c56138b1e644a121237d30974ef4f",
+    "mechanical_report.json": "4e064d4daf121d5e808d14320675d5d7489e6db7e12a4148c78ef888d85124a6",
+    "slides_input": "3362141238d9ff3f42a4396807518aa42e638348ee9ee26f810c850cbc045cdb"
+  },
+  "trace_id": "019f675a-dcc1-7053-80dc-c6f572fb4d87",
+  "trace_run_count": 155
+}

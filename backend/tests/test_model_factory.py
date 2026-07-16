@@ -98,6 +98,22 @@ def test_raises_when_model_not_found(monkeypatch):
         factory_module.create_chat_model(name="ghost-model")
 
 
+def test_attach_tracing_false_is_not_forwarded_and_skips_tracer(monkeypatch):
+    cfg = _make_app_config([_make_model("private-payload-model")])
+    monkeypatch.setattr(factory_module, "get_app_config", lambda: cfg)
+    monkeypatch.setattr(factory_module, "resolve_class", lambda path, base: FakeChatModel)
+    monkeypatch.setattr(factory_module, "is_tracing_enabled", lambda: True)
+
+    FakeChatModel.captured_kwargs = {}
+    model = factory_module.create_chat_model(
+        name="private-payload-model",
+        attach_tracing=False,
+    )
+
+    assert "attach_tracing" not in FakeChatModel.captured_kwargs
+    assert not model.callbacks
+
+
 # ---------------------------------------------------------------------------
 # thinking_enabled=True
 # ---------------------------------------------------------------------------

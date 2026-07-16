@@ -1,0 +1,12 @@
+{
+  "audience": "AI product and engineering leaders",
+  "explicit_brand_style_constraints": [
+    "restrained editorial system",
+    "warm ivory, ink, muted cobalt, and one ember accent",
+    "native editable text and shapes"
+  ],
+  "goal": "Convince leaders that motivation-based arbitration, not prompt heuristics, is the correct control layer for reliable agent behavior",
+  "request": "[presentation] Build one editable 5-slide PowerPoint presentation for AI product and engineering leaders. Topic: PSI agent architecture and motivation as control signal. Canary ID: CANARY-F05EFB3A.\n\nNARRATIVE STRUCTURE:\n1. Cover slide — Decisive thesis on motivation as control signal for AI agents\n2. Control-loop diagram — Native perception → appraisal → motives → action loop, clearly labeled and spatially clean\n3. Worked scenario — Competing motives and action selection in a concrete example\n4. Engineering lessons — Single comparison visual (not dashboard) showing LLM-based agent lessons vs baseline\n5. Decision checklist and memorable close\n\nDESIGN SYSTEM:\n- Color palette: Warm ivory (background/primary), ink (text/structure), muted cobalt (secondary), one ember accent (emphasis only)\n- Restrained editorial system—clean, spatial, distinct composition per slide\n- Native editable text and shapes only—no screenshots, no text baked into images\n- No eyebrow/kicker labels, navigation rows, recurring template chrome, page numbers, footers, icon strips, or dense card grids\n\nTYPOGRAPHY & CONTRAST:\n- Body and narrative text: minimum 24px\n- Compact optional labels: minimum 20px\n- Contrast ratio: minimum 4.5:1 on all text\n- Vertical slack in text boxes (no tight framing)\n- Exact alignment of connectors and peer shapes\n- Zero clipping, overflow, overlap, or misalignment\n\nDELIVERABLE:\n- Format: Editable .pptx (PowerPoint)\n- Run every presentation quality check before delivery\n- Deliver only if all gates pass (typography, contrast, alignment, editability, visual hierarchy, narrative clarity)\n- This is a fresh build—do not reuse or modify any prior task\n- No follow-up questions; build and deliver the .pptx directly",
+  "subject": "PSI agent architecture and motivation as a control signal for autonomous agents",
+  "viewing_context": "Projected in a technical product review; also reviewed asynchronously on a laptop"
+}

@@ -1,0 +1,349 @@
+{
+  "confidence": 0.95,
+  "coverage_confirmed": true,
+  "criterion_scores": [
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "rendered_readability",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "Core messages and relationships are immediately legible in the individual renders. Type has strong contrast, comfortable line spacing, and uncluttered grouping, including the denser comparison page.",
+      "score": 5
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "narrative_arc_and_pacing",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The sequence clearly progresses from thesis to loop, scenario, engineering comparison, and decision questions. However, the close only lists checks and adds a slogan rather than visibly synthesizing the preceding argument, establishing the score-3 closing defect.",
+      "score": 3
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "subject_specificity",
+      "evidence_selectors": [
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "PSI vocabulary and the destructive-action example are specific, but the counterfactual substitution test exposes a transferable visual system: process boxes, versus containers, a comparison table, and a checklist could carry an unrelated technical subject with little structural change.",
+      "score": 3
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "visual_hierarchy",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "Scale, placement, contrast, and grouping consistently identify the headline, primary relationship, and emphasized conclusion. The selected motive, preferred comparison entry, and fourth checklist question are especially clear.",
+      "score": 5
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "structural_variety_and_sequence_rhythm",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The cover, horizontal loop, competing-motive scenario, comparison table, and checklist are visibly distinct compositions matched to their respective beats while retaining a coherent palette and typographic system.",
+      "score": 5
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "typography_and_consistency",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The serif headline and sans-serif explanatory system is consistent, controlled, and expressive. Measures and wraps are clean, and emphasis is applied selectively without visible clipping or crowded text boxes.",
+      "score": 5
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "composition_and_space",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "Alignment and spacing are orderly, with particularly strong balance on the cover and scenario. Across the sequence, however, several layouts remain conservative and leave large lower or right-side areas underactivated, producing limited spatial tension.",
+      "score": 3
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "visual_medium_choice_and_integration",
+      "evidence_selectors": [
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The process, scenario, comparison, and checklist formats communicate the basics, but the mechanism views are literal. Neither the control loop nor worked example reveals motive weights or arbitration dynamics beyond prose, and the feedback line does not visibly complete a loop.",
+      "score": 3
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "audience_fit",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The deck uses concise architecture language, an irreversible-action case, inspectable weights, trace logging, debugging, and a ship checklist that are visibly tuned to AI product and engineering leadership review.",
+      "score": 5
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "restraint_and_anti_slop",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The presentation avoids decorative effects, icon strips, recurring chrome, gradients, and dense card grids. Rules, borders, and accent color are sparse and consistently tied to structure or emphasis.",
+      "score": 5
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "memorability_and_forward_momentum",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The opening thesis and caution-versus-helpfulness scenario provide recognizable moments, but most visual treatments remain predictable, and the checklist close does not resolve them into a distinctive final image.",
+      "score": 3
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "explicit_user_taste_fit",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The visible deck strongly honors the requested warm-ivory editorial palette, restraint, and distinct slide compositions. It falls short of full compliance because the cover includes a bottom footer-like caption despite the explicit no-footer direction.",
+      "score": 4
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "default_look_gravity",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The requested cream editorial direction is recognizably and consistently applied, but most slides still rely on familiar technology-deck patterns. The visual language does not become specific enough to PSI motivation arbitration to exceed the score-3 anchor.",
+      "score": 3
+    }
+  ],
+  "deck_failure_codes": [
+    "weak_closing_synthesis",
+    "weak_subject_specificity",
+    "weak_spatial_tension",
+    "weak_mechanism_visualization",
+    "weak_memorability",
+    "explicit_taste_mismatch",
+    "default_look_gravity"
+  ],
+  "evaluated_selectors": [
+    "slide:1",
+    "slide:2",
+    "slide:3",
+    "slide:4",
+    "slide:5"
+  ],
+  "overall_impression": "A polished, highly legible editorial deck with a decisive thesis, coherent progression, and disciplined palette. Its main limitation is that the subject is carried more by precise copy than by distinctive explanatory visuals: the mechanism is rendered as familiar boxes, comparisons, and lists, and the close remains a checklist plus slogan rather than a visual synthesis.",
+  "schema_version": "deck-quality-blind-assessment/v4",
+  "slide_findings": [
+    {
+      "code": "explicit_taste_mismatch",
+      "evidence_selectors": [
+        "slide:1"
+      ],
+      "observation": "The bottom caption functions visually as a footer despite the explicit prohibition on footers."
+    },
+    {
+      "code": "weak_mechanism_visualization",
+      "evidence_selectors": [
+        "slide:2"
+      ],
+      "observation": "The architecture is represented as a literal row of labeled boxes; the feedback rule does not visibly return to perception with a directional loop, so arbitration dynamics remain largely textual."
+    },
+    {
+      "code": "weak_mechanism_visualization",
+      "evidence_selectors": [
+        "slide:3"
+      ],
+      "observation": "The scenario names rising motive weights and a winner but provides no visual scale, weight comparison, or arbitration state; two outlined containers carry most of the explanation."
+    },
+    {
+      "code": "weak_closing_synthesis",
+      "evidence_selectors": [
+        "slide:5"
+      ],
+      "observation": "The final page presents four questions and a slogan but does not visually compress or transform the architecture, scenario, and engineering comparison into a concluding model."
+    },
+    {
+      "code": "weak_subject_specificity",
+      "evidence_selectors": [
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The process boxes, versus layout, comparison table, and numbered checklist could support another technical-control topic with limited structural change; topic-specific copy provides most of the specificity."
+    },
+    {
+      "code": "weak_spatial_tension",
+      "evidence_selectors": [
+        "slide:2",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "Several pages are orderly but conservative, leaving broad lower or right-side canvas areas without a strong compositional role."
+    },
+    {
+      "code": "weak_memorability",
+      "evidence_selectors": [
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The thesis and scenario are clear, but familiar box, table, and list treatments do not accumulate into a distinctive subject-specific visual image."
+    },
+    {
+      "code": "default_look_gravity",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The serif-led cream editorial treatment is coherent and requested, yet the underlying compositions remain familiar presentation patterns rather than a visual world unique to PSI motivation arbitration."
+    }
+  ],
+  "strengths": [
+    {
+      "code": "coherent_editorial_system",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "Warm ivory, ink, muted cobalt, and ember are applied consistently with restrained rules, borders, and ample negative space."
+    },
+    {
+      "code": "clear_hierarchy",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "Large serif headlines, concise supporting text, and selective ember emphasis establish an immediate reading order throughout."
+    },
+    {
+      "code": "clear_control_sequence",
+      "evidence_selectors": [
+        "slide:2"
+      ],
+      "observation": "The four control stages are cleanly aligned and labeled, making the basic left-to-right sequence immediately understandable."
+    },
+    {
+      "code": "concrete_worked_example",
+      "evidence_selectors": [
+        "slide:3"
+      ],
+      "observation": "The destructive-action scenario makes competing motives and the selected outcome tangible for the stated audience."
+    },
+    {
+      "code": "audience_relevant_comparison",
+      "evidence_selectors": [
+        "slide:4"
+      ],
+      "observation": "The baseline-versus-PSI comparison focuses on action selection, pressure, inspectability, and debugging—concerns relevant to product and engineering leaders."
+    }
+  ],
+  "uncertainties": [
+    {
+      "criterion_id": "rendered_readability",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "kind": "evidence_limit",
+      "plausible_max_score": null,
+      "plausible_min_score": null,
+      "reason": "Exact font sizes and numerical contrast ratios cannot be verified from rendered pixels alone; the visual assessment is based on apparent presentation-scale legibility and contrast."
+    },
+    {
+      "criterion_id": "explicit_user_taste_fit",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "kind": "evidence_limit",
+      "plausible_max_score": null,
+      "plausible_min_score": null,
+      "reason": "Native editability and the use of editable text and shapes cannot be established from the supplied renders or visible-text sidecar."
+    }
+  ]
+}

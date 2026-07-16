@@ -1,0 +1,179 @@
+schema_version: deck-quality-rubric/v1
+version: deck-rubric-v2
+criteria:
+  - id: rendered_readability
+    assessment: blind_visual
+    critical: true
+    weight: 1.0
+    failure_codes: [rendered_readability_failure]
+    score_anchors:
+      1: Required text or visual relationships cannot be read at presentation scale on multiple slides.
+      3: Required content is readable, but small type, weak contrast, or crowded grouping creates visible strain.
+      5: Every required message and relationship is immediately legible at presentation scale with comfortable hierarchy.
+    source_refs: [hands-on-deck/designing-slides, hands-on-deck/create-judge, sophia/deck-craft]
+  - id: narrative_arc_and_pacing
+    assessment: blind_visual
+    critical: true
+    weight: 1.0
+    failure_codes: [weak_narrative_arc, weak_closing_synthesis]
+    score_anchors:
+      1: Slides behave as disconnected pages or repeat one beat without a meaningful opening, development, and close.
+      3: The sequence is understandable but transitions or the close are generic and momentum is uneven.
+      5: Each page turn advances a deliberate argument whose opening, escalation, and synthesis are visually apparent.
+    source_refs: [hands-on-deck/designing-slides, hallmark/macrostructures, sophia/deck-craft]
+  - id: subject_specificity
+    assessment: blind_visual
+    critical: true
+    weight: 1.0
+    failure_codes: [weak_subject_specificity]
+    score_anchors:
+      1: The deck could accept an unrelated subject with little meaningful change to structure, motifs, diagrams, or material language.
+      3: Some subject vocabulary or motifs appear, but the main visual system remains generic and transferable.
+      5: Materials, diagram language, motifs, and sequence are inseparable from this subject and audience.
+    source_refs: [hands-on-deck/designing-slides, hallmark/custom-craft, sophia/deck-craft]
+  - id: visual_hierarchy
+    assessment: blind_visual
+    critical: true
+    weight: 1.0
+    failure_codes: [weak_visual_hierarchy]
+    score_anchors:
+      1: Competing elements obscure what to notice first and key relationships are visually ambiguous.
+      3: The intended reading order is recoverable but emphasis is inconsistent or several slides feel flat.
+      5: Scale, placement, contrast, and grouping make the reading order and key relationship immediate on every slide.
+    source_refs: [hands-on-deck/create-judge, impeccable/layout, hallmark/layout-and-space]
+  - id: structural_variety_and_sequence_rhythm
+    assessment: blind_visual
+    critical: true
+    weight: 1.0
+    failure_codes: [low_sequence_rhythm, repetitive_structure]
+    score_anchors:
+      1: Nearly every slide repeats the same container or card-grid composition regardless of content.
+      3: A few layouts vary, but the sequence still settles into a predictable template rhythm.
+      5: Distinct compositions fit each content beat while maintaining a coherent and intentional sequence rhythm.
+    source_refs: [hands-on-deck/designing-slides, hallmark/structure, sophia/deck-craft]
+  - id: signature_realization
+    assessment: plan_realization
+    critical: true
+    weight: 1.0
+    failure_codes: [weak_signature_realization]
+    score_anchors:
+      1: The promised signature is absent or survives only as generic decoration with no memorable function.
+      3: The signature appears, but inconsistently or without shaping the deck's main visual identity.
+      5: The promised signature is unmistakable, functional, and memorable across the sequence without becoming chrome.
+    source_refs: [sophia/deck-craft, hallmark/custom-craft, hands-on-deck/edit-judge]
+  - id: typography_and_consistency
+    assessment: blind_visual
+    critical: false
+    weight: 1.0
+    failure_codes: [weak_typography, inconsistent_typography]
+    score_anchors:
+      1: Type choices, sizing, wrapping, or alignment repeatedly impede reading and feel uncontrolled.
+      3: Typography is serviceable and mostly consistent but has visible weak wraps, density, or hierarchy lapses.
+      5: Type scale, measure, wrapping, and alignment are controlled, expressive, and consistent with the content system.
+    source_refs: [hands-on-deck/create-judge, hallmark/typography, impeccable/polish]
+  - id: composition_and_space
+    assessment: blind_visual
+    critical: false
+    weight: 1.0
+    failure_codes: [weak_composition, weak_spatial_tension]
+    score_anchors:
+      1: Elements appear accidentally placed, cramped, stranded, or balanced by empty space with no compositional purpose.
+      3: Layouts are orderly but conservative, with limited tension or uneven use of the canvas.
+      5: Alignment, scale, density, and negative space create deliberate balance and spatial energy appropriate to each beat.
+    source_refs: [impeccable/layout, hallmark/layout-and-space, hands-on-deck/edit-judge]
+  - id: visual_medium_choice_and_integration
+    assessment: blind_visual
+    critical: false
+    weight: 1.0
+    failure_codes: [weak_mechanism_visualization, mismatched_visual_medium]
+    score_anchors:
+      1: Content that needs a diagram, comparison, or evidence view is reduced to prose or generic boxes without explanatory structure.
+      3: The chosen medium communicates the basics but is literal, weakly integrated, or misses a more revealing representation.
+      5: Diagrams, native shapes, imagery, tables, or text-led treatments are chosen per content need and integrated into one visual argument.
+    source_refs: [hands-on-deck/designing-slides, hallmark/structure, sophia/deck-craft]
+  - id: audience_fit
+    assessment: blind_visual
+    critical: false
+    weight: 1.0
+    failure_codes: [weak_audience_fit]
+    score_anchors:
+      1: Density, vocabulary, evidence, or tone visibly conflicts with the stated audience and viewing context.
+      3: The deck is broadly appropriate but could be shown to many audiences with little adjustment.
+      5: Information density, examples, tone, and visual framing are clearly tuned to this audience and use setting.
+    source_refs: [hands-on-deck/create-judge, sophia/deck-craft]
+  - id: restraint_and_anti_slop
+    assessment: blind_visual
+    critical: false
+    weight: 1.0
+    failure_codes: [deck_neon_cyber_default, decorative_slop, dense_card_grid]
+    score_anchors:
+      1: Repeated chrome, decorative effects, icon strips, gratuitous gradients, or dense cards overwhelm the message.
+      3: The deck is mostly restrained but retains a few generic flourishes or unnecessary containers.
+      5: Every visual device earns its place; the deck is controlled without becoming timid, sterile, or style-policed.
+    source_refs: [hallmark/anti-patterns, hallmark/slop-test, impeccable/quieter]
+  - id: memorability_and_forward_momentum
+    assessment: blind_visual
+    critical: false
+    weight: 1.0
+    failure_codes: [weak_memorability, weak_forward_momentum]
+    score_anchors:
+      1: No slide creates a distinctive mental image and the sequence feels static or interchangeable.
+      3: One or two moments stand out, but much of the deck remains predictable and the close dissipates.
+      5: Distinct visual moments accumulate across page turns and resolve in a concise, memorable final synthesis.
+    source_refs: [hands-on-deck/designing-slides, impeccable/bolder, hallmark/macrostructures]
+  - id: explicit_user_taste_fit
+    assessment: blind_visual
+    critical: false
+    weight: 1.0
+    failure_codes: [explicit_taste_mismatch]
+    score_anchors:
+      1: The visible result materially contradicts explicit current-request brand, style, or format constraints.
+      3: The requested direction is recognizable but applied superficially or inconsistently.
+      5: The result visibly honors the explicit direction while adapting it intelligently to the presentation content.
+    source_refs: [hands-on-deck/edit-judge, impeccable/critique, controller/precedence]
+  - id: composition_plan_fidelity
+    assessment: plan_realization
+    critical: false
+    weight: 1.0
+    failure_codes: [composition_plan_not_realized, weak_fingerprint_realization]
+    score_anchors:
+      1: Promised per-slide fingerprints and composition rationales are absent or collapse into one repeated layout.
+      3: Several planned structures are visible, but important commitments are diluted or inconsistently realized.
+      5: The rendered sequence realizes the promised fingerprints and rationales while remaining visually coherent.
+    source_refs: [sophia/deck-craft, hands-on-deck/designing-slides, hands-on-deck/edit-judge]
+  - id: default_look_gravity
+    assessment: blind_visual
+    critical: false
+    weight: 1.0
+    failure_codes: [default_look_gravity]
+    score_anchors:
+      1: The deck falls into a generic transferable template despite content or explicit direction that calls for a distinct visual world.
+      3: Some custom choices resist the default, but most slides still rely on familiar editorial or technology-deck patterns.
+      5: The deck has a specific visual world; any minimal, dark, cream, gradient, table-led, or text-led choices are visibly requested or content-justified.
+    source_refs: [hallmark/custom-craft, hallmark/anti-patterns, controller/precedence]
+source_rules:
+  - {id: hod_sequence_as_argument, classification: visual_judge_criterion, source_ref: third_party/hands_on_deck/skills/hands-on-deck/designing-slides.md, criterion_id: narrative_arc_and_pacing}
+  - {id: hod_slide_specific_composition, classification: visual_judge_criterion, source_ref: third_party/hands_on_deck/skills/hands-on-deck/designing-slides.md, criterion_id: structural_variety_and_sequence_rhythm}
+  - {id: hod_create_readability, classification: visual_judge_criterion, source_ref: third_party/hands_on_deck/evals/judges/create-judge.md, criterion_id: rendered_readability}
+  - {id: hod_create_hierarchy, classification: visual_judge_criterion, source_ref: third_party/hands_on_deck/evals/judges/create-judge.md, criterion_id: visual_hierarchy}
+  - {id: hod_edit_intent_fidelity, classification: plan_realization_criterion, source_ref: third_party/hands_on_deck/evals/judges/edit-judge.md, criterion_id: composition_plan_fidelity}
+  - {id: impeccable_layout_balance, classification: visual_judge_criterion, source_ref: third_party/impeccable/reference/layout.md, criterion_id: composition_and_space}
+  - {id: impeccable_critique_specificity, classification: visual_judge_criterion, source_ref: third_party/impeccable/reference/critique.md, criterion_id: explicit_user_taste_fit}
+  - {id: impeccable_bolder_momentum, classification: visual_judge_criterion, source_ref: third_party/impeccable/reference/bolder.md, criterion_id: memorability_and_forward_momentum}
+  - {id: impeccable_quieter_restraint, classification: visual_judge_criterion, source_ref: third_party/impeccable/reference/quieter.md, criterion_id: restraint_and_anti_slop}
+  - {id: impeccable_polish_typography, classification: visual_judge_criterion, source_ref: third_party/impeccable/reference/polish.md, criterion_id: typography_and_consistency}
+  - {id: hallmark_custom_craft, classification: visual_judge_criterion, source_ref: skills/public/hallmark/references/custom-craft.md, criterion_id: subject_specificity}
+  - {id: hallmark_macrostructure, classification: visual_judge_criterion, source_ref: skills/public/hallmark/references/macrostructures.md, criterion_id: narrative_arc_and_pacing}
+  - {id: hallmark_slop_detection, classification: visual_judge_criterion, source_ref: skills/public/hallmark/references/slop-test.md, criterion_id: restraint_and_anti_slop}
+  - {id: sophia_signature_promise, classification: plan_realization_criterion, source_ref: skills/public/sophia/deck_craft.md, criterion_id: signature_realization}
+  - {id: d211_native_text, classification: deterministic_mechanical_gate, source_ref: specs/sophia_spec_D2_1_1_deck_craft_contract_mechanical_fidelity.md}
+  - {id: d211_contrast_overflow, classification: deterministic_mechanical_gate, source_ref: specs/sophia_spec_D2_1_1_deck_craft_contract_mechanical_fidelity.md}
+  - {id: controller_blindness, classification: controller_invariant, source_ref: specs/sophia_campaign_DQ1_production_shadow_rendered_deck_quality.md}
+  - {id: controller_no_mutation, classification: controller_invariant, source_ref: specs/sophia_campaign_DQ1_production_shadow_rendered_deck_quality.md}
+  - {id: targeted_repair_methods, classification: future_repair_technique, source_ref: specs/sophia_spec_D3_deck_evaluation_rubric_loop.md}
+  - {id: explicit_brand_exception, classification: deck_inapplicable_exclusion, source_ref: specs/sophia_campaign_DQ1_production_shadow_rendered_deck_quality.md, criterion_id: default_look_gravity}
+  - {id: minimal_text_led_exception, classification: deck_inapplicable_exclusion, source_ref: specs/sophia_campaign_DQ1_production_shadow_rendered_deck_quality.md, criterion_id: visual_medium_choice_and_integration}
+adjudication:
+  schema_version: deck-quality-adjudication/v1
+  critical_score_floor: 4
+  min_weighted_score: 3.5

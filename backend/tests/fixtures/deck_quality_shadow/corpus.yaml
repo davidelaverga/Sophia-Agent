@@ -1,0 +1,28 @@
+schema_version: deck-quality-corpus/v1
+fixtures:
+  - id: clean_underdesigned_psi_v1
+    category: clean_underdesigned
+    artifact_path: bundles/clean_underdesigned_psi_v1/artifact.pptx
+    render_dir: bundles/clean_underdesigned_psi_v1/renders
+    brief_path: bundles/clean_underdesigned_psi_v1/brief.json
+    creative_plan_path: bundles/clean_underdesigned_psi_v1/creative_plan.json
+    design_plan_path: bundles/clean_underdesigned_psi_v1/design_plan.json
+    mechanical_report_path: bundles/clean_underdesigned_psi_v1/mechanical_report.json
+    manifest_path: bundles/clean_underdesigned_psi_v1/manifest.json
+    visible_text_path: bundles/clean_underdesigned_psi_v1/visible_text.json
+    expected:
+      verdict: needs_revision
+      mechanical: passed
+      expected_strengths:
+        - clear hierarchy
+        - readable typography
+        - coherent content arc
+        - native editability
+      required_failure_codes:
+        - default_look_gravity
+        - weak_subject_specificity
+        - weak_signature_realization
+        - low_sequence_rhythm
+        - weak_closing_synthesis
+      expected_selectors: [slide:2, slide:3, slide:5]
+    label_source: supplied_by_campaign_spec

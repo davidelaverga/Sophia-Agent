@@ -1,0 +1,72 @@
+{
+  "adaptive_downsample": false,
+  "assessment_a": {
+    "cost_usd": "0.257465",
+    "deployment_name": "openai-gpt-5-6-sol",
+    "input_tokens": 22633,
+    "latency_ms": 56592,
+    "output_tokens": 4810,
+    "plan_hash": "1029041782dc92bf971ac1f996391274b11f40baaaf9201770cc52e94547aa05",
+    "preflight_input_tokens": 22633,
+    "preflight_payload_hash": "06b063fdba7072128339dbdbdf8dda72d71ff6c6b93c1608d34b08e585d05d97",
+    "profile_version": "v2",
+    "provider": "openai",
+    "provider_model": "gpt-5.6-sol",
+    "route_name": "deck.judge.visual",
+    "total_tokens": 27443
+  },
+  "assessment_c": {
+    "cost_usd": "0.198815",
+    "deployment_name": "openai-gpt-5-6-sol",
+    "input_tokens": 23671,
+    "latency_ms": 32931,
+    "output_tokens": 2682,
+    "plan_hash": "1029041782dc92bf971ac1f996391274b11f40baaaf9201770cc52e94547aa05",
+    "preflight_input_tokens": 23671,
+    "preflight_payload_hash": "01dbdf18912e08a9c76c064742f89a4870b1de25710e8e81a1163711f0b16a96",
+    "profile_version": "v2",
+    "provider": "openai",
+    "provider_model": "gpt-5.6-sol",
+    "route_name": "deck.judge.visual",
+    "total_tokens": 26353
+  },
+  "assessment_c_error": null,
+  "assessment_c_skipped_reason": null,
+  "configured_cost_cap_usd": "0.60",
+  "contact_sheet_image_detail": "high",
+  "cost_preflight": {
+    "admitted": true,
+    "assessment_a": {
+      "input_tokens": 22633,
+      "payload_hash": "06b063fdba7072128339dbdbdf8dda72d71ff6c6b93c1608d34b08e585d05d97"
+    },
+    "assessment_c": {
+      "input_tokens": 23671,
+      "payload_hash": "01dbdf18912e08a9c76c064742f89a4870b1de25710e8e81a1163711f0b16a96"
+    },
+    "projected_max_cost_usd": "0.591520"
+  },
+  "evidence_preprocessor_version": "deck-evidence-v4",
+  "fixture_id": "clean_underdesigned_psi_v1_evidence_v4",
+  "image_count_per_assessment": 6,
+  "individual_slide_image_detail": "original",
+  "judge_invoker_version": "deck-judge-invoker-v4",
+  "lossless_png_inputs": true,
+  "model": "gpt-5.6-sol",
+  "previous_response_reused": false,
+  "pricing_source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+  "profile_version": "v2",
+  "quality_run_id": "quality_fad93a9e830a2c8a198c4eadfd7e9540073674c41ec85859150094fd05549087",
+  "reasoning": {
+    "context": "current_turn",
+    "effort": "high",
+    "mode": "standard"
+  },
+  "resume_assessment_a": false,
+  "route": "deck.judge.visual",
+  "safety_identifier_present": true,
+  "schema_version": "deck-quality-smoke-metrics/v2",
+  "store": false,
+  "structured_output_method": "json_schema_strict",
+  "total_cost_usd": "0.456280"
+}

@@ -1,0 +1,61 @@
+{
+  "authoritative_record_hash": "4e064d4daf121d5e808d14320675d5d7489e6db7e12a4148c78ef888d85124a6",
+  "checks": [
+    {
+      "check_id": "authoritative_gate",
+      "failure_codes": [],
+      "selectors": [],
+      "status": "passed"
+    },
+    {
+      "check_id": "source_retention",
+      "failure_codes": [],
+      "selectors": [],
+      "status": "passed"
+    },
+    {
+      "check_id": "native_editability",
+      "failure_codes": [],
+      "selectors": [],
+      "status": "passed"
+    },
+    {
+      "check_id": "contrast",
+      "failure_codes": [],
+      "selectors": [],
+      "status": "passed"
+    },
+    {
+      "check_id": "native_lint",
+      "failure_codes": [],
+      "selectors": [],
+      "status": "passed"
+    },
+    {
+      "check_id": "overflow_collision_clipping",
+      "failure_codes": [],
+      "selectors": [],
+      "status": "passed"
+    },
+    {
+      "check_id": "render_success",
+      "failure_codes": [],
+      "selectors": [],
+      "status": "passed"
+    },
+    {
+      "check_id": "visual_asset_completeness",
+      "failure_codes": [],
+      "selectors": [],
+      "status": "passed"
+    },
+    {
+      "check_id": "artifact_identity",
+      "failure_codes": [],
+      "selectors": [],
+      "status": "passed"
+    }
+  ],
+  "schema_version": "deck-quality-mechanical-projection/v1",
+  "status": "passed"
+}

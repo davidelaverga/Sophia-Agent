@@ -1,3 +1,8 @@
+> [!WARNING]
+> **Historical / superseded draft.** Retained for provenance only. Do not
+> implement this draft verbatim where it conflicts with D3.2 Rendered Taste
+> Judge or Campaign DQ-1. The technical body below is intentionally unchanged.
+
 # Spec D3 — Deck Evaluation Loop: deterministic gates + rubric judge + repair
 
 Status: draft, implementation-ready  

@@ -28,6 +28,11 @@ services:
       # ppt-generation workflow execute inside sophia-langgraph, not gateway.
       - key: OPENAI_API_KEY
         sync: false
+      # DQ-1 accepts only the dedicated synthetic production identity. The
+      # value is intentionally dashboard-managed and shared with the gateway
+      # for duplicate scope checks; it contains no ordinary-user IDs.
+      - key: SOPHIA_DECK_QUALITY_CANARY_USER_IDS
+        sync: false
       - key: MEM0_API_KEY
         sync: false
       - key: SOPHIA_SESSION_STORE
@@ -47,6 +52,10 @@ services:
       - key: SUPABASE_BUILDER_BUCKET
         value: sophia-builder-artifacts
       - key: SOPHIA_GATEWAY_URL
+        sync: false
+      # Shared with sophia-gateway. Signs exact DQ-1 publication-admission
+      # bytes only; baseline terminal delivery remains independent.
+      - key: SOPHIA_BUILDER_EVENTS_HMAC_SECRET
         sync: false
       # Keep global LangSmith autotracing off; Sophia builder tracing is attached
       # explicitly via graph callbacks below. Secrets are set in the Render
@@ -143,6 +152,15 @@ services:
       - key: STREAM_API_SECRET
         sync: false
       - key: LANGGRAPH_URL
+        sync: false
+      # Gateway performs durable request reconciliation, bounded provenance
+      # materialization, and lease dispatch. It never receives OPENAI_API_KEY,
+      # rendered judge evidence, or model-facing payloads.
+      - key: SOPHIA_DECK_QUALITY_CANARY_USER_IDS
+        sync: false
+      # Shared with sophia-langgraph for the authenticated DQ-1 publication
+      # handoff only; it is not a prerequisite for terminal delivery.
+      - key: SOPHIA_BUILDER_EVENTS_HMAC_SECRET
         sync: false
       - key: SOPHIA_VOICE_SERVER_URL
         sync: false

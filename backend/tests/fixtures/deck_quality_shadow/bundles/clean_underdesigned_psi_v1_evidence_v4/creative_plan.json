@@ -1,0 +1,223 @@
+{
+  "anti_slop_commitments": [
+    "No slide repeats another slide's box arrangement",
+    "Exactly one comparison visual, not a dashboard",
+    "No eyebrow, footer, or page numbers anywhere",
+    "Ember accent reserved strictly for emphasis, never base decoration"
+  ],
+  "audience": "AI product and engineering leaders",
+  "design_plan": {
+    "anti_slop_profile": [
+      "no repeated eyebrow or icon strip",
+      "no dashboard grid of cards",
+      "one comparison visual only, not multiple charts",
+      "varied composition per slide"
+    ],
+    "audience": "AI product and engineering leaders",
+    "goal": "Convince leaders motivation is the control layer for reliable agents",
+    "grid": {
+      "eyebrow_policy": "none",
+      "footer_policy": "none",
+      "margin_x_px": 120,
+      "margin_y_px": 90,
+      "title_y_px": 90
+    },
+    "palette": [
+      {
+        "hex": "#F5EFE3",
+        "name": "ivory",
+        "role": "slide substrate"
+      },
+      {
+        "hex": "#1C1A17",
+        "name": "ink",
+        "role": "primary text and structure"
+      },
+      {
+        "hex": "#2F4A6B",
+        "name": "cobalt",
+        "role": "secondary structure and labels"
+      },
+      {
+        "hex": "#B4472A",
+        "name": "ember",
+        "role": "emphasis accent only"
+      }
+    ],
+    "requested_style_terms": [
+      "restrained editorial",
+      "clean spatial composition"
+    ],
+    "rhythm": "cover asymmetric type block, then loop diagram, then split scenario with resolution band, then two-column comparison, then checklist close",
+    "signature": "single control rail motif marking emphasis, never repeated as decoration",
+    "source": "creative_plan",
+    "style_lane": "restrained_editorial_control_systems",
+    "subject": "PSI agent architecture and motivation as control signal",
+    "typography": {
+      "body": "Calibri",
+      "body_weight": 420,
+      "display": "Cambria",
+      "display_weight": 700
+    }
+  },
+  "goal": "Convince leaders that motivation-based arbitration, not prompt heuristics, is the correct control layer for reliable agent behavior",
+  "image_assets": [],
+  "image_strategy": "diagram_native",
+  "image_strategy_rationale": "The subject is a precise architectural mechanism (motive arbitration); native labeled shapes keep every relationship editable and legible, and the brief explicitly forbids screenshots or baked-in text",
+  "plan_critique": {
+    "final_scores": {
+      "execution_feasibility": 5,
+      "hierarchy": 5,
+      "philosophy": 4,
+      "restraint": 5,
+      "specificity": 4,
+      "variety": 5
+    },
+    "initial_scores": {
+      "execution_feasibility": 4,
+      "hierarchy": 4,
+      "philosophy": 4,
+      "restraint": 4,
+      "specificity": 3,
+      "variety": 3
+    },
+    "revision_made": "Redesigned the scenario slide with a full-width resolution band beneath two panels, the comparison slide as a single row-ruled table rather than boxed cards, removed the invented eyebrow chrome placeholder from the cover, and raised all loop-node sub-labels and the feedback label to 24px so every required descendant meets the 24px floor",
+    "weakest_point": "Initial scenario and comparison slides risked converging on the same two-column panel look as the loop slide, weakening variety; also the cover carried an unused eyebrow-space chrome element and loop-node labels were sub-minimum size"
+  },
+  "skill_refs": [
+    "hands-on-deck/designing-slides",
+    "deck-hallmark/slop-test",
+    "deck-impeccable/spacing-critique"
+  ],
+  "slide_compositions": [
+    {
+      "composition_rationale": "Left-anchored vertical ember rail plus large type block creates a decisive, uncluttered open, with no eyebrow chrome",
+      "headline_intent": "State the thesis that motivation is the control signal",
+      "image_asset_ids": [],
+      "layout_name": "asymmetric_cover",
+      "native_elements": [
+        "headline",
+        "rail",
+        "subhead",
+        "meta line"
+      ],
+      "required_element_ids": [
+        "cover-headline",
+        "cover-sub",
+        "cover-rail"
+      ],
+      "risk_notes": [],
+      "selector": "slide:1",
+      "slide_role": "cover",
+      "structural_fingerprint": "vertical ember rail at far left with stacked left-aligned type block, no right-side content"
+    },
+    {
+      "composition_rationale": "Four equal nodes in a horizontal row with connecting bars mirror a control loop; feedback bar underneath closes the cycle visually",
+      "headline_intent": "Show the four-stage motivation control loop with feedback",
+      "image_asset_ids": [],
+      "layout_name": "diagram_loop",
+      "native_elements": [
+        "headline",
+        "four diagram nodes",
+        "three connectors",
+        "feedback bar",
+        "feedback label"
+      ],
+      "required_element_ids": [
+        "node-perception",
+        "node-appraisal",
+        "node-motives",
+        "node-action",
+        "conn-feedback"
+      ],
+      "risk_notes": [
+        "connector bars aligned to node vertical centerline at top:547px"
+      ],
+      "selector": "slide:2",
+      "slide_role": "architecture",
+      "structural_fingerprint": "four horizontal boxes with connectors, single feedback bar spanning beneath"
+    },
+    {
+      "composition_rationale": "Two motive panels side by side in tension, resolved by a single banded panel beneath, differs structurally from the loop slide",
+      "headline_intent": "Ground the loop in one concrete scenario of competing motives resolving to an action",
+      "image_asset_ids": [],
+      "layout_name": "scenario_split",
+      "native_elements": [
+        "headline",
+        "setup line",
+        "two motive panels",
+        "vs mark",
+        "connector",
+        "resolution panel"
+      ],
+      "required_element_ids": [
+        "motive-help",
+        "motive-caution",
+        "resolution"
+      ],
+      "risk_notes": [],
+      "selector": "slide:3",
+      "slide_role": "evidence",
+      "structural_fingerprint": "two side-by-side panels above one full-width resolution band"
+    },
+    {
+      "composition_rationale": "One two-column table-like comparison with a single vertical divider avoids dashboard-card sameness while staying data-honest",
+      "headline_intent": "Contrast baseline agent behavior against motivation-governed agent across four engineering dimensions in one comparison, not a dashboard",
+      "image_asset_ids": [],
+      "layout_name": "single_comparison",
+      "native_elements": [
+        "headline",
+        "column headers",
+        "vertical divider",
+        "four row labels",
+        "four baseline cells",
+        "four psi cells",
+        "row rules"
+      ],
+      "required_element_ids": [
+        "row1-label",
+        "row1-base",
+        "row1-psi",
+        "row3-psi"
+      ],
+      "risk_notes": [
+        "keep exactly one comparison structure per brief restraint requirement"
+      ],
+      "selector": "slide:4",
+      "slide_role": "comparison",
+      "structural_fingerprint": "single two-column comparison with horizontal row rules and one vertical divider, no card grid"
+    },
+    {
+      "composition_rationale": "Four stacked left-border checklist rows followed by one large closing line differs from all prior slide structures and ends on synthesis",
+      "headline_intent": "Give an operational checklist then land a memorable closing line",
+      "image_asset_ids": [],
+      "layout_name": "checklist_close",
+      "native_elements": [
+        "headline",
+        "four checklist rows",
+        "decorative rule",
+        "closing line"
+      ],
+      "required_element_ids": [
+        "check-1",
+        "check-2",
+        "check-3",
+        "check-4",
+        "close-line"
+      ],
+      "risk_notes": [],
+      "selector": "slide:5",
+      "slide_role": "closing",
+      "structural_fingerprint": "four stacked bordered rows above one large standalone closing statement"
+    }
+  ],
+  "story_arc": "Open with a decisive thesis, show the native control loop mechanism, ground it in one concrete scenario of competing motives, contrast engineering outcomes against baseline agents, close with an operational checklist and memorable line",
+  "subject": "PSI agent architecture and motivation as a control signal for autonomous agents",
+  "subject_materials": [
+    "perception-appraisal-motives-action control loop",
+    "competing motive weights and arbitration",
+    "irreversibility-triggered caution override",
+    "motive trace logging for debuggability"
+  ],
+  "viewing_context": "Projected in a technical product review; also reviewed asynchronously on a laptop"
+}

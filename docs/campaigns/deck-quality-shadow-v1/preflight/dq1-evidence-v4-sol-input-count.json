@@ -1,0 +1,28 @@
+{
+  "admitted": true,
+  "assessment_a": {
+    "input_tokens": 22633,
+    "payload_hash": "06b063fdba7072128339dbdbdf8dda72d71ff6c6b93c1608d34b08e585d05d97"
+  },
+  "assessment_c": {
+    "input_tokens": 23671,
+    "payload_hash": "01dbdf18912e08a9c76c064742f89a4870b1de25710e8e81a1163711f0b16a96"
+  },
+  "contact_sheet_max_dimension": 2048,
+  "corpus_file_sha256": "f9c94570d5a37a2af9986d182bfb459eefc89baf3b0cbb93f189b1d220002e91",
+  "count_endpoint": "/v1/responses/input_tokens",
+  "evidence_preprocessor_version": "deck-evidence-v4",
+  "fixture_id": "clean_underdesigned_psi_v1_evidence_v4",
+  "fixture_manifest_sha256": "1f6dbe2ce17aac4b20140232b45dda854663b4f5a7017b6511677ee9e5e6b9ab",
+  "individual_slide_detail": "original",
+  "judge_invoker_version": "deck-judge-invoker-v4",
+  "max_output_tokens_per_assessment": 6000,
+  "model": "gpt-5.6-sol",
+  "pricing_version": "gpt-5.6-sol-pricing-2026-07-16",
+  "provider_generation_calls": 0,
+  "raster_max_dimension": 2200,
+  "recorded_at": "2026-07-16T18:33:00Z",
+  "schema_version": "dq1-sol-input-count-evidence/v1",
+  "source_artifact_sha256": "1e9b3a8f1b6605c60388bcb0ade3cb35574428de5929553dbb4c76a7a76b2bd4",
+  "worst_case_cost_usd": "0.591520"
+}

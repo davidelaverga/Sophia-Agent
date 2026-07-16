@@ -2,8 +2,8 @@
 
 Internal webhook endpoints plus legacy router definitions:
 
-- ``POST /internal/builder-events`` — accepts a webhook from the LangGraph
-  process (``deerflow.sophia.builder_events``) when a sophia_builder task
+- ``POST /internal/builder-events`` — accepts the baseline webhook from the
+  LangGraph process (``deerflow.sophia.builder_events``) when a sophia_builder task
   reaches a terminal state. Hands the payload to the per-app
   ``BuilderEventsWorker``, which fans it out to webapp SSE subscribers
   and the channel ``MessageBus``.
@@ -12,9 +12,10 @@ Internal webhook endpoints plus legacy router definitions:
   to focused backward-compatibility tests, but the gateway app no longer
   mounts them. Browsers consume authenticated builder-canvas SSE routes.
 
-The internal POST is intended for in-cluster traffic only. Production
-deployments should bind the gateway to a non-public interface or guard
-the path at the reverse proxy.
+DQ-1 publication admission is isolated at
+``/internal/deck-quality-publications`` and authenticates its exact raw body
+before parsing or persistence, so shadow retries can never replay or gate the
+baseline terminal-delivery route.
 """
 
 from __future__ import annotations
@@ -24,11 +25,11 @@ import json
 import logging
 import os
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, Literal
 
 from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from app.gateway.artifact_registry import (
     ArtifactRegistry,
@@ -37,11 +38,20 @@ from app.gateway.artifact_registry import (
 from app.gateway.workers.builder_canvas import get_builder_canvas_worker
 from app.gateway.workers.builder_events import get_builder_events_worker
 from app.gateway.workers.companion_wakeup import get_companion_wakeup_or_none
+from app.gateway.workers.deck_quality_publication import (
+    DeckQualityPublicationAdmissionError,
+    admit_deck_quality_publication,
+)
+from deerflow.sophia.builder_event_auth import (
+    BuilderEventAuthenticationError,
+    authenticate_builder_event,
+)
 from deerflow.sophia.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
 
 _SUCCESSFUL_BUILDER_STATUSES = {"success", "completed"}
+_MAX_DECK_QUALITY_PUBLICATION_BODY_BYTES = 64 * 1024
 _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "artifact_path",
     "artifact_ext",
@@ -53,8 +63,10 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "storage_bucket",
     "storage_object_path",
     "storage_status",
+    "artifact_sha256",
     "manifest_path",
     "manifest_revision",
+    "deck_build_id",
     "logical_artifact_id",
     "current_artifact_version_id",
     "foundation_status",
@@ -196,6 +208,7 @@ def _durable_builder_result(payload: dict[str, Any]) -> dict[str, Any]:
         "storage_status",
         "manifest_path",
         "manifest_revision",
+        "deck_build_id",
         "logical_artifact_id",
         "current_artifact_version_id",
         "foundation_status",
@@ -484,8 +497,10 @@ class BuilderCompletionEvent(BaseModel):
     storage_bucket: str | None = None
     storage_object_path: str | None = None
     storage_status: str | None = None
+    artifact_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     manifest_path: str | None = None
     manifest_revision: int | None = None
+    deck_build_id: str | None = None
     logical_artifact_id: str | None = None
     current_artifact_version_id: str | None = None
     foundation_status: str | None = None
@@ -626,6 +641,44 @@ class BuilderCompletionEvent(BaseModel):
         None,
         description="Originating user id, used by the companion wakeup worker to construct a properly-attributed synthetic turn.",
     )
+    deck_quality_publication_intent: dict[str, Any] | None = Field(
+        default=None,
+        description="Content-free DQ-1 canary publication ticket; stripped before user/channel fan-out.",
+    )
+
+
+class _DeckQualityMechanicalEligibility(BaseModel):
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    passed: bool
+
+
+class DeckQualityPublicationEnvelope(BaseModel):
+    """Minimal authenticated metadata needed for independent DQ admission."""
+
+    model_config = ConfigDict(extra="forbid", strict=True)
+
+    thread_id: str
+    task_id: str
+    run_id: str
+    builder_trace_root_run_id: str
+    user_id: str
+    status: Literal["success", "completed"]
+    task_type: Literal["presentation"]
+    artifact_path: str
+    artifact_type: Literal["presentation"]
+    artifact_ext: str
+    artifact_is_fallback: bool
+    storage_provider: str
+    storage_status: str
+    storage_object_path: str
+    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    manifest_revision: int
+    deck_build_id: str
+    logical_artifact_id: str
+    current_artifact_version_id: str
+    mechanical_gate_results: _DeckQualityMechanicalEligibility
+    deck_quality_publication_intent: dict[str, Any]
 
 
 class BuilderProgressEvent(BaseModel):
@@ -664,19 +717,63 @@ internal_router = APIRouter(prefix="/internal", tags=["builder-events"])
 public_router = APIRouter(prefix="/api/threads", tags=["builder-events"])
 
 
+async def _authenticated_publication_body(
+    request: Request,
+) -> bytes | Response:
+    """Read a bounded body and authenticate it before any route side effect."""
+
+    content_length = request.headers.get("content-length")
+    if content_length is not None:
+        try:
+            declared_length = int(content_length)
+        except (TypeError, ValueError, OverflowError):
+            return Response(status_code=status.HTTP_400_BAD_REQUEST)
+        if declared_length < 1:
+            return Response(status_code=status.HTTP_400_BAD_REQUEST)
+        if declared_length > _MAX_DECK_QUALITY_PUBLICATION_BODY_BYTES:
+            return Response(status_code=status.HTTP_413_CONTENT_TOO_LARGE)
+
+    chunks = bytearray()
+    try:
+        async for chunk in request.stream():
+            chunks.extend(chunk)
+            if len(chunks) > _MAX_DECK_QUALITY_PUBLICATION_BODY_BYTES:
+                return Response(status_code=status.HTTP_413_CONTENT_TOO_LARGE)
+    except Exception:  # noqa: BLE001 - malformed transport is content-free.
+        logger.warning("DQ1 publication body read failed contentExcluded=true")
+        return Response(status_code=status.HTTP_400_BAD_REQUEST)
+    body = bytes(chunks)
+    try:
+        authenticate_builder_event(body, request.headers)
+    except BuilderEventAuthenticationError as exc:
+        logger.warning(
+            "DQ1 publication authentication failed code=%s contentExcluded=true",
+            exc.code,
+        )
+        response_status = status.HTTP_503_SERVICE_UNAVAILABLE if exc.code == "builder_event_auth_unavailable" else status.HTTP_401_UNAUTHORIZED
+        return Response(status_code=response_status)
+    return body
+
+
 @internal_router.post(
     "/builder-events",
     status_code=status.HTTP_202_ACCEPTED,
+    response_model=None,
     summary="Receive a builder-completion event from the LangGraph process",
 )
-async def receive_builder_event(event: BuilderCompletionEvent, request: Request) -> dict[str, Any]:
+async def receive_builder_event(
+    event: BuilderCompletionEvent,
+    request: Request,
+) -> dict[str, Any]:
     """Internal webhook target.
 
     Accepts the event, hands it to the worker for SSE fan-out, and also
     publishes it onto the channel ``MessageBus`` so Telegram/Slack/Feishu
     adapters can deliver a card to the originating chat.
     """
-    payload = await _hydrate_missing_run_id(event.model_dump())
+    raw_payload = event.model_dump()
+    raw_payload.pop("deck_quality_publication_intent", None)
+    payload = await _hydrate_missing_run_id(raw_payload)
     await _persist_builder_terminal_state(payload)
     try:
         _upsert_builder_terminal_artifact(payload)
@@ -728,6 +825,53 @@ async def receive_builder_event(event: BuilderCompletionEvent, request: Request)
             )
 
     return {"delivered_subscribers": delivered}
+
+
+@internal_router.post(
+    "/deck-quality-publications",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=None,
+    summary="Admit one authenticated DQ-1 canary publication",
+)
+async def receive_deck_quality_publication(
+    request: Request,
+) -> dict[str, Any] | Response:
+    """Durably admit metadata only, with no terminal-delivery side effects."""
+
+    authenticated = await _authenticated_publication_body(request)
+    if isinstance(authenticated, Response):
+        return authenticated
+    try:
+        envelope = DeckQualityPublicationEnvelope.model_validate_json(authenticated)
+    except (ValidationError, ValueError):
+        logger.warning("DQ1 publication envelope validation failed contentExcluded=true")
+        return Response(status_code=status.HTTP_400_BAD_REQUEST)
+    builder_payload = envelope.model_dump(mode="python")
+    publication_intent = builder_payload.pop(
+        "deck_quality_publication_intent",
+        None,
+    )
+    try:
+        publication_ack = await admit_deck_quality_publication(
+            request.app,
+            raw_intent=publication_intent,
+            builder_payload=builder_payload,
+        )
+    except DeckQualityPublicationAdmissionError as exc:
+        logger.error(
+            "DQ1 publication admission failed error_type=%s contentExcluded=true",
+            exc.__class__.__name__,
+            exc_info=False,
+        )
+        return Response(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            headers={"Retry-After": "5"},
+        )
+    if publication_ack is None:
+        return Response(status_code=status.HTTP_400_BAD_REQUEST)
+    return {
+        "deck_quality_publication_ack": publication_ack.model_dump(mode="json"),
+    }
 
 
 @internal_router.post(

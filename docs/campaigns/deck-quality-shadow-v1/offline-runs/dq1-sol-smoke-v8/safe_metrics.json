@@ -1,0 +1,43 @@
+{
+  "assessment_a": {
+    "cost_usd": "0.27827",
+    "deployment_name": "openai-gpt-5-6-sol",
+    "input_tokens": 20308,
+    "latency_ms": 72991,
+    "output_tokens": 5891,
+    "plan_hash": "2941b784df144f029d03257a4966ea46cbefabf27e6d9ed7f1acec9133279dd6",
+    "profile_version": "v1",
+    "provider": "openai",
+    "provider_model": "gpt-5.6-sol",
+    "route_name": "deck.judge.visual",
+    "total_tokens": 26199
+  },
+  "assessment_c": {
+    "cost_usd": "0.21311",
+    "deployment_name": "openai-gpt-5-6-sol",
+    "input_tokens": 21346,
+    "latency_ms": 47724,
+    "output_tokens": 3546,
+    "plan_hash": "2941b784df144f029d03257a4966ea46cbefabf27e6d9ed7f1acec9133279dd6",
+    "profile_version": "v1",
+    "provider": "openai",
+    "provider_model": "gpt-5.6-sol",
+    "route_name": "deck.judge.visual",
+    "total_tokens": 24892
+  },
+  "assessment_c_error": null,
+  "assessment_c_skipped_reason": null,
+  "configured_cost_cap_usd": "0.60",
+  "image_count_per_assessment": 6,
+  "image_detail": "high",
+  "lossless_png_inputs": true,
+  "model": "gpt-5.6-sol",
+  "pricing_source": "https://developers.openai.com/api/docs/models/gpt-5.6-sol",
+  "profile_version": "v1",
+  "quality_run_id": "quality_b509cf186610337e7dd6b41d2d169414ff63f4c36acd48e7e3a39911cac2ab22",
+  "route": "deck.judge.visual",
+  "safety_identifier_present": true,
+  "schema_version": "deck-quality-smoke-metrics/v1",
+  "structured_output_method": "json_schema_strict",
+  "total_cost_usd": "0.49138"
+}

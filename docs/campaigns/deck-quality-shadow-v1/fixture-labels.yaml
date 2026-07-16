@@ -1,0 +1,42 @@
+schema_version: deck-quality-fixture-labels/v1
+campaign_id: DQ-1
+corpus_status:
+  required_human_labels: 12
+  independently_confirmed_human_labels: 0
+  campaign_spec_anchors: 1
+  complete_bundles_required: 6
+  complete_bundles_confirmed: 1
+  status: human_corpus_pending
+  note: >-
+    The PSI expectation below is copied from Campaign DQ-1 Appendix B. It is
+    not counted as an independently collected human label. No other label is
+    inferred from artifact appearance or model output.
+fixtures:
+  - fixture_id: clean_underdesigned_psi_v1
+    label_source: supplied_by_campaign_spec
+    source_ref: specs/sophia_campaign_DQ1_production_shadow_rendered_deck_quality.md#appendix-b--initial-expected-psi-observation
+    human_label_status: pending_independent_confirmation
+    expected_verdict: needs_revision
+    mechanical_expected: passed
+    expected_strengths:
+      - clear hierarchy
+      - readable typography
+      - coherent content arc
+      - native editability
+    expected_failures:
+      - default_look_gravity
+      - weak_subject_specificity
+      - weak_signature_realization
+      - low_sequence_rhythm
+      - weak_closing_synthesis
+    expected_selectors:
+      - slide:2
+      - slide:3
+      - slide:5
+    critical_criterion_floors: {}
+    top_three_failure_codes: null
+    rationale: null
+    confidence: null
+    note: >-
+      Critical floors, a ranked top three, rationale, and confidence require a
+      dated human judgment and are deliberately not invented here.

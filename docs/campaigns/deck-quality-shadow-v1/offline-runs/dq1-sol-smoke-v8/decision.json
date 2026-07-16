@@ -1,0 +1,37 @@
+{
+  "critical_score_floor": 4,
+  "evidence_selectors": [
+    "slide:1",
+    "slide:2",
+    "slide:3",
+    "slide:4",
+    "slide:5"
+  ],
+  "failing_criterion_ids": [
+    "narrative_arc_and_pacing",
+    "signature_realization",
+    "subject_specificity"
+  ],
+  "failure_codes": [
+    "default_look_gravity",
+    "explicit_taste_mismatch",
+    "weak_closing_synthesis",
+    "weak_fingerprint_realization",
+    "weak_mechanism_visualization",
+    "weak_memorability",
+    "weak_signature_realization",
+    "weak_spatial_tension",
+    "weak_subject_specificity"
+  ],
+  "mechanical_projection_hash": "75bc7ead25273ef11adcef38155228ec50175d77af2dd38768d759db298e1620",
+  "plan_assessment_hash": "a407a2272564e0d6dd221ce629b944b9d7038e10427f810da3af7bdef6c304d7",
+  "policy_hash": "b4ee9776b963523ba2e1a5ad7d905e00b80c714a9a12135ac24bff5bd817c65a",
+  "reason_codes": [
+    "critical_score_below_floor"
+  ],
+  "result": "needs_revision",
+  "rubric_hash": "19282085698ad2594ac537ccea36bf72ac3098073674689b498fa162ceb8cabe",
+  "schema_version": "deck-quality-shadow-decision/v1",
+  "visual_assessment_hash": "7042bb6e64d44471e54bc5540449b6ae93bba3ea9d41fcb915e4fe759752b859",
+  "weighted_score": "3.933333333333333333333333333"
+}

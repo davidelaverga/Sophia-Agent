@@ -2548,6 +2548,7 @@ def _required_primary_upload_to_supabase(
     artifact_args["storage_bucket"] = supabase_artifact_store.configured_bucket_name()
     artifact_args["storage_object_path"] = object_path
     artifact_args["storage_status"] = "available"
+    artifact_args["artifact_sha256"] = hashlib.sha256(content).hexdigest()
     return "uploaded"
 
 

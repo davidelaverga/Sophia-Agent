@@ -775,6 +775,30 @@ def test_builder_completion_prefers_matching_pregel_root_over_detached_current_s
     assert feedback_client.feedback[-1]["run_id"] == "builder-root"
 
 
+def test_builder_completion_overwrites_untrusted_trace_identity(monkeypatch) -> None:
+    root = _FakeRunTree()
+    root.id = "authoritative-builder-root"
+    root.parent_run_id = None
+    root.metadata = {"thread_id": "builder-thread", "run_id": "builder-run"}
+    feedback_client = _FakeFeedbackClient()
+    artifact = {
+        "artifact_path": "deck.pptx",
+        "run_id": "builder-run",
+        "builder_trace_run_id": "stale-child",
+        "builder_trace_root_run_id": "stale-root",
+    }
+    monkeypatch.setattr(observability, "_current_run_tree", lambda: root)
+    monkeypatch.setattr(observability, "_feedback_client", lambda: feedback_client)
+
+    assert observability.annotate_builder_completion(
+        {"thread_id": "builder-thread", "run_id": "builder-run"},
+        artifact,
+    ) is True
+
+    assert artifact["builder_trace_run_id"] == "authoritative-builder-root"
+    assert artifact["builder_trace_root_run_id"] == "authoritative-builder-root"
+
+
 def test_builder_completion_matches_build_identity_and_closes_canceled_model_span(monkeypatch) -> None:
     class _FakeTracer:
         pass

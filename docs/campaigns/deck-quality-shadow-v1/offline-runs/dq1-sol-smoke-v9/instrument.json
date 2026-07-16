@@ -1,0 +1,20 @@
+{
+  "adjudication_policy_hash": "b4ee9776b963523ba2e1a5ad7d905e00b80c714a9a12135ac24bff5bd817c65a",
+  "assessment_schema_versions": {
+    "blind_visual": "deck-quality-blind-assessment/v4",
+    "mechanical": "deck-quality-mechanical-projection/v1",
+    "plan_realization": "deck-quality-plan-assessment/v4"
+  },
+  "evidence_preprocessor_version": "deck-evidence-v4",
+  "judge_invoker_version": "deck-judge-invoker-v4",
+  "judge_plan_hash": "1029041782dc92bf971ac1f996391274b11f40baaaf9201770cc52e94547aa05",
+  "judge_profile_version": "v2",
+  "prompt_hashes": {
+    "blind_visual": "589b4f6b971da980fb2436ea877d17e6b4dc9c798385fab127654d3f2543fcad",
+    "large_deck_consolidation": "0d0eef82bf3e750fa885eb36bdf460cd44d485b7250133db4be9f04e90bd0300",
+    "plan_realization": "dfe6610ac1e267ed1c004beb0e09a90a0e2705e077d9e266a1392b89abda6d97"
+  },
+  "rubric_hash": "19282085698ad2594ac537ccea36bf72ac3098073674689b498fa162ceb8cabe",
+  "rubric_version": "deck-rubric-v2",
+  "schema_version": "deck-quality-instrument/v2"
+}

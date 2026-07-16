@@ -6,11 +6,11 @@ webapp via SSE and to channel adapters like Telegram).
 
 Why a webhook and not shared state: the LangGraph and Gateway processes
 are deployed separately (different containers in production). The
-webhook keeps the contract explicit and testable — a single POST per
-terminal task transition. Failures are logged and never block the
-builder's own completion path.
+webhook keeps the contract explicit and testable — one delivery POST per
+terminal task transition, plus an optional metadata-only DQ-1 admission.
+Failures are logged and never block the builder's own completion path.
 
-The webhook fires *exactly once* per task_id/run_id even if
+The terminal-delivery webhook fires *exactly once* per task_id/run_id even if
 ``BuilderArtifactMiddleware.after_model`` is exercised multiple times
 during cleanup. Legacy callers without a run_id still dedup by task_id.
 Dedup is process-local; if the LangGraph process
@@ -22,8 +22,10 @@ which builds the wire payload from the captured ``emit_builder_artifact``
 dict via :func:`build_completion_payload_from_artifact`. The legacy
 ``SubagentResult``-based path (``emit_completion_event`` + the original
 ``build_completion_payload``) was removed when ``SubagentExecutor`` exited
-the builder hot path in the Phase-1 async migration; the helpers below
-deliberately do NOT take a ``SubagentResult`` parameter.
+the builder hot path in the Phase-1 async migration. Eligible DQ-1 canaries
+perform a second, independently retried metadata-only publication admission
+after terminal delivery succeeds; those retries never replay delivery. The
+helpers below deliberately do NOT take a ``SubagentResult`` parameter.
 """
 
 from __future__ import annotations
@@ -33,11 +35,17 @@ import os
 import threading
 import time
 from collections import OrderedDict
+from collections.abc import Callable, Mapping
+from copy import deepcopy
 from datetime import UTC, datetime
 from typing import Any
 
 import httpx
 
+from deerflow.sophia.builder_event_auth import (
+    encode_builder_event_body,
+    signed_builder_event_headers,
+)
 from deerflow.sophia.builder_failure_diagnostics import (
     build_builder_failure_diagnostics,
     merge_builder_failure_diagnostics,
@@ -48,6 +56,7 @@ logger = logging.getLogger(__name__)
 
 _DEFAULT_GATEWAY_URL = "http://localhost:8001"
 _WEBHOOK_PATH = "/internal/builder-events"
+_DECK_QUALITY_PUBLICATION_PATH = "/internal/deck-quality-publications"
 _WEBHOOK_TIMEOUT_SECONDS = 2.0
 # Bounded retry on transient failure (transport error / 5xx). A single
 # fire-and-forget POST dropped completion events when the gateway hiccuped —
@@ -55,6 +64,56 @@ _WEBHOOK_TIMEOUT_SECONDS = 2.0
 # the gateway-side terminal-edit retry backoff. 4xx is a contract bug and is
 # NOT retried. Runs on a daemon thread so the sleeps never block the executor.
 _WEBHOOK_RETRY_BACKOFFS_SECONDS = (2.0, 5.0, 15.0)
+_DECK_QUALITY_PUBLICATION_INTENT_KEY = "deck_quality_publication_intent"
+_DECK_QUALITY_PUBLICATION_ACK_KEY = "deck_quality_publication_ack"
+_DECK_QUALITY_PUBLICATION_ACK_SCHEMA = "deck-quality-publication-ack/v1"
+_DECK_QUALITY_PUBLICATION_ACK_STATES = frozenset({"requested", "reconciled"})
+_DECK_QUALITY_PUBLICATION_ACK_FIELDS = frozenset({"schema_version", "quality_run_id", "state"})
+_DECK_QUALITY_ARTIFACT_SNAPSHOT_FIELDS = (
+    "artifact_type",
+    "artifact_ext",
+    "artifact_is_fallback",
+    "mechanical_gate_results",
+    "storage_provider",
+    "storage_status",
+    "artifact_path",
+    "builder_trace_root_run_id",
+    "deck_build_id",
+    "logical_artifact_id",
+    "current_artifact_version_id",
+    "storage_object_path",
+    "artifact_sha256",
+    "manifest_revision",
+    "native_editability_score",
+    "missing_expected_visual_count",
+    "artifact_id",
+    "source_retention_report",
+    "native_contrast_report",
+    "native_mechanical_report",
+)
+_DECK_QUALITY_COMPLETION_SNAPSHOT_FIELDS = (
+    "user_id",
+    "status",
+    "task_type",
+    "thread_id",
+    "task_id",
+    "run_id",
+    "builder_trace_root_run_id",
+    "task_brief",
+    "artifact_path",
+    "artifact_type",
+    "artifact_ext",
+    "artifact_is_fallback",
+    "mechanical_gate_results",
+    "storage_provider",
+    "storage_status",
+    "storage_object_path",
+    "artifact_sha256",
+    "manifest_revision",
+    "deck_build_id",
+    "logical_artifact_id",
+    "current_artifact_version_id",
+)
 _INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
     {
         "ledger",
@@ -381,12 +440,211 @@ def _is_phantom_success(
     return confidence_value <= _PHANTOM_SUCCESS_CONFIDENCE_THRESHOLD
 
 
-def _post_webhook(payload: dict[str, Any]) -> None:
+def _sent_deck_quality_run_id(payload: Mapping[str, Any]) -> str | None:
+    """Return the exact content-free run ID carried by this webhook."""
+
+    raw_intent = payload.get(_DECK_QUALITY_PUBLICATION_INTENT_KEY)
+    if not isinstance(raw_intent, Mapping):
+        return None
+    quality_run_id = raw_intent.get("quality_run_id")
+    if not isinstance(quality_run_id, str):
+        return None
+    digest = quality_run_id.removeprefix("quality_")
+    if not quality_run_id.startswith("quality_") or len(digest) != 64 or any(character not in "0123456789abcdef" for character in digest):
+        return None
+    return quality_run_id
+
+
+def _response_acknowledges_deck_quality_publication(
+    response: httpx.Response,
+    *,
+    payload: Mapping[str, Any],
+) -> bool:
+    """Validate the gateway's strict v1 ACK against the sent intent."""
+
+    try:
+        sent_quality_run_id = _sent_deck_quality_run_id(payload)
+        if sent_quality_run_id is None:
+            return False
+        body = response.json()
+        if not isinstance(body, Mapping):
+            return False
+        ack = body.get(_DECK_QUALITY_PUBLICATION_ACK_KEY)
+        if not isinstance(ack, Mapping) or frozenset(ack) != _DECK_QUALITY_PUBLICATION_ACK_FIELDS:
+            return False
+        schema_version = ack.get("schema_version")
+        acknowledged_run_id = ack.get("quality_run_id")
+        state = ack.get("state")
+        return (
+            isinstance(schema_version, str)
+            and schema_version == _DECK_QUALITY_PUBLICATION_ACK_SCHEMA
+            and isinstance(acknowledged_run_id, str)
+            and acknowledged_run_id == sent_quality_run_id
+            and isinstance(state, str)
+            and state in _DECK_QUALITY_PUBLICATION_ACK_STATES
+        )
+    except Exception:  # noqa: BLE001 - malformed/legacy success is not an ACK
+        return False
+
+
+def _deck_quality_publication_payload(
+    payload: Mapping[str, Any],
+) -> dict[str, Any] | None:
+    """Build the minimal content-free admission envelope.
+
+    The terminal event contains user-visible delivery fields and rich builder
+    diagnostics.  None of those cross the independent DQ-1 admission route.
+    Only the exact eligibility and immutable identity fields rechecked by the
+    gateway are retained.
+    """
+
+    intent = payload.get(_DECK_QUALITY_PUBLICATION_INTENT_KEY)
+    if not isinstance(intent, Mapping):
+        return None
+    mechanical = payload.get("mechanical_gate_results")
+    mechanical_passed = mechanical.get("passed") is True if isinstance(mechanical, Mapping) else False
+    field_names = (
+        "thread_id",
+        "task_id",
+        "run_id",
+        "builder_trace_root_run_id",
+        "user_id",
+        "status",
+        "task_type",
+        "artifact_path",
+        "artifact_type",
+        "artifact_ext",
+        "artifact_is_fallback",
+        "storage_provider",
+        "storage_status",
+        "storage_object_path",
+        "artifact_sha256",
+        "manifest_revision",
+        "deck_build_id",
+        "logical_artifact_id",
+        "current_artifact_version_id",
+    )
+    return {
+        **{name: payload.get(name) for name in field_names},
+        "mechanical_gate_results": {"passed": mechanical_passed},
+        _DECK_QUALITY_PUBLICATION_INTENT_KEY: dict(intent),
+    }
+
+
+def _post_deck_quality_publication(
+    payload: dict[str, Any],
+    on_ack: Callable[[], None],
+) -> None:
+    """Admit one canary publication without replaying terminal delivery."""
+
+    publication_payload = _deck_quality_publication_payload(payload)
+    if publication_payload is None:
+        logger.warning(
+            "[Builder] DQ-1 publication envelope unavailable task_id=%s run_id=%s",
+            payload.get("task_id"),
+            payload.get("run_id"),
+        )
+        return
+    try:
+        body = encode_builder_event_body(publication_payload)
+    except Exception as exc:  # noqa: BLE001 - quality cannot affect delivery
+        logger.warning(
+            "[Builder] DQ-1 publication envelope encoding failed task_id=%s run_id=%s error_type=%s",
+            payload.get("task_id"),
+            payload.get("run_id"),
+            exc.__class__.__name__,
+        )
+        return
+
+    url = f"{_gateway_url()}{_DECK_QUALITY_PUBLICATION_PATH}"
+    task_id = payload.get("task_id")
+    max_attempts = len(_WEBHOOK_RETRY_BACKOFFS_SECONDS) + 1
+    for attempt in range(1, max_attempts + 1):
+        try:
+            headers = signed_builder_event_headers(body)
+            with httpx.Client(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
+                response = client.post(url, content=body, headers=headers)
+            if 200 <= response.status_code < 300:
+                if _response_acknowledges_deck_quality_publication(
+                    response,
+                    payload=publication_payload,
+                ):
+                    if attempt > 1:
+                        logger.info(
+                            "[Builder] DQ-1 publication admitted task_id=%s attempt=%d",
+                            task_id,
+                            attempt,
+                        )
+                    try:
+                        on_ack()
+                    except Exception as exc:  # noqa: BLE001 - shadow-only continuation
+                        logger.warning(
+                            "[Builder] DQ-1 post-ACK publication failed task_id=%s run_id=%s error_type=%s",
+                            task_id,
+                            payload.get("run_id"),
+                            exc.__class__.__name__,
+                        )
+                    return
+                logger.warning(
+                    "[Builder] DQ-1 publication ACK missing or invalid task_id=%s run_id=%s quality_run_id=%s attempt=%d/%d",
+                    task_id,
+                    payload.get("run_id"),
+                    _sent_deck_quality_run_id(publication_payload),
+                    attempt,
+                    max_attempts,
+                )
+            elif 400 <= response.status_code < 500:
+                logger.warning(
+                    "[Builder] DQ-1 publication rejected status=%s task_id=%s",
+                    response.status_code,
+                    task_id,
+                )
+                return
+            elif response.status_code >= 500:
+                logger.warning(
+                    "[Builder] DQ-1 publication returned %s task_id=%s attempt=%d/%d",
+                    response.status_code,
+                    task_id,
+                    attempt,
+                    max_attempts,
+                )
+            else:
+                logger.warning(
+                    "[Builder] DQ-1 publication rejected nonterminal status=%s task_id=%s",
+                    response.status_code,
+                    task_id,
+                )
+                return
+        except Exception:
+            logger.warning(
+                "[Builder] DQ-1 publication transport failed task_id=%s attempt=%d/%d",
+                task_id,
+                attempt,
+                max_attempts,
+                exc_info=True,
+            )
+        if attempt <= len(_WEBHOOK_RETRY_BACKOFFS_SECONDS):
+            time.sleep(_WEBHOOK_RETRY_BACKOFFS_SECONDS[attempt - 1])
+    logger.error(
+        "[Builder] DQ-1 publication exhausted %d attempts task_id=%s; publication dropped",
+        max_attempts,
+        task_id,
+    )
+
+
+def _post_webhook(
+    payload: dict[str, Any],
+    prepare_deck_quality_publication_handoff: Callable[
+        [], tuple[dict[str, Any], Callable[[], None] | None]
+    ]
+    | None = None,
+) -> None:
     """Fire the POST with bounded retry. On a daemon thread so it never blocks.
 
-    Retries transient failures (transport error / 5xx) with the
-    ``_WEBHOOK_RETRY_BACKOFFS_SECONDS`` backoff; a 2xx stops immediately and a
-    4xx (contract bug) is not retried. Without this, a single gateway hiccup
+    Retries transient delivery failures (transport error / 5xx) with the
+    ``_WEBHOOK_RETRY_BACKOFFS_SECONDS`` backoff; a delivery 2xx proceeds to the
+    independently retried publication handoff, while a delivery 4xx stops.
+    Without this, a single gateway hiccup
     silently dropped a terminal completion event — prod 2026-06-26, where a
     deck's ceiling-fallback ``status=success`` webhook failed to deliver.
     """
@@ -394,28 +652,54 @@ def _post_webhook(payload: dict[str, Any]) -> None:
         # No parent thread → nothing for the gateway to route to.
         return
     _warn_if_misconfigured(payload)
+    delivery_payload = dict(payload)
+    delivery_payload.pop(_DECK_QUALITY_PUBLICATION_INTENT_KEY, None)
     url = f"{_gateway_url()}{_WEBHOOK_PATH}"
     task_id = payload.get("task_id")
     max_attempts = len(_WEBHOOK_RETRY_BACKOFFS_SECONDS) + 1
     for attempt in range(1, max_attempts + 1):
         try:
             with httpx.Client(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
-                response = client.post(url, json=payload)
-            if response.status_code < 400:
+                # Preserve the baseline delivery wire contract. Authentication
+                # is isolated to the optional canary publication request so a
+                # shadow-only configuration issue cannot affect delivery.
+                response = client.post(url, json=delivery_payload)
+            if 200 <= response.status_code < 300:
                 if attempt > 1:
                     logger.info(
                         "Builder-events webhook delivered for task_id=%s on attempt=%d",
                         task_id,
                         attempt,
                     )
+                if prepare_deck_quality_publication_handoff is not None:
+                    try:
+                        publication_payload, on_ack = (
+                            prepare_deck_quality_publication_handoff()
+                        )
+                    except Exception as exc:  # noqa: BLE001 - shadow cannot affect delivery
+                        logger.warning(
+                            "[Builder] DQ-1 post-delivery preparation failed task_id=%s run_id=%s error_type=%s",
+                            task_id,
+                            payload.get("run_id"),
+                            exc.__class__.__name__,
+                        )
+                    else:
+                        if on_ack is not None:
+                            _post_deck_quality_publication(
+                                publication_payload,
+                                on_ack,
+                            )
+                return
+            if response.status_code < 400:
+                # Preserve the legacy terminal-delivery behavior for redirects,
+                # but never interpret a non-2xx response as publication ACK.
                 return
             if response.status_code < 500:
                 # 4xx is a contract bug we want to know about — not retryable.
                 logger.warning(
-                    "Builder-events webhook rejected (status=%s) for task_id=%s body=%s",
+                    "Builder-events webhook rejected (status=%s) for task_id=%s",
                     response.status_code,
                     task_id,
-                    response.text[:200],
                 )
                 return
             logger.warning(
@@ -775,8 +1059,10 @@ def _artifact_completion_fields(
         "storage_bucket": artifact.get("storage_bucket"),
         "storage_object_path": artifact.get("storage_object_path"),
         "storage_status": artifact.get("storage_status"),
+        "artifact_sha256": artifact.get("artifact_sha256"),
         "manifest_path": artifact.get("manifest_path"),
         "manifest_revision": artifact.get("manifest_revision"),
+        "deck_build_id": artifact.get("deck_build_id"),
         "logical_artifact_id": artifact.get("logical_artifact_id"),
         "current_artifact_version_id": artifact.get("current_artifact_version_id"),
         "foundation_status": artifact.get("foundation_status"),
@@ -1053,6 +1339,121 @@ def build_completion_payload_from_artifact(
     return payload
 
 
+def _deck_quality_publication_ack_callback(
+    *,
+    prepared: Any,
+    intent: Any,
+    instrument: Any,
+) -> Callable[[], None]:
+    """Build the detached continuation without importing capture code yet."""
+
+    def continue_after_ack() -> None:
+        from deerflow.sophia.deck_quality.publisher import (
+            complete_deck_quality_publication_after_ack,
+        )
+
+        complete_deck_quality_publication_after_ack(
+            prepared=prepared,
+            intent=intent,
+            instrument=instrument,
+        )
+
+    return continue_after_ack
+
+
+def _snapshot_deck_quality_handoff_inputs(
+    *,
+    state: Mapping[str, Any],
+    artifact: Mapping[str, Any],
+    completion_payload: Mapping[str, Any],
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    """Freeze only bounded DQ linkage metadata before detaching delivery.
+
+    This performs no eligibility/configuration work and no provider or file
+    access. It intentionally excludes messages and unrelated user state while
+    copying the selected nested reports so later builder cleanup cannot alter
+    the post-delivery publication identity.
+    """
+
+    raw_thread_data = state.get("thread_data")
+    outputs_path = (
+        raw_thread_data.get("outputs_path")
+        if isinstance(raw_thread_data, Mapping)
+        else None
+    )
+    state_snapshot = {"thread_data": {"outputs_path": outputs_path}}
+    artifact_snapshot = {
+        field: deepcopy(artifact.get(field))
+        for field in _DECK_QUALITY_ARTIFACT_SNAPSHOT_FIELDS
+    }
+    completion_snapshot = {
+        field: deepcopy(completion_payload.get(field))
+        for field in _DECK_QUALITY_COMPLETION_SNAPSHOT_FIELDS
+    }
+    return state_snapshot, artifact_snapshot, completion_snapshot
+
+
+def _prepare_deck_quality_publication_handoff(
+    *,
+    state: Mapping[str, Any],
+    artifact: Mapping[str, Any],
+    completion_payload: dict[str, Any],
+) -> tuple[dict[str, Any], Callable[[], None] | None]:
+    """Prepare a content-free canary intent after terminal delivery succeeds.
+
+    This runs inside the already-detached delivery thread only after a baseline
+    2xx. The exact eligibility gate runs before instrument compilation. Neither
+    this function nor the callback factory reads artifact bytes or local deck
+    evidence. Any DQ-1 error ends only the shadow handoff.
+    """
+
+    try:
+        from deerflow.config.app_config import get_app_config
+        from deerflow.sophia.deck_quality.instrument import (
+            compile_runtime_instrument,
+        )
+        from deerflow.sophia.deck_quality.publisher import (
+            build_deck_quality_publication_intent,
+            prepare_deck_quality_publication,
+        )
+
+        config = get_app_config()
+        prepared = prepare_deck_quality_publication(
+            config=config,
+            state=state,
+            artifact=artifact,
+            completion_payload=completion_payload,
+        )
+        if prepared is None:
+            return completion_payload, None
+        instrument = compile_runtime_instrument(config)
+        intent = build_deck_quality_publication_intent(
+            prepared=prepared,
+            instrument=instrument,
+        )
+        wire_intent = intent.model_dump(mode="json")
+        if not isinstance(wire_intent, dict):
+            raise TypeError("publication intent did not serialize to an object")
+        wire_payload = {
+            **completion_payload,
+            _DECK_QUALITY_PUBLICATION_INTENT_KEY: wire_intent,
+        }
+        callback = _deck_quality_publication_ack_callback(
+            prepared=prepared,
+            intent=intent,
+            instrument=instrument,
+        )
+        return wire_payload, callback
+    except Exception as exc:  # noqa: BLE001 - quality never affects delivery
+        logger.warning(
+            "[Builder] DQ-1 publication intent preparation failed task_id=%s run_id=%s error_type=%s",
+            completion_payload.get("task_id"),
+            completion_payload.get("run_id"),
+            exc.__class__.__name__,
+        )
+        return completion_payload, None
+
+
 def fire_completion_webhook_from_artifact(
     *,
     state: dict[str, Any],
@@ -1133,9 +1534,43 @@ def fire_completion_webhook_from_artifact(
         payload.get("image_generation_reason"),
     )
 
+    prepare_publication_after_delivery: Callable[
+        [], tuple[dict[str, Any], Callable[[], None] | None]
+    ] | None = None
+    try:
+        (
+            quality_state_snapshot,
+            quality_artifact_snapshot,
+            quality_completion_snapshot,
+        ) = _snapshot_deck_quality_handoff_inputs(
+            state=_state_dict(state),
+            artifact=_state_dict(artifact),
+            completion_payload=payload,
+        )
+    except Exception as exc:  # noqa: BLE001 - metadata snapshot cannot affect delivery
+        logger.warning(
+            "[Builder] DQ-1 metadata snapshot failed task_id=%s run_id=%s error_type=%s",
+            task_id,
+            builder_run_id,
+            exc.__class__.__name__,
+        )
+    else:
+
+        def prepare_publication_after_delivery() -> tuple[
+            dict[str, Any], Callable[[], None] | None
+        ]:
+            return _prepare_deck_quality_publication_handoff(
+                state=quality_state_snapshot,
+                artifact=quality_artifact_snapshot,
+                completion_payload=quality_completion_snapshot,
+            )
+
     threading.Thread(
         target=_post_webhook,
         args=(payload,),
+        kwargs={
+            "prepare_deck_quality_publication_handoff": prepare_publication_after_delivery,
+        },
         name=f"builder-events-{task_id}",
         daemon=True,
     ).start()

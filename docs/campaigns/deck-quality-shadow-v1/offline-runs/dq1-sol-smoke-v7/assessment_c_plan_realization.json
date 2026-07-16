@@ -1,0 +1,182 @@
+{
+  "commitments": [
+    {
+      "commitment_id": "subject-materials",
+      "dimension": "subject_material",
+      "evidence_selectors": [
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The sequence visibly covers the perception–appraisal–motives–action loop, weighted motive arbitration, an irreversibility-driven caution override, and motive-trace logging for debugging.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "signature",
+      "dimension": "signature",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "Functional rail treatments mark the cover thesis, feedback path, scenario resolution, and final checklist, but the motif changes form and often reads as a generic rule or border; it is not unmistakable on the comparison slide.",
+      "status": "partial"
+    },
+    {
+      "commitment_id": "rhythm",
+      "dimension": "rhythm",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The rendered sequence follows the promised progression from asymmetric cover to loop diagram, split scenario and resolution band, row-ruled comparison, and checklist close.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:1",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:1"
+      ],
+      "observation": "A tall ember rail anchors a stacked, left-aligned type block while the right side remains open.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:2",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:2"
+      ],
+      "observation": "Four aligned horizontal boxes are joined by connectors, with one long feedback bar positioned beneath them.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:3",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:3"
+      ],
+      "observation": "Two competing-motive panels sit side by side above a single wide resolution band.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:4",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:4"
+      ],
+      "observation": "The slide uses one two-column comparison structure with horizontal row rules and a single vertical divider, without a card grid or multiple charts.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:5",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:5"
+      ],
+      "observation": "Four stacked checklist entries appear above a large standalone close, but they are not four individually bordered rows; a single continuous vertical rail organizes the list instead.",
+      "status": "partial"
+    },
+    {
+      "commitment_id": "visual-medium",
+      "dimension": "visual_medium",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The deck visibly uses clean labeled diagrams, rules, borders, and text rather than screenshots or image-based explanatory content.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "default-look-resistance",
+      "dimension": "default_look",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The deck avoids eyebrows, navigation chrome, icon strips, footers, page numbers, dashboard grids, and multiple comparison visuals while varying the composition on every slide.",
+      "status": "realized"
+    }
+  ],
+  "confidence": 0.96,
+  "criterion_scores": [
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "signature_realization",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The rail motif recurs in functional emphasis roles and does not become template chrome, but its thin-line vocabulary is fairly generic, varies substantially across slides, and does not shape the comparison slide strongly enough to become an unmistakable, memorable deck signature.",
+      "score": 3
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "composition_plan_fidelity",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The sequence closely realizes the planned cover, loop, scenario, comparison, and closing structures with clear compositional variety. Fidelity falls short of complete realization because the closing slide substitutes one shared rail for the promised four bordered rows.",
+      "score": 4
+    }
+  ],
+  "evaluated_selectors": [
+    "slide:1",
+    "slide:2",
+    "slide:3",
+    "slide:4",
+    "slide:5"
+  ],
+  "failure_codes": [
+    "weak_signature_realization",
+    "weak_fingerprint_realization"
+  ],
+  "schema_version": "deck-quality-plan-assessment/v3",
+  "uncertainties": [
+    {
+      "criterion_id": "signature_realization",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "kind": "material_taste",
+      "reason": "Reviewers could differ on whether the adapted rail treatments form a memorable subject-derived signature or remain generic editorial rules, which could affect the signature finding."
+    },
+    {
+      "criterion_id": null,
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "kind": "evidence_limit",
+      "reason": "The renders support the intended diagram-and-shape visual medium but cannot prove native PowerPoint editability."
+    }
+  ]
+}

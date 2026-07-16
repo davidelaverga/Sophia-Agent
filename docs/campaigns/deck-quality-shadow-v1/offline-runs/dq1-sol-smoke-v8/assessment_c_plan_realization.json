@@ -1,0 +1,186 @@
+{
+  "commitments": [
+    {
+      "commitment_id": "subject-materials",
+      "dimension": "subject_material",
+      "evidence_selectors": [
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The sequence visibly covers the full promised mechanism: the four-stage feedback loop, weighted motive competition, an irreversibility-triggered caution outcome, and motive-trace logging for debugging.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "signature",
+      "dimension": "signature",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "Rail-like emphasis is functional on the feedback, resolution, and checklist beats, but it changes orientation and treatment, is absent as a distinctive motif from the comparison slide, and sometimes reads as a generic rule rather than an unmistakable deck signature.",
+      "status": "partial"
+    },
+    {
+      "commitment_id": "rhythm",
+      "dimension": "rhythm",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The rendered sequence follows the promised progression from asymmetric cover to loop, split scenario and resolution, row-ruled comparison, and checklist close, with visibly distinct compositions at each beat.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:1",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:1"
+      ],
+      "observation": "A far-left vertical ember rail anchors a stacked, left-aligned thesis block while the right side remains open.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:2",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:2"
+      ],
+      "observation": "Four horizontally aligned labeled boxes are joined by centered connectors, with one long feedback rail and label beneath them.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:3",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:3"
+      ],
+      "observation": "Two competing-motive panels sit side by side above a single wide resolution band, making the arbitration relationship clear.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:4",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:4"
+      ],
+      "observation": "The slide uses one table-like comparison with row rules and a single vertical divider between the two compared agent approaches, not a card grid or dashboard.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "fingerprint-slide:5",
+      "dimension": "structural_fingerprint",
+      "evidence_selectors": [
+        "slide:5"
+      ],
+      "observation": "Four checklist items are stacked above a large standalone closing statement, but they are grouped by one shared vertical rail rather than rendered as four individually bordered rows.",
+      "status": "partial"
+    },
+    {
+      "commitment_id": "visual-medium",
+      "dimension": "visual_medium",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The visible deck is consistently expressed through labeled diagrams, rules, text, and simple geometric structures; no screenshots or image-baked text are visible.",
+      "status": "realized"
+    },
+    {
+      "commitment_id": "default-look-resistance",
+      "dimension": "default_look",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "observation": "The restrained ivory editorial system avoids recurring eyebrows, navigation chrome, icon strips, page numbers, and dashboard cards; the comparison remains a single visual and the five layouts are materially varied.",
+      "status": "realized"
+    }
+  ],
+  "confidence": 0.98,
+  "criterion_scores": [
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "signature_realization",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The control-rail idea appears repeatedly and has some functional uses, especially for feedback, resolution, and checklist emphasis. However, its changing orientation and styling, its absence as a distinctive device on slide 4, and its overlap with ordinary rules and dividers prevent it from unmistakably shaping the deck's main visual identity.",
+      "score": 3
+    },
+    {
+      "applicability_reason": null,
+      "applicable": true,
+      "criterion_id": "composition_plan_fidelity",
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "rationale": "The sequence strongly realizes the planned fingerprints: the cover, loop, split scenario, and comparison closely match their specified structures, and the closing slide preserves the planned checklist-to-statement hierarchy. It falls short of full fidelity because slide 5 replaces four separately bordered rows with one shared rail.",
+      "score": 4
+    }
+  ],
+  "evaluated_selectors": [
+    "slide:1",
+    "slide:2",
+    "slide:3",
+    "slide:4",
+    "slide:5"
+  ],
+  "failure_codes": [
+    "weak_signature_realization",
+    "weak_fingerprint_realization"
+  ],
+  "schema_version": "deck-quality-plan-assessment/v4",
+  "uncertainties": [
+    {
+      "criterion_id": null,
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "kind": "evidence_limit",
+      "plausible_max_score": null,
+      "plausible_min_score": null,
+      "reason": "Rendered images and source-verified visible text establish the diagram-native appearance but cannot prove native PowerPoint editability."
+    },
+    {
+      "criterion_id": null,
+      "evidence_selectors": [
+        "slide:1",
+        "slide:2",
+        "slide:3",
+        "slide:4",
+        "slide:5"
+      ],
+      "kind": "evidence_limit",
+      "plausible_max_score": null,
+      "plausible_min_score": null,
+      "reason": "Exact font-size values and numerical contrast ratios cannot be verified from renders alone."
+    }
+  ]
+}

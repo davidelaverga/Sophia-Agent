@@ -503,18 +503,48 @@ build_foundation:
   mirror_sources: true
   verify_durable_objects: true
 
-# Provider-neutral routes are optional until their consumers are enabled.
+# Provider-neutral quality routes are optional until their consumer is enabled.
+# DQ-1 requires all four listed capabilities and permits no silent provider
+# failover within one measurement instrument.
 # model_routes:
 #   deck.judge.visual:
-#     primary: claude-sonnet
+#     primary: openai-gpt-5-6-sol
 #     fallbacks: []
-#     profile: structured-visual-v1
-#     required_capabilities: [image_input, strict_structured_output]
-#     max_failovers: 1
+#     profile: deck-visual-judge-v2
+#     required_capabilities:
+#       [image_input, multi_image_input, strict_structured_output, reasoning_effort]
+#     max_failovers: 0
 # harness_profiles:
-#   structured-visual-v1:
-#     version: v1
-#     timeout_seconds: 120
+#   deck-visual-judge-v2:
+#     version: v2
+#     timeout_seconds: 180
 #     max_retries: 0
 #     model_overrides:
-#       max_tokens: 8192
+#       reasoning:
+#         effort: high
+#         mode: standard
+#         context: current_turn
+#       output_version: responses/v1
+#       use_responses_api: true
+#       store: false
+#       max_completion_tokens: 6000
+
+# DQ-1 stays disabled by default. If enabled, scope and authority fields are
+# locked to canary-only, asynchronous, non-mutating shadow behavior.
+# deck_quality:
+#   enabled: false
+#   mode: off
+#   scope: canary
+#   canary_user_ids: []
+#   judge_route: deck.judge.visual
+#   rubric_version: deck-rubric-v2
+#   judge_profile_version: deck-visual-judge-v2
+#   evidence_preprocessor_version: deck-evidence-v4
+#   judge_invoker_version: deck-judge-invoker-v4
+#   async_after_success: true
+#   mutate_artifact: false
+#   affect_delivery: false
+#   sample_rate: 0.0
+#   max_quality_calls: 2
+#   max_quality_cost_usd: 0.60
+#   max_quality_wall_clock_seconds: 300

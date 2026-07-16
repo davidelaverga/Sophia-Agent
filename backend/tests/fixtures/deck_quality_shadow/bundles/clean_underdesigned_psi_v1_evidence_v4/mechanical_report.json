@@ -1,0 +1,376 @@
+{
+  "authoritative_gate_result": {
+    "failure_code": null,
+    "failure_summary": null,
+    "issues": [],
+    "passed": true,
+    "slide_render_metrics": [
+      {
+        "file": "slide-0.jpg",
+        "mean_luminance": 229.63,
+        "non_background_ratio": 0.161,
+        "selector": "slide:1"
+      },
+      {
+        "file": "slide-1.jpg",
+        "mean_luminance": 233.67,
+        "non_background_ratio": 0.194,
+        "selector": "slide:2"
+      },
+      {
+        "file": "slide-2.jpg",
+        "mean_luminance": 236.29,
+        "non_background_ratio": 0.1697,
+        "selector": "slide:3"
+      },
+      {
+        "file": "slide-3.jpg",
+        "mean_luminance": 232.09,
+        "non_background_ratio": 0.1753,
+        "selector": "slide:4"
+      },
+      {
+        "file": "slide-4.jpg",
+        "mean_luminance": 233.11,
+        "non_background_ratio": 0.1072,
+        "selector": "slide:5"
+      }
+    ],
+    "warnings": []
+  },
+  "authoritative_mechanical_report": {
+    "contrast": {
+      "checked_run_count": 45,
+      "indeterminate_required_count": 0,
+      "issue_count": 0,
+      "issues": [],
+      "passed": true,
+      "required_issue_count": 0
+    },
+    "diff_changed": true,
+    "diff_success": true,
+    "full_slide_picture_count": 0,
+    "inspect_success": true,
+    "lint_fix_applied_count": 0,
+    "lint_fix_success": true,
+    "lint_issue_count_before": 0,
+    "lint_residue": [],
+    "lint_residue_count": 0,
+    "lint_residue_kinds": {},
+    "native_editability_score": 1,
+    "native_text_shape_count": 43,
+    "picture_shape_count": 0,
+    "render_success": true,
+    "rendered_slide_count": 5,
+    "source_retention": {
+      "duplicate_source_id_count": 0,
+      "duplicates": [],
+      "low_retention": [],
+      "missing_required": [],
+      "missing_required_count": 0,
+      "passed": true,
+      "slide_count": 5,
+      "slides": [
+        {
+          "duplicate_source_ids": [],
+          "missing_required_ids": [],
+          "native_shape_names": [
+            "h2p-1-box-1",
+            "h2p-1-cover-headline-text-1",
+            "h2p-1-cover-meta-text-1",
+            "h2p-1-cover-rail-box-1",
+            "h2p-1-cover-sub-text-1"
+          ],
+          "required_source_ids": [
+            "cover-headline",
+            "cover-rail",
+            "cover-sub"
+          ],
+          "retained_required_ids": [
+            "cover-headline",
+            "cover-rail",
+            "cover-sub"
+          ],
+          "retained_semantic_ids": [
+            "cover-headline",
+            "cover-meta",
+            "cover-rail",
+            "cover-sub"
+          ],
+          "retention_ratio": 1,
+          "selector": "slide:1",
+          "semantic_source_ids": [
+            "cover-headline",
+            "cover-meta",
+            "cover-rail",
+            "cover-sub"
+          ]
+        },
+        {
+          "duplicate_source_ids": [],
+          "missing_required_ids": [],
+          "native_shape_names": [
+            "h2p-2-box-1",
+            "h2p-2-conn-1-box-1",
+            "h2p-2-conn-2-box-1",
+            "h2p-2-conn-3-box-1",
+            "h2p-2-conn-feedback-box-1",
+            "h2p-2-feedback-label-text-1",
+            "h2p-2-loop-title-text-1",
+            "h2p-2-node-action-box-1",
+            "h2p-2-node-appraisal-box-1",
+            "h2p-2-node-motives-box-1",
+            "h2p-2-node-perception-box-1",
+            "h2p-2-text-2",
+            "h2p-2-text-3",
+            "h2p-2-text-4",
+            "h2p-2-text-5",
+            "h2p-2-text-6",
+            "h2p-2-text-7",
+            "h2p-2-text-8",
+            "h2p-2-text-9"
+          ],
+          "required_source_ids": [
+            "conn-feedback",
+            "node-action",
+            "node-appraisal",
+            "node-motives",
+            "node-perception"
+          ],
+          "retained_required_ids": [
+            "conn-feedback",
+            "node-action",
+            "node-appraisal",
+            "node-motives",
+            "node-perception"
+          ],
+          "retained_semantic_ids": [
+            "conn-1",
+            "conn-2",
+            "conn-3",
+            "conn-feedback",
+            "feedback-label",
+            "loop-title",
+            "node-action",
+            "node-appraisal",
+            "node-motives",
+            "node-perception"
+          ],
+          "retention_ratio": 1,
+          "selector": "slide:2",
+          "semantic_source_ids": [
+            "conn-1",
+            "conn-2",
+            "conn-3",
+            "conn-feedback",
+            "feedback-label",
+            "loop-title",
+            "node-action",
+            "node-appraisal",
+            "node-motives",
+            "node-perception"
+          ]
+        },
+        {
+          "duplicate_source_ids": [],
+          "missing_required_ids": [],
+          "native_shape_names": [
+            "h2p-3-box-1",
+            "h2p-3-conn-down-box-1",
+            "h2p-3-motive-caution-box-1",
+            "h2p-3-motive-help-box-1",
+            "h2p-3-resolution-box-1",
+            "h2p-3-resolution-line-1-part-2",
+            "h2p-3-scenario-setup-text-1",
+            "h2p-3-scenario-title-text-1",
+            "h2p-3-text-2",
+            "h2p-3-text-3",
+            "h2p-3-text-4",
+            "h2p-3-text-5",
+            "h2p-3-text-6",
+            "h2p-3-text-7",
+            "h2p-3-vs-mark-text-1"
+          ],
+          "required_source_ids": [
+            "motive-caution",
+            "motive-help",
+            "resolution"
+          ],
+          "retained_required_ids": [
+            "motive-caution",
+            "motive-help",
+            "resolution"
+          ],
+          "retained_semantic_ids": [
+            "conn-down",
+            "motive-caution",
+            "motive-help",
+            "resolution",
+            "scenario-setup",
+            "scenario-title",
+            "vs-mark"
+          ],
+          "retention_ratio": 1,
+          "selector": "slide:3",
+          "semantic_source_ids": [
+            "conn-down",
+            "motive-caution",
+            "motive-help",
+            "resolution",
+            "scenario-setup",
+            "scenario-title",
+            "vs-mark"
+          ]
+        },
+        {
+          "duplicate_source_ids": [],
+          "missing_required_ids": [],
+          "native_shape_names": [
+            "h2p-4-box-1",
+            "h2p-4-col-head-baseline-text-1",
+            "h2p-4-col-head-psi-text-1",
+            "h2p-4-comp-title-text-1",
+            "h2p-4-divider-v-box-1",
+            "h2p-4-row1-base-text-1",
+            "h2p-4-row1-label-text-1",
+            "h2p-4-row1-psi-text-1",
+            "h2p-4-row2-base-text-1",
+            "h2p-4-row2-label-text-1",
+            "h2p-4-row2-psi-text-1",
+            "h2p-4-row3-base-text-1",
+            "h2p-4-row3-label-text-1",
+            "h2p-4-row3-psi-text-1",
+            "h2p-4-row4-base-text-1",
+            "h2p-4-row4-label-text-1",
+            "h2p-4-row4-psi-text-1",
+            "h2p-4-rule1-box-1",
+            "h2p-4-rule2-box-1",
+            "h2p-4-rule3-box-1"
+          ],
+          "required_source_ids": [
+            "row1-base",
+            "row1-label",
+            "row1-psi",
+            "row3-psi"
+          ],
+          "retained_required_ids": [
+            "row1-base",
+            "row1-label",
+            "row1-psi",
+            "row3-psi"
+          ],
+          "retained_semantic_ids": [
+            "col-head-baseline",
+            "col-head-psi",
+            "comp-title",
+            "divider-v",
+            "row1-base",
+            "row1-label",
+            "row1-psi",
+            "row2-base",
+            "row2-label",
+            "row2-psi",
+            "row3-base",
+            "row3-label",
+            "row3-psi",
+            "row4-base",
+            "row4-label",
+            "row4-psi",
+            "rule1",
+            "rule2",
+            "rule3"
+          ],
+          "retention_ratio": 1,
+          "selector": "slide:4",
+          "semantic_source_ids": [
+            "col-head-baseline",
+            "col-head-psi",
+            "comp-title",
+            "divider-v",
+            "row1-base",
+            "row1-label",
+            "row1-psi",
+            "row2-base",
+            "row2-label",
+            "row2-psi",
+            "row3-base",
+            "row3-label",
+            "row3-psi",
+            "row4-base",
+            "row4-label",
+            "row4-psi",
+            "rule1",
+            "rule2",
+            "rule3"
+          ]
+        },
+        {
+          "duplicate_source_ids": [],
+          "missing_required_ids": [],
+          "native_shape_names": [
+            "h2p-5-box-1",
+            "h2p-5-check-1-line-1-part-1",
+            "h2p-5-check-2-line-1-part-1",
+            "h2p-5-check-3-line-1-part-1",
+            "h2p-5-check-4-line-1-part-1",
+            "h2p-5-close-line-text-1",
+            "h2p-5-close-rule-box-1",
+            "h2p-5-close-title-text-1",
+            "h2p-5-text-2",
+            "h2p-5-text-3",
+            "h2p-5-text-4",
+            "h2p-5-text-5"
+          ],
+          "required_source_ids": [
+            "check-1",
+            "check-2",
+            "check-3",
+            "check-4",
+            "close-line"
+          ],
+          "retained_required_ids": [
+            "check-1",
+            "check-2",
+            "check-3",
+            "check-4",
+            "close-line"
+          ],
+          "retained_semantic_ids": [
+            "check-1",
+            "check-2",
+            "check-3",
+            "check-4",
+            "close-line",
+            "close-rule",
+            "close-title"
+          ],
+          "retention_ratio": 1,
+          "selector": "slide:5",
+          "semantic_source_ids": [
+            "check-1",
+            "check-2",
+            "check-3",
+            "check-4",
+            "close-line",
+            "close-rule",
+            "close-title"
+          ]
+        }
+      ]
+    }
+  },
+  "checks": {
+    "artifact_identity": true,
+    "authoritative_gate": true,
+    "contrast": true,
+    "native_editability": true,
+    "native_lint": true,
+    "overflow_collision_clipping": true,
+    "render_success": true,
+    "source_retention": true,
+    "visual_asset_completeness": true
+  },
+  "schema_version": "deck-quality-fixture-mechanical/v1",
+  "source_trace_run_started_at": "2026-07-15T20:00:09.971876Z",
+  "terminal_status": "success"
+}

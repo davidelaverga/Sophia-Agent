@@ -1,0 +1,27 @@
+{
+  "artifact_id": "artifact_6726b07cedb246eb14a5eabf",
+  "artifact_version_id": "artifact_version_01KXKNV1DJ7B4ABS00FN20G1SK",
+  "build_id": "build_01KXKNNQ5Z9N198VCMJPDWSBJ0",
+  "fixture_id": "clean_underdesigned_psi_v1",
+  "render_hashes": {
+    "contact-sheet.png": "d597ac35aecc7b1795d1cebe293f1e383ab502981dc7404edab6cfced49a69d5",
+    "slide-1.png": "5f766101e6633d88791cb585e26358ad90ad811a2c32821accd178c8c096fc00",
+    "slide-2.png": "d0c78bb454ef6a11bf9a41f79a05d25b549918f17c5f7eaf30edd15eb00526d7",
+    "slide-3.png": "aa1e994c9f79594ec567092808b3ad27f9e9736697fcbea73f4933bb8c247633",
+    "slide-4.png": "12a4fd9691aa71d0f2213a6f068035b1c6ef6415e7a70249565f9b9c06c00c17",
+    "slide-5.png": "74a6858b32d8144b2fc1e45aa2e11ec2f3eb1394c7eb0097ceef87696fc688d4"
+  },
+  "schema_version": "deck-quality-fixture-bundle/v1",
+  "source": "synthetic production canary",
+  "source_hashes": {
+    "artifact.pptx": "1e9b3a8f1b6605c60388bcb0ade3cb35574428de5929553dbb4c76a7a76b2bd4",
+    "brief.json": "03bd27085bfbb8d641202ec9a52596d286bd5dc2c44b65ba95111a70921d3e1b",
+    "creative_plan.json": "43fce3c6aadd834aa58bfcb206bda770cd341b4a01afb00273abf5e2684bc351",
+    "deck_stylesheet": "6490a8a464189622d4b11c79e166feab10a3b5714dc582e3b791be6e0b09330c",
+    "design_plan.json": "c2e430c3d01a324d8e7e703d5db21738402c56138b1e644a121237d30974ef4f",
+    "mechanical_report.json": "4e064d4daf121d5e808d14320675d5d7489e6db7e12a4148c78ef888d85124a6",
+    "slides_input": "3362141238d9ff3f42a4396807518aa42e638348ee9ee26f810c850cbc045cdb"
+  },
+  "trace_id": "019f675a-dcc1-7053-80dc-c6f572fb4d87",
+  "trace_run_count": 155
+}
