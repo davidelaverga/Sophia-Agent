@@ -80,5 +80,8 @@ missing strong/exception/human-corpus evidence.
 
 Production remains at the frozen rollback SHA
 `f05efb3adce121fb0af009407b7fc53ba6e98312`, tagged
-`dq1-baseline-f05efb3`. The offline v9 evidence, decisions, experiment ledger,
-and amendment are retained without relabeling historical runs.
+`dq1-baseline-f05efb3`. The complete non-deployed candidate and terminal
+evidence are preserved in local commit
+`72c2fed659d474689c49b149e7d5820f59460064`, whose parent is that baseline.
+The offline v9 evidence, decisions, experiment ledger, and amendment are
+retained without relabeling historical runs.

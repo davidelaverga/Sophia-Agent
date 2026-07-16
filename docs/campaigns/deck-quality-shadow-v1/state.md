@@ -27,6 +27,9 @@ all locked invariants.
 - Campaign branch: `codex/sophia-observability-v1`.
 - Frozen source/production SHA:
   `f05efb3adce121fb0af009407b7fc53ba6e98312`.
+- Non-deployed terminal archive commit:
+  `72c2fed659d474689c49b149e7d5820f59460064` (parent is the frozen
+  baseline SHA).
 - Immutable rollback tag: `dq1-baseline-f05efb3`.
 - Render gateway deploy: `dep-d9bu80navr4c73bbbk00`.
 - Render LangGraph deploy: `dep-d9bu80ojs32c73ed9pk0`.
