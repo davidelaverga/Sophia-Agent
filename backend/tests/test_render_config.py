@@ -46,6 +46,27 @@ def test_production_dq1_is_exact_canary_shadow_with_no_delivery_authority() -> N
     assert dq_deployment["access_scope"] == "route_only"
 
 
+def test_production_dq2_authority_defaults_closed_with_locked_routes() -> None:
+    config_path = Path(__file__).resolve().parents[2] / "config.production.yaml"
+    production = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    design_lift = production["deck_design_lift"]
+
+    assert design_lift["enabled"] is False
+    assert design_lift["mode"] == "off"
+    assert design_lift["canary_user_ids"] == "$SOPHIA_DECK_QUALITY_CANARY_USER_IDS"
+    assert design_lift["max_repairs"] == 1
+    assert design_lift["max_judge_calls"] == 4
+    assert design_lift["max_repair_calls"] == 1
+    assert design_lift["affect_delivery"] is False
+    assert design_lift["promote_improved_candidate"] is True
+
+    repair_route = production["model_routes"]["deck.repair.executor"]
+    assert repair_route["fallbacks"] == []
+    assert repair_route["max_failovers"] == 0
+    assert repair_route["profile"] == "deck-repair-executor-v1"
+    assert production["harness_profiles"]["deck-repair-executor-v1"]["max_retries"] == 0
+
+
 def test_gateway_declares_artifact_registry_supabase_config() -> None:
     # Codex P1 PR #131: the gateway builds ArtifactRegistry() at router import
     # and FAIL-FASTS in a production runtime unless the store mode + bucket are

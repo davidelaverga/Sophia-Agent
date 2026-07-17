@@ -9,6 +9,7 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from deerflow.config.build_foundation_config import BuildFoundationConfig
 from deerflow.config.checkpointer_config import CheckpointerConfig, load_checkpointer_config_from_dict, set_checkpointer_config
+from deerflow.config.deck_design_lift_config import DeckDesignLiftConfig
 from deerflow.config.deck_quality_config import DeckQualityConfig
 from deerflow.config.extensions_config import ExtensionsConfig
 from deerflow.config.memory_config import load_memory_config_from_dict
@@ -40,6 +41,7 @@ class AppConfig(BaseModel):
     harness_profiles: dict[str, HarnessProfileConfig] = Field(default_factory=dict, description="Provider request profiles")
     build_foundation: BuildFoundationConfig = Field(default_factory=BuildFoundationConfig)
     deck_quality: DeckQualityConfig = Field(default_factory=DeckQualityConfig)
+    deck_design_lift: DeckDesignLiftConfig = Field(default_factory=DeckDesignLiftConfig)
     sandbox: SandboxConfig = Field(description="Sandbox configuration")
     tools: list[ToolConfig] = Field(default_factory=list, description="Available tools")
     tool_groups: list[ToolGroupConfig] = Field(default_factory=list, description="Available tool groups")

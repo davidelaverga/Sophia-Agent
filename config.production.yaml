@@ -13,8 +13,8 @@ models:
     max_tokens: 4096
     temperature: 1.0
 
-  # DQ-1 only. This deployment is never selected by the companion or builder;
-  # it is reachable solely through the canary-scoped deck.judge.visual route.
+  # DQ canary only. This deployment is never selected by the companion or
+  # builder; it is reachable solely through locked judge/repair routes.
   # The DQ invoker injects SOPHIA_DECK_QUALITY_OPENAI_API_KEY only after exact
   # canary admission. Ordinary builder/companion/image/fallback paths retain
   # their pre-campaign configuration and cannot select this DQ-only authority.
@@ -44,6 +44,17 @@ model_routes:
       - reasoning_effort
     max_failovers: 0
 
+  deck.repair.executor:
+    primary: openai-gpt-5-6-sol
+    fallbacks: []
+    profile: deck-repair-executor-v1
+    required_capabilities:
+      - image_input
+      - multi_image_input
+      - strict_structured_output
+      - reasoning_effort
+    max_failovers: 0
+
 harness_profiles:
   deck-visual-judge-v2:
     version: v2
@@ -61,6 +72,20 @@ harness_profiles:
       # provider-side retention of the synthetic canary evidence.
       store: false
       max_completion_tokens: 6000
+
+  deck-repair-executor-v1:
+    version: v1
+    timeout_seconds: 240
+    max_retries: 0
+    model_overrides:
+      reasoning:
+        effort: high
+        mode: standard
+        context: current_turn
+      output_version: responses/v1
+      use_responses_api: true
+      store: false
+      max_completion_tokens: 12000
 
 # Amendment 002 reopens DQ-1 with a durable pre-delivery outbox. Admission is
 # still exact-canary only; all user-visible and repair authorities remain
@@ -86,6 +111,30 @@ deck_quality:
   max_quality_calls: 2
   max_quality_cost_usd: 0.60
   max_quality_wall_clock_seconds: 300
+
+# DQ-2 is a separate authority and remains closed until its durable mutation
+# schema, graph, and production admission tests are deployed together.
+deck_design_lift:
+  enabled: false
+  mode: "off"
+  scope: canary
+  canary_user_ids: $SOPHIA_DECK_QUALITY_CANARY_USER_IDS
+  judge_route: deck.judge.visual
+  repair_route: deck.repair.executor
+  judge_profile_version: deck-visual-judge-v2
+  repair_profile_version: deck-repair-executor-v1
+  max_repairs: 1
+  affect_delivery: false
+  promote_improved_candidate: true
+  max_judge_calls: 4
+  max_repair_calls: 1
+  max_campaign_cost_usd: 3.00
+  max_campaign_wall_clock_seconds: 900
+  require_manifest_enforce: true
+  require_mutation_transactions: true
+  require_mechanical_pass_before_commit: true
+  require_second_judge_approval: true
+  require_deterministic_improvement: true
 
 sandbox:
   use: deerflow.sandbox.local:LocalSandboxProvider
