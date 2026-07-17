@@ -321,3 +321,44 @@ existing-state guards, and an independent exact postflight. Pre-existing
 builder OpenAI and fallback behavior is preserved; the separate DQ credential
 is admitted only for the exact synthetic canary. Enforcement, repair, Advisor,
 ordinary-user DQ processing, and builder/companion migration remain forbidden.
+
+## 2026-07-17 — DQ-1 terminates BLOCKED at production admission
+
+The Amendment 002 implementation is fixed at
+`e6e28aafa5101350057047de5235f8f6bd547a58`; its exact reviewed release
+candidate, including bounded production-image package transactions, is
+`d306f07892a9666559bf75ead8ca5924baa80df3`. Integrated backend, frontend,
+migration, isolation, image, runtime, and adversarial verification is green.
+The exact-HEAD backend result is 4,343 passed / 149 skipped / zero failed. The
+production image digest is
+`sha256:ac60ef7dcc8d16431d33d5903ea5deb693c09fc1806b315b03f490b1d1d6daab`;
+39/39 in-image root-runtime tests and real PPTX-to-PDF-to-PNG conversion pass.
+The final audit found no open P0/P1/P2 issue. This is predeployment clearance,
+not production or promotion evidence.
+
+Read-only Render preflight found the required exact-canary and builder-event
+HMAC variable names absent from both services and the DQ-only provider variable
+name absent from LangGraph. Values were not inspected. Because startup requires
+the complete matching canary/HMAC proof and a DQ credential distinct from
+baseline builder authority, any partial configuration, migration, or deploy
+would violate the locked fail-closed contract. No deployment was attempted and
+production remains on `f05efb3adce121fb0af009407b7fc53ba6e98312`.
+
+Section 22 classifies an unresolved provider, credential, deployment, or
+database dependency that cannot be resolved within authorized scope as
+`BLOCKED`. That is the current
+explicit terminal. It is not `ACHIEVED` and not `HUMAN_JUDGMENT_REQUIRED`,
+because no operational candidate exists for human promotion judgment. The user
+also prohibited API-key changes; no API key was created, rotated, revoked,
+edited, revealed, substituted, or value-inspected.
+
+The smallest authorized unblock is an operator supplying the already-authorized
+distinct DQ credential on LangGraph only plus matching exact-canary and HMAC
+configuration on the required services, without exposing values. Only after
+that prerequisite may the ordered July 15 through July 19 migration chain and
+release candidate `d306f07892a9666559bf75ead8ca5924baa80df3` enter a controlled
+gateway-first/LangGraph-second deployment and real-app canary sequence. The
+required 12 independent labels, six complete bundles, known-strong and
+explicit-brand controls, false-reject/top-failure gates, and repeatability
+evidence remain separate unmet achievement gates; they are not the cause of
+the current `BLOCKED` admission terminal.
