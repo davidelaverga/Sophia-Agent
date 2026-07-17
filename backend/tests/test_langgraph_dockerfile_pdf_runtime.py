@@ -32,6 +32,22 @@ def _builder_relevant_skills(repo_root: Path) -> tuple[str, ...]:
     raise AssertionError("BuilderTaskMiddleware._BUILDER_RELEVANT_SKILLS not found")
 
 
+def _dockerfile_logical_instructions(contents: str) -> tuple[str, ...]:
+    """Collapse backslash-continued Dockerfile instructions for assertions."""
+    instructions: list[str] = []
+    current: list[str] = []
+    for raw_line in contents.splitlines():
+        line = raw_line.strip()
+        if not current and (not line or line.startswith("#")):
+            continue
+        current.append(line.removesuffix("\\").strip())
+        if not line.endswith("\\"):
+            instructions.append(" ".join(current))
+            current = []
+    assert not current, "Dockerfile ends inside a continued instruction"
+    return tuple(instructions)
+
+
 def test_langgraph_dockerfile_installs_pdf_runtime() -> None:
     repo_root = Path(__file__).resolve().parents[2]
     dockerfile = repo_root / "backend" / "Dockerfile.langgraph"
@@ -52,14 +68,57 @@ def test_langgraph_dockerfile_installs_pdf_runtime() -> None:
         "fonts-dejavu-core",
         "fonts-crosextra-caladea",
         "fonts-crosextra-carlito",
+        "libreoffice-impress",
+        "poppler-utils",
         "chromium",
+        "nodejs",
     ):
         assert package in contents
 
+    # Keep the large TeX, office, browser, and Node runtimes in bounded apt
+    # transactions. A single 1.5+ GiB acquisition exhausts the production-like
+    # 4 GiB builder before dpkg can release its archive set.
+    instructions = _dockerfile_logical_instructions(contents)
+    apt_install_runs = tuple(
+        instruction
+        for instruction in instructions
+        if instruction.startswith("RUN ") and "apt-get install -y" in instruction
+    )
+    assert len(apt_install_runs) == 7
+    for instruction in apt_install_runs:
+        assert "--mount=type=cache,target=/var/cache/apt,sharing=locked" in instruction
+        assert "--mount=type=cache,target=/var/lib/apt/lists,sharing=locked" in instruction
+
+    def apt_run_for(package: str) -> str:
+        matching = tuple(
+            instruction
+            for instruction in apt_install_runs
+            if re.search(rf"(?<![A-Za-z0-9_-]){re.escape(package)}(?![A-Za-z0-9_-])", instruction)
+        )
+        assert len(matching) == 1, f"expected one apt RUN for {package}, got {len(matching)}"
+        return matching[0]
+
+    pandoc_run = apt_run_for("pandoc")
+    assert apt_run_for("texlive-xetex") == pandoc_run
+    assert apt_run_for("texlive-latex-extra") != pandoc_run
+    heavy_runs = {
+        pandoc_run,
+        apt_run_for("texlive-fonts-extra"),
+        apt_run_for("libreoffice-impress"),
+        apt_run_for("chromium"),
+        apt_run_for("nodejs"),
+    }
+    assert len(heavy_runs) == 5
+
     assert "pandoc --version" in contents
     assert "xelatex --version" in contents
+    assert "soffice --version" in contents
+    assert "pdftoppm -v" in contents
     assert "chromium --version" in contents
+    assert "node --version" in contents
     assert "dot -V" in contents  # graphviz present
+    assert "UV_HTTP_TIMEOUT=120 uv sync" in contents
+    assert "PLAYWRIGHT_DOWNLOAD_CONNECTION_TIMEOUT=120000" in contents
     assert "deerflow/sophia/js" in contents
     assert "npm ci" in contents
     assert "compile_pptx.mjs" in contents

@@ -380,7 +380,10 @@ print(p.pid)
             timeout=10,
         )
         assert completed.returncode == 0
-        deadline = time.monotonic() + 3
+        # Cold production-like containers may still be settling large runtime
+        # pages after image start. Preserve the security assertion while giving
+        # the detached probe the same scheduling budget as its marker wait.
+        deadline = time.monotonic() + 10
         while not evidence.exists() and time.monotonic() < deadline:
             time.sleep(0.01)
         assert evidence.read_bytes() == b"DENIED"
