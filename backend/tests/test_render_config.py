@@ -29,6 +29,7 @@ def test_production_dq1_is_exact_canary_shadow_with_no_delivery_authority() -> N
         "judge_profile_version": "deck-visual-judge-v2",
         "evidence_preprocessor_version": "deck-evidence-v4",
         "judge_invoker_version": "deck-judge-invoker-v4",
+        "allow_shared_provider_credential": True,
         "async_after_success": True,
         "mutate_artifact": False,
         "affect_delivery": False,

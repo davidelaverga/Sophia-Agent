@@ -75,6 +75,10 @@ deck_quality:
   judge_profile_version: deck-visual-judge-v2
   evidence_preprocessor_version: deck-evidence-v4
   judge_invoker_version: deck-judge-invoker-v4
+  # Explicit operator authorization for this internal canary campaign. The
+  # existing OpenAI credential is copied into the DQ-only environment name;
+  # all route, exact-canary, privacy, and call-budget locks remain enforced.
+  allow_shared_provider_credential: true
   async_after_success: true
   mutate_artifact: false
   affect_delivery: false

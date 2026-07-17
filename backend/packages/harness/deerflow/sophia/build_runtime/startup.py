@@ -162,12 +162,22 @@ def audit_deck_quality_builder_service_startup(*, config: AppConfig) -> None:
         raise BuildFoundationStartupError(
             "enabled deck quality judge requires the baseline builder provider credential"
         )
-    if hmac.compare_digest(
+    credentials_match = hmac.compare_digest(
         dq_provider_key.encode("utf-8"),
         baseline_provider_key.encode("utf-8"),
-    ):
+    )
+    allow_shared_provider_credential = bool(
+        getattr(deck_quality, "allow_shared_provider_credential", False)
+    )
+    if credentials_match and not allow_shared_provider_credential:
         raise BuildFoundationStartupError(
             "deck quality and baseline builder provider credentials must be distinct"
+        )
+    if credentials_match:
+        logger.warning(
+            "Deck quality provider credential is operator-authorized for shared "
+            "billing authority; DQ route and exact-canary isolation remain enabled "
+            "credentialValueExcluded=true"
         )
 
 

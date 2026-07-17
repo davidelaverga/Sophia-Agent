@@ -99,6 +99,7 @@ def test_config_defaults_are_off_shadow_only_and_non_authoritative() -> None:
     assert config.rubric_version == "deck-rubric-v2"
     assert config.evidence_preprocessor_version == "deck-evidence-v4"
     assert config.judge_invoker_version == "deck-judge-invoker-v4"
+    assert config.allow_shared_provider_credential is False
     assert config.max_quality_calls == 2
 
 

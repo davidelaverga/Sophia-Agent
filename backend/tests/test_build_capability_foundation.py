@@ -561,6 +561,9 @@ def test_enabled_deck_quality_requires_isolated_producer_dependencies_at_service
     ):
         audit_deck_quality_builder_service_startup(config=config)
 
+    config.deck_quality.allow_shared_provider_credential = True
+    audit_deck_quality_builder_service_startup(config=config)
+
 
 def test_enabled_deck_quality_requires_failure_signal_auth_at_service_startup(
     monkeypatch,

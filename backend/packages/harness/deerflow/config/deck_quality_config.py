@@ -37,6 +37,10 @@ class DeckQualityConfig(BaseModel):
     judge_profile_version: str = "deck-visual-judge-v2"
     evidence_preprocessor_version: str = "deck-evidence-v4"
     judge_invoker_version: str = "deck-judge-invoker-v4"
+    # Defaults closed. Production may opt in only after an operator explicitly
+    # authorizes reusing the baseline provider credential through the DQ-only
+    # environment name; route/canary/call-budget isolation still applies.
+    allow_shared_provider_credential: bool = False
     async_after_success: Literal[True] = True
     mutate_artifact: Literal[False] = False
     affect_delivery: Literal[False] = False
