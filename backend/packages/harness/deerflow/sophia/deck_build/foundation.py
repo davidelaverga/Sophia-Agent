@@ -10,9 +10,10 @@ from deerflow.config import get_app_config
 from deerflow.config.build_foundation_config import BuildFoundationConfig
 from deerflow.sandbox.tools import get_thread_data, replace_virtual_path
 from deerflow.sophia.artifact_acceptance import ArtifactAcceptedPayload
-from deerflow.sophia.build_manifest import BuildComponent, BuildManifest
+from deerflow.sophia.build_manifest import DECK_STYLE_ROOT_SELECTOR, BuildComponent, BuildManifest
 from deerflow.sophia.build_runtime.identity import new_version_id
-from deerflow.sophia.build_sources import materialize_compact_deck_sources
+from deerflow.sophia.build_sources import MaterializedDeckSources, materialize_compact_deck_sources
+from deerflow.sophia.build_versions import BuildComponentVersion
 from deerflow.sophia.storage import supabase_artifact_store
 from deerflow.sophia.storage.build_foundation_store import configured_build_foundation_store
 
@@ -50,8 +51,8 @@ def materialize_deck_foundation(deck: Any, runtime: Any) -> None:
         raise BuildFoundationPersistenceError("enforce-mode build requires user_id")
     user_id = user_id or "shadow-unknown-user"
     root = _outputs_root(runtime)
-    source_versions = _materialize_source_versions(deck, root)
-    components = _manifest_components(deck, source_versions)
+    materialized_sources = _materialize_source_versions(deck, root)
+    components = _manifest_components(deck, materialized_sources)
     artifact_version_id = new_version_id("artifact_version")
     logical_artifact_id = _logical_artifact_id(user_id, deck.build_id)
     object_root = _foundation_object_root(user_id=user_id, thread_id=deck.thread_id, build_id=deck.build_id)
@@ -87,9 +88,9 @@ def materialize_deck_foundation(deck: Any, runtime: Any) -> None:
         )
 
 
-def _materialize_source_versions(deck: Any, root: Path) -> tuple[Any, ...]:
+def _materialize_source_versions(deck: Any, root: Path) -> MaterializedDeckSources | None:
     if deck.deck_authoring_contract not in {"compact_model_html_v1", "compact_model_html_v2"} or not deck.deck_stylesheet:
-        return ()
+        return None
     materialized = materialize_compact_deck_sources(
         build_id=deck.build_id,
         root=root,
@@ -98,25 +99,66 @@ def _materialize_source_versions(deck: Any, root: Path) -> tuple[Any, ...]:
     )
     deck.source_bundle_path = f"/mnt/user-data/outputs/.builder/builds/{deck.build_id}/sources"
     deck.foundation_source_bytes = materialized.total_source_bytes
-    return materialized.versions
+    return materialized
 
 
-def _manifest_components(deck: Any, source_versions: tuple[Any, ...]) -> list[BuildComponent]:
-    versions_by_selector = {version.selector: version for version in source_versions}
-    return [
+def _manifest_components(
+    deck: Any,
+    materialized_sources: MaterializedDeckSources | None,
+) -> list[BuildComponent]:
+    if materialized_sources is None:
+        return []
+    versions_by_selector = {
+        version.selector: version
+        for version in materialized_sources.versions
+    }
+    slides = [
         _manifest_component(deck, slide, versions_by_selector[slide.selector])
         for slide in deck.slides
         if slide.selector in versions_by_selector
     ]
+    return [_manifest_deck_style_component(deck, materialized_sources.stylesheet_version), *slides]
 
 
-def _manifest_component(deck: Any, slide: Any, version: Any) -> BuildComponent:
+def _manifest_deck_style_component(deck: Any, version: BuildComponentVersion) -> BuildComponent:
+    return BuildComponent(
+        id=version.component_id,
+        selector=DECK_STYLE_ROOT_SELECTOR,
+        type="deck_style",
+        index=0,
+        source_path=version.source_roles["deck_css"],
+        source_roles=dict(version.source_roles),
+        source_hashes=dict(version.source_hashes),
+        shared_dependencies=[],
+        asset_paths=[],
+        status="gated",
+        gate_results={
+            "mechanical_passed": bool(deck.mechanical_gate_results.get("passed")),
+            "source_retention_passed": bool(deck.source_retention_report.get("passed", True)),
+        },
+        current_version_id=version.version_id,
+        provenance={"authored_by": "fresh", "source_version_id": version.source_version_id},
+    )
+
+
+def _manifest_component(deck: Any, slide: Any, version: BuildComponentVersion) -> BuildComponent:
+    source_hashes = {
+        role: version.source_hashes[role]
+        for role in ("body", "slide_css", "notes", "assembled")
+        if role in version.source_hashes
+    }
+    deck_css_hash = version.source_hashes.get("deck_css") or version.source_hashes.get("deck.css")
+    if deck_css_hash:
+        source_hashes["deck_css"] = deck_css_hash
     return BuildComponent(
         id=version.component_id,
         selector=slide.selector,
         type="slide",
         index=slide.index,
-        source_path=version.source_paths[0],
+        source_path=version.source_roles.get("body") or version.source_paths[0],
+        source_roles=dict(version.source_roles),
+        source_hashes=source_hashes,
+        shared_dependencies=[DECK_STYLE_ROOT_SELECTOR],
         asset_paths=[str(slide.visual_asset_path)] if slide.visual_asset_path else [],
         status="gated",
         gate_results={

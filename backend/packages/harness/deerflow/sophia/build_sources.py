@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from deerflow.sophia.build_manifest import DECK_STYLE_ROOT_SELECTOR
 from deerflow.sophia.build_runtime.identity import component_id, new_version_id
 from deerflow.sophia.build_versions import BuildComponentVersion
 
@@ -27,6 +28,7 @@ def _write_immutable(path: Path, content: bytes) -> None:
 class MaterializedDeckSources:
     root: Path
     stylesheet_path: Path
+    stylesheet_version: BuildComponentVersion
     versions: tuple[BuildComponentVersion, ...]
     total_source_bytes: int
 
@@ -43,7 +45,31 @@ def materialize_compact_deck_sources(
     build_root = root / ".builder" / "builds" / build_id
     stylesheet_path = build_root / "sources" / "deck.css"
     stylesheet_bytes = deck_stylesheet.encode("utf-8")
+    stylesheet_hash = sha256_bytes(stylesheet_bytes)
     _write_immutable(stylesheet_path, stylesheet_bytes)
+    stylesheet_component_id = component_id(build_id, DECK_STYLE_ROOT_SELECTOR)
+    stylesheet_version_id = new_version_id("component_version")
+    stylesheet_source_version_id = new_version_id("source_version")
+    stylesheet_version_path = (
+        build_root
+        / "components"
+        / stylesheet_component_id
+        / "versions"
+        / stylesheet_version_id
+        / "deck.css"
+    )
+    _write_immutable(stylesheet_version_path, stylesheet_bytes)
+    stylesheet_version = BuildComponentVersion(
+        version_id=stylesheet_version_id,
+        component_id=stylesheet_component_id,
+        selector=DECK_STYLE_ROOT_SELECTOR,
+        source_version_id=stylesheet_source_version_id,
+        source_paths=[str(stylesheet_version_path)],
+        source_hashes={"deck_css": stylesheet_hash},
+        source_roles={"deck_css": str(stylesheet_version_path)},
+        resolved_output_hash=stylesheet_hash,
+        authored_by="fresh",
+    )
     versions: list[BuildComponentVersion] = []
     total = len(stylesheet_bytes)
     for slide_number, slide in enumerate(slides, start=1):
@@ -75,7 +101,7 @@ def materialize_compact_deck_sources(
         metadata = {
             "assembly_contract": assembly_contract,
             "harness_version": harness_version,
-            "stylesheet_hash": sha256_bytes(stylesheet_bytes),
+            "stylesheet_hash": stylesheet_hash,
             "source_hashes": {key: sha256_bytes(value) for key, value in payloads.items()},
         }
         _write_immutable(version_root / "assembly.json", json.dumps(metadata, sort_keys=True, separators=(",", ":")).encode())
@@ -87,9 +113,16 @@ def materialize_compact_deck_sources(
                 selector=selector,
                 source_version_id=source_version_id,
                 source_paths=[str(path) for path in paths.values()],
-                source_hashes={"deck.css": sha256_bytes(stylesheet_bytes), **metadata["source_hashes"]},
+                source_hashes={"deck.css": stylesheet_hash, **metadata["source_hashes"]},
+                source_roles={key: str(path) for key, path in paths.items()},
                 resolved_output_hash=sha256_bytes(assembled),
                 authored_by="fresh",
             )
         )
-    return MaterializedDeckSources(build_root, stylesheet_path, tuple(versions), total)
+    return MaterializedDeckSources(
+        root=build_root,
+        stylesheet_path=stylesheet_path,
+        stylesheet_version=stylesheet_version,
+        versions=tuple(versions),
+        total_source_bytes=total,
+    )
