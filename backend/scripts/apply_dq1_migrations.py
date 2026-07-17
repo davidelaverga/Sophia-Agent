@@ -126,6 +126,39 @@ def _safe_sqlstate(exc: BaseException) -> str:
     return value if isinstance(value, str) and _SQLSTATE.fullmatch(value) else "unknown"
 
 
+def _safe_connection_reason(exc: BaseException) -> str:
+    """Reduce driver/network detail to a static, non-secret operator code."""
+
+    message = str(exc).casefold()
+    classifiers = (
+        (("password authentication failed", "authentication failed"), "authentication_failed"),
+        (("tenant or user not found", "project or user not found"), "pooler_identity_rejected"),
+        (("no pg_hba.conf entry",), "connection_policy_rejected"),
+        (
+            (
+                "could not translate host name",
+                "name or service not known",
+                "temporary failure in name resolution",
+            ),
+            "dns_failed",
+        ),
+        (("connection timed out", "timeout expired", "operation timed out"), "network_timeout"),
+        (
+            ("connection refused", "server closed the connection unexpectedly"),
+            "pooler_unavailable",
+        ),
+        (
+            ("remaining connection slots are reserved", "too many connections"),
+            "database_capacity_exhausted",
+        ),
+        (("certificate verify failed", "ssl error", "tls"), "tls_failed"),
+    )
+    for markers, reason in classifiers:
+        if any(marker in message for marker in markers):
+            return reason
+    return "unknown"
+
+
 def _database_sanity_check(connection: Any) -> None:
     with connection.cursor() as cursor:
         cursor.execute(_DATABASE_SANITY_SQL)
@@ -192,6 +225,7 @@ def main() -> int:
         _log(
             "database_connection_failed",
             error_type=type(exc).__name__,
+            reason=_safe_connection_reason(exc),
             sqlstate=_safe_sqlstate(exc),
         )
         return 1

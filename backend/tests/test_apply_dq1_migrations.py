@@ -130,6 +130,23 @@ class FakeDatabaseError(Exception):
     sqlstate = "55000"
 
 
+@pytest.mark.parametrize(
+    ("message", "reason"),
+    (
+        ("FATAL: password authentication failed for user", "authentication_failed"),
+        ("FATAL: Tenant or user not found", "pooler_identity_rejected"),
+        ("could not translate host name", "dns_failed"),
+        ("connection timed out", "network_timeout"),
+        ("connection refused", "pooler_unavailable"),
+        ("too many connections", "database_capacity_exhausted"),
+        ("SSL error", "tls_failed"),
+        ("opaque driver failure", "unknown"),
+    ),
+)
+def test_connection_failures_emit_only_static_reason_codes(message: str, reason: str) -> None:
+    assert runner._safe_connection_reason(RuntimeError(message)) == reason
+
+
 def test_each_migration_gets_its_own_locked_transaction(capsys: pytest.CaptureFixture[str]) -> None:
     migrations = (("one.sql", "SELECT 1"), ("two.sql", "SELECT 2"))
     connection = FakeConnection()
