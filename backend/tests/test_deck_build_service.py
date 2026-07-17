@@ -42,7 +42,9 @@ _OUTPUTS = "/mnt/user-data/outputs/"
 def _runtime(outputs: Path, *, user_request: str = "Build a visual 3 slide deck") -> SimpleNamespace:
     outputs.mkdir(parents=True, exist_ok=True)
     workspace = outputs.parent / "workspace"
+    uploads = outputs.parent / "uploads"
     workspace.mkdir(parents=True, exist_ok=True)
+    uploads.mkdir(parents=True, exist_ok=True)
     return SimpleNamespace(
         state={
             "thread_id": "builder-thread",
@@ -55,6 +57,7 @@ def _runtime(outputs: Path, *, user_request: str = "Build a visual 3 slide deck"
             "thread_data": {
                 "outputs_path": str(outputs),
                 "workspace_path": str(workspace),
+                "uploads_path": str(uploads),
             },
         },
         context={"thread_id": "builder-thread"},
@@ -1209,7 +1212,7 @@ def test_deck_image_batch_subprocess_timeout_is_structured(tmp_path: Path, monke
     def timeout_run(*_args, **_kwargs):
         raise subprocess.TimeoutExpired(cmd=["python"], timeout=10, output="partial stdout", stderr="provider hung")
 
-    monkeypatch.setattr(deck_service.subprocess, "run", timeout_run)
+    monkeypatch.setattr(deck_service, "run_trusted_image_request", timeout_run)
 
     result = DeckBuildService()._run_image_batch_subprocess(f"{_OUTPUTS}assets/slide-visuals.manifest.json", runtime)
 

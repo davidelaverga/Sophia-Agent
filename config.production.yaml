@@ -15,10 +15,12 @@ models:
 
   # DQ-1 only. This deployment is never selected by the companion or builder;
   # it is reachable solely through the canary-scoped deck.judge.visual route.
-  # ChatOpenAI resolves OPENAI_API_KEY lazily in sophia-langgraph, so the shared
-  # gateway config can validate the route without receiving the provider key.
+  # The DQ invoker injects SOPHIA_DECK_QUALITY_OPENAI_API_KEY only after exact
+  # canary admission. Ordinary builder/companion/image/fallback paths retain
+  # their pre-campaign configuration and cannot select this DQ-only authority.
   - name: openai-gpt-5-6-sol
     display_name: OpenAI GPT-5.6 Sol (DQ-1 shadow judge)
+    access_scope: route_only
     use: langchain_openai:ChatOpenAI
     provider: openai
     model: gpt-5.6-sol
@@ -60,14 +62,14 @@ harness_profiles:
       store: false
       max_completion_tokens: 6000
 
-# Campaign DQ-1 terminated as PREMISE_INVALIDATED before deployment. Keep the
-# candidate explicitly off in the production file; a successor architecture
-# must make a new, reviewed change to enable canary shadow execution.
+# Amendment 002 reopens DQ-1 with a durable pre-delivery outbox. Admission is
+# still exact-canary only; all user-visible and repair authorities remain
+# locked off. The environment value is dashboard-managed on both services.
 deck_quality:
-  enabled: false
-  mode: "off"
+  enabled: true
+  mode: "shadow"
   scope: canary
-  canary_user_ids: []
+  canary_user_ids: $SOPHIA_DECK_QUALITY_CANARY_USER_IDS
   judge_route: deck.judge.visual
   rubric_version: deck-rubric-v2
   judge_profile_version: deck-visual-judge-v2

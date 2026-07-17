@@ -14,6 +14,7 @@ import httpx
 from langchain.tools import ToolRuntime, tool
 
 from deerflow.sandbox.tools import get_thread_data
+from deerflow.sophia.process_group import run_native_process
 
 logger = logging.getLogger(__name__)
 
@@ -351,12 +352,13 @@ def _write_chart_spec(
 
 
 def _run_chart_script(node: str, script_path: Path, spec_host_path: Path) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(  # noqa: S603 - fixed node executable + script path, JSON spec file arg only.
+    return run_native_process(
         [node, str(script_path), str(spec_host_path)],
         check=False,
         capture_output=True,
         text=True,
         timeout=45,
+        identity_paths=[spec_host_path],
     )
 
 

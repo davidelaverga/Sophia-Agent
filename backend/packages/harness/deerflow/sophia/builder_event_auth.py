@@ -1,13 +1,13 @@
-"""Authenticated wire envelope for DQ-1 publication admission.
+"""Authenticated wire envelope for the DQ-1 producer-failure fallback.
 
 The LangGraph and gateway services are separate production processes, but the
 gateway route is reachable through the public service.  Each request to the
-dedicated ``/internal/deck-quality-publications`` endpoint is therefore signed
-over its exact JSON bytes with a shared, dashboard-managed secret. The baseline
+dedicated ``/internal/deck-quality-producer-failures`` endpoint is therefore
+signed over its exact JSON bytes with a shared, dashboard-managed secret. The baseline
 ``/internal/builder-events`` delivery remains unsigned and independent so a
 shadow-only configuration issue cannot gate user delivery. The gateway verifies
 timestamp freshness, signature equality, and a bounded nonce replay cache before
-any publication-admission side effect.
+any failure-evidence side effect.
 
 This module never logs, returns, or embeds the secret in an exception.
 """
@@ -23,7 +23,7 @@ import re
 import secrets
 import time
 from collections import OrderedDict
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from threading import Lock
 from typing import Any
 
@@ -31,7 +31,11 @@ BUILDER_EVENT_HMAC_SECRET_ENV = "SOPHIA_BUILDER_EVENTS_HMAC_SECRET"
 BUILDER_EVENT_TIMESTAMP_HEADER = "X-Sophia-Builder-Timestamp"
 BUILDER_EVENT_NONCE_HEADER = "X-Sophia-Builder-Nonce"
 BUILDER_EVENT_SIGNATURE_HEADER = "X-Sophia-Builder-Signature"
+BUILDER_EVENT_PROBE_ACK_HEADER = "X-Sophia-Builder-Probe-Ack"
 BUILDER_EVENT_AUTH_VERSION = "sophia-builder-event-hmac/v1"
+BUILDER_EVENT_CANARY_SCOPE_PROOF_VERSION = (
+    "sophia-builder-event-canary-scope-proof/v1"
+)
 
 MAX_BUILDER_EVENT_BODY_BYTES = 4 * 1024 * 1024
 MAX_BUILDER_EVENT_CLOCK_SKEW_SECONDS = 90
@@ -39,6 +43,7 @@ MAX_BUILDER_EVENT_REPLAY_ENTRIES = 10_000
 
 _NONCE_RE = re.compile(r"^[0-9a-f]{32}$")
 _SIGNATURE_RE = re.compile(r"^v1=[0-9a-f]{64}$")
+_PROBE_ACK_RE = re.compile(r"^v1=[0-9a-f]{64}$")
 
 
 class BuilderEventAuthenticationError(RuntimeError):
@@ -57,6 +62,92 @@ def _secret_bytes() -> bytes:
     if raw != raw.strip() or not 32 <= len(encoded) <= 4_096:
         raise BuilderEventAuthenticationError("builder_event_auth_unavailable")
     return encoded
+
+
+def probe_builder_event_auth() -> None:
+    """Validate that the shared secret is present and non-weak.
+
+    The value is intentionally neither returned nor included in an error.
+    """
+
+    _secret_bytes()
+
+
+def builder_event_canary_scope_proof(
+    canary_user_ids: Iterable[str],
+) -> str:
+    """Return a keyed, content-free proof of one exact canary set.
+
+    The HMAC prevents the dashboard-managed synthetic identity from becoming
+    an offline-guessable plain hash. Only the 64-character proof crosses the
+    service boundary; neither the identities nor the shared secret do.
+    """
+
+    try:
+        normalized = tuple(sorted(set(canary_user_ids)))
+    except (TypeError, ValueError):
+        raise BuilderEventAuthenticationError(
+            "builder_event_canary_scope_invalid"
+        ) from None
+    if not normalized or any(
+        not isinstance(user_id, str)
+        or not user_id
+        or user_id != user_id.strip()
+        or "\x00" in user_id
+        for user_id in normalized
+    ):
+        raise BuilderEventAuthenticationError(
+            "builder_event_canary_scope_invalid"
+        )
+    material = encode_builder_event_body(
+        {
+            "campaign_id": "DQ-1",
+            "canary_user_ids": normalized,
+            "schema_version": BUILDER_EVENT_CANARY_SCOPE_PROOF_VERSION,
+        }
+    )
+    return hmac.new(
+        _secret_bytes(),
+        material,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def builder_event_probe_ack(body: bytes) -> str:
+    """Create an endpoint-specific keyed acknowledgment for one probe body."""
+
+    if (
+        not isinstance(body, bytes)
+        or not body
+        or len(body) > MAX_BUILDER_EVENT_BODY_BYTES
+    ):
+        raise BuilderEventAuthenticationError("builder_event_body_invalid")
+    body_hash = hashlib.sha256(body).hexdigest()
+    material = (
+        "sophia-builder-event-probe-ack/v1\n" + body_hash
+    ).encode("ascii")
+    return "v1=" + hmac.new(
+        _secret_bytes(),
+        material,
+        hashlib.sha256,
+    ).hexdigest()
+
+
+def verify_builder_event_probe_ack(
+    body: bytes,
+    headers: Mapping[str, str],
+) -> None:
+    """Require the exact keyed acknowledgment returned by the gateway."""
+
+    received = _header(headers, BUILDER_EVENT_PROBE_ACK_HEADER)
+    if (
+        received is None
+        or _PROBE_ACK_RE.fullmatch(received) is None
+        or not hmac.compare_digest(received, builder_event_probe_ack(body))
+    ):
+        raise BuilderEventAuthenticationError(
+            "builder_event_gateway_probe_ack_invalid"
+        )
 
 
 def encode_builder_event_body(payload: Mapping[str, Any]) -> bytes:

@@ -47,6 +47,7 @@ def test_langgraph_dockerfile_installs_pdf_runtime() -> None:
         # `dot` binary backing the ported diagram tool).
         "texlive-fonts-extra",
         "graphviz",
+        "util-linux",
         "lmodern",
         "fonts-dejavu-core",
         "fonts-crosextra-caladea",
@@ -66,6 +67,8 @@ def test_langgraph_dockerfile_installs_pdf_runtime() -> None:
     assert "COPY third_party/hands_on_deck ./third_party/hands_on_deck" in contents
     assert "third_party/hands_on_deck/skills/hands-on-deck/scripts/deck.py --help" in contents
     assert "python -m playwright install chromium" in contents
+    assert "PLAYWRIGHT_BROWSERS_PATH=/ms-playwright" in contents
+    assert 'chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH"' in contents
     assert "third_party/hands_on_deck/skills/hands-on-deck/scripts/html2patch.py --help" in contents
     assert "from playwright.sync_api import sync_playwright" in contents
     # The mermaid→excalidraw diagram stack was retired (graphviz port); the

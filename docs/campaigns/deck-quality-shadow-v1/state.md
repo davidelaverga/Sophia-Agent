@@ -2,150 +2,142 @@
 
 Last updated: 2026-07-16 (US/Pacific)
 
-## TERMINAL STATE
+## CURRENT STATE
 
-`PREMISE_INVALIDATED`
+`ACTIVE — AMENDMENT 002 PREDEPLOY VERIFICATION`
 
-The campaign did not deploy its DQ-1 candidate. A mandatory predeploy audit
-disproved the load-bearing section 8.3 assumption that Sophia already has a
-durable, replayable builder-event path. The required amendment is
-`amendment-001-durable-builder-event-premise.md`.
+The historical candidate correctly terminated as `PREMISE_INVALIDATED` and
+was not deployed. The campaign has since been explicitly reopened under
+`amendment-002-durable-outbox-reopen.md`, which implements Amendment 001's
+required successor architecture without weakening any locked invariant.
 
-This is not `ACHIEVED`: production-canary reliability and quality gates were
-not run. It is not `BLOCKED`: no missing credential or external outage caused
-the stop. Per section 22, a false load-bearing architecture premise requires an
-amendment and termination rather than a deployment that only appears durable.
+This is not `ACHIEVED`: no amended SHA has yet been deployed and the production
+canary, strong/exception controls, twelve-fixture human corpus, six complete
+bundles, and repeatability gates remain outstanding. It is not `BLOCKED` while
+local verification and authorized deployment preparation can still progress.
 
 ## MISSION
 
-Deploy an independent rendered-deck quality controller into the real production
-topology in canary-scoped shadow mode, preserving native artifact delivery and
-all locked invariants.
+Deploy an independent rendered-deck quality controller into the real
+production topology in exact-canary shadow mode, preserving native artifact
+delivery and all locked prohibitions.
 
-## BASELINE AND PRODUCTION ROLLBACK
+## BASELINE AND ROLLBACK
 
 - Campaign branch: `codex/sophia-observability-v1`.
-- Frozen source/production SHA:
+- Frozen production rollback SHA:
   `f05efb3adce121fb0af009407b7fc53ba6e98312`.
-- Non-deployed terminal archive commit:
-  `72c2fed659d474689c49b149e7d5820f59460064` (parent is the frozen
-  baseline SHA).
+- Historical non-deployed archive commit:
+  `72c2fed659d474689c49b149e7d5820f59460064`.
 - Immutable rollback tag: `dq1-baseline-f05efb3`.
-- Render gateway deploy: `dep-d9bu80navr4c73bbbk00`.
-- Render LangGraph deploy: `dep-d9bu80ojs32c73ed9pk0`.
-- Vercel app build:
-  `7092042b13f3edc40468fd614685d7ede3b21f2a`, deployment
-  `dpl_Bv2yaEMssrnz6JnGhQtsxP9RgQjR`.
+- Baseline Render gateway deploy: `dep-d9bu80navr4c73bbbk00`.
+- Baseline Render LangGraph deploy: `dep-d9bu80ojs32c73ed9pk0`.
+- Baseline Vercel deployment: `dpl_Bv2yaEMssrnz6JnGhQtsxP9RgQjR`.
 
-No DQ-1 migration, environment change, Render deploy, or new production canary
-was performed from the candidate tree. The production rollback point therefore
-remains the unchanged baseline, not a post-DQ deploy.
+The amended release must deploy gateway first and LangGraph second. Rollback is
+the reverse order, restoring this baseline SHA and its exact pre-campaign
+environment behavior.
+
+## LOCKED CANDIDATE
+
+- Exact synthetic canary only; the identity is dashboard-managed and is not
+  written into public campaign evidence.
+- `enabled=true`, `mode=shadow`, `scope=canary`, `sample_rate=0`.
+- `mutate_artifact=false`, `affect_delivery=false`.
+- Exactly two bounded judge calls through `deck.judge.visual`.
+- Separate DQ-only provider credential admitted only after exact canary scope.
+- Gateway receives no DQ-specific OpenAI credential; its pre-campaign
+  environment remains otherwise unchanged.
+- Pre-existing ordinary builder visual/fallback behavior is unchanged.
+- No enforcement, automatic repair, Advisor, ordinary-user DQ processing,
+  builder migration, companion migration, `soul.md`, or `voice.md` change.
+
+## AMENDED ENGINEERING RESULT
+
+The successor candidate now provides:
+
+- a public-signable, create-only, artifact-version/content-hash-bound primary
+  path for eligible exact-canary PPTX builds only;
+- unchanged ordinary-user primary path/upsert behavior and zero DQ reads;
+- a private canonical source pack followed by a content-free outbox marker no
+  larger than 64 KiB, written before detached delivery;
+- no second PPTX upload or producer-side PPTX read;
+- gateway validation of campaign, canary, instrument, identity, and canonical
+  paths before source/artifact reads;
+- bounded rehashing of source pack and accepted PPTX, atomic request-ready DB
+  convergence, immutable archive, and retry-safe inbox retirement;
+- durable flat producer-failure and gateway-rejection evidence that degrades DQ
+  readiness until resolved;
+- content-free large-object conflict evidence, poison isolation, bounded
+  listing, absolute deadlines, and response-loss/readback recovery;
+- a forward-only atomic migration with exact legacy/v2, function-body,
+  function-attribute, owner, return/argument, ACL, and existing-row guards; and
+- startup validation of route, instrument, canary, storage, persistence, and
+  DQ-only provider authority.
+
+The shipped `2026_07_16_sophia_deck_quality_publications.sql` migration remains
+byte-identical to repository `HEAD`. The successor uses the ordered,
+forward-only `2026_07_17` atomic-convergence, `2026_07_18` producer-failure,
+and `2026_07_19` dispatch-intent-fence deltas. Every step independently proves
+its accepted input catalog and exact committed output catalog.
+
+## VERIFICATION TO DATE
+
+- Publisher, builder boundary, primary storage: `172 passed`.
+- Additional builder callers: `30 passed`.
+- Worker/reconciler: `28 passed`.
+- Expanded producer/storage/router/migration slice: `353 passed`.
+- Forward migration/persistence slice: `12 passed`.
+- Real PostgreSQL 16 convergence/integration: `13 passed`.
+- Production configuration/invariant slice: `56 passed`.
+- Targeted Ruff and `git diff --check`: passed.
+
+The full DQ graph/snapshot sweep and complete backend/frontend builds are still
+required on the final integrated tree before deployment. Local verification is
+necessary but cannot establish delivery-latency or production durability.
 
 ## BEST QUALITY RESULT
 
-`dq1-sol-smoke-v9` is the final paid offline calibration result. Against the
-frozen five-slide PSI fixture it produced:
+`dq1-sol-smoke-v9` remains the best paid offline calibration result. It
+classified the frozen five-slide PSI fixture `needs_revision`, with mechanical
+`passed`, complete 5/5 coverage, weighted score `4`, four of five supplied
+failure-code overlaps, exact two-call request parity, `$0.591520` worst-case
+admission, and `$0.456280` actual cost.
 
-- quality run
-  `quality_fad93a9e830a2c8a198c4eadfd7e9540073674c41ec85859150094fd05549087`;
-- `needs_revision`, matching the supplied expectation;
-- mechanical status `passed`;
-- five expected, rendered, and evaluated slides;
-- weighted score `4` and failing critical criteria
-  `narrative_arc_and_pacing`, `signature_realization`, and
-  `subject_specificity`;
-- four of five supplied required failure codes, with
-  `low_sequence_rhythm` still missing;
-- exact A/C input counts 22,633 and 23,671 tokens;
-- projected worst-case cost `$0.591520` under the immutable `$0.60` ceiling;
-- actual two-call cost `$0.456280`; and
-- no adaptive downsampling, provider storage, response continuation, automatic
-  private-payload tracing, enforcement, repair, or Advisor activity.
+That is one supplied synthetic negative anchor. It is not a human label,
+known-strong control, brand-exception control, corpus agreement result, or
+promotion decision.
 
-The immutable result bundle is under
-`offline-runs/dq1-sol-smoke-v9`. It establishes one supplied synthetic negative
-anchor, not human-corpus agreement or promotion readiness.
+## PREDEPLOY GATES REMAINING
 
-## ENGINEERING RESULT
+1. Make the full DQ graph/snapshot and all backend suites green on the final
+   tree; run the prescribed builder/gateway sweep, full frontend test/build,
+   typecheck, lint, and final adversarial audit.
+2. Commit and push one reviewed SHA while preserving unrelated user files.
+3. Apply the historical migration followed by the ordered immutable
+   `2026_07_17` → `2026_07_18` → `2026_07_19` forward chain to the production
+   project, with transactional schema/ACL evidence.
+4. Set the exact canary environment on both services and the DQ-only provider
+   credential on LangGraph only. Do not alter baseline builder authority.
+5. Deploy the same SHA to gateway then LangGraph and verify startup/readiness,
+   Render logs, and rollback coordinates.
+6. Submit every runtime-significant canary through the real `sophia-ei.com`
+   application using computer use, and correlate delivery, Render logs,
+   LangSmith traces, durable records, evidence objects, and rendered artifact.
+7. Require zero material delivery delay, status/path divergence, duplicate
+   delivery, unresolved producer failure/rejection evidence, or noncanary read.
 
-The candidate established and tested:
+## ACHIEVEMENT GATES STILL MISSING
 
-- a compiled rubric, strict A/B/C schemas, complete-slide evidence, and
-  deterministic adjudication;
-- a provider-routed, exact-two-call judge with exact count/generation request
-  parity and fail-closed cost admission;
-- no automatic tracing of raw judge messages, images, plans, or provider-private
-  state;
-- immutable source/run records, leased dispatch, bounded safe trace records,
-  restart/idempotency guards, and real-PostgreSQL persistence tests; and
-- a blind-context boundary derived only from the sanitized current request.
-  Plan-only sentinel changes cannot alter the blind brief, messages, canonical
-  Responses input, or payload hash.
+`ACHIEVED` still requires three PSI-style production canaries, a known-strong
+canary, an explicit-brand exception canary, twelve independently human-labeled
+fixtures, six complete evidence bundles, at least 10/12 verdict agreement,
+17/18 repeatable anchor verdicts, zero critical false accepts, complete
+eligible-canary dispatch/evidence coverage, and every locked reliability,
+privacy, cost, and delivery gate.
 
-Verification on the final integrated candidate tree:
-
-- full backend suite: `4162 passed, 95 skipped, 3 warnings`;
-- focused publication/persistence/worker regression: `44 passed`;
-- focused blind-context pipeline: `72 passed`;
-- real PostgreSQL publication/quality integration: `5 passed`;
-- prescribed builder/gateway sweep: `267 passed`; and
-- campaign-touched Python Ruff checks: passed.
-
-Local correctness does not repair the missing durable producer boundary and is
-not a deployment gate by itself.
-
-## INVALIDATED PREMISE EVIDENCE
-
-The actual production-path implementation has two unrecoverable process-death
-windows:
-
-1. terminal delivery succeeds before DQ preparation/admission begins; death in
-   that interval leaves no durable publication row; and
-2. DQ admission succeeds before local-only source capture/upload/commit; death
-   in that interval strands `awaiting_inputs` without a reconstructable source
-   pack.
-
-The producer uses a daemon thread and process-local deduplication. The gateway
-terminal worker is in-memory. Best-effort LangGraph thread-state persistence is
-not an indexed outbox. The artifact registry lacks the current request and
-creative/design/build inputs. Build-foundation shadow mode does not durably
-mirror those inputs. Bounded retries or a second POST cannot provide restart
-safety.
-
-Consequently the candidate cannot satisfy:
-
-```text
-eligible-canary shadow dispatch rate = 100%
-restart-safe durable asynchronous publication
-durable shadow_dispatch_unavailable evidence
-```
-
-## LOCKED INVARIANTS AT CLOSE
-
-All sixteen campaign invariants remain locked. In particular, production still
-has no DQ-1 enforcement, artifact mutation, automatic repair, Advisor,
-ordinary-user OpenAI processing, or builder/companion model migration. No
-changes were made to `soul.md` or `voice.md`.
-
-## SUCCESSOR REQUIREMENT
-
-Continuation requires a newly authorized or amended campaign that first adds:
-
-- canary-only immutable, manifest-last source mirroring under shadow authority;
-- a durable producer outbox written before detached delivery;
-- independent delivery and DQ reconciliation so DQ recovery never replays
-  delivery;
-- durable `shadow_dispatch_unavailable`; and
-- startup validation plus explicit degraded DQ readiness.
-
-Only after the required crash/restart tests pass may that successor deploy a
-canary-scoped shadow iteration and resume browser, Render, LangSmith, stored
-record, and rendered-artifact evidence collection.
-
-## REMAINING QUALITY EVIDENCE
-
-Even after the architecture premise is repaired, `ACHIEVED` still requires the
-three PSI-style production canaries, a known-strong canary, an explicit-brand
-exception canary, the twelve-fixture human-labeled corpus, repeatability runs,
-and all reliability/quality gates. No model output or campaign-agent inspection
-was promoted into a human label.
+No model output, agent judgment, or supplied expectation may be promoted into
+an independent human label. If an external credential, required corpus, or
+human decision remains unavailable after all safe authorized work is exhausted,
+the campaign must record an explicit evidence-backed external-decision terminal
+instead of claiming `ACHIEVED`.

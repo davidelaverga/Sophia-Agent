@@ -43,6 +43,7 @@ from typing import Any
 from langchain.tools import ToolRuntime, tool
 
 from deerflow.sandbox.tools import get_thread_data, mask_local_paths_in_output, replace_virtual_path
+from deerflow.sophia.process_group import run_native_process
 
 try:  # pragma: no cover - import availability varies by runtime image
     from pypdf import PdfReader
@@ -651,13 +652,15 @@ def _pandoc_command(
 
 def _run_pandoc(cmd: list[str], cwd: Path | None = None) -> subprocess.CompletedProcess[str] | str:
     try:
-        return subprocess.run(  # noqa: S603 — pandoc binary path is from shutil.which
+        output = Path(cmd[cmd.index("-o") + 1])
+        return run_native_process(
             cmd,
             capture_output=True,
             text=True,
             timeout=_PANDOC_TIMEOUT_SECONDS,
             check=False,
             cwd=str(cwd) if cwd is not None else None,
+            writable_files=[output],
         )
     except subprocess.TimeoutExpired:
         return _result(

@@ -51,3 +51,7 @@ The authoritative execution contract is
 P-2, D3, and D3.2 contracts retain their stated ownership. The older
 `specs/sophia_spec_D3_deck_evaluation_rubric_loop.md` is historical where it
 conflicts with D3.2 or DQ-1.
+
+Amendment 001 remains the authoritative diagnosis of the invalid original
+producer premise. Amendment 002 authorizes the durable-outbox successor and
+reopens the campaign without weakening any completion gate or prohibition.

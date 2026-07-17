@@ -12,6 +12,7 @@ are missing so local development keeps working without Supabase.
 from __future__ import annotations
 
 import hashlib
+import json
 import logging
 import mimetypes
 import os
@@ -30,6 +31,11 @@ logger = logging.getLogger(__name__)
 DEFAULT_BUCKET = "sophia-builder-artifacts"
 _REQUEST_TIMEOUT_SECONDS = 15.0
 _MAX_LIST_DEPTH = 8
+_MAX_INTERNAL_LIST_OBJECTS = 10_000
+_MAX_INTERNAL_LIST_DEPTH = 32
+_MAX_INTERNAL_LIST_PAGE_SIZE = 1_000
+_MAX_INTERNAL_LIST_PAGES = 1_000
+_MAX_STORAGE_ERROR_BODY_BYTES = 4_096
 _SAFE_SEGMENT_RE = re.compile(r"[^A-Za-z0-9._=-]+")
 _CREATE_ONLY_CONFLICT_STATUS_CODES = frozenset({400, 409})
 
@@ -54,6 +60,26 @@ UPLOADS_PREFIX = "uploads/"
 # same object.
 LEDGER_PREFIX = "ledger/"
 
+# Reserved storage path segments that hold inputs or builder-internal state,
+# never user-facing deliverables. Match these at *any* depth: durable deck
+# quality evidence lives below ``foundation/.builder/...``, not at a legacy
+# thread-relative root. Service-role worker read/write helpers intentionally do
+# not enforce this presentation boundary; only public listing/signing surfaces
+# do.
+_INTERNAL_ARTIFACT_PATH_SEGMENTS = frozenset(
+    {
+        ".builder",
+        "assets",
+        "deck_build",
+        "ledger",
+        "slides",
+        "source_artifact",
+        "sources",
+        "uploads",
+        "visuals",
+    }
+)
+
 
 @dataclass(frozen=True)
 class SupabaseConfig:
@@ -72,6 +98,10 @@ class SupabaseArtifactInfo:
 
 class ArtifactObjectSizeError(RuntimeError):
     """A remote object exceeded an explicit pre-allocation read budget."""
+
+
+class ArtifactObjectListLimitError(RuntimeError):
+    """A bounded internal object listing could not be completed safely."""
 
 
 def _truthy_env(value: str | None) -> bool:
@@ -126,6 +156,20 @@ def _load_config() -> SupabaseConfig | None:
     return SupabaseConfig(url=url.rstrip("/"), service_role_key=service_role_key, bucket=bucket)
 
 
+def _load_service_role_config() -> SupabaseConfig | None:
+    """Load storage config only when the explicit service-role key is set.
+
+    Generic prefix enumeration is intentionally unavailable to deployments
+    configured with only ``SUPABASE_KEY``. Exact object operations retain
+    their existing development fallback, while recursive internal scans must
+    always authenticate as the service role.
+    """
+
+    if not (os.getenv("SUPABASE_SERVICE_ROLE_KEY") or "").strip():
+        return None
+    return _load_config()
+
+
 def is_configured() -> bool:
     return _load_config() is not None
 
@@ -173,6 +217,19 @@ def normalize_object_path(object_path: str) -> str:
     if not normalized:
         raise ValueError("Supabase object path is required")
     return normalized
+
+
+def is_internal_artifact_path(path: str) -> bool:
+    """Return whether ``path`` enters a reserved artifact keyspace.
+
+    This is a segment classifier rather than a prefix check so both legacy
+    paths (``thread/.builder/...``) and user-scoped durable paths
+    (``artifacts/user/thread/foundation/.builder/...``) are protected. It is
+    deliberately side-effect free and does not prevent trusted workers from
+    reading an exact internal object through the service-role APIs.
+    """
+    normalized = str(path or "").strip().replace("\\", "/")
+    return any(segment.casefold() in _INTERNAL_ARTIFACT_PATH_SEGMENTS for segment in normalized.split("/") if segment not in {"", "."})
 
 
 def safe_object_path_segment(value: object, *, default: str = "segment") -> str:
@@ -251,6 +308,39 @@ def builder_artifact_object_path(
     )
 
 
+def immutable_builder_artifact_object_path(
+    *,
+    user_id: str,
+    thread_or_session_id: str,
+    logical_artifact_id: str,
+    artifact_version_id: str,
+    artifact_sha256: str,
+    filename: str,
+) -> str:
+    """Return a public-signable, version/hash-bound create-only artifact key."""
+
+    required_identity = {
+        "user_id": user_id,
+        "thread_or_session_id": thread_or_session_id,
+        "logical_artifact_id": logical_artifact_id,
+        "artifact_version_id": artifact_version_id,
+        "filename": filename,
+    }
+    if any(not isinstance(value, str) or not value.strip() for value in required_identity.values()):
+        raise ValueError("immutable artifact identity is invalid")
+    if re.fullmatch(r"[0-9a-f]{64}", artifact_sha256) is None:
+        raise ValueError("artifact SHA-256 is invalid")
+    version_digest = hashlib.sha256(artifact_version_id.encode("utf-8")).hexdigest()
+    return normalize_object_path(
+        "artifacts/"
+        f"{safe_object_path_segment(user_id, default='user')}/"
+        f"{safe_object_path_segment(thread_or_session_id, default='thread')}/"
+        f"{safe_object_path_segment(logical_artifact_id, default='artifact')}/"
+        f"versions/{version_digest}/{artifact_sha256}/"
+        f"{safe_filename_segment(filename)}"
+    )
+
+
 def _thread_prefix(thread_id: str) -> str:
     safe_thread = thread_id.strip().strip("/")
     if not safe_thread:
@@ -307,7 +397,7 @@ def _folder_prefix_from_list_record(root_prefix: str, current_prefix: str, recor
     relative = _relative_list_name(root_prefix, current_prefix, raw_name).strip().strip("/")
     if not relative:
         return None
-    if _is_internal_relative_name(relative):
+    if is_internal_artifact_path(relative):
         return None
     return f"{root_prefix}{relative}/"
 
@@ -333,10 +423,8 @@ def is_ledger_object_name(filename: str) -> bool:
 
 
 def _is_internal_relative_name(filename: str) -> bool:
-    """Keyspaces that must never appear in artifact listings: uploads
-    (surfaced through the attachments UI instead) and the delegation
-    ledger (internal conversation record, AD-6)."""
-    return _is_uploads_relative_name(filename) or is_ledger_object_name(filename)
+    """Keyspaces that must never appear in user-facing artifact listings."""
+    return is_internal_artifact_path(filename)
 
 
 def _record_name(record: Any) -> str | None:
@@ -556,6 +644,8 @@ def _list_page(
     prefix: str,
     page_size: int,
     offset: int,
+    sort_column: str = "updated_at",
+    sort_order: Literal["asc", "desc"] = "desc",
 ) -> list[Any] | None:
     response = http.post(
         url,
@@ -564,7 +654,7 @@ def _list_page(
             "prefix": prefix,
             "limit": page_size,
             "offset": offset,
-            "sortBy": {"column": "updated_at", "order": "desc"},
+            "sortBy": {"column": sort_column, "order": sort_order},
         },
     )
     response.raise_for_status()
@@ -690,6 +780,278 @@ def list_artifacts(
             http.close()
 
 
+def _validate_internal_list_bound(name: str, value: int, *, minimum: int, maximum: int) -> None:
+    if isinstance(value, bool) or not isinstance(value, int) or not minimum <= value <= maximum:
+        raise ValueError(f"{name} must be between {minimum} and {maximum}")
+
+
+def _internal_list_record_path(
+    *,
+    root_prefix: str,
+    current_prefix: str,
+    raw_name: str,
+) -> str:
+    raw_path = raw_name.strip().replace("\\", "/")
+    root_path = root_prefix.rstrip("/")
+    current_path = current_prefix.rstrip("/")
+    if raw_path == root_path or raw_path.startswith(root_prefix):
+        candidate = raw_path
+    elif raw_path == current_path or raw_path.startswith(current_prefix):
+        candidate = raw_path
+    else:
+        candidate = f"{current_prefix}{raw_path}"
+    normalized = normalize_object_path(candidate)
+    if normalized != root_path and not normalized.startswith(root_prefix):
+        raise ValueError("Supabase list response escaped the requested prefix")
+    return normalized
+
+
+def list_artifact_object_paths_bounded(
+    prefix: str,
+    *,
+    max_objects: int,
+    max_depth: int,
+    page_size: int = 100,
+    client: httpx.Client | None = None,
+) -> list[str]:
+    """Recursively list canonical object paths under an internal prefix.
+
+    This is a trusted service-role primitive, not a user-facing artifact
+    listing. It intentionally does not apply presentation-keyspace filters so
+    a recovery worker can scan a top-level internal producer queue such as
+    ``dq1/producer/v1``. Every caller-selected dimension is validated against a
+    hard ceiling, and overflow raises :class:`ArtifactObjectListLimitError`
+    instead of returning an apparently complete partial scan.
+    """
+
+    normalized_root = normalize_object_path(prefix)
+    _validate_internal_list_bound(
+        "max_objects",
+        max_objects,
+        minimum=1,
+        maximum=_MAX_INTERNAL_LIST_OBJECTS,
+    )
+    _validate_internal_list_bound(
+        "max_depth",
+        max_depth,
+        minimum=0,
+        maximum=_MAX_INTERNAL_LIST_DEPTH,
+    )
+    _validate_internal_list_bound(
+        "page_size",
+        page_size,
+        minimum=1,
+        maximum=_MAX_INTERNAL_LIST_PAGE_SIZE,
+    )
+
+    config = _load_service_role_config()
+    if config is None:
+        raise RuntimeError("Supabase service-role artifact listing is not configured")
+
+    root_prefix = f"{normalized_root}/"
+    root_segment_count = len(normalized_root.split("/"))
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+        "Content-Type": "application/json",
+    }
+    url = _list_url(config)
+    paths: list[str] = []
+    seen_paths: set[str] = set()
+    visited_prefixes: set[str] = set()
+    page_requests = 0
+
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+
+    def visit(current_prefix: str) -> None:
+        nonlocal page_requests
+        if current_prefix in visited_prefixes:
+            return
+        visited_prefixes.add(current_prefix)
+        offset = 0
+        while True:
+            if page_requests >= _MAX_INTERNAL_LIST_PAGES:
+                raise ArtifactObjectListLimitError("internal object listing exceeded its page budget")
+            page_requests += 1
+            data = _list_page(
+                http,
+                url=url,
+                headers=headers,
+                prefix=current_prefix,
+                page_size=page_size,
+                offset=offset,
+            )
+            if data is None:
+                raise RuntimeError("Supabase internal object listing returned an invalid response")
+
+            for item in data:
+                raw_name = _record_name(item)
+                if raw_name is None:
+                    continue
+                object_path = _internal_list_record_path(
+                    root_prefix=root_prefix,
+                    current_prefix=current_prefix,
+                    raw_name=raw_name,
+                )
+                if object_path == normalized_root:
+                    continue
+                relative_segments = object_path.split("/")[root_segment_count:]
+                if not relative_segments:
+                    continue
+
+                if isinstance(item, dict) and _is_folder_record(item):
+                    folder_depth = len(relative_segments)
+                    if folder_depth > max_depth:
+                        raise ArtifactObjectListLimitError("internal object listing exceeded max_depth")
+                    visit(f"{object_path}/")
+                    continue
+
+                parent_depth = len(relative_segments) - 1
+                if parent_depth > max_depth:
+                    raise ArtifactObjectListLimitError("internal object listing exceeded max_depth")
+                if object_path in seen_paths:
+                    continue
+                if len(paths) >= max_objects:
+                    raise ArtifactObjectListLimitError("internal object listing exceeded max_objects")
+                seen_paths.add(object_path)
+                paths.append(object_path)
+
+            if len(data) < page_size:
+                return
+            offset += page_size
+
+    try:
+        visit(root_prefix)
+        return sorted(paths)
+    finally:
+        if owns_client:
+            http.close()
+
+
+def list_artifact_object_paths_flat_page(
+    prefix: str,
+    *,
+    limit: int,
+    client: httpx.Client | None = None,
+) -> list[str]:
+    """List one bounded page of direct child objects under an internal prefix.
+
+    Returning exactly ``limit`` objects is valid and does not imply the prefix
+    is complete. Nested folders fail closed so deleting processed direct
+    children always advances the next deterministic queue page.
+    """
+
+    normalized_root = normalize_object_path(prefix)
+    _validate_internal_list_bound(
+        "limit",
+        limit,
+        minimum=1,
+        maximum=_MAX_INTERNAL_LIST_PAGE_SIZE,
+    )
+    config = _load_service_role_config()
+    if config is None:
+        raise RuntimeError("Supabase service-role artifact listing is not configured")
+
+    root_prefix = f"{normalized_root}/"
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+        "Content-Type": "application/json",
+    }
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        data = _list_page(
+            http,
+            url=_list_url(config),
+            headers=headers,
+            prefix=root_prefix,
+            page_size=limit,
+            offset=0,
+            sort_column="name",
+            sort_order="asc",
+        )
+        if data is None:
+            raise RuntimeError("Supabase flat object listing returned an invalid response")
+        paths: list[str] = []
+        seen: set[str] = set()
+        for item in data:
+            if not isinstance(item, dict):
+                raise RuntimeError("Supabase flat object listing returned a malformed record")
+            raw_name = _record_name(item)
+            if raw_name is None:
+                raise RuntimeError("Supabase flat object listing returned a nameless record")
+            if _is_folder_record(item):
+                raise ArtifactObjectListLimitError("flat internal object queue contains a nested folder")
+            object_path = _internal_list_record_path(
+                root_prefix=root_prefix,
+                current_prefix=root_prefix,
+                raw_name=raw_name,
+            )
+            relative = object_path.removeprefix(root_prefix)
+            if not relative or "/" in relative:
+                raise ArtifactObjectListLimitError("flat internal object queue contains a nested object")
+            if object_path in seen:
+                raise RuntimeError("Supabase flat object listing returned a duplicate")
+            seen.add(object_path)
+            paths.append(object_path)
+        return sorted(paths)
+    finally:
+        if owns_client:
+            http.close()
+
+
+def delete_artifact_object_if_present(
+    object_path: str,
+    *,
+    client: httpx.Client | None = None,
+) -> Literal["deleted", "missing"]:
+    """Delete one canonical internal object with service-role authorization.
+
+    Callers requiring ambiguity safety read the path back after this operation;
+    transport failure can occur after Supabase committed deletion.
+    """
+
+    normalized_path = normalize_object_path(object_path)
+    config = _load_service_role_config()
+    if config is None:
+        raise RuntimeError("Supabase service-role artifact deletion is not configured")
+    headers = {
+        "Authorization": f"Bearer {config.service_role_key}",
+        "apikey": config.service_role_key,
+        "Content-Type": "application/json",
+    }
+    owns_client = client is None
+    http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
+    try:
+        # Supabase's remove contract is bucket-scoped. The object keys belong
+        # in the ``prefixes`` JSON body; a 404 from this endpoint is a route or
+        # bucket failure, not proof that the requested object is absent.
+        response = http.request(
+            "DELETE",
+            f"{config.url}/storage/v1/object/{config.bucket}",
+            headers=headers,
+            json={"prefixes": [normalized_path]},
+        )
+        response.raise_for_status()
+        try:
+            deleted = response.json()
+        except ValueError as exc:
+            raise RuntimeError("Supabase artifact deletion returned invalid JSON") from exc
+        if deleted == []:
+            return "missing"
+        if not isinstance(deleted, list) or len(deleted) != 1:
+            raise RuntimeError("Supabase artifact deletion returned an invalid result")
+        record = deleted[0]
+        if not isinstance(record, dict) or _record_name(record) != normalized_path:
+            raise RuntimeError("Supabase artifact deletion did not acknowledge the exact object")
+        return "deleted"
+    finally:
+        if owns_client:
+            http.close()
+
+
 def check_artifact_exists(
     thread_id: str,
     filename: str,
@@ -776,6 +1138,9 @@ def create_signed_url(
         return None
 
     target_object_path = normalize_object_path(object_path) if object_path else _object_path(thread_id, filename)
+    if is_internal_artifact_path(target_object_path):
+        logger.warning("Refusing to mint a signed URL for an internal artifact keyspace")
+        return None
     sign_url = f"{config.url}/storage/v1/object/sign/{config.bucket}/{_encoded_object_path(target_object_path)}"
     headers = {
         "Authorization": f"Bearer {config.service_role_key}",
@@ -963,6 +1328,46 @@ def download_artifact_object(
             http.close()
 
 
+def _is_supabase_missing_object_response(response: httpx.Response) -> bool:
+    """Recognize the exact Supabase Storage missing-object response shape.
+
+    Some Supabase Storage deployments have returned HTTP 400 while carrying
+    the canonical 404 payload. An arbitrary 400 must still fail closed. The
+    error body is consumed only up to a small fixed ceiling and is never
+    logged, because provider error bodies can contain sensitive object data.
+    """
+
+    if response.status_code == 404:
+        return True
+    if response.status_code != 400:
+        return False
+
+    content_length = response.headers.get("content-length")
+    if content_length is not None:
+        try:
+            if int(content_length) > _MAX_STORAGE_ERROR_BODY_BYTES:
+                return False
+        except ValueError:
+            return False
+
+    body = bytearray()
+    for chunk in response.iter_bytes():
+        if len(body) + len(chunk) > _MAX_STORAGE_ERROR_BODY_BYTES:
+            return False
+        body.extend(chunk)
+    try:
+        payload = json.loads(body)
+    except (TypeError, ValueError):
+        return False
+    if not isinstance(payload, dict):
+        return False
+
+    status_code = str(payload.get("statusCode", "")).strip()
+    error = str(payload.get("error", "")).strip().casefold().replace("-", "_").replace(" ", "_")
+    message = " ".join(str(payload.get("message", "")).strip().casefold().split())
+    return status_code == "404" and error == "not_found" and message == "object not found"
+
+
 def download_artifact_object_bounded(
     object_path: str,
     *,
@@ -987,7 +1392,7 @@ def download_artifact_object_bounded(
     http = client or httpx.Client(timeout=_REQUEST_TIMEOUT_SECONDS)
     try:
         with http.stream("GET", url, headers=headers) as response:
-            if response.status_code == 404:
+            if _is_supabase_missing_object_response(response):
                 return None
             response.raise_for_status()
             content_length = response.headers.get("content-length")
@@ -1097,6 +1502,36 @@ class SupabaseImmutableObjectStore:
             client=self._client,
         )
         return stored[0] if stored is not None else None
+
+    def list_prefix(
+        self,
+        prefix: str,
+        *,
+        max_objects: int,
+        max_depth: int,
+    ) -> list[str]:
+        return list_artifact_object_paths_bounded(
+            prefix,
+            max_objects=max_objects,
+            max_depth=max_depth,
+            client=self._client,
+        )
+
+    def list_flat_page(self, prefix: str, *, limit: int) -> list[str]:
+        return list_artifact_object_paths_flat_page(
+            prefix,
+            limit=limit,
+            client=self._client,
+        )
+
+    def delete_if_present(
+        self,
+        object_path: str,
+    ) -> Literal["deleted", "missing"]:
+        return delete_artifact_object_if_present(
+            object_path,
+            client=self._client,
+        )
 
 
 def list_upload_filenames(

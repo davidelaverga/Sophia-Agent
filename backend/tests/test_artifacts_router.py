@@ -93,6 +93,10 @@ def test_get_artifact_serves_local_html_as_text_html(tmp_path, monkeypatch) -> N
     [
         "mnt/user-data/outputs/deck_build/build.json",
         "mnt/user-data/outputs/.builder/state.json",
+        (
+            "mnt/user-data/outputs/foundation/.builder/builds/build-1/quality/"
+            "quality-1/publication/source_pack/manifest.json"
+        ),
         "mnt/user-data/outputs/assets/prompts/slide-01.json",
         "mnt/user-data/outputs/slides/slide-01.html",
         "mnt/user-data/outputs/sources/research.md",
@@ -396,6 +400,19 @@ def test_supabase_fallback_refuses_delegation_ledger_keyspace(monkeypatch) -> No
     assert served is not None
 
 
+def test_supabase_fallback_refuses_nested_deck_quality_keyspace(monkeypatch) -> None:
+    def _must_not_download(**_kwargs):  # pragma: no cover - must not be reached
+        raise AssertionError("internal DQ keyspace must never be downloaded via the artifact proxy")
+
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact", _must_not_download)
+    path = (
+        "mnt/user-data/outputs/foundation/.builder/builds/build-1/quality/"
+        "quality-1/publication/source_pack/manifest.json"
+    )
+
+    assert artifacts_router._try_serve_from_supabase("thread-1", path, http_request()) is None
+
+
 def test_get_artifact_serves_local_pptx_as_attachment(tmp_path, monkeypatch) -> None:
     artifact_path = tmp_path / "deck.pptx"
     artifact_path.write_bytes(b"pptx-bytes")
@@ -483,6 +500,33 @@ def test_list_artifacts_returns_output_files_sorted_by_modified_time(tmp_path, m
     assert all("deck_build/" not in item.path for item in response.artifacts)
 
 
+def test_list_artifacts_excludes_nested_local_deck_quality_keyspace(tmp_path, monkeypatch) -> None:
+    outputs_dir = tmp_path / "outputs"
+    source_pack = (
+        outputs_dir
+        / "foundation"
+        / ".builder"
+        / "builds"
+        / "build-1"
+        / "quality"
+        / "quality-1"
+        / "publication"
+        / "source_pack"
+        / "manifest.json"
+    )
+    source_pack.parent.mkdir(parents=True)
+    source_pack.write_text('{"private":"source"}', encoding="utf-8")
+    deliverable = outputs_dir / "deck.pptx"
+    deliverable.write_bytes(b"pptx")
+
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: outputs_dir)
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "list_artifacts", lambda *, thread_id: [])
+
+    response = asyncio.run(artifacts_router.list_artifacts("thread-1"))
+
+    assert [item.path for item in response.artifacts] == ["mnt/user-data/outputs/deck.pptx"]
+
+
 def test_list_artifacts_includes_supabase_objects_when_local_outputs_are_missing(tmp_path, monkeypatch) -> None:
     missing_outputs = tmp_path / "missing" / "outputs"
     supabase_info = artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
@@ -535,6 +579,15 @@ def test_list_artifacts_filters_supabase_visual_support_assets(tmp_path, monkeyp
             modified_at="2026-05-26T22:46:53Z",
             content_type="text/html",
         ),
+        artifacts_router.supabase_artifact_store.SupabaseArtifactInfo(
+            filename=(
+                "foundation/.builder/builds/build-1/quality/quality-1/"
+                "publication/source_pack/manifest.json"
+            ),
+            size_bytes=4324,
+            modified_at="2026-05-26T22:46:54Z",
+            content_type="application/json",
+        ),
     ]
 
     monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: missing_outputs)
@@ -559,6 +612,12 @@ def test_supabase_support_filter_keeps_root_preview_pdfs_discoverable() -> None:
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("sources/x.preview.pdf") is True
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("deck_build/build.json") is True
     assert artifacts_router._is_supabase_thread_list_support_artifact_path(".builder/x.preview.pdf") is True
+    assert (
+        artifacts_router._is_supabase_thread_list_support_artifact_path(
+            "foundation/.builder/builds/build-1/quality/quality-1/publication/source_pack/manifest.json"
+        )
+        is True
+    )
     assert artifacts_router._is_supabase_thread_list_support_artifact_path("source_artifact/x.preview.pdf") is True
 
 

@@ -86,6 +86,9 @@ from deerflow.sophia.deck_quality.tracing import (
     QualityTraceOperation,
     SafeQualityTraceOperationTerminal,
 )
+from deerflow.sophia.storage.supabase_artifact_store import (
+    immutable_builder_artifact_object_path,
+)
 
 HASH = "a" * 64
 SOURCE_SHA = "1" * 40
@@ -294,7 +297,14 @@ def _snapshot_objects(
     manifest_path = f"{root}/evidence_manifest.json"
     image = _oversized_png() if render_over_budget else _png()
     image_hash = hashlib.sha256(image).hexdigest()
-    artifact_object_path = f"artifacts/{CANARY_USER}/thread-01/foundation/.builder/builds/{BUILD_ID}/artifacts/artifact-01/{ARTIFACT_VERSION_ID}/{ARTIFACT_HASH}/deck.pptx"
+    artifact_object_path = immutable_builder_artifact_object_path(
+        user_id=CANARY_USER,
+        thread_or_session_id="thread-01",
+        logical_artifact_id="artifact-01",
+        artifact_version_id=ARTIFACT_VERSION_ID,
+        artifact_sha256=ARTIFACT_HASH,
+        filename="deck.pptx",
+    )
     selectors = tuple(f"slide:{index}" for index in range(1, slide_count + 1))
     slide_paths = tuple(f"{root}/renders/slide-{index:04d}.png" for index in range(1, slide_count + 1))
     renders = RenderEvidence(

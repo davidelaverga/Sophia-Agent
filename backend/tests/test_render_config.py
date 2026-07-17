@@ -14,6 +14,37 @@ def _service_env(service_name: str) -> dict[str, dict]:
     raise AssertionError(f"service not found in render.yaml: {service_name}")
 
 
+def test_production_dq1_is_exact_canary_shadow_with_no_delivery_authority() -> None:
+    config_path = Path(__file__).resolve().parents[2] / "config.production.yaml"
+    production = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    deck_quality = production["deck_quality"]
+
+    assert deck_quality == {
+        "enabled": True,
+        "mode": "shadow",
+        "scope": "canary",
+        "canary_user_ids": "$SOPHIA_DECK_QUALITY_CANARY_USER_IDS",
+        "judge_route": "deck.judge.visual",
+        "rubric_version": "deck-rubric-v2",
+        "judge_profile_version": "deck-visual-judge-v2",
+        "evidence_preprocessor_version": "deck-evidence-v4",
+        "judge_invoker_version": "deck-judge-invoker-v4",
+        "async_after_success": True,
+        "mutate_artifact": False,
+        "affect_delivery": False,
+        "sample_rate": 0.0,
+        "max_quality_calls": 2,
+        "max_quality_cost_usd": 0.60,
+        "max_quality_wall_clock_seconds": 300,
+    }
+    dq_deployment = next(
+        model
+        for model in production["models"]
+        if model["name"] == "openai-gpt-5-6-sol"
+    )
+    assert dq_deployment["access_scope"] == "route_only"
+
+
 def test_gateway_declares_artifact_registry_supabase_config() -> None:
     # Codex P1 PR #131: the gateway builds ArtifactRegistry() at router import
     # and FAIL-FASTS in a production runtime unless the store mode + bucket are
@@ -40,7 +71,7 @@ def test_langgraph_and_gateway_agree_on_artifact_bucket() -> None:
     assert langgraph["SOPHIA_ARTIFACT_REGISTRY_STORE"]["value"] == "supabase"
 
 
-def test_langgraph_declares_openai_api_key_secret() -> None:
+def test_langgraph_preserves_builder_and_adds_dq_scoped_openai_secrets() -> None:
     render_yaml = Path(__file__).resolve().parents[2] / "render.yaml"
     lines = render_yaml.read_text(encoding="utf-8").splitlines()
 
@@ -56,11 +87,12 @@ def test_langgraph_declares_openai_api_key_secret() -> None:
 
     joined = "\n".join(langgraph_block)
     assert "name: sophia-langgraph" in joined
+    assert "key: SOPHIA_DECK_QUALITY_OPENAI_API_KEY" in joined
     assert "key: OPENAI_API_KEY" in joined
     assert "sync: false" in joined
 
 
-def test_langgraph_enables_builder_openai_fallback_and_gateway_does_not() -> None:
+def test_langgraph_preserves_builder_openai_fallback_and_gateway_does_not_declare_it() -> None:
     langgraph = _service_env("sophia-langgraph")
     gateway = _service_env("sophia-gateway")
 

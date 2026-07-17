@@ -810,7 +810,12 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
             output: str
             telemetry: dict[str, object]
             if hasattr(sandbox, "execute_command_with_metadata"):
-                output, telemetry = sandbox.execute_command_with_metadata(command)
+                output, telemetry = sandbox.execute_command_with_metadata(
+                    command,
+                    workspace_root=(thread_data or {}).get("workspace_path"),
+                    outputs_root=(thread_data or {}).get("outputs_path"),
+                    uploads_root=(thread_data or {}).get("uploads_path"),
+                )
             else:
                 output = sandbox.execute_command(command)
                 telemetry = {

@@ -1,3 +1,5 @@
+from typing import Literal
+
 from pydantic import BaseModel, ConfigDict, Field
 
 
@@ -12,6 +14,13 @@ class ModelConfig(BaseModel):
         description="Class path of the model provider(e.g. langchain_openai.ChatOpenAI)",
     )
     model: str = Field(..., description="Model name")
+    access_scope: Literal["public", "route_only"] = Field(
+        default="public",
+        description=(
+            "Selection surface for this deployment. route_only deployments are "
+            "excluded from public discovery and generic/user model selection."
+        ),
+    )
     provider: str | None = Field(default=None, description="Validated provider metadata; never passed to the model constructor")
     capabilities: set[str] = Field(default_factory=set, description="Stable application-level model capabilities")
     model_config = ConfigDict(extra="allow")

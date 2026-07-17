@@ -408,7 +408,7 @@ class DeerFlowClient:
                     "supports_thinking": getattr(model, "supports_thinking", False),
                     "supports_reasoning_effort": getattr(model, "supports_reasoning_effort", False),
                 }
-                for model in self._app_config.models
+                for model in self._app_config.public_models
             ]
         }
 

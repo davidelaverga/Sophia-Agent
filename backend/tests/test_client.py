@@ -34,6 +34,7 @@ def mock_app_config():
 
     config = MagicMock()
     config.models = [model]
+    config.public_models = (model,)
     return config
 
 
@@ -1507,6 +1508,7 @@ class TestGatewayConformance:
         model.description = "A test model"
         model.supports_thinking = False
         mock_app_config.models = [model]
+        mock_app_config.public_models = (model,)
 
         with patch("deerflow.client.get_app_config", return_value=mock_app_config):
             client = DeerFlowClient()

@@ -20,9 +20,9 @@ import re
 import shlex
 import time
 import zipfile
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path, PurePosixPath
-from typing import Annotated, Any, NotRequired, override
+from typing import Annotated, Any, Literal, NotRequired, override
 
 from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
@@ -106,9 +106,7 @@ _PRESENTATION_PREFLIGHT_RESULT_MAX_BYTES = 8 * 1024
 _PRESENTATION_ATTACHMENT_MEMORY_MAX_BYTES = 8 * 1024
 _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES = 32 * 1024
 _PRESENTATION_REPAIR_INSTRUCTION_MAX_BYTES = 8 * 1024
-_PRESENTATION_PREVIOUS_ARGS_MARKER = (
-    "Previous complete prepare_deck_build arguments (JSON; preserve unchanged values except the exact repairs):\n"
-)
+_PRESENTATION_PREVIOUS_ARGS_MARKER = "Previous complete prepare_deck_build arguments (JSON; preserve unchanged values except the exact repairs):\n"
 _PRESENTATION_AUTHORING_SYSTEM_PROMPT = (
     "You are Sophia's presentation authoring lane.\n"
     "Produce exactly one prepare_deck_build tool call and no prose. You own the story, design, CSS, "
@@ -134,8 +132,7 @@ _PRESENTATION_AUTHORING_SYSTEM_PROMPT = (
     "parent's slide-global offset on a nested child. "
     "Do not add eyebrow or kicker labels, section/navigation rows, footers, page or slide numbers, "
     "icon strips, or any other recurring page chrome; creative_plan.design_plan.grid.footer_policy "
-    "and eyebrow_policy must both be 'none'. "
-    + compiler_capability_prompt_excerpt()
+    "and eyebrow_policy must both be 'none'. " + compiler_capability_prompt_excerpt()
 )
 _PRESENTATION_PREFLIGHT_SYSTEM_PROMPT = (
     "You are Sophia's bounded presentation research preflight. Call the single available web tool "
@@ -2434,6 +2431,7 @@ _REQUIRED_SUPABASE_FAILURE_RESULTS = frozenset(
         "required_context_missing",
         "required_not_configured",
         "required_user_missing",
+        "required_immutable_identity_invalid",
         "required_upload_failed",
         "required_verify_failed",
     }
@@ -2503,7 +2501,6 @@ def _required_primary_upload_to_supabase(
             exc.__class__.__name__,
         )
         return "required_upload_failed"
-
     local_path = f"mnt/user-data/outputs/{relative}"
     filename = PurePosixPath(relative).name or "artifact"
     renderer_kind = supabase_artifact_store.builder_renderer_kind(
@@ -2519,15 +2516,65 @@ def _required_primary_upload_to_supabase(
             renderer_kind=renderer_kind,
         )
 
-    object_path = supabase_artifact_store.builder_artifact_object_path(
+    artifact_sha256 = hashlib.sha256(content).hexdigest()
+    immutable_route, immutable_object_path = (
+        _deck_quality_immutable_primary_path(
+            user_id=user_id.strip(),
+            thread_id=thread_id,
+            artifact_args=artifact_args,
+            artifact_virtual_path=f"/mnt/user-data/outputs/{relative}",
+            artifact_sha256=artifact_sha256,
+        )
+    )
+    if immutable_route == "reject":
+        logger.warning(
+            "BuilderArtifact: exact-canary immutable primary identity invalid path=%s",
+            relative,
+        )
+        return "required_immutable_identity_invalid"
+    object_path = immutable_object_path or supabase_artifact_store.builder_artifact_object_path(
         user_id=user_id.strip(),
         thread_or_session_id=thread_id,
         artifact_id=artifact_id,
         filename=filename,
     )
+    if immutable_object_path is not None and not content:
+        logger.warning(
+            "BuilderArtifact: immutable canary primary upload rejected empty path=%s",
+            relative,
+        )
+        return "required_upload_failed"
 
     try:
-        uploaded_path = supabase_artifact_store.upload_artifact_object(object_path, content)
+        if immutable_object_path is not None:
+            immutable_store = supabase_artifact_store.SupabaseImmutableObjectStore()
+            create_ambiguous = False
+            try:
+                outcome = immutable_store.create_if_absent(
+                    object_path,
+                    content,
+                    content_type=("application/vnd.openxmlformats-officedocument.presentationml.presentation"),
+                )
+            except Exception:  # noqa: BLE001
+                # A create-only upload may commit before its response is lost.
+                # Reconcile only the exact immutable key and exact bytes.
+                create_ambiguous = True
+                outcome = None
+            if create_ambiguous or outcome == "exists":
+                existing = immutable_store.read_bounded(
+                    object_path,
+                    max_bytes=len(content),
+                )
+                if existing != content:
+                    return "required_verify_failed"
+            elif outcome != "created":
+                return "required_upload_failed"
+            uploaded_path = object_path
+        else:
+            uploaded_path = supabase_artifact_store.upload_artifact_object(
+                object_path,
+                content,
+            )
         if uploaded_path != object_path:
             return "required_upload_failed"
         if not supabase_artifact_store.check_artifact_object_exists(object_path):
@@ -2548,8 +2595,73 @@ def _required_primary_upload_to_supabase(
     artifact_args["storage_bucket"] = supabase_artifact_store.configured_bucket_name()
     artifact_args["storage_object_path"] = object_path
     artifact_args["storage_status"] = "available"
-    artifact_args["artifact_sha256"] = hashlib.sha256(content).hexdigest()
+    artifact_args["artifact_sha256"] = artifact_sha256
     return "uploaded"
+
+
+def _deck_quality_immutable_primary_path(
+    *,
+    user_id: str,
+    thread_id: str,
+    artifact_args: Mapping[str, Any],
+    artifact_virtual_path: str,
+    artifact_sha256: str,
+) -> tuple[Literal["ordinary", "immutable", "reject"], str | None]:
+    """Choose ordinary, immutable-canary, or fail-closed primary storage."""
+
+    mechanical_gate_results = artifact_args.get("mechanical_gate_results")
+    if (
+        artifact_args.get("artifact_is_fallback") is not False
+        or str(artifact_args.get("artifact_type") or "").casefold() != "presentation"
+        or str(artifact_args.get("artifact_ext") or "").lstrip(".").casefold() != "pptx"
+        or PurePosixPath(artifact_virtual_path).suffix.casefold() != ".pptx"
+        or not isinstance(mechanical_gate_results, Mapping)
+        or mechanical_gate_results.get("passed") is not True
+    ):
+        return "ordinary", None
+    try:
+        from deerflow.config.app_config import get_app_config
+        from deerflow.sophia.deck_quality.publisher import (
+            deck_quality_immutable_artifact_snapshot_path,
+        )
+
+        config = get_app_config().deck_quality
+    except Exception:
+        # Candidate-shaped presentation bytes must never fall through to a
+        # mutable key when DQ routing cannot be established. Healthy services
+        # validate/cache this configuration before readiness.
+        return "reject", None
+    try:
+        if not config.enabled:
+            return "ordinary", None
+        if user_id not in config.canary_user_ids:
+            return "ordinary", None
+        if config.mode != "shadow" or config.scope != "canary":
+            return "reject", None
+    except Exception:
+        return "reject", None
+    build_id = artifact_args.get("deck_build_id")
+    logical_artifact_id = artifact_args.get("logical_artifact_id")
+    artifact_version_id = artifact_args.get("current_artifact_version_id")
+    if not all(isinstance(value, str) and value.strip() for value in (build_id, logical_artifact_id, artifact_version_id)):
+        return "reject", None
+    try:
+        return (
+            "immutable",
+            deck_quality_immutable_artifact_snapshot_path(
+                user_id=user_id,
+                thread_id=thread_id,
+                build_id=str(build_id),
+                logical_artifact_id=str(logical_artifact_id),
+                artifact_version_id=str(artifact_version_id),
+                artifact_sha256=artifact_sha256,
+                artifact_virtual_path=artifact_virtual_path,
+            ),
+        )
+    except Exception:  # noqa: BLE001
+        # Any unexpected identity/path construction failure must preserve the
+        # create-only boundary. Never fall through to the mutable ordinary key.
+        return "reject", None
 
 
 def _upload_builder_outputs_to_supabase(
@@ -6953,9 +7065,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         if phase == "preflight_result_received":
             return {
                 "builder_presentation_phase": "authoring_pending",
-                "builder_presentation_authoring_started_at_ms": int(
-                    state.get("builder_presentation_authoring_started_at_ms") or now_ms
-                ),
+                "builder_presentation_authoring_started_at_ms": int(state.get("builder_presentation_authoring_started_at_ms") or now_ms),
             }
         if phase == "preflight_call_emitted":
             result = cls._presentation_preflight_result_message(state)
@@ -6967,9 +7077,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             failed = status == "error" or content.lstrip().startswith("Error:")
             return {
                 "builder_presentation_phase": "authoring_pending",
-                "builder_presentation_authoring_started_at_ms": int(
-                    state.get("builder_presentation_authoring_started_at_ms") or now_ms
-                ),
+                "builder_presentation_authoring_started_at_ms": int(state.get("builder_presentation_authoring_started_at_ms") or now_ms),
                 "builder_pptx_diagnostics": {
                     "presentation_preflight_status": "failed" if failed else "completed",
                     "presentation_preflight_elapsed_ms": max(0, now_ms - started_ms),
@@ -7857,9 +7965,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     supabase_mirror_attempted=mirror_result not in {"skipped", "not_configured"},
                     supabase_mirror_result=mirror_result,
                 )
-        fallback["terminal_cleanup_elapsed_ms"] = int(
-            (time.perf_counter() - cleanup_started) * 1000
-        )
+        fallback["terminal_cleanup_elapsed_ms"] = int((time.perf_counter() - cleanup_started) * 1000)
         annotate_builder_completion(state, fallback)
         if _is_required_supabase_failure(mirror_result):
             fire_completion_webhook_from_artifact(
@@ -8932,9 +9038,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             choice = self._forced_fetch_tool_choice() if tool_name == "builder_web_fetch" else self._forced_search_tool_choice()
             return choice, {
                 "builder_presentation_phase": "preflight_call_emitted",
-                "builder_presentation_preflight_started_at_ms": int(
-                    state.get("builder_presentation_preflight_started_at_ms") or time.time() * 1_000
-                ),
+                "builder_presentation_preflight_started_at_ms": int(state.get("builder_presentation_preflight_started_at_ms") or time.time() * 1_000),
                 "builder_pptx_diagnostics": {"presentation_preflight_status": "running"},
             }
         if presentation_phase == "authoring_pending":
@@ -10005,9 +10109,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             root_summary = failure_summary
             force_reason = "model_error"
         else:
-            failure_summary = (
-                "The presentation authoring step exceeded its configured cumulative deadline."
-            )
+            failure_summary = "The presentation authoring step exceeded its configured cumulative deadline."
             root_summary = failure_summary
             force_reason = "authoring_deadline"
         root_failure_code = diagnostics.get("deck_root_failure_code") or failure_code
@@ -10023,11 +10125,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "prepare_force_reason": force_reason,
         }
         result_messages: list[ToolMessage] = []
-        prepare_calls = [
-            call
-            for call in tool_calls or []
-            if str(call.get("name") or "") == _PREPARE_DECK_BUILD_TOOL_NAME
-        ]
+        prepare_calls = [call for call in tool_calls or [] if str(call.get("name") or "") == _PREPARE_DECK_BUILD_TOOL_NAME]
         if prepare_calls:
             call_update = self._prepare_call_after_model_update(state, prepare_calls, runtime)
             call_delta = call_update.get("builder_pptx_diagnostics")
@@ -10266,11 +10364,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state_update = self._merged_presentation_state_update(state_update, request_update)
         tool_name = self._tool_choice_name(choice)
         preflight = tool_name in _PRESENTATION_PREFLIGHT_TOOLS
-        remaining = (
-            self._presentation_preflight_seconds_remaining(request.state)
-            if preflight
-            else self._presentation_authoring_seconds_remaining(request.state)
-        )
+        remaining = self._presentation_preflight_seconds_remaining(request.state) if preflight else self._presentation_authoring_seconds_remaining(request.state)
         if remaining is None:
             return self._model_result_with_state_update(await handler(request), state_update)
         if remaining <= 0:
@@ -10462,10 +10556,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 f"Presentation brief:\n{brief}{target}\n\nCall {tool_name} exactly once.",
                 _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES,
             )
-            timeout_seconds = max(1, min(
-                presentation_preflight_timeout_seconds(request.state),
-                int(cls._presentation_preflight_seconds_remaining(request.state) or 1),
-            ))
+            timeout_seconds = max(
+                1,
+                min(
+                    presentation_preflight_timeout_seconds(request.state),
+                    int(cls._presentation_preflight_seconds_remaining(request.state) or 1),
+                ),
+            )
             settings = {
                 **request.model_settings,
                 "max_tokens": _PRESENTATION_PREFLIGHT_MODEL_MAX_TOKENS,
@@ -10512,21 +10609,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 previous_args_bytes = len(previous_args_json.encode("utf-8"))
                 prefix = "Required repair:\n"
                 args_block = f"\n\n{_PRESENTATION_PREVIOUS_ARGS_MARKER}{previous_args_json}"
-                available_repair_bytes = (
-                    _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES
-                    - len(prefix.encode("utf-8"))
-                    - len(args_block.encode("utf-8"))
-                )
+                available_repair_bytes = _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES - len(prefix.encode("utf-8")) - len(args_block.encode("utf-8"))
                 repair_with_args = cls._fit_complete_repair_lines(repair_prompt, available_repair_bytes)
                 candidate = f"{prefix}{repair_with_args}{args_block}"
-                has_complete_target = repair_with_args == repair_prompt or any(
-                    line.split(".", 1)[0].isdigit() for line in repair_with_args.splitlines()
-                )
-                if (
-                    repair_with_args
-                    and has_complete_target
-                    and len(candidate.encode("utf-8")) <= _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES
-                ):
+                has_complete_target = repair_with_args == repair_prompt or any(line.split(".", 1)[0].isdigit() for line in repair_with_args.splitlines())
+                if repair_with_args and has_complete_target and len(candidate.encode("utf-8")) <= _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES:
                     prompt = candidate
                     previous_args_included = True
                     repair_prompt_sent = repair_with_args
@@ -10536,16 +10623,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             else:
                 previous_args_omitted_reason = "prior_prepare_args_unavailable"
             if not previous_args_included:
-                prompt = (
-                    f"Presentation brief:\n{brief}\n\n"
-                    f"Output path: {target_path}\nRequested slides: {requested_slides or 'infer from brief'}\n\n"
-                    f"Required repair:\n{repair_prompt}"
-                )
+                prompt = f"Presentation brief:\n{brief}\n\nOutput path: {target_path}\nRequested slides: {requested_slides or 'infer from brief'}\n\nRequired repair:\n{repair_prompt}"
                 if previous_args is not None:
-                    prompt += (
-                        "\n\nThe prior prepare arguments were too large to include completely. Recreate the complete deck "
-                        "input from the brief and repair targets; no partial prior JSON is supplied."
-                    )
+                    prompt += "\n\nThe prior prepare arguments were too large to include completely. Recreate the complete deck input from the brief and repair targets; no partial prior JSON is supplied."
                 prompt = cls._truncate_utf8(prompt, _PRESENTATION_AUTHORING_PROMPT_MAX_BYTES)
         else:
             source_context = cls._presentation_preflight_context(request.state)
@@ -10572,10 +10652,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         remaining = cls._presentation_authoring_seconds_remaining(request.state)
         return request, {
             "builder_pptx_diagnostics": {
-                "deck_authoring_started_at_ms": int(
-                    request.state.get("builder_presentation_authoring_started_at_ms")
-                    or time.time() * 1_000
-                ),
+                "deck_authoring_started_at_ms": int(request.state.get("builder_presentation_authoring_started_at_ms") or time.time() * 1_000),
                 "deck_authoring_budget_ms": presentation_authoring_deadline_seconds(request.state) * 1_000,
                 "deck_authoring_prompt_bytes": prompt_bytes,
                 "deck_authoring_prompt_estimated_tokens": (prompt_bytes + 3) // 4,
@@ -10644,16 +10721,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         status: str,
     ) -> dict[str, Any]:
         started_ms = state.get("builder_presentation_preflight_started_at_ms")
-        elapsed_ms = (
-            max(0, int(time.time() * 1_000) - int(started_ms))
-            if isinstance(started_ms, (int, float)) and started_ms > 0
-            else 0
-        )
+        elapsed_ms = max(0, int(time.time() * 1_000) - int(started_ms)) if isinstance(started_ms, (int, float)) and started_ms > 0 else 0
         return {
             "builder_presentation_phase": "authoring_pending",
-            "builder_presentation_authoring_started_at_ms": int(
-                state.get("builder_presentation_authoring_started_at_ms") or time.time() * 1_000
-            ),
+            "builder_presentation_authoring_started_at_ms": int(state.get("builder_presentation_authoring_started_at_ms") or time.time() * 1_000),
             "builder_pptx_diagnostics": {
                 "presentation_preflight_status": status,
                 "presentation_preflight_elapsed_ms": elapsed_ms,
@@ -12002,9 +12073,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         repair_attempt_count = self._prepare_repair_attempt_count(state)
         tool_call = getattr(request, "tool_call", {})
         raw_args = tool_call.get("args") if isinstance(tool_call, dict) else None
-        validation_summary = (
-            prepare_deck_build_validation_summary(raw_args) if raw_args is not None else ""
-        )
+        validation_summary = prepare_deck_build_validation_summary(raw_args) if raw_args is not None else ""
         tool_error = result.additional_kwargs.get("tool_error")
         if not validation_summary and isinstance(tool_error, dict):
             validation_summary = str(tool_error.get("validation_summary") or "").strip()
@@ -12159,11 +12228,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "deck_source_quality_failed",
             }
             failure_code = str(payload.get("failure_code") or delta.get("deck_failure_code") or "")
-            if (
-                bool(payload.get("retryable"))
-                and failure_code in retryable_codes
-                and self._prepare_repair_attempt_count(request.state or {}) >= 1
-            ):
+            if bool(payload.get("retryable")) and failure_code in retryable_codes and self._prepare_repair_attempt_count(request.state or {}) >= 1:
                 return self._prepare_retry_exhausted_result_command(request, result, payload, delta)
             fallback = self._prepare_deck_build_failure_fallback(
                 state=request.state or {},
@@ -12385,9 +12450,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "companion_summary": failure_summary,
             "companion_tone_hint": "Direct and apologetic — the deck build failed before a quality PPTX was available.",
             "user_next_action": (
-                "Retry after correcting the production image-generation issue named in the failure metadata."
-                if image_failure
-                else "Retry after correcting the exact deck input or runtime issue named in the failure metadata."
+                "Retry after correcting the production image-generation issue named in the failure metadata." if image_failure else "Retry after correcting the exact deck input or runtime issue named in the failure metadata."
             ),
             "confidence": 0.0,
             "status": terminal_status,
@@ -13111,11 +13174,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         error ToolMessage. This lets the model see the rejection and retry.
         """
         tool_name = str(request.tool_call.get("name") or "")
-        if (
-            tool_name in _PRESENTATION_PREFLIGHT_TOOLS
-            and _deck_build_service_route_active(request.state or {})
-            and request.state.get("builder_presentation_phase") == "preflight_call_emitted"
-        ):
+        if tool_name in _PRESENTATION_PREFLIGHT_TOOLS and _deck_build_service_route_active(request.state or {}) and request.state.get("builder_presentation_phase") == "preflight_call_emitted":
             started = time.monotonic()
             result = handler(request)
             allotted = float(presentation_preflight_timeout_seconds(request.state or {}))
@@ -13992,11 +14051,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
     ) -> ToolMessage | Command:
         """Async variant — same logic as wrap_tool_call."""
         tool_name = str(request.tool_call.get("name") or "")
-        if (
-            tool_name in _PRESENTATION_PREFLIGHT_TOOLS
-            and _deck_build_service_route_active(request.state or {})
-            and request.state.get("builder_presentation_phase") == "preflight_call_emitted"
-        ):
+        if tool_name in _PRESENTATION_PREFLIGHT_TOOLS and _deck_build_service_route_active(request.state or {}) and request.state.get("builder_presentation_phase") == "preflight_call_emitted":
             remaining = self._presentation_preflight_seconds_remaining(request.state or {})
             try:
                 async with asyncio.timeout(max(0.001, remaining or 0.001)):
@@ -14148,15 +14203,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             diagnostics["first_prepare_turn"] = int(state.get("builder_non_artifact_turns", 0) or 0) + 1
         call_id = str(calls[-1].get("id") or "").strip()
         call_args = calls[-1].get("args") if isinstance(calls[-1].get("args"), dict) else {}
-        diagnostics["deck_authoring_output_bytes"] = len(
-            json.dumps(call_args, separators=(",", ":"), default=str).encode("utf-8")
-        )
+        diagnostics["deck_authoring_output_bytes"] = len(json.dumps(call_args, separators=(",", ":"), default=str).encode("utf-8"))
         diagnostics["authoring_tool_call_started"] = True
-        diagnostics["deck_authoring_contract"] = (
-            str(call_args.get("authoring_contract") or "compact_model_html_v1")
-            if str(call_args.get("deck_stylesheet") or "").strip()
-            else "legacy_full_html_v1"
-        )
+        diagnostics["deck_authoring_contract"] = str(call_args.get("authoring_contract") or "compact_model_html_v1") if str(call_args.get("deck_stylesheet") or "").strip() else "legacy_full_html_v1"
         diagnostics["deck_authoring_elapsed_ms"] = _elapsed_since_presentation_authoring_start_ms(state)
         diagnostics.setdefault("prepare_force_reason", "model_initiated")
         update: dict[str, Any] = {
@@ -14180,23 +14229,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         tool_calls: list[dict[str, Any]],
         prepare_call_update: dict[str, Any],
     ) -> dict[str, Any] | None:
-        calls = [
-            call
-            for call in tool_calls
-            if str(call.get("name") or "") == _PREPARE_DECK_BUILD_TOOL_NAME
-        ]
+        calls = [call for call in tool_calls if str(call.get("name") or "") == _PREPARE_DECK_BUILD_TOOL_NAME]
         if len(calls) <= 1:
             return None
 
         prior_diagnostics = _pptx_diagnostics(state)
-        root_failure_code = (
-            prior_diagnostics.get("deck_root_failure_code")
-            or "deck_prepare_parallel_calls_forbidden"
-        )
-        root_failure_summary = (
-            prior_diagnostics.get("deck_root_failure_summary")
-            or "Multiple prepare_deck_build calls were emitted in one model turn."
-        )
+        root_failure_code = prior_diagnostics.get("deck_root_failure_code") or "deck_prepare_parallel_calls_forbidden"
+        root_failure_summary = prior_diagnostics.get("deck_root_failure_summary") or "Multiple prepare_deck_build calls were emitted in one model turn."
         call_delta = prepare_call_update.get("builder_pptx_diagnostics")
         if not isinstance(call_delta, dict):
             call_delta = {}
@@ -14211,9 +14250,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "deck_root_failure_code": root_failure_code,
                 "deck_root_failure_summary": root_failure_summary,
                 "last_prepare_failure_code": "deck_prepare_parallel_calls_forbidden",
-                "last_prepare_failure_summary": (
-                    "Multiple prepare_deck_build calls were emitted in one model turn."
-                ),
+                "last_prepare_failure_summary": ("Multiple prepare_deck_build calls were emitted in one model turn."),
                 "prepare_repair_count": self._prepare_repair_attempt_count(state),
                 "prepare_retry_executed": self._prepare_repair_attempt_count(state) > 0,
             },
@@ -14221,15 +14258,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         payload = {
             "success": False,
             "failure_code": "deck_prepare_parallel_calls_forbidden",
-            "failure_summary": (
-                "prepare_deck_build calls must be sequential; multiple calls were emitted in one model turn."
-            ),
+            "failure_summary": ("prepare_deck_build calls must be sequential; multiple calls were emitted in one model turn."),
             "root_failure_code": root_failure_code,
             "root_failure_summary": root_failure_summary,
             "last_prepare_failure_code": "deck_prepare_parallel_calls_forbidden",
-            "last_prepare_failure_summary": (
-                "Multiple prepare_deck_build calls were emitted in one model turn."
-            ),
+            "last_prepare_failure_summary": ("Multiple prepare_deck_build calls were emitted in one model turn."),
             "retryable": False,
         }
         terminal_state = {
@@ -14971,3 +15004,20 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
 
         log_middleware("BuilderArtifact", "no AI message found", _t0)
         return None
+
+    @hook_config(can_jump_to=["end"])
+    @override
+    async def aafter_model(
+        self,
+        state: BuilderArtifactState,
+        runtime: Runtime,
+    ) -> dict | None:
+        """Run the synchronous completion boundary outside the event loop.
+
+        Accepted canary artifacts must durably record their DQ-1 producer
+        bundle before baseline delivery is detached. LangGraph otherwise wraps
+        the synchronous ``after_model`` hook directly in its async runnable,
+        which would hold the active loop during bounded storage I/O.
+        """
+
+        return await asyncio.to_thread(self.after_model, state, runtime)

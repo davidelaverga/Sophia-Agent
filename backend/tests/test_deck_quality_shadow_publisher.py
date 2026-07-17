@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import json
+import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -15,7 +18,6 @@ from deerflow.sophia.deck_quality.evidence import prepare_blind_visual_evidence
 from deerflow.sophia.deck_quality.invoker import MultimodalStructuredModelInvoker
 from deerflow.sophia.deck_quality.messages import build_blind_visual_messages
 from deerflow.sophia.deck_quality.prompts import VersionedPrompt
-from deerflow.sophia.deck_quality.publication_persistence import PublicationState
 from deerflow.sophia.deck_quality.schemas import (
     BlindVisualAssessment,
     ImageEvidence,
@@ -44,6 +46,7 @@ def _state(tmp_path) -> dict:
 
 
 def _artifact(artifact_bytes: bytes = b"accepted pptx bytes") -> dict:
+    artifact_sha256 = hashlib.sha256(artifact_bytes).hexdigest()
     return {
         "artifact_path": "/mnt/user-data/outputs/deck.pptx",
         "artifact_type": "presentation",
@@ -55,8 +58,16 @@ def _artifact(artifact_bytes: bytes = b"accepted pptx bytes") -> dict:
         "manifest_revision": 1,
         "storage_provider": "supabase",
         "storage_status": "available",
-        "storage_object_path": ("artifacts/canary-user/companion-thread/artifact-canary-1/deck.pptx"),
-        "artifact_sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+        "storage_object_path": publisher.deck_quality_immutable_artifact_snapshot_path(
+            user_id="canary-user",
+            thread_id="companion-thread",
+            build_id="build_01KXKNNQ5Z9N198VCMJPDWSBJ0",
+            logical_artifact_id="artifact-canary-1",
+            artifact_version_id="artifact-version-canary-1",
+            artifact_sha256=artifact_sha256,
+            artifact_virtual_path="/mnt/user-data/outputs/deck.pptx",
+        ),
+        "artifact_sha256": artifact_sha256,
         "deck_build_id": "build_01KXKNNQ5Z9N198VCMJPDWSBJ0",
         "builder_trace_root_run_id": "builder-trace-root-1",
         "mechanical_gate_results": {"passed": True},
@@ -170,9 +181,18 @@ def _prepare_files(tmp_path, artifact_bytes: bytes = b"accepted pptx bytes") -> 
 class _MemoryObjects:
     def __init__(self, artifact_path: str, artifact_bytes: bytes) -> None:
         self.objects = {artifact_path: artifact_bytes}
+        self.creates: list[str] = []
+        self.reads: list[tuple[str, int]] = []
 
     def read(self, object_path: str) -> bytes | None:
         return self.objects.get(object_path)
+
+    def read_bounded(self, object_path: str, *, max_bytes: int) -> bytes | None:
+        self.reads.append((object_path, max_bytes))
+        content = self.objects.get(object_path)
+        if content is not None and len(content) > max_bytes:
+            raise ValueError("object exceeds bound")
+        return content
 
     def create_if_absent(
         self,
@@ -182,37 +202,11 @@ class _MemoryObjects:
         content_type: str,
     ) -> str:
         del content_type
+        self.creates.append(object_path)
         if object_path in self.objects:
             return "exists"
         self.objects[object_path] = content
         return "created"
-
-
-def _publication_record(request, *, state=PublicationState.AWAITING_INPUTS):
-    return SimpleNamespace(
-        quality_run_id=request.quality_run_id,
-        campaign_id=request.campaign_id,
-        instrument_identity_hash=request.instrument_identity_hash,
-        instrument_lock=lambda: request.instrument,
-        user_id=request.user_id,
-        thread_id=request.thread_id,
-        task_id=request.task_id,
-        build_id=request.build_id,
-        builder_run_id=request.builder_run_id,
-        parent_builder_trace_id=request.parent_builder_trace_id,
-        logical_artifact_id=request.logical_artifact_id,
-        artifact_version_id=request.artifact_version_id,
-        manifest_revision=request.manifest_revision,
-        artifact_object_path=request.artifact_object_path,
-        artifact_hash=request.artifact_hash,
-        max_attempts=request.max_attempts,
-        deadline_at=request.deadline_at,
-        quality_max_attempts=request.quality_max_attempts,
-        quality_run_deadline_at=request.quality_run_deadline_at,
-        source_pack_object_path=None,
-        source_pack_hash=None,
-        state=state,
-    )
 
 
 def test_prepare_rejects_non_canary_before_any_file_access(tmp_path, monkeypatch) -> None:
@@ -351,7 +345,7 @@ def test_publication_intent_is_content_free_and_reads_no_source_files(
     assert "creative_plan" not in serialized
 
 
-def test_source_pack_captures_once_and_uploads_create_only(tmp_path) -> None:
+def test_producer_bundle_encode_decode_is_strict_and_deterministic(tmp_path) -> None:
     artifact_bytes = b"accepted pptx bytes"
     _prepare_files(tmp_path, artifact_bytes)
     prepared = publisher.prepare_deck_quality_publication(
@@ -363,36 +357,93 @@ def test_source_pack_captures_once_and_uploads_create_only(tmp_path) -> None:
     assert prepared is not None
     prepared = prepared.model_copy(update={"task_brief": "Build a concise PSI deck.\n\nRelevant memories from this session:\n- private memory"})
 
-    pack, encoded = publisher.capture_deck_quality_source_pack(
+    pack, source_pack_bytes = publisher.capture_deck_quality_source_pack(
         prepared=prepared,
         instrument=_instrument(),
     )
-    (tmp_path / "outputs" / "deck_build" / "creative_plan.json").write_text(
-        json.dumps({"subject": "mutated after capture"}),
-        encoding="utf-8",
-    )
-    objects = _MemoryObjects(
-        prepared.artifact_storage_object_path,
-        artifact_bytes,
-    )
-    descriptor = publisher.upload_deck_quality_source_pack(
+    first_encoded, first_descriptor = publisher.encode_deck_quality_producer_bundle(
         pack=pack,
-        encoded=encoded,
-        object_store=objects,
+        source_pack_bytes=source_pack_bytes,
     )
-    replay = publisher.upload_deck_quality_source_pack(
+    second_encoded, second_descriptor = publisher.encode_deck_quality_producer_bundle(
         pack=pack,
-        encoded=encoded,
-        object_store=objects,
+        source_pack_bytes=source_pack_bytes,
+    )
+    decoded = publisher.decode_deck_quality_producer_bundle(
+        first_encoded,
+        expected_quality_run_id=pack.quality_run_id,
+        expected_object_path=publisher.deck_quality_producer_bundle_path(pack.quality_run_id),
+    )
+    archive_path = publisher.deck_quality_producer_archive_path(pack.quality_run_id)
+    archive_decoded = publisher.decode_deck_quality_producer_bundle(
+        first_encoded,
+        expected_quality_run_id=pack.quality_run_id,
+        expected_object_path=archive_path,
     )
 
-    assert descriptor == replay
-    assert descriptor.object_path.endswith(f"/quality/{pack.quality_run_id}/publication/source_pack/{descriptor.sha256}.json")
-    assert objects.objects[descriptor.object_path] == encoded
+    assert first_encoded == second_encoded
+    assert first_descriptor == second_descriptor == decoded.descriptor
+    assert decoded.manifest.source_pack_sha256 == hashlib.sha256(source_pack_bytes).hexdigest()
+    assert decoded.manifest.source_pack_size_bytes == len(source_pack_bytes)
+    assert decoded.manifest.artifact_sha256 == hashlib.sha256(artifact_bytes).hexdigest()
+    assert decoded.manifest.artifact_object_path == pack.immutable_snapshot_object_path
+    assert decoded.manifest.source_pack_object_path == publisher.deck_quality_source_pack_path(
+        user_id=pack.user_id,
+        thread_id=pack.thread_id,
+        build_id=pack.build_id,
+        quality_run_id=pack.quality_run_id,
+    )
+    assert len(first_encoded) <= 64 * 1024
+    assert artifact_bytes not in first_encoded
+    assert b"PSI motivation architecture" not in first_encoded
+    assert b"creative_plan" not in first_encoded
+    assert b"design_plan" not in first_encoded
+    assert b"build_record" not in first_encoded
+    assert publisher.parse_deck_quality_producer_bundle_path(decoded.descriptor.object_path) == pack.quality_run_id
+    assert archive_decoded.descriptor.object_path == archive_path
+    assert publisher.parse_deck_quality_producer_archive_path(archive_path) == pack.quality_run_id
+    assert pack.accepted_delivery_object_path == prepared.artifact_storage_object_path
+    assert pack.immutable_snapshot_object_path == pack.accepted_delivery_object_path
+    assert pack.artifact_storage_object_path == pack.immutable_snapshot_object_path
+    assert "/.builder/" not in pack.artifact_storage_object_path
+    assert "/versions/" in pack.artifact_storage_object_path
     assert pack.creative_plan["subject"] == "PSI motivation architecture"
     assert pack.blind_brief.request == "Build a concise PSI deck."
-    assert b"private memory" not in encoded
+    assert b"private memory" not in source_pack_bytes
     assert pack.source_hashes.creative_plan == publisher.canonical_sha256(pack.creative_plan)
+
+    with pytest.raises(
+        publisher.DeckQualityPublicationError,
+        match="producer_bundle_invalid",
+    ):
+        publisher.decode_deck_quality_producer_bundle(first_encoded + b"trailing")
+
+
+def test_producer_storage_paths_are_strict_flat_and_content_bound() -> None:
+    quality_run_id = f"quality_{'a' * 64}"
+    inbox_path = publisher.deck_quality_producer_bundle_path(quality_run_id)
+    archive_path = publisher.deck_quality_producer_archive_path(quality_run_id)
+
+    assert inbox_path == f"dq1/producer-inbox/v1/{quality_run_id}.bin"
+    assert archive_path == (f"dq1/producer-archive/v1/{quality_run_id}/bundle.bin")
+    assert publisher.parse_deck_quality_producer_bundle_path(inbox_path) == quality_run_id
+    assert publisher.parse_deck_quality_producer_archive_path(archive_path) == quality_run_id
+    assert publisher.parse_deck_quality_producer_bundle_path(f"dq1/producer-inbox/v1/{quality_run_id}/bundle.bin") is None
+    assert publisher.parse_deck_quality_producer_archive_path(inbox_path) is None
+
+    first = publisher.deck_quality_producer_quarantine_path(
+        inbox_path,
+        reason="bundle_invalid",
+        content_sha256="1" * 64,
+    )
+    second = publisher.deck_quality_producer_quarantine_path(
+        inbox_path,
+        reason="bundle_invalid",
+        content_sha256="2" * 64,
+    )
+    assert first != second
+    assert first.endswith(f"/{'1' * 64}.bin")
+    assert second.endswith(f"/{'2' * 64}.bin")
 
 
 def test_long_current_request_keeps_full_request_and_bounds_structured_projection(
@@ -430,10 +481,7 @@ def test_plan_only_tokens_cannot_influence_blind_request_pipeline(
 
     artifact_bytes = b"accepted pptx bytes"
     _prepare_files(tmp_path, artifact_bytes)
-    current_request = (
-        "Build a concise PSI deck for the current product review using the "
-        "user-requested cobalt accent."
-    )
+    current_request = "Build a concise PSI deck for the current product review using the user-requested cobalt accent."
     completion = _payload()
     completion["task_brief"] = current_request
     prepared = publisher.prepare_deck_quality_publication(
@@ -601,15 +649,27 @@ def test_plan_only_tokens_cannot_influence_blind_request_pipeline(
     assert sentinel not in serialized_messages
     assert current_request in serialized_messages
 
-    def create_chat_model(_name: str, **kwargs) -> ChatOpenAI:
+    def create_internal_route_chat_model(**kwargs) -> ChatOpenAI:
+        kwargs.pop("plan")
+        kwargs.pop("capability")
         kwargs.pop("attach_tracing")
+        kwargs.pop("api_key")
         return ChatOpenAI(
             model="gpt-5.6-sol",
             api_key="synthetic-not-used",
             **kwargs,
         )
 
-    monkeypatch.setattr(invoker_module, "create_chat_model", create_chat_model)
+    monkeypatch.setattr(
+        invoker_module,
+        "create_internal_route_chat_model",
+        create_internal_route_chat_model,
+    )
+    monkeypatch.setattr(invoker_module, "get_app_config", _config)
+    monkeypatch.setenv(
+        "SOPHIA_DECK_QUALITY_OPENAI_API_KEY",
+        "synthetic-dq-only-not-used",
+    )
     invoker = MultimodalStructuredModelInvoker()
     baseline_request = invoker.prepare_request(
         plan=_judge_plan(),
@@ -688,42 +748,268 @@ def test_source_pack_capture_rejects_oversized_native_input(tmp_path) -> None:
         )
 
 
-def test_source_pack_upload_rejects_existing_conflict(tmp_path) -> None:
-    _prepare_files(tmp_path)
+def test_producer_persists_source_then_small_outbox_without_artifact_copy(
+    tmp_path,
+) -> None:
+    remote_artifact = b"exact accepted Supabase PPTX bytes"
+    local_artifact = b"divergent ephemeral local PPTX bytes"
+    _prepare_files(tmp_path, local_artifact)
     prepared = publisher.prepare_deck_quality_publication(
         config=_config(),
         state=_state(tmp_path),
-        artifact=_artifact(),
+        artifact=_artifact(remote_artifact),
         completion_payload=_payload(),
     )
     assert prepared is not None
-    pack, encoded = publisher.capture_deck_quality_source_pack(
-        prepared=prepared,
-        instrument=_instrument(),
-    )
     objects = _MemoryObjects(
         prepared.artifact_storage_object_path,
-        b"accepted pptx bytes",
+        remote_artifact,
     )
-    descriptor = publisher.upload_deck_quality_source_pack(
-        pack=pack,
-        encoded=encoded,
+
+    receipt = publisher.persist_deck_quality_producer_bundle(
+        prepared=prepared,
+        instrument=_instrument(),
         object_store=objects,
     )
-    objects.objects[descriptor.object_path] = b"conflict"
+
+    bundle = objects.objects[receipt.bundle_object_path]
+    decoded = publisher.decode_deck_quality_producer_bundle(
+        bundle,
+        expected_quality_run_id=receipt.quality_run_id,
+        expected_object_path=receipt.bundle_object_path,
+    )
+    source_path = decoded.manifest.source_pack_object_path
+    source_pack = publisher.DeckQualitySourcePack.model_validate_json(
+        objects.objects[source_path]
+    )
+    assert decoded.manifest.artifact_object_path == prepared.artifact_storage_object_path
+    assert source_pack.accepted_delivery_object_path == prepared.artifact_storage_object_path
+    assert source_pack.immutable_snapshot_object_path == publisher._immutable_artifact_object_path(prepared)
+    assert objects.creates == [source_path, receipt.bundle_object_path]
+    assert all(path != prepared.artifact_storage_object_path for path, _bound in objects.reads)
+    assert objects.objects[prepared.artifact_storage_object_path] == remote_artifact
+    assert remote_artifact not in bundle
+    assert local_artifact not in bundle
+    assert remote_artifact not in objects.objects[source_path]
+    assert local_artifact not in objects.objects[source_path]
+    assert receipt.bundle_size_bytes <= 64 * 1024
+
+
+def test_create_response_loss_reconciles_exact_committed_bundle(tmp_path) -> None:
+    artifact_bytes = b"accepted pptx bytes"
+    _prepare_files(tmp_path, artifact_bytes)
+    prepared = publisher.prepare_deck_quality_publication(
+        config=_config(),
+        state=_state(tmp_path),
+        artifact=_artifact(artifact_bytes),
+        completion_payload=_payload(),
+    )
+    assert prepared is not None
+
+    class _CreateResponseLostObjects(_MemoryObjects):
+        response_lost = False
+
+        def create_if_absent(
+            self,
+            object_path: str,
+            content: bytes,
+            *,
+            content_type: str,
+        ) -> str:
+            outcome = super().create_if_absent(
+                object_path,
+                content,
+                content_type=content_type,
+            )
+            if object_path.startswith(publisher.DECK_QUALITY_PRODUCER_PREFIX):
+                self.response_lost = True
+                raise RuntimeError("synthetic response loss")
+            return outcome
+
+    objects = _CreateResponseLostObjects(
+        prepared.artifact_storage_object_path,
+        artifact_bytes,
+    )
+
+    receipt = publisher.persist_deck_quality_producer_bundle(
+        prepared=prepared,
+        instrument=_instrument(),
+        object_store=objects,
+    )
+
+    assert objects.response_lost is True
+    assert receipt.bundle_object_path in objects.objects
+    decoded = publisher.decode_deck_quality_producer_bundle(
+        objects.objects[receipt.bundle_object_path],
+        expected_quality_run_id=receipt.quality_run_id,
+    )
+    assert decoded.descriptor.sha256 == receipt.bundle_hash
+
+
+def test_source_create_response_loss_reconciles_before_outbox_commit(tmp_path) -> None:
+    artifact_bytes = b"accepted pptx bytes"
+    _prepare_files(tmp_path, artifact_bytes)
+    prepared = publisher.prepare_deck_quality_publication(
+        config=_config(),
+        state=_state(tmp_path),
+        artifact=_artifact(artifact_bytes),
+        completion_payload=_payload(),
+    )
+    assert prepared is not None
+
+    class _SourceResponseLostObjects(_MemoryObjects):
+        response_lost = False
+
+        def create_if_absent(
+            self,
+            object_path: str,
+            content: bytes,
+            *,
+            content_type: str,
+        ) -> str:
+            outcome = super().create_if_absent(
+                object_path,
+                content,
+                content_type=content_type,
+            )
+            if "/source_pack/" in object_path and not self.response_lost:
+                self.response_lost = True
+                raise RuntimeError("synthetic source response loss")
+            return outcome
+
+    objects = _SourceResponseLostObjects(
+        prepared.artifact_storage_object_path,
+        artifact_bytes,
+    )
+    receipt = publisher.persist_deck_quality_producer_bundle(
+        prepared=prepared,
+        instrument=_instrument(),
+        object_store=objects,
+    )
+    manifest = publisher.decode_deck_quality_producer_bundle(
+        objects.objects[receipt.bundle_object_path]
+    ).manifest
+
+    assert objects.response_lost is True
+    assert objects.creates == [
+        manifest.source_pack_object_path,
+        receipt.bundle_object_path,
+    ]
+    assert (
+        manifest.source_pack_object_path,
+        publisher._MAX_SOURCE_PACK_BYTES,
+    ) in objects.reads
+
+
+def test_source_conflict_prevents_outbox_commit(tmp_path) -> None:
+    artifact_bytes = b"accepted pptx bytes"
+    _prepare_files(tmp_path, artifact_bytes)
+    prepared = publisher.prepare_deck_quality_publication(
+        config=_config(),
+        state=_state(tmp_path),
+        artifact=_artifact(artifact_bytes),
+        completion_payload=_payload(),
+    )
+    assert prepared is not None
+    instrument = _instrument()
+    pack, _source_bytes = publisher.capture_deck_quality_source_pack(
+        prepared=prepared,
+        instrument=instrument,
+    )
+    source_path = publisher.deck_quality_source_pack_path(
+        user_id=pack.user_id,
+        thread_id=pack.thread_id,
+        build_id=pack.build_id,
+        quality_run_id=pack.quality_run_id,
+    )
+    objects = _MemoryObjects(prepared.artifact_storage_object_path, artifact_bytes)
+    objects.objects[source_path] = b'{"conflict":true}'
 
     with pytest.raises(
         publisher.DeckQualityPublicationError,
-        match="source_pack_persistence_conflict",
+        match="producer_source_persistence_conflict",
     ):
-        publisher.upload_deck_quality_source_pack(
-            pack=pack,
-            encoded=encoded,
+        publisher.persist_deck_quality_producer_bundle(
+            prepared=prepared,
+            instrument=instrument,
+            object_store=objects,
+        )
+
+    assert objects.creates == [source_path]
+    assert publisher.deck_quality_producer_bundle_path(pack.quality_run_id) not in objects.objects
+
+
+def test_bundle_decoder_and_replay_reject_tamper_or_identity_conflict(
+    tmp_path,
+) -> None:
+    artifact_bytes = b"accepted pptx bytes"
+    _prepare_files(tmp_path, artifact_bytes)
+    prepared = publisher.prepare_deck_quality_publication(
+        config=_config(),
+        state=_state(tmp_path),
+        artifact=_artifact(artifact_bytes),
+        completion_payload=_payload(),
+    )
+    assert prepared is not None
+    instrument = _instrument()
+    objects = _MemoryObjects(prepared.artifact_storage_object_path, artifact_bytes)
+    receipt = publisher.persist_deck_quality_producer_bundle(
+        prepared=prepared,
+        instrument=instrument,
+        object_store=objects,
+    )
+    encoded = objects.objects[receipt.bundle_object_path]
+
+    source_tamper = encoded + b" "
+    with pytest.raises(
+        publisher.DeckQualityPublicationError,
+        match="producer_bundle_noncanonical",
+    ):
+        publisher.decode_deck_quality_producer_bundle(source_tamper)
+
+    artifact_tamper_payload = json.loads(encoded)
+    artifact_tamper_payload["artifact_sha256"] = "0" * 64
+    artifact_tamper = json.dumps(
+        artifact_tamper_payload,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode()
+    with pytest.raises(
+        publisher.DeckQualityPublicationError,
+        match="producer_bundle_invalid",
+    ):
+        publisher.decode_deck_quality_producer_bundle(artifact_tamper)
+
+    with pytest.raises(
+        publisher.DeckQualityPublicationError,
+        match="producer_bundle_invalid",
+    ):
+        publisher.decode_deck_quality_producer_bundle(b"{")
+
+    conflicting_prepared = prepared.model_copy(update={"task_id": "different-builder-thread"})
+    with pytest.raises(
+        publisher.DeckQualityPublicationError,
+        match="producer_bundle_conflict",
+    ):
+        publisher.persist_deck_quality_producer_bundle(
+            prepared=conflicting_prepared,
+            instrument=instrument,
+            object_store=objects,
+        )
+
+    objects.objects[receipt.bundle_object_path] = artifact_tamper
+    with pytest.raises(
+        publisher.DeckQualityPublicationError,
+        match="producer_bundle_conflict",
+    ):
+        publisher.persist_deck_quality_producer_bundle(
+            prepared=prepared,
+            instrument=instrument,
             object_store=objects,
         )
 
 
-def test_after_ack_captures_once_and_commits_exact_source_pack(
+def test_bundle_replay_after_local_cleanup_skips_sources_and_accepted_object(
     tmp_path,
     monkeypatch,
 ) -> None:
@@ -737,105 +1023,373 @@ def test_after_ack_captures_once_and_commits_exact_source_pack(
     )
     assert prepared is not None
     instrument = _instrument()
-    intent = publisher.build_deck_quality_publication_intent(
+    objects = _MemoryObjects(prepared.artifact_storage_object_path, artifact_bytes)
+    first = publisher.persist_deck_quality_producer_bundle(
         prepared=prepared,
         instrument=instrument,
+        object_store=objects,
     )
-    request = publisher._publication_request_from_intent(
-        intent,
-        instrument=instrument,
-    )
-    record = _publication_record(request)
-    objects = _MemoryObjects(prepared.artifact_storage_object_path, artifact_bytes)
-    captures = 0
-    real_capture = publisher._captured_native_inputs
+    creates_after_first = tuple(objects.creates)
 
-    def counted_capture(value):
-        nonlocal captures
-        captures += 1
-        return real_capture(value)
-
-    class _PublicationStore:
-        def __init__(self) -> None:
-            self.commits = []
-            self.closed = False
-
-        async def get(self, quality_run_id):
-            assert quality_run_id == intent.quality_run_id
-            return record
-
-        async def commit_inputs(
-            self,
-            current,
-            *,
-            source_pack_object_path,
-            source_pack_hash,
-        ):
-            assert current is record
-            self.commits.append((source_pack_object_path, source_pack_hash))
-            committed = _publication_record(
-                request,
-                state=PublicationState.PENDING,
-            )
-            committed.source_pack_object_path = source_pack_object_path
-            committed.source_pack_hash = source_pack_hash
-            return committed
-
-        async def aclose(self):
-            self.closed = True
-
-    store = _PublicationStore()
-    monkeypatch.setattr(publisher, "_captured_native_inputs", counted_capture)
-    monkeypatch.setattr(publisher, "SupabaseImmutableObjectStore", lambda: objects)
+    for path in (tmp_path / "outputs").rglob("*"):
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+    objects.objects.pop(prepared.artifact_storage_object_path)
+    reads_before_replay = len(objects.reads)
     monkeypatch.setattr(
         publisher,
-        "configured_deck_quality_publication_store",
-        lambda: store,
+        "_captured_native_inputs",
+        lambda _prepared: pytest.fail("bundle replay cannot read local sources"),
     )
 
-    committed = publisher.complete_deck_quality_publication_after_ack(
+    replay = publisher.persist_deck_quality_producer_bundle(
         prepared=prepared,
-        intent=intent,
         instrument=instrument,
+        object_store=objects,
     )
 
-    assert captures == 1
-    assert len(store.commits) == 1
-    assert committed.source_pack_object_path == store.commits[0][0]
-    assert committed.source_pack_hash == store.commits[0][1]
-    assert objects.objects[committed.source_pack_object_path]
-    assert store.closed is True
+    assert replay == first
+    assert tuple(objects.creates) == creates_after_first
+    assert objects.reads[reads_before_replay:] == [
+        (
+            publisher.deck_quality_producer_archive_path(first.quality_run_id),
+            publisher._MAX_PRODUCER_BUNDLE_BYTES,
+        ),
+        (first.bundle_object_path, publisher._MAX_PRODUCER_BUNDLE_BYTES),
+    ]
 
 
-def test_after_ack_identity_mismatch_reads_no_source_files(
+def test_bundle_replay_prefers_archive_after_inbox_retirement(
     tmp_path,
     monkeypatch,
 ) -> None:
-    _prepare_files(tmp_path)
+    artifact_bytes = b"accepted pptx bytes"
+    _prepare_files(tmp_path, artifact_bytes)
     prepared = publisher.prepare_deck_quality_publication(
         config=_config(),
         state=_state(tmp_path),
-        artifact=_artifact(),
+        artifact=_artifact(artifact_bytes),
         completion_payload=_payload(),
     )
     assert prepared is not None
     instrument = _instrument()
-    intent = publisher.build_deck_quality_publication_intent(
+    objects = _MemoryObjects(prepared.artifact_storage_object_path, artifact_bytes)
+    first = publisher.persist_deck_quality_producer_bundle(
         prepared=prepared,
         instrument=instrument,
-    ).model_copy(update={"artifact_sha256": "0" * 64})
+        object_store=objects,
+    )
+    archive_path = publisher.deck_quality_producer_archive_path(first.quality_run_id)
+    objects.objects[archive_path] = objects.objects.pop(first.bundle_object_path)
+    creates_after_first = tuple(objects.creates)
+
+    for path in (tmp_path / "outputs").rglob("*"):
+        if path.is_file() or path.is_symlink():
+            path.unlink()
+    objects.objects.pop(prepared.artifact_storage_object_path)
+    reads_before_replay = len(objects.reads)
     monkeypatch.setattr(
         publisher,
         "_captured_native_inputs",
-        lambda _prepared: pytest.fail("identity mismatch cannot read source files"),
+        lambda _prepared: pytest.fail("archive replay cannot read local sources"),
     )
+
+    replay = publisher.persist_deck_quality_producer_bundle(
+        prepared=prepared,
+        instrument=instrument,
+        object_store=objects,
+    )
+
+    assert replay.quality_run_id == first.quality_run_id
+    assert replay.bundle_hash == first.bundle_hash
+    assert replay.bundle_size_bytes == first.bundle_size_bytes
+    assert replay.bundle_object_path == archive_path
+    assert tuple(objects.creates) == creates_after_first
+    assert objects.reads[reads_before_replay:] == [(archive_path, publisher._MAX_PRODUCER_BUNDLE_BYTES)]
+
+
+def test_failure_marker_is_deterministic_content_free_and_create_only() -> None:
+    artifact = _artifact()
+    payload = _payload()
+    payload["task_brief"] = "PRIVATE BRIEF SENTINEL"
+    artifact["artifact_url"] = "https://private.example/signed-secret"
+    candidate_digest = publisher.derive_deck_quality_candidate_digest(
+        artifact=artifact,
+        completion_payload=payload,
+    )
+    objects = _MemoryObjects("unused", b"unused")
+
+    first = publisher.persist_deck_quality_producer_failure(
+        candidate_digest=candidate_digest,
+        failure_stage="candidate_metadata",
+        failure_code="candidate_metadata_invalid",
+        object_store=objects,
+    )
+    encoded = objects.objects[first.object_path]
+    replay = publisher.persist_deck_quality_producer_failure(
+        candidate_digest=candidate_digest,
+        failure_stage="candidate_metadata",
+        failure_code="candidate_metadata_invalid",
+        object_store=objects,
+    )
+
+    assert replay == first
+    assert objects.creates == [first.object_path]
+    assert first.object_path == (
+        f"{publisher.DECK_QUALITY_PRODUCER_FAILURE_PREFIX}/{candidate_digest}.json"
+    )
+    assert publisher.parse_deck_quality_producer_failure_path(first.object_path) == candidate_digest
+    assert (
+        publisher.parse_deck_quality_producer_failure_path(
+            f"{publisher.DECK_QUALITY_PRODUCER_FAILURE_PREFIX}/{candidate_digest}/manifest.json"
+        )
+        is None
+    )
+    assert hashlib.sha256(encoded).hexdigest() == first.sha256
+    assert json.loads(encoded) == {
+        "campaign_id": "DQ-1",
+        "candidate_digest": candidate_digest,
+        "failure_code": "candidate_metadata_invalid",
+        "failure_stage": "candidate_metadata",
+        "schema_version": "deck-quality-producer-failure/v1",
+        "shadow_error_code": "shadow_dispatch_unavailable",
+    }
+    assert b"PRIVATE BRIEF SENTINEL" not in encoded
+    assert b"private.example" not in encoded
+    assert b"occurred_at" not in encoded
+    assert b"error_type" not in encoded
+
+
+def test_owned_producer_protocol_has_one_cancellable_absolute_deadline(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    artifact_bytes = b"accepted pptx bytes"
+    _prepare_files(tmp_path, artifact_bytes)
+    prepared = publisher.prepare_deck_quality_publication(
+        config=_config(),
+        state=_state(tmp_path),
+        artifact=_artifact(artifact_bytes),
+        completion_payload=_payload(),
+    )
+    assert prepared is not None
+
+    class _DribblingAsyncStore:
+        closed = False
+
+        async def read_bounded(self, *_args, **_kwargs):
+            while True:
+                await asyncio.sleep(0.001)
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    store = _DribblingAsyncStore()
+    monkeypatch.setattr(
+        publisher,
+        "AsyncSupabaseImmutableObjectStore",
+        lambda: store,
+    )
+    monkeypatch.setattr(
+        publisher,
+        "_PRODUCER_PROTOCOL_TIMEOUT_SECONDS",
+        0.025,
+    )
+    monkeypatch.setattr(
+        publisher,
+        "_PRODUCER_AMBIGUITY_RESERVE_SECONDS",
+        0.01,
+    )
+    started = time.monotonic()
 
     with pytest.raises(
         publisher.DeckQualityPublicationError,
-        match="publication_identity_mismatch",
+        match="producer_bundle_deadline_exceeded",
     ):
-        publisher.complete_deck_quality_publication_after_ack(
+        publisher.persist_deck_quality_producer_bundle(
             prepared=prepared,
-            intent=intent,
+            instrument=_instrument(),
+        )
+
+    assert time.monotonic() - started < 0.2
+    assert store.closed is True
+
+
+def test_blocked_local_source_capture_returns_at_deadline_and_cannot_write_late(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    artifact_bytes = b"accepted pptx bytes"
+    _prepare_files(tmp_path, artifact_bytes)
+    prepared = publisher.prepare_deck_quality_publication(
+        config=_config(),
+        state=_state(tmp_path),
+        artifact=_artifact(artifact_bytes),
+        completion_payload=_payload(),
+    )
+    assert prepared is not None
+    capture_started = threading.Event()
+    release_capture = threading.Event()
+
+    class _AsyncStore:
+        closed = False
+        creates: list[str] = []
+
+        async def read_bounded(self, *_args, **_kwargs):
+            return None
+
+        async def create_if_absent(
+            self,
+            object_path: str,
+            *_args,
+            **_kwargs,
+        ) -> str:
+            self.creates.append(object_path)
+            return "created"
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    store = _AsyncStore()
+
+    def blocked_capture(**_kwargs):
+        capture_started.set()
+        release_capture.wait(timeout=1.0)
+        raise RuntimeError("late read result must be discarded")
+
+    monkeypatch.setattr(
+        publisher,
+        "AsyncSupabaseImmutableObjectStore",
+        lambda: store,
+    )
+    monkeypatch.setattr(
+        publisher,
+        "capture_deck_quality_source_pack",
+        blocked_capture,
+    )
+    monkeypatch.setattr(
+        publisher,
+        "_PRODUCER_PROTOCOL_TIMEOUT_SECONDS",
+        0.05,
+    )
+    monkeypatch.setattr(
+        publisher,
+        "_PRODUCER_AMBIGUITY_RESERVE_SECONDS",
+        0.015,
+    )
+    started = time.monotonic()
+
+    try:
+        with pytest.raises(
+            publisher.DeckQualityPublicationError,
+            match="producer_bundle_deadline_exceeded",
+        ):
+            publisher.persist_deck_quality_producer_bundle(
+                prepared=prepared,
+                instrument=_instrument(),
+            )
+        elapsed = time.monotonic() - started
+        assert capture_started.wait(timeout=0.05)
+        assert elapsed < 0.2
+        assert store.closed is True
+        assert store.creates == []
+    finally:
+        release_capture.set()
+    time.sleep(0.02)
+    assert store.creates == []
+
+
+def test_owned_failure_marker_has_reserved_absolute_deadline(tmp_path, monkeypatch) -> None:
+    artifact_bytes = b"accepted pptx bytes"
+    _prepare_files(tmp_path, artifact_bytes)
+    prepared = publisher.prepare_deck_quality_publication(
+        config=_config(),
+        state=_state(tmp_path),
+        artifact=_artifact(artifact_bytes),
+        completion_payload=_payload(),
+    )
+    assert prepared is not None
+    instrument = _instrument()
+    intent = publisher.build_deck_quality_producer_intent(
+        prepared=prepared,
+        instrument=instrument,
+    )
+    class _DribblingAsyncStore:
+        closed = False
+
+        async def exists(self, *_args, **_kwargs):
+            while True:
+                await asyncio.sleep(0.001)
+
+        async def read_bounded(self, *_args, **_kwargs):
+            while True:
+                await asyncio.sleep(0.001)
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    store = _DribblingAsyncStore()
+    monkeypatch.setattr(
+        publisher,
+        "AsyncSupabaseImmutableObjectStore",
+        lambda: store,
+    )
+    monkeypatch.setattr(
+        publisher,
+        "_FAILURE_PROTOCOL_TIMEOUT_SECONDS",
+        0.025,
+    )
+    started = time.monotonic()
+
+    with pytest.raises(
+        publisher.DeckQualityPublicationError,
+        match="producer_failure_deadline_exceeded",
+    ):
+        publisher.persist_deck_quality_producer_failure(
+            candidate_digest="a" * 64,
+            failure_stage="producer_bundle",
+            failure_code="producer_bundle_unavailable",
+            quality_run_id=intent.quality_run_id,
+            prepared=prepared,
             instrument=instrument,
         )
+
+    assert time.monotonic() - started < 0.2
+    assert store.closed is True
+
+
+def test_candidate_digest_excludes_task_brief_urls_and_content() -> None:
+    baseline_artifact = _artifact()
+    baseline_payload = _payload()
+    baseline_payload["task_brief"] = "PRIVATE TASK CONTENT ALPHA"
+    baseline_payload["artifact_url"] = "https://private.example/alpha"
+    baseline_artifact["artifact_url"] = "https://private.example/artifact-alpha"
+    baseline_artifact["creative_plan"] = {"private": "alpha"}
+    baseline = publisher.derive_deck_quality_candidate_digest(
+        artifact=baseline_artifact,
+        completion_payload=baseline_payload,
+    )
+
+    changed_artifact = dict(baseline_artifact)
+    changed_artifact["artifact_url"] = "https://private.example/artifact-beta"
+    changed_artifact["creative_plan"] = {"private": "beta"}
+    changed_payload = dict(baseline_payload)
+    changed_payload["task_brief"] = "PRIVATE TASK CONTENT BETA"
+    changed_payload["artifact_url"] = "https://private.example/beta"
+    changed = publisher.derive_deck_quality_candidate_digest(
+        artifact=changed_artifact,
+        completion_payload=changed_payload,
+    )
+
+    changed_identity_payload = dict(changed_payload)
+    changed_identity_payload["task_id"] = "different-builder-thread"
+    changed_identity = publisher.derive_deck_quality_candidate_digest(
+        artifact=changed_artifact,
+        completion_payload=changed_identity_payload,
+    )
+
+    assert changed == baseline
+    assert changed_identity != baseline
+    assert baseline.isascii()
+    assert len(baseline) == 64
+    assert "PRIVATE" not in baseline

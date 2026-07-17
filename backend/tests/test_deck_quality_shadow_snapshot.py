@@ -30,6 +30,9 @@ from deerflow.sophia.deck_quality.snapshot import (
     rasterize_preview_pdf,
 )
 from deerflow.sophia.pptx_preview import maybe_render_pptx_preview
+from deerflow.sophia.storage.supabase_artifact_store import (
+    immutable_builder_artifact_object_path,
+)
 
 QUALITY_RUN_ID = f"quality_{'a' * 64}"
 BUILD_ID = "build_01SNAPSHOT"
@@ -138,7 +141,14 @@ def snapshot_inputs(tmp_path: Path) -> dict[str, object]:
         logical_artifact_id="artifact-01",
         artifact_version_id="artifact-version-01",
         manifest_revision=1,
-        artifact_storage_object_path=("artifacts/canary-user/thread-01/artifact-01/psi-deck.pptx"),
+        artifact_storage_object_path=immutable_builder_artifact_object_path(
+            user_id="canary-user",
+            thread_or_session_id="thread-01",
+            logical_artifact_id="artifact-01",
+            artifact_version_id="artifact-version-01",
+            artifact_sha256=hashlib.sha256(artifact.read_bytes()).hexdigest(),
+            filename="psi-deck.pptx",
+        ),
     )
     return {
         "outputs": outputs,
@@ -300,7 +310,7 @@ def test_pre_render_input_bundle_round_trip_is_restart_ready_and_manifest_last(
 
     assert loaded.metadata.quality_run_id == QUALITY_RUN_ID
     assert loaded.metadata.artifact_storage_object_path.endswith(".pptx")
-    assert loaded.metadata.artifact_storage_object_path != source_metadata.artifact_storage_object_path
+    assert loaded.metadata.artifact_storage_object_path == source_metadata.artifact_storage_object_path
     assert loaded.brief.request == "Explain the PSI feedback loop."
     assert loaded.mechanical_record == snapshot_inputs["mechanical"]
     assert loaded.artifact_host_path.read_bytes() == source_artifact.read_bytes()
@@ -595,7 +605,7 @@ def test_pre_render_input_bundle_rejects_partial_remote_without_local_writes(
     assert not materialization_root.exists()
 
 
-def test_pre_render_bundle_survives_later_primary_and_local_input_mutation(
+def test_pre_render_bundle_survives_local_input_mutation_without_primary_duplication(
     snapshot_inputs: dict[str, object],
     tmp_path: Path,
 ) -> None:
@@ -612,7 +622,6 @@ def test_pre_render_bundle_survives_later_primary_and_local_input_mutation(
     uploader.objects[metadata.artifact_storage_object_path] = accepted_bytes
     descriptor = _freeze_pre_render_inputs(snapshot_inputs, uploader)
 
-    uploader.objects[metadata.artifact_storage_object_path] = b"mutated primary"
     artifact.write_bytes(b"mutated local artifact")
     preview.write_bytes(b"%PDF-1.7\nmutated local preview\n%%EOF")
     (outputs / "deck_build" / "creative_plan.json").write_text(
@@ -628,13 +637,13 @@ def test_pre_render_bundle_survives_later_primary_and_local_input_mutation(
 
     assert loaded.artifact_host_path.read_bytes() == accepted_bytes
     assert not (loaded.outputs_root / "psi-deck.preview.pdf").exists()
-    assert loaded.metadata.artifact_storage_object_path != metadata.artifact_storage_object_path
-    assert uploader.objects[metadata.artifact_storage_object_path] == b"mutated primary"
+    assert loaded.metadata.artifact_storage_object_path == metadata.artifact_storage_object_path
+    assert uploader.objects[metadata.artifact_storage_object_path] == accepted_bytes
     reconstructed_creative = json.loads((loaded.outputs_root / "deck_build" / "creative_plan.json").read_bytes())
     assert reconstructed_creative["signature"] == "control loop"
 
 
-def test_snapshot_freezes_exact_evidence_to_separate_immutable_artifact(
+def test_snapshot_reuses_exact_immutable_primary_for_evidence(
     snapshot_inputs: dict[str, object],
 ) -> None:
     uploader = MemoryImmutableUploader()
@@ -662,8 +671,15 @@ def test_snapshot_freezes_exact_evidence_to_separate_immutable_artifact(
     assert len(immutable_paths) == 1
     immutable_path = immutable_paths[0]
     artifact_hash = hashlib.sha256(artifact.read_bytes()).hexdigest()
-    assert immutable_path != metadata.artifact_storage_object_path
-    assert (f"/.builder/builds/{BUILD_ID}/artifacts/artifact-01/artifact-version-01/{artifact_hash}/psi-deck.pptx") in f"/{immutable_path}"
+    assert immutable_path == metadata.artifact_storage_object_path
+    assert immutable_path == immutable_builder_artifact_object_path(
+        user_id=metadata.user_id,
+        thread_or_session_id=metadata.thread_id,
+        logical_artifact_id=metadata.logical_artifact_id,
+        artifact_version_id=metadata.artifact_version_id,
+        artifact_sha256=artifact_hash,
+        filename="psi-deck.pptx",
+    )
     assert uploader.objects[immutable_path] == artifact.read_bytes()
     assert immutable_path in uploader.reads
 
@@ -772,7 +788,7 @@ def test_snapshot_create_only_artifact_replay_rejects_overwrite(
     assert descriptor.snapshot_path not in {path for path, _ in uploader.attempts}
 
 
-def test_later_primary_path_mutation_does_not_change_historical_snapshot(
+def test_later_immutable_primary_corruption_is_rejected_by_historical_snapshot(
     snapshot_inputs: dict[str, object],
     tmp_path: Path,
 ) -> None:
@@ -789,20 +805,22 @@ def test_later_primary_path_mutation_does_not_change_historical_snapshot(
     manifest = json.loads(uploader.objects[descriptor.snapshot_path])
     bundle = json.loads(uploader.objects[manifest["evidence_bundle_path"]])
     immutable_path = bundle["artifact"]["storage_object_path"]
-    assert immutable_path != metadata.artifact_storage_object_path
+    assert immutable_path == metadata.artifact_storage_object_path
 
     uploader.objects[metadata.artifact_storage_object_path] = b"later primary overwrite"
     artifact.write_bytes(b"later local overwrite")
-    loaded = load_evidence_snapshot(
-        descriptor=descriptor,
-        expected_identity=_identity_from_uploader(snapshot_inputs, uploader),
-        reader=uploader,
-        materialization_root=tmp_path / "historical-materialization",
-    )
+    with pytest.raises(
+        SnapshotConflictError,
+        match="immutable accepted artifact bytes do not match snapshot",
+    ):
+        load_evidence_snapshot(
+            descriptor=descriptor,
+            expected_identity=_identity_from_uploader(snapshot_inputs, uploader),
+            reader=uploader,
+            materialization_root=tmp_path / "historical-materialization",
+        )
 
-    assert loaded.manifest.artifact.storage_object_path == immutable_path
-    assert loaded.snapshot.artifact_hash == accepted_hash
-    assert uploader.objects[immutable_path] == accepted_bytes
+    assert accepted_hash != hashlib.sha256(uploader.objects[immutable_path]).hexdigest()
     assert uploader.objects[metadata.artifact_storage_object_path] == b"later primary overwrite"
 
 
@@ -926,9 +944,11 @@ def test_pdf_rasterizer_uses_fixed_resolved_bounded_poppler_command(
         lambda binary: "/opt/poppler/bin/pdftoppm" if binary == "pdftoppm" else None,
     )
 
-    def fake_run(command: list[str], *, timeout: int):
+    def fake_run(command: list[str], *, timeout: int, writable_dirs, identity_paths):
         captured["command"] = command
         captured["timeout"] = timeout
+        captured["writable_dirs"] = writable_dirs
+        captured["identity_paths"] = identity_paths
         prefix = Path(command[-1])
         prefix.with_name(prefix.name + "-1.png").write_bytes(png)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -947,3 +967,4 @@ def test_pdf_rasterizer_uses_fixed_resolved_bounded_poppler_command(
         captured["command"][-1],  # type: ignore[index]
     ]
     assert captured["timeout"] == 180
+    assert len(captured["writable_dirs"]) == 1  # type: ignore[arg-type]

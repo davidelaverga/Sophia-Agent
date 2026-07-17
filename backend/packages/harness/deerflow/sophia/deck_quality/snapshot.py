@@ -35,6 +35,7 @@ from deerflow.sophia.deck_quality.visible_text import visible_text_sidecar
 from deerflow.sophia.pptx_preview import maybe_render_pptx_preview
 from deerflow.sophia.process_group import run_process_group
 from deerflow.sophia.storage.supabase_artifact_store import (
+    immutable_builder_artifact_object_path,
     normalize_object_path,
     safe_object_path_segment,
 )
@@ -671,6 +672,8 @@ def rasterize_preview_pdf(pdf_path: Path) -> tuple[bytes, ...]:
                     str(prefix),
                 ],
                 timeout=_PDFTOPPM_TIMEOUT_SECONDS,
+                writable_dirs=[directory],
+                identity_paths=[source],
             )
             if completed.returncode != 0:
                 raise SnapshotCoverageError("preview PDF rasterization failed")
@@ -867,19 +870,17 @@ def _immutable_artifact_object_path(
     artifact_hash: str,
     artifact_virtual_path: str,
 ) -> str:
-    filename = safe_object_path_segment(
-        PurePosixPath(artifact_virtual_path.replace("\\", "/")).name,
-        default="accepted-artifact.pptx",
-    )
-    return normalize_object_path(
-        "artifacts/"
-        f"{safe_object_path_segment(user_id, default='user')}/"
-        f"{safe_object_path_segment(thread_id, default='thread')}/"
-        "foundation/.builder/builds/"
-        f"{safe_object_path_segment(build_id, default='build')}/artifacts/"
-        f"{safe_object_path_segment(logical_artifact_id, default='artifact')}/"
-        f"{safe_object_path_segment(artifact_version_id, default='version')}/"
-        f"{artifact_hash}/{filename}"
+    if not build_id.strip():
+        raise SnapshotMissingEvidenceError("build identity is invalid")
+    return immutable_builder_artifact_object_path(
+        user_id=user_id,
+        thread_or_session_id=thread_id,
+        logical_artifact_id=logical_artifact_id,
+        artifact_version_id=artifact_version_id,
+        artifact_sha256=artifact_hash,
+        filename=PurePosixPath(
+            artifact_virtual_path.replace("\\", "/")
+        ).name,
     )
 
 

@@ -2,6 +2,8 @@ import os
 import re
 from pathlib import Path
 
+from deerflow.sandbox_identity import prepare_thread_data_boundary, running_as_linux_root
+
 # Virtual path prefix seen by agents inside the sandbox
 VIRTUAL_PATH_PREFIX = "/mnt/user-data"
 
@@ -141,19 +143,28 @@ class Paths:
     def ensure_thread_dirs(self, thread_id: str) -> None:
         """Create all standard sandbox directories for a thread.
 
-        Directories are created with mode 0o777 so that sandbox containers
-        (which may run as a different UID than the host backend process) can
-        write to the volume-mounted paths without "Permission denied" errors.
-        The explicit chmod() call is necessary because Path.mkdir(mode=...) is
-        subject to the process umask and may not yield the intended permissions.
+        Portable/non-root runtimes retain the established 0o777 leaf modes for
+        container volume compatibility. The root-Linux production LocalSandbox
+        immediately adopts the tree for a deterministic per-thread UID instead:
+        workspace/outputs become private+writable, uploads private+read-only,
+        and the root-owned enclosing user-data directory is a non-writable 0o710
+        cross-thread fence keyed by the thread's stable GID.
         """
+        root_boundary = running_as_linux_root()
         for d in [
             self.sandbox_work_dir(thread_id),
             self.sandbox_uploads_dir(thread_id),
             self.sandbox_outputs_dir(thread_id),
         ]:
             d.mkdir(parents=True, exist_ok=True)
-            d.chmod(0o777)
+            if not root_boundary:
+                d.chmod(0o777)
+        if root_boundary:
+            prepare_thread_data_boundary(
+                workspace_root=self.sandbox_work_dir(thread_id),
+                outputs_root=self.sandbox_outputs_dir(thread_id),
+                uploads_root=self.sandbox_uploads_dir(thread_id),
+            )
 
     def resolve_virtual_path(self, thread_id: str, virtual_path: str) -> Path:
         """Resolve a sandbox virtual path to the actual host filesystem path.

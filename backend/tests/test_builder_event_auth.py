@@ -6,11 +6,16 @@ import pytest
 
 from deerflow.sophia.builder_event_auth import (
     BUILDER_EVENT_HMAC_SECRET_ENV,
+    BUILDER_EVENT_PROBE_ACK_HEADER,
     BuilderEventAuthenticationError,
     BuilderEventReplayGuard,
     authenticate_builder_event,
+    builder_event_canary_scope_proof,
+    builder_event_probe_ack,
     encode_builder_event_body,
+    probe_builder_event_auth,
     signed_builder_event_headers,
+    verify_builder_event_probe_ack,
 )
 
 _SECRET = "dq1-test-builder-event-secret-" + "a" * 40
@@ -67,11 +72,65 @@ def test_missing_or_weak_secret_never_authenticates(
 ) -> None:
     body = encode_builder_event_body({"task_id": "task-1"})
     monkeypatch.delenv(BUILDER_EVENT_HMAC_SECRET_ENV)
+    with pytest.raises(
+        BuilderEventAuthenticationError,
+        match="builder_event_auth_unavailable",
+    ):
+        probe_builder_event_auth()
     with pytest.raises(BuilderEventAuthenticationError, match="builder_event_auth_unavailable"):
         signed_builder_event_headers(body, now=_NOW, nonce=_NONCE)
     monkeypatch.setenv(BUILDER_EVENT_HMAC_SECRET_ENV, "short")
     with pytest.raises(BuilderEventAuthenticationError, match="builder_event_auth_unavailable"):
         signed_builder_event_headers(body, now=_NOW, nonce=_NONCE)
+
+
+def test_startup_probe_validates_without_exposing_secret() -> None:
+    assert probe_builder_event_auth() is None
+
+
+def test_canary_scope_proof_is_order_stable_keyed_and_content_free(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = builder_event_canary_scope_proof(
+        {"synthetic-canary-b", "synthetic-canary-a"}
+    )
+    assert first == builder_event_canary_scope_proof(
+        ["synthetic-canary-a", "synthetic-canary-b"]
+    )
+    assert len(first) == 64
+    assert "synthetic-canary" not in first
+
+    monkeypatch.setenv(
+        BUILDER_EVENT_HMAC_SECRET_ENV,
+        "different-synthetic-shared-secret-" + "b" * 40,
+    )
+    assert builder_event_canary_scope_proof(
+        {"synthetic-canary-a", "synthetic-canary-b"}
+    ) != first
+
+    with pytest.raises(
+        BuilderEventAuthenticationError,
+        match="builder_event_canary_scope_invalid",
+    ):
+        builder_event_canary_scope_proof([])
+
+
+def test_gateway_probe_ack_is_keyed_to_exact_body_and_required() -> None:
+    body = encode_builder_event_body({"probe": "synthetic"})
+    ack = builder_event_probe_ack(body)
+    headers = {BUILDER_EVENT_PROBE_ACK_HEADER: ack}
+
+    assert verify_builder_event_probe_ack(body, headers) is None
+    with pytest.raises(
+        BuilderEventAuthenticationError,
+        match="builder_event_gateway_probe_ack_invalid",
+    ):
+        verify_builder_event_probe_ack(body + b" ", headers)
+    with pytest.raises(
+        BuilderEventAuthenticationError,
+        match="builder_event_gateway_probe_ack_invalid",
+    ):
+        verify_builder_event_probe_ack(body, {})
 
 
 def test_noncanonical_json_is_signed_as_exact_bytes() -> None:

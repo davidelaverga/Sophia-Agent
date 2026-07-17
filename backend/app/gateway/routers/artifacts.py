@@ -348,7 +348,7 @@ def _is_builder_support_artifact_path(relative_path: str) -> bool:
     parts = [part for part in normalized.split("/") if part]
     if not parts:
         return False
-    if parts[0] in {"visuals", "assets", "slides", "sources", "source_artifact", "deck_build", ".builder"}:
+    if supabase_artifact_store.is_internal_artifact_path(normalized):
         return True
     name = parts[-1].lower()
     return (
@@ -376,6 +376,8 @@ def _is_supabase_thread_list_support_artifact_path(relative_path: str) -> bool:
     parts = [part for part in normalized.split("/") if part]
     if not parts:
         return False
+    if supabase_artifact_store.is_internal_artifact_path(normalized):
+        return True
     support_roots = {"visuals", "assets", "slides", "sources", "source_artifact", "deck_build", ".builder", "outputs"}
     if parts[-1].lower().endswith(".preview.pdf") and (len(parts) == 1 or parts[0] not in support_roots):
         return False
@@ -995,13 +997,12 @@ def _try_serve_from_supabase(
     relative = _relative_output_artifact_path(path)
     if relative is None or relative == "":
         return None
-    # The delegation ledger (Spec D) is internal conversation content,
-    # mirrored under {thread_id}/ledger/ — never user-facing. Without this
-    # guard, mnt/user-data/outputs/ledger/session.jsonl would download the
-    # mirror through the artifact proxy (Codex P1 PR #131).
-    if supabase_artifact_store.is_ledger_object_name(relative):
+    # Internal keyspaces are never user-facing. Match reserved segments at any
+    # depth so durable DQ inputs below foundation/.builder cannot be fetched by
+    # the legacy service-role proxy.
+    if supabase_artifact_store.is_internal_artifact_path(relative):
         logger.info(
-            "Refusing artifact serve for internal ledger keyspace: thread_id=%s",
+            "Refusing artifact serve for internal keyspace: thread_id=%s",
             thread_id,
         )
         return None

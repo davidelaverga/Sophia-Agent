@@ -18,7 +18,7 @@ RUN apt-get update && apt-get install -y \
     lmodern fonts-dejavu-core libcairo2 libcairo2-dev libpango-1.0-0 libpangocairo-1.0-0 pkg-config \
     libreoffice-impress fonts-liberation fonts-crosextra-caladea fonts-crosextra-carlito \
     chromium \
-    graphviz \
+    graphviz util-linux \
     poppler-utils \
     && mkdir -p /etc/apt/keyrings \
     && curl -fsSL https://deb.nodesource.com/gpgkey/nodesource-repo.gpg.key -o /etc/apt/keyrings/nodesource.gpg \
@@ -39,8 +39,15 @@ COPY third_party/hands_on_deck ./third_party/hands_on_deck
 RUN --mount=type=cache,target=/root/.cache/uv \
     sh -c "cd backend && uv sync"
 
-RUN cd /app/backend \
-    && uv run python -m playwright install chromium
+# User-authored shells and input-capable native subprocesses drop from the
+# trusted root process to a private numeric UID/GID boundary.
+# Keep Playwright's browser binaries in a shared read-only location so that
+# privilege separation does not change deck rendering.
+ENV PLAYWRIGHT_BROWSERS_PATH=/ms-playwright
+RUN mkdir -p "$PLAYWRIGHT_BROWSERS_PATH" \
+    && cd /app/backend \
+    && uv run python -m playwright install chromium \
+    && chmod -R a+rX "$PLAYWRIGHT_BROWSERS_PATH"
 
 RUN cd /app/backend \
     && uv run python ../skills/public/image-generation/scripts/generate.py --help >/dev/null \

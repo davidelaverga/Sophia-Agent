@@ -108,17 +108,16 @@ def expected_publication_source_pack_path(
     thread_id: str,
     build_id: str,
     quality_run_id: str,
-    source_pack_hash: str,
 ) -> str:
-    if _SHA256_RE.fullmatch(source_pack_hash) is None:
-        raise ValueError("source-pack hash is invalid")
     manifest_path = expected_publication_input_manifest_path(
         user_id=user_id,
         thread_id=thread_id,
         build_id=build_id,
         quality_run_id=quality_run_id,
     )
-    return manifest_path.removesuffix("input_bundle/manifest.json") + (f"publication/source_pack/{source_pack_hash}.json")
+    return manifest_path.removesuffix("input_bundle/manifest.json") + (
+        "publication/source_pack/manifest.json"
+    )
 
 
 def _artifact_scope_prefix(*, user_id: str, thread_id: str) -> str:
@@ -188,13 +187,13 @@ class PublicationRequest(_FrozenModel):
             quality_run_id=self.quality_run_id,
         )
 
-    def source_pack_object_path(self, source_pack_hash: str) -> str:
+    @property
+    def source_pack_object_path(self) -> str:
         return expected_publication_source_pack_path(
             user_id=self.user_id,
             thread_id=self.thread_id,
             build_id=self.build_id,
             quality_run_id=self.quality_run_id,
-            source_pack_hash=source_pack_hash,
         )
 
     @model_validator(mode="after")
@@ -455,7 +454,6 @@ class PublicationRecord(_FrozenModel):
                 thread_id=self.thread_id,
                 build_id=self.build_id,
                 quality_run_id=self.quality_run_id,
-                source_pack_hash=self.source_pack_hash or "",
             )
             if self.source_pack_object_path != expected_source:
                 raise ValueError("publication source-pack scope is inconsistent")
@@ -573,8 +571,7 @@ class SupabaseDeckQualityPublicationRpcClient:
 
     async def probe(self) -> None:
         required = {
-            "/rpc/sophia_request_deck_quality_publication",
-            "/rpc/sophia_commit_deck_quality_publication_inputs",
+            "/rpc/sophia_request_ready_deck_quality_publication",
             "/rpc/sophia_claim_deck_quality_publications",
             "/rpc/sophia_renew_deck_quality_publication_lease",
             "/rpc/sophia_retry_deck_quality_publication",
@@ -652,6 +649,28 @@ class SupabaseDeckQualityPublicationStore:
     async def request(self, request: PublicationRequest) -> PublicationRecord:
         return await self._one("sophia_request_deck_quality_publication", request.rpc_payload())
 
+    async def request_ready(
+        self,
+        request: PublicationRequest,
+        *,
+        source_pack_object_path: str,
+        source_pack_hash: str,
+    ) -> PublicationRecord:
+        if _SHA256_RE.fullmatch(source_pack_hash) is None:
+            raise ValueError("source-pack hash is invalid")
+        if source_pack_object_path != request.source_pack_object_path:
+            raise ValueError(
+                "source-pack path does not match the exact publication scope"
+            )
+        return await self._one(
+            "sophia_request_ready_deck_quality_publication",
+            {
+                **request.rpc_payload(),
+                "p_source_pack_object_path": source_pack_object_path,
+                "p_source_pack_hash": source_pack_hash,
+            },
+        )
+
     async def commit_inputs(
         self,
         publication: PublicationRecord,
@@ -666,7 +685,6 @@ class SupabaseDeckQualityPublicationStore:
             thread_id=publication.thread_id,
             build_id=publication.build_id,
             quality_run_id=publication.quality_run_id,
-            source_pack_hash=source_pack_hash,
         )
         if source_pack_object_path != expected_source:
             raise ValueError("source-pack path does not match the exact publication scope")

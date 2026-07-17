@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -28,8 +29,15 @@ from deerflow.sophia.build_runtime.events import (
 )
 from deerflow.sophia.build_runtime.identity import component_id, new_build_id, new_operation_id, new_version_id
 from deerflow.sophia.build_runtime.metrics import derive_prepare_metrics
-from deerflow.sophia.build_runtime.startup import audit_build_foundation
+from deerflow.sophia.build_runtime.startup import (
+    audit_build_foundation,
+    audit_deck_quality_builder_service_startup,
+)
 from deerflow.sophia.build_sources import materialize_compact_deck_sources
+from deerflow.sophia.builder_event_auth import (
+    BUILDER_EVENT_PROBE_ACK_HEADER,
+    builder_event_probe_ack,
+)
 from deerflow.sophia.storage.build_foundation_store import (
     BuildFoundationStoreConfig,
     BuildFoundationStoreError,
@@ -195,7 +203,7 @@ class _RouteConfig:
         }
         self.harness_profiles = {"visual-v1": HarnessProfileConfig(version="1", model_overrides={"max_tokens": 4096})}
 
-    def get_model_config(self, name: str):
+    def get_model_deployment(self, name: str):
         return self._model if name == self._model.name else None
 
 
@@ -254,6 +262,354 @@ def test_startup_reuses_process_event_sink(monkeypatch) -> None:
         configure_default_event_sink(None)
 
     assert calls == 1
+
+
+def test_ordinary_builder_construction_has_zero_dq_startup_validation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.agents.sophia_agent import builder_agent
+    from deerflow.sophia.build_runtime import startup
+
+    config = SimpleNamespace(
+        models=[],
+        deck_quality=SimpleNamespace(
+            enabled=True,
+            canary_user_ids=frozenset({"synthetic-canary"}),
+        ),
+        build_foundation=SimpleNamespace(
+            enabled=False,
+            manifest_mode="observe",
+            persist_event_journal=False,
+        ),
+    )
+    baseline_audits: list[object] = []
+
+    def forbidden_dq_validation(*_args, **_kwargs):
+        raise AssertionError("per-run builder performed DQ startup validation")
+
+    class _Agent:
+        recursion_limit = 0
+
+    monkeypatch.delenv("SOPHIA_DECK_QUALITY_OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("SOPHIA_BUILDER_EVENTS_HMAC_SECRET", raising=False)
+    monkeypatch.setattr(builder_agent, "get_app_config", lambda: config)
+    monkeypatch.setattr(builder_agent, "ChatAnthropic", lambda **_kwargs: object())
+    monkeypatch.setattr(builder_agent, "supports_vision", lambda _model: False)
+    monkeypatch.setattr(
+        builder_agent,
+        "build_builder_middleware_chain",
+        lambda **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        builder_agent,
+        "build_builder_tools_for_task_type",
+        lambda *_args, **_kwargs: [],
+    )
+    monkeypatch.setattr(
+        builder_agent,
+        "assert_deck_tool_contract",
+        lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        builder_agent,
+        "create_agent",
+        lambda **_kwargs: _Agent(),
+    )
+    monkeypatch.setattr(
+        builder_agent,
+        "wrap_builder_agent_for_observability",
+        lambda agent, **_kwargs: agent,
+    )
+    monkeypatch.setattr(
+        startup,
+        "validate_expected_supabase_project",
+        lambda: baseline_audits.append(config),
+    )
+    monkeypatch.setattr(
+        startup,
+        "probe_builder_event_auth",
+        forbidden_dq_validation,
+    )
+    monkeypatch.setattr(
+        startup,
+        "probe_deck_quality_failure_signal_gateway_auth",
+        forbidden_dq_validation,
+    )
+    monkeypatch.setattr(
+        startup.supabase_artifact_store,
+        "is_configured",
+        forbidden_dq_validation,
+    )
+    monkeypatch.setattr(
+        "deerflow.sophia.deck_quality.instrument.compile_runtime_instrument",
+        forbidden_dq_validation,
+    )
+
+    agent = builder_agent.make_sophia_builder(
+        {
+            "configurable": {
+                "user_id": "ordinary-user",
+                "model_name": "claude-sonnet-5",
+            }
+        }
+    )
+
+    assert isinstance(agent, _Agent)
+    # The pre-campaign foundation audit remains on the factory path.
+    assert baseline_audits == [config]
+
+
+def test_enabled_deck_quality_instrument_is_compiled_at_service_startup(
+    monkeypatch,
+) -> None:
+    from deerflow.sophia.build_runtime import startup
+
+    config = SimpleNamespace(
+        deck_quality=SimpleNamespace(
+            enabled=True,
+            canary_user_ids=frozenset({"synthetic-canary"}),
+        ),
+        build_foundation=SimpleNamespace(
+            enabled=False,
+            manifest_mode="observe",
+            persist_event_journal=False,
+        ),
+    )
+    compiled = []
+    monkeypatch.setattr(startup, "validate_expected_supabase_project", lambda: None)
+    monkeypatch.setattr(
+        startup,
+        "probe_deck_quality_failure_signal_gateway_auth",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(startup.supabase_artifact_store, "is_configured", lambda: True)
+    monkeypatch.setenv(
+        "SOPHIA_DECK_QUALITY_OPENAI_API_KEY",
+        "synthetic-dq-only-key",
+    )
+    monkeypatch.setenv(
+        "SOPHIA_BUILDER_EVENTS_HMAC_SECRET",
+        "synthetic-builder-event-secret-" + "a" * 40,
+    )
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-baseline-builder-key")
+    monkeypatch.setattr(
+        "deerflow.sophia.deck_quality.instrument.compile_runtime_instrument",
+        lambda value: compiled.append(value),
+    )
+
+    audit_deck_quality_builder_service_startup(config=config)
+
+    assert compiled == [config]
+
+
+@pytest.mark.parametrize(
+    ("status_code", "acknowledged", "expected_error"),
+    [
+        (403, True, None),
+        (403, False, "builder_event_gateway_probe_ack_invalid"),
+        (401, False, "builder_event_gateway_auth_mismatch"),
+        (409, False, "builder_event_gateway_canary_scope_mismatch"),
+        (503, False, "builder_event_gateway_auth_unavailable"),
+    ],
+)
+def test_deck_quality_startup_proves_gateway_hmac_equality(
+    monkeypatch: pytest.MonkeyPatch,
+    status_code: int,
+    acknowledged: bool,
+    expected_error: str | None,
+) -> None:
+    from deerflow.sophia.build_runtime import startup
+
+    calls: list[dict[str, object]] = []
+
+    class _Client:
+        def __init__(self, *, timeout: httpx.Timeout) -> None:
+            self.timeout = timeout
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return None
+
+        def post(self, url: str, **kwargs):
+            calls.append({"url": url, **kwargs})
+            response_headers = (
+                {
+                    BUILDER_EVENT_PROBE_ACK_HEADER: (
+                        builder_event_probe_ack(kwargs["content"])
+                    )
+                }
+                if acknowledged
+                else {}
+            )
+            return SimpleNamespace(
+                status_code=status_code,
+                headers=response_headers,
+            )
+
+    monkeypatch.setenv(
+        "SOPHIA_BUILDER_EVENTS_HMAC_SECRET",
+        "synthetic-builder-event-secret-" + "a" * 40,
+    )
+    monkeypatch.setenv("SOPHIA_GATEWAY_URL", "https://gateway.internal/")
+    monkeypatch.setattr(startup.httpx, "Client", _Client)
+
+    if expected_error is None:
+        assert startup.probe_deck_quality_failure_signal_gateway_auth(
+            canary_user_ids={"synthetic-canary"},
+        ) is None
+    else:
+        with pytest.raises(
+            startup.BuilderEventAuthenticationError,
+            match=expected_error,
+        ):
+            startup.probe_deck_quality_failure_signal_gateway_auth(
+                canary_user_ids={"synthetic-canary"},
+            )
+
+    assert len(calls) == 1
+    call = calls[0]
+    assert call["url"] == (
+        "https://gateway.internal/internal/deck-quality-producer-failures"
+    )
+    body = call["content"]
+    headers = call["headers"]
+    assert isinstance(body, bytes)
+    assert isinstance(headers, dict)
+    assert headers["Content-Type"] == "application/json"
+    assert headers["X-Sophia-Builder-Signature"].startswith("v1=")
+    decoded_body = json.loads(body)
+    scope_proof = decoded_body.pop("canary_scope_proof")
+    assert isinstance(scope_proof, str)
+    assert len(scope_proof) == 64
+    assert "synthetic-canary" not in scope_proof
+    assert decoded_body == {
+        "campaign_id": "DQ-1",
+        "candidate_digest": (
+            "ebf93716177a0c737cf2f0182c333e6c9c08d65817f218de23b491f33cdccc65"
+        ),
+        "failure_code": "shadow_dispatch_unavailable",
+        "failure_stage": "candidate_metadata",
+        "quality_run_id": None,
+        "schema_version": "deck-quality-producer-failure-signal/v1",
+        "upstream_failure_code": "candidate_metadata_invalid",
+        "user_id": "__sophia_dq1_hmac_probe_reserved_noncanary__",
+    }
+
+
+def test_enabled_deck_quality_requires_isolated_producer_dependencies_at_service_startup(
+    monkeypatch,
+) -> None:
+    from deerflow.sophia.build_runtime import startup
+
+    config = SimpleNamespace(
+        deck_quality=SimpleNamespace(
+            enabled=True,
+            canary_user_ids=frozenset({"synthetic-canary"}),
+        ),
+        build_foundation=SimpleNamespace(
+            enabled=False,
+            manifest_mode="observe",
+            persist_event_journal=False,
+        ),
+    )
+    monkeypatch.setattr(startup, "validate_expected_supabase_project", lambda: None)
+    monkeypatch.setattr(
+        startup,
+        "probe_deck_quality_failure_signal_gateway_auth",
+        lambda **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "deerflow.sophia.deck_quality.instrument.compile_runtime_instrument",
+        lambda _value: object(),
+    )
+    monkeypatch.setenv(
+        "SOPHIA_BUILDER_EVENTS_HMAC_SECRET",
+        "synthetic-builder-event-secret-" + "a" * 40,
+    )
+    monkeypatch.setattr(startup.supabase_artifact_store, "is_configured", lambda: False)
+
+    with pytest.raises(
+        startup.BuildFoundationStartupError,
+        match="durable object storage",
+    ):
+        audit_deck_quality_builder_service_startup(config=config)
+
+    monkeypatch.setattr(startup.supabase_artifact_store, "is_configured", lambda: True)
+    monkeypatch.setenv("OPENAI_API_KEY", "synthetic-baseline-builder-key")
+    monkeypatch.delenv("SOPHIA_DECK_QUALITY_OPENAI_API_KEY", raising=False)
+    with pytest.raises(
+        startup.BuildFoundationStartupError,
+        match="isolated provider credential",
+    ):
+        audit_deck_quality_builder_service_startup(config=config)
+
+    monkeypatch.setenv("SOPHIA_DECK_QUALITY_OPENAI_API_KEY", "synthetic-dq-only-key")
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    with pytest.raises(
+        startup.BuildFoundationStartupError,
+        match="baseline builder provider credential",
+    ):
+        audit_deck_quality_builder_service_startup(config=config)
+
+    monkeypatch.setenv("SOPHIA_DECK_QUALITY_OPENAI_API_KEY", "shared-key")
+    monkeypatch.setenv("OPENAI_API_KEY", "shared-key")
+    with pytest.raises(
+        startup.BuildFoundationStartupError,
+        match="must be distinct",
+    ):
+        audit_deck_quality_builder_service_startup(config=config)
+
+
+def test_enabled_deck_quality_requires_failure_signal_auth_at_service_startup(
+    monkeypatch,
+) -> None:
+    from deerflow.sophia.build_runtime import startup
+
+    config = SimpleNamespace(
+        deck_quality=SimpleNamespace(enabled=True),
+        build_foundation=SimpleNamespace(
+            enabled=False,
+            manifest_mode="observe",
+            persist_event_journal=False,
+        ),
+    )
+    monkeypatch.setattr(startup, "validate_expected_supabase_project", lambda: None)
+    monkeypatch.setattr(
+        "deerflow.sophia.deck_quality.instrument.compile_runtime_instrument",
+        lambda _value: object(),
+    )
+    monkeypatch.delenv("SOPHIA_BUILDER_EVENTS_HMAC_SECRET", raising=False)
+
+    with pytest.raises(
+        startup.BuildFoundationStartupError,
+        match="builder-event authentication",
+    ):
+        audit_deck_quality_builder_service_startup(config=config)
+
+
+def test_enabled_invalid_deck_quality_instrument_fails_service_startup(
+    monkeypatch,
+) -> None:
+    from deerflow.sophia.build_runtime import startup
+
+    config = SimpleNamespace(
+        deck_quality=SimpleNamespace(enabled=True),
+        build_foundation=SimpleNamespace(
+            enabled=False,
+            manifest_mode="observe",
+            persist_event_journal=False,
+        ),
+    )
+    monkeypatch.setattr(startup, "validate_expected_supabase_project", lambda: None)
+    monkeypatch.setattr(
+        "deerflow.sophia.deck_quality.instrument.compile_runtime_instrument",
+        lambda _value: (_ for _ in ()).throw(ValueError("invalid instrument")),
+    )
+
+    with pytest.raises(ValueError, match="invalid instrument"):
+        audit_deck_quality_builder_service_startup(config=config)
 
 
 def test_build_foundation_rpcs_grant_service_role_execution() -> None:

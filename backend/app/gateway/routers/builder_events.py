@@ -8,28 +8,33 @@ Internal webhook endpoints plus legacy router definitions:
   ``BuilderEventsWorker``, which fans it out to webapp SSE subscribers
   and the channel ``MessageBus``.
 
+- ``POST /internal/deck-quality-producer-failures`` — accepts only the
+  authenticated, content-free fallback emitted when both DQ-1 producer object
+  writes fail. It records through an independent service-role DB channel and
+  never fans out to delivery consumers.
+
 - The ``public_router`` legacy completion SSE definitions remain available
   to focused backward-compatibility tests, but the gateway app no longer
   mounts them. Browsers consume authenticated builder-canvas SSE routes.
 
-DQ-1 publication admission is isolated at
-``/internal/deck-quality-publications`` and authenticates its exact raw body
-before parsing or persistence, so shadow retries can never replay or gate the
-baseline terminal-delivery route.
+The retired ``/internal/deck-quality-publications`` route remains mounted only
+as an explicit ``410 Gone`` tombstone for rolling compatibility. DQ-1 v2 uses
+immutable producer bundles discovered by the gateway reconciler instead.
 """
 
 from __future__ import annotations
 
 import asyncio
+import hmac
 import json
 import logging
 import os
 from datetime import UTC, datetime
-from typing import Any, Literal
+from typing import Any
 
 from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, Field, ValidationError
 
 from app.gateway.artifact_registry import (
     ArtifactRegistry,
@@ -38,20 +43,26 @@ from app.gateway.artifact_registry import (
 from app.gateway.workers.builder_canvas import get_builder_canvas_worker
 from app.gateway.workers.builder_events import get_builder_events_worker
 from app.gateway.workers.companion_wakeup import get_companion_wakeup_or_none
-from app.gateway.workers.deck_quality_publication import (
-    DeckQualityPublicationAdmissionError,
-    admit_deck_quality_publication,
-)
+from deerflow.config.app_config import get_app_config
 from deerflow.sophia.builder_event_auth import (
+    BUILDER_EVENT_PROBE_ACK_HEADER,
     BuilderEventAuthenticationError,
     authenticate_builder_event,
+    builder_event_canary_scope_proof,
+    builder_event_probe_ack,
+    encode_builder_event_body,
+)
+from deerflow.sophia.deck_quality.producer_failure_signal import (
+    MAX_PRODUCER_FAILURE_SIGNAL_BODY_BYTES,
+    ProducerFailureSignal,
+    ProducerFailureSignalReceipt,
+    is_producer_failure_hmac_probe,
 )
 from deerflow.sophia.session_store import SessionStore
 
 logger = logging.getLogger(__name__)
 
 _SUCCESSFUL_BUILDER_STATUSES = {"success", "completed"}
-_MAX_DECK_QUALITY_PUBLICATION_BODY_BYTES = 64 * 1024
 _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "artifact_path",
     "artifact_ext",
@@ -181,6 +192,142 @@ _TERMINAL_TASK_OPTIONAL_FIELDS = (
 )
 _artifact_registry = ArtifactRegistry()
 _session_store = SessionStore()
+_PRODUCER_FAILURE_SIGNAL_STORE_ATTR = "_dq1_producer_failure_signal_store"
+_PRODUCER_FAILURE_SIGNAL_READINESS_ATTR = (
+    "_dq1_producer_failure_signal_readiness"
+)
+_PRODUCER_FAILURE_SIGNAL_RPC_TIMEOUT_SECONDS = 2.0
+
+
+def install_producer_failure_signal_store(
+    app: Any,
+    store: Any | None,
+) -> None:
+    setattr(app.state, _PRODUCER_FAILURE_SIGNAL_STORE_ATTR, store)
+
+
+def get_producer_failure_signal_store_or_none(app: Any) -> Any | None:
+    return getattr(app.state, _PRODUCER_FAILURE_SIGNAL_STORE_ATTR, None)
+
+
+def set_producer_failure_signal_readiness(
+    app: Any,
+    component: dict[str, object],
+) -> None:
+    setattr(
+        app.state,
+        _PRODUCER_FAILURE_SIGNAL_READINESS_ATTR,
+        dict(component),
+    )
+
+
+def get_producer_failure_signal_readiness(
+    app: Any,
+) -> dict[str, object] | None:
+    component = getattr(
+        app.state,
+        _PRODUCER_FAILURE_SIGNAL_READINESS_ATTR,
+        None,
+    )
+    return dict(component) if isinstance(component, dict) else None
+
+
+def _degrade_producer_failure_signal_transport(
+    app: Any,
+    *,
+    reason: str,
+    error_type: str | None = None,
+) -> None:
+    component = get_producer_failure_signal_readiness(app) or {}
+    transport: dict[str, object] = {
+        "status": "degraded",
+        "reason": reason,
+    }
+    if error_type is not None:
+        transport["error_type"] = error_type
+    component["transport"] = transport
+    component["status"] = "degraded"
+    if component.get("reason") not in {
+        "producer_failure_signal_unresolved",
+        "producer_failure_signal_conflict",
+    }:
+        component["reason"] = reason
+    set_producer_failure_signal_readiness(app, component)
+
+
+def _parse_producer_failure_signal(
+    body: bytes,
+) -> ProducerFailureSignal | None:
+    try:
+        decoded = json.loads(body)
+        if not isinstance(decoded, dict):
+            return None
+        signal = ProducerFailureSignal.model_validate(decoded)
+        if encode_builder_event_body(signal.model_dump(mode="json")) != body:
+            return None
+        return signal
+    except (
+        BuilderEventAuthenticationError,
+        json.JSONDecodeError,
+        TypeError,
+        ValidationError,
+        ValueError,
+    ):
+        return None
+
+
+def _is_exact_canary_failure_signal(signal: ProducerFailureSignal) -> bool:
+    if is_producer_failure_hmac_probe(signal):
+        return False
+    try:
+        deck_quality = get_app_config().deck_quality
+    except Exception:
+        return False
+    return bool(
+        deck_quality.enabled
+        and deck_quality.mode == "shadow"
+        and deck_quality.scope == "canary"
+        and signal.campaign_id == "DQ-1"
+        and signal.user_id in deck_quality.canary_user_ids
+    )
+
+
+def _authenticated_body_claims_exact_canary(body: bytes) -> bool:
+    try:
+        decoded = json.loads(body)
+        if not isinstance(decoded, dict):
+            return False
+        user_id = decoded.get("user_id")
+        campaign_id = decoded.get("campaign_id")
+        deck_quality = get_app_config().deck_quality
+    except Exception:
+        return False
+    return bool(
+        isinstance(user_id, str)
+        and campaign_id == "DQ-1"
+        and deck_quality.enabled
+        and deck_quality.mode == "shadow"
+        and deck_quality.scope == "canary"
+        and user_id in deck_quality.canary_user_ids
+    )
+
+
+async def _bounded_failure_signal_body(request: Request) -> bytes:
+    declared_length = request.headers.get("content-length")
+    if declared_length is not None:
+        try:
+            if int(declared_length) > MAX_PRODUCER_FAILURE_SIGNAL_BODY_BYTES:
+                raise ValueError
+        except (TypeError, ValueError, OverflowError):
+            raise OverflowError from None
+    chunks: list[bytes] = []
+    size = 0
+    async for chunk in request.stream():
+        size += len(chunk)
+        if size > MAX_PRODUCER_FAILURE_SIGNAL_BODY_BYTES:
+            raise OverflowError
+        chunks.append(chunk)
+    return b"".join(chunks)
 
 
 def _langgraph_url() -> str:
@@ -647,40 +794,6 @@ class BuilderCompletionEvent(BaseModel):
     )
 
 
-class _DeckQualityMechanicalEligibility(BaseModel):
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    passed: bool
-
-
-class DeckQualityPublicationEnvelope(BaseModel):
-    """Minimal authenticated metadata needed for independent DQ admission."""
-
-    model_config = ConfigDict(extra="forbid", strict=True)
-
-    thread_id: str
-    task_id: str
-    run_id: str
-    builder_trace_root_run_id: str
-    user_id: str
-    status: Literal["success", "completed"]
-    task_type: Literal["presentation"]
-    artifact_path: str
-    artifact_type: Literal["presentation"]
-    artifact_ext: str
-    artifact_is_fallback: bool
-    storage_provider: str
-    storage_status: str
-    storage_object_path: str
-    artifact_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
-    manifest_revision: int
-    deck_build_id: str
-    logical_artifact_id: str
-    current_artifact_version_id: str
-    mechanical_gate_results: _DeckQualityMechanicalEligibility
-    deck_quality_publication_intent: dict[str, Any]
-
-
 class BuilderProgressEvent(BaseModel):
     """Wire contract for the LangGraph-side ``BuilderProgressMiddleware`` webhook.
 
@@ -715,44 +828,6 @@ class BuilderProgressEvent(BaseModel):
 
 internal_router = APIRouter(prefix="/internal", tags=["builder-events"])
 public_router = APIRouter(prefix="/api/threads", tags=["builder-events"])
-
-
-async def _authenticated_publication_body(
-    request: Request,
-) -> bytes | Response:
-    """Read a bounded body and authenticate it before any route side effect."""
-
-    content_length = request.headers.get("content-length")
-    if content_length is not None:
-        try:
-            declared_length = int(content_length)
-        except (TypeError, ValueError, OverflowError):
-            return Response(status_code=status.HTTP_400_BAD_REQUEST)
-        if declared_length < 1:
-            return Response(status_code=status.HTTP_400_BAD_REQUEST)
-        if declared_length > _MAX_DECK_QUALITY_PUBLICATION_BODY_BYTES:
-            return Response(status_code=status.HTTP_413_CONTENT_TOO_LARGE)
-
-    chunks = bytearray()
-    try:
-        async for chunk in request.stream():
-            chunks.extend(chunk)
-            if len(chunks) > _MAX_DECK_QUALITY_PUBLICATION_BODY_BYTES:
-                return Response(status_code=status.HTTP_413_CONTENT_TOO_LARGE)
-    except Exception:  # noqa: BLE001 - malformed transport is content-free.
-        logger.warning("DQ1 publication body read failed contentExcluded=true")
-        return Response(status_code=status.HTTP_400_BAD_REQUEST)
-    body = bytes(chunks)
-    try:
-        authenticate_builder_event(body, request.headers)
-    except BuilderEventAuthenticationError as exc:
-        logger.warning(
-            "DQ1 publication authentication failed code=%s contentExcluded=true",
-            exc.code,
-        )
-        response_status = status.HTTP_503_SERVICE_UNAVAILABLE if exc.code == "builder_event_auth_unavailable" else status.HTTP_401_UNAUTHORIZED
-        return Response(status_code=response_status)
-    return body
 
 
 @internal_router.post(
@@ -831,47 +906,149 @@ async def receive_builder_event(
     "/deck-quality-publications",
     status_code=status.HTTP_202_ACCEPTED,
     response_model=None,
-    summary="Admit one authenticated DQ-1 canary publication",
+    summary="Retired DQ-1 publication webhook tombstone",
 )
 async def receive_deck_quality_publication(
     request: Request,
-) -> dict[str, Any] | Response:
-    """Durably admit metadata only, with no terminal-delivery side effects."""
+) -> Response:
+    """Reject the retired second-POST admission protocol.
 
-    authenticated = await _authenticated_publication_body(request)
-    if isinstance(authenticated, Response):
-        return authenticated
+    Production never deployed this endpoint's non-atomic request/commit path.
+    DQ-1 v2 discovers immutable producer bundles through the gateway worker;
+    accepting a webhook intent here could create an unrecoverable legacy row
+    and poison reconciliation. The route remains as an explicit rolling-
+    compatibility tombstone instead of silently becoming a 404.
+    """
+
+    _ = request
+    return Response(status_code=status.HTTP_410_GONE)
+
+
+@internal_router.post(
+    "/deck-quality-producer-failures",
+    status_code=status.HTTP_202_ACCEPTED,
+    response_model=None,
+    summary="Record an authenticated DQ-1 producer double-storage failure",
+)
+async def receive_deck_quality_producer_failure(
+    request: Request,
+) -> Response:
+    """Persist one content-free signal through the independent DB channel.
+
+    Authentication covers the exact bytes before JSON parsing. The endpoint
+    accepts only the fixed failure schema, revalidates current exact-canary
+    admission before touching persistence, and returns no response body.
+    """
+
+    content_type = request.headers.get("content-type", "").split(";", 1)[0]
+    if content_type.strip().casefold() != "application/json":
+        return Response(status_code=status.HTTP_415_UNSUPPORTED_MEDIA_TYPE)
     try:
-        envelope = DeckQualityPublicationEnvelope.model_validate_json(authenticated)
-    except (ValidationError, ValueError):
-        logger.warning("DQ1 publication envelope validation failed contentExcluded=true")
-        return Response(status_code=status.HTTP_400_BAD_REQUEST)
-    builder_payload = envelope.model_dump(mode="python")
-    publication_intent = builder_payload.pop(
-        "deck_quality_publication_intent",
-        None,
-    )
-    try:
-        publication_ack = await admit_deck_quality_publication(
-            request.app,
-            raw_intent=publication_intent,
-            builder_payload=builder_payload,
-        )
-    except DeckQualityPublicationAdmissionError as exc:
-        logger.error(
-            "DQ1 publication admission failed error_type=%s contentExcluded=true",
-            exc.__class__.__name__,
-            exc_info=False,
-        )
+        body = await _bounded_failure_signal_body(request)
+    except OverflowError:
         return Response(
-            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
-            headers={"Retry-After": "5"},
+            status_code=status.HTTP_413_CONTENT_TOO_LARGE
         )
-    if publication_ack is None:
+    signal = _parse_producer_failure_signal(body)
+    try:
+        authenticate_builder_event(body, request.headers)
+    except BuilderEventAuthenticationError as exc:
+        if exc.code == "builder_event_auth_unavailable":
+            if signal is not None and is_producer_failure_hmac_probe(signal):
+                return Response(
+                    status_code=status.HTTP_503_SERVICE_UNAVAILABLE
+                )
+            _degrade_producer_failure_signal_transport(
+                request.app,
+                reason="producer_failure_signal_auth_unavailable",
+                error_type=exc.__class__.__name__,
+            )
+            return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+        return Response(status_code=status.HTTP_401_UNAUTHORIZED)
+    if signal is None:
+        if _authenticated_body_claims_exact_canary(body):
+            _degrade_producer_failure_signal_transport(
+                request.app,
+                reason="producer_failure_signal_schema_failed",
+            )
         return Response(status_code=status.HTTP_400_BAD_REQUEST)
-    return {
-        "deck_quality_publication_ack": publication_ack.model_dump(mode="json"),
-    }
+
+    if is_producer_failure_hmac_probe(signal):
+        # Legacy probes omitted the keyed scope proof; retain their side-effect
+        # free 403 for rollback compatibility. The amended LangGraph startup
+        # always sends a proof and refuses readiness unless the gateway's exact
+        # dashboard-managed canary set produces the same value.
+        if signal.canary_scope_proof is None:
+            return Response(
+                status_code=status.HTTP_403_FORBIDDEN,
+                headers={
+                    BUILDER_EVENT_PROBE_ACK_HEADER: (
+                        builder_event_probe_ack(body)
+                    )
+                },
+            )
+        try:
+            expected_scope_proof = builder_event_canary_scope_proof(
+                get_app_config().deck_quality.canary_user_ids
+            )
+        except Exception as exc:  # noqa: BLE001 - no identity enters logs.
+            _degrade_producer_failure_signal_transport(
+                request.app,
+                reason="producer_failure_signal_scope_probe_unavailable",
+                error_type=exc.__class__.__name__,
+            )
+            return Response(
+                status_code=status.HTTP_503_SERVICE_UNAVAILABLE
+            )
+        if hmac.compare_digest(
+            signal.canary_scope_proof,
+            expected_scope_proof,
+        ):
+            return Response(
+                status_code=status.HTTP_403_FORBIDDEN,
+                headers={
+                    BUILDER_EVENT_PROBE_ACK_HEADER: (
+                        builder_event_probe_ack(body)
+                    )
+                },
+            )
+        return Response(status_code=status.HTTP_409_CONFLICT)
+
+    if not _is_exact_canary_failure_signal(signal):
+        return Response(status_code=status.HTTP_403_FORBIDDEN)
+
+    store = get_producer_failure_signal_store_or_none(request.app)
+    if store is None:
+        _degrade_producer_failure_signal_transport(
+            request.app,
+            reason="producer_failure_signal_store_unavailable",
+        )
+        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+    try:
+        async with asyncio.timeout(
+            _PRODUCER_FAILURE_SIGNAL_RPC_TIMEOUT_SECONDS
+        ):
+            receipt = await store.record(signal)
+    except Exception as exc:  # noqa: BLE001 - response stays content-free.
+        _degrade_producer_failure_signal_transport(
+            request.app,
+            reason="producer_failure_signal_persistence_failed",
+            error_type=exc.__class__.__name__,
+        )
+        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+    if not isinstance(receipt, ProducerFailureSignalReceipt):
+        _degrade_producer_failure_signal_transport(
+            request.app,
+            reason="producer_failure_signal_protocol_failed",
+        )
+        return Response(status_code=status.HTTP_503_SERVICE_UNAVAILABLE)
+    component = receipt.component()
+    if receipt.outcome == "conflict":
+        component["reason"] = "producer_failure_signal_conflict"
+        set_producer_failure_signal_readiness(request.app, component)
+        return Response(status_code=status.HTTP_409_CONFLICT)
+    set_producer_failure_signal_readiness(request.app, component)
+    return Response(status_code=status.HTTP_202_ACCEPTED)
 
 
 @internal_router.post(

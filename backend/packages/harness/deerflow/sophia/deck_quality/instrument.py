@@ -59,6 +59,9 @@ def compile_runtime_instrument(
     """
 
     plan = ModelRouteResolver(config).resolve(route_name=config.deck_quality.judge_route)
+    deployment = config.get_model_deployment(plan.deployment_name)
+    if deployment is None or deployment.access_scope != "route_only":
+        raise ValueError("deck-quality judge deployment must be route-only")
     audit_deck_quality_startup(config.deck_quality, resolved_plan=plan)
     rubric = compile_rubric(rubric_path)
     verify_rubric_lock(rubric, rubric_lock_path)

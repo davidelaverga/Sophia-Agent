@@ -1,16 +1,254 @@
 import os
+import shlex
 import shutil
 import signal
 import subprocess
 import time
 from datetime import UTC, datetime
+from pathlib import Path
 
 from deerflow.sandbox.local.list_dir import list_dir
 from deerflow.sandbox.sandbox import Sandbox
+from deerflow.sandbox_identity import prepare_thread_data_boundary, running_as_linux_root
+from deerflow.sophia.image_subprocess import (
+    ImageThreadRoots,
+    TrustedImageRequest,
+    run_trusted_image_request,
+)
+from deerflow.sophia.process_group import isolated_process_boundary
+from deerflow.sophia.subprocess_env import trusted_subprocess_env
 
 _COMMAND_TIMEOUT_SECONDS = 600
 _COMMAND_PREVIEW_CHARS = 400
 _GROUP_DRAIN_SECONDS = 10
+_SANDBOX_PRIVATE_ENV_KEYS = frozenset(
+    {
+        # DQ-1 authority is parent-process only. Ordinary builder shell tools
+        # cannot discover either provider credentials or canary admission data.
+        "SOPHIA_DECK_QUALITY_OPENAI_API_KEY",
+        "SOPHIA_DECK_QUALITY_CANARY_USER_IDS",
+        # The internal builder-event signing key is likewise orchestration
+        # authority, not an agent/tool capability.
+        "SOPHIA_BUILDER_EVENTS_HMAC_SECRET",
+        # Parent services hold durable storage, trace-export, database, and
+        # service-to-service authority.  A LocalSandbox command is authored by
+        # an ordinary user/model and must not inherit any of it.
+        "DATABASE_URL",
+        "POSTGRES_URL",
+        "POSTGRESQL_URL",
+        "REDIS_URL",
+        "REDIS_TLS_URL",
+        "MONGO_URL",
+        "MONGODB_URI",
+        "MYSQL_URL",
+        "AMQP_URL",
+        "CELERY_BROKER_URL",
+        "PGPASSWORD",
+        "PGPASSFILE",
+        "PGSERVICE",
+        "SUPABASE_URL",
+        "SSH_AUTH_SOCK",
+        # Proxy URLs may contain inline credentials.  Render does not require
+        # them for the existing visual-skill subprocess path.
+        "ALL_PROXY",
+        "HTTP_PROXY",
+        "HTTPS_PROXY",
+    }
+)
+
+_SANDBOX_PRIVATE_ENV_NAME_FRAGMENTS = (
+    "API_KEY",
+    "AUTHORIZATION",
+    "CONNECTION_STRING",
+    "COOKIE",
+    "CREDENTIAL",
+    "DSN",
+    "_KEY",
+    "PASSWORD",
+    "PRIVATE_KEY",
+    "SERVICE_ROLE",
+    "SECRET",
+    "TOKEN",
+)
+
+_SANDBOX_PRIVATE_ENV_PREFIXES = (
+    "AWS_",
+    "AZURE_",
+    "GCP_",
+    "GOOGLE_APPLICATION_CREDENTIALS",
+)
+
+
+def _is_sandbox_private_env_key(key: str) -> bool:
+    """Return whether *key* carries parent-process authority.
+
+    Ordinary user/model-authored shell commands receive no provider keys.
+    The fixed, root-owned image generator has a separate exact-command path
+    below; everything else that resembles authority is fail-closed.
+    """
+
+    normalized = key.upper()
+    if normalized in _SANDBOX_PRIVATE_ENV_KEYS:
+        return True
+    if normalized.startswith(_SANDBOX_PRIVATE_ENV_PREFIXES):
+        return True
+    return any(fragment in normalized for fragment in _SANDBOX_PRIVATE_ENV_NAME_FRAGMENTS)
+
+
+def _sandbox_child_env() -> dict[str, str]:
+    """Copy only non-authority environment for an ordinary shell command."""
+
+    return {
+        key: value
+        for key, value in os.environ.items()
+        if not _is_sandbox_private_env_key(key)
+    }
+
+
+def _fixed_image_script(path: str) -> Path | None:
+    try:
+        candidate = Path(path).resolve(strict=True)
+    except OSError:
+        return None
+    configured = os.getenv("SOPHIA_IMAGE_GENERATION_SCRIPT", "").strip()
+    candidates = [
+        Path("/mnt/skills/public/image-generation/scripts/generate.py"),
+        Path("/app/skills/public/image-generation/scripts/generate.py"),
+        Path(__file__).resolve().parents[6] / "skills/public/image-generation/scripts/generate.py",
+    ]
+    if configured:
+        candidates.insert(0, Path(configured))
+    allowed: set[Path] = set()
+    for item in candidates:
+        try:
+            allowed.add(item.resolve(strict=True))
+        except OSError:
+            continue
+    if candidate not in allowed:
+        return None
+    info = candidate.stat()
+    if (
+        os.name == "posix"
+        and hasattr(os, "geteuid")
+        and os.geteuid() == 0
+        and (info.st_uid != 0 or info.st_mode & 0o022)
+    ):
+        return None
+    return candidate
+
+
+def _trusted_image_provider_command(
+    command: str,
+    *,
+    workspace_root: str | Path | None = None,
+    outputs_root: str | Path | None = None,
+    uploads_root: str | Path | None = None,
+) -> TrustedImageRequest | None:
+    """Parse one exact fixed image command into a staged broker request."""
+
+    try:
+        tokens = shlex.split(command, posix=True)
+    except ValueError:
+        return None
+    if len(tokens) < 3 or Path(tokens[0]).name not in {"python", "python3"}:
+        return None
+    interpreter = shutil.which(tokens[0])
+    script = _fixed_image_script(tokens[1])
+    if interpreter is None or script is None:
+        return None
+    if outputs_root is not None:
+        parent = Path(outputs_root).parent
+        workspace_root = workspace_root or parent / "workspace"
+        uploads_root = uploads_root or parent / "uploads"
+    if workspace_root is None or outputs_root is None or uploads_root is None:
+        return None
+    try:
+        roots = ImageThreadRoots.create(
+            workspace=workspace_root,
+            outputs=outputs_root,
+            uploads=uploads_root,
+        )
+    except (OSError, RuntimeError):
+        return None
+
+    value_flags = {"--prompt-file", "--output-file", "--aspect-ratio", "--size", "--manifest"}
+    switch_flags = {"--slide-visual", "--preflight"}
+    parsed: dict[str, list[str]] = {}
+    index = 2
+    while index < len(tokens):
+        flag = tokens[index]
+        if flag in switch_flags:
+            if flag in parsed:
+                return None
+            parsed[flag] = []
+            index += 1
+            continue
+        if flag == "--reference-images":
+            index += 1
+            values: list[str] = []
+            while index < len(tokens) and not tokens[index].startswith("--"):
+                values.append(tokens[index])
+                index += 1
+            if not values or flag in parsed:
+                return None
+            parsed[flag] = values
+            continue
+        if flag not in value_flags or flag in parsed or index + 1 >= len(tokens):
+            return None
+        parsed[flag] = [tokens[index + 1]]
+        index += 2
+
+    preflight = "--preflight" in parsed
+    manifest_value = parsed.get("--manifest", [None])[0]
+    prompt_value = parsed.get("--prompt-file", [None])[0]
+    output_value = parsed.get("--output-file", [None])[0]
+    if preflight:
+        if len(parsed) != 1:
+            return None
+        return TrustedImageRequest(
+            python_executable=interpreter,
+            script=script,
+            roots=roots,
+            mode="preflight",
+        )
+    elif manifest_value is not None:
+        if len(parsed) != 1:
+            return None
+        manifest = Path(manifest_value)
+        if not manifest.is_absolute():
+            return None
+        return TrustedImageRequest(
+            python_executable=interpreter,
+            script=script,
+            roots=roots,
+            mode="manifest",
+            manifest_file=manifest,
+        )
+    else:
+        if prompt_value is None or output_value is None:
+            return None
+        prompt = Path(prompt_value)
+        output = Path(output_value)
+        if not prompt.is_absolute() or not output.is_absolute():
+            return None
+        references: list[Path] = []
+        for reference in parsed.get("--reference-images", []):
+            reference_path = Path(reference)
+            if not reference_path.is_absolute():
+                return None
+            references.append(reference_path)
+        return TrustedImageRequest(
+            python_executable=interpreter,
+            script=script,
+            roots=roots,
+            mode="single",
+            prompt_file=prompt,
+            output_file=output,
+            reference_images=tuple(references),
+            aspect_ratio=parsed.get("--aspect-ratio", ["16:9"])[0],
+            size=parsed.get("--size", [None])[0],
+            slide_visual="--slide-visual" in parsed,
+        )
 
 
 def _terminate_process_group(proc: "subprocess.Popen[str]") -> None:
@@ -63,15 +301,21 @@ def _run_command_capture(
         text=True,
         **popen_kwargs,
     )
+    group_terminated = False
     try:
-        stdout, stderr = proc.communicate(timeout=timeout)
-    except subprocess.TimeoutExpired:
-        _terminate_process_group(proc)
         try:
-            stdout, stderr = proc.communicate(timeout=_GROUP_DRAIN_SECONDS)
+            stdout, stderr = proc.communicate(timeout=timeout)
         except subprocess.TimeoutExpired:
-            stdout, stderr = "", ""
-        raise subprocess.TimeoutExpired(proc.args, timeout, output=stdout, stderr=stderr) from None
+            _terminate_process_group(proc)
+            group_terminated = True
+            try:
+                stdout, stderr = proc.communicate(timeout=_GROUP_DRAIN_SECONDS)
+            except subprocess.TimeoutExpired:
+                stdout, stderr = "", ""
+            raise subprocess.TimeoutExpired(proc.args, timeout, output=stdout, stderr=stderr) from None
+    finally:
+        if not group_terminated:
+            _terminate_process_group(proc)
     return subprocess.CompletedProcess(proc.args, proc.returncode, stdout, stderr)
 
 
@@ -127,7 +371,14 @@ class LocalSandbox(Sandbox):
             return shell_from_path
         raise RuntimeError("No suitable shell executable found. Tried /bin/zsh, /bin/bash, /bin/sh, and `sh` on PATH.")
 
-    def execute_command_with_metadata(self, command: str) -> tuple[str, dict[str, object]]:
+    def execute_command_with_metadata(
+        self,
+        command: str,
+        *,
+        workspace_root: str | Path | None = None,
+        outputs_root: str | Path | None = None,
+        uploads_root: str | Path | None = None,
+    ) -> tuple[str, dict[str, object]]:
         started_at = datetime.now(UTC)
         started_perf = time.perf_counter()
         telemetry: dict[str, object] = {
@@ -155,21 +406,84 @@ class LocalSandbox(Sandbox):
         telemetry["shell_executable"] = shell_executable
 
         try:
+            if running_as_linux_root():
+                if workspace_root is None or outputs_root is None or uploads_root is None:
+                    raise RuntimeError(
+                        "LocalSandbox refuses root Linux execution without canonical thread roots"
+                    )
+                prepare_thread_data_boundary(
+                    workspace_root=workspace_root,
+                    outputs_root=outputs_root,
+                    uploads_root=uploads_root,
+                )
+            provider_request = _trusted_image_provider_command(
+                command,
+                workspace_root=workspace_root,
+                outputs_root=outputs_root,
+                uploads_root=uploads_root,
+            )
             # On Windows, subprocess.run(shell=True, executable=...) doesn't work
             # the same way as on Unix. Build the correct invocation per shell type.
             shell_name = os.path.basename(shell_executable).lower().replace(".exe", "")
-            if os.name == "nt" and shell_name in ("powershell", "pwsh"):
+            if provider_request is not None:
+                # Preserve the established image-generation skill, but bypass
+                # the user shell entirely. The broker snapshots inputs, assigns
+                # a fresh provider-only UID, and parent-publishes staged output.
+                telemetry["runner"] = "trusted_image_provider"
+                result = run_trusted_image_request(
+                    provider_request,
+                    env=trusted_subprocess_env(allow_openai=True, allow_langsmith=True),
+                    timeout=_COMMAND_TIMEOUT_SECONDS,
+                )
+            elif os.name == "nt" and shell_name in ("powershell", "pwsh"):
                 run_args: list[str] | str = [shell_executable, "-NoProfile", "-Command", command]
                 run_kwargs = {"shell": False}
+                child_env = _sandbox_child_env()
+                writable_files = []
             elif os.name == "nt" and shell_name == "cmd":
                 run_args = command
                 run_kwargs = {"shell": True}  # shell=True on Windows uses cmd.exe
+                child_env = _sandbox_child_env()
+                writable_files = []
             else:
-                # Unix path — use the detected shell
-                run_args = command
-                run_kwargs = {"shell": True, "executable": shell_executable}
+                # An explicit argv keeps the shell command compatible with the
+                # root-Linux UID/capability boundary below.
+                run_args = [shell_executable, "-c", command]
+                run_kwargs = {
+                    "shell": False,
+                    "cwd": str(workspace_root) if workspace_root is not None else None,
+                }
+                child_env = _sandbox_child_env()
+                writable_files = []
 
-            result = _run_command_capture(run_args, run_kwargs, _COMMAND_TIMEOUT_SECONDS)
+            # LocalSandbox executes ordinary user-directed builder commands in
+            # the LangGraph process. Always pass an explicit child environment;
+            # only the exact fixed provider command above receives baseline
+            # OpenAI/LangSmith, never DQ/canary/signing/storage authority.
+            if provider_request is not None:
+                pass
+            elif isinstance(run_args, list):
+                with isolated_process_boundary(
+                    run_args,
+                    env=child_env,
+                    writable_files=writable_files,
+                    writable_dirs=(),
+                    identity_paths=[
+                        value
+                        for value in (workspace_root, outputs_root, uploads_root)
+                        if value is not None
+                    ],
+                ) as (bounded_args, bounded_env):
+                    run_kwargs["env"] = bounded_env
+                    result = _run_command_capture(
+                        bounded_args,
+                        run_kwargs,
+                        _COMMAND_TIMEOUT_SECONDS,
+                    )
+            else:
+                # Windows cmd.exe is the sole string/shell=True path.
+                run_kwargs["env"] = child_env
+                result = _run_command_capture(run_args, run_kwargs, _COMMAND_TIMEOUT_SECONDS)
         except subprocess.TimeoutExpired as exc:
             completed_at = datetime.now(UTC)
             stdout_preview = _preview_text(exc.stdout)
@@ -231,8 +545,20 @@ class LocalSandbox(Sandbox):
 
         return (output if output else "(no output)", telemetry)
 
-    def execute_command(self, command: str) -> str:
-        output, _telemetry = self.execute_command_with_metadata(command)
+    def execute_command(
+        self,
+        command: str,
+        *,
+        workspace_root: str | Path | None = None,
+        outputs_root: str | Path | None = None,
+        uploads_root: str | Path | None = None,
+    ) -> str:
+        output, _telemetry = self.execute_command_with_metadata(
+            command,
+            workspace_root=workspace_root,
+            outputs_root=outputs_root,
+            uploads_root=uploads_root,
+        )
         return output
 
     def list_dir(self, path: str, max_depth=2) -> list[str]:

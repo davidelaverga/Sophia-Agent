@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import hmac
+import inspect
 import json
 import logging
 import os
@@ -21,7 +22,7 @@ import tempfile
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
 
@@ -33,12 +34,24 @@ from deerflow.sophia.deck_quality.publication_persistence import (
     PublicationErrorCode,
     PublicationLease,
     PublicationRecord,
+    PublicationRequest,
     PublicationState,
     SupabaseDeckQualityPublicationStore,
     configured_deck_quality_publication_store,
     expected_publication_source_pack_path,
 )
-from deerflow.sophia.deck_quality.publisher import DeckQualitySourcePack
+from deerflow.sophia.deck_quality.publisher import (
+    DECK_QUALITY_PRODUCER_FAILURE_PREFIX,
+    DECK_QUALITY_PRODUCER_PREFIX,
+    DeckQualityProducerOutboxManifest,
+    DeckQualityProducerQuarantineReason,
+    DeckQualitySourcePack,
+    deck_quality_producer_archive_path,
+    deck_quality_producer_oversize_quarantine_path,
+    deck_quality_producer_quarantine_path,
+    decode_deck_quality_producer_bundle,
+    parse_deck_quality_producer_bundle_path,
+)
 from deerflow.sophia.deck_quality.schemas import QualityInstrumentLock
 from deerflow.sophia.deck_quality.snapshot import (
     ImmutableObjectUploader,
@@ -51,9 +64,11 @@ from deerflow.sophia.deck_quality.snapshot import (
     SnapshotUploadError,
     freeze_and_upload_pre_render_input_bundle,
 )
+from deerflow.sophia.storage.async_supabase_object_store import (
+    AsyncSupabaseImmutableObjectStore,
+)
 from deerflow.sophia.storage.supabase_artifact_store import (
     ArtifactObjectSizeError,
-    SupabaseImmutableObjectStore,
 )
 
 logger = logging.getLogger(__name__)
@@ -66,6 +81,13 @@ _LEASE_SECONDS_MAX = 120
 _READ_TIMEOUT_SECONDS = 15.0
 _MATERIALIZE_TIMEOUT_SECONDS = 75.0
 _PROCESS_TIMEOUT_SECONDS = 115.0
+_MAX_PRODUCER_BUNDLE_BYTES = 64 * 1024
+_PRODUCER_INBOX_PAGE_SIZE = 32
+_PRODUCER_LIST_TIMEOUT_SECONDS = 5.0
+_PRODUCER_RECONCILE_TIMEOUT_SECONDS = 15.0
+_WORKER_RPC_TIMEOUT_SECONDS = 20.0
+_WORKER_STOP_TIMEOUT_SECONDS = 5.0
+_PRODUCER_REJECTION_PREFIX = "dq1/producer-rejections/v1"
 _WORKER_ATTR = "_deck_quality_publication_worker"
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
@@ -112,11 +134,31 @@ class DeckQualityPublicationWorkerStore(Protocol):
 
     async def get(self, quality_run_id: str) -> PublicationRecord | None: ...
 
+    async def request_ready(
+        self,
+        request: PublicationRequest,
+        *,
+        source_pack_object_path: str,
+        source_pack_hash: str,
+    ) -> PublicationRecord: ...
+
     async def aclose(self) -> None: ...
 
 
 class BoundedPublicationObjectStore(ImmutableObjectUploader, Protocol):
     def read_bounded(self, object_path: str, *, max_bytes: int) -> bytes | None: ...
+
+    def list_flat_page(
+        self,
+        prefix: str,
+        *,
+        limit: int,
+    ) -> list[str]: ...
+
+    def delete_if_present(
+        self,
+        object_path: str,
+    ) -> Literal["deleted", "missing"]: ...
 
 
 class _PublicationWorkError(RuntimeError):
@@ -133,8 +175,34 @@ class _PublicationWorkError(RuntimeError):
         super().__init__(f"{code.value}:{stage}")
 
 
+class _PermanentProducerBundleError(RuntimeError):
+    """A deterministic immutable-bundle rejection safe to index forever."""
+
+    def __init__(self, reason: DeckQualityProducerQuarantineReason) -> None:
+        self.reason = reason
+        super().__init__(reason)
+
+
+class _OversizedProducerInboxError(RuntimeError):
+    """An inbox object exceeded the strict producer evidence read ceiling."""
+
+
+class _PermanentProducerObjectConflict(RuntimeError):
+    """Observed immutable bytes differ from the exact producer candidate."""
+
+    def __init__(self, *, object_path: str, content: bytes) -> None:
+        self.object_path = object_path
+        self.content = content
+        super().__init__("producer_object_conflict")
+
+
 @dataclass(frozen=True)
 class PublicationCycleResult:
+    producer_seen: int = 0
+    producer_reconciled: int = 0
+    producer_quarantined: int = 0
+    producer_failed: int = 0
+    producer_failure_evidence: int = 0
     claimed: int = 0
     published: int = 0
     failed: int = 0
@@ -180,8 +248,7 @@ def _instrument_matches_config(
     return all(
         (
             config.rubric_version == instrument.rubric_version,
-            config.evidence_preprocessor_version
-            == instrument.evidence_preprocessor_version,
+            config.evidence_preprocessor_version == instrument.evidence_preprocessor_version,
             config.judge_invoker_version == instrument.judge_invoker_version,
         )
     )
@@ -221,15 +288,8 @@ def _assert_row_before_source_read(
     instrument: QualityInstrumentLock,
     instrument_hash: str,
 ) -> None:
-    exact_instrument = (
-        record.instrument_identity_hash == instrument_hash
-        and record.instrument_lock() == instrument
-    )
-    exact_scope = (
-        record.campaign_id == "DQ-1"
-        and record.scope_kind == "canary"
-        and record.user_id in config.canary_user_ids
-    )
+    exact_instrument = record.instrument_identity_hash == instrument_hash and record.instrument_lock() == instrument
+    exact_scope = record.campaign_id == "DQ-1" and record.scope_kind == "canary" and record.user_id in config.canary_user_ids
     if not exact_scope or not exact_instrument:
         raise _PublicationWorkError(
             PublicationErrorCode.ARTIFACT_SNAPSHOT_STALE,
@@ -247,7 +307,6 @@ def _assert_row_before_source_read(
         thread_id=record.thread_id,
         build_id=record.build_id,
         quality_run_id=record.quality_run_id,
-        source_pack_hash=record.source_pack_hash,
     )
     if record.source_pack_object_path != expected_source_path:
         raise _PublicationWorkError(
@@ -316,6 +375,144 @@ def _verify_artifact_bytes(record: PublicationRecord, content: bytes) -> None:
         )
 
 
+def _source_pack_matches_outbox(
+    *,
+    pack: DeckQualitySourcePack,
+    manifest: DeckQualityProducerOutboxManifest,
+    instrument: QualityInstrumentLock,
+    instrument_hash: str,
+) -> bool:
+    return all(
+        (
+            pack.campaign_id == manifest.campaign_id == "DQ-1",
+            pack.quality_run_id == manifest.quality_run_id,
+            pack.instrument == instrument,
+            pack.instrument_identity_hash == manifest.instrument_identity_hash == instrument_hash,
+            pack.user_id == manifest.user_id,
+            pack.thread_id == manifest.thread_id,
+            pack.task_id == manifest.task_id,
+            pack.build_id == manifest.build_id,
+            pack.builder_run_id == manifest.builder_run_id,
+            pack.parent_builder_trace_id == manifest.parent_builder_trace_id,
+            pack.logical_artifact_id == manifest.logical_artifact_id,
+            pack.artifact_version_id == manifest.artifact_version_id,
+            pack.manifest_revision == manifest.manifest_revision,
+            pack.artifact_virtual_path == manifest.artifact_virtual_path,
+            pack.accepted_delivery_object_path == manifest.artifact_object_path,
+            pack.immutable_snapshot_object_path == manifest.artifact_object_path,
+            pack.artifact_sha256 == manifest.artifact_sha256,
+        )
+    )
+
+
+def _publication_request_from_source_pack(
+    pack: DeckQualitySourcePack,
+    *,
+    requested_at: datetime,
+) -> PublicationRequest:
+    """Project one producer bundle into the RPC-only publication row."""
+
+    deadline_at = requested_at + timedelta(seconds=170)
+    return PublicationRequest(
+        campaign_id=pack.campaign_id,
+        instrument=pack.instrument,
+        user_id=pack.user_id,
+        thread_id=pack.thread_id,
+        task_id=pack.task_id,
+        build_id=pack.build_id,
+        builder_run_id=pack.builder_run_id,
+        parent_builder_trace_id=pack.parent_builder_trace_id,
+        logical_artifact_id=pack.logical_artifact_id,
+        artifact_version_id=pack.artifact_version_id,
+        manifest_revision=pack.manifest_revision,
+        artifact_object_path=pack.immutable_snapshot_object_path,
+        artifact_hash=pack.artifact_sha256,
+        deadline_at=deadline_at,
+        quality_run_deadline_at=deadline_at + timedelta(minutes=12),
+    )
+
+
+def _create_and_verify_producer_objects(
+    *,
+    pack: DeckQualitySourcePack,
+    source_pack_bytes: bytes,
+    object_store: BoundedPublicationObjectStore,
+) -> tuple[str, str]:
+    """Materialize the small source pack beside an immutable artifact."""
+
+    source_path = expected_publication_source_pack_path(
+        user_id=pack.user_id,
+        thread_id=pack.thread_id,
+        build_id=pack.build_id,
+        quality_run_id=pack.quality_run_id,
+    )
+    source_hash = hashlib.sha256(source_pack_bytes).hexdigest()
+    objects = (
+        (
+            source_path,
+            source_pack_bytes,
+            "application/json",
+            _MAX_SOURCE_PACK_BYTES,
+            source_hash,
+        ),
+    )
+    for object_path, content, content_type, max_bytes, expected_hash in objects:
+        try:
+            outcome = object_store.create_if_absent(
+                object_path,
+                content,
+                content_type=content_type,
+            )
+        except Exception:
+            # A create-only write can commit while its response is lost. The
+            # exact byte/hash read below is the ambiguity fence; a true outage
+            # still fails because no matching object can be observed.
+            outcome = "ambiguous"
+        stored = object_store.read_bounded(object_path, max_bytes=max_bytes)
+        if (
+            outcome not in {"created", "exists", "ambiguous"}
+            or stored is None
+            or len(stored) != len(content)
+            or not hmac.compare_digest(
+                hashlib.sha256(stored).hexdigest(),
+                expected_hash,
+            )
+        ):
+            raise RuntimeError("producer materialization conflict")
+    return source_path, source_hash
+
+
+def _assert_reconciled_producer_record(
+    *,
+    record: PublicationRecord,
+    pack: DeckQualitySourcePack,
+    source_path: str,
+    source_hash: str,
+    config: DeckQualityConfig,
+    instrument: QualityInstrumentLock,
+    instrument_hash: str,
+) -> None:
+    _assert_row_before_source_read(
+        record=record,
+        config=config,
+        instrument=instrument,
+        instrument_hash=instrument_hash,
+    )
+    _assert_pack_before_artifact_read(
+        record=record,
+        pack=pack,
+        instrument=instrument,
+    )
+    if (
+        record.source_pack_object_path != source_path
+        or record.source_pack_hash != source_hash
+        or record.artifact_object_path != pack.immutable_snapshot_object_path
+        or record.artifact_hash != pack.artifact_sha256
+        or record.state is PublicationState.AWAITING_INPUTS
+    ):
+        raise RuntimeError("producer publication reconciliation mismatch")
+
+
 def _bounded_native_bytes(value: Mapping[str, Any], *, role: str) -> bytes:
     try:
         content = canonical_json_bytes(dict(value))
@@ -334,14 +531,59 @@ def _bounded_native_bytes(value: Mapping[str, Any], *, role: str) -> bytes:
     return content
 
 
+@dataclass(frozen=True)
+class _PendingImmutableObject:
+    object_path: str
+    content: bytes
+    content_type: str
+
+
+class _CollectingImmutableObjectStore:
+    """Capture deterministic snapshot uploads without performing network I/O."""
+
+    def __init__(self) -> None:
+        self._objects: dict[str, _PendingImmutableObject] = {}
+
+    def create_if_absent(
+        self,
+        object_path: str,
+        content: bytes,
+        *,
+        content_type: str,
+    ) -> Literal["created", "exists"]:
+        existing = self._objects.get(object_path)
+        if existing is not None:
+            if existing.content != content:
+                raise RuntimeError("local snapshot object conflict")
+            return "exists"
+        self._objects[object_path] = _PendingImmutableObject(
+            object_path=object_path,
+            content=content,
+            content_type=content_type,
+        )
+        return "created"
+
+    def read(self, object_path: str) -> bytes | None:
+        existing = self._objects.get(object_path)
+        return existing.content if existing is not None else None
+
+    def read_bounded(self, object_path: str, *, max_bytes: int) -> bytes | None:
+        content = self.read(object_path)
+        if content is not None and len(content) > max_bytes:
+            raise ArtifactObjectSizeError("captured object exceeds budget")
+        return content
+
+    def pending(self) -> tuple[_PendingImmutableObject, ...]:
+        return tuple(self._objects.values())
+
+
 def _materialize_and_freeze(
     *,
     record: PublicationRecord,
     pack: DeckQualitySourcePack,
     artifact_bytes: bytes,
-    object_store: BoundedPublicationObjectStore,
     materialization_root: Path,
-) -> PreRenderInputBundleDescriptor:
+) -> tuple[PreRenderInputBundleDescriptor, tuple[_PendingImmutableObject, ...]]:
     creative_bytes = _bounded_native_bytes(pack.creative_plan, role="creative")
     design_bytes = _bounded_native_bytes(pack.design_plan, role="design")
     build_bytes = _bounded_native_bytes(pack.build_record, role="build")
@@ -354,21 +596,16 @@ def _materialize_and_freeze(
         )
 
     materialization_root.mkdir(parents=True, exist_ok=True)
+    captured_store = _CollectingImmutableObjectStore()
     try:
         with tempfile.TemporaryDirectory(
             prefix=f"{record.quality_run_id[:20]}-publication-",
             dir=materialization_root,
         ) as directory:
             outputs_root = Path(directory) / "outputs"
-            relative_artifact = pack.artifact_virtual_path.removeprefix(
-                "/mnt/user-data/outputs/"
-            )
+            relative_artifact = pack.artifact_virtual_path.removeprefix("/mnt/user-data/outputs/")
             pure_relative = PurePosixPath(relative_artifact)
-            if (
-                not relative_artifact
-                or ".." in pure_relative.parts
-                or pure_relative.suffix.casefold() != ".pptx"
-            ):
+            if not relative_artifact or ".." in pure_relative.parts or pure_relative.suffix.casefold() != ".pptx":
                 raise _PublicationWorkError(
                     PublicationErrorCode.ARTIFACT_SNAPSHOT_STALE,
                     stage="artifact_path",
@@ -390,9 +627,7 @@ def _materialize_and_freeze(
                 thread_id=record.thread_id,
                 task_id=record.task_id or "missing-task",
                 builder_run_id=record.builder_run_id or "missing-builder-run",
-                parent_builder_trace_id=(
-                    record.parent_builder_trace_id or "missing-builder-trace"
-                ),
+                parent_builder_trace_id=(record.parent_builder_trace_id or "missing-builder-trace"),
                 logical_artifact_id=record.logical_artifact_id,
                 artifact_version_id=record.artifact_version_id,
                 manifest_revision=record.manifest_revision,
@@ -405,7 +640,7 @@ def _materialize_and_freeze(
                 artifact_host_path=artifact_host_path,
                 task_brief=pack.blind_brief,
                 authoritative_mechanical=pack.mechanical_record,
-                uploader=object_store,
+                uploader=captured_store,
             )
     except _PublicationWorkError:
         raise
@@ -447,7 +682,7 @@ def _materialize_and_freeze(
             stage="input_manifest",
             retryable=False,
         )
-    return descriptor
+    return descriptor, captured_store.pending()
 
 
 class DeckQualityPublicationWorker:
@@ -459,7 +694,7 @@ class DeckQualityPublicationWorker:
         config: DeckQualityConfig,
         instrument: QualityInstrumentLock,
         store: DeckQualityPublicationWorkerStore,
-        object_store: BoundedPublicationObjectStore,
+        object_store: BoundedPublicationObjectStore | AsyncSupabaseImmutableObjectStore,
         lease_owner: str | None = None,
         lease_seconds: int = _LEASE_SECONDS_MAX,
         claim_limit: int = _CLAIM_LIMIT_MAX,
@@ -468,19 +703,10 @@ class DeckQualityPublicationWorker:
         claim_token_factory: Callable[[], str] = _default_claim_token,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
     ) -> None:
-        if (
-            not config.enabled
-            or config.mode != "shadow"
-            or config.scope != "canary"
-            or not config.canary_user_ids
-        ):
-            raise ValueError(
-                "deck quality publication worker requires enabled canary shadow configuration"
-            )
+        if not config.enabled or config.mode != "shadow" or config.scope != "canary" or not config.canary_user_ids:
+            raise ValueError("deck quality publication worker requires enabled canary shadow configuration")
         if not _instrument_matches_config(config, instrument):
-            raise ValueError(
-                "deck quality publication worker instrument does not match configuration"
-            )
+            raise ValueError("deck quality publication worker instrument does not match configuration")
         if not 15 <= lease_seconds <= _LEASE_SECONDS_MAX:
             raise ValueError("publication worker lease must be between 15 and 120 seconds")
         if not 1 <= claim_limit <= _CLAIM_LIMIT_MAX:
@@ -496,32 +722,537 @@ class DeckQualityPublicationWorker:
         self._lease_seconds = lease_seconds
         self._claim_limit = claim_limit
         self._poll_seconds = poll_seconds
-        self._materialization_root = materialization_root or (
-            Path(tempfile.gettempdir()) / "deerflow-dq1-publication"
-        )
+        self._materialization_root = materialization_root or (Path(tempfile.gettempdir()) / "deerflow-dq1-publication")
         self._claim_token_factory = claim_token_factory
         self._clock = clock
         self._last_claim_token: str | None = None
         self._task: asyncio.Task[None] | None = None
         self._stop = asyncio.Event()
+        self._started_at: datetime | None = None
+        self._last_cycle_success_at: datetime | None = None
+        self._last_cycle_error_at: datetime | None = None
+        self._last_cycle_error_type: str | None = None
+        self._consecutive_cycle_errors = 0
 
     @property
     def running(self) -> bool:
         return self._task is not None and not self._task.done()
 
+    def readiness(self) -> dict[str, str]:
+        """Return content-free live worker health, not a startup snapshot."""
+
+        now = self._clock()
+        if not self.running:
+            return {"status": "degraded", "reason": "worker_not_running"}
+        stale_after_seconds = max(30.0, self._poll_seconds * 4)
+        if self._last_cycle_success_at is None:
+            if self._last_cycle_error_type is not None:
+                return {
+                    "status": "degraded",
+                    "reason": "cycle_failed",
+                    "error_type": self._last_cycle_error_type,
+                }
+            if self._started_at is not None and (now - self._started_at).total_seconds() > stale_after_seconds:
+                return {"status": "degraded", "reason": "heartbeat_stale"}
+            return {"status": "starting", "reason": "awaiting_first_cycle"}
+        heartbeat_age = (now - self._last_cycle_success_at).total_seconds()
+        if self._consecutive_cycle_errors > 0:
+            return {
+                "status": "degraded",
+                "reason": "cycle_failed",
+                "error_type": self._last_cycle_error_type or "RuntimeError",
+            }
+        if heartbeat_age > stale_after_seconds:
+            return {"status": "degraded", "reason": "heartbeat_stale"}
+        return {
+            "status": "ready",
+            "last_success_at": self._last_cycle_success_at.isoformat(),
+        }
+
     async def probe(self) -> None:
         probe = getattr(self._store, "probe", None)
         if not callable(probe):
             raise RuntimeError("publication persistence store is not probeable")
-        await probe()
+        async with asyncio.timeout(_WORKER_RPC_TIMEOUT_SECONDS):
+            await probe()
+        await self._producer_paths()
+        await self._failure_evidence_paths()
+
+    async def _object_call(
+        self,
+        method_name: str,
+        *args: object,
+        **kwargs: object,
+    ) -> object:
+        method = getattr(self._object_store, method_name, None)
+        if not callable(method):
+            raise RuntimeError(f"publication object store cannot {method_name}")
+        if inspect.iscoroutinefunction(method):
+            return await method(*args, **kwargs)
+        # Sync stores are accepted only as deterministic test doubles. The
+        # configured production factory below always installs the native
+        # cancellable async transport.
+        result = await asyncio.to_thread(method, *args, **kwargs)
+        return await result if inspect.isawaitable(result) else result
+
+    async def _flat_paths(self, prefix: str) -> tuple[str, ...]:
+        list_flat_page = getattr(self._object_store, "list_flat_page", None)
+        if not callable(list_flat_page):
+            raise RuntimeError("publication object store is not flat-page-listable")
+        async with asyncio.timeout(_PRODUCER_LIST_TIMEOUT_SECONDS):
+            paths = await self._object_call(
+                "list_flat_page",
+                prefix,
+                limit=_PRODUCER_INBOX_PAGE_SIZE,
+            )
+        if not isinstance(paths, list) or any(not isinstance(path, str) for path in paths):
+            raise RuntimeError("producer inbox listing returned an invalid shape")
+        if len(paths) > _PRODUCER_INBOX_PAGE_SIZE:
+            raise RuntimeError("producer evidence listing exceeded its page")
+        return tuple(sorted(paths))
+
+    async def _producer_paths(self) -> tuple[str, ...]:
+        return await self._flat_paths(DECK_QUALITY_PRODUCER_PREFIX)
+
+    async def _failure_evidence_paths(self) -> tuple[str, ...]:
+        producer_failures = await self._flat_paths(DECK_QUALITY_PRODUCER_FAILURE_PREFIX)
+        gateway_rejections = await self._flat_paths(_PRODUCER_REJECTION_PREFIX)
+        return (*producer_failures, *gateway_rejections)
+
+    async def _write_exact_producer_object(
+        self,
+        *,
+        object_path: str,
+        content: bytes,
+        content_type: str = "application/octet-stream",
+        max_bytes: int = _MAX_PRODUCER_BUNDLE_BYTES,
+    ) -> None:
+        if not isinstance(content, bytes) or len(content) > max_bytes:
+            raise RuntimeError("producer object is oversized")
+        try:
+            outcome = await self._object_call(
+                "create_if_absent",
+                object_path,
+                content,
+                content_type=content_type,
+            )
+        except Exception:
+            outcome = "ambiguous"
+        stored = await self._object_call(
+            "read_bounded",
+            object_path,
+            max_bytes=max_bytes,
+        )
+        if not isinstance(stored, bytes):
+            raise RuntimeError("producer object persistence unavailable")
+        if stored != content:
+            raise _PermanentProducerObjectConflict(
+                object_path=object_path,
+                content=stored,
+            )
+        if outcome not in {"created", "exists", "ambiguous"}:
+            raise RuntimeError("producer object persistence failed")
+
+    async def _retire_inbox(self, object_path: str) -> None:
+        try:
+            outcome = await self._object_call(
+                "delete_if_present",
+                object_path,
+            )
+        except Exception:
+            outcome = "ambiguous"
+        remaining = await self._object_call(
+            "read_bounded",
+            object_path,
+            max_bytes=_MAX_PRODUCER_BUNDLE_BYTES,
+        )
+        if outcome not in {"deleted", "missing", "ambiguous"}:
+            raise RuntimeError("producer inbox deletion failed")
+        if remaining is not None:
+            if not isinstance(remaining, bytes):
+                raise RuntimeError("producer inbox deletion verification failed")
+            # Archive and DB convergence make replay safe. A still-visible
+            # exact inbox after an ambiguous delete is transient, not poison.
+            raise RuntimeError("producer inbox deletion remains unacknowledged")
+
+    async def _read_producer_inbox(self, object_path: str) -> bytes:
+        try:
+            content = await self._object_call(
+                "read_bounded",
+                object_path,
+                max_bytes=_MAX_PRODUCER_BUNDLE_BYTES,
+            )
+        except ArtifactObjectSizeError:
+            raise _OversizedProducerInboxError from None
+        except Exception:
+            raise RuntimeError("producer inbox read failed") from None
+        if content is None or not isinstance(content, bytes):
+            raise RuntimeError("producer inbox object is unavailable")
+        return content
+
+    async def _quarantine_and_retire(
+        self,
+        *,
+        object_path: str,
+        content: bytes,
+        reason: DeckQualityProducerQuarantineReason,
+    ) -> None:
+        quarantine_path = deck_quality_producer_quarantine_path(
+            object_path,
+            reason=reason,
+            content_sha256=hashlib.sha256(content).hexdigest(),
+        )
+        await self._write_exact_producer_object(
+            object_path=quarantine_path,
+            content=content,
+        )
+        await self._write_rejection_evidence(
+            inbox_path=object_path,
+            reason=reason,
+            observed_content=content,
+        )
+        await self._retire_inbox(object_path)
+
+    async def _write_rejection_evidence(
+        self,
+        *,
+        inbox_path: str,
+        reason: str,
+        observed_content: bytes | None = None,
+        conflicting_path: str | None = None,
+        conflicting_content: bytes | None = None,
+    ) -> None:
+        evidence = {
+            "schema_version": "deck-quality-producer-rejection-evidence/v1",
+            "reason": reason,
+            "inbox_path_sha256": hashlib.sha256(inbox_path.encode("utf-8")).hexdigest(),
+            "observed_content_sha256": (
+                hashlib.sha256(observed_content).hexdigest()
+                if observed_content is not None
+                else None
+            ),
+            "observed_size_bytes": (
+                len(observed_content) if observed_content is not None else None
+            ),
+            "conflicting_path_sha256": (
+                hashlib.sha256(conflicting_path.encode("utf-8")).hexdigest()
+                if conflicting_path is not None
+                else None
+            ),
+            "conflicting_content_sha256": (
+                hashlib.sha256(conflicting_content).hexdigest()
+                if conflicting_content is not None
+                else None
+            ),
+            "conflicting_size_bytes": (
+                len(conflicting_content) if conflicting_content is not None else None
+            ),
+        }
+        content = canonical_json_bytes(evidence)
+        digest = hashlib.sha256(content).hexdigest()
+        await self._write_exact_producer_object(
+            object_path=f"{_PRODUCER_REJECTION_PREFIX}/{digest}.json",
+            content=content,
+            content_type="application/json",
+            max_bytes=2 * 1024,
+        )
+
+    async def _quarantine_oversized_and_retire(self, object_path: str) -> None:
+        manifest_path = deck_quality_producer_oversize_quarantine_path(object_path)
+        manifest = canonical_json_bytes(
+            {
+                "schema_version": "deck-quality-producer-oversize-quarantine/v1",
+                "reason": "producer_bundle_read_limit_exceeded",
+                "inbox_path_sha256": hashlib.sha256(object_path.encode("utf-8")).hexdigest(),
+                "read_limit_bytes": _MAX_PRODUCER_BUNDLE_BYTES,
+            }
+        )
+        await self._write_exact_producer_object(
+            object_path=manifest_path,
+            content=manifest,
+            content_type="application/json",
+            max_bytes=2 * 1024,
+        )
+        await self._write_rejection_evidence(
+            inbox_path=object_path,
+            reason="producer_bundle_read_limit_exceeded",
+        )
+        await self._retire_inbox(object_path)
+
+    async def _quarantine_conflict_and_retire(
+        self,
+        *,
+        inbox_path: str,
+        inbox_content: bytes,
+        conflict: _PermanentProducerObjectConflict,
+    ) -> None:
+        # Preserve the small, content-free inbox marker itself, but never copy
+        # a conflicting source pack or PPTX into quarantine. A mismatch can be
+        # tens of megabytes and must not become a queue-poisoning upload. The
+        # durable conflict evidence below records only hashes, path hashes, and
+        # byte counts.
+        inbox_digest = hashlib.sha256(inbox_content).hexdigest()
+        quarantine_path = deck_quality_producer_quarantine_path(
+            inbox_path,
+            reason="storage_conflict",
+            content_sha256=inbox_digest,
+        )
+        await self._write_exact_producer_object(
+            object_path=quarantine_path,
+            content=inbox_content,
+        )
+        await self._write_rejection_evidence(
+            inbox_path=inbox_path,
+            reason="storage_conflict",
+            observed_content=inbox_content,
+            conflicting_path=conflict.object_path,
+            conflicting_content=conflict.content,
+        )
+        await self._retire_inbox(inbox_path)
+
+    async def _reconcile_producer_bundle(
+        self,
+        *,
+        object_path: str,
+        quality_run_id: str,
+        content: bytes,
+    ) -> PublicationRecord:
+        try:
+            decoded = decode_deck_quality_producer_bundle(
+                content,
+                expected_quality_run_id=quality_run_id,
+                expected_object_path=object_path,
+            )
+        except Exception:
+            raise _PermanentProducerBundleError("bundle_invalid") from None
+        manifest = decoded.manifest
+        if manifest.campaign_id != "DQ-1" or manifest.user_id not in self._config.canary_user_ids or manifest.instrument_identity_hash != self._instrument_hash or manifest.quality_run_id != quality_run_id:
+            raise _PermanentProducerBundleError("scope_invalid")
+
+        # Replays check the immutable archive before following either private
+        # reference.  A different byte sequence at the same run identity is a
+        # permanent collision; an exact archive remains safe to converge after
+        # a prior DB or inbox-delete response was lost.
+        archive_path = deck_quality_producer_archive_path(quality_run_id)
+        archived_content = await self._object_call(
+            "read_bounded",
+            archive_path,
+            max_bytes=_MAX_PRODUCER_BUNDLE_BYTES,
+        )
+        if archived_content is not None:
+            if not isinstance(archived_content, bytes):
+                raise RuntimeError("producer archive has an invalid shape")
+            if not hmac.compare_digest(archived_content, content):
+                raise _PermanentProducerObjectConflict(
+                    object_path=archive_path,
+                    content=archived_content,
+                )
+
+        source_content = await self._object_call(
+            "read_bounded",
+            manifest.source_pack_object_path,
+            max_bytes=_MAX_SOURCE_PACK_BYTES,
+        )
+        if source_content is None:
+            raise RuntimeError("producer source pack is unavailable")
+        if not isinstance(source_content, bytes):
+            raise RuntimeError("producer source pack has an invalid shape")
+        if len(source_content) != manifest.source_pack_size_bytes or not hmac.compare_digest(
+            hashlib.sha256(source_content).hexdigest(),
+            manifest.source_pack_sha256,
+        ):
+            raise _PermanentProducerObjectConflict(
+                object_path=manifest.source_pack_object_path,
+                content=source_content,
+            )
+        try:
+            pack = _strict_source_pack(source_content)
+        except _PublicationWorkError:
+            raise _PermanentProducerObjectConflict(
+                object_path=manifest.source_pack_object_path,
+                content=source_content,
+            ) from None
+        if not _source_pack_matches_outbox(
+            pack=pack,
+            manifest=manifest,
+            instrument=self._instrument,
+            instrument_hash=self._instrument_hash,
+        ):
+            raise _PermanentProducerObjectConflict(
+                object_path=manifest.source_pack_object_path,
+                content=source_content,
+            )
+
+        artifact_content = await self._object_call(
+            "read_bounded",
+            manifest.artifact_object_path,
+            max_bytes=_MAX_ACCEPTED_PPTX_BYTES,
+        )
+        if artifact_content is None:
+            raise RuntimeError("producer artifact is unavailable")
+        if not isinstance(artifact_content, bytes):
+            raise RuntimeError("producer artifact has an invalid shape")
+        if not hmac.compare_digest(
+            hashlib.sha256(artifact_content).hexdigest(),
+            manifest.artifact_sha256,
+        ):
+            raise _PermanentProducerObjectConflict(
+                object_path=manifest.artifact_object_path,
+                content=artifact_content,
+            )
+        source_path = manifest.source_pack_object_path
+        source_hash = manifest.source_pack_sha256
+        request = _publication_request_from_source_pack(
+            pack,
+            requested_at=self._clock(),
+        )
+        try:
+            record = await self._store.request_ready(
+                request,
+                source_pack_object_path=source_path,
+                source_pack_hash=source_hash,
+            )
+        except Exception:
+            # The transaction may commit while the response is lost. Replaying
+            # the exact request is the first ambiguity recovery. If that also
+            # fails, read the row: an exact committed row converges, a
+            # mismatched row is permanent poison, and no observable row stays
+            # retryable without retiring the inbox.
+            try:
+                record = await self._store.request_ready(
+                    request,
+                    source_pack_object_path=source_path,
+                    source_pack_hash=source_hash,
+                )
+            except Exception:
+                try:
+                    record = await self._store.get(quality_run_id)
+                except Exception:
+                    raise RuntimeError("producer request-ready is ambiguous") from None
+                if record is None:
+                    raise RuntimeError("producer request-ready is uncommitted")
+        try:
+            _assert_reconciled_producer_record(
+                record=record,
+                pack=pack,
+                source_path=source_path,
+                source_hash=source_hash,
+                config=self._config,
+                instrument=self._instrument,
+                instrument_hash=self._instrument_hash,
+            )
+        except (RuntimeError, _PublicationWorkError):
+            raise _PermanentProducerBundleError("identity_conflict") from None
+
+        if archived_content is None:
+            await self._write_exact_producer_object(
+                object_path=archive_path,
+                content=content,
+            )
+        archived = decode_deck_quality_producer_bundle(
+            content,
+            expected_quality_run_id=quality_run_id,
+            expected_object_path=archive_path,
+        )
+        if archived.manifest != manifest:
+            raise _PermanentProducerBundleError("identity_conflict")
+        await self._retire_inbox(object_path)
+        return record
+
+    async def _reconcile_producers(self) -> tuple[int, int, int, int]:
+        paths = await self._producer_paths()
+        reconciled = 0
+        quarantined = 0
+        failed = 0
+        for object_path in paths:
+            try:
+                async with asyncio.timeout(_PRODUCER_RECONCILE_TIMEOUT_SECONDS):
+                    content = await self._read_producer_inbox(object_path)
+                    quality_run_id = parse_deck_quality_producer_bundle_path(object_path)
+                    if quality_run_id is None:
+                        raise _PermanentProducerBundleError("path_invalid")
+                    await self._reconcile_producer_bundle(
+                        object_path=object_path,
+                        quality_run_id=quality_run_id,
+                        content=content,
+                    )
+                reconciled += 1
+                logger.info(
+                    "DQ1 producer reconciled quality_run_id=%s contentExcluded=true",
+                    quality_run_id,
+                )
+            except _OversizedProducerInboxError:
+                try:
+                    async with asyncio.timeout(_PRODUCER_RECONCILE_TIMEOUT_SECONDS):
+                        await self._quarantine_oversized_and_retire(object_path)
+                except Exception as quarantine_exc:
+                    failed += 1
+                    logger.error(
+                        "DQ1 oversized producer quarantine failed error_type=%s contentExcluded=true",
+                        quarantine_exc.__class__.__name__,
+                        exc_info=False,
+                    )
+                else:
+                    quarantined += 1
+                    logger.error(
+                        "DQ1 oversized producer permanently quarantined contentExcluded=true",
+                        exc_info=False,
+                    )
+            except _PermanentProducerObjectConflict as exc:
+                try:
+                    async with asyncio.timeout(_PRODUCER_RECONCILE_TIMEOUT_SECONDS):
+                        await self._quarantine_conflict_and_retire(
+                            inbox_path=object_path,
+                            inbox_content=content,
+                            conflict=exc,
+                        )
+                except Exception as quarantine_exc:
+                    failed += 1
+                    logger.error(
+                        "DQ1 producer conflict quarantine failed error_type=%s contentExcluded=true",
+                        quarantine_exc.__class__.__name__,
+                        exc_info=False,
+                    )
+                else:
+                    quarantined += 1
+                    logger.error(
+                        "DQ1 producer immutable conflict quarantined contentExcluded=true",
+                        exc_info=False,
+                    )
+            except _PermanentProducerBundleError as exc:
+                try:
+                    async with asyncio.timeout(_PRODUCER_RECONCILE_TIMEOUT_SECONDS):
+                        await self._quarantine_and_retire(
+                            object_path=object_path,
+                            content=content,
+                            reason=exc.reason,
+                        )
+                except Exception as quarantine_exc:
+                    logger.error(
+                        "DQ1 producer quarantine failed error_type=%s contentExcluded=true",
+                        quarantine_exc.__class__.__name__,
+                        exc_info=False,
+                    )
+                    failed += 1
+                else:
+                    quarantined += 1
+                logger.error(
+                    "DQ1 producer permanently rejected reason=%s contentExcluded=true",
+                    exc.reason,
+                    exc_info=False,
+                )
+            except Exception as exc:
+                failed += 1
+                logger.error(
+                    "DQ1 producer reconciliation failed error_type=%s contentExcluded=true",
+                    exc.__class__.__name__,
+                    exc_info=False,
+                )
+        return len(paths), reconciled, quarantined, failed
 
     def _next_claim_token(self) -> str:
         token = self._claim_token_factory()
-        if (
-            not isinstance(token, str)
-            or _SAFE_TOKEN_RE.fullmatch(token) is None
-            or token == self._last_claim_token
-        ):
+        if not isinstance(token, str) or _SAFE_TOKEN_RE.fullmatch(token) is None or token == self._last_claim_token:
             raise RuntimeError("publication claim token is invalid or reused")
         self._last_claim_token = token
         return token
@@ -533,12 +1264,13 @@ class DeckQualityPublicationWorker:
             "lease_seconds": self._lease_seconds,
             "limit": self._claim_limit,
         }
-        try:
-            return await self._store.claim(**arguments)
-        except Exception:
-            # The claim can commit while its response is lost. One replay with
-            # the same token/hash is safe and cannot increment the attempt.
-            return await self._store.claim(**arguments)
+        async with asyncio.timeout(_WORKER_RPC_TIMEOUT_SECONDS):
+            try:
+                return await self._store.claim(**arguments)
+            except Exception:
+                # The claim can commit while its response is lost. One replay
+                # with the same token/hash is safe and cannot increment it.
+                return await self._store.claim(**arguments)
 
     async def _read_bounded(
         self,
@@ -549,8 +1281,8 @@ class DeckQualityPublicationWorker:
     ) -> bytes:
         try:
             content = await asyncio.wait_for(
-                asyncio.to_thread(
-                    self._object_store.read_bounded,
+                self._object_call(
+                    "read_bounded",
                     object_path,
                     max_bytes=max_bytes,
                 ),
@@ -596,17 +1328,27 @@ class DeckQualityPublicationWorker:
         artifact_bytes: bytes,
     ) -> PreRenderInputBundleDescriptor:
         try:
-            return await asyncio.wait_for(
-                asyncio.to_thread(
+            async with asyncio.timeout(_MATERIALIZE_TIMEOUT_SECONDS):
+                descriptor, pending = await asyncio.to_thread(
                     _materialize_and_freeze,
                     record=record,
                     pack=pack,
                     artifact_bytes=artifact_bytes,
-                    object_store=self._object_store,
                     materialization_root=self._materialization_root,
-                ),
-                timeout=_MATERIALIZE_TIMEOUT_SECONDS,
-            )
+                )
+                for item in pending:
+                    # The accepted object is the same immutable primary that
+                    # `_process` just read and hash-verified. Re-uploading it
+                    # would duplicate tens of megabytes after delivery.
+                    if item.object_path == record.artifact_object_path and item.content == artifact_bytes:
+                        continue
+                    await self._write_exact_producer_object(
+                        object_path=item.object_path,
+                        content=item.content,
+                        content_type=item.content_type,
+                        max_bytes=max(1, len(item.content)),
+                    )
+                return descriptor
         except TimeoutError:
             raise _PublicationWorkError(
                 PublicationErrorCode.PERSISTENCE_ERROR,
@@ -667,38 +1409,32 @@ class DeckQualityPublicationWorker:
         record: PublicationRecord,
         error: _PublicationWorkError,
     ) -> Literal["failed", "retry_scheduled", "ambiguous"]:
-        lease = PublicationLease.from_record(record)
-        if error.retryable:
-            delay = min(120, 5 * (2 ** max(0, record.attempt_count - 1)))
-            try:
-                transitioned = await self._store.retry(
+        try:
+            async with asyncio.timeout(_WORKER_RPC_TIMEOUT_SECONDS):
+                lease = PublicationLease.from_record(record)
+                if error.retryable:
+                    delay = min(120, 5 * (2 ** max(0, record.attempt_count - 1)))
+                    transitioned = await self._store.retry(
+                        lease,
+                        operation_token=_operation_token("retry", record),
+                        error_code=error.code,
+                        error_stage=error.stage,
+                        delay_seconds=delay,
+                    )
+                    if transitioned.state is PublicationState.FAILED:
+                        return "failed"
+                    if transitioned.state is PublicationState.RETRY_WAIT:
+                        return "retry_scheduled"
+                    return "ambiguous"
+                transitioned = await self._store.fail(
                     lease,
-                    operation_token=_operation_token("retry", record),
+                    operation_token=_operation_token("fail", record),
                     error_code=error.code,
                     error_stage=error.stage,
-                    delay_seconds=delay,
                 )
-            except Exception:
-                return "ambiguous"
-            if transitioned.state is PublicationState.FAILED:
-                return "failed"
-            if transitioned.state is PublicationState.RETRY_WAIT:
-                return "retry_scheduled"
-            return "ambiguous"
-        try:
-            transitioned = await self._store.fail(
-                lease,
-                operation_token=_operation_token("fail", record),
-                error_code=error.code,
-                error_stage=error.stage,
-            )
         except Exception:
             return "ambiguous"
-        return (
-            "failed"
-            if transitioned.state is PublicationState.FAILED
-            else "ambiguous"
-        )
+        return "failed" if transitioned.state is PublicationState.FAILED else "ambiguous"
 
     async def _process(self, record: PublicationRecord) -> str:
         try:
@@ -761,6 +1497,13 @@ class DeckQualityPublicationWorker:
             )
 
     async def run_once(self) -> PublicationCycleResult:
+        (
+            producer_seen,
+            producer_reconciled,
+            producer_quarantined,
+            producer_failed,
+        ) = await self._reconcile_producers()
+        producer_failure_evidence = len(await self._failure_evidence_paths())
         claim_token = self._next_claim_token()
         records = await self._claim(claim_token)
         if len(records) > self._claim_limit or len(records) > _CLAIM_LIMIT_MAX:
@@ -785,6 +1528,11 @@ class DeckQualityPublicationWorker:
             raise RuntimeError("publication claim returned an invalid replay fence")
         outcomes = await asyncio.gather(*(self._process(record) for record in records))
         counts = {
+            "producer_seen": producer_seen,
+            "producer_reconciled": producer_reconciled,
+            "producer_quarantined": producer_quarantined,
+            "producer_failed": producer_failed,
+            "producer_failure_evidence": producer_failure_evidence,
             "claimed": len(records),
             "published": 0,
             "failed": 0,
@@ -804,10 +1552,21 @@ class DeckQualityPublicationWorker:
     async def _run(self) -> None:
         while not self._stop.is_set():
             try:
-                await self.run_once()
+                cycle = await self.run_once()
+                if cycle.producer_failed:
+                    raise RuntimeError("producer reconciliation failed")
+                if cycle.producer_quarantined or cycle.producer_failure_evidence:
+                    raise RuntimeError("producer failure evidence is unresolved")
+                self._last_cycle_success_at = self._clock()
+                self._last_cycle_error_at = None
+                self._last_cycle_error_type = None
+                self._consecutive_cycle_errors = 0
             except asyncio.CancelledError:
                 raise
-            except Exception:
+            except Exception as exc:
+                self._last_cycle_error_at = self._clock()
+                self._last_cycle_error_type = exc.__class__.__name__
+                self._consecutive_cycle_errors += 1
                 logger.error(
                     "DQ1 publication worker cycle failed contentExcluded=true",
                     exc_info=False,
@@ -821,6 +1580,11 @@ class DeckQualityPublicationWorker:
         if self.running:
             return
         self._stop.clear()
+        self._started_at = self._clock()
+        self._last_cycle_success_at = None
+        self._last_cycle_error_at = None
+        self._last_cycle_error_type = None
+        self._consecutive_cycle_errors = 0
         self._task = asyncio.create_task(
             self._run(),
             name="dq1-deck-quality-publication-worker",
@@ -828,12 +1592,36 @@ class DeckQualityPublicationWorker:
 
     async def stop(self) -> None:
         self._stop.set()
-        if self._task is not None:
-            await self._task
+        task = self._task
+        if task is not None and not task.done():
+            task.cancel()
+            try:
+                async with asyncio.timeout(_WORKER_STOP_TIMEOUT_SECONDS):
+                    await task
+            except asyncio.CancelledError:
+                pass
+            except TimeoutError:
+                logger.error(
+                    "DQ1 publication worker stop timed out contentExcluded=true",
+                    exc_info=False,
+                )
         self._task = None
-        close = getattr(self._store, "aclose", None)
-        if callable(close):
-            await close()
+        for resource in (self._object_store, self._store):
+            close = getattr(resource, "aclose", None)
+            if callable(close):
+                try:
+                    async with asyncio.timeout(_WORKER_STOP_TIMEOUT_SECONDS):
+                        if inspect.iscoroutinefunction(close):
+                            result = close()
+                        else:
+                            result = await asyncio.to_thread(close)
+                        if inspect.isawaitable(result):
+                            await result
+                except Exception:
+                    logger.error(
+                        "DQ1 publication worker resource close failed contentExcluded=true",
+                        exc_info=False,
+                    )
 
 
 def build_configured_deck_quality_publication_worker(
@@ -841,7 +1629,7 @@ def build_configured_deck_quality_publication_worker(
     config: DeckQualityConfig,
     instrument: QualityInstrumentLock,
     store: SupabaseDeckQualityPublicationStore | None = None,
-    object_store: SupabaseImmutableObjectStore | None = None,
+    object_store: (BoundedPublicationObjectStore | AsyncSupabaseImmutableObjectStore | None) = None,
 ) -> DeckQualityPublicationWorker | None:
     if not config.enabled:
         return None
@@ -852,7 +1640,7 @@ def build_configured_deck_quality_publication_worker(
         config=config,
         instrument=instrument,
         store=configured_store,
-        object_store=object_store or SupabaseImmutableObjectStore(),
+        object_store=object_store or AsyncSupabaseImmutableObjectStore(),
     )
 
 

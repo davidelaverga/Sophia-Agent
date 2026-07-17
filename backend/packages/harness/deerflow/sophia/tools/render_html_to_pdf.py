@@ -317,7 +317,12 @@ def _rendered_vector_visual_count(completed: subprocess.CompletedProcess[str]) -
 
 
 def _run_html_pdf_renderer_process(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return run_process_group(cmd, timeout=_RENDER_TIMEOUT_SECONDS)
+    output = Path(cmd[cmd.index("--pdf-file") + 1])
+    return run_process_group(
+        cmd,
+        timeout=_RENDER_TIMEOUT_SECONDS,
+        writable_files=[output],
+    )
 
 
 def _html_pdf_path_error(html_path: str, pdf_path: str) -> str | None:

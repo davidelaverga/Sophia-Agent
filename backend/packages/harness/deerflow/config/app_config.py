@@ -203,8 +203,14 @@ class AppConfig(BaseModel):
             return [cls.resolve_env_variables(item) for item in config]
         return config
 
+    @property
+    def public_models(self) -> tuple[ModelConfig, ...]:
+        """Models eligible for public discovery and generic/user selection."""
+
+        return tuple(model for model in self.models if model.access_scope == "public")
+
     def get_model_config(self, name: str) -> ModelConfig | None:
-        """Get the model config by name.
+        """Get a publicly selectable model config by name.
 
         Args:
             name: The name of the model to get the config for.
@@ -212,6 +218,15 @@ class AppConfig(BaseModel):
         Returns:
             The model config if found, otherwise None.
         """
+        return next((model for model in self.public_models if model.name == name), None)
+
+    def get_model_deployment(self, name: str) -> ModelConfig | None:
+        """Resolve any configured deployment for trusted route infrastructure.
+
+        This deliberately includes ``route_only`` entries. User-facing and
+        generic callers must use :meth:`get_model_config` instead.
+        """
+
         return next((model for model in self.models if model.name == name), None)
 
     def get_tool_config(self, name: str) -> ToolConfig | None:

@@ -172,6 +172,7 @@ QualityRunState = Literal[
     "failed",
     "stale",
 ]
+DispatchIntentStatus = Literal["prepared", "unresolved", "confirmed", "reconciled"]
 
 
 def _instrument_identity_hash(instrument: QualityInstrumentLock) -> str:
@@ -428,6 +429,19 @@ class QualityRunRecord(_FrozenModel):
         pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
     )
     claim_hash: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    dispatch_intent_epoch: int | None = Field(default=None, ge=1)
+    dispatch_intent_attempt_count: int | None = Field(default=None, ge=0)
+    dispatch_intent_token: str | None = Field(
+        default=None,
+        pattern=r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$",
+    )
+    dispatch_intent_status: DispatchIntentStatus | None = None
+    dispatch_recovery_proof_hash: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{64}$",
+    )
+    dispatch_intent_at: datetime | None = None
+    dispatch_resolved_at: datetime | None = None
     pending_terminal_state: Literal["failed", "stale"] | None = None
     terminal_trace_payload_hash: str | None = Field(
         default=None,
@@ -459,6 +473,9 @@ class QualityRunRecord(_FrozenModel):
         "run_deadline_at",
         "trace_deadline_at",
         "lease_expires_at",
+        "dispatch_intent_at",
+        "dispatch_resolved_at",
+        "last_error_at",
         "requested_at",
         "started_at",
         "updated_at",
@@ -554,6 +571,39 @@ class QualityRunRecord(_FrozenModel):
             raise ValueError("quality run claim replay fence is incomplete")
         if leased != (self.claim_token is not None):
             raise ValueError("quality run lease and claim replay fence disagree")
+        dispatch_fields = (
+            self.dispatch_intent_epoch,
+            self.dispatch_intent_attempt_count,
+            self.dispatch_intent_token,
+            self.dispatch_recovery_proof_hash,
+            self.dispatch_intent_at,
+        )
+        if self.dispatch_intent_status is None:
+            if any(value is not None for value in dispatch_fields) or self.dispatch_resolved_at is not None:
+                raise ValueError("quality run dispatch intent shape is inconsistent")
+        else:
+            if any(
+                value is None
+                for value in (
+                    self.dispatch_intent_epoch,
+                    self.dispatch_intent_attempt_count,
+                    self.dispatch_intent_token,
+                    self.dispatch_intent_at,
+                )
+            ):
+                raise ValueError("quality run dispatch intent is incomplete")
+            assert self.dispatch_intent_epoch is not None
+            assert self.dispatch_intent_attempt_count is not None
+            assert self.dispatch_intent_at is not None
+            if self.dispatch_intent_epoch > self.lease_epoch:
+                raise ValueError("quality run dispatch intent exceeds the lease epoch")
+            if self.dispatch_intent_attempt_count > self.max_attempts:
+                raise ValueError("quality run dispatch intent exceeds the attempt cap")
+            if self.dispatch_intent_status in {"confirmed", "reconciled"}:
+                if self.dispatch_resolved_at is None or self.dispatch_resolved_at < self.dispatch_intent_at:
+                    raise ValueError("confirmed quality dispatch is missing its resolution")
+            elif self.dispatch_resolved_at is not None:
+                raise ValueError("unconfirmed quality dispatch has a resolution timestamp")
         terminal = self.state in {"completed", "failed", "stale"}
         if terminal != (self.finished_at is not None):
             raise ValueError("quality run terminal timestamp is inconsistent")
@@ -745,6 +795,9 @@ class SupabaseDeckQualityRunRpcClient:
     async def probe(self) -> None:
         required = {
             "/rpc/sophia_claim_deck_quality_shadow_runs",
+            "/rpc/sophia_begin_deck_quality_shadow_dispatch",
+            "/rpc/sophia_resolve_deck_quality_shadow_dispatch",
+            "/rpc/sophia_list_unresolved_deck_quality_shadow_dispatches",
             "/rpc/sophia_renew_deck_quality_shadow_lease",
             "/rpc/sophia_release_deck_quality_shadow_lease",
             "/rpc/sophia_retry_deck_quality_shadow_run",
@@ -894,6 +947,74 @@ class SupabaseDeckQualityRunStore:
             "sophia_renew_deck_quality_shadow_lease",
             {**lease.rpc_payload(), "p_lease_seconds": lease_seconds},
         )
+
+    async def begin_dispatch(
+        self,
+        lease: QualityRunLease,
+        *,
+        intent_token: str,
+    ) -> QualityRunRecord:
+        if _CLAIM_TOKEN_RE.fullmatch(intent_token) is None:
+            raise ValueError("dispatch intent token is invalid")
+        return await self._one(
+            "sophia_begin_deck_quality_shadow_dispatch",
+            {
+                **lease.rpc_payload(),
+                "p_dispatch_intent_token": intent_token,
+            },
+        )
+
+    async def resolve_dispatch(
+        self,
+        *,
+        quality_run_id: str,
+        intent_token: str,
+        status: Literal["unresolved", "confirmed", "reconciled"],
+    ) -> QualityRunRecord:
+        if _CLAIM_TOKEN_RE.fullmatch(intent_token) is None:
+            raise ValueError("dispatch intent token is invalid")
+        if status not in {"unresolved", "confirmed", "reconciled"}:
+            raise ValueError("dispatch intent resolution is invalid")
+        return await self._one(
+            "sophia_resolve_deck_quality_shadow_dispatch",
+            {
+                "p_quality_run_id": quality_run_id,
+                "p_dispatch_intent_token": intent_token,
+                "p_dispatch_intent_status": status,
+            },
+        )
+
+    async def unresolved_dispatches(self, *, limit: int = 100) -> tuple[str, ...]:
+        if not 1 <= limit <= 100:
+            raise ValueError("unresolved dispatch limit is invalid")
+        raw = await self._rpc.call(
+            "sophia_list_unresolved_deck_quality_shadow_dispatches",
+            {"p_limit": limit},
+        )
+        if not isinstance(raw, list) or len(raw) > limit:
+            raise DeckQualityPersistenceProtocolError(
+                "deck quality unresolved dispatch response shape is invalid"
+            )
+        quality_run_ids: list[str] = []
+        for item in raw:
+            if (
+                not isinstance(item, dict)
+                or set(item) != {"quality_run_id", "dispatch_intent_status"}
+                or not isinstance(item["quality_run_id"], str)
+                or re.fullmatch(r"quality_[0-9a-f]{64}", item["quality_run_id"])
+                is None
+                or item["dispatch_intent_status"]
+                not in {"prepared", "unresolved", "reconciled", "confirmed"}
+            ):
+                raise DeckQualityPersistenceProtocolError(
+                    "deck quality unresolved dispatch record is invalid"
+                )
+            quality_run_ids.append(item["quality_run_id"])
+        if len(set(quality_run_ids)) != len(quality_run_ids):
+            raise DeckQualityPersistenceProtocolError(
+                "deck quality unresolved dispatch response contains duplicates"
+            )
+        return tuple(quality_run_ids)
 
     async def release(self, lease: QualityRunLease) -> QualityRunRecord:
         return await self._one("sophia_release_deck_quality_shadow_lease", lease.rpc_payload())

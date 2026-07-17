@@ -28,6 +28,27 @@ class _Result(BaseModel):
     verdict: str
 
 
+@pytest.fixture(autouse=True)
+def _dq_specific_provider_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv(
+        "SOPHIA_DECK_QUALITY_OPENAI_API_KEY",
+        "synthetic-dq-only-key",
+    )
+    monkeypatch.setattr(
+        invoker_module,
+        "get_app_config",
+        lambda: SimpleNamespace(
+            deck_quality=SimpleNamespace(
+                enabled=True,
+                mode="shadow",
+                scope="canary",
+                canary_user_ids=frozenset({"synthetic-canary-user"}),
+                judge_route="deck.judge.visual",
+            )
+        ),
+    )
+
+
 def _plan(**overrides: object) -> ResolvedModelPlan:
     values: dict[str, object] = {
         "route_name": "deck.judge.visual",
@@ -168,17 +189,25 @@ def _fake_setup(
     _FakeResponses,
     dict[str, Any],
 ]:
+    monkeypatch.setenv(
+        "SOPHIA_DECK_QUALITY_OPENAI_API_KEY",
+        "synthetic-dq-only-key",
+    )
     responses = _FakeResponses(response=response)
     captured: dict[str, Any] = {}
 
-    def create_chat_model(name: str, **kwargs: Any) -> _FakeModel:
-        captured["name"] = name
+    def create_internal_route_chat_model(*, plan: ResolvedModelPlan, **kwargs: Any) -> _FakeModel:
+        captured["name"] = plan.deployment_name
         captured["kwargs"] = kwargs
         model = _FakeModel(responses, payload_mutator=payload_mutator)
         captured["model"] = model
         return model
 
-    monkeypatch.setattr(invoker_module, "create_chat_model", create_chat_model)
+    monkeypatch.setattr(
+        invoker_module,
+        "create_internal_route_chat_model",
+        create_internal_route_chat_model,
+    )
     invoker = MultimodalStructuredModelInvoker()
     request = invoker.prepare_request(
         plan=_plan(),
@@ -214,6 +243,9 @@ def test_one_canonical_payload_is_projected_for_count_and_reused_for_generation(
     assert responses.tracing_states == [False, False]
     assert captured["name"] == "openai-gpt-5-6-sol"
     assert captured["kwargs"]["attach_tracing"] is False
+    assert captured["kwargs"]["api_key"].get_secret_value() == (
+        "synthetic-dq-only-key"
+    )
     model = captured["model"]
     assert (model.callbacks, model.tags, model.metadata, model.verbose) == (
         [],
@@ -230,11 +262,23 @@ def test_one_canonical_payload_is_projected_for_count_and_reused_for_generation(
 def test_real_pinned_chatopenai_builds_the_exact_locked_eight_key_payload(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    def create_chat_model(_name: str, **kwargs: Any) -> ChatOpenAI:
+    monkeypatch.setenv(
+        "SOPHIA_DECK_QUALITY_OPENAI_API_KEY",
+        "synthetic-dq-only-key",
+    )
+
+    def create_internal_route_chat_model(**kwargs: Any) -> ChatOpenAI:
+        kwargs.pop("plan")
+        kwargs.pop("capability")
         kwargs.pop("attach_tracing")
+        kwargs.pop("api_key")
         return ChatOpenAI(model="gpt-5.6-sol", api_key="synthetic-not-used", **kwargs)
 
-    monkeypatch.setattr(invoker_module, "create_chat_model", create_chat_model)
+    monkeypatch.setattr(
+        invoker_module,
+        "create_internal_route_chat_model",
+        create_internal_route_chat_model,
+    )
     contact = "data:image/png;base64,Y29udGFjdA=="
     slide = "data:image/png;base64,c2xpZGU="
     blocks: list[dict[str, Any]] = [
@@ -281,6 +325,73 @@ def test_real_pinned_chatopenai_builds_the_exact_locked_eight_key_payload(
     assert payload["text"]["format"]["type"] == "json_schema"
     assert payload["text"]["format"]["strict"] is True
     assert payload["text"]["format"]["schema"]["additionalProperties"] is False
+
+
+def test_missing_dq_specific_credential_fails_without_falling_back_to_process_openai_key(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("SOPHIA_DECK_QUALITY_OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "ordinary-process-key-must-not-be-used")
+    create_calls = 0
+
+    def create_internal_route_chat_model(**_kwargs: Any) -> _FakeModel:
+        nonlocal create_calls
+        create_calls += 1
+        return _FakeModel(_FakeResponses())
+
+    monkeypatch.setattr(
+        invoker_module,
+        "create_internal_route_chat_model",
+        create_internal_route_chat_model,
+    )
+    with pytest.raises(QualityInvocationError, match="judge_unavailable"):
+        MultimodalStructuredModelInvoker().prepare_request(
+            plan=_plan(),
+            schema=_Result,
+            messages=["content-excluded"],
+            campaign_id="DQ-1",
+            canary_user_id="synthetic-canary-user",
+        )
+    assert create_calls == 0
+
+
+def test_noncanary_fails_before_dq_credential_lookup(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    actual_getenv = invoker_module.os.getenv
+    dq_key_reads = 0
+    create_calls = 0
+
+    def guarded_getenv(name: str, default: str | None = None) -> str | None:
+        nonlocal dq_key_reads
+        if name == "SOPHIA_DECK_QUALITY_OPENAI_API_KEY":
+            dq_key_reads += 1
+            raise AssertionError("noncanary attempted to read DQ credential")
+        return actual_getenv(name, default)
+
+    def create_internal_route_chat_model(**_kwargs: Any) -> _FakeModel:
+        nonlocal create_calls
+        create_calls += 1
+        return _FakeModel(_FakeResponses())
+
+    monkeypatch.setattr(invoker_module.os, "getenv", guarded_getenv)
+    monkeypatch.setattr(
+        invoker_module,
+        "create_internal_route_chat_model",
+        create_internal_route_chat_model,
+    )
+
+    with pytest.raises(QualityInvocationError, match="judge_unavailable"):
+        MultimodalStructuredModelInvoker().prepare_request(
+            plan=_plan(),
+            schema=_Result,
+            messages=["content-excluded"],
+            campaign_id="DQ-1",
+            canary_user_id="ordinary-user",
+        )
+
+    assert dq_key_reads == 0
+    assert create_calls == 0
 
 
 @pytest.mark.parametrize(
@@ -446,11 +557,15 @@ def test_callback_overrides_are_stripped_from_the_private_route(
     captured: dict[str, Any] = {}
     responses = _FakeResponses()
 
-    def create_chat_model(_name: str, **kwargs: Any) -> _FakeModel:
+    def create_internal_route_chat_model(**kwargs: Any) -> _FakeModel:
         captured.update(kwargs)
         return _FakeModel(responses)
 
-    monkeypatch.setattr(invoker_module, "create_chat_model", create_chat_model)
+    monkeypatch.setattr(
+        invoker_module,
+        "create_internal_route_chat_model",
+        create_internal_route_chat_model,
+    )
     overrides = dict(_plan().model_overrides)
     overrides.update(
         {

@@ -30,6 +30,10 @@ from deerflow.agents.checkpointer.provider import (
     _get_active_checkpointer_config,
     _resolve_sqlite_conn_str,
 )
+from deerflow.config.app_config import get_app_config
+from deerflow.sophia.build_runtime.startup import (
+    audit_deck_quality_builder_service_startup,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -88,7 +92,12 @@ async def _async_checkpointer(config) -> AsyncIterator[Checkpointer]:
 
 @contextlib.asynccontextmanager
 async def make_checkpointer() -> AsyncIterator[Checkpointer]:
-    """Async context manager that yields a checkpointer for the caller's lifetime.
+    """Run service-startup audits, then yield the process checkpointer.
+
+    LangGraph enters this configured context before graph collection and before
+    its ASGI lifespan yields readiness. An audit exception therefore fails the
+    service closed without coupling DQ prerequisites to ordinary graph runs.
+
     Resources are opened on enter and closed on exit — no global state::
 
         async with make_checkpointer() as checkpointer:
@@ -97,6 +106,7 @@ async def make_checkpointer() -> AsyncIterator[Checkpointer]:
     Yields an ``InMemorySaver`` when no checkpointer is configured in *config.yaml*.
     """
 
+    audit_deck_quality_builder_service_startup(config=get_app_config())
     config = _get_active_checkpointer_config()
 
     if config is None:

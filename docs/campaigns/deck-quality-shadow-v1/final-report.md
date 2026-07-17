@@ -1,4 +1,10 @@
-# Campaign DQ-1 Final Report
+# Campaign DQ-1 Historical Final Report
+
+> **Archived historical terminal — superseded by Amendment 002.** This report
+> records the `PREMISE_INVALIDATED` terminal reached by the original candidate.
+> Amendment 002 subsequently authorized and reopened DQ-1 on the durable
+> producer boundary described here. See [`state.md`](state.md) for the current
+> campaign state and current terminal evidence.
 
 Campaign status: **`PREMISE_INVALIDATED`**
 
@@ -58,9 +64,11 @@ evidence.
 Avoiding a known-invalid deploy is part of the terminal decision, not missing
 campaign evidence being represented as success.
 
-## Required next campaign
+## Successor requirement later authorized by Amendment 002
 
-Authorize a durable builder-completion producer amendment before resuming DQ-1:
+This report required a durable builder-completion producer amendment before
+resuming DQ-1. Amendment 002 later supplied that authorization and is now the
+controlling campaign amendment:
 
 1. mirror the current request and required source inputs immutably for eligible
    canaries under shadow authority;

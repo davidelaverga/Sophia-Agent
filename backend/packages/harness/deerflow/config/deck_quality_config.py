@@ -7,6 +7,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 
 from deerflow.config.model_route_config import ResolvedModelPlan
 from deerflow.sophia.deck_quality.cost import validate_sol_plan_locks
+from deerflow.sophia.storage.supabase_artifact_store import safe_object_path_segment
 
 REQUIRED_DECK_JUDGE_CAPABILITIES = frozenset(
     {
@@ -59,6 +60,13 @@ class DeckQualityConfig(BaseModel):
             raise DeckQualityConfigError("enabled DQ-1 execution must use shadow authority")
         if not self.canary_user_ids:
             raise DeckQualityConfigError("enabled canary scope requires at least one canary user ID")
+        if any(
+            safe_object_path_segment(user_id, default="user") != user_id
+            for user_id in self.canary_user_ids
+        ):
+            raise DeckQualityConfigError(
+                "enabled canary user IDs must be canonical durable-path segments"
+            )
         if self.max_quality_cost_usd is None:
             raise DeckQualityConfigError("enabled DQ-1 execution requires an explicit positive cost cap")
         if self.max_quality_cost_usd != Decimal("0.60"):

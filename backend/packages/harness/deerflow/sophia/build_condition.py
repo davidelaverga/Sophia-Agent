@@ -28,6 +28,8 @@ import tempfile
 from pathlib import Path
 from typing import Any
 
+from deerflow.sophia.process_group import run_native_process
+
 logger = logging.getLogger(__name__)
 
 _DEFAULT_MAX_ITERATIONS = 3
@@ -190,7 +192,7 @@ def rasterize_preview_pages(pdf_path: Path, max_pages: int | None = None) -> lis
             output: list[bytes] = []
             for page in pages_to_render:
                 prefix = Path(tmp_dir) / f"page-{page}"
-                completed = subprocess.run(  # noqa: S603 — binary from shutil.which
+                completed = run_native_process(
                     [
                         pdftoppm,
                         "-png",
@@ -206,6 +208,8 @@ def rasterize_preview_pages(pdf_path: Path, max_pages: int | None = None) -> lis
                     capture_output=True,
                     timeout=_PDFTOPPM_TIMEOUT_SECONDS,
                     check=False,
+                    writable_dirs=[tmp_dir],
+                    identity_paths=[pdf_path],
                 )
                 if completed.returncode != 0:
                     logger.warning(

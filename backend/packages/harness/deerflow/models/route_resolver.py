@@ -39,7 +39,7 @@ class ModelRouteResolver:
         route = self._config.model_routes.get(route_name)
         if route is None:
             raise ModelRouteResolutionError(f"model route not configured: {route_name}")
-        deployment = self._config.get_model_config(route.primary)
+        deployment = self._config.get_model_deployment(route.primary)
         if deployment is None:
             raise ModelRouteResolutionError(f"model deployment not configured: {route.primary}")
         profile = self._config.harness_profiles.get(route.profile)

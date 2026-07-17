@@ -113,7 +113,7 @@ def _install_fake(
     monkeypatch: pytest.MonkeyPatch,
     fake: _FakeInvoker,
 ) -> None:
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("SOPHIA_DECK_QUALITY_OPENAI_API_KEY", "sk-test")
     monkeypatch.setattr(
         smoke,
         "MultimodalStructuredModelInvoker",

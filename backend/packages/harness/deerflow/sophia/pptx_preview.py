@@ -82,6 +82,8 @@ def maybe_render_pptx_preview(
                     str(pptx_path),
                 ],
                 timeout=timeout,
+                writable_dirs=[tmp_dir],
+                identity_paths=[pptx_path],
             )
             produced = Path(tmp_dir) / (pptx_path.stem + ".pdf")
             if completed.returncode != 0 or not produced.is_file():

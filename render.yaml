@@ -28,6 +28,11 @@ services:
       # ppt-generation workflow execute inside sophia-langgraph, not gateway.
       - key: OPENAI_API_KEY
         sync: false
+      # DQ-1-only provider authority. The quality invoker injects this key
+      # explicitly for the exact admitted canary judge route; ordinary runtime
+      # model selection never reads it.
+      - key: SOPHIA_DECK_QUALITY_OPENAI_API_KEY
+        sync: false
       # DQ-1 accepts only the dedicated synthetic production identity. The
       # value is intentionally dashboard-managed and shared with the gateway
       # for duplicate scope checks; it contains no ordinary-user IDs.
@@ -53,8 +58,8 @@ services:
         value: sophia-builder-artifacts
       - key: SOPHIA_GATEWAY_URL
         sync: false
-      # Shared with sophia-gateway. Signs exact DQ-1 publication-admission
-      # bytes only; baseline terminal delivery remains independent.
+      # Shared with sophia-gateway. Signs the content-free DQ-1 producer
+      # double-storage-failure fallback; baseline delivery stays independent.
       - key: SOPHIA_BUILDER_EVENTS_HMAC_SECRET
         sync: false
       # Keep global LangSmith autotracing off; Sophia builder tracing is attached
@@ -70,9 +75,8 @@ services:
         value: Sophia
       - key: LANGSMITH_API_KEY
         sync: false
-      # Builder provider resilience: when Anthropic is overloaded or otherwise
-      # unavailable, retry the model turn once through OpenAI. OPENAI_API_KEY is
-      # already required above for builder visual skills.
+      # Preserve the pre-DQ-1 builder provider resilience behavior exactly.
+      # DQ-1 does not select, migrate, or otherwise alter this path.
       - key: SOPHIA_BUILDER_OPENAI_FALLBACK_ENABLED
         value: "true"
       - key: SOPHIA_BUILDER_OPENAI_FALLBACK_MODEL
@@ -154,12 +158,13 @@ services:
       - key: LANGGRAPH_URL
         sync: false
       # Gateway performs durable request reconciliation, bounded provenance
-      # materialization, and lease dispatch. It never receives OPENAI_API_KEY,
-      # rendered judge evidence, or model-facing payloads.
+      # materialization, and lease dispatch. It never receives the DQ-only
+      # OpenAI credential, rendered judge evidence, or model-facing payloads;
+      # pre-campaign gateway environment remains otherwise unchanged.
       - key: SOPHIA_DECK_QUALITY_CANARY_USER_IDS
         sync: false
-      # Shared with sophia-langgraph for the authenticated DQ-1 publication
-      # handoff only; it is not a prerequisite for terminal delivery.
+      # Shared with sophia-langgraph for the authenticated content-free DQ-1
+      # producer-failure fallback; it never authenticates terminal delivery.
       - key: SOPHIA_BUILDER_EVENTS_HMAC_SECRET
         sync: false
       - key: SOPHIA_VOICE_SERVER_URL

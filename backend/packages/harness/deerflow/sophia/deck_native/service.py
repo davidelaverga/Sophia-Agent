@@ -69,7 +69,7 @@ class DeckNativeService:
         command = [self._python, str(self._deck_cli), str(pptx), "inspect", "-o", str(raw_json_path)]
         if slide is not None:
             command.extend(["--slide", str(slide)])
-        completed = self._run(command)
+        completed = self._run(command, writable_files=[raw_json_path])
         if completed.returncode != 0:
             return NativeDeckInspectResult(
                 success=False,
@@ -141,7 +141,7 @@ class DeckNativeService:
             "--source-map",
             str(source_map),
         ]
-        completed = self._run(command)
+        completed = self._run(command, writable_files=[patch, source_map])
         if completed.returncode != 0:
             patch.unlink(missing_ok=True)
             source_map.unlink(missing_ok=True)
@@ -187,7 +187,7 @@ class DeckNativeService:
         ]
         if fix:
             command.append("--fix")
-        completed = self._run(command)
+        completed = self._run(command, writable_files=[output])
         if completed.returncode != 0 or not output.is_file():
             output.unlink(missing_ok=True)
             return NativeDeckPatchResult(
@@ -220,7 +220,7 @@ class DeckNativeService:
             command.extend(["--slides", ",".join(str(slide) for slide in touched)])
         else:
             command.append("--all")
-        completed = self._run(command)
+        completed = self._run(command, writable_files=[pptx])
         if completed.returncode != 0:
             return NativeDeckLintFixResult(
                 success=False,
@@ -271,7 +271,11 @@ class DeckNativeService:
         valid_slides = [int(slide) for slide in slides or [] if int(slide) >= 0]
         if valid_slides:
             command.extend(["--slide", ",".join(str(slide) for slide in valid_slides)])
-        completed = self._run(command, timeout=_RENDER_TIMEOUT_SECONDS)
+        completed = self._run(
+            command,
+            timeout=_RENDER_TIMEOUT_SECONDS,
+            writable_dirs=[render_dir],
+        )
         rendered = len(list(render_dir.glob("slide-*.jpg")))
         complete, expected_label = _render_completeness(rendered, valid_slides)
         errors = _render_errors(completed, complete=complete, expected_label=expected_label, rendered=rendered)
@@ -294,7 +298,14 @@ class DeckNativeService:
             "errors": [] if completed.returncode == 0 else _errors(completed),
         }
 
-    def _run(self, command: list[str], *, timeout: int = _CLI_TIMEOUT_SECONDS) -> subprocess.CompletedProcess[str]:
+    def _run(
+        self,
+        command: list[str],
+        *,
+        timeout: int = _CLI_TIMEOUT_SECONDS,
+        writable_files: list[Path] | None = None,
+        writable_dirs: list[Path] | None = None,
+    ) -> subprocess.CompletedProcess[str]:
         _ensure_script(command[1])
         if self._deadline_epoch_ms is not None:
             remaining = (self._deadline_epoch_ms - int(time.time() * 1000)) / 1000
@@ -311,6 +322,8 @@ class DeckNativeService:
                 command,
                 timeout=timeout,
                 cwd=self._scripts_dir,
+                writable_files=writable_files or (),
+                writable_dirs=writable_dirs or (),
             )
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout if isinstance(exc.stdout, str) else ""

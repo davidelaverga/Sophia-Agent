@@ -114,6 +114,7 @@ def test_runtime_instrument_compiles_every_identity_from_committed_inputs() -> N
                 name="openai-gpt-5-6-sol",
                 use="langchain_openai:ChatOpenAI",
                 model="gpt-5.6-sol",
+                access_scope="route_only",
                 provider="openai",
                 capabilities=REQUIRED_DECK_JUDGE_CAPABILITIES,
             )
@@ -155,6 +156,16 @@ def test_runtime_instrument_compiles_every_identity_from_committed_inputs() -> N
     assert runtime.lock.judge_profile_version == "v2"
     assert runtime.lock.assessment_schema_versions["blind_visual"].endswith("/v4")
     assert {item.id for item in runtime.all_criteria} == {item.id for item in runtime.rubric.document.criteria}
+
+    public_judge = config.model_copy(
+        update={
+            "models": [
+                config.models[0].model_copy(update={"access_scope": "public"})
+            ]
+        }
+    )
+    with pytest.raises(ValueError, match="judge deployment must be route-only"):
+        compile_runtime_instrument(public_judge)
 
 
 @pytest.mark.parametrize(
@@ -205,6 +216,15 @@ def test_canary_user_string_is_normalized_and_config_is_frozen() -> None:
     assert config.canary_user_ids == frozenset({"alpha", "beta"})
     with pytest.raises(ValidationError):
         config.enabled = False  # type: ignore[misc]
+
+
+@pytest.mark.parametrize(
+    "user_id",
+    ["canary@example.com", "tenant:canary", "canary/user", "_canary", "x" * 129],
+)
+def test_enabled_config_rejects_noncanonical_canary_user_ids(user_id: str) -> None:
+    with pytest.raises(ValidationError, match="canonical durable-path segments"):
+        _enabled_config(canary_user_ids={user_id})
 
 
 def test_startup_audit_is_noop_when_disabled_and_accepts_capable_route() -> None:

@@ -66,7 +66,7 @@ async def list_models() -> ModelsListResponse:
             supports_thinking=model.supports_thinking,
             supports_reasoning_effort=model.supports_reasoning_effort,
         )
-        for model in config.models
+        for model in config.public_models
     ]
     return ModelsListResponse(models=models)
 

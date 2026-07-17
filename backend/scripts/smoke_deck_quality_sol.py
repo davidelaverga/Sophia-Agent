@@ -68,16 +68,16 @@ def _write_json(path: Path, value: Any) -> None:
     )
 
 
-def _app_config(api_key: str, *, http_async_client: httpx.AsyncClient) -> AppConfig:
+def _app_config(*, http_async_client: httpx.AsyncClient) -> AppConfig:
     return AppConfig(
         models=[
             ModelConfig(
                 name="openai-gpt-5-6-sol",
                 display_name="OpenAI GPT-5.6 Sol",
+                access_scope="route_only",
                 provider="openai",
                 use="langchain_openai:ChatOpenAI",
                 model="gpt-5.6-sol",
-                api_key=api_key,
                 http_async_client=http_async_client,
                 supports_vision=True,
                 supports_reasoning_effort=True,
@@ -195,11 +195,13 @@ async def run_smoke(
     output_dir: Path,
     fixture_id: str,
 ) -> dict[str, Any]:
-    api_key = os.environ.get("OPENAI_API_KEY")
+    api_key = os.environ.get("SOPHIA_DECK_QUALITY_OPENAI_API_KEY")
     if not api_key:
-        raise RuntimeError("OPENAI_API_KEY is required for the opt-in Sol smoke")
+        raise RuntimeError(
+            "SOPHIA_DECK_QUALITY_OPENAI_API_KEY is required for the opt-in Sol smoke"
+        )
     http_async_client = httpx.AsyncClient(timeout=httpx.Timeout(180.0))
-    config = _app_config(api_key, http_async_client=http_async_client)
+    config = _app_config(http_async_client=http_async_client)
     set_app_config(config)
     try:
         plan = ModelRouteResolver(config).resolve(route_name="deck.judge.visual")

@@ -2,16 +2,22 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 import re
 import time
 from dataclasses import dataclass, field
 from typing import Any, Literal, TypeVar
 
 import anyio
-from pydantic import BaseModel
+from pydantic import BaseModel, SecretStr
 
+from deerflow.config.app_config import get_app_config
 from deerflow.config.model_route_config import ResolvedModelPlan
-from deerflow.models.factory import create_chat_model
+from deerflow.models.factory import (
+    InternalModelRouteCapability,
+    _issue_internal_model_route_capability,
+    create_internal_route_chat_model,
+)
 from deerflow.sophia.deck_quality.canonical import canonical_json_bytes
 from deerflow.sophia.deck_quality.strict_schema import strict_model_json_schema
 from deerflow.sophia.observability import langsmith_tracing_disabled
@@ -42,6 +48,7 @@ _LOCKED_REASONING = {
     "context": "current_turn",
 }
 _LOCKED_MAX_OUTPUT_TOKENS = 6000
+_DQ_OPENAI_API_KEY_ENV = "SOPHIA_DECK_QUALITY_OPENAI_API_KEY"
 _SAFE_PROVIDER_ERROR_TYPES = frozenset(
     {
         "APIConnectionError",
@@ -179,6 +186,29 @@ class MultimodalStructuredModelInvoker:
     """Strict provider-routed invocation for DQ-1; no provider client is constructed here."""
 
     @staticmethod
+    def _admitted_route_capability(
+        *,
+        plan: ResolvedModelPlan,
+        campaign_id: str,
+        canary_user_id: str,
+    ) -> InternalModelRouteCapability:
+        config = get_app_config()
+        deck_quality = config.deck_quality
+        if (
+            campaign_id != "DQ-1"
+            or not deck_quality.enabled
+            or deck_quality.mode != "shadow"
+            or deck_quality.scope != "canary"
+            or canary_user_id not in deck_quality.canary_user_ids
+            or deck_quality.judge_route != plan.route_name
+        ):
+            raise TypeError
+        return _issue_internal_model_route_capability(
+            plan,
+            purpose="deck_quality_judge",
+        )
+
+    @staticmethod
     def _overrides(
         *,
         plan: ResolvedModelPlan,
@@ -237,9 +267,31 @@ class MultimodalStructuredModelInvoker:
             campaign_id=campaign_id,
             canary_user_id=canary_user_id,
         )
-        model = create_chat_model(
-            plan.deployment_name,
+        if (
+            plan.route_name != "deck.judge.visual"
+            or plan.provider.casefold() != "openai"
+            or plan.deployment_name != "openai-gpt-5-6-sol"
+        ):
+            raise TypeError
+        capability = self._admitted_route_capability(
+            plan=plan,
+            campaign_id=campaign_id,
+            canary_user_id=canary_user_id,
+        )
+        # Do not even read the DQ-only credential name until exact campaign,
+        # mode, scope, identity, and route admission has succeeded.
+        api_key = os.getenv(_DQ_OPENAI_API_KEY_ENV, "").strip()
+        if not api_key:
+            raise RuntimeError("DQ-1 provider credential is unavailable")
+        model = create_internal_route_chat_model(
+            plan=plan,
+            capability=capability,
             attach_tracing=False,
+            # This credential is deliberately not OPENAI_API_KEY. Only the
+            # exact canary quality invoker injects it, so ordinary builder,
+            # companion, image-generation, and fallback paths cannot discover
+            # or consume the DQ-1 provider authority.
+            api_key=SecretStr(api_key),
             **overrides,
         )
         self._scrub_private_callbacks(model)

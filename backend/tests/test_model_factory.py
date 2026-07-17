@@ -89,6 +89,38 @@ def test_uses_first_model_when_name_is_none(monkeypatch):
     assert FakeChatModel.captured_kwargs.get("model") == "alpha"
 
 
+def test_default_selection_skips_route_only_model(monkeypatch):
+    internal = _make_model("internal").model_copy(update={"access_scope": "route_only"})
+    cfg = _make_app_config([internal, _make_model("public")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name=None)
+
+    assert FakeChatModel.captured_kwargs.get("model") == "public"
+
+
+def test_raises_when_only_route_only_models_are_configured(monkeypatch):
+    internal = _make_model("internal").model_copy(update={"access_scope": "route_only"})
+    cfg = _make_app_config([internal])
+    _patch_factory(monkeypatch, cfg)
+
+    with pytest.raises(ValueError, match="No public chat models are configured"):
+        factory_module.create_chat_model(name=None)
+
+
+def test_model_access_metadata_is_not_forwarded_to_provider(monkeypatch):
+    cfg = _make_app_config([_make_model("public")])
+    _patch_factory(monkeypatch, cfg)
+
+    FakeChatModel.captured_kwargs = {}
+    factory_module.create_chat_model(name="public")
+
+    assert "access_scope" not in FakeChatModel.captured_kwargs
+    assert "provider" not in FakeChatModel.captured_kwargs
+    assert "capabilities" not in FakeChatModel.captured_kwargs
+
+
 def test_raises_when_model_not_found(monkeypatch):
     cfg = _make_app_config([_make_model("only-model")])
     monkeypatch.setattr(factory_module, "get_app_config", lambda: cfg)

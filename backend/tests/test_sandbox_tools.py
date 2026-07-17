@@ -16,7 +16,7 @@ class _DummySandbox:
     def read_file(self, path: str) -> str:
         return self.files[path]
 
-    def execute_command_with_metadata(self, command: str) -> tuple[str, dict[str, object]]:
+    def execute_command_with_metadata(self, command: str, **_roots) -> tuple[str, dict[str, object]]:
         return f"ok:{command}", {"status": "completed", "command": command}
 
 

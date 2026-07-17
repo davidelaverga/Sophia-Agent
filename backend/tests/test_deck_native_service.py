@@ -51,15 +51,27 @@ def test_deck_native_subprocess_timeout_uses_process_group_runner(
     script.write_text("raise SystemExit(0)\n", encoding="utf-8")
     captured: dict = {}
 
-    def _timeout(command, *, timeout, cwd):
-        captured.update(command=command, timeout=timeout, cwd=cwd)
+    def _timeout(command, *, timeout, cwd, writable_files, writable_dirs):
+        captured.update(
+            command=command,
+            timeout=timeout,
+            cwd=cwd,
+            writable_files=writable_files,
+            writable_dirs=writable_dirs,
+        )
         raise subprocess.TimeoutExpired(command, timeout, output="partial", stderr="hung child")
 
     monkeypatch.setattr(native_service_module, "run_process_group", _timeout)
 
     result = DeckNativeService(scripts_dir=tmp_path)._run(["python", str(script)], timeout=30)
 
-    assert captured == {"command": ["python", str(script)], "timeout": 30, "cwd": tmp_path}
+    assert captured == {
+        "command": ["python", str(script)],
+        "timeout": 30,
+        "cwd": tmp_path,
+        "writable_files": (),
+        "writable_dirs": (),
+    }
     assert result.returncode == 124
     assert result.stdout == "partial"
     assert "hands-on-deck subprocess timed out after 30s" in result.stderr
@@ -74,8 +86,14 @@ def test_deck_native_default_subprocess_timeout_supports_long_decks(
     script.write_text("raise SystemExit(0)\n", encoding="utf-8")
     captured: dict = {}
 
-    def _complete(command, *, timeout, cwd):
-        captured.update(command=command, timeout=timeout, cwd=cwd)
+    def _complete(command, *, timeout, cwd, writable_files, writable_dirs):
+        captured.update(
+            command=command,
+            timeout=timeout,
+            cwd=cwd,
+            writable_files=writable_files,
+            writable_dirs=writable_dirs,
+        )
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
     monkeypatch.setattr(native_service_module, "run_process_group", _complete)

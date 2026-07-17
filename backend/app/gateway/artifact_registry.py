@@ -200,33 +200,11 @@ def normalize_artifact_storage_object_path(path: str | None) -> str | None:
         raise ValueError("Unsafe artifact storage path") from exc
 
 
-# Reserved Supabase keyspaces that are NEVER user-facing deliverables and must
-# never be served as registry artifacts: the delegation ledger (Spec D internal
-# conversation record), raw uploads (surfaced through the attachments UI), and
-# builder support scratch. Matched as path *segments* so the guard is layout-
-# independent. Mirrors ``supabase_artifact_store._is_internal_relative_name`` and
-# the list-side ``_is_builder_support_artifact_path`` so every read surface
-# excludes the same keyspaces.
-_INTERNAL_STORAGE_OBJECT_SEGMENTS = frozenset(
-    {
-        "ledger",
-        "uploads",
-        ".builder",
-        "visuals",
-        "assets",
-        "slides",
-        "sources",
-        "source_artifact",
-        "deck_build",
-    }
-)
-
-
 def _storage_object_addresses_internal_keyspace(relative_object_path: str) -> bool:
     """True when a thread-relative object path addresses an internal,
     non-deliverable keyspace that must never be served as a user artifact."""
     segments = [segment for segment in relative_object_path.split("/") if segment]
-    if any(segment in _INTERNAL_STORAGE_OBJECT_SEGMENTS for segment in segments):
+    if supabase_artifact_store.is_internal_artifact_path(relative_object_path):
         return True
     name = segments[-1].lower() if segments else ""
     return (

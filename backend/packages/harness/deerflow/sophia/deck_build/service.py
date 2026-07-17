@@ -76,6 +76,12 @@ from deerflow.sophia.deck_native.models import (
     NativeDeckRenderResult,
 )
 from deerflow.sophia.deck_native.policy import classify_native_deck_substrate
+from deerflow.sophia.image_subprocess import (
+    ImageThreadRoots,
+    TrustedImageRequest,
+    run_trusted_image_request,
+)
+from deerflow.sophia.subprocess_env import trusted_subprocess_env
 from deerflow.sophia.tools.prepare_pptx_image_manifest import create_pptx_image_manifest_core
 from deerflow.sophia.tools.render_markdown_to_pdf import _ensure_relative_to_outputs
 
@@ -1805,11 +1811,14 @@ class DeckBuildService:
         env = _image_subprocess_env(runtime)
         timeout = _deck_image_batch_timeout_seconds(manifest_path, runtime)
         try:
-            completed = subprocess.run(  # noqa: S603
-                [sys.executable, str(script), "--manifest", manifest_path],
-                check=False,
-                capture_output=True,
-                text=True,
+            completed = run_trusted_image_request(
+                TrustedImageRequest(
+                    python_executable=sys.executable,
+                    script=script,
+                    roots=_image_thread_roots(runtime),
+                    mode="manifest",
+                    manifest_file=_host_path(manifest_path, runtime),
+                ),
                 timeout=timeout,
                 env=env,
             )
@@ -1860,20 +1869,16 @@ class DeckBuildService:
         )
         aspect_ratio = (slide.asset_plan.aspect_ratio if slide.asset_plan else None) or "16:9"
         try:
-            completed = subprocess.run(  # noqa: S603
-                [
-                    sys.executable,
-                    str(script),
-                    "--prompt-file",
-                    slide.visual_prompt_path,
-                    "--output-file",
-                    slide.visual_asset_path,
-                    "--aspect-ratio",
-                    aspect_ratio,
-                ],
-                check=False,
-                capture_output=True,
-                text=True,
+            completed = run_trusted_image_request(
+                TrustedImageRequest(
+                    python_executable=sys.executable,
+                    script=script,
+                    roots=_image_thread_roots(runtime),
+                    mode="single",
+                    prompt_file=_host_path(slide.visual_prompt_path, runtime),
+                    output_file=_host_path(slide.visual_asset_path, runtime),
+                    aspect_ratio=aspect_ratio,
+                ),
                 timeout=timeout,
                 env=_image_subprocess_env(runtime),
             )
@@ -2466,7 +2471,10 @@ def _current_image_trace_env(runtime: ToolRuntime) -> dict[str, str]:
 
 
 def _image_subprocess_env(runtime: ToolRuntime) -> dict[str, str]:
-    env = os.environ.copy()
+    env = trusted_subprocess_env(
+        allow_openai=True,
+        allow_langsmith=True,
+    )
     thread_data = get_thread_data(runtime) or {}
     if thread_data.get("outputs_path"):
         env["SOPHIA_OUTPUTS_HOST_PATH"] = str(thread_data["outputs_path"])
@@ -2500,6 +2508,23 @@ def _manifest_item_count_for_timeout(manifest_path: str, runtime: ToolRuntime) -
         return 0
     items = payload.get("items") if isinstance(payload, dict) else None
     return len(items) if isinstance(items, list) else 0
+
+
+def _image_thread_roots(runtime: ToolRuntime) -> ImageThreadRoots:
+    """Return the one canonical thread boundary used by the image broker."""
+
+    thread_data = get_thread_data(runtime) or {}
+    values: dict[str, str] = {}
+    for name, key in (
+        ("workspace", "workspace_path"),
+        ("outputs", "outputs_path"),
+        ("uploads", "uploads_path"),
+    ):
+        value = thread_data.get(key)
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError(f"image subprocess requires thread {key}")
+        values[name] = value
+    return ImageThreadRoots.create(**values)
 
 
 def _deck_image_batch_timeout_seconds(manifest_path: str, runtime: ToolRuntime) -> int:

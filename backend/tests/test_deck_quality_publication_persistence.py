@@ -24,6 +24,11 @@ from deerflow.sophia.deck_quality.publication_persistence import (
 from deerflow.sophia.deck_quality.schemas import QualityInstrumentLock
 
 MIGRATION = Path(__file__).resolve().parents[1] / "migrations" / "2026_07_16_sophia_deck_quality_publications.sql"
+ATOMIC_MIGRATION = (
+    Path(__file__).resolve().parents[1]
+    / "migrations"
+    / "2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql"
+)
 SHADOW_MIGRATION = Path(__file__).resolve().parents[1] / "migrations" / "2026_07_15_sophia_deck_quality_shadow_runs.sql"
 
 
@@ -128,7 +133,17 @@ class _FakeRpc:
         payload: dict[str, object],
     ) -> list[dict[str, object]]:
         if self.request_payload is not None:
-            if self.request_payload != payload:
+            immutable_keys = set(payload) - {
+                "p_deadline_at",
+                "p_quality_run_deadline_at",
+            }
+            if immutable_keys != set(self.request_payload) - {
+                "p_deadline_at",
+                "p_quality_run_deadline_at",
+            } or any(
+                self.request_payload[key] != payload[key]
+                for key in immutable_keys
+            ):
                 raise DeckQualityPersistenceRpcError("request_conflict", status_code=409)
             return self._copy()
         self.request_payload = copy.deepcopy(payload)
@@ -187,6 +202,22 @@ class _FakeRpc:
             "finished_at": None,
         }
         return self._copy()
+
+    def sophia_request_ready_deck_quality_publication(
+        self,
+        payload: dict[str, object],
+    ) -> list[dict[str, object]]:
+        source_path = payload.pop("p_source_pack_object_path")
+        source_hash = payload.pop("p_source_pack_hash")
+        requested = self.sophia_request_deck_quality_publication(payload)
+        assert len(requested) == 1
+        return self.sophia_commit_deck_quality_publication_inputs(
+            {
+                "p_quality_run_id": payload["p_quality_run_id"],
+                "p_source_pack_object_path": source_path,
+                "p_source_pack_hash": source_hash,
+            }
+        )
 
     def sophia_commit_deck_quality_publication_inputs(
         self,
@@ -430,12 +461,11 @@ def test_request_locks_exact_identity_paths_and_separate_deadlines() -> None:
     assert request.quality_max_attempts == 5
     assert request.quality_run_deadline_at > request.deadline_at
     assert request.input_manifest_object_path.endswith(f"/quality/{request.quality_run_id}/input_bundle/manifest.json")
-    assert request.source_pack_object_path("2" * 64) == expected_publication_source_pack_path(
+    assert request.source_pack_object_path == expected_publication_source_pack_path(
         user_id=request.user_id,
         thread_id=request.thread_id,
         build_id=request.build_id,
         quality_run_id=request.quality_run_id,
-        source_pack_hash="2" * 64,
     )
     with pytest.raises(ValidationError, match="identity is not canonical"):
         _request(build_id="build_")
@@ -471,6 +501,51 @@ def test_request_locks_exact_identity_paths_and_separate_deadlines() -> None:
         _request(max_attempts=4)
 
 
+def test_request_ready_is_atomic_and_replays_without_resetting_deadline_or_state() -> None:
+    async def scenario() -> None:
+        rpc = _FakeRpc()
+        store = SupabaseDeckQualityPublicationStore(rpc)
+        request = _request(now=rpc.now)
+        source_hash = "2" * 64
+
+        ready = await store.request_ready(
+            request,
+            source_pack_object_path=request.source_pack_object_path,
+            source_pack_hash=source_hash,
+        )
+        assert ready.state is PublicationState.PENDING
+        assert ready.source_pack_object_path == request.source_pack_object_path
+        assert ready.source_pack_hash == source_hash
+        original_deadline = ready.deadline_at
+
+        assert rpc.row is not None
+        rpc.row["state"] = "retry_wait"
+        replay_request = request.model_copy(
+            update={
+                "deadline_at": request.deadline_at + timedelta(seconds=1),
+                "quality_run_deadline_at": (
+                    request.quality_run_deadline_at + timedelta(seconds=1)
+                ),
+            }
+        )
+        replay = await store.request_ready(
+            replay_request,
+            source_pack_object_path=request.source_pack_object_path,
+            source_pack_hash=source_hash,
+        )
+        assert replay.state is PublicationState.RETRY_WAIT
+        assert replay.deadline_at == original_deadline
+
+        with pytest.raises(ValueError, match="source-pack path"):
+            await store.request_ready(
+                request,
+                source_pack_object_path=request.input_manifest_object_path,
+                source_pack_hash=source_hash,
+            )
+
+    anyio.run(scenario)
+
+
 def test_exact_replay_from_request_through_atomic_promotion() -> None:
     async def scenario() -> None:
         rpc = _FakeRpc()
@@ -482,7 +557,7 @@ def test_exact_replay_from_request_through_atomic_promotion() -> None:
         assert await store.request(request) == awaiting
 
         source_hash = "2" * 64
-        source_path = request.source_pack_object_path(source_hash)
+        source_path = request.source_pack_object_path
         with pytest.raises(ValueError, match="source-pack path"):
             await store.commit_inputs(
                 awaiting,
@@ -577,7 +652,7 @@ def test_claim_receipt_is_concurrent_empty_and_delayed_replay_safe() -> None:
         awaiting = await store.request(request)
         pending = await store.commit_inputs(
             awaiting,
-            source_pack_object_path=request.source_pack_object_path("2" * 64),
+            source_pack_object_path=request.source_pack_object_path,
             source_pack_hash="2" * 64,
         )
         assert await store.claim(lease_owner="publisher-1", claim_token="empty-claim") == ()
@@ -656,7 +731,7 @@ def test_claim_rejects_duplicate_out_of_order_and_oversized_rpc_results() -> Non
         awaiting = await store.request(request)
         await store.commit_inputs(
             awaiting,
-            source_pack_object_path=request.source_pack_object_path("2" * 64),
+            source_pack_object_path=request.source_pack_object_path,
             source_pack_hash="2" * 64,
         )
         record = (
@@ -716,7 +791,7 @@ def test_retry_is_fenced_and_third_attempt_fails_closed() -> None:
         record = await store.request(request)
         record = await store.commit_inputs(
             record,
-            source_pack_object_path=request.source_pack_object_path("2" * 64),
+            source_pack_object_path=request.source_pack_object_path,
             source_pack_hash="2" * 64,
         )
 
@@ -770,7 +845,7 @@ def test_explicit_failure_replay_rejects_token_reuse_with_changed_arguments() ->
         record = await store.request(request)
         record = await store.commit_inputs(
             record,
-            source_pack_object_path=request.source_pack_object_path("2" * 64),
+            source_pack_object_path=request.source_pack_object_path,
             source_pack_hash="2" * 64,
         )
         claimed = (
@@ -828,6 +903,7 @@ def test_response_validation_rejects_preview_or_content_fields() -> None:
 
 def test_migration_locks_rpc_only_atomic_publication_contract() -> None:
     sql = MIGRATION.read_text()
+    atomic_sql = ATOMIC_MIGRATION.read_text()
     shadow_sql = SHADOW_MIGRATION.read_text()
     lower = sql.lower()
 
@@ -859,15 +935,36 @@ def test_migration_locks_rpc_only_atomic_publication_contract() -> None:
     assert "FOR UPDATE SKIP LOCKED\n         LIMIT 100" in claim
     assert "terminal_candidates" in claim
     assert "quality_run_ids" in claim
-    source_validator = sql.split(
+    source_validator = atomic_sql.split(
         "CREATE OR REPLACE FUNCTION public.sophia_deck_quality_publication_source_path_valid",
         maxsplit=1,
     )[1].split(
-        "CREATE OR REPLACE FUNCTION public.sophia_deck_quality_publication_artifact_path_valid",
+        "CREATE OR REPLACE FUNCTION public.sophia_request_deck_quality_publication",
         maxsplit=1,
     )[0]
     assert "p_object_path = replace(" in source_validator
+    assert "publication/source_pack/manifest.json" in source_validator
+    assert "p_object_hash || '.json'" not in source_validator
     assert "p_object_path IN" not in source_validator
+    request = atomic_sql.split(
+        "CREATE OR REPLACE FUNCTION public.sophia_request_deck_quality_publication",
+        maxsplit=1,
+    )[1].split(
+        "CREATE OR REPLACE FUNCTION public.sophia_request_ready_deck_quality_publication",
+        maxsplit=1,
+    )[0]
+    assert "v_publication.deadline_at IS DISTINCT" not in request
+    assert "v_publication.quality_run_deadline_at IS DISTINCT" not in request
+    request_ready = atomic_sql.split(
+        "CREATE OR REPLACE FUNCTION public.sophia_request_ready_deck_quality_publication",
+        maxsplit=1,
+    )[1].split(
+        "REVOKE ALL ON FUNCTION",
+        maxsplit=1,
+    )[0]
+    assert "sophia_request_deck_quality_publication(" in request_ready
+    assert "sophia_commit_deck_quality_publication_inputs(" in request_ready
+    assert "COMMIT" not in request_ready
     promote = sql.split(
         "CREATE OR REPLACE FUNCTION public.sophia_promote_deck_quality_publication",
         maxsplit=1,
@@ -889,6 +986,18 @@ def test_migration_locks_rpc_only_atomic_publication_contract() -> None:
     assert promote.index("public.sophia_request_deck_quality_shadow_run(") < promote.index("SET state = 'published'")
     assert "REVOKE ALL ON TABLE public.sophia_deck_quality_publications" in sql
     assert "REVOKE ALL ON TABLE public.sophia_deck_quality_publication_claim_receipts" in sql
+    assert (
+        "GRANT EXECUTE ON FUNCTION public.sophia_request_deck_quality_publication("
+        not in atomic_sql
+    )
+    assert (
+        "GRANT EXECUTE ON FUNCTION public.sophia_commit_deck_quality_publication_inputs("
+        not in atomic_sql
+    )
+    assert (
+        "GRANT EXECUTE ON FUNCTION public.sophia_request_ready_deck_quality_publication("
+        in atomic_sql
+    )
     assert "PRIMARY KEY (lease_owner, claim_token)" in sql
     assert "claim_limit BETWEEN 1 AND 2" in sql
     assert "isfinite(deadline_at)" in sql
@@ -905,6 +1014,7 @@ def test_migration_locks_rpc_only_atomic_publication_contract() -> None:
     assert "GRANT EXECUTE ON FUNCTION public.sophia_request_deck_quality_shadow_run" not in sql
     for operation in (
         "request",
+        "request_ready",
         "commit",
         "claim",
         "renew",
@@ -913,4 +1023,11 @@ def test_migration_locks_rpc_only_atomic_publication_contract() -> None:
         "promote",
         "get",
     ):
-        assert f"sophia_{operation}_deck_quality_publication" in sql or (operation == "claim" and "sophia_claim_deck_quality_publications" in sql)
+        assert (
+            f"sophia_{operation}_deck_quality_publication" in sql
+            or f"sophia_{operation}_deck_quality_publication" in atomic_sql
+            or (
+                operation == "claim"
+                and "sophia_claim_deck_quality_publications" in sql
+            )
+        )

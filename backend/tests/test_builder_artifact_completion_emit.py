@@ -9,14 +9,14 @@ the wire shape, the dedup, and the phantom-success guard.
 from __future__ import annotations
 
 import asyncio
+import copy
 import hashlib
 import json
-from collections.abc import Callable
+import threading
+import time
 from types import SimpleNamespace
-from typing import Any
 from unittest.mock import MagicMock, patch
 
-import httpx
 import pytest
 
 from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
@@ -433,6 +433,394 @@ def test_required_builder_upload_success_sets_verified_user_scoped_metadata(tmp_
     assert "signed" not in serialized.lower()
 
 
+def test_exact_canary_primary_is_create_only_public_and_immutable(tmp_path, monkeypatch):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    content = b"exact canary pptx bytes"
+    (outputs / "deck.pptx").write_bytes(content)
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-role-placeholder")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+    creates: list[tuple[str, bytes, str]] = []
+
+    class _ImmutableStore:
+        def create_if_absent(self, object_path, stored, *, content_type):
+            creates.append((object_path, stored, content_type))
+            return "created"
+
+        def read_bounded(self, *_args, **_kwargs):  # pragma: no cover - must not run
+            raise AssertionError("an acknowledged create must not re-read the PPTX")
+
+    monkeypatch.setattr(
+        "deerflow.config.app_config.get_app_config",
+        lambda: _quality_config(),
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "SupabaseImmutableObjectStore",
+        _ImmutableStore,
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "upload_artifact_object",
+        lambda *_args, **_kwargs: pytest.fail("canary primary must not use upsert"),
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "check_artifact_object_exists",
+        lambda _path: True,
+    )
+    artifact = _quality_artifact(user_id="alice")
+    for key in ("storage_provider", "storage_status", "storage_object_path", "artifact_sha256"):
+        artifact.pop(key, None)
+
+    result = builder_artifact_module._upload_builder_outputs_to_supabase(
+        thread_id="thread-1",
+        outputs_host_path=str(outputs),
+        artifact_args=artifact,
+    )
+
+    artifact_sha256 = hashlib.sha256(content).hexdigest()
+    version_digest = hashlib.sha256(b"version-1").hexdigest()
+    expected_path = (
+        "artifacts/alice/thread-1/logical-1/versions/"
+        f"{version_digest}/{artifact_sha256}/deck.pptx"
+    )
+    assert result == "uploaded"
+    assert creates == [
+        (
+            expected_path,
+            content,
+            "application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        )
+    ]
+    assert artifact["storage_object_path"] == expected_path
+    assert artifact["artifact_sha256"] == artifact_sha256
+    assert "/.builder/" not in expected_path
+
+
+def test_exact_canary_primary_reconciles_create_response_loss(tmp_path, monkeypatch):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    content = b"exact canary pptx bytes"
+    (outputs / "deck.pptx").write_bytes(content)
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-role-placeholder")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+    reads: list[tuple[str, int]] = []
+
+    class _ResponseLostStore:
+        def create_if_absent(self, *_args, **_kwargs):
+            raise RuntimeError("synthetic response loss after commit")
+
+        def read_bounded(self, object_path, *, max_bytes):
+            reads.append((object_path, max_bytes))
+            return content
+
+    monkeypatch.setattr(
+        "deerflow.config.app_config.get_app_config",
+        lambda: _quality_config(),
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "SupabaseImmutableObjectStore",
+        _ResponseLostStore,
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "upload_artifact_object",
+        lambda *_args, **_kwargs: pytest.fail("canary primary must not use upsert"),
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "check_artifact_object_exists",
+        lambda _path: True,
+    )
+    artifact = _quality_artifact(user_id="alice")
+    for key in ("storage_provider", "storage_status", "storage_object_path", "artifact_sha256"):
+        artifact.pop(key, None)
+
+    result = builder_artifact_module._upload_builder_outputs_to_supabase(
+        thread_id="thread-1",
+        outputs_host_path=str(outputs),
+        artifact_args=artifact,
+    )
+
+    assert result == "uploaded"
+    assert reads == [(artifact["storage_object_path"], len(content))]
+
+
+def test_exact_canary_primary_conflict_fails_without_storage_metadata(tmp_path, monkeypatch):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "deck.pptx").write_bytes(b"exact canary pptx bytes")
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-role-placeholder")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+
+    class _ConflictStore:
+        def create_if_absent(self, *_args, **_kwargs):
+            return "exists"
+
+        def read_bounded(self, *_args, **_kwargs):
+            return b"different bytes at immutable key"
+
+    monkeypatch.setattr(
+        "deerflow.config.app_config.get_app_config",
+        lambda: _quality_config(),
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "SupabaseImmutableObjectStore",
+        _ConflictStore,
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "check_artifact_object_exists",
+        lambda _path: pytest.fail("conflicting bytes cannot be acknowledged"),
+    )
+    artifact = _quality_artifact(user_id="alice")
+    for key in ("storage_provider", "storage_status", "storage_object_path", "artifact_sha256"):
+        artifact.pop(key, None)
+
+    result = builder_artifact_module._upload_builder_outputs_to_supabase(
+        thread_id="thread-1",
+        outputs_host_path=str(outputs),
+        artifact_args=artifact,
+    )
+
+    assert result == "required_verify_failed"
+    assert "storage_object_path" not in artifact
+    assert "artifact_sha256" not in artifact
+
+
+@pytest.mark.parametrize(
+    "invalid_identity_field",
+    ["deck_build_id", "logical_artifact_id", "current_artifact_version_id"],
+)
+def test_exact_canary_invalid_immutable_identity_never_falls_back_to_upsert(
+    tmp_path,
+    monkeypatch,
+    invalid_identity_field,
+):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "deck.pptx").write_bytes(b"exact canary pptx bytes")
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-role-placeholder")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+    monkeypatch.setattr(
+        "deerflow.config.app_config.get_app_config",
+        lambda: _quality_config(),
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "SupabaseImmutableObjectStore",
+        lambda: pytest.fail("invalid immutable identity must not construct storage"),
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "upload_artifact_object",
+        lambda *_args, **_kwargs: pytest.fail(
+            "invalid exact canary must not use mutable upsert"
+        ),
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "check_artifact_object_exists",
+        lambda _path: pytest.fail("invalid exact canary has no uploaded object"),
+    )
+    artifact = _quality_artifact(user_id="alice")
+    artifact.pop(invalid_identity_field)
+    for key in (
+        "storage_provider",
+        "storage_status",
+        "storage_object_path",
+        "artifact_sha256",
+    ):
+        artifact.pop(key, None)
+
+    result = builder_artifact_module._upload_builder_outputs_to_supabase(
+        thread_id="thread-1",
+        outputs_host_path=str(outputs),
+        artifact_args=artifact,
+    )
+
+    assert result == "required_immutable_identity_invalid"
+    assert "storage_object_path" not in artifact
+    assert "artifact_sha256" not in artifact
+
+
+def test_candidate_shaped_primary_fails_closed_when_dq_config_is_unavailable(
+    tmp_path,
+    monkeypatch,
+):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "deck.pptx").write_bytes(b"candidate-shaped pptx bytes")
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-role-placeholder")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+    monkeypatch.setattr(
+        "deerflow.config.app_config.get_app_config",
+        lambda: (_ for _ in ()).throw(RuntimeError("synthetic config failure")),
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "SupabaseImmutableObjectStore",
+        lambda: pytest.fail("unroutable candidate must not construct storage"),
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "upload_artifact_object",
+        lambda *_args, **_kwargs: pytest.fail(
+            "unroutable candidate must not use mutable upsert"
+        ),
+    )
+    artifact = _quality_artifact(user_id="alice")
+    for key in (
+        "storage_provider",
+        "storage_status",
+        "storage_object_path",
+        "artifact_sha256",
+    ):
+        artifact.pop(key, None)
+
+    result = builder_artifact_module._upload_builder_outputs_to_supabase(
+        thread_id="thread-1",
+        outputs_host_path=str(outputs),
+        artifact_args=artifact,
+    )
+
+    assert result == "required_immutable_identity_invalid"
+    assert "storage_object_path" not in artifact
+    assert "artifact_sha256" not in artifact
+
+
+def test_exact_canary_path_construction_failure_never_escapes_or_upserts(
+    tmp_path,
+    monkeypatch,
+):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "deck.pptx").write_bytes(b"exact canary pptx bytes")
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-role-placeholder")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+    monkeypatch.setattr(
+        "deerflow.config.app_config.get_app_config",
+        lambda: _quality_config(),
+    )
+    monkeypatch.setattr(
+        "deerflow.sophia.deck_quality.publisher.deck_quality_immutable_artifact_snapshot_path",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            RuntimeError("synthetic immutable path failure")
+        ),
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "SupabaseImmutableObjectStore",
+        lambda: pytest.fail("invalid immutable path must not construct storage"),
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "upload_artifact_object",
+        lambda *_args, **_kwargs: pytest.fail(
+            "invalid immutable path must not use mutable upsert"
+        ),
+    )
+    artifact = _quality_artifact(user_id="alice")
+    for key in (
+        "storage_provider",
+        "storage_status",
+        "storage_object_path",
+        "artifact_sha256",
+    ):
+        artifact.pop(key, None)
+
+    result = builder_artifact_module._upload_builder_outputs_to_supabase(
+        thread_id="thread-1",
+        outputs_host_path=str(outputs),
+        artifact_args=artifact,
+    )
+
+    assert result == "required_immutable_identity_invalid"
+    assert "storage_object_path" not in artifact
+    assert "artifact_sha256" not in artifact
+
+
+def test_noncanary_presentation_keeps_ordinary_upsert_and_no_dq_store_reads(
+    tmp_path,
+    monkeypatch,
+):
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    content = b"ordinary pptx bytes"
+    (outputs / "deck.pptx").write_bytes(content)
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("SOPHIA_ARTIFACT_REGISTRY_STORE", "supabase")
+    monkeypatch.setenv("SUPABASE_URL", "https://example.supabase.co")
+    monkeypatch.setenv("SUPABASE_SERVICE_ROLE_KEY", "svc-role-placeholder")
+    monkeypatch.setenv("SUPABASE_BUILDER_BUCKET", "sophia-builder-artifacts")
+    uploaded: list[tuple[str, bytes]] = []
+    monkeypatch.setattr(
+        "deerflow.config.app_config.get_app_config",
+        lambda: _quality_config(canary_user_ids=frozenset({"canary-only"})),
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "SupabaseImmutableObjectStore",
+        lambda: pytest.fail("ordinary users must not construct the DQ object store"),
+    )
+
+    def upload_object(object_path, stored, **_kwargs):
+        uploaded.append((object_path, stored))
+        return object_path
+
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "upload_artifact_object",
+        upload_object,
+    )
+    monkeypatch.setattr(
+        builder_artifact_module.supabase_artifact_store,
+        "check_artifact_object_exists",
+        lambda _path: True,
+    )
+    artifact = _quality_artifact(user_id="alice")
+    for key in (
+        "deck_build_id",
+        "logical_artifact_id",
+        "current_artifact_version_id",
+    ):
+        artifact.pop(key, None)
+    for key in ("storage_provider", "storage_status", "storage_object_path", "artifact_sha256"):
+        artifact.pop(key, None)
+
+    result = builder_artifact_module._upload_builder_outputs_to_supabase(
+        thread_id="thread-1",
+        outputs_host_path=str(outputs),
+        artifact_args=artifact,
+    )
+
+    assert result == "uploaded"
+    assert uploaded == [(artifact["storage_object_path"], content)]
+    assert "/versions/" not in artifact["storage_object_path"]
+    assert f"/{artifact['artifact_id']}/deck.pptx" in artifact["storage_object_path"]
+
+
 def test_required_builder_upload_promotes_primary_artifact_before_preview(tmp_path, monkeypatch):
     outputs = tmp_path / "outputs"
     outputs.mkdir()
@@ -838,15 +1226,9 @@ _QUALITY_RUN_ID = f"quality_{'a' * 64}"
 
 
 class _WebhookResponse:
-    def __init__(self, status_code: int, body: object) -> None:
+    def __init__(self, status_code: int) -> None:
         self.status_code = status_code
         self.text = "response"
-        self._body = body
-
-    def json(self) -> object:
-        if isinstance(self._body, BaseException):
-            raise self._body
-        return self._body
 
 
 def _install_webhook_responses(
@@ -863,429 +1245,122 @@ def _install_webhook_responses(
             return None
 
         def post(self, url: str, **kwargs):
-            index = len(calls)
-            if "json" in kwargs:
-                wire_json = kwargs["json"]
-                body = None
-                headers: dict[str, str] = {}
-            else:
-                body = kwargs["content"]
-                wire_json = json.loads(body)
-                headers = kwargs["headers"]
-            calls.append(
-                {
-                    "url": url,
-                    "body": body,
-                    "json": wire_json,
-                    "headers": headers,
-                }
-            )
-            result = responses[min(index, len(responses) - 1)]
+            calls.append({"url": url, **kwargs})
+            result = responses[min(len(calls) - 1, len(responses) - 1)]
             if isinstance(result, BaseException):
                 raise result
             return result
 
+    class _AsyncClient:
+        def __init__(self, **_kwargs) -> None:
+            pass
+
+        async def post(self, url: str, **kwargs):
+            calls.append({"url": url, **kwargs})
+            result = responses[min(len(calls) - 1, len(responses) - 1)]
+            if isinstance(result, BaseException):
+                raise result
+            return result
+
+        async def aclose(self) -> None:
+            return None
+
     monkeypatch.setattr(builder_events.httpx, "Client", lambda **_kwargs: _Client())
+    monkeypatch.setattr(builder_events.httpx, "AsyncClient", _AsyncClient)
     monkeypatch.setattr(builder_events.time, "sleep", lambda *_args: None)
     monkeypatch.setattr(builder_events, "_gateway_url", lambda: "http://gateway.test")
     monkeypatch.setattr(builder_events, "_warn_if_misconfigured", lambda _payload: None)
     return calls
 
 
-def _quality_webhook_payload() -> dict[str, object]:
-    return {
-        "thread_id": "parent-thread",
+def _quality_config(
+    *,
+    enabled: bool = True,
+    canary_user_ids: frozenset[str] = frozenset({"alice"}),
+) -> SimpleNamespace:
+    return SimpleNamespace(
+        deck_quality=SimpleNamespace(
+            enabled=enabled,
+            mode="shadow" if enabled else "off",
+            scope="canary",
+            canary_user_ids=canary_user_ids,
+        )
+    )
+
+
+def _quality_state() -> dict:
+    state = _make_state(
+        task_brief="Build the fixed DQ-1 presentation canary.",
+        task_type="presentation",
+    )
+    state["thread_data"] = {"outputs_path": "/mnt/user-data/outputs"}
+    return state
+
+
+def _quality_artifact(**overrides) -> dict:
+    artifact = _success_artifact(
+        artifact_path="/mnt/user-data/outputs/deck.pptx",
+        artifact_type="presentation",
+        artifact_ext="pptx",
+        artifact_is_fallback=False,
+        storage_provider="supabase",
+        storage_status="available",
+        storage_object_path="artifacts/alice/thread-companion-1/deck.pptx",
+        artifact_sha256="f" * 64,
+        manifest_revision=1,
+        deck_build_id="build-1",
+        logical_artifact_id="logical-1",
+        current_artifact_version_id="version-1",
+        builder_trace_root_run_id="builder-trace-root",
+        mechanical_gate_results={"passed": True},
+    )
+    artifact.update(overrides)
+    return artifact
+
+
+def _quality_completion_payload(**overrides) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "thread_id": "thread-companion-1",
         "task_id": "builder-task",
         "run_id": "builder-run",
         "builder_trace_root_run_id": "builder-trace-root",
-        "user_id": "canary-user",
+        "user_id": "alice",
         "status": "success",
         "task_type": "presentation",
-        "task_brief": "Prohibited user-visible content",
-        "trace_id": "prohibited-companion-trace",
-        "artifact_path": "mnt/user-data/outputs/deck.pptx",
-        "artifact_url": "https://signed.example/private",
-        "artifact_title": "Prohibited title",
-        "artifact_filename": "prohibited.pptx",
-        "artifact_files": [{"path": "prohibited"}],
-        "artifact_type": "presentation",
-        "artifact_ext": "pptx",
-        "artifact_is_fallback": False,
-        "storage_provider": "supabase",
-        "storage_status": "available",
-        "storage_object_path": "artifacts/canary-user/parent-thread/deck.pptx",
-        "artifact_sha256": "f" * 64,
-        "manifest_revision": 1,
-        "deck_build_id": "build-1",
-        "logical_artifact_id": "logical-1",
-        "current_artifact_version_id": "version-1",
-        "mechanical_gate_results": {"passed": True, "diagnostics": "prohibited"},
-        "source_retention_report": {"source": "prohibited"},
-        "native_contrast_report": {"diagnostics": "prohibited"},
-        "creative_plan_path": "/mnt/user-data/outputs/private-plan.json",
-        "builder_failure_diagnostics": {"details": "prohibited"},
-        "summary": "prohibited",
-        "error_message": "prohibited",
-        "deck_quality_publication_intent": {
-            "quality_run_id": _QUALITY_RUN_ID,
-        },
+        "task_brief": "Build the fixed DQ-1 presentation canary.",
     }
+    payload.update(overrides)
+    return payload
 
 
-def _quality_ack(*, state: str = "requested", quality_run_id: str = _QUALITY_RUN_ID) -> dict[str, object]:
-    return {
-        "deck_quality_publication_ack": {
-            "schema_version": "deck-quality-publication-ack/v1",
-            "quality_run_id": quality_run_id,
-            "state": state,
-        },
-    }
-
-
-def _quality_handoff(
-    callback: Callable[[], None],
-) -> Callable[[], tuple[dict[str, Any], Callable[[], None]]]:
-    return lambda: (_quality_webhook_payload(), callback)
-
-
-@pytest.mark.parametrize("ack_state", ["requested", "reconciled"])
-def test_post_webhook_continues_only_after_exact_durable_ack(
-    monkeypatch: pytest.MonkeyPatch,
-    ack_state: str,
-) -> None:
-    calls = _install_webhook_responses(
-        monkeypatch,
-        [
-            _WebhookResponse(202, {"delivered_subscribers": 1}),
-            _WebhookResponse(202, _quality_ack(state=ack_state)),
-        ],
-    )
-    callback_observations: list[int] = []
-
-    builder_events._post_webhook(
-        _quality_webhook_payload(),
-        _quality_handoff(lambda: callback_observations.append(len(calls))),
+def _quality_receipt() -> SimpleNamespace:
+    return SimpleNamespace(
+        quality_run_id=_QUALITY_RUN_ID,
+        bundle_object_path=f"dq1/producer/v1/{_QUALITY_RUN_ID}/bundle.bin",
+        bundle_hash="e" * 64,
+        bundle_size_bytes=4096,
     )
 
-    assert len(calls) == 2
-    assert callback_observations == [2]
-    assert calls[0]["url"] == "http://gateway.test/internal/builder-events"
-    assert calls[1]["url"] == ("http://gateway.test/internal/deck-quality-publications")
-    delivery = calls[0]["json"]
-    publication = calls[1]["json"]
-    assert isinstance(delivery, dict)
-    assert isinstance(publication, dict)
-    assert "deck_quality_publication_intent" not in delivery
-    assert publication["mechanical_gate_results"] == {"passed": True}
-    for prohibited in (
-        "task_brief",
-        "artifact_url",
-        "artifact_title",
-        "artifact_filename",
-        "artifact_files",
-        "source_retention_report",
-        "native_contrast_report",
-        "creative_plan_path",
-        "builder_failure_diagnostics",
-        "trace_id",
-        "summary",
-        "error_message",
-    ):
-        assert prohibited not in publication
-    assert calls[0]["headers"] == {}
-    assert calls[1]["headers"]["X-Sophia-Builder-Nonce"]
+
+def _quality_intent() -> SimpleNamespace:
+    return SimpleNamespace(quality_run_id=_QUALITY_RUN_ID)
 
 
-def test_post_webhook_retries_5xx_but_continues_once_on_later_exact_ack(
+def test_exact_canary_is_durable_before_thread_start_and_only_posts_baseline(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    calls = _install_webhook_responses(
-        monkeypatch,
-        [
-            _WebhookResponse(202, {"delivered_subscribers": 1}),
-            _WebhookResponse(503, _quality_ack()),
-            _WebhookResponse(202, _quality_ack()),
-        ],
-    )
-    callback = MagicMock()
-
-    builder_events._post_webhook(
-        _quality_webhook_payload(),
-        _quality_handoff(callback),
-    )
-
-    assert len(calls) == 3
-    assert calls[0]["url"].endswith("/internal/builder-events")
-    assert all(call["url"].endswith("/internal/deck-quality-publications") for call in calls[1:])
-    assert len(
-        {
-            call["headers"]["X-Sophia-Builder-Nonce"]
-            for call in calls[1:]
-        }
-    ) == 2
-    callback.assert_called_once_with()
-
-
-@pytest.mark.parametrize(
-    "body",
-    [
-        {"delivered_subscribers": 1},
-        _quality_ack(quality_run_id=f"quality_{'b' * 64}"),
-        _quality_ack(state="completed"),
-        {
-            **_quality_ack(),
-            "deck_quality_publication_ack": {
-                **_quality_ack()["deck_quality_publication_ack"],
-                "extra": True,
-            },
-        },
-        ValueError("not JSON"),
-    ],
-    ids=["legacy", "run-mismatch", "invalid-state", "extra-ack-field", "non-json"],
-)
-def test_publication_retries_legacy_mismatched_or_invalid_ack(
-    monkeypatch: pytest.MonkeyPatch,
-    body: object,
-) -> None:
-    calls = _install_webhook_responses(
-        monkeypatch,
-        [
-            _WebhookResponse(202, {"delivered_subscribers": 1}),
-            *[_WebhookResponse(202, body) for _ in range(4)],
-        ],
-    )
-    callback = MagicMock()
-
-    builder_events._post_webhook(
-        _quality_webhook_payload(),
-        _quality_handoff(callback),
-    )
-
-    assert len(calls) == 5
-    callback.assert_not_called()
-
-
-@pytest.mark.parametrize(
-    ("responses", "expected_calls"),
-    [
-        ([_WebhookResponse(400, _quality_ack())], 2),
-        ([_WebhookResponse(302, _quality_ack())], 2),
-        ([_WebhookResponse(503, _quality_ack())] * 4, 5),
-    ],
-    ids=["4xx", "redirect", "exhausted-5xx"],
-)
-def test_post_webhook_never_continues_without_a_2xx_exact_ack(
-    monkeypatch: pytest.MonkeyPatch,
-    responses: list[_WebhookResponse],
-    expected_calls: int,
-) -> None:
-    calls = _install_webhook_responses(
-        monkeypatch,
-        [_WebhookResponse(202, {"delivered_subscribers": 1}), *responses],
-    )
-    callback = MagicMock()
-
-    builder_events._post_webhook(
-        _quality_webhook_payload(),
-        _quality_handoff(callback),
-    )
-
-    assert len(calls) == expected_calls
-    callback.assert_not_called()
-
-
-def test_publication_response_loss_retries_without_replaying_delivery(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    calls = _install_webhook_responses(
-        monkeypatch,
-        [
-            _WebhookResponse(202, {"delivered_subscribers": 1}),
-            httpx.ReadError("response lost"),
-            _WebhookResponse(202, _quality_ack(state="reconciled")),
-        ],
-    )
-    callback = MagicMock()
-
-    builder_events._post_webhook(
-        _quality_webhook_payload(),
-        _quality_handoff(callback),
-    )
-
-    assert len(calls) == 3
-    assert sum(call["url"].endswith("/internal/builder-events") for call in calls) == 1
-    assert sum(call["url"].endswith("/internal/deck-quality-publications") for call in calls) == 2
-    callback.assert_called_once_with()
-
-
-def test_ordinary_delivery_never_calls_publication_endpoint_or_source_capture(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = _quality_webhook_payload()
-    payload.pop("deck_quality_publication_intent")
-    calls = _install_webhook_responses(
-        monkeypatch,
-        [_WebhookResponse(202, {"delivered_subscribers": 1})],
-    )
-
-    handoff = MagicMock(return_value=(payload, None))
-    with patch("deerflow.sophia.deck_quality.publisher.capture_deck_quality_source_pack") as capture:
-        builder_events._post_webhook(
-            payload,
-            handoff,
-        )
-
-    assert len(calls) == 1
-    assert calls[0]["url"].endswith("/internal/builder-events")
-    handoff.assert_called_once_with()
-    capture.assert_not_called()
-
-
-def test_quality_preparation_never_runs_before_successful_delivery(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    payload = _quality_webhook_payload()
-    payload.pop("deck_quality_publication_intent")
-    calls = _install_webhook_responses(
-        monkeypatch,
-        [_WebhookResponse(503, {})] * 4,
-    )
-    handoff = MagicMock()
-
-    builder_events._post_webhook(payload, handoff)
-
-    assert len(calls) == 4
-    assert all(call["url"].endswith("/internal/builder-events") for call in calls)
-    assert all(call["headers"] == {} for call in calls)
-    handoff.assert_not_called()
-
-
-def test_quality_ack_callback_calls_exact_publisher_continuation() -> None:
-    prepared = object()
-    intent = object()
-    instrument = object()
-
-    with patch("deerflow.sophia.deck_quality.publisher.complete_deck_quality_publication_after_ack") as complete:
-        callback = builder_events._deck_quality_publication_ack_callback(
-            prepared=prepared,
-            intent=intent,
-            instrument=instrument,
-        )
-        complete.assert_not_called()
-        callback()
-
-    complete.assert_called_once_with(
-        prepared=prepared,
-        intent=intent,
-        instrument=instrument,
-    )
-
-
-def test_quality_handoff_snapshot_is_selective_and_stable() -> None:
-    state = {
-        "thread_data": {"outputs_path": "/tmp/original"},
-        "messages": [{"content": "must not be captured"}],
-    }
-    artifact = {
-        "artifact_path": "/mnt/user-data/outputs/deck.pptx",
-        "mechanical_gate_results": {
-            "passed": True,
-            "issues": [{"code": "original"}],
-        },
-        "source_retention_report": {"items": [{"path": "original"}]},
-        "unrelated_private_field": "must not be captured",
-    }
-    completion = {
-        "thread_id": "parent-thread",
-        "task_id": "builder-task",
-        "task_brief": "bounded brief",
-        "artifact_path": "mnt/user-data/outputs/deck.pptx",
-        "summary": "must not be captured",
-    }
-
-    state_snapshot, artifact_snapshot, completion_snapshot = (
-        builder_events._snapshot_deck_quality_handoff_inputs(
-            state=state,
-            artifact=artifact,
-            completion_payload=completion,
-        )
-    )
-    state["thread_data"]["outputs_path"] = "/tmp/mutated"
-    artifact["mechanical_gate_results"]["issues"][0]["code"] = "mutated"
-    artifact["source_retention_report"]["items"][0]["path"] = "mutated"
-    completion["task_brief"] = "mutated"
-
-    assert state_snapshot == {"thread_data": {"outputs_path": "/tmp/original"}}
-    assert "messages" not in state_snapshot
-    assert artifact_snapshot["mechanical_gate_results"]["issues"] == [
-        {"code": "original"}
-    ]
-    assert artifact_snapshot["source_retention_report"]["items"] == [
-        {"path": "original"}
-    ]
-    assert "unrelated_private_field" not in artifact_snapshot
-    assert completion_snapshot["task_brief"] == "bounded brief"
-    assert "summary" not in completion_snapshot
-
-
-def test_quality_snapshot_failure_still_schedules_baseline_delivery() -> None:
-    runtime = _make_runtime(builder_thread_id="dq1-snapshot-isolation")
-    thread = MagicMock()
-
-    with (
-        patch.object(builder_events, "_signed_artifact_url", return_value=None),
-        patch.object(builder_events.threading, "Thread", return_value=thread) as thread_cls,
-        patch.object(
-            builder_events,
-            "_snapshot_deck_quality_handoff_inputs",
-            side_effect=RuntimeError("snapshot failed"),
-        ),
-    ):
-        result = builder_events.fire_completion_webhook_from_artifact(
-            state=_make_state(),
-            runtime=runtime,
-            artifact=_success_artifact(),
-            status="completed",
-        )
-
-    assert result is True
-    thread.start.assert_called_once_with()
-    assert (
-        thread_cls.call_args.kwargs["kwargs"][
-            "prepare_deck_quality_publication_handoff"
-        ]
-        is None
-    )
-
-
-def test_exact_canary_is_prepared_only_after_detached_delivery_succeeds(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = _make_runtime(
-        builder_thread_id="dq1-canary",
-        builder_run_id="run-1",
-    )
-    state = _make_state()
-    config = object()
+    state = _quality_state()
+    artifact = _quality_artifact()
+    state_before = copy.deepcopy(state)
+    artifact_before = copy.deepcopy(artifact)
     prepared = object()
     instrument = object()
-    intent_wire = {
-        "schema_version": "deck-quality-publication-intent/v1",
-        "quality_run_id": _QUALITY_RUN_ID,
-    }
-    intent = SimpleNamespace(model_dump=lambda **_kwargs: intent_wire)
-    callback = MagicMock()
     order: list[str] = []
     threads: list[object] = []
-    calls = _install_webhook_responses(
-        monkeypatch,
-        [
-            _WebhookResponse(202, {"delivered_subscribers": 1}),
-            _WebhookResponse(202, _quality_ack()),
-        ],
-    )
+    calls = _install_webhook_responses(monkeypatch, [_WebhookResponse(202)])
+    post_webhook = builder_events._post_webhook
 
-    class _DetachedThread:
+    class _SynchronousThread:
         def __init__(self, **kwargs) -> None:
             order.append("thread-init")
             self.kwargs = kwargs
@@ -1298,9 +1373,11 @@ def test_exact_canary_is_prepared_only_after_detached_delivery_succeeds(
                 **self.kwargs.get("kwargs", {}),
             )
 
+    def derive(**_kwargs):
+        order.append("derive")
+        return "d" * 64
+
     def prepare(**_kwargs):
-        assert len(calls) == 1
-        assert calls[0]["url"].endswith("/internal/builder-events")
         order.append("prepare")
         return prepared
 
@@ -1309,22 +1386,26 @@ def test_exact_canary_is_prepared_only_after_detached_delivery_succeeds(
         return instrument
 
     def build_intent(**_kwargs):
-        order.append("build-intent")
-        return intent
+        order.append("intent")
+        return _quality_intent()
 
-    def build_callback(**_kwargs):
-        order.append("build-callback")
-        return callback
+    def persist(**_kwargs):
+        order.append("persist-complete")
+        return _quality_receipt()
+
+    def post(payload):
+        order.append("post")
+        post_webhook(payload)
 
     with (
         patch.object(builder_events, "_signed_artifact_url", return_value=None),
-        patch.object(builder_events.threading, "Thread", _DetachedThread),
-        patch.object(
-            builder_events,
-            "_deck_quality_publication_ack_callback",
-            side_effect=build_callback,
+        patch.object(builder_events.threading, "Thread", _SynchronousThread),
+        patch.object(builder_events, "_post_webhook", side_effect=post) as posted,
+        patch("deerflow.config.app_config.get_app_config", return_value=_quality_config()),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.derive_deck_quality_candidate_digest",
+            side_effect=derive,
         ),
-        patch("deerflow.config.app_config.get_app_config", return_value=config),
         patch(
             "deerflow.sophia.deck_quality.publisher.prepare_deck_quality_publication",
             side_effect=prepare,
@@ -1334,158 +1415,932 @@ def test_exact_canary_is_prepared_only_after_detached_delivery_succeeds(
             side_effect=compile_instrument,
         ),
         patch(
-            "deerflow.sophia.deck_quality.publisher.build_deck_quality_publication_intent",
+            "deerflow.sophia.deck_quality.publisher.build_deck_quality_producer_intent",
             side_effect=build_intent,
         ),
-        patch("deerflow.sophia.deck_quality.publisher.capture_deck_quality_source_pack") as capture,
-        patch("deerflow.sophia.deck_quality.publisher.complete_deck_quality_publication_after_ack") as complete,
+        patch(
+            "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_bundle",
+            side_effect=persist,
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_failure"
+        ) as persist_failure,
     ):
-
-        async def invoke_from_active_event_loop() -> bool:
-            assert asyncio.get_running_loop().is_running()
-            return builder_events.fire_completion_webhook_from_artifact(
-                state=state,
-                runtime=runtime,
-                artifact=_success_artifact(),
-                status="completed",
-            )
-
-        result = asyncio.run(invoke_from_active_event_loop())
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=state,
+            runtime=_make_runtime(
+                builder_thread_id="builder-task",
+                builder_run_id="builder-run",
+            ),
+            artifact=artifact,
+            status="completed",
+        )
 
     assert result is True
     assert order == [
-        "thread-init",
-        "thread-start",
+        "derive",
         "prepare",
         "compile",
-        "build-intent",
-        "build-callback",
+        "intent",
+        "persist-complete",
+        "thread-init",
+        "thread-start",
+        "post",
     ]
     assert len(threads) == 1
-    thread_kwargs = threads[0].kwargs
-    assert thread_kwargs["target"] is builder_events._post_webhook
-    assert thread_kwargs["daemon"] is True
-    assert "deck_quality_publication_intent" not in thread_kwargs["args"][0]
-    assert callable(
-        thread_kwargs["kwargs"]["prepare_deck_quality_publication_handoff"]
+    assert threads[0].kwargs["target"] is posted
+    delivery_payload = threads[0].kwargs["args"][0]
+    assert calls == [
+        {
+            "url": "http://gateway.test/internal/builder-events",
+            "json": delivery_payload,
+        }
+    ]
+    assert "deck_quality_publication_intent" not in delivery_payload
+    assert state == state_before
+    assert artifact == artifact_before
+    persist_failure.assert_not_called()
+
+
+def test_quality_persistence_exception_still_schedules_identical_baseline() -> None:
+    baseline = _quality_completion_payload(
+        artifact_path="mnt/user-data/outputs/deck.pptx",
+        artifact_type="presentation",
+        artifact_ext="pptx",
     )
+    baseline_before = copy.deepcopy(baseline)
+    thread = MagicMock()
+    prepared = object()
+    instrument = object()
+    post = MagicMock()
+    order: list[str] = []
+
+    def fail_marker(**_kwargs) -> None:
+        order.append("failure-marker")
+        raise RuntimeError("storage unavailable")
+
+    def send_signal(**_kwargs) -> bool:
+        order.append("failure-signal")
+        return True
+
+    def make_thread(**_kwargs):
+        order.append("thread-init")
+        return thread
+
+    thread.start.side_effect = lambda: order.append("thread-start")
+
+    with (
+        patch.object(
+            builder_events,
+            "build_completion_payload_from_artifact",
+            return_value=baseline,
+        ),
+        patch.object(builder_events.time, "monotonic", return_value=100.0),
+        patch.object(
+            builder_events.threading,
+            "Thread",
+            side_effect=make_thread,
+        ) as thread_cls,
+        patch.object(builder_events, "_post_webhook", post),
+        patch("deerflow.config.app_config.get_app_config", return_value=_quality_config()),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.derive_deck_quality_candidate_digest",
+            return_value="d" * 64,
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.prepare_deck_quality_publication",
+            return_value=prepared,
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.instrument.compile_runtime_instrument",
+            return_value=instrument,
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.build_deck_quality_producer_intent",
+            return_value=_quality_intent(),
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_bundle",
+            side_effect=RuntimeError("database unavailable"),
+        ) as persist_bundle,
+        patch(
+            "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_failure",
+            side_effect=fail_marker,
+        ) as persist_failure,
+        patch.object(
+            builder_events,
+            "_post_deck_quality_producer_failure_signal",
+            side_effect=send_signal,
+        ) as failure_signal,
+    ):
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=_quality_state(),
+            runtime=_make_runtime(
+                builder_thread_id="builder-task",
+                builder_run_id="builder-run",
+            ),
+            artifact=_quality_artifact(),
+            status="completed",
+        )
+
+    assert result is True
+    assert baseline == baseline_before
+    assert order == [
+        "failure-marker",
+        "failure-signal",
+        "thread-init",
+        "thread-start",
+    ]
+    assert thread_cls.call_args.kwargs["target"] is post
+    assert thread_cls.call_args.kwargs["args"] == (baseline,)
+    thread.start.assert_called_once_with()
+    persist_bundle.assert_called_once_with(
+        prepared=prepared,
+        instrument=instrument,
+        intent=_quality_intent(),
+        deadline=101.15,
+    )
+    post.assert_not_called()
+    persist_failure.assert_called_once_with(
+        candidate_digest="d" * 64,
+        failure_stage="producer_bundle",
+        failure_code="producer_bundle_unavailable",
+        quality_run_id=_QUALITY_RUN_ID,
+        prepared=prepared,
+        instrument=instrument,
+        intent=_quality_intent(),
+        deadline=101.5,
+    )
+    failure_signal.assert_called_once()
+    signal_arguments = dict(failure_signal.call_args.kwargs)
+    deadline = signal_arguments.pop("deadline")
+    assert deadline == 102.0
+    assert signal_arguments == {
+        "candidate_digest": "d" * 64,
+        "user_id": "alice",
+        "failure_stage": "producer_bundle",
+        "upstream_failure_code": "producer_bundle_unavailable",
+        "quality_run_id": _QUALITY_RUN_ID,
+    }
+
+
+def test_independent_failure_signal_retries_response_loss_with_same_body_new_nonce(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_webhook_responses(
+        monkeypatch,
+        [RuntimeError("response lost"), _WebhookResponse(202)],
+    )
+
+    result = builder_events._post_deck_quality_producer_failure_signal(
+        candidate_digest="d" * 64,
+        user_id="alice",
+        failure_stage="producer_bundle",
+        upstream_failure_code="producer_bundle_unavailable",
+        quality_run_id=_QUALITY_RUN_ID,
+    )
+
+    assert result is True
     assert len(calls) == 2
-    assert calls[0]["headers"] == {}
-    assert calls[1]["headers"]["X-Sophia-Builder-Signature"].startswith("v1=")
-    callback.assert_called_once_with()
-    capture.assert_not_called()
-    complete.assert_not_called()
+    assert {
+        str(call["url"]) for call in calls
+    } == {"http://gateway.test/internal/deck-quality-producer-failures"}
+    assert calls[0]["content"] == calls[1]["content"]
+    first_headers = calls[0]["headers"]
+    second_headers = calls[1]["headers"]
+    assert isinstance(first_headers, dict)
+    assert isinstance(second_headers, dict)
+    assert first_headers["X-Sophia-Builder-Nonce"] != (
+        second_headers["X-Sophia-Builder-Nonce"]
+    )
+    decoded = json.loads(calls[0]["content"])
+    assert decoded == {
+        "campaign_id": "DQ-1",
+        "candidate_digest": "d" * 64,
+        "failure_code": "shadow_dispatch_unavailable",
+        "failure_stage": "producer_bundle",
+        "quality_run_id": _QUALITY_RUN_ID,
+        "schema_version": "deck-quality-producer-failure-signal/v1",
+        "upstream_failure_code": "producer_bundle_unavailable",
+        "user_id": "alice",
+    }
+
+
+def test_failure_signal_attempt_timeouts_share_one_absolute_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    timeouts: list[float] = []
+    attempts = 0
+
+    class _AsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            timeouts.append(timeout)
+
+        async def post(self, *_args, **_kwargs):
+            nonlocal attempts
+            attempts += 1
+            if attempts == 1:
+                raise RuntimeError("synthetic response loss")
+            await asyncio.sleep(1.0)
+
+        async def aclose(self) -> None:
+            return None
+
+    monkeypatch.setattr(builder_events.httpx, "AsyncClient", _AsyncClient)
+    monkeypatch.setattr(builder_events, "_gateway_url", lambda: "http://gateway.test")
+    # Leave enough scheduling margin for a loaded full-suite worker while the
+    # second synthetic request still exceeds the single absolute deadline.
+    deadline = time.monotonic() + 0.5
+    started = time.monotonic()
+
+    result = builder_events._post_deck_quality_producer_failure_signal(
+        candidate_digest="d" * 64,
+        user_id="alice",
+        failure_stage="producer_bundle",
+        upstream_failure_code="producer_bundle_unavailable",
+        quality_run_id=_QUALITY_RUN_ID,
+        deadline=deadline,
+    )
+
+    assert result is False
+    assert time.monotonic() - started < 0.75
+    assert attempts == 2
+    assert len(timeouts) == 1
+    assert 0 < timeouts[0] <= 0.5
+
+
+@pytest.mark.parametrize("failure_point", ["constructor", "start"])
+def test_preparation_thread_failure_is_signaled_before_delivery(
+    failure_point: str,
+) -> None:
+    delivery = _quality_completion_payload()
+    delivery_before = copy.deepcopy(delivery)
+    delivery_thread = MagicMock()
+    marker_arguments: dict[str, object] = {}
+    signal_arguments: dict[str, object] = {}
+    order: list[str] = []
+
+    class _FailingPreparationThread:
+        def __init__(self, **_kwargs) -> None:
+            order.append("preparation-thread-init")
+            if failure_point == "constructor":
+                raise RuntimeError("preparation thread construction failed")
+
+        def start(self) -> None:
+            order.append("preparation-thread-start")
+            raise RuntimeError("preparation thread start failed")
+
+    def derive(**_kwargs) -> str:
+        order.append("derive")
+        return "d" * 64
+
+    def fail_marker(**kwargs) -> None:
+        marker_arguments.update(kwargs)
+        order.append("failure-marker")
+        raise RuntimeError("object store unavailable")
+
+    def persist_signal(**kwargs) -> bool:
+        signal_arguments.update(kwargs)
+        order.append("failure-signal")
+        return True
+
+    def make_delivery_thread(**_kwargs):
+        order.append("delivery-thread-init")
+        return delivery_thread
+
+    delivery_thread.start.side_effect = lambda: order.append(
+        "delivery-thread-start"
+    )
+    with (
+        patch.object(
+            builder_events,
+            "build_completion_payload_from_artifact",
+            return_value=delivery,
+        ),
+        patch.object(
+            builder_events,
+            "_READ_ONLY_PREPARATION_THREAD",
+            _FailingPreparationThread,
+        ),
+        patch.object(
+            builder_events.threading,
+            "Thread",
+            side_effect=make_delivery_thread,
+        ),
+        patch(
+            "deerflow.config.app_config.get_app_config",
+            return_value=_quality_config(),
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.derive_deck_quality_candidate_digest",
+            side_effect=derive,
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.prepare_deck_quality_publication"
+        ) as prepare,
+        patch(
+            "deerflow.sophia.deck_quality.instrument.compile_runtime_instrument"
+        ) as compile_instrument,
+        patch(
+            "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_bundle"
+        ) as persist_bundle,
+        patch(
+            "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_failure",
+            side_effect=fail_marker,
+        ),
+        patch.object(
+            builder_events,
+            "_post_deck_quality_producer_failure_signal",
+            side_effect=persist_signal,
+        ),
+        patch.object(builder_events, "_post_webhook", MagicMock()),
+    ):
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=_quality_state(),
+            artifact=_quality_artifact(),
+            runtime=_make_runtime(
+                builder_thread_id="builder-task",
+                builder_run_id="builder-run",
+            ),
+            status="completed",
+        )
+
+    expected_thread_order = ["preparation-thread-init"]
+    if failure_point == "start":
+        expected_thread_order.append("preparation-thread-start")
+    assert result is True
+    assert order == [
+        "derive",
+        *expected_thread_order,
+        "failure-marker",
+        "failure-signal",
+        "delivery-thread-init",
+        "delivery-thread-start",
+    ]
+    marker_deadline = marker_arguments.pop("deadline")
+    signal_deadline = signal_arguments.pop("deadline")
+    assert isinstance(marker_deadline, float)
+    assert isinstance(signal_deadline, float)
+    assert marker_deadline < signal_deadline
+    assert marker_arguments == {
+        "candidate_digest": "d" * 64,
+        "failure_stage": "candidate_metadata",
+        "failure_code": "candidate_metadata_invalid",
+        "quality_run_id": None,
+        "prepared": None,
+        "instrument": None,
+        "intent": None,
+    }
+    assert signal_arguments == {
+        "candidate_digest": "d" * 64,
+        "user_id": "alice",
+        "failure_stage": "candidate_metadata",
+        "upstream_failure_code": "candidate_metadata_invalid",
+        "quality_run_id": None,
+    }
+    assert delivery == delivery_before
+    prepare.assert_not_called()
+    compile_instrument.assert_not_called()
+    persist_bundle.assert_not_called()
+
+
+def test_stalled_read_only_preparation_delivers_with_content_free_evidence() -> None:
+    delivery = _quality_completion_payload()
+    delivery_before = copy.deepcopy(delivery)
+    preparation_entered = threading.Event()
+    release_preparation = threading.Event()
+    delivery_started = threading.Event()
+    delivery_thread = MagicMock()
+    marker_arguments: dict[str, object] = {}
+    signal_arguments: dict[str, object] = {}
+    order: list[str] = []
+
+    def derive(**_kwargs) -> str:
+        order.append("derive")
+        return "d" * 64
+
+    def stalled_preparation(**kwargs) -> None:
+        order.append("preparation-entered")
+        preparation_entered.set()
+        release_preparation.wait(timeout=1.0)
+        kwargs["progress"].finish()
+
+    def fail_marker(**kwargs):
+        marker_arguments.update(kwargs)
+        order.append("failure-marker")
+        raise RuntimeError("object store unavailable")
+
+    def persist_signal(**kwargs):
+        signal_arguments.update(kwargs)
+        order.append("failure-signal")
+        return True
+
+    def make_delivery_thread(**_kwargs):
+        order.append("thread-init")
+        return delivery_thread
+
+    def start_delivery() -> None:
+        order.append("thread-start")
+        delivery_started.set()
+
+    delivery_thread.start.side_effect = start_delivery
+    persist_bundle = MagicMock()
+    try:
+        with (
+            patch.object(
+                builder_events,
+                "_PRODUCER_PREDELIVERY_DEADLINE_SECONDS",
+                0.15,
+            ),
+            patch.object(
+                builder_events,
+                "_PRODUCER_FAILURE_MARKER_RESERVE_SECONDS",
+                0.04,
+            ),
+            patch.object(
+                builder_events,
+                "_PRODUCER_FAILURE_SIGNAL_RESERVE_SECONDS",
+                0.04,
+            ),
+            patch.object(
+                builder_events,
+                "build_completion_payload_from_artifact",
+                return_value=delivery,
+            ),
+            patch.object(
+                builder_events.threading,
+                "Thread",
+                side_effect=make_delivery_thread,
+            ),
+            patch.object(
+                builder_events,
+                "_prepare_deck_quality_read_only",
+                side_effect=stalled_preparation,
+            ),
+            patch("deerflow.config.app_config.get_app_config", return_value=_quality_config()),
+            patch(
+                "deerflow.sophia.deck_quality.publisher.derive_deck_quality_candidate_digest",
+                side_effect=derive,
+            ),
+            patch(
+                "deerflow.sophia.deck_quality.publisher.prepare_deck_quality_publication",
+            ) as prepare,
+            patch(
+                "deerflow.sophia.deck_quality.instrument.compile_runtime_instrument",
+            ) as compile_instrument,
+            patch(
+                "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_bundle",
+                persist_bundle,
+            ),
+            patch(
+                "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_failure",
+                side_effect=fail_marker,
+            ),
+            patch.object(
+                builder_events,
+                "_post_deck_quality_producer_failure_signal",
+                side_effect=persist_signal,
+            ),
+            patch.object(builder_events, "_post_webhook", MagicMock()),
+        ):
+            started = time.monotonic()
+            result = builder_events.fire_completion_webhook_from_artifact(
+                state=_quality_state(),
+                artifact=_quality_artifact(),
+                runtime=_make_runtime(
+                    builder_thread_id="builder-task",
+                    builder_run_id="builder-run",
+                ),
+                status="completed",
+            )
+            elapsed = time.monotonic() - started
+
+        assert result is True
+        assert preparation_entered.is_set()
+        assert delivery_started.is_set()
+        assert elapsed < 0.3
+        assert order == [
+            "derive",
+            "preparation-entered",
+            "failure-marker",
+            "failure-signal",
+            "thread-init",
+            "thread-start",
+        ]
+        marker_deadline = marker_arguments.pop("deadline")
+        signal_deadline = signal_arguments.pop("deadline")
+        assert isinstance(marker_deadline, float)
+        assert isinstance(signal_deadline, float)
+        assert marker_deadline < signal_deadline
+        assert marker_arguments == {
+            "candidate_digest": "d" * 64,
+            "failure_stage": "candidate_metadata",
+            "failure_code": "candidate_metadata_invalid",
+            "quality_run_id": None,
+            "prepared": None,
+            "instrument": None,
+            "intent": None,
+        }
+        assert signal_arguments == {
+            "candidate_digest": "d" * 64,
+            "user_id": "alice",
+            "failure_stage": "candidate_metadata",
+            "upstream_failure_code": "candidate_metadata_invalid",
+            "quality_run_id": None,
+        }
+        assert delivery == delivery_before
+        prepare.assert_not_called()
+        compile_instrument.assert_not_called()
+        persist_bundle.assert_not_called()
+    finally:
+        release_preparation.set()
+    time.sleep(0.02)
+    # The abandoned worker owns preparation only; completing it late cannot
+    # gain an object-store call after baseline delivery has detached.
+    persist_bundle.assert_not_called()
+
+
+def test_unexpected_quality_boundary_error_still_schedules_baseline() -> None:
+    baseline = _quality_completion_payload()
+    thread = MagicMock()
+    post = MagicMock()
+    order: list[str] = []
+
+    def fail_quality(**_kwargs) -> None:
+        order.append("producer-attempt")
+        raise RuntimeError("unexpected quality boundary error")
+
+    def make_thread(**_kwargs):
+        order.append("thread-init")
+        return thread
+
+    thread.start.side_effect = lambda: order.append("thread-start")
+    with (
+        patch.object(
+            builder_events,
+            "build_completion_payload_from_artifact",
+            return_value=baseline,
+        ),
+        patch.object(
+            builder_events,
+            "_persist_deck_quality_before_delivery",
+            side_effect=fail_quality,
+        ),
+        patch.object(
+            builder_events.threading,
+            "Thread",
+            side_effect=make_thread,
+        ) as thread_cls,
+        patch.object(builder_events, "_post_webhook", post),
+    ):
+        result = builder_events.fire_completion_webhook_from_artifact(
+            state=_quality_state(),
+            runtime=_make_runtime(
+                builder_thread_id="builder-task",
+                builder_run_id="builder-run",
+            ),
+            artifact=_quality_artifact(),
+            status="completed",
+        )
+
+    assert result is True
+    assert order == ["producer-attempt", "thread-init", "thread-start"]
+    assert thread_cls.call_args.kwargs["target"] is post
+    assert thread_cls.call_args.kwargs["args"] == (baseline,)
 
 
 @pytest.mark.parametrize(
-    "quality",
+    ("failure_stage", "failure_code", "expected_quality_run_id"),
     [
-        SimpleNamespace(
-            enabled=False,
-            mode="off",
-            scope="canary",
-            canary_user_ids=frozenset(),
-        ),
-        SimpleNamespace(
-            enabled=True,
-            mode="shadow",
-            scope="canary",
-            canary_user_ids=frozenset({"another-user"}),
-        ),
-        SimpleNamespace(
-            enabled=True,
-            mode="shadow",
-            scope="canary",
-            canary_user_ids=frozenset({"alice"}),
-        ),
+        ("candidate_metadata", "candidate_metadata_invalid", None),
+        ("instrument", "instrument_invalid", None),
+        ("producer_bundle", "producer_bundle_unavailable", _QUALITY_RUN_ID),
     ],
-    ids=["disabled", "noncanary", "ineligible-artifact"],
 )
-def test_ordinary_paths_do_no_quality_compilation_callback_or_source_reads(
-    quality: SimpleNamespace,
-    monkeypatch: pytest.MonkeyPatch,
+def test_every_candidate_failure_is_marked_before_identical_delivery(
+    failure_stage: str,
+    failure_code: str,
+    expected_quality_run_id: str | None,
 ) -> None:
-    runtime = _make_runtime(builder_thread_id=f"ordinary-{quality.mode}-{len(quality.canary_user_ids)}")
-    state = _make_state()
-    thread = MagicMock()
-    calls = _install_webhook_responses(
-        monkeypatch,
-        [_WebhookResponse(202, {"delivered_subscribers": 1})],
+    delivery = _quality_completion_payload()
+    delivery_before = copy.deepcopy(delivery)
+    prepared = object()
+    instrument = object()
+    prepare = MagicMock(
+        return_value=None if failure_stage == "candidate_metadata" else prepared
     )
+    compile_instrument = MagicMock(return_value=instrument)
+    build_intent = MagicMock(return_value=_quality_intent())
+    persist_bundle = MagicMock(return_value=_quality_receipt())
+    if failure_stage == "instrument":
+        compile_instrument.side_effect = RuntimeError("instrument unavailable")
+    elif failure_stage == "producer_bundle":
+        persist_bundle.side_effect = RuntimeError("bundle unavailable")
+    failure = SimpleNamespace(candidate_digest="d" * 64, sha256="c" * 64)
+    post = MagicMock()
+    thread = MagicMock()
+    order: list[str] = []
+
+    def persist_failure_marker(**_kwargs):
+        order.append("failure-marker")
+        return failure
+
+    def make_delivery_thread(**_kwargs):
+        order.append("thread-init")
+        return thread
+
+    thread.start.side_effect = lambda: order.append("thread-start")
 
     with (
-        patch.object(builder_events, "_signed_artifact_url", return_value=None),
-        patch.object(builder_events.threading, "Thread", return_value=thread) as thread_cls,
-        patch(
-            "deerflow.config.app_config.get_app_config",
-            return_value=SimpleNamespace(deck_quality=quality),
+        patch.object(
+            builder_events,
+            "build_completion_payload_from_artifact",
+            return_value=delivery,
         ),
-        patch("deerflow.sophia.deck_quality.instrument.compile_runtime_instrument") as compile_instrument,
-        patch.object(builder_events, "_deck_quality_publication_ack_callback") as callback_factory,
-        patch("deerflow.sophia.deck_quality.publisher.capture_deck_quality_source_pack") as capture,
-        patch("deerflow.sophia.deck_quality.publisher.complete_deck_quality_publication_after_ack") as complete,
-    ):
-        result = builder_events.fire_completion_webhook_from_artifact(
-            state=state,
-            runtime=runtime,
-            artifact=_success_artifact(),
-            status="completed",
-        )
-        detached = thread_cls.call_args.kwargs
-        detached["target"](*detached["args"], **detached["kwargs"])
-
-    assert result is True
-    thread_cls.assert_called_once()
-    thread.start.assert_called_once_with()
-    dispatched = thread_cls.call_args.kwargs["args"][0]
-    assert "deck_quality_publication_intent" not in dispatched
-    assert len(calls) == 1
-    assert calls[0]["url"].endswith("/internal/builder-events")
-    compile_instrument.assert_not_called()
-    callback_factory.assert_not_called()
-    capture.assert_not_called()
-    complete.assert_not_called()
-
-
-def test_quality_intent_preparation_failure_cannot_change_delivery(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    runtime = _make_runtime(
-        builder_thread_id="dq1-isolation",
-        builder_run_id="run-1",
-    )
-    state = _make_state()
-    thread = MagicMock()
-    calls = _install_webhook_responses(
-        monkeypatch,
-        [_WebhookResponse(202, {"delivered_subscribers": 1})],
-    )
-
-    with (
-        patch.object(builder_events, "_signed_artifact_url", return_value=None),
-        patch.object(builder_events.threading, "Thread", return_value=thread) as thread_cls,
-        patch("deerflow.config.app_config.get_app_config", return_value=object()),
+        patch.object(
+            builder_events.threading,
+            "Thread",
+            side_effect=make_delivery_thread,
+        ) as thread_cls,
+        patch("deerflow.config.app_config.get_app_config", return_value=_quality_config()),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.derive_deck_quality_candidate_digest",
+            return_value="d" * 64,
+        ),
         patch(
             "deerflow.sophia.deck_quality.publisher.prepare_deck_quality_publication",
-            side_effect=RuntimeError("isolated quality failure"),
+            prepare,
         ),
+        patch(
+            "deerflow.sophia.deck_quality.instrument.compile_runtime_instrument",
+            compile_instrument,
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.build_deck_quality_producer_intent",
+            build_intent,
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_bundle",
+            persist_bundle,
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_failure",
+            side_effect=persist_failure_marker,
+        ) as persist_failure,
+        patch.object(
+            builder_events,
+            "_post_deck_quality_producer_failure_signal",
+        ) as failure_signal,
+        patch.object(builder_events, "_post_webhook", post),
     ):
         result = builder_events.fire_completion_webhook_from_artifact(
-            state=state,
-            runtime=runtime,
-            artifact=_success_artifact(),
+            state=_quality_state(),
+            artifact=_quality_artifact(),
+            runtime=_make_runtime(
+                builder_thread_id="builder-task",
+                builder_run_id="builder-run",
+            ),
             status="completed",
         )
-        detached = thread_cls.call_args.kwargs
-        detached["target"](*detached["args"], **detached["kwargs"])
 
     assert result is True
-    thread.start.assert_called_once_with()
-    dispatched = thread_cls.call_args.kwargs["args"][0]
-    assert dispatched["status"] == "success"
-    assert "deck_quality_publication_intent" not in dispatched
-    assert len(calls) == 1
-    assert calls[0]["url"].endswith("/internal/builder-events")
+    failure_arguments = dict(persist_failure.call_args.kwargs)
+    marker_deadline = failure_arguments.pop("deadline")
+    assert isinstance(marker_deadline, float)
+    assert marker_deadline > 0
+    assert failure_arguments == {
+        "candidate_digest": "d" * 64,
+        "failure_stage": failure_stage,
+        "failure_code": failure_code,
+        "quality_run_id": expected_quality_run_id,
+        "prepared": prepared if failure_stage == "producer_bundle" else None,
+        "instrument": (
+            instrument if failure_stage == "producer_bundle" else None
+        ),
+        "intent": (
+            _quality_intent()
+            if failure_stage == "producer_bundle"
+            else None
+        ),
+    }
+    failure_signal.assert_not_called()
+    assert order == ["failure-marker", "thread-init", "thread-start"]
+    assert thread_cls.call_args.kwargs["target"] is post
+    assert thread_cls.call_args.kwargs["args"] == (delivery,)
+    post.assert_not_called()
+    assert delivery == delivery_before
+
+
+def test_async_artifact_middleware_keeps_loop_live_during_slow_producer() -> None:
+    started = threading.Event()
+    release = threading.Event()
+    middleware = builder_artifact_module.BuilderArtifactMiddleware()
+
+    def slow_after_model(_state, _runtime) -> dict[str, bool]:
+        # Stand in for the sync accepted-artifact path while its bounded DQ-1
+        # producer storage call is in progress.
+        started.set()
+        release.wait(timeout=1.0)
+        return {"completed": True}
+
+    async def exercise() -> tuple[dict[str, bool] | None, int]:
+        ticks = 0
+        ticking = True
+
+        async def ticker() -> None:
+            nonlocal ticks
+            while ticking:
+                ticks += 1
+                await asyncio.sleep(0.002)
+
+        ticker_task = asyncio.create_task(ticker())
+        middleware_task = asyncio.create_task(
+            middleware.aafter_model({}, SimpleNamespace())
+        )
+        for _ in range(100):
+            if started.is_set():
+                break
+            await asyncio.sleep(0.002)
+        await asyncio.sleep(0.03)
+        ticking = False
+        await ticker_task
+        release.set()
+        return await middleware_task, ticks
+
+    with patch.object(
+        middleware,
+        "after_model",
+        side_effect=slow_after_model,
+    ) as after_model:
+        result, ticks = asyncio.run(exercise())
+
+    release.set()
+    assert result == {"completed": True}
+    assert started.is_set()
+    assert ticks >= 5
+    after_model.assert_called_once()
+
+
+@pytest.mark.parametrize(
+    ("config", "artifact"),
+    [
+        (_quality_config(enabled=False), _quality_artifact()),
+        (
+            _quality_config(canary_user_ids=frozenset({"somebody-else"})),
+            _quality_artifact(),
+        ),
+        (_quality_config(), _quality_artifact(mechanical_gate_results={"passed": False})),
+    ],
+    ids=["disabled", "noncanary", "ineligible"],
+)
+def test_non_candidates_do_no_compile_persist_source_or_provider_work(
+    config: SimpleNamespace,
+    artifact: dict,
+) -> None:
+    with (
+        patch("deerflow.config.app_config.get_app_config", return_value=config),
+        patch.object(
+            builder_events,
+            "_READ_ONLY_PREPARATION_THREAD",
+        ) as preparation_thread,
+        patch(
+            "deerflow.sophia.deck_quality.instrument.compile_runtime_instrument"
+        ) as compile_instrument,
+        patch(
+            "deerflow.sophia.deck_quality.publisher.derive_deck_quality_candidate_digest"
+        ) as derive,
+        patch(
+            "deerflow.sophia.deck_quality.publisher.prepare_deck_quality_publication"
+        ) as prepare,
+        patch(
+            "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_bundle"
+        ) as persist,
+        patch(
+            "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_failure"
+        ) as persist_failure,
+        patch(
+            "deerflow.sophia.deck_quality.publisher.capture_deck_quality_source_pack"
+        ) as capture,
+        patch(
+            "deerflow.sophia.deck_quality.publisher.AsyncSupabaseImmutableObjectStore"
+        ) as provider,
+        patch.object(
+            builder_events,
+            "_post_deck_quality_producer_failure_signal",
+        ) as failure_signal,
+    ):
+        result = builder_events._persist_deck_quality_before_delivery(
+            state=_quality_state(),
+            artifact=artifact,
+            completion_payload=_quality_completion_payload(),
+        )
+
+    assert result is None
+    preparation_thread.assert_not_called()
+    compile_instrument.assert_not_called()
+    derive.assert_not_called()
+    prepare.assert_not_called()
+    persist.assert_not_called()
+    persist_failure.assert_not_called()
+    capture.assert_not_called()
+    provider.assert_not_called()
+    failure_signal.assert_not_called()
+
+
+def test_process_style_replay_reconciles_durable_publication_without_dq_http(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_webhook_responses(
+        monkeypatch,
+        [_WebhookResponse(202), _WebhookResponse(202)],
+    )
+    prepared = object()
+    instrument = object()
+    persist = MagicMock(return_value=_quality_receipt())
+
+    class _SynchronousThread:
+        def __init__(self, **kwargs) -> None:
+            self.kwargs = kwargs
+
+        def start(self) -> None:
+            self.kwargs["target"](
+                *self.kwargs.get("args", ()),
+                **self.kwargs.get("kwargs", {}),
+            )
+
+    def invoke() -> bool:
+        return builder_events.fire_completion_webhook_from_artifact(
+            state=_quality_state(),
+            runtime=_make_runtime(
+                builder_thread_id="builder-task",
+                builder_run_id="builder-run",
+            ),
+            artifact=_quality_artifact(),
+            status="completed",
+        )
+
+    with (
+        patch.object(builder_events, "_signed_artifact_url", return_value=None),
+        patch.object(builder_events.threading, "Thread", _SynchronousThread),
+        patch("deerflow.config.app_config.get_app_config", return_value=_quality_config()),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.derive_deck_quality_candidate_digest",
+            return_value="d" * 64,
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.prepare_deck_quality_publication",
+            return_value=prepared,
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.instrument.compile_runtime_instrument",
+            return_value=instrument,
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.build_deck_quality_producer_intent",
+            return_value=_quality_intent(),
+        ),
+        patch(
+            "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_bundle",
+            persist,
+        ),
+    ):
+        assert invoke() is True
+        # A fresh process has an empty in-memory delivery dedup cache. The
+        # durable request is intentionally replayed and reconciles by identity.
+        builder_events.reset_for_tests()
+        assert invoke() is True
+
+    assert persist.call_count == 2
+    assert len(calls) == 2
+    assert all(
+        call["url"] == "http://gateway.test/internal/builder-events"
+        for call in calls
+    )
+    assert all("deck-quality-publications" not in str(call["url"]) for call in calls)
+
+
+def test_delivery_retries_never_replay_quality(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls = _install_webhook_responses(
+        monkeypatch,
+        [_WebhookResponse(503), _WebhookResponse(503), _WebhookResponse(202)],
+    )
+    payload = _quality_completion_payload()
+
+    with patch.object(
+        builder_events,
+        "_persist_deck_quality_before_delivery",
+    ) as persist:
+        builder_events._post_webhook(payload)
+
+    persist.assert_not_called()
+    assert len(calls) == 3
+    assert all(
+        call["url"] == "http://gateway.test/internal/builder-events"
+        for call in calls
+    )
+    assert all(call["json"] == payload for call in calls)
 
 
 def test_fire_webhook_allows_new_run_on_same_task_id():

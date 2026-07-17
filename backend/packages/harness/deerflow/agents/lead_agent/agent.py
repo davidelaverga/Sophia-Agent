@@ -25,7 +25,8 @@ logger = logging.getLogger(__name__)
 def _resolve_model_name(requested_model_name: str | None = None) -> str:
     """Resolve a runtime model name safely, falling back to default if invalid. Returns None if no models are configured."""
     app_config = get_app_config()
-    default_model_name = app_config.models[0].name if app_config.models else None
+    public_models = app_config.public_models
+    default_model_name = public_models[0].name if public_models else None
     if default_model_name is None:
         raise ValueError("No chat models are configured. Please configure at least one model in config.yaml.")
 

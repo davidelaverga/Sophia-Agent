@@ -295,3 +295,29 @@ durable `shadow_dispatch_unavailable`, and explicit degraded DQ readiness.
 
 The locked prohibitions remain unchanged: no enforcement, repair, Advisor,
 ordinary-user OpenAI processing, or builder/companion migration is authorized.
+
+## 2026-07-16 — Amendment 002 reopens DQ-1 on a durable producer boundary
+
+The user explicitly authorized continued pursuit of DQ-1 using the supplied
+context bundle and required the implementation, deployment, full production
+test, artifact, and terminal proof. Amendment 001's historical
+`PREMISE_INVALIDATED` result remains correct for the archived candidate, but
+is superseded as the current campaign state.
+
+The successor makes the exact canary's already-required primary PPTX upload
+create-only and version/hash bound, persists the private source pack first,
+and writes a small identity/reference-only outbox last before detached
+delivery. The gateway validates scope before reference reads, rehashes source
+and PPTX, atomically converges the row, archives the marker, and retires the
+inbox. Durable failure/rejection evidence degrades DQ readiness. Large
+conflicting objects are represented by hashes and byte counts rather than
+copied into quarantine.
+
+The shipped 2026-07-16 migration stays immutable. Successor convergence is an
+ordered forward-only chain: 2026-07-17 atomic publication convergence,
+2026-07-18 durable producer-failure signals, and 2026-07-19 dispatch-intent
+fencing. Each delta carries exact schema/function/owner/ACL fingerprints,
+existing-state guards, and an independent exact postflight. Pre-existing
+builder OpenAI and fallback behavior is preserved; the separate DQ credential
+is admitted only for the exact synthetic canary. Enforcement, repair, Advisor,
+ordinary-user DQ processing, and builder/companion migration remain forbidden.

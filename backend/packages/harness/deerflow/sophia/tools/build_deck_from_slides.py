@@ -32,7 +32,7 @@ from typing import Any
 from langchain.tools import ToolRuntime, tool
 
 from deerflow.sandbox.tools import get_thread_data
-from deerflow.sophia.process_group import run_process_group
+from deerflow.sophia.process_group import run_native_process, run_process_group
 from deerflow.sophia.tools.render_html_to_pdf import (
     _host_path_for_virtual_output,
     _resolved_host_path_error,
@@ -153,7 +153,12 @@ def _run_slide_render(cmd: list[str], html: Path) -> tuple[subprocess.CompletedP
 
 
 def _run_slide_renderer_process(cmd: list[str]) -> subprocess.CompletedProcess[str]:
-    return run_process_group(cmd, timeout=_PER_SLIDE_TIMEOUT_SECONDS)
+    output = Path(cmd[cmd.index("--png-file") + 1])
+    return run_process_group(
+        cmd,
+        timeout=_PER_SLIDE_TIMEOUT_SECONDS,
+        writable_files=[output],
+    )
 
 
 def _slide_render_succeeded(completed: subprocess.CompletedProcess[str] | None, png: Path) -> bool:
@@ -222,8 +227,14 @@ def _render_slide_pngs(
 
 def _run_wrap_command(wrap_cmd: list[str]) -> tuple[subprocess.CompletedProcess[str] | None, str | None]:
     try:
-        wrapped = subprocess.run(  # noqa: S603 — fixed node + bundled script, file path args only
-            wrap_cmd, check=False, capture_output=True, text=True, timeout=_WRAP_TIMEOUT_SECONDS,
+        output = Path(wrap_cmd[wrap_cmd.index("--output-file") + 1])
+        wrapped = run_native_process(
+            wrap_cmd,
+            check=False,
+            capture_output=True,
+            text=True,
+            timeout=_WRAP_TIMEOUT_SECONDS,
+            writable_files=[output],
         )
     except subprocess.TimeoutExpired:
         return None, _result(success=False, error_type="wrap_timeout", error=f"PPTX wrap exceeded {_WRAP_TIMEOUT_SECONDS}s.")

@@ -346,6 +346,13 @@ class _FakeRpc:
             "lease_expires_at": None,
             "claim_token": None,
             "claim_hash": None,
+            "dispatch_intent_epoch": None,
+            "dispatch_intent_attempt_count": None,
+            "dispatch_intent_token": None,
+            "dispatch_intent_status": None,
+            "dispatch_recovery_proof_hash": None,
+            "dispatch_intent_at": None,
+            "dispatch_resolved_at": None,
             "pending_terminal_state": None,
             "terminal_trace_payload_hash": None,
             "safe_trace_root_input": None,
@@ -493,6 +500,55 @@ class _FakeRpc:
         )
         row["updated_at"] = self.now
         return [self._copy(row)]
+
+    def sophia_begin_deck_quality_shadow_dispatch(
+        self,
+        payload: dict[str, object],
+    ) -> list[dict[str, object]]:
+        row = self._require_lease(payload)
+        row.update(
+            dispatch_intent_epoch=row["lease_epoch"],
+            dispatch_intent_attempt_count=row["attempt_count"],
+            dispatch_intent_token=payload["p_dispatch_intent_token"],
+            dispatch_intent_status="prepared",
+            dispatch_recovery_proof_hash=None,
+            dispatch_intent_at=self.now,
+            dispatch_resolved_at=None,
+        )
+        return [self._copy(row)]
+
+    def sophia_resolve_deck_quality_shadow_dispatch(
+        self,
+        payload: dict[str, object],
+    ) -> list[dict[str, object]]:
+        row = self.rows[str(payload["p_quality_run_id"])]
+        if row["dispatch_intent_token"] != payload["p_dispatch_intent_token"]:
+            raise DeckQualityPersistenceRpcError(
+                "sophia_resolve_deck_quality_shadow_dispatch",
+                status_code=409,
+            )
+        status = str(payload["p_dispatch_intent_status"])
+        row["dispatch_intent_status"] = status
+        row["dispatch_resolved_at"] = (
+            self.now if status in {"confirmed", "reconciled"} else None
+        )
+        return [self._copy(row)]
+
+    def sophia_list_unresolved_deck_quality_shadow_dispatches(
+        self,
+        payload: dict[str, object],
+    ) -> list[dict[str, object]]:
+        limit = int(payload["p_limit"])
+        return [
+            {
+                "quality_run_id": row["quality_run_id"],
+                "dispatch_intent_status": row["dispatch_intent_status"],
+            }
+            for row in self.rows.values()
+            if row["state"] not in {"completed", "failed", "stale"}
+            and row["dispatch_intent_status"]
+            in {"prepared", "unresolved", "reconciled"}
+        ][:limit]
 
     def sophia_release_deck_quality_shadow_lease(self, payload: dict[str, object]) -> list[dict[str, object]]:
         row = self._require_lease(payload)
@@ -2049,6 +2105,42 @@ def test_safe_payload_validation_rejects_raw_or_string_metrics_before_rpc() -> N
                 stage=QualityRunStage.SNAPSHOT_LOADED,
                 trace_ids={"trace": "private value with spaces"},
             )
+
+    anyio.run(scenario)
+
+
+def test_dispatch_intent_store_contract_is_content_free_and_exact_token_bound() -> None:
+    async def scenario() -> None:
+        rpc = _FakeRpc()
+        store = SupabaseDeckQualityRunStore(rpc)
+        requested = await store.request(_request())
+        claimed = (await _claim(store, lease_owner="dispatch-store"))[0]
+        lease = QualityRunLease.from_record(claimed)
+        intent_token = "dq1-dispatch:store-contract"
+
+        begun = await store.begin_dispatch(
+            lease,
+            intent_token=intent_token,
+        )
+        assert begun.dispatch_intent_status == "prepared"
+        assert begun.dispatch_intent_token == intent_token
+        assert begun.dispatch_intent_epoch == lease.epoch
+        assert begun.dispatch_recovery_proof_hash is None
+        assert await store.unresolved_dispatches() == (
+            requested.quality_run_id,
+        )
+
+        confirmed = await store.resolve_dispatch(
+            quality_run_id=requested.quality_run_id,
+            intent_token=intent_token,
+            status="confirmed",
+        )
+        assert confirmed.dispatch_intent_status == "confirmed"
+        assert confirmed.dispatch_resolved_at == rpc.now
+        assert await store.unresolved_dispatches() == ()
+
+        with pytest.raises(ValueError, match="intent token"):
+            await store.begin_dispatch(lease, intent_token="not valid")
 
     anyio.run(scenario)
 
