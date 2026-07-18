@@ -35,6 +35,10 @@ from deerflow.sophia.deck_quality.schemas import QualityInstrumentLock
 logger = logging.getLogger(__name__)
 
 _QUALITY_GRAPH_ID = "sophia_deck_quality_shadow"
+_QUALITY_THREAD_ID_PREFIX = (
+    "https://sophia-ei.com/ids/langgraph-thread/"
+    f"{_QUALITY_GRAPH_ID}/v1/"
+)
 _RECONCILIATION_RUN_LIMIT = 100
 _RECONCILIATION_ATTEMPTS = 4
 _RECONCILIATION_INTERVAL_SECONDS = 0.2
@@ -181,6 +185,17 @@ def _default_owner() -> str:
 
 def _default_claim_token() -> str:
     return f"dq1-quality-claim:{uuid.uuid4().hex}"
+
+
+def _quality_thread_id(quality_run_id: str) -> str:
+    """Map the semantic DQ-1 identity to LangGraph's UUID thread contract."""
+
+    return str(
+        uuid.uuid5(
+            uuid.NAMESPACE_URL,
+            f"{_QUALITY_THREAD_ID_PREFIX}{quality_run_id}",
+        )
+    )
 
 
 def _dispatch_metadata(
@@ -426,7 +441,7 @@ class DeckQualityDispatcher:
             runs = await self._client_call(
                 self._get_client().runs,
                 "list",
-                record.quality_run_id,
+                _quality_thread_id(record.quality_run_id),
                 limit=_RECONCILIATION_RUN_LIMIT,
                 select=["metadata"],
             )
@@ -558,7 +573,7 @@ class DeckQualityDispatcher:
                 await self._client_call(
                     client.threads,
                     "create",
-                    thread_id=record.quality_run_id,
+                    thread_id=_quality_thread_id(record.quality_run_id),
                     if_exists="do_nothing",
                     graph_id=_QUALITY_GRAPH_ID,
                 )
@@ -597,7 +612,7 @@ class DeckQualityDispatcher:
             await self._client_call(
                 client.runs,
                 "create",
-                record.quality_run_id,
+                _quality_thread_id(record.quality_run_id),
                 _QUALITY_GRAPH_ID,
                 input=safe_input,
                 context=safe_input,

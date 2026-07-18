@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
@@ -219,6 +220,19 @@ def _recovery_proof_hash(record: QualityRunRecord) -> str | None:
                 "safe_trace_root_input_hash": (
                     record.safe_trace_root_input_hash
                 ),
+            }
+        )
+    if (
+        error_code == QualityRunErrorCode.SHADOW_DISPATCH_UNAVAILABLE.value
+        and record.last_error_stage == "shadow_dispatch_prelaunch"
+        and record.last_error_at is not None
+    ):
+        return canonical_sha256(
+            {
+                "proof_kind": "dispatch_prelaunch",
+                "last_error_code": error_code,
+                "last_error_stage": record.last_error_stage,
+                "last_error_at": record.last_error_at.isoformat(),
             }
         )
     resumable_error = (
@@ -624,12 +638,20 @@ async def test_dispatches_one_safe_deterministic_quality_run() -> None:
     record = _record()
     store = FakeStore((record,))
     runs = FakeRuns()
+    dispatcher = _dispatcher(store, runs)
 
-    result = await _dispatcher(store, runs).run_once()
+    result = await dispatcher.run_once()
 
     assert result.dispatched == 1
     assert not store.retries and not store.finishes
-    assert runs.create_calls[0][0] == (record.quality_run_id, "sophia_deck_quality_shadow")
+    quality_thread_id = dispatcher_module._quality_thread_id(
+        record.quality_run_id
+    )
+    assert dispatcher._client.threads.calls[0]["thread_id"] == quality_thread_id
+    assert runs.create_calls[0][0] == (
+        quality_thread_id,
+        "sophia_deck_quality_shadow",
+    )
     kwargs = runs.create_calls[0][1]
     assert kwargs["input"] == {
         "quality_run_id": record.quality_run_id,
@@ -645,6 +667,24 @@ async def test_dispatches_one_safe_deterministic_quality_run() -> None:
     assert kwargs["multitask_strategy"] == "enqueue"
     assert kwargs["durability"] == "sync"
     assert "user_id" not in str(kwargs)
+
+
+def test_quality_thread_id_is_stable_domain_separated_uuid5() -> None:
+    quality_run_id = _record().quality_run_id
+
+    thread_id = dispatcher_module._quality_thread_id(quality_run_id)
+
+    parsed = uuid.UUID(thread_id)
+    assert parsed.version == 5
+    assert (
+        dispatcher_module._quality_thread_id("quality_example")
+        == "aab9c9d1-673f-5e1d-a8a5-2a31095d710c"
+    )
+    assert thread_id == dispatcher_module._quality_thread_id(quality_run_id)
+    assert thread_id != str(uuid.uuid5(uuid.NAMESPACE_URL, quality_run_id))
+    assert thread_id != dispatcher_module._quality_thread_id(
+        f"{quality_run_id}-different"
+    )
 
 
 @pytest.mark.anyio
@@ -784,6 +824,9 @@ async def test_response_loss_and_list_lag_reconcile_without_second_create() -> N
     assert result.reconciled == 1
     assert len(runs.create_calls) == 1
     assert len(runs.list_calls) == 3
+    assert {call[0] for call in runs.list_calls} == {
+        runs.create_calls[0][0][0]
+    }
     assert runs.committed_metadata == _matching_metadata(
         record,
         intent_token=store.begin_calls[0]["intent_token"],
@@ -815,7 +858,13 @@ async def test_non_timeout_exception_reconciles_matching_current_epoch() -> None
     result = await _dispatcher(store, runs).run_once()
 
     assert result.reconciled == 1
-    assert runs.list_calls == [(record.quality_run_id, 100, ("metadata",))]
+    assert runs.list_calls == [
+        (
+            dispatcher_module._quality_thread_id(record.quality_run_id),
+            100,
+            ("metadata",),
+        )
+    ]
     assert not store.retries
 
 
@@ -872,6 +921,9 @@ async def test_later_epoch_reconciles_late_commit_without_second_create() -> Non
     assert len(runs.create_calls) == 1
     assert len(store.retries) == 1
     assert len(runs.list_calls) == dispatcher_module._RECONCILIATION_ATTEMPTS + 1
+    assert {call[0] for call in runs.list_calls} == {
+        runs.create_calls[0][0][0]
+    }
 
 
 @pytest.mark.anyio
@@ -1387,6 +1439,47 @@ async def test_thread_create_failure_persists_prelaunch_fence_without_run_create
 
 
 @pytest.mark.anyio
+async def test_prelaunch_failure_retries_on_mapped_uuid_thread_next_epoch() -> None:
+    first_record = _record()
+    store = FakeStore((first_record,))
+    runs = FakeRuns(listed=[])
+
+    first = await _dispatcher(
+        store,
+        runs,
+        thread_error=RuntimeError("legacy non-UUID thread rejected"),
+    ).run_once()
+
+    assert first.ambiguous == first.retry_scheduled == first.launch_fenced == 1
+    retried = store.current[first_record.quality_run_id]
+    second_record = retried.model_copy(
+        update={
+            "state": "running",
+            "lease_owner": "worker-1",
+            "lease_epoch": 2,
+            "lease_expires_at": datetime.now(UTC) + timedelta(minutes=5),
+            "claim_token": "claim-2",
+            "claim_hash": "7" * 64,
+            "attempt_count": 2,
+        }
+    )
+    store.records = (second_record,)
+    store.current[second_record.quality_run_id] = second_record
+
+    second = await _dispatcher(store, runs).run_once()
+
+    mapped_thread_id = dispatcher_module._quality_thread_id(
+        first_record.quality_run_id
+    )
+    assert second.dispatched == 1
+    assert runs.create_calls[0][0][0] == mapped_thread_id
+    assert store.begin_calls[-1]["intent_token"] != store.begin_calls[0][
+        "intent_token"
+    ]
+    assert not store.finishes
+
+
+@pytest.mark.anyio
 async def test_reconciliation_scans_beyond_twenty_and_requires_exact_epoch() -> None:
     record = _record()
     store = FakeStore((record,))
@@ -1408,7 +1501,13 @@ async def test_reconciliation_scans_beyond_twenty_and_requires_exact_epoch() -> 
     result = await _dispatcher(store, runs).run_once()
 
     assert result.reconciled == 1
-    assert runs.list_calls == [(record.quality_run_id, 100, ("metadata",))]
+    assert runs.list_calls == [
+        (
+            dispatcher_module._quality_thread_id(record.quality_run_id),
+            100,
+            ("metadata",),
+        )
+    ]
 
 
 def test_quality_record_fixture_is_nonterminal_and_hash_consistent() -> None:
