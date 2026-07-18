@@ -69,30 +69,46 @@ def _shape_contrast_findings(
     selector: str,
     required_names: set[str],
 ) -> tuple[int, list[NativeContrastIssue]]:
-    if not getattr(shape, "has_text_frame", False) or not shape.has_text_frame:
-        return 0, []
     shape_name = str(shape.name or "")
     required = shape_name in required_names
     background, background_reason = _effective_background(shape, prior_shapes, slide_background)
+    text_frames: list[tuple[Any, str | None, str]] = []
+    if getattr(shape, "has_text_frame", False) and shape.has_text_frame:
+        text_frames.append((shape.text_frame, background, background_reason))
+    if getattr(shape, "has_table", False) and shape.has_table:
+        for row in shape.table.rows:
+            for cell in row.cells:
+                cell_background = _solid_fill_rgb(cell.fill)
+                text_frames.append(
+                    (
+                        cell.text_frame,
+                        cell_background or background,
+                        "cell_fill" if cell_background is not None else background_reason,
+                    )
+                )
+    if not text_frames:
+        return 0, []
+
     issues: list[NativeContrastIssue] = []
     checked_runs = 0
-    for paragraph in shape.text_frame.paragraphs:
-        for run in paragraph.runs:
-            text = str(run.text or "").strip()
-            if not text:
-                continue
-            checked_runs += 1
-            issue = _run_contrast_issue(
-                run=run,
-                text=text,
-                selector=selector,
-                shape_name=shape_name,
-                background=background,
-                background_reason=background_reason,
-                required=required,
-            )
-            if issue is not None:
-                issues.append(issue)
+    for text_frame, frame_background, frame_background_reason in text_frames:
+        for paragraph in text_frame.paragraphs:
+            for run in paragraph.runs:
+                text = str(run.text or "").strip()
+                if not text:
+                    continue
+                checked_runs += 1
+                issue = _run_contrast_issue(
+                    run=run,
+                    text=text,
+                    selector=selector,
+                    shape_name=shape_name,
+                    background=frame_background,
+                    background_reason=frame_background_reason,
+                    required=required,
+                )
+                if issue is not None:
+                    issues.append(issue)
     return checked_runs, issues
 
 

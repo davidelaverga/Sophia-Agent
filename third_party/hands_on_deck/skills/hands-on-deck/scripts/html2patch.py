@@ -27,21 +27,35 @@ from pathlib import Path
 
 PX_PER_IN = 96.0
 PT_PER_PX = 0.75
+MAX_TYPOGRAPHY_NORMALIZATIONS = 128
 
 # Browser-side extractor. Runs inside the page; returns a JSON-able tree of
 # "items" in document order (= back-to-front z-order) plus page metadata.
 # All geometry is in CSS px; Python converts to inches/points.
 EXTRACT_JS = r"""
 () => {
-  const out = { body: {}, items: [], warnings: [], errors: [] };
+  const out = {
+    body: {}, items: [], warnings: [], errors: [],
+    typographyNormalizations: [],
+    typographyNormalizationCount: 0,
+    typographyNormalizationsTruncated: false,
+  };
   const cs = (el) => window.getComputedStyle(el);
   const TEXT_TAGS = new Set(['P','H1','H2','H3','H4','H5','H6']);
   const SINGLE_WEIGHT = new Set(['impact']);  // faux-bold widens text in PPT
+  const REQUIRED_TEXT_ROLES = new Set([
+    'body', 'callout', 'content', 'description', 'evidence',
+    'heading', 'headline', 'narrative', 'paragraph', 'title',
+  ]);
+  const REQUIRED_TEXT_MIN_PX = 24;
+  const COMPACT_TEXT_MIN_PX = 20;
+  const SAFE_LINE_HEIGHT_RATIO = 1.2;
+  const MAX_TYPOGRAPHY_NORMALIZATIONS = 128;
 
   const ownSourceMeta = (el) => ({
     sourceId: el.getAttribute('data-deck-id') || null,
     sourceRole: el.getAttribute('data-deck-role') || null,
-    sourceRequired: el.getAttribute('data-deck-required') === 'true',
+    sourceRequired: (el.getAttribute('data-deck-required') || '').toLowerCase() === 'true',
   });
   const sourceMeta = (el) => {
     const direct = ownSourceMeta(el);
@@ -52,12 +66,181 @@ EXTRACT_JS = r"""
     }
     return { ...direct, sourceRefs };
   };
+  const mergeSourceRefs = (...groups) => {
+    const merged = new Map();
+    groups.flat().forEach(ref => {
+      if (!ref || !ref.sourceId) return;
+      const prior = merged.get(ref.sourceId);
+      if (!prior) {
+        merged.set(ref.sourceId, { ...ref });
+        return;
+      }
+      prior.sourceRole = prior.sourceRole || ref.sourceRole || null;
+      prior.sourceRequired = Boolean(prior.sourceRequired || ref.sourceRequired);
+    });
+    return Array.from(merged.values());
+  };
+  const subtreeHidden = (el, style = cs(el)) => {
+    if (style.display === 'none' || parseFloat(style.opacity) === 0) return true;
+    for (let current = el.parentElement; current; current = current.parentElement) {
+      const ancestorStyle = cs(current);
+      if (ancestorStyle.display === 'none' || parseFloat(ancestorStyle.opacity) === 0)
+        return true;
+    }
+    return false;
+  };
+  const visible = (el, style = cs(el)) => {
+    if (subtreeHidden(el, style) || ['hidden', 'collapse'].includes(style.visibility)) return false;
+    const r = el.getBoundingClientRect();
+    return r.width > 0.5 && r.height > 0.5;
+  };
+  const textPaintVisible = (style) => {
+    const color = String(style.color || '').trim().toLowerCase();
+    if (!color || color === 'transparent') return false;
+    const rgba = color.match(/rgba\([^)]*[,/]\s*([\d.]+)\s*\)$/);
+    return !rgba || parseFloat(rgba[1]) > 0;
+  };
+  const textNodeIsRendered = (node) => {
+    if (node.nodeType !== Node.TEXT_NODE || !node.textContent.trim()) return false;
+    const parent = node.parentElement;
+    if (!parent) return false;
+    const style = cs(parent);
+    if (!visible(parent, style) || !textPaintVisible(style)) return false;
+    let rects;
+    try {
+      const range = document.createRange();
+      range.selectNodeContents(node);
+      rects = Array.from(range.getClientRects());
+    } catch (e) { return false; }
+    return rects.some(rect => {
+      let left = rect.left, right = rect.right, top = rect.top, bottom = rect.bottom;
+      for (let current = parent; current; current = current.parentElement) {
+        const currentStyle = cs(current);
+        const clipX = ['hidden', 'clip', 'auto', 'scroll'].includes(currentStyle.overflowX);
+        const clipY = ['hidden', 'clip', 'auto', 'scroll'].includes(currentStyle.overflowY);
+        if (!clipX && !clipY) continue;
+        const clip = current.getBoundingClientRect();
+        if (clipX) { left = Math.max(left, clip.left); right = Math.min(right, clip.right); }
+        if (clipY) { top = Math.max(top, clip.top); bottom = Math.min(bottom, clip.bottom); }
+      }
+      return right - left > 0.5 && bottom - top > 0.5;
+    });
+  };
+  const firstRenderedTextNode = (el) => {
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode())
+      if (textNodeIsRendered(node)) return node;
+    return null;
+  };
+  const hasRenderedText = (el) => Boolean(firstRenderedTextNode(el));
+  const ownsRenderedText = (el) => {
+    if (Array.from(el.childNodes).some(node =>
+      node.nodeType === Node.TEXT_NODE && textNodeIsRendered(node))) return true;
+    if (!['TH', 'TD'].includes(el.tagName)) return false;
+    // A native table uses the cell's computed font for the flattened cell
+    // text, so the cell is the style owner even when inline descendants own
+    // the source text nodes.
+    const walker = document.createTreeWalker(el, NodeFilter.SHOW_TEXT);
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+      if (textNodeIsRendered(node)) return true;
+    }
+    return false;
+  };
+  const requiredTextContext = (el) => {
+    for (let current = el; current; current = current.parentElement) {
+      const meta = ownSourceMeta(current);
+      if (meta.sourceRequired || REQUIRED_TEXT_ROLES.has((meta.sourceRole || '').toLowerCase()))
+        return true;
+    }
+    return false;
+  };
+  const nearestSourceMeta = (el) => {
+    for (let current = el; current; current = current.parentElement) {
+      const meta = ownSourceMeta(current);
+      if (meta.sourceId) return meta;
+    }
+    return { sourceId: null, sourceRole: null, sourceRequired: false };
+  };
+  const roundedPx = (value) => Number.isFinite(value)
+    ? Math.round(value * 1000) / 1000 : null;
+  const normalizeTypography = () => {
+    const pending = [];
+    const requiredTables = new Set();
+    document.body.querySelectorAll('table').forEach(table => {
+      const walker = document.createTreeWalker(table, NodeFilter.SHOW_TEXT);
+      for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+        if (!textNodeIsRendered(node)) continue;
+        if (requiredTextContext(node.parentElement)) {
+          requiredTables.add(table);
+          break;
+        }
+      }
+    });
+    document.body.querySelectorAll('*').forEach(el => {
+      if (!ownsRenderedText(el)) return;
+      const style = cs(el);
+      if (!visible(el, style)) return;
+      const oldFontPx = parseFloat(style.fontSize);
+      if (!Number.isFinite(oldFontPx) || oldFontPx <= 0.5) return;
+      const table = el.closest('table');
+      const required = requiredTextContext(el) || Boolean(table && requiredTables.has(table));
+      const minimumPx = required ? REQUIRED_TEXT_MIN_PX : COMPACT_TEXT_MIN_PX;
+      const targetFontPx = Math.max(oldFontPx, minimumPx);
+      const rawLineHeight = style.lineHeight;
+      const oldLineHeightPx = rawLineHeight === 'normal' ? null : parseFloat(rawLineHeight);
+      const lineHeightIsExplicit = Number.isFinite(oldLineHeightPx);
+      const minimumLineHeightPx = targetFontPx * SAFE_LINE_HEIGHT_RATIO;
+      const fontChanged = oldFontPx + 0.01 < targetFontPx;
+      const lineHeightChanged = lineHeightIsExplicit && oldLineHeightPx + 0.01 < minimumLineHeightPx;
+      if (!fontChanged && !lineHeightChanged) return;
+      const source = nearestSourceMeta(el);
+      if (fontChanged)
+        el.style.setProperty('font-size', `${targetFontPx}px`, 'important');
+      if (lineHeightChanged)
+        el.style.setProperty('line-height', `${minimumLineHeightPx}px`, 'important');
+      pending.push({
+        el,
+        source,
+        required,
+        minimumPx,
+        oldFontPx,
+        oldLineHeightPx: lineHeightIsExplicit ? oldLineHeightPx : null,
+        fontChanged,
+        lineHeightChanged,
+      });
+    });
+
+    // Resolve every contract mutation before any extraction geometry is read.
+    document.body.getBoundingClientRect();
+    out.typographyNormalizationCount = pending.length;
+    out.typographyNormalizationsTruncated = pending.length > MAX_TYPOGRAPHY_NORMALIZATIONS;
+    pending.slice(0, MAX_TYPOGRAPHY_NORMALIZATIONS).forEach(item => {
+      const normalized = cs(item.el);
+      const normalizedLineHeight = normalized.lineHeight === 'normal'
+        ? null : parseFloat(normalized.lineHeight);
+      out.typographyNormalizations.push({
+        sourceId: item.source.sourceId,
+        sourceRole: item.source.sourceRole,
+        elementTag: item.el.tagName.toLowerCase(),
+        required: item.required,
+        minimumPx: item.minimumPx,
+        oldFontPx: roundedPx(item.oldFontPx),
+        newFontPx: roundedPx(parseFloat(normalized.fontSize)),
+        oldLineHeightPx: roundedPx(item.oldLineHeightPx),
+        newLineHeightPx: roundedPx(normalizedLineHeight),
+        fontChanged: item.fontChanged,
+        lineHeightChanged: item.lineHeightChanged,
+      });
+    });
+  };
   const seenSourceIds = new Set();
   document.querySelectorAll('[data-deck-id]').forEach(el => {
     const sourceId = el.getAttribute('data-deck-id');
     if (seenSourceIds.has(sourceId)) out.errors.push('duplicate data-deck-id: ' + sourceId);
     seenSourceIds.add(sourceId);
   });
+
+  normalizeTypography();
 
   // an element whose rendered children are all inline (or text/BR) is a text
   // block even if it isn't a <p>/<h*> — figcaption, blockquote, dt, a bare div
@@ -165,13 +348,6 @@ EXTRACT_JS = r"""
     return null;  // top-anchored or ambiguous → leave as default
   };
 
-  const visible = (el, style) => {
-    if (style.display === 'none' || style.visibility === 'hidden') return false;
-    if (parseFloat(style.opacity) === 0) return false;
-    const r = el.getBoundingClientRect();
-    return r.width > 0.5 && r.height > 0.5;
-  };
-
   // Resolve the effective run style at an inline node
   const runStyle = (style) => {
     const color = parseColor(style.color);
@@ -194,7 +370,7 @@ EXTRACT_JS = r"""
     const walk = (node, transform) => {
       if (node.nodeType === Node.TEXT_NODE) {
         const text = transformText(node.textContent.replace(/\s+/g, ' '), transform);
-        if (text) {
+        if (text && textNodeIsRendered(node)) {
           const st = runStyle(cs(node.parentElement));
           const a = node.parentElement.closest('a[href]');
           if (a) st.link = a.href;
@@ -209,7 +385,7 @@ EXTRACT_JS = r"""
       if (node.tagName === 'BR') { paras.push([]); return; }
       if (node.tagName === 'UL' || node.tagName === 'OL') return; // nested lists are their own paragraphs
       const st = cs(node);
-      if (st.display === 'none' || st.visibility === 'hidden') return;
+      if (subtreeHidden(node, st)) return;
       const t = st.textTransform !== 'none' ? st.textTransform : transform;
       node.childNodes.forEach(c => walk(c, t));
     };
@@ -326,7 +502,14 @@ EXTRACT_JS = r"""
   // ---- walk ----
   const emit = (el) => {
     const style = cs(el);
-    if (!visible(el, style)) return;
+    if (!visible(el, style)) {
+      // visibility is overridable and zero-size/display:contents containers
+      // may still have rendered descendants. Only display:none or composed
+      // zero opacity hides the entire subtree.
+      if (!subtreeHidden(el, style))
+        el.childNodes.forEach(n => { if (n.nodeType === Node.ELEMENT_NODE) emit(n); });
+      return;
+    }
     const tag = el.tagName;
 
     if (tag === 'IMG') {
@@ -341,20 +524,31 @@ EXTRACT_JS = r"""
       const r = el.getBoundingClientRect();
       const rows = [];
       const cellStyles = [];
+      const representedCellRows = [];
       el.querySelectorAll('tr').forEach(tr => {
-        const row = [], rowSt = [];
+        const row = [], rowSt = [], representedCells = [];
         tr.querySelectorAll('th,td').forEach(cell => {
+          const cellCs = cs(cell);
+          if (!visible(cell, cellCs)) return;
           if (cell.colSpan > 1 || cell.rowSpan > 1)
             out.warnings.push('table cell spans are not supported; layout will be off');
-          const cellCs = cs(cell);
           // textContent flattens <br> to nothing, gluing words together —
           // walk the cell so explicit breaks survive as newlines
           const withBreaks = (function walk(node) {
             let s = '';
             node.childNodes.forEach(n => {
-              if (n.nodeType === Node.TEXT_NODE) s += n.textContent;
-              else if (n.nodeType === Node.ELEMENT_NODE)
-                s += n.tagName === 'BR' ? '\n' : walk(n);
+              if (n.nodeType === Node.TEXT_NODE) {
+                if (textNodeIsRendered(n)) s += n.textContent;
+              }
+              else if (n.nodeType === Node.ELEMENT_NODE) {
+                const childStyle = cs(n);
+                if (n.tagName === 'BR') {
+                  if (!subtreeHidden(n, childStyle) && childStyle.visibility === 'visible') s += '\n';
+                  return;
+                }
+                if (subtreeHidden(n, childStyle)) return;
+                s += walk(n);
+              }
             });
             return s;
           })(cell);
@@ -362,19 +556,37 @@ EXTRACT_JS = r"""
             withBreaks.split('\n').map(l => l.replace(/\s+/g, ' ').trim())
                       .filter(Boolean).join('\n'),
             cellCs.textTransform));
-          const st = runStyle(cellCs);
+          const firstText = firstRenderedTextNode(cell);
+          const st = runStyle(firstText ? cs(firstText.parentElement) : cellCs);
           const bg = parseColor(cellCs.backgroundColor);
           rowSt.push({ ...st, fill: bg ? bg.hex : null,
                        align: { start: 'left' }[cellCs.textAlign] || cellCs.textAlign });
+          representedCells.push(cell);
         });
-        if (row.length) { rows.push(row); cellStyles.push(rowSt); }
+        if (row.length) {
+          rows.push(row);
+          cellStyles.push(rowSt);
+          representedCellRows.push(representedCells);
+        }
       });
       if (rows.length) {
-        const firstTr = el.querySelector('tr');
-        const colWidths = firstTr
-          ? Array.from(firstTr.querySelectorAll('th,td')).map(c => c.getBoundingClientRect().width)
-          : [];
-        out.items.push({ ...sourceMeta(el), type: 'table', box: { x: r.left, y: r.top, w: r.width, h: r.height },
+        const colWidths = (representedCellRows[0] || [])
+          .map(cell => cell.getBoundingClientRect().width);
+        const tableMeta = sourceMeta(el);
+        const representedRefs = [tableMeta.sourceRefs];
+        representedCellRows.flat().forEach(cell => {
+          // The native table represents each included cell and its visible
+          // textual descendants, but not hidden or non-text decorations that
+          // the table operation discards.
+          representedRefs.push(sourceMeta(cell).sourceRefs);
+          cell.querySelectorAll('[data-deck-id]').forEach(descendant => {
+            if (!visible(descendant, cs(descendant))) return;
+            if (!hasRenderedText(descendant)) return;
+            representedRefs.push(sourceMeta(descendant).sourceRefs);
+          });
+        });
+        out.items.push({ ...tableMeta, sourceRefs: mergeSourceRefs(...representedRefs),
+                         type: 'table', box: { x: r.left, y: r.top, w: r.width, h: r.height },
                          rows, cellStyles, colWidths,
                          fontSizePx: parseFloat(cs(el).fontSize) });
       }
@@ -822,6 +1034,35 @@ def compile_page(extract, slide_ref, html_path, tmpdir, prefix, warnings, source
     ops = []
     seq = [0]
     source_seq = {}
+    selector = f"slide:{slide_ref + 1}"
+    slide_map = source_map.setdefault("slides", {}).setdefault(selector, {"elements": {}})
+
+    raw_normalizations = [
+        item for item in extract.get("typographyNormalizations") or []
+        if isinstance(item, dict)
+    ][:MAX_TYPOGRAPHY_NORMALIZATIONS]
+    normalization_count = max(
+        len(raw_normalizations),
+        int(extract.get("typographyNormalizationCount") or 0),
+    )
+    if normalization_count:
+        allowed_keys = {
+            "sourceId", "sourceRole", "elementTag", "required", "minimumPx",
+            "oldFontPx", "newFontPx", "oldLineHeightPx", "newLineHeightPx",
+            "fontChanged", "lineHeightChanged",
+        }
+        slide_map["typography_normalizations"] = [
+            {
+                "selector": selector,
+                **{key: value for key, value in item.items() if key in allowed_keys},
+            }
+            for item in raw_normalizations
+        ]
+        slide_map["typography_normalization_count"] = normalization_count
+        slide_map["typography_normalizations_truncated"] = bool(
+            extract.get("typographyNormalizationsTruncated")
+            or normalization_count > len(raw_normalizations)
+        )
 
     def next_name(kind):
         seq[0] += 1
@@ -858,8 +1099,6 @@ def compile_page(extract, slide_ref, html_path, tmpdir, prefix, warnings, source
         refs = source_refs(item)
         if not refs:
             return
-        selector = "slide:%d" % (slide_ref + 1)
-        slide_map = source_map.setdefault("slides", {}).setdefault(selector, {"elements": {}})
         shape_names = []
         for index, op in enumerate(emitted, start=1):
             if op.get("op") not in ("add-shape", "add-picture", "add-table"):

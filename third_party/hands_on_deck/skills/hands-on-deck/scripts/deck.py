@@ -2511,6 +2511,122 @@ def _single_edge_alignment_translation(rec, recs, *, slide_w, slide_h):
     return role, new_left, delta
 
 
+def _contained_shape_ids(outer, recs):
+    """Shapes geometrically carried by an AUTO_SHAPE container."""
+    if outer.type != "AUTO_SHAPE" or outer.group is not None:
+        return set()
+    outer_left, outer_top, outer_width, outer_height = _absolute_rect(outer)
+    if outer_width < ALIGN_MIN_DIM or outer_height < ALIGN_MIN_DIM:
+        return set()
+    outer_right = outer_left + outer_width
+    outer_bottom = outer_top + outer_height
+    # Alignment inventory is rounded to hundredths of an inch, and native
+    # text commonly bleeds a hair past its painted panel. Treat a shape within
+    # the on-grid tolerance as carried so a boundary repair preserves the
+    # opposite panel edge instead of translating the whole container.
+    containment_eps = ALIGN_EPS
+    contained = set()
+    for sid, inner in recs.items():
+        # A top-level GROUP is a single carried design unit. Its descendants
+        # are deliberately skipped here because preserving the group bounds
+        # preserves their transformed child geometry as well.
+        if sid == outer.sid or inner.group is not None:
+            continue
+        inner_left, inner_top, inner_width, inner_height = _absolute_rect(inner)
+        if inner_width > outer_width + containment_eps or inner_height > outer_height + containment_eps:
+            continue
+        if (
+            outer_left <= inner_left + containment_eps
+            and outer_top <= inner_top + containment_eps
+            and outer_right + containment_eps >= inner_left + inner_width
+            and outer_bottom + containment_eps >= inner_top + inner_height
+        ):
+            contained.add(sid)
+    return contained
+
+
+def _single_edge_autoshape_alignment(rec, recs, *, slide_w, slide_h):
+    """Snap one proven AUTO_SHAPE edge without guessing at source semantics.
+
+    Decorative shapes translate and preserve their dimensions. A shape that
+    geometrically carries content moves only the flagged boundary, preserving
+    the opposite boundary. The combined slide transaction later proves that
+    every original containment relationship still holds after coordinated
+    child repairs.
+    """
+    if (
+        len(rec.misaligned) != 1
+        or rec.type != "AUTO_SHAPE"
+        or rec.is_text
+        or rec.is_table
+        or rec.group is not None
+        or float(getattr(rec.shape, "rotation", 0) or 0) % 360
+    ):
+        return None
+    item = rec.misaligned[0]
+    role = str(item.get("edge") or "")
+    if role not in _ALIGNMENT_ROLE or role not in _alignment_edges(rec, slide_w, slide_h):
+        return None
+
+    peers = [str(peer) for peer in item.get("with") or [] if str(peer)]
+    if len(set(peers)) < ALIGN_MIN_CLUSTER:
+        return None
+    peer_coordinates = []
+    for peer_id in peers:
+        peer = recs.get(peer_id)
+        if peer is None or float(getattr(peer.shape, "rotation", 0) or 0) % 360:
+            return None
+        if _alignment_edges(peer, slide_w, slide_h).get(role) is None:
+            return None
+        peer_coordinates.append(_absolute_alignment_coordinate(peer, role))
+    target = sum(peer_coordinates) / len(peer_coordinates)
+    if any(abs(coordinate - target) > ALIGN_EPS for coordinate in peer_coordinates):
+        return None
+
+    current = _absolute_alignment_coordinate(rec, role)
+    if current is None:
+        return None
+    delta = target - current
+    if not (ALIGN_EPS < abs(delta) <= ALIGN_BAND + ALIGN_EPS):
+        return None
+
+    left, top, width, height = _absolute_rect(rec)
+    carries_content = bool(_contained_shape_ids(rec, recs))
+    # A center snap can only translate the whole container. Moving a painted
+    # panel without translating its carried contents changes their relative
+    # padding even when every child technically remains inside the panel.
+    if carries_content and role in {"hcenter", "vcenter"}:
+        return None
+    mode = "boundary" if carries_content else "translate"
+    if carries_content:
+        if role == "left":
+            width -= delta
+            left += delta
+        elif role == "right":
+            width += delta
+        elif role == "top":
+            height -= delta
+            top += delta
+        elif role == "bottom":
+            height += delta
+    else:
+        axis = _ALIGNMENT_ROLE[role][0]
+        if axis == "x":
+            left += delta
+        else:
+            top += delta
+
+    if (
+        (width < ALIGN_MIN_DIM and height < ALIGN_MIN_DIM)
+        or width < ALIGN_MIN_THICK
+        or height < ALIGN_MIN_THICK
+    ):
+        return None
+    if left < 0 or top < 0 or left + width > slide_w or top + height > slide_h:
+        return None
+    return role, left, top, width, height, delta, mode
+
+
 def _shared_text_seam_plan(rec, recs, *, role, new_left, excluded=()):
     """Coordinate a left snap with its immediate row neighbor when needed."""
     rec_left, rec_top, rec_width, rec_height = _absolute_rect(rec)
@@ -2637,6 +2753,37 @@ def _raw_text_overlap_areas(recs, affected):
     return pairs
 
 
+def _raw_external_autoshape_text_overlap_areas(recs, affected, carried_pairs):
+    """AUTO_SHAPE/text intersections touching a repair, excluding original children."""
+    affected = set(affected or ())
+    pairs = {}
+    for outer_sid, outer in recs.items():
+        if outer.type != "AUTO_SHAPE" or outer.group is not None:
+            continue
+        outer_left, outer_top, outer_width, outer_height = _absolute_rect(outer)
+        for text_sid, text_rec in recs.items():
+            pair = (outer_sid, text_sid)
+            if (
+                not text_rec.is_text
+                or text_sid == outer_sid
+                or pair in carried_pairs
+                or (outer_sid not in affected and text_sid not in affected)
+            ):
+                continue
+            text_left, text_top, text_width, text_height = _absolute_rect(text_rec)
+            overlap_width = min(
+                outer_left + outer_width,
+                text_left + text_width,
+            ) - max(outer_left, text_left)
+            overlap_height = min(
+                outer_top + outer_height,
+                text_top + text_height,
+            ) - max(outer_top, text_top)
+            if overlap_width > 0 and overlap_height > 0:
+                pairs[pair] = overlap_width * overlap_height
+    return pairs
+
+
 def _issue_value_worsened(before, after):
     if before is None:
         return True
@@ -2653,8 +2800,58 @@ def _issue_value_worsened(before, after):
     return after != before
 
 
-def _alignment_transaction_failure(before_recs, after_recs, target_sids):
+def _misalignment_worsened(before_items, after_items):
+    """Compare actual edge offsets, ignoring harmless inferred-peer churn."""
+    before_by_edge = {}
+    for item in before_items or []:
+        try:
+            edge = str(item["edge"])
+            off = float(item["off"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        before_by_edge[edge] = min(off, before_by_edge.get(edge, off))
+    for item in after_items or []:
+        try:
+            edge = str(item["edge"])
+            off = float(item["off"])
+        except (KeyError, TypeError, ValueError):
+            return True
+        before = before_by_edge.get(edge)
+        if before is None or off > before + 1e-6:
+            return True
+    return False
+
+
+def _original_containment_failure(before_recs, after_recs, affected_sids):
+    """Keep every pre-existing AUTO_SHAPE containment relationship intact."""
+    affected = set(affected_sids or ())
+    for outer_sid, before_outer in before_recs.items():
+        if before_outer.type != "AUTO_SHAPE" or before_outer.group is not None:
+            continue
+        carried = _contained_shape_ids(before_outer, before_recs)
+        if not carried:
+            continue
+        after_outer = after_recs.get(outer_sid)
+        if after_outer is None:
+            return "container %s disappeared" % outer_sid
+        after_carried = _contained_shape_ids(after_outer, after_recs)
+        for inner_sid in carried:
+            if outer_sid not in affected and inner_sid not in affected:
+                continue
+            if inner_sid not in after_carried:
+                return "original containment %s/%s was lost" % (outer_sid, inner_sid)
+    return None
+
+
+def _alignment_transaction_failure(
+    before_recs,
+    after_recs,
+    target_sids,
+    *,
+    affected_sids=None,
+):
     """Return a reason if a proposed alignment worsens any measured slide issue."""
+    affected = set(affected_sids if affected_sids is not None else target_sids)
     all_text = {
         sid
         for sid, rec in {**before_recs, **after_recs}.items()
@@ -2666,15 +2863,50 @@ def _alignment_transaction_failure(before_recs, after_recs, target_sids):
         if area > before_overlaps.get(pair, 0.0) + 1e-6:
             return "new or increased text overlap %s" % ("/".join(pair),)
 
+    carried_pairs = {
+        (outer_sid, inner_sid)
+        for outer_sid, outer in before_recs.items()
+        for inner_sid in _contained_shape_ids(outer, before_recs)
+        if before_recs.get(inner_sid) is not None and before_recs[inner_sid].is_text
+    }
+    before_autoshape_text = _raw_external_autoshape_text_overlap_areas(
+        before_recs,
+        affected,
+        carried_pairs,
+    )
+    after_autoshape_text = _raw_external_autoshape_text_overlap_areas(
+        after_recs,
+        affected,
+        carried_pairs,
+    )
+    for pair, area in after_autoshape_text.items():
+        if area > before_autoshape_text.get(pair, 0.0) + 1e-6:
+            return "new or increased AUTO_SHAPE/external-text overlap %s" % (
+                "/".join(pair),
+            )
+
     for sid, after_rec in after_recs.items():
         after_issues = rec_issues(after_rec)
         before_rec = before_recs.get(sid)
         before_issues = rec_issues(before_rec) if before_rec is not None else {}
         for key, value in after_issues.items():
-            if key == "overlaps":
+            if key in {"overlaps", "misaligned"}:
                 continue
             if key not in before_issues or _issue_value_worsened(before_issues[key], value):
                 return "new or increased %s on %s" % (key, sid)
+        if _misalignment_worsened(
+            before_rec.misaligned if before_rec is not None else [],
+            after_rec.misaligned,
+        ):
+            return "new or increased misaligned on %s" % sid
+
+    containment = _original_containment_failure(
+        before_recs,
+        after_recs,
+        affected,
+    )
+    if containment:
+        return containment
 
     for sid in target_sids:
         after_rec = after_recs.get(sid)
@@ -2779,6 +3011,7 @@ def cmd_fix(args):
                 geometry = _alignment_geometry(r, recs, slide_w=slide_w, slide_h=slide_h)
                 if geometry is not None:
                     axis, new_origin, new_extent = geometry
+                    originals = [(sh, sh.left, sh.top, sh.width, sh.height)]
                     if axis == "x":
                         new_left, new_width = new_origin, new_extent
                         sh.left = int(er.tf.child_x(Inches(new_left)))
@@ -2789,12 +3022,20 @@ def cmd_fix(args):
                         sh.top = int(er.tf.child_y(Inches(new_top)))
                         sh.height = int(Inches(new_height) / er.tf.sy)
                         changed = "top,height"
-                    fixed.append({
+                    fixed_entry = {
                         "slide": slide_idx,
                         "shape": sid,
                         "action": "align-%s" % axis,
                         "was": max(float(item.get("off") or 0) for item in r.misaligned),
                         "detail": "set %s from same-peer grid constraints" % changed,
+                    }
+                    fixed.append(fixed_entry)
+                    alignment_changes.append({
+                        "slide": slide_idx,
+                        "targets": {sid},
+                        "affected": {sid},
+                        "originals": originals,
+                        "fixed": fixed_entry,
                     })
                     geometry_touched.add((slide_idx, sid))
                 elif (slide_idx, sid) not in geometry_touched:
@@ -2889,6 +3130,42 @@ def cmd_fix(args):
                                 "fixed": fixed_entry,
                             })
                             geometry_touched.update((slide_idx, shape_id) for shape_id in affected)
+                    else:
+                        adjustment = _single_edge_autoshape_alignment(
+                            r,
+                            recs,
+                            slide_w=slide_w,
+                            slide_h=slide_h,
+                        )
+                        if adjustment is not None:
+                            role, new_left, new_top, new_width, new_height, delta, mode = adjustment
+                            originals = [(sh, sh.left, sh.top, sh.width, sh.height)]
+                            sh.left = int(er.tf.child_x(Inches(new_left)))
+                            sh.top = int(er.tf.child_y(Inches(new_top)))
+                            sh.width = int(Inches(new_width) / er.tf.sx)
+                            sh.height = int(Inches(new_height) / er.tf.sy)
+                            axis = _ALIGNMENT_ROLE[role][0]
+                            action = "align-%s%s" % (
+                                axis,
+                                "-boundary" if mode == "boundary" else "",
+                            )
+                            fixed_entry = {
+                                "slide": slide_idx,
+                                "shape": sid,
+                                "action": action,
+                                "was": abs(delta),
+                                "detail": "%s %s edge %.3f\" to the same-role peer grid"
+                                % (mode, role, delta),
+                            }
+                            fixed.append(fixed_entry)
+                            alignment_changes.append({
+                                "slide": slide_idx,
+                                "targets": {sid},
+                                "affected": {sid},
+                                "originals": originals,
+                                "fixed": fixed_entry,
+                            })
+                            geometry_touched.add((slide_idx, sid))
 
             for key, axis in (("slide_overflow_right", "x"), ("slide_overflow_bottom", "y")):
                 ovs = iss.get(key)
@@ -2964,10 +3241,16 @@ def cmd_fix(args):
                 for change in alignment_changes
                 if change["slide"] == slide_idx
             ))
+            affected = set().union(*(
+                change["affected"]
+                for change in alignment_changes
+                if change["slide"] == slide_idx
+            ))
             reason = _alignment_transaction_failure(
                 midx.get(slide_idx, {}),
                 post_index.get(slide_idx, {}),
                 targets,
+                affected_sids=affected,
             )
             if reason:
                 unsafe_slides[slide_idx] = reason
@@ -3000,7 +3283,13 @@ def cmd_fix(args):
             key = "frame_overflow_bottom"
         elif f["action"] in ("nudge-left", "fit-width"):
             key = "slide_overflow_right"
-        elif f["action"] in ("align-x", "align-y", "align-x-seam"):
+        elif f["action"] in (
+            "align-x",
+            "align-y",
+            "align-x-seam",
+            "align-x-boundary",
+            "align-y-boundary",
+        ):
             key = "misaligned"
         else:
             key = "slide_overflow_bottom"

@@ -446,6 +446,84 @@ def test_native_contrast_passes_explicit_required_text_and_fails_indeterminate(t
     assert low["issues"][0]["reason"] == "contrast_below_threshold"
 
 
+def _contrast_table_deck(
+    path: Path,
+    *,
+    foreground: RGBColor,
+    cell_background: RGBColor | None,
+) -> None:
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    underlay = slide.shapes.add_shape(MSO_SHAPE.RECTANGLE, Inches(1), Inches(1), Inches(8), Inches(2))
+    underlay.fill.solid()
+    underlay.fill.fore_color.rgb = RGBColor(0x0A, 0x0E, 0x14)
+    underlay.line.fill.background()
+    table_shape = slide.shapes.add_table(1, 1, Inches(1), Inches(1), Inches(8), Inches(2))
+    table_shape.name = "s1-required-table"
+    cell = table_shape.table.cell(0, 0)
+    if cell_background is None:
+        cell.fill.background()
+    else:
+        cell.fill.solid()
+        cell.fill.fore_color.rgb = cell_background
+    cell.text = "Required table evidence"
+    run = cell.text_frame.paragraphs[0].runs[0]
+    run.font.size = Pt(20)
+    run.font.color.rgb = foreground
+    presentation.save(path)
+
+
+def test_native_contrast_checks_required_table_cell_fill_and_shape_background(tmp_path: Path) -> None:
+    source_map = {
+        "slides": {
+            "slide:1": {
+                "elements": {
+                    "required-table-copy": {
+                        "source_required": True,
+                        "shape_names": ["s1-required-table"],
+                    }
+                }
+            }
+        }
+    }
+    passing = tmp_path / "passing-table.pptx"
+    low_contrast = tmp_path / "low-contrast-table.pptx"
+    _contrast_table_deck(
+        passing,
+        foreground=RGBColor(0xEE, 0xF4, 0xFB),
+        cell_background=RGBColor(0x0A, 0x0E, 0x14),
+    )
+    _contrast_table_deck(
+        low_contrast,
+        foreground=RGBColor(0x11, 0x18, 0x27),
+        cell_background=None,
+    )
+
+    passed = evaluate_native_contrast(pptx_path=passing, source_element_map=source_map)
+    assert passed["passed"] is True
+    assert passed["checked_run_count"] == 1
+    assert passed["issue_count"] == 0
+
+    failed = evaluate_native_contrast(pptx_path=low_contrast, source_element_map=source_map)
+    assert failed["passed"] is False
+    assert failed["checked_run_count"] == 1
+    assert failed["required_issue_count"] == 1
+    assert failed["issues"] == [
+        {
+            "selector": "slide:1",
+            "shape_name": "s1-required-table",
+            "text_excerpt": "Required table evidence",
+            "foreground": "111827",
+            "background": "0A0E14",
+            "contrast_ratio": 1.09,
+            "required_ratio": 3.0,
+            "required_semantic": True,
+            "indeterminate": False,
+            "reason": "contrast_below_threshold",
+        }
+    ]
+
+
 def test_native_shape_only_pptx_counts_as_visual_evidence(tmp_path: Path) -> None:
     path = tmp_path / "native-shape.pptx"
     presentation = Presentation()

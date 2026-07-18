@@ -882,6 +882,416 @@ def test_deck_native_lint_fix_rolls_back_seam_that_would_wrap_text(
     assert repaired_neighbor.text_frame.paragraphs[0].runs[0].font.size.pt == 18
 
 
+def test_deck_native_lint_fix_coordinates_production_shaped_closing_grid(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "coordinated-closing-grid.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    def add_text(
+        name: str,
+        left: float,
+        top: float,
+        width: float,
+        height: float,
+        font_size: float,
+        text: str,
+    ) -> None:
+        shape = slide.shapes.add_textbox(
+            Inches(left), Inches(top), Inches(width), Inches(height)
+        )
+        shape.name = name
+        shape.text = text
+        text_frame = shape.text_frame
+        text_frame.margin_left = 0
+        text_frame.margin_right = 0
+        text_frame.margin_top = 0
+        text_frame.margin_bottom = 0
+        text_frame.paragraphs[0].line_spacing = Pt(font_size)
+        text_frame.paragraphs[0].runs[0].font.size = Pt(font_size)
+
+    add_text("closing-title", 1.25, 0.73, 15.94, 1.25, 39, "Title")
+    accent = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.25),
+        Inches(2.04),
+        Inches(1.0),
+        Inches(0.06),
+    )
+    accent.name = "closing-accent"
+
+    for index, (top, label_top) in enumerate(
+        ((2.60, 2.80), (3.83, 4.03), (5.06, 5.26), (6.29, 6.49)),
+        start=1,
+    ):
+        panel = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(1.0),
+            Inches(top),
+            Inches(17.77),
+            Inches(1.02),
+        )
+        panel.name = f"question-panel-{index}"
+        add_text(f"question-label-{index}", 1.30, label_top, 0.27, 0.29, 18, str(index))
+
+    closing_panel = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.0),
+        Inches(9.38),
+        Inches(17.81),
+        Inches(1.46),
+    )
+    closing_panel.name = "closing-panel"
+    add_text("closing-thesis", 1.40, 9.73, 17.42, 0.19, 12, "Close")
+    presentation.save(output)
+
+    original = Presentation(output)
+    original_text = {
+        shape.name: shape.text
+        for shape in original.slides[0].shapes
+        if shape.has_text_frame
+    }
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.lint_issue_count_before == 4
+    assert fixed.fix_applied_count == 4, fixed.residue
+    assert fixed.issue_kinds == {"align-x": 3, "align-x-boundary": 1}
+    assert fixed.residue_count == 0
+    repaired = Presentation(output)
+    by_name = {shape.name: shape for shape in repaired.slides[0].shapes}
+    assert by_name["closing-title"].left.inches == pytest.approx(1.30, abs=0.001)
+    assert by_name["closing-accent"].left.inches == pytest.approx(1.30, abs=0.001)
+    assert by_name["closing-panel"].left.inches == pytest.approx(1.0, abs=0.001)
+    assert by_name["closing-panel"].width.inches == pytest.approx(17.77, abs=0.001)
+    assert by_name["closing-thesis"].left.inches == pytest.approx(1.30, abs=0.001)
+    assert {
+        shape.name: shape.text
+        for shape in repaired.slides[0].shapes
+        if shape.has_text_frame
+    } == original_text
+    assert by_name["closing-title"].text_frame.paragraphs[0].runs[0].font.size.pt == 39
+    assert by_name["closing-thesis"].text_frame.paragraphs[0].runs[0].font.size.pt == 12
+
+    clean = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+    assert clean.lint_issue_count_before == 0
+    assert clean.fix_applied_count == 0
+    assert clean.residue_count == 0
+
+
+def test_deck_native_lint_fix_rolls_back_container_boundary_without_child_snap(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "unsafe-container-boundary.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    for index, top in enumerate((2.0, 3.2, 4.4, 5.6), start=1):
+        panel = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(1.0),
+            Inches(top),
+            Inches(17.77),
+            Inches(0.9),
+        )
+        panel.name = f"peer-panel-{index}"
+
+    target = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.0),
+        Inches(7.0),
+        Inches(17.81),
+        Inches(1.4),
+    )
+    target.name = "unsafe-container"
+    child = slide.shapes.add_textbox(
+        Inches(2.0),
+        Inches(7.3),
+        Inches(16.82),
+        Inches(0.5),
+    )
+    child.name = "unmoved-child"
+    child.text = "Child"
+    child.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+    presentation.save(output)
+    before = Presentation(output)
+    before_target = next(shape for shape in before.slides[0].shapes if shape.name == "unsafe-container")
+    before_left, before_width = before_target.left, before_target.width
+    before_child = next(
+        shape for shape in before.slides[0].shapes if shape.name == "unmoved-child"
+    )
+    before_child_geometry = (
+        before_child.left,
+        before_child.top,
+        before_child.width,
+        before_child.height,
+    )
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_kinds == {"misaligned": 1}
+    assert "original containment" in fixed.residue[0]["issue"]
+    repaired = Presentation(output)
+    repaired_target = next(
+        shape for shape in repaired.slides[0].shapes if shape.name == "unsafe-container"
+    )
+    assert repaired_target.left == before_left
+    assert repaired_target.width == before_width
+    repaired_child = next(
+        shape for shape in repaired.slides[0].shapes if shape.name == "unmoved-child"
+    )
+    assert (
+        repaired_child.left,
+        repaired_child.top,
+        repaired_child.width,
+        repaired_child.height,
+    ) == before_child_geometry
+    assert repaired_child.text == child.text
+
+
+def test_deck_native_lint_fix_rolls_back_multi_edge_container_resize(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "unsafe-multi-edge-container.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    for index, top in enumerate((1.0, 2.5, 4.0, 5.5), start=1):
+        peer = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(1.0),
+            Inches(top),
+            Inches(17.77),
+            Inches(0.9),
+        )
+        peer.name = f"multi-edge-peer-{index}"
+
+    target = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.0),
+        Inches(7.0),
+        Inches(17.87),
+        Inches(1.4),
+    )
+    target.name = "multi-edge-container"
+    child = slide.shapes.add_textbox(
+        Inches(2.0),
+        Inches(7.3),
+        Inches(16.85),
+        Inches(0.5),
+    )
+    child.name = "multi-edge-child"
+    child.text = "Child"
+    child.text_frame.margin_left = 0
+    child.text_frame.margin_right = 0
+    child.text_frame.margin_top = 0
+    child.text_frame.margin_bottom = 0
+    child.text_frame.paragraphs[0].runs[0].font.size = Pt(12)
+    presentation.save(output)
+
+    before = Presentation(output)
+    before_target = next(
+        shape for shape in before.slides[0].shapes if shape.name == "multi-edge-container"
+    )
+    before_geometry = (
+        before_target.left,
+        before_target.top,
+        before_target.width,
+        before_target.height,
+    )
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_kinds == {"misaligned": 1}
+    assert "original containment" in fixed.residue[0]["issue"]
+    repaired = Presentation(output)
+    repaired_target = next(
+        shape for shape in repaired.slides[0].shapes if shape.name == "multi-edge-container"
+    )
+    assert (
+        repaired_target.left,
+        repaired_target.top,
+        repaired_target.width,
+        repaired_target.height,
+    ) == before_geometry
+
+
+def test_deck_native_lint_fix_rolls_back_autoshape_external_text_occlusion(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "unsafe-autoshape-text-occlusion.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    for index, (top, width) in enumerate(
+        ((2.0, 2.0), (3.0, 2.5), (4.0, 3.0)),
+        start=1,
+    ):
+        peer = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(2.0),
+            Inches(top),
+            Inches(width),
+            Inches(0.4),
+        )
+        peer.name = f"occlusion-peer-{index}"
+
+    external_text = slide.shapes.add_textbox(
+        Inches(2.95),
+        Inches(1.0),
+        Inches(1.0),
+        Inches(0.4),
+    )
+    external_text.name = "external-text"
+    external_text.text = "External"
+    external_text.text_frame.margin_left = 0
+    external_text.text_frame.margin_right = 0
+    external_text.text_frame.margin_top = 0
+    external_text.text_frame.margin_bottom = 0
+    external_text.text_frame.paragraphs[0].runs[0].font.size = Pt(12)
+
+    target = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.9),
+        Inches(1.0),
+        Inches(1.0),
+        Inches(0.4),
+    )
+    target.name = "occluding-target"
+    presentation.save(output)
+
+    before = Presentation(output)
+    before_target = next(
+        shape for shape in before.slides[0].shapes if shape.name == "occluding-target"
+    )
+    before_geometry = (
+        before_target.left,
+        before_target.top,
+        before_target.width,
+        before_target.height,
+    )
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_kinds == {"misaligned": 1}
+    assert "AUTO_SHAPE/external-text overlap" in fixed.residue[0]["issue"]
+    repaired = Presentation(output)
+    repaired_target = next(
+        shape for shape in repaired.slides[0].shapes if shape.name == "occluding-target"
+    )
+    assert (
+        repaired_target.left,
+        repaired_target.top,
+        repaired_target.width,
+        repaired_target.height,
+    ) == before_geometry
+
+
+def test_deck_native_lint_fix_preserves_top_level_group_inside_container(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "grouped-container-content.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    for index, (left, width, top) in enumerate(
+        ((1.0, 17.77, 1.0), (2.0, 16.77, 2.5), (3.0, 15.77, 4.0)),
+        start=1,
+    ):
+        peer = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(left),
+            Inches(top),
+            Inches(width),
+            Inches(0.9),
+        )
+        peer.name = f"group-container-peer-{index}"
+
+    target = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.0),
+        Inches(7.0),
+        Inches(17.81),
+        Inches(1.4),
+    )
+    target.name = "group-container-target"
+    group = slide.shapes.add_group_shape()
+    group.name = "carried-group"
+    grouped_content = group.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(2.0),
+        Inches(7.3),
+        Inches(16.82),
+        Inches(0.5),
+    )
+    grouped_content.name = "grouped-content"
+    presentation.save(output)
+
+    before = Presentation(output)
+    before_target = next(
+        shape for shape in before.slides[0].shapes if shape.name == "group-container-target"
+    )
+    before_group = next(
+        shape for shape in before.slides[0].shapes if shape.name == "carried-group"
+    )
+    before_target_geometry = (
+        before_target.left,
+        before_target.top,
+        before_target.width,
+        before_target.height,
+    )
+    before_group_geometry = (
+        before_group.left,
+        before_group.top,
+        before_group.width,
+        before_group.height,
+    )
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_kinds == {"misaligned": 1}
+    assert "original containment" in fixed.residue[0]["issue"]
+    repaired = Presentation(output)
+    repaired_target = next(
+        shape for shape in repaired.slides[0].shapes if shape.name == "group-container-target"
+    )
+    repaired_group = next(
+        shape for shape in repaired.slides[0].shapes if shape.name == "carried-group"
+    )
+    assert (
+        repaired_target.left,
+        repaired_target.top,
+        repaired_target.width,
+        repaired_target.height,
+    ) == before_target_geometry
+    assert (
+        repaired_group.left,
+        repaired_group.top,
+        repaired_group.width,
+        repaired_group.height,
+    ) == before_group_geometry
+
+
 def test_deck_native_lint_fix_grows_small_overflow_inside_containing_panel(
     tmp_path: Path,
 ) -> None:
