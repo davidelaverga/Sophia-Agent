@@ -33,6 +33,8 @@ _UNPRIVILEGED_ID_SPAN = 1_000_000_000
 _PROVIDER_ID_MIN = 1_100_000_000
 _PROVIDER_ID_SPAN = 1_000_000_000
 _PROVIDER_LEASE_ROOT = Path("/tmp/sophia-provider-identities")
+_CAP_SETPCAP = 8
+_THREAD_STATUS_PATH = Path("/proc/thread-self/status")
 
 
 @dataclass(frozen=True)
@@ -188,6 +190,50 @@ def _setpriv_path() -> str:
     return executable
 
 
+def _has_permitted_capability(
+    capability: int,
+    *,
+    status_path: Path = _THREAD_STATUS_PATH,
+) -> bool:
+    """Return whether util-linux can activate *capability* for this thread.
+
+    Capability bounding-set changes require ``CAP_SETPCAP``. Some production
+    containers intentionally grant root enough authority to switch UID/GID but
+    omit that capability. In that case the child boundary must retain the
+    host-imposed bounding ceiling while relying on the UID drop, empty active
+    capability sets, and ``no_new_privs`` to make the ceiling non-reacquirable.
+    """
+
+    if capability < 0:
+        raise ValueError("capability number must be non-negative")
+    try:
+        status = status_path.read_text(encoding="utf-8", errors="replace")
+    except OSError as exc:
+        raise RuntimeError(
+            "native renderer cannot inspect permitted capabilities"
+        ) from exc
+    permitted_lines = [
+        line.split(":", 1)[1].strip()
+        for line in status.splitlines()
+        if line.startswith("CapPrm:")
+    ]
+    if len(permitted_lines) != 1 or not permitted_lines[0]:
+        raise RuntimeError(
+            "native renderer received invalid permitted capability status"
+        )
+    if any(character not in "0123456789abcdefABCDEF" for character in permitted_lines[0]):
+        raise RuntimeError(
+            "native renderer received invalid permitted capability status"
+        )
+    try:
+        permitted = int(permitted_lines[0], 16)
+    except ValueError as exc:
+        raise RuntimeError(
+            "native renderer received invalid permitted capability status"
+        ) from exc
+    return bool(permitted & (1 << capability))
+
+
 def _setpriv_command(
     command: Sequence[str],
     *,
@@ -195,6 +241,7 @@ def _setpriv_command(
     gid: int,
     executable: str | None = None,
     umask: int = 0o077,
+    drop_bounding_set: bool,
 ) -> list[str]:
     if not 0 <= umask <= 0o777:
         raise ValueError("native subprocess umask must be between 0000 and 0777")
@@ -207,7 +254,7 @@ def _setpriv_command(
         "sophia-umask",
         *command,
     ]
-    return [
+    privilege_args = [
         executable or _setpriv_path(),
         f"--reuid={uid}",
         f"--regid={gid}",
@@ -215,7 +262,11 @@ def _setpriv_command(
         "--no-new-privs",
         "--inh-caps=-all",
         "--ambient-caps=-all",
-        "--bounding-set=-all",
+    ]
+    if drop_bounding_set:
+        privilege_args.append("--bounding-set=-all")
+    return [
+        *privilege_args,
         "--pdeathsig=KILL",
         "--",
         *payload,
@@ -517,6 +568,7 @@ def isolated_process_boundary(
             gid=gid,
             executable=setpriv,
             umask=umask,
+            drop_bounding_set=_has_permitted_capability(_CAP_SETPCAP),
         )
         yield bounded_command, isolated_env
     finally:

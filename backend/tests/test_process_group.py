@@ -48,6 +48,7 @@ def test_setpriv_command_drops_distinct_identity_and_all_capability_sets() -> No
         uid=410_001,
         gid=410_002,
         executable="/usr/bin/setpriv",
+        drop_bounding_set=True,
     )
 
     assert command == [
@@ -69,6 +70,77 @@ def test_setpriv_command_drops_distinct_identity_and_all_capability_sets() -> No
         "-c",
         "true",
     ]
+
+
+def test_setpriv_command_keeps_safe_boundary_without_setpcap() -> None:
+    command = process_group._setpriv_command(
+        ["/bin/sh", "-c", "true"],
+        uid=410_001,
+        gid=410_002,
+        executable="/usr/bin/setpriv",
+        drop_bounding_set=False,
+    )
+
+    assert "--bounding-set=-all" not in command
+    assert command[:7] == [
+        "/usr/bin/setpriv",
+        "--reuid=410001",
+        "--regid=410002",
+        "--clear-groups",
+        "--no-new-privs",
+        "--inh-caps=-all",
+        "--ambient-caps=-all",
+    ]
+    assert "--pdeathsig=KILL" in command
+
+
+def test_permitted_capability_detection_reads_thread_status(tmp_path: Path) -> None:
+    status = tmp_path / "status"
+    status.write_text("CapPrm:\t0000000000000100\n", encoding="utf-8")
+
+    assert process_group._has_permitted_capability(
+        process_group._CAP_SETPCAP,
+        status_path=status,
+    )
+
+    status.write_text("CapPrm:\t00000000000400cb\n", encoding="utf-8")
+    assert not process_group._has_permitted_capability(
+        process_group._CAP_SETPCAP,
+        status_path=status,
+    )
+
+
+@pytest.mark.parametrize(
+    "contents",
+    (
+        "",
+        "CapEff:\t0000000000000100\n",
+        "CapPrm:\tnot-hex\n",
+        "CapPrm:\t-1\n",
+        "CapPrm:\t+100\n",
+        "CapPrm:\t0x100\n",
+        "CapPrm:\t1_00\n",
+        "CapPrm:\t0000000000000100\nCapPrm:\t0000000000000100\n",
+    ),
+)
+def test_permitted_capability_detection_fails_closed(
+    tmp_path: Path,
+    contents: str,
+) -> None:
+    status = tmp_path / "status"
+    status.write_text(contents, encoding="utf-8")
+
+    with pytest.raises(RuntimeError, match="invalid permitted capability status"):
+        process_group._has_permitted_capability(
+            process_group._CAP_SETPCAP,
+            status_path=status,
+        )
+
+    with pytest.raises(RuntimeError, match="cannot inspect permitted capabilities"):
+        process_group._has_permitted_capability(
+            process_group._CAP_SETPCAP,
+            status_path=tmp_path / "missing",
+        )
 
 
 def test_unprivileged_identity_is_fresh_per_invocation(monkeypatch) -> None:
@@ -175,8 +247,23 @@ try:
     parent = Path(f'/proc/{os.getppid()}/environ').read_bytes()
 except PermissionError:
     parent = b'DENIED'
+status = {}
+for line in Path('/proc/thread-self/status').read_text().splitlines():
+    if ':' in line:
+        key, value = line.split(':', 1)
+        status[key] = value.strip()
 Path(os.environ['PROBE_OUTPUT']).write_text(
-    f'uid={os.geteuid()} parent={parent.decode(errors="replace")}',
+    ' '.join((
+        f'uid={os.geteuid()}',
+        f'gid={os.getegid()}',
+        f'groups={os.getgroups()}',
+        f'nnp={status.get("NoNewPrivs")}',
+        f'cap_prm={status.get("CapPrm")}',
+        f'cap_eff={status.get("CapEff")}',
+        f'cap_inh={status.get("CapInh")}',
+        f'cap_amb={status.get("CapAmb")}',
+        f'parent={parent.decode(errors="replace")}',
+    )),
     encoding='utf-8',
 )
 """
@@ -199,6 +286,13 @@ Path(os.environ['PROBE_OUTPUT']).write_text(
         assert "parent=DENIED" in evidence
         assert secret not in evidence
         assert f"uid={os.geteuid()}" not in evidence
+        assert f"gid={os.getegid()}" not in evidence
+        assert "groups=[]" in evidence
+        assert "nnp=1" in evidence
+        assert "cap_prm=0000000000000000" in evidence
+        assert "cap_eff=0000000000000000" in evidence
+        assert "cap_inh=0000000000000000" in evidence
+        assert "cap_amb=0000000000000000" in evidence
     finally:
         output.unlink(missing_ok=True)
 
