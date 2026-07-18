@@ -168,6 +168,201 @@ def test_rejects_duplicate_semantic_source_ids() -> None:
     assert "duplicate data-deck-id: title" in result.errors
 
 
+def test_normalizes_incomplete_required_descendants_under_valid_required_ancestor() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; }",
+        html_body="""
+<section data-deck-id='s1-eyecap' data-deck-role='header' data-deck-required='true'>
+  <span class='tag'>PSI AGENT ARCHITECTURE</span>
+  <h1 data-deck-id='s1-title' data-deck-required='true'>Motivation as Control Signal</h1>
+</section>
+<div data-deck-id='s1-why' data-deck-role='evidence' data-deck-required='true'>
+  <h3 data-deck-required='true'>Why leaders should care</h3>
+  <p data-deck-required='true'>Motives arbitrate action before irreversible execution.</p>
+</div>
+""",
+    )
+
+    sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+    assert result.sanitized is True
+    assert result.warnings == ["removed 3 redundant nested data-deck-required marker(s)"]
+    assert sanitized.count("data-deck-required='true'") == 2
+    assert "data-deck-id='s1-title'" in sanitized
+    title = next(element for element in result.source_elements if element["source_id"] == "s1-title")
+    assert title["source_required"] is False
+    assert title["source_role"] == ""
+
+
+def test_defaults_neutral_role_for_addressable_required_root_element() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; }",
+        html_body=(
+            "<div class='card' data-deck-id='s3-help' data-deck-required='true'>"
+            "<h3>Helpfulness</h3><p>Comply quickly.</p></div>"
+        ),
+    )
+
+    sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+    assert result.sanitized is True
+    assert 'data-deck-id=\'s3-help\' data-deck-required=\'true\' data-deck-role="content"' in sanitized
+    assert result.warnings == ['defaulted 1 required data-deck-role marker(s) to "content"']
+    source = next(element for element in result.source_elements if element["source_id"] == "s3-help")
+    assert source["source_required"] is True
+    assert source["source_role"] == "content"
+
+
+def test_does_not_default_role_for_generic_addressable_root_element() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; }",
+        html_body=(
+            "<section data-deck-id='generic' data-deck-required='true'>"
+            "Generic semantic container</section>"
+        ),
+    )
+
+    sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert result.sanitized is False
+    assert sanitized == html
+    assert "required element generic requires data-deck-role" in result.errors
+
+
+def test_root_required_element_still_requires_its_own_id_and_role() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; }",
+        html_body="<h1 data-deck-required='true'>Motivation as Control Signal</h1>",
+    )
+
+    sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert result.sanitized is False
+    assert sanitized == html
+    assert "data-deck-required=true requires data-deck-id" in result.errors
+    assert "required element <unknown> requires data-deck-role" in result.errors
+
+
+def test_nested_required_element_is_not_normalized_under_invalid_required_ancestor() -> None:
+    for ancestor_attrs in (
+        "data-deck-id='section' data-deck-role='' data-deck-required='true'",
+        "data-deck-id='Invalid!' data-deck-role='evidence' data-deck-required='true'",
+    ):
+        html = assemble_compact_slide_html(
+            deck_stylesheet=".slide-root { background: #101828; }",
+            html_body=(
+                f"<section {ancestor_attrs}>"
+                "<h1 data-deck-required='true'>Motivation as Control Signal</h1>"
+                "</section>"
+            ),
+        )
+
+        sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+        assert result.valid is False
+        assert result.sanitized is False
+        assert sanitized == html
+        assert sanitized.count("data-deck-required='true'") == 2
+        assert "data-deck-required=true requires data-deck-id" in result.errors
+        assert "required element <unknown> requires data-deck-role" in result.errors
+
+
+def test_does_not_use_unstable_text_container_as_required_coverage() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; }",
+        html_body=(
+            "<p data-deck-id='intro' data-deck-role='body' data-deck-required='true'>"
+            "Intro<div data-deck-required='true'>Detached block</div></p>"
+        ),
+    )
+
+    sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert result.sanitized is False
+    assert sanitized == html
+    assert "data-deck-required=true requires data-deck-id" in result.errors
+
+
+def test_does_not_strip_required_marker_across_table_foster_parenting_context() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; }",
+        html_body=(
+            "<table><div data-deck-id='cover' data-deck-role='content' "
+            "data-deck-required='true'><tr><td>"
+            "<h3 data-deck-required='true'>Must keep</h3>"
+            "</td></tr></div></table>"
+        ),
+    )
+
+    sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert result.sanitized is False
+    assert sanitized == html
+    assert sanitized.count("data-deck-required='true'") == 2
+    assert "data-deck-required=true requires data-deck-id" in result.errors
+
+
+def test_does_not_strip_required_marker_across_implicit_list_item_close() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; }",
+        html_body=(
+            "<ul><li><div data-deck-id='cover' data-deck-role='content' "
+            "data-deck-required='true'>Cover"
+            "<li><h3 data-deck-required='true'>Must keep</h3></ul>"
+        ),
+    )
+
+    sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert result.sanitized is False
+    assert sanitized == html
+    assert sanitized.count("data-deck-required='true'") == 2
+    assert "data-deck-required=true requires data-deck-id" in result.errors
+
+
+def test_does_not_strip_required_marker_after_mismatched_heading_close() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; }",
+        html_body=(
+            "<h1><div data-deck-id='cover' data-deck-role='content' "
+            "data-deck-required='true'>Cover</h2>"
+            "<h3 data-deck-required='true'>Must keep</h3>"
+        ),
+    )
+
+    sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert result.sanitized is False
+    assert sanitized == html
+    assert sanitized.count("data-deck-required='true'") == 2
+    assert "data-deck-required=true requires data-deck-id" in result.errors
+
+
+def test_rejects_duplicate_semantic_attributes_without_normalizing_them() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; }",
+        html_body=(
+            "<div data-deck-id='card' data-deck-required='true' "
+            "data-deck-required='true'>Duplicate semantics</div>"
+        ),
+    )
+
+    sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert result.sanitized is False
+    assert sanitized == html
+    assert "duplicate semantic attribute data-deck-required is forbidden" in result.errors
+
+
 def test_canvas_size_uses_slide_canvas_not_first_child_width() -> None:
     html = """<!doctype html><html><head><style>
 .badge { width: 80px; height: 28px; background: #38BDF8; }

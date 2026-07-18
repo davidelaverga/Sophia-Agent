@@ -33,6 +33,76 @@ _FILE_URI_RE = re.compile(r"^file:", re.I)
 _URL_ATTRIBUTE_NAMES = {"src", "href", "poster", "background", "data"}
 _LEGACY_SUBRESOURCE_ATTRIBUTE_NAMES = {"poster", "background", "data"}
 _DECK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_VOID_TAGS = frozenset(
+    {
+        "area",
+        "base",
+        "br",
+        "col",
+        "embed",
+        "hr",
+        "img",
+        "input",
+        "link",
+        "meta",
+        "param",
+        "source",
+        "track",
+        "wbr",
+    }
+)
+_STABLE_REQUIRED_CONTAINER_TAGS = frozenset(
+    {
+        "article",
+        "aside",
+        "div",
+        "figcaption",
+        "figure",
+        "footer",
+        "header",
+        "main",
+        "nav",
+        "section",
+    }
+)
+_CONTEXTUAL_HTML_TAGS = frozenset(
+    {
+        "a",
+        "button",
+        "colgroup",
+        "dd",
+        "dt",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "li",
+        "math",
+        "nobr",
+        "optgroup",
+        "option",
+        "p",
+        "rb",
+        "rp",
+        "rt",
+        "rtc",
+        "select",
+        "svg",
+        "table",
+        "tbody",
+        "td",
+        "template",
+        "tfoot",
+        "th",
+        "thead",
+        "tr",
+    }
+)
+_SEMANTIC_ATTRIBUTE_NAMES = frozenset(
+    {"data-deck-id", "data-deck-required", "data-deck-role"}
+)
 
 
 def assemble_compact_slide_html(
@@ -128,8 +198,11 @@ class _HtmlScanner(HTMLParser):
             name = raw_name.lower()
             value = raw_value or ""
             local_name = _attribute_local_name(name)
-            if name in seen and local_name in _URL_ATTRIBUTE_NAMES | {"srcset"}:
-                self.errors.append(f"duplicate URL attribute {name} is forbidden")
+            if name in seen:
+                if local_name in _URL_ATTRIBUTE_NAMES | {"srcset"}:
+                    self.errors.append(f"duplicate URL attribute {name} is forbidden")
+                if name in _SEMANTIC_ATTRIBUTE_NAMES:
+                    self.errors.append(f"duplicate semantic attribute {name} is forbidden")
             seen.add(name)
             attr_map.setdefault(name, value)
             if local_name.startswith("on"):
@@ -169,6 +242,150 @@ class _HtmlScanner(HTMLParser):
                 self.author_styles.append(data)
 
 
+class _RequiredSemanticNormalizer(HTMLParser):
+    """Normalize safe required semantics without reserializing authored HTML."""
+
+    def __init__(self, source: str) -> None:
+        super().__init__(convert_charrefs=True)
+        self.source = source
+        self.replacements: list[tuple[int, int, str]] = []
+        self.open_elements: list[tuple[str, bool, bool]] = []
+        self.valid_required_depth = 0
+        self.contextual_html_depth = 0
+        self.defaulted_role_count = 0
+        self.removed_required_count = 0
+        self.line_offsets: list[int] = []
+        offset = 0
+        for line in source.splitlines(keepends=True):
+            self.line_offsets.append(offset)
+            offset += len(line)
+        if not self.line_offsets:
+            self.line_offsets.append(0)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._handle_start(tag, attrs, push=tag.lower() not in _VOID_TAGS)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self._handle_start(tag, attrs, push=False)
+
+    def _handle_start(
+        self,
+        tag: str,
+        attrs: list[tuple[str, str | None]],
+        *,
+        push: bool,
+    ) -> None:
+        attr_map: dict[str, str] = {}
+        attr_counts: dict[str, int] = {}
+        for raw_name, raw_value in attrs:
+            clean_name = raw_name.lower()
+            attr_map.setdefault(clean_name, raw_value or "")
+            attr_counts[clean_name] = attr_counts.get(clean_name, 0) + 1
+        source_required = attr_map.get("data-deck-required", "").strip().lower() == "true"
+        source_id = attr_map.get("data-deck-id", "").strip()
+        source_role = attr_map.get("data-deck-role", "").strip()
+        class_tokens = set(attr_map.get("class", "").lower().split())
+        semantic_attrs_are_unique = all(
+            attr_counts.get(name, 0) <= 1 for name in _SEMANTIC_ATTRIBUTE_NAMES
+        )
+        has_role_attribute = attr_counts.get("data-deck-role", 0) == 1
+        valid_source_id = bool(_DECK_ID_RE.fullmatch(source_id))
+
+        has_covered_required_ancestor = bool(
+            self.valid_required_depth > 0 and self.contextual_html_depth == 0
+        )
+        defaulted_role = bool(
+            source_required
+            and valid_source_id
+            and not source_role
+            and not has_role_attribute
+            and semantic_attrs_are_unique
+            and not has_covered_required_ancestor
+            and self.contextual_html_depth == 0
+            and tag.lower() in _STABLE_REQUIRED_CONTAINER_TAGS
+            and "card" in class_tokens
+            and self._record_default_role()
+        )
+        effective_role = source_role or ("content" if defaulted_role else "")
+        redundant_unaddressable = bool(
+            source_required
+            and (
+                not source_id
+                or (valid_source_id and not source_role and not has_role_attribute)
+            )
+            and has_covered_required_ancestor
+            and semantic_attrs_are_unique
+            and self._record_required_attribute_removal()
+        )
+        valid_required = bool(
+            source_required and not redundant_unaddressable and valid_source_id and effective_role
+        )
+        if push:
+            stable_required_container = valid_required and tag.lower() in _STABLE_REQUIRED_CONTAINER_TAGS
+            contextual_html = tag.lower() in _CONTEXTUAL_HTML_TAGS
+            self.open_elements.append((tag.lower(), stable_required_container, contextual_html))
+            if stable_required_container:
+                self.valid_required_depth += 1
+            if contextual_html:
+                self.contextual_html_depth += 1
+
+    def _record_required_attribute_removal(self) -> bool:
+        raw_tag = self.get_starttag_text() or ""
+        attributes = [
+            (start, end)
+            for name, value, start, end in _start_tag_attributes(raw_tag)
+            if name == "data-deck-required" and value.strip().lower() == "true"
+        ]
+        if len(attributes) != 1:
+            return False
+        start, end = attributes[0]
+        normalized_tag = f"{raw_tag[:start]}{raw_tag[end:]}"
+        if not self._record_tag_replacement(raw_tag, normalized_tag):
+            return False
+        self.removed_required_count += 1
+        return True
+
+    def _record_default_role(self) -> bool:
+        raw_tag = self.get_starttag_text() or ""
+        closing = re.search(r"\s*/?>$", raw_tag)
+        if closing is None:
+            return False
+        normalized_tag = (
+            f'{raw_tag[: closing.start()]} data-deck-role="content"'
+            f"{raw_tag[closing.start() :]}"
+        )
+        if not self._record_tag_replacement(raw_tag, normalized_tag):
+            return False
+        self.defaulted_role_count += 1
+        return True
+
+    def _record_tag_replacement(self, raw_tag: str, normalized_tag: str) -> bool:
+        if normalized_tag == raw_tag:
+            return False
+        line, column = self.getpos()
+        if line <= 0 or line > len(self.line_offsets):
+            return False
+        start = self.line_offsets[line - 1] + column
+        end = start + len(raw_tag)
+        if self.source[start:end] != raw_tag:
+            return False
+        self.replacements.append((start, end, normalized_tag))
+        return True
+
+    def handle_endtag(self, tag: str) -> None:
+        clean_tag = tag.lower()
+        for index in range(len(self.open_elements) - 1, -1, -1):
+            if self.open_elements[index][0] != clean_tag:
+                continue
+            removed = self.open_elements[index:]
+            del self.open_elements[index:]
+            self.valid_required_depth -= sum(1 for _tag, valid, _context in removed if valid)
+            self.contextual_html_depth -= sum(
+                1 for _tag, _valid, contextual in removed if contextual
+            )
+            return
+
+
 def validate_and_sanitize_slide_html(
     slide: DeckSlideSpec,
     *,
@@ -179,6 +396,15 @@ def validate_and_sanitize_slide_html(
     if not source.strip():
         validation.errors.append("html_source is required")
         return source, validation
+    source, defaulted_role_count, removed_required_count = _normalize_required_semantics(source)
+    if defaulted_role_count:
+        validation.warnings.append(
+            f'defaulted {defaulted_role_count} required data-deck-role marker(s) to "content"'
+        )
+    if removed_required_count:
+        validation.warnings.append(
+            f"removed {removed_required_count} redundant nested data-deck-required marker(s)"
+        )
     scanner = _HtmlScanner()
     try:
         scanner.feed(source)
@@ -203,7 +429,7 @@ def validate_and_sanitize_slide_html(
     _validate_css(scanner.styles, validation)
     _validate_image_refs(validation.image_refs, allowed_asset_refs, validation)
     sanitized = _sanitize_css(source)
-    validation.sanitized = sanitized != source
+    validation.sanitized = bool(defaulted_role_count or removed_required_count) or sanitized != source
     validation.valid = not validation.errors
     return sanitized, validation
 
@@ -222,6 +448,75 @@ def validation_summary(results: list[HtmlSourceValidation]) -> dict[str, Any]:
         "unsupported_tags": {result.selector: result.unsupported_tags for result in results if result.unsupported_tags},
         "unsupported_css": {result.selector: result.unsupported_css for result in results if result.unsupported_css},
     }
+
+
+def _normalize_required_semantics(source: str) -> tuple[str, int, int]:
+    """Normalize only semantics that retain deterministic required coverage.
+
+    An authored ``card`` container with a valid stable ID receives the neutral
+    ``content`` role when the role attribute is absent. An incomplete nested
+    marker is removed only when a stable, fully valid required container already
+    covers its descendants and no contextual or optional-end-tag HTML parser
+    state can reparent the node. All other incomplete semantics remain untouched
+    and retain validation errors.
+    """
+
+    normalizer = _RequiredSemanticNormalizer(source)
+    try:
+        normalizer.feed(source)
+    except Exception:  # noqa: BLE001 - validation will report parser failures later.
+        return source, 0, 0
+    if not normalizer.replacements:
+        return source, 0, 0
+    normalized = source
+    for start, end, replacement in reversed(normalizer.replacements):
+        normalized = f"{normalized[:start]}{replacement}{normalized[end:]}"
+    return normalized, normalizer.defaulted_role_count, normalizer.removed_required_count
+
+
+def _start_tag_attributes(raw_tag: str) -> list[tuple[str, str, int, int]]:
+    """Return source-preserving attribute spans from one authored start tag."""
+
+    attributes: list[tuple[str, str, int, int]] = []
+    index = 1
+    length = len(raw_tag)
+    while index < length and raw_tag[index].isspace():
+        index += 1
+    while index < length and not raw_tag[index].isspace() and raw_tag[index] not in "/>":
+        index += 1
+    while index < length:
+        span_start = index
+        while index < length and raw_tag[index].isspace():
+            index += 1
+        if index >= length or raw_tag[index] in "/>":
+            break
+        name_start = index
+        while index < length and not raw_tag[index].isspace() and raw_tag[index] not in "=/>":
+            index += 1
+        name = raw_tag[name_start:index].lower()
+        while index < length and raw_tag[index].isspace():
+            index += 1
+        value = ""
+        if index < length and raw_tag[index] == "=":
+            index += 1
+            while index < length and raw_tag[index].isspace():
+                index += 1
+            if index < length and raw_tag[index] in "\"'":
+                quote = raw_tag[index]
+                index += 1
+                value_start = index
+                while index < length and raw_tag[index] != quote:
+                    index += 1
+                value = raw_tag[value_start:index]
+                if index < length:
+                    index += 1
+            else:
+                value_start = index
+                while index < length and not raw_tag[index].isspace() and raw_tag[index] not in ">":
+                    index += 1
+                value = raw_tag[value_start:index]
+        attributes.append((name, value, span_start, index))
+    return attributes
 
 
 def _validate_uri(value: str, *, errors: list[str]) -> None:

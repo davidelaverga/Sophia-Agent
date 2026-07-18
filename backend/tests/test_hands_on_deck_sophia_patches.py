@@ -534,3 +534,58 @@ def test_browser_typography_floor_reflows_before_geometry_and_records_provenance
     assert by_source_id["optional-label"]["newFontPx"] == 20
     assert by_source_id["role-required"]["required"] is True
     assert by_source_id["nested-copy"]["required"] is True
+
+
+def test_nested_text_without_own_required_marker_inherits_ancestor_contract(tmp_path: Path) -> None:
+    patch, source_map = _html_to_patch_or_skip(
+        tmp_path,
+        """<!doctype html><html><body style="margin:0;width:1920px;height:1080px;background:#FFFFFF;color:#111827;font-family:Arial">
+        <div data-deck-id="s1-eyecap" data-deck-role="header" data-deck-required="true"
+             style="position:absolute;left:96px;top:96px;width:1200px">
+          <h1 data-deck-id="s1-title"
+              style="margin:0;font-size:10px;line-height:10px">Motivation as Control Signal</h1>
+        </div>
+        </body></html>""",
+        stem="nested-required-ancestor",
+    )
+
+    title = _text_operation(patch, "s1-title")
+    assert _single_run_font_size(title) == 18.0
+
+    slide_map = source_map["slides"]["slide:1"]
+    elements = slide_map["elements"]
+    assert elements["s1-title"] == {
+        "source_role": None,
+        "source_required": False,
+        "shape_names": [title["name"]],
+    }
+    assert elements["s1-eyecap"] == {
+        "source_role": "header",
+        "source_required": True,
+        "shape_names": [title["name"]],
+    }
+    normalization = next(
+        item
+        for item in slide_map["typography_normalizations"]
+        if item["sourceId"] == "s1-title"
+    )
+    assert normalization["required"] is True
+    assert normalization["minimumPx"] == 24
+
+    base = tmp_path / "nested-required-ancestor-apply-base.pptx"
+    patch_path = tmp_path / "nested-required-ancestor-apply.patch.json"
+    output = tmp_path / "nested-required-ancestor-applied.pptx"
+    _wide_base_deck(base)
+    patch_path.write_text(json.dumps(patch), encoding="utf-8")
+    applied = DeckNativeService().apply_patch(
+        base_deck_path=str(base),
+        patch_path=str(patch_path),
+        output_path=str(output),
+        fix=False,
+    )
+    assert applied.success is True, applied.errors
+    issues = _compiled_typography_issues(
+        SimpleNamespace(source_element_map=source_map, slides=[]),
+        native_pptx_path=output,
+    )
+    assert issues == []
