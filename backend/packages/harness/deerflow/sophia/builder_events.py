@@ -71,6 +71,11 @@ assert (
 # Delivery tests replace ``threading.Thread`` to observe only the baseline
 # webhook, while production can still abandon stuck read-only preparation.
 _READ_ONLY_PREPARATION_THREAD = threading.Thread
+# Preserve a separate primitive for the complete synchronous producer boundary.
+# LangGraph can select the sync completion hook while its ASGI event loop is
+# active even though ``aafter_model`` normally offloads it. In that production
+# shape, all nested ``asyncio.run`` protocols must execute on a fresh thread.
+_PRODUCER_BOUNDARY_THREAD = threading.Thread
 # Bounded retry on transient failure (transport error / 5xx). A single
 # fire-and-forget POST dropped completion events when the gateway hiccuped —
 # prod 2026-06-26 (a deck's ceiling-fallback success webhook was lost). Mirrors
@@ -1491,6 +1496,57 @@ def _persist_deck_quality_before_delivery(
     return None
 
 
+def _persist_deck_quality_before_delivery_off_loop(
+    *,
+    state: Mapping[str, Any],
+    artifact: Mapping[str, Any],
+    completion_payload: Mapping[str, Any],
+) -> Any | None:
+    """Keep the complete synchronous producer boundary off a running loop.
+
+    The ordinary synchronous path remains direct. If LangGraph invokes that
+    same hook on an active event-loop thread, the owned non-daemon worker is
+    joined before baseline delivery detaches. The unchanged producer protocols
+    retain their absolute deadlines, and no producer write can outlive this
+    pre-delivery call.
+    """
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return _persist_deck_quality_before_delivery(
+            state=state,
+            artifact=artifact,
+            completion_payload=completion_payload,
+        )
+
+    result: list[Any | None] = []
+    errors: list[Exception] = []
+
+    def run_boundary() -> None:
+        try:
+            result.append(
+                _persist_deck_quality_before_delivery(
+                    state=state,
+                    artifact=artifact,
+                    completion_payload=completion_payload,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001 - re-raised on the caller.
+            errors.append(exc)
+
+    worker = _PRODUCER_BOUNDARY_THREAD(
+        target=run_boundary,
+        name="dq1-producer-boundary",
+        daemon=False,
+    )
+    worker.start()
+    worker.join()
+    if errors:
+        raise errors[0]
+    return result[0] if result else None
+
+
 def fire_completion_webhook_from_artifact(
     *,
     state: dict[str, Any],
@@ -1559,7 +1615,7 @@ def fire_completion_webhook_from_artifact(
     # failure marker) must already be discoverable. The helper catches every
     # quality exception, so shadow observation can never suppress delivery.
     try:
-        _persist_deck_quality_before_delivery(
+        _persist_deck_quality_before_delivery_off_loop(
             state=_state_dict(state),
             artifact=_state_dict(artifact),
             completion_payload=payload,

@@ -2181,6 +2181,119 @@ def test_async_artifact_middleware_keeps_loop_live_during_slow_producer() -> Non
     after_model.assert_called_once()
 
 
+def test_sync_completion_hook_offloads_dq1_boundary_from_running_loop() -> None:
+    """Production may select the sync hook while the ASGI loop is active."""
+
+    delivery = _quality_completion_payload()
+    delivery_thread = MagicMock()
+    caller_thread_id: int | None = None
+    producer_thread_id: int | None = None
+    order: list[str] = []
+
+    def persist_boundary(**_kwargs) -> None:
+        nonlocal producer_thread_id
+        producer_thread_id = threading.get_ident()
+        with pytest.raises(RuntimeError):
+            asyncio.get_running_loop()
+        assert asyncio.run(asyncio.sleep(0, result="producer-ok")) == "producer-ok"
+        order.append("producer")
+
+    def make_delivery_thread(**_kwargs):
+        order.append("delivery-init")
+        return delivery_thread
+
+    delivery_thread.start.side_effect = lambda: order.append("delivery-start")
+
+    async def exercise() -> bool:
+        nonlocal caller_thread_id
+        caller_thread_id = threading.get_ident()
+        return builder_events.fire_completion_webhook_from_artifact(
+            state=_quality_state(),
+            artifact=_quality_artifact(),
+            runtime=_make_runtime(
+                builder_thread_id="builder-task",
+                builder_run_id="builder-run",
+            ),
+            status="completed",
+        )
+
+    with (
+        patch.object(
+            builder_events,
+            "build_completion_payload_from_artifact",
+            return_value=delivery,
+        ),
+        patch.object(
+            builder_events,
+            "_persist_deck_quality_before_delivery",
+            side_effect=persist_boundary,
+        ),
+        patch.object(
+            builder_events.threading,
+            "Thread",
+            side_effect=make_delivery_thread,
+        ),
+        patch.object(builder_events, "_post_webhook", MagicMock()),
+    ):
+        result = asyncio.run(exercise())
+
+    assert result is True
+    assert caller_thread_id is not None
+    assert producer_thread_id is not None
+    assert producer_thread_id != caller_thread_id
+    assert order == ["producer", "delivery-init", "delivery-start"]
+
+
+def test_running_loop_quality_error_still_starts_baseline_delivery() -> None:
+    delivery = _quality_completion_payload()
+    delivery_thread = MagicMock()
+    order: list[str] = []
+
+    def fail_boundary(**_kwargs) -> None:
+        order.append("producer-error")
+        raise RuntimeError("quality boundary failed")
+
+    def make_delivery_thread(**_kwargs):
+        order.append("delivery-init")
+        return delivery_thread
+
+    delivery_thread.start.side_effect = lambda: order.append("delivery-start")
+
+    async def exercise() -> bool:
+        return builder_events.fire_completion_webhook_from_artifact(
+            state=_quality_state(),
+            artifact=_quality_artifact(),
+            runtime=_make_runtime(
+                builder_thread_id="builder-task",
+                builder_run_id="builder-run",
+            ),
+            status="completed",
+        )
+
+    with (
+        patch.object(
+            builder_events,
+            "build_completion_payload_from_artifact",
+            return_value=delivery,
+        ),
+        patch.object(
+            builder_events,
+            "_persist_deck_quality_before_delivery",
+            side_effect=fail_boundary,
+        ),
+        patch.object(
+            builder_events.threading,
+            "Thread",
+            side_effect=make_delivery_thread,
+        ),
+        patch.object(builder_events, "_post_webhook", MagicMock()),
+    ):
+        result = asyncio.run(exercise())
+
+    assert result is True
+    assert order == ["producer-error", "delivery-init", "delivery-start"]
+
+
 @pytest.mark.parametrize(
     ("config", "artifact"),
     [
