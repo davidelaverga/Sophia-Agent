@@ -1,0 +1,534 @@
+from __future__ import annotations
+
+import asyncio
+import hashlib
+import io
+from types import SimpleNamespace
+from typing import Any
+
+import pytest
+from PIL import Image
+
+from deerflow.config.model_route_config import ResolvedModelPlan
+from deerflow.sophia.deck_design_lift.invoker import (
+    DeckRepairInputTokenCount,
+    DeckRepairInvocationMetrics,
+    DeckRepairInvocationResult,
+    PreparedDeckRepairRequest,
+)
+from deerflow.sophia.deck_design_lift.repair_author import (
+    MAX_REPAIR_CONTEXT_SOURCE_BYTES,
+    DeckRepairAuthorError,
+    ProductionDeckRepairAuthor,
+    RepairAuthorContext,
+    RepairAuthorContextIdentity,
+    RepairBriefContext,
+    RepairContextImage,
+    RepairOwnedAssetContext,
+    RepairPlanContext,
+    RepairSkillExcerptContext,
+    RepairSourceContext,
+    projected_repair_campaign_cost_usd,
+    repair_preflight_admitted,
+)
+from deerflow.sophia.deck_design_lift.runtime import RepairInvocationRequest
+from deerflow.sophia.deck_design_lift.schemas import (
+    DeckRepairCandidate,
+    DeckRepairProgram,
+    RepairRenderEvidence,
+    SelectorRepair,
+    SkillRef,
+    SourceUpdate,
+)
+from deerflow.sophia.deck_quality.canonical import (
+    canonical_json_bytes,
+    canonical_sha256,
+)
+from deerflow.sophia.deck_quality.schemas import BlindBrief
+
+HASH = "a" * 64
+OTHER_HASH = "b" * 64
+MANIFEST_HASH = "c" * 64
+SKILL_SOURCE_HASH = "d" * 64
+SOURCE_TEXT = "<section><h1>Current PSI control loop</h1></section>"
+SKILL_EXCERPT = "Use one subject-specific mechanism visual and preserve factual text."
+
+
+def _run(awaitable):
+    return asyncio.run(awaitable)
+
+
+def _png_bytes(*, width: int = 64, height: int = 36, color: str = "navy") -> bytes:
+    buffer = io.BytesIO()
+    Image.new("RGB", (width, height), color=color).save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+CONTACT_BYTES = _png_bytes(color="white")
+RENDER_BYTES = _png_bytes(color="navy")
+CONTACT_HASH = hashlib.sha256(CONTACT_BYTES).hexdigest()
+RENDER_HASH = hashlib.sha256(RENDER_BYTES).hexdigest()
+SOURCE_HASH = hashlib.sha256(SOURCE_TEXT.encode()).hexdigest()
+SKILL_EXCERPT_HASH = hashlib.sha256(SKILL_EXCERPT.encode()).hexdigest()
+
+
+def _plan() -> ResolvedModelPlan:
+    return ResolvedModelPlan.model_validate(
+        {
+            "route_name": "deck.repair.executor",
+            "deployment_name": "openai-gpt-5-6-sol",
+            "provider": "openai",
+            "provider_model": "gpt-5.6-sol",
+            "profile_name": "deck-repair-executor-v1",
+            "profile_version": "v1",
+            "capabilities": frozenset(
+                {
+                    "image_input",
+                    "multi_image_input",
+                    "strict_structured_output",
+                    "reasoning_effort",
+                }
+            ),
+            "model_overrides": {
+                "reasoning": {
+                    "effort": "high",
+                    "mode": "standard",
+                    "context": "current_turn",
+                },
+                "output_version": "responses/v1",
+                "use_responses_api": True,
+                "store": False,
+                "max_completion_tokens": 12_000,
+                "timeout": 240,
+                "max_retries": 0,
+            },
+            "plan_hash": HASH,
+        }
+    )
+
+
+def _program(*, render_hash: str = RENDER_HASH) -> DeckRepairProgram:
+    render = RepairRenderEvidence(
+        selector="slide:1",
+        path="renders/slide-1.png",
+        sha256=render_hash,
+    )
+    skill = SkillRef(
+        path="skills/public/hands-on-deck/designing-slides.md",
+        source_hash=SKILL_SOURCE_HASH,
+        excerpt_hash=SKILL_EXCERPT_HASH,
+    )
+    payload: dict[str, Any] = {
+        "schema_version": "sophia-deck-repair-program/v1",
+        "build_id": "build-psi-001",
+        "initial_quality_run_id": "quality-initial-001",
+        "initial_manifest_revision": 1,
+        "repair_attempt": 1,
+        "plan_revision_allowed": False,
+        "authorized_selectors": ("slide:1",),
+        "authorized_source_roles": {"slide:1": ("body",)},
+        "deck_instruction": "Repair only the frozen PSI mechanism slide.",
+        "selector_repairs": (
+            SelectorRepair(
+                selector="slide:1",
+                failure_codes=("weak_subject_specificity",),
+                render_evidence=(render,),
+                instruction="Make the PSI mechanism visible and subject-specific.",
+                retained_content=("Preserve the PSI control-loop claim.",),
+                allowed_asset_changes=("hero-asset",),
+            ),
+        ),
+        "must_preserve": ("Preserve factual content and slide count.",),
+        "must_not": ("Do not edit another selector.",),
+        "skill_refs": (skill,),
+        "expected_improvements": ("weak_subject_specificity",),
+        "forbidden_regressions": ("content_regression",),
+        "rubric_version": "deck-quality-rubric-v1",
+        "instrument_hash": OTHER_HASH,
+    }
+    payload["program_hash"] = canonical_sha256(payload)
+    return DeckRepairProgram.model_validate(payload)
+
+
+def _request(*, program: DeckRepairProgram | None = None) -> RepairInvocationRequest:
+    return RepairInvocationRequest(
+        campaign_run_id="campaign-dq2-001",
+        experiment_id="experiment-dq2-001",
+        user_id="user-canary-001",
+        thread_id="thread-canary-001",
+        build_id="build-psi-001",
+        operation_id="operation-dq2-001",
+        transaction_id="transaction-dq2-001",
+        initial_artifact_version_id="artifact-initial-001",
+        program=program or _program(),
+    )
+
+
+def _context(*, request: RepairInvocationRequest | None = None) -> RepairAuthorContext:
+    request = request or _request()
+    brief = BlindBrief(
+        request="Build an editable five-slide PSI deck.",
+        subject="Proportional-symbolic integration",
+        audience="Product and engineering leaders",
+        goal="Explain the control loop",
+    )
+    creative = {"story": "observe, integrate, act", "slide_count": 5}
+    design = {"signature": "control-loop trace", "palette": ["ink", "cyan"]}
+    metadata = {"role": "mechanism-photo", "semantic_text": False}
+    return RepairAuthorContext(
+        identity=RepairAuthorContextIdentity(
+            campaign_run_id=request.campaign_run_id,
+            experiment_id=request.experiment_id,
+            user_id=request.user_id,
+            thread_id=request.thread_id,
+            build_id=request.build_id,
+            operation_id=request.operation_id,
+            transaction_id=request.transaction_id,
+            initial_artifact_version_id=request.initial_artifact_version_id,
+            repair_program_hash=request.program.program_hash,
+            manifest_revision=request.program.initial_manifest_revision,
+            manifest_hash=MANIFEST_HASH,
+        ),
+        brief=RepairBriefContext(
+            artifact_version_id=request.initial_artifact_version_id,
+            brief=brief,
+            brief_hash=canonical_sha256(brief),
+        ),
+        plans=(
+            RepairPlanContext(
+                artifact_version_id=request.initial_artifact_version_id,
+                role="creative_plan",
+                content=creative,
+                content_hash=canonical_sha256(creative),
+            ),
+            RepairPlanContext(
+                artifact_version_id=request.initial_artifact_version_id,
+                role="design_plan",
+                content=design,
+                content_hash=canonical_sha256(design),
+            ),
+        ),
+        contact_sheet=RepairContextImage(
+            artifact_version_id=request.initial_artifact_version_id,
+            selector="contact-sheet",
+            path="renders/contact-sheet.png",
+            sha256=CONTACT_HASH,
+            width=64,
+            height=36,
+            png_bytes=CONTACT_BYTES,
+        ),
+        failing_renders=(
+            RepairContextImage(
+                artifact_version_id=request.initial_artifact_version_id,
+                selector="slide:1",
+                path="renders/slide-1.png",
+                sha256=RENDER_HASH,
+                width=64,
+                height=36,
+                png_bytes=RENDER_BYTES,
+            ),
+        ),
+        authorized_sources=(
+            RepairSourceContext(
+                build_id=request.build_id,
+                manifest_revision=request.program.initial_manifest_revision,
+                manifest_hash=MANIFEST_HASH,
+                selector="slide:1",
+                source_role="body",
+                component_version_id="slide-1-version-001",
+                manifest_source_path="versions/slide-1/body.html",
+                manifest_source_hash=SOURCE_HASH,
+                text=SOURCE_TEXT,
+            ),
+        ),
+        owned_assets=(
+            RepairOwnedAssetContext(
+                build_id=request.build_id,
+                manifest_revision=request.program.initial_manifest_revision,
+                manifest_hash=MANIFEST_HASH,
+                selector="slide:1",
+                asset_id="hero-asset",
+                current_path="assets/hero.png",
+                current_sha256=HASH,
+                media_type="image/png",
+                size_bytes=1_024,
+                metadata=metadata,
+                metadata_hash=canonical_sha256(metadata),
+            ),
+        ),
+        skill_excerpts=(
+            RepairSkillExcerptContext(
+                path="skills/public/hands-on-deck/designing-slides.md",
+                source_hash=SKILL_SOURCE_HASH,
+                excerpt_hash=SKILL_EXCERPT_HASH,
+                excerpt=SKILL_EXCERPT,
+            ),
+        ),
+    )
+
+
+def _candidate(*, expected_source_hash: str = SOURCE_HASH) -> DeckRepairCandidate:
+    return DeckRepairCandidate(
+        source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="body",
+                expected_source_hash=expected_source_hash,
+                content="<section><h1>Repaired PSI control loop</h1></section>",
+            ),
+        ),
+        rationale="Strengthen the frozen PSI mechanism without collateral edits.",
+    )
+
+
+def _prepared() -> PreparedDeckRepairRequest:
+    payload = canonical_json_bytes({"input": [], "model": "gpt-5.6-sol"})
+    return PreparedDeckRepairRequest(
+        root_async_client=SimpleNamespace(),
+        provider_payload_json=payload,
+        payload_hash=hashlib.sha256(payload).hexdigest(),
+        deployment_name="openai-gpt-5-6-sol",
+        provider="openai",
+        provider_model="gpt-5.6-sol",
+        route_name="deck.repair.executor",
+        profile_version="v1",
+        plan_hash=HASH,
+    )
+
+
+class FakeContextLoader:
+    def __init__(self, value: object) -> None:
+        self.value = value
+        self.error: Exception | None = None
+        self.calls: list[RepairInvocationRequest] = []
+
+    async def load(self, request: RepairInvocationRequest) -> Any:
+        self.calls.append(request)
+        if self.error is not None:
+            raise self.error
+        return self.value
+
+
+class FakeTwoPhaseInvoker:
+    def __init__(
+        self,
+        *,
+        candidate: DeckRepairCandidate | None = None,
+        input_tokens: int = 200,
+    ) -> None:
+        self.prepared = _prepared()
+        self.input_tokens = input_tokens
+        self.result = DeckRepairInvocationResult(
+            candidate=candidate or _candidate(),
+            metrics=DeckRepairInvocationMetrics(
+                latency_ms=100,
+                input_tokens=input_tokens,
+                output_tokens=50,
+                total_tokens=input_tokens + 50,
+                deployment_name=self.prepared.deployment_name,
+                provider=self.prepared.provider,
+                provider_model=self.prepared.provider_model,
+                route_name=self.prepared.route_name,
+                profile_version=self.prepared.profile_version,
+                plan_hash=self.prepared.plan_hash,
+                payload_hash=self.prepared.payload_hash,
+            ),
+        )
+        self.prepare_calls: list[dict[str, Any]] = []
+        self.count_calls: list[PreparedDeckRepairRequest] = []
+        self.invoke_calls: list[dict[str, Any]] = []
+        self.prepare_error: Exception | None = None
+        self.count_error: Exception | None = None
+        self.invoke_error: Exception | None = None
+
+    def prepare_request(self, **kwargs: Any) -> PreparedDeckRepairRequest:
+        self.prepare_calls.append(kwargs)
+        if self.prepare_error is not None:
+            raise self.prepare_error
+        return self.prepared
+
+    async def count_input_tokens(
+        self,
+        *,
+        request: PreparedDeckRepairRequest,
+    ) -> DeckRepairInputTokenCount:
+        self.count_calls.append(request)
+        if self.count_error is not None:
+            raise self.count_error
+        return DeckRepairInputTokenCount(
+            input_tokens=self.input_tokens,
+            payload_hash=request.payload_hash,
+        )
+
+    async def invoke(self, **kwargs: Any) -> DeckRepairInvocationResult:
+        self.invoke_calls.append(kwargs)
+        if self.invoke_error is not None:
+            raise self.invoke_error
+        return self.result
+
+
+def _author(
+    *,
+    request: RepairInvocationRequest | None = None,
+    context: object | None = None,
+    invoker: FakeTwoPhaseInvoker | None = None,
+) -> tuple[ProductionDeckRepairAuthor, FakeContextLoader, FakeTwoPhaseInvoker]:
+    request = request or _request()
+    loader = FakeContextLoader(context if context is not None else _context(request=request))
+    resolved_invoker = invoker or FakeTwoPhaseInvoker()
+    return (
+        ProductionDeckRepairAuthor(
+            context_loader=loader,
+            invoker=resolved_invoker,
+            plan=_plan(),
+        ),
+        loader,
+        resolved_invoker,
+    )
+
+
+def _assert_code(error: pytest.ExceptionInfo[DeckRepairAuthorError], code: str) -> None:
+    assert error.value.code == code
+    assert str(error.value) == code
+    assert error.value.__cause__ is None
+
+
+def test_exact_context_builds_bounded_multimodal_prompt_and_one_create() -> None:
+    request = _request()
+    author, loader, invoker = _author(request=request)
+
+    result = _run(author(request))
+
+    assert result.candidate == _candidate()
+    assert loader.calls == [request]
+    assert len(invoker.prepare_calls) == len(invoker.count_calls) == len(invoker.invoke_calls) == 1
+    prepare = invoker.prepare_calls[0]
+    assert prepare["canary_user_id"] == request.user_id
+    assert prepare["plan"] == _plan()
+    messages = prepare["messages"]
+    assert len(messages) == 2
+    human_blocks = messages[1].content
+    image_blocks = [block for block in human_blocks if block["type"] == "image_url"]
+    assert len(image_blocks) == 2
+    assert image_blocks[0]["image_url"]["detail"] == "high"
+    assert image_blocks[1]["image_url"]["detail"] == "original"
+    assert all(block["image_url"]["url"].startswith("data:image/png;base64,") for block in image_blocks)
+    prompt_text = messages[0].content + "\n" + "\n".join(block["text"] for block in human_blocks if block["type"] == "text")
+    assert SOURCE_TEXT in prompt_text
+    assert SKILL_EXCERPT in prompt_text
+    assert SOURCE_HASH in prompt_text
+    assert "slide:1" in prompt_text
+    assert "slide:2" not in prompt_text
+    for forbidden in (
+        "needs_revision",
+        "weighted_score",
+        "criterion_scores",
+        "initial_quality_run_id",
+        '"rationale"',
+    ):
+        assert forbidden not in prompt_text
+
+
+def test_cost_projection_reserves_both_dq1_runs_and_rejects_without_create() -> None:
+    assert projected_repair_campaign_cost_usd(input_tokens=200) > 1
+    assert repair_preflight_admitted(input_tokens=200)
+    assert not repair_preflight_admitted(input_tokens=300_000)
+    request = _request()
+    invoker = FakeTwoPhaseInvoker(input_tokens=300_000)
+    author, _loader, invoker = _author(request=request, invoker=invoker)
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "repair_cost_rejected")
+    assert len(invoker.prepare_calls) == len(invoker.count_calls) == 1
+    assert invoker.invoke_calls == []
+
+
+@pytest.mark.parametrize("kind", ["source", "render"])
+def test_unrelated_source_or_render_is_rejected_before_provider(kind: str) -> None:
+    request = _request()
+    context = _context(request=request)
+    if kind == "source":
+        extra = context.authorized_sources[0].model_copy(
+            update={
+                "selector": "slide:2",
+                "component_version_id": "slide-2-version-001",
+                "manifest_source_path": "versions/slide-2/body.html",
+            }
+        )
+        context = context.model_copy(update={"authorized_sources": (*context.authorized_sources, extra)})
+    else:
+        extra = context.failing_renders[0].model_copy(update={"selector": "slide:2", "path": "renders/slide-2.png"})
+        context = context.model_copy(update={"failing_renders": (*context.failing_renders, extra)})
+    author, _loader, invoker = _author(request=request, context=context)
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "context_invalid")
+    assert invoker.prepare_calls == []
+
+
+def test_render_hash_or_program_identity_mismatch_is_rejected_before_provider() -> None:
+    request = _request(program=_program(render_hash=OTHER_HASH))
+    context = _context(request=request)
+    author, _loader, invoker = _author(request=request, context=context)
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "context_invalid")
+    assert invoker.prepare_calls == []
+
+
+def test_exact_program_source_role_and_manifest_hash_bind_candidate() -> None:
+    request = _request()
+    wrong = FakeTwoPhaseInvoker(candidate=_candidate(expected_source_hash=OTHER_HASH))
+    author, _loader, invoker = _author(request=request, invoker=wrong)
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize("kind", ["malformed", "oversize"])
+def test_malformed_or_oversized_context_is_sanitized_before_provider(kind: str) -> None:
+    request = _request()
+    if kind == "malformed":
+        context: object = {"private_source": "SECRET_CONTEXT"}
+    else:
+        valid = _context(request=request)
+        oversized_source = valid.authorized_sources[0].model_copy(update={"text": "x" * (MAX_REPAIR_CONTEXT_SOURCE_BYTES + 1)})
+        context = valid.model_copy(update={"authorized_sources": (oversized_source,)})
+    author, _loader, invoker = _author(request=request, context=context)
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "context_invalid")
+    assert "SECRET_CONTEXT" not in str(error.value)
+    assert invoker.prepare_calls == []
+
+
+@pytest.mark.parametrize("stage", ["loader", "prepare", "count", "invoke"])
+def test_raw_loader_or_provider_errors_are_sanitized(stage: str) -> None:
+    request = _request()
+    author, loader, invoker = _author(request=request)
+    raw_error = RuntimeError("SECRET_PROMPT_IMAGE_SOURCE_PROVIDER_PAYLOAD")
+    if stage == "loader":
+        loader.error = raw_error
+        expected = "context_unavailable"
+    else:
+        setattr(invoker, f"{stage}_error", raw_error)
+        expected = "repair_unavailable"
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, expected)
+    assert "SECRET_PROMPT_IMAGE_SOURCE_PROVIDER_PAYLOAD" not in str(error.value)
+    if stage in {"loader", "prepare", "count"}:
+        assert invoker.invoke_calls == []

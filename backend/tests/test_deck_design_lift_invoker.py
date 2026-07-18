@@ -122,11 +122,28 @@ def _complete_response(
 
 
 class _FakeResponses:
-    def __init__(self, *, response: Any | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        response: Any | None = None,
+        counted_input_tokens: object = 200,
+    ) -> None:
         self.response = response or _complete_response()
+        self.counted_input_tokens = counted_input_tokens
+        self.count_calls: list[dict[str, Any]] = []
+        self.count_tracing_states: list[bool | None] = []
         self.create_calls: list[dict[str, Any]] = []
         self.tracing_states: list[bool | None] = []
+        self.count_error: Exception | None = None
         self.create_error: Exception | None = None
+        self.input_tokens = SimpleNamespace(count=self.count)
+
+    async def count(self, **kwargs: Any) -> Any:
+        self.count_calls.append(kwargs)
+        self.count_tracing_states.append(get_tracing_context()["enabled"])
+        if self.count_error is not None:
+            raise self.count_error
+        return SimpleNamespace(input_tokens=self.counted_input_tokens)
 
     async def create(self, **kwargs: Any) -> Any:
         self.create_calls.append(kwargs)
@@ -199,13 +216,34 @@ def _invoke_with_fake(
         create_internal_route_chat_model,
     )
     result = asyncio.run(
-        DeckRepairModelInvoker().invoke(
+        _invoke_two_phase(
+            invoker=DeckRepairModelInvoker(),
             plan=plan or _plan(),
             messages=["PRIVATE_REPAIR_INPUT"],
             canary_user_id="synthetic-canary-user",
         )
     )
     return result, responses, captured
+
+
+async def _invoke_two_phase(
+    *,
+    invoker: DeckRepairModelInvoker,
+    plan: ResolvedModelPlan,
+    messages: list[Any],
+    canary_user_id: str,
+) -> Any:
+    request = invoker.prepare_request(
+        plan=plan,
+        messages=messages,
+        canary_user_id=canary_user_id,
+    )
+    preflight = await invoker.count_input_tokens(request=request)
+    return await invoker.invoke(
+        request=request,
+        plan=plan,
+        preflight=preflight,
+    )
 
 
 def test_factory_admits_only_the_exact_purpose_route_deployment_pair() -> None:
@@ -248,6 +286,10 @@ def test_exact_canary_invocation_is_one_stateless_untraced_provider_call(
 ) -> None:
     result, responses, captured = _invoke_with_fake(monkeypatch)
 
+    assert len(responses.count_calls) == 1
+    count_call = responses.count_calls[0]
+    assert count_call.pop("timeout") == 240
+    assert set(count_call) == {"model", "reasoning", "input", "text"}
     assert len(responses.create_calls) == 1
     call = responses.create_calls[0]
     assert call.pop("timeout") == 240
@@ -269,8 +311,10 @@ def test_exact_canary_invocation_is_one_stateless_untraced_provider_call(
         "mode": "standard",
         "context": "current_turn",
     }
+    assert {key: call[key] for key in count_call} == count_call
     assert "conversation" not in call
     assert "previous_response_id" not in call
+    assert responses.count_tracing_states == [False]
     assert responses.tracing_states == [False]
     assert captured["kwargs"]["attach_tracing"] is False
     assert captured["kwargs"]["api_key"].get_secret_value() == ("synthetic-dq-only-key")
@@ -289,6 +333,63 @@ def test_exact_canary_invocation_is_one_stateless_untraced_provider_call(
     assert result.metrics.output_tokens == 50
     assert result.metrics.total_tokens == 250
     assert result.metrics.payload_hash != ""
+
+
+def test_preflight_payload_mismatch_fails_before_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = _FakeResponses()
+    monkeypatch.setattr(
+        invoker_module,
+        "create_internal_route_chat_model",
+        lambda **_kwargs: _FakeModel(responses),
+    )
+    invoker = DeckRepairModelInvoker()
+    plan = _plan()
+    request = invoker.prepare_request(
+        plan=plan,
+        messages=["PRIVATE_REPAIR_INPUT"],
+        canary_user_id="synthetic-canary-user",
+    )
+
+    with pytest.raises(DeckRepairInvocationError) as error:
+        asyncio.run(
+            invoker.invoke(
+                request=request,
+                plan=plan,
+                preflight=invoker_module.DeckRepairInputTokenCount(
+                    input_tokens=200,
+                    payload_hash="f" * 64,
+                ),
+            )
+        )
+
+    assert error.value.code == "structured_output_invalid"
+    assert responses.create_calls == []
+
+
+def test_token_count_failure_is_sanitized_and_never_creates(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    responses = _FakeResponses(counted_input_tokens=True)
+    monkeypatch.setattr(
+        invoker_module,
+        "create_internal_route_chat_model",
+        lambda **_kwargs: _FakeModel(responses),
+    )
+    invoker = DeckRepairModelInvoker()
+    request = invoker.prepare_request(
+        plan=_plan(),
+        messages=["PRIVATE_REPAIR_INPUT"],
+        canary_user_id="synthetic-canary-user",
+    )
+
+    with pytest.raises(DeckRepairInvocationError) as error:
+        asyncio.run(invoker.count_input_tokens(request=request))
+
+    assert error.value.code == "repair_unavailable"
+    assert error.value.__cause__ is None
+    assert responses.create_calls == []
 
 
 def test_real_pinned_chatopenai_builds_the_locked_repair_payload(
@@ -397,7 +498,8 @@ def test_scope_or_route_drift_fails_before_credential_or_model_access(
 
     with pytest.raises(DeckRepairInvocationError, match="repair_unavailable"):
         asyncio.run(
-            DeckRepairModelInvoker().invoke(
+            _invoke_two_phase(
+                invoker=DeckRepairModelInvoker(),
                 plan=_plan(**plan_overrides),
                 messages=["PRIVATE_REPAIR_INPUT"],
                 canary_user_id=user_id,
@@ -427,7 +529,8 @@ def test_missing_dq_credential_never_falls_back_to_process_openai_key(
 
     with pytest.raises(DeckRepairInvocationError, match="repair_unavailable"):
         asyncio.run(
-            DeckRepairModelInvoker().invoke(
+            _invoke_two_phase(
+                invoker=DeckRepairModelInvoker(),
                 plan=_plan(),
                 messages=["PRIVATE_REPAIR_INPUT"],
                 canary_user_id="synthetic-canary-user",
@@ -468,7 +571,8 @@ def test_payload_lock_drift_fails_before_provider_invocation(
 
     with pytest.raises(DeckRepairInvocationError, match="repair_unavailable"):
         asyncio.run(
-            DeckRepairModelInvoker().invoke(
+            _invoke_two_phase(
+                invoker=DeckRepairModelInvoker(),
                 plan=_plan(),
                 messages=["PRIVATE_REPAIR_INPUT"],
                 canary_user_id="synthetic-canary-user",
@@ -513,7 +617,8 @@ def test_profile_or_client_override_drift_fails_closed(
 
     with pytest.raises(DeckRepairInvocationError, match="repair_unavailable"):
         asyncio.run(
-            DeckRepairModelInvoker().invoke(
+            _invoke_two_phase(
+                invoker=DeckRepairModelInvoker(),
                 plan=_plan(model_overrides=model_overrides),
                 messages=["PRIVATE_REPAIR_INPUT"],
                 canary_user_id="synthetic-canary-user",
@@ -553,7 +658,8 @@ def test_usage_or_structured_output_drift_is_sanitized(
 
     with pytest.raises(DeckRepairInvocationError) as captured:
         asyncio.run(
-            DeckRepairModelInvoker().invoke(
+            _invoke_two_phase(
+                invoker=DeckRepairModelInvoker(),
                 plan=_plan(),
                 messages=["PRIVATE_REPAIR_INPUT"],
                 canary_user_id="synthetic-canary-user",
@@ -581,7 +687,8 @@ def test_provider_error_retains_only_allowlisted_diagnostics(
 
     with pytest.raises(DeckRepairInvocationError) as captured:
         asyncio.run(
-            DeckRepairModelInvoker().invoke(
+            _invoke_two_phase(
+                invoker=DeckRepairModelInvoker(),
                 plan=_plan(),
                 messages=["PRIVATE_REPAIR_INPUT"],
                 canary_user_id="synthetic-canary-user",

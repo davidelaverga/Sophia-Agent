@@ -271,11 +271,7 @@ class DeckRepairModelInvoker:
             or overrides["timeout"] != _LOCKED_TIMEOUT_SECONDS
         ):
             raise TypeError
-        overrides["extra_body"] = {
-            "safety_identifier": repair_safety_identifier(
-                canary_user_id=canary_user_id
-            )
-        }
+        overrides["extra_body"] = {"safety_identifier": repair_safety_identifier(canary_user_id=canary_user_id)}
         return overrides
 
     @staticmethod
@@ -352,11 +348,7 @@ class DeckRepairModelInvoker:
         root_async_client = getattr(model, "root_async_client", None)
         responses = getattr(root_async_client, "responses", None)
         input_tokens = getattr(responses, "input_tokens", None)
-        if (
-            root_async_client is None
-            or not callable(getattr(responses, "create", None))
-            or not callable(getattr(input_tokens, "count", None))
-        ):
+        if root_async_client is None or not callable(getattr(responses, "create", None)) or not callable(getattr(input_tokens, "count", None)):
             raise TypeError
         provider_payload_json = canonical_json_bytes(payload)
         return PreparedDeckRepairRequest(
@@ -398,18 +390,10 @@ class DeckRepairModelInvoker:
 
     @staticmethod
     def _decode_request(request: PreparedDeckRepairRequest) -> dict[str, Any]:
-        if (
-            not isinstance(request, PreparedDeckRepairRequest)
-            or hashlib.sha256(request.provider_payload_json).hexdigest()
-            != request.payload_hash
-        ):
+        if not isinstance(request, PreparedDeckRepairRequest) or hashlib.sha256(request.provider_payload_json).hexdigest() != request.payload_hash:
             raise TypeError
         payload = json.loads(request.provider_payload_json)
-        if (
-            not isinstance(payload, dict)
-            or set(payload) != _LOCKED_PROVIDER_PAYLOAD_KEYS
-            or canonical_json_bytes(payload) != request.provider_payload_json
-        ):
+        if not isinstance(payload, dict) or set(payload) != _LOCKED_PROVIDER_PAYLOAD_KEYS or canonical_json_bytes(payload) != request.provider_payload_json:
             raise TypeError
         return payload
 
@@ -439,10 +423,7 @@ class DeckRepairModelInvoker:
         try:
             with langsmith_tracing_disabled():
                 payload = self._decode_request(request)
-                count_payload = {
-                    key: payload[key]
-                    for key in _REQUIRED_INPUT_TOKEN_COUNT_PAYLOAD_KEYS
-                }
+                count_payload = {key: payload[key] for key in _REQUIRED_INPUT_TOKEN_COUNT_PAYLOAD_KEYS}
                 count = request.root_async_client.responses.input_tokens.count
                 with anyio.fail_after(_LOCKED_TIMEOUT_SECONDS):
                     response = await count(
@@ -478,15 +459,8 @@ class DeckRepairModelInvoker:
             with langsmith_tracing_disabled():
                 payload = self._decode_request(request)
                 self._validate_prepared_plan(request, plan)
-                if (
-                    not isinstance(preflight, DeckRepairInputTokenCount)
-                    or type(preflight.input_tokens) is not int
-                    or preflight.input_tokens < 0
-                    or preflight.payload_hash != request.payload_hash
-                ):
-                    raise DeckRepairInvocationError(
-                        "structured_output_invalid"
-                    )
+                if not isinstance(preflight, DeckRepairInputTokenCount) or type(preflight.input_tokens) is not int or preflight.input_tokens < 0 or preflight.payload_hash != request.payload_hash:
+                    raise DeckRepairInvocationError("structured_output_invalid")
                 started = time.monotonic()
                 with anyio.fail_after(_LOCKED_TIMEOUT_SECONDS):
                     response = await request.root_async_client.responses.create(

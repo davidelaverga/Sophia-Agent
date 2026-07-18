@@ -8,9 +8,11 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from deerflow.sophia.artifact_acceptance import ArtifactAcceptedPayload
 from deerflow.sophia.build_manifest import (
+    DECK_STYLE_ROOT_SELECTOR,
     BuildManifest,
     BuildManifestConcurrentModification,
     BuildManifestStore,
+    component_dependency_closure,
     manifest_components_by_selector,
 )
 from deerflow.sophia.build_mutation import (
@@ -879,10 +881,22 @@ class DeckDesignLiftRuntime:
         changed = {selector for selector, version_id in candidate_versions.items() if baseline_versions[selector] != version_id}
         if changed != set(staged.locality.changed_component_versions):
             raise DeckDesignLiftRuntimeError("candidate locality proof does not match manifest versions")
-        if not changed or not changed.issubset(set(program.authorized_selectors)):
+        try:
+            expected_changed = set(
+                component_dependency_closure(
+                    manifest,
+                    program.authorized_selectors,
+                )
+            )
+        except ValueError:
+            raise DeckDesignLiftRuntimeError("candidate dependency graph is invalid") from None
+        if not changed or changed != expected_changed:
             raise DeckDesignLiftRuntimeError("candidate changed an unauthorized component version")
         if set(staged.locality.authorized_selectors) != set(program.authorized_selectors):
             raise DeckDesignLiftRuntimeError("candidate locality authorization mismatch")
+        expected_shared_change = DECK_STYLE_ROOT_SELECTOR in program.authorized_selectors
+        if staged.locality.shared_dependency_changed != expected_shared_change:
+            raise DeckDesignLiftRuntimeError("candidate shared-dependency proof does not match authorization")
         unchanged = set(baseline_versions) - changed
         if unchanged != set(staged.locality.unchanged_component_versions):
             raise DeckDesignLiftRuntimeError("candidate locality proof does not cover every unchanged component")
