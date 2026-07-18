@@ -7,6 +7,7 @@ from typing import Any
 from urllib.parse import unquote, urlsplit
 
 import tinycss2
+from tinycss2.color3 import parse_color
 
 from deerflow.sophia.deck_build.compiler_capabilities import (
     lossy_css_in_html,
@@ -100,9 +101,46 @@ _CONTEXTUAL_HTML_TAGS = frozenset(
         "tr",
     }
 )
-_SEMANTIC_ATTRIBUTE_NAMES = frozenset(
-    {"data-deck-id", "data-deck-required", "data-deck-role"}
+_SEMANTIC_ATTRIBUTE_NAMES = frozenset({"data-deck-id", "data-deck-required", "data-deck-role"})
+_HEADING_TAGS = frozenset({"h1", "h2", "h3", "h4", "h5", "h6"})
+_TABLE_STRUCTURE_TAGS = frozenset(
+    {
+        "caption",
+        "col",
+        "colgroup",
+        "table",
+        "tbody",
+        "td",
+        "tfoot",
+        "th",
+        "thead",
+        "tr",
+    }
 )
+_TABLE_SECTION_TAGS = frozenset({"tbody", "tfoot", "thead"})
+_TABLE_PARAGRAPH_TEXT_STYLE_PROPERTIES = frozenset(
+    {
+        "color",
+        "font-family",
+        "font-size",
+        "font-style",
+        "font-weight",
+        "line-height",
+        "margin",
+        "margin-bottom",
+        "margin-left",
+        "margin-right",
+        "margin-top",
+        "text-align",
+        "text-decoration",
+        "text-transform",
+    }
+)
+_POSITIVE_TEXT_MEASURE_RE = re.compile(
+    r"^(?P<number>(?:\d+(?:\.\d+)?|\.\d+))(?:px|pt|em|rem|%)?$",
+    re.I,
+)
+_ZERO_MEASURE_RE = re.compile(r"^[+-]?0(?:\.0+)?(?:px|pt|em|rem|%)?$", re.I)
 
 
 def assemble_compact_slide_html(
@@ -177,7 +215,7 @@ class _HtmlScanner(HTMLParser):
         if clean_tag == "link" and attr_map.get("rel", "").lower() == "stylesheet":
             self.errors.append("external stylesheet links are forbidden")
         if clean_tag == "meta" and not meta_attributes_are_inert(attr_map):
-            self.errors.append("meta directives are forbidden; only <meta charset=\"utf-8\"> is allowed")
+            self.errors.append('meta directives are forbidden; only <meta charset="utf-8"> is allowed')
         if clean_tag == "body":
             self.body_attrs = attr_map
         if clean_tag == "main" and not self.main_attrs:
@@ -242,17 +280,172 @@ class _HtmlScanner(HTMLParser):
                 self.author_styles.append(data)
 
 
-class _RequiredSemanticNormalizer(HTMLParser):
-    """Normalize safe required semantics without reserializing authored HTML."""
+class _CanonicalTableStructureValidator(HTMLParser):
+    """Accept only table structure whose cell ancestry is source-explicit."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.stack: list[str] = []
+        self.valid = True
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        self._handle_start(tag.lower(), self_closing=False)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        self._handle_start(tag.lower(), self_closing=True)
+
+    def _handle_start(self, tag: str, *, self_closing: bool) -> None:
+        if not self.valid:
+            return
+        if tag not in _TABLE_STRUCTURE_TAGS:
+            if self.stack and self.stack[-1] not in {"caption", "td", "th"}:
+                self.valid = False
+            return
+        if tag == "col":
+            if not self.stack or self.stack[-1] != "colgroup":
+                self.valid = False
+            return
+        if self_closing:
+            self.valid = False
+            return
+        if tag == "table":
+            if self.stack:
+                self.valid = False
+                return
+        elif tag in {"caption", "colgroup"} | _TABLE_SECTION_TAGS:
+            if self.stack != ["table"]:
+                self.valid = False
+                return
+        elif tag == "tr":
+            if self.stack not in (
+                ["table"],
+                ["table", "thead"],
+                ["table", "tbody"],
+                ["table", "tfoot"],
+            ):
+                self.valid = False
+                return
+        elif tag in {"td", "th"}:
+            if not self.stack or self.stack[-1] != "tr":
+                self.valid = False
+                return
+        self.stack.append(tag)
+
+    def handle_endtag(self, tag: str) -> None:
+        clean_tag = tag.lower()
+        if not self.valid or clean_tag not in _TABLE_STRUCTURE_TAGS:
+            return
+        if clean_tag == "col" or not self.stack or self.stack[-1] != clean_tag:
+            self.valid = False
+            return
+        self.stack.pop()
+
+    def handle_data(self, data: str) -> None:
+        if self.valid and self.stack and self.stack[-1] not in {"caption", "td", "th"} and data.strip():
+            self.valid = False
+
+
+@dataclass
+class _ParagraphTextCandidate:
+    start: int
+    safe: bool
+    has_text: bool = False
+
+
+class _TableParagraphCoverageCollector(HTMLParser):
+    """Locate source-explicit paragraphs that the native table preserves as text."""
 
     def __init__(self, source: str) -> None:
         super().__init__(convert_charrefs=True)
         self.source = source
+        self.covered_starts: set[int] = set()
+        self.open_elements: list[tuple[str, _ParagraphTextCandidate | None]] = []
+        self.active_candidates: list[_ParagraphTextCandidate] = []
+        self.line_offsets: list[int] = []
+        offset = 0
+        for line in source.splitlines(keepends=True):
+            self.line_offsets.append(offset)
+            offset += len(line)
+        if not self.line_offsets:
+            self.line_offsets.append(0)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        clean_tag = tag.lower()
+        nested_in_paragraph = bool(self.active_candidates)
+        for candidate in self.active_candidates:
+            candidate.safe = False
+        candidate = None
+        if clean_tag == "p":
+            candidate = _ParagraphTextCandidate(
+                start=self._current_start_offset(),
+                safe=not nested_in_paragraph and _paragraph_attrs_are_statically_textual(attrs),
+            )
+            self.active_candidates.append(candidate)
+        if clean_tag not in _VOID_TAGS:
+            self.open_elements.append((clean_tag, candidate))
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del tag, attrs
+        for candidate in self.active_candidates:
+            candidate.safe = False
+
+    def handle_data(self, data: str) -> None:
+        if not data.strip() or not self.open_elements:
+            return
+        tag, candidate = self.open_elements[-1]
+        if tag == "p" and candidate is not None:
+            candidate.has_text = True
+
+    def handle_endtag(self, tag: str) -> None:
+        clean_tag = tag.lower()
+        for index in range(len(self.open_elements) - 1, -1, -1):
+            if self.open_elements[index][0] != clean_tag:
+                continue
+            removed = self.open_elements[index:]
+            del self.open_elements[index:]
+            for removed_tag, candidate in removed:
+                if candidate is None:
+                    continue
+                if candidate in self.active_candidates:
+                    self.active_candidates.remove(candidate)
+                if (
+                    clean_tag == "p"
+                    and removed_tag == "p"
+                    and candidate.safe
+                    and candidate.has_text
+                ):
+                    self.covered_starts.add(candidate.start)
+            return
+
+    def _current_start_offset(self) -> int:
+        line, column = self.getpos()
+        if line <= 0 or line > len(self.line_offsets):
+            return -1
+        return self.line_offsets[line - 1] + column
+
+
+class _RequiredSemanticNormalizer(HTMLParser):
+    """Normalize safe required semantics without reserializing authored HTML."""
+
+    def __init__(
+        self,
+        source: str,
+        *,
+        allow_required_table_coverage: bool,
+        table_text_covered_starts: set[int],
+    ) -> None:
+        super().__init__(convert_charrefs=True)
+        self.source = source
+        self.allow_required_table_coverage = allow_required_table_coverage
+        self.table_text_covered_starts = table_text_covered_starts
         self.replacements: list[tuple[int, int, str]] = []
-        self.open_elements: list[tuple[str, bool, bool]] = []
+        self.open_elements: list[tuple[str, bool, bool, bool, bool]] = []
         self.valid_required_depth = 0
         self.contextual_html_depth = 0
-        self.defaulted_role_count = 0
+        self.valid_required_table_depth = 0
+        self.inferred_role_count = 0
         self.removed_required_count = 0
         self.line_offsets: list[int] = []
         offset = 0
@@ -285,57 +478,86 @@ class _RequiredSemanticNormalizer(HTMLParser):
         source_id = attr_map.get("data-deck-id", "").strip()
         source_role = attr_map.get("data-deck-role", "").strip()
         class_tokens = set(attr_map.get("class", "").lower().split())
-        semantic_attrs_are_unique = all(
-            attr_counts.get(name, 0) <= 1 for name in _SEMANTIC_ATTRIBUTE_NAMES
-        )
+        semantic_attrs_are_unique = all(attr_counts.get(name, 0) <= 1 for name in _SEMANTIC_ATTRIBUTE_NAMES)
         has_role_attribute = attr_counts.get("data-deck-role", 0) == 1
         valid_source_id = bool(_DECK_ID_RE.fullmatch(source_id))
 
-        has_covered_required_ancestor = bool(
+        has_stable_required_coverage = bool(
             self.valid_required_depth > 0 and self.contextual_html_depth == 0
         )
-        defaulted_role = bool(
-            source_required
-            and valid_source_id
-            and not source_role
-            and not has_role_attribute
-            and semantic_attrs_are_unique
-            and not has_covered_required_ancestor
-            and self.contextual_html_depth == 0
-            and tag.lower() in _STABLE_REQUIRED_CONTAINER_TAGS
-            and "card" in class_tokens
-            and self._record_default_role()
+        has_required_table_text_coverage = bool(
+            tag.lower() == "p"
+            and self._current_start_offset() in self.table_text_covered_starts
+            and self.allow_required_table_coverage
+            and self.valid_required_table_depth > 0
+            and self._is_direct_child_of_required_table_cell()
         )
-        effective_role = source_role or ("content" if defaulted_role else "")
+        has_covered_required_ancestor = bool(
+            has_stable_required_coverage or has_required_table_text_coverage
+        )
+        inferred_role = _inferred_required_role(
+            tag.lower(),
+            class_tokens,
+            inside_table=any(element[0] == "table" for element in self.open_elements),
+        )
+        role_was_inferred = bool(source_required and valid_source_id and not source_role and not has_role_attribute and semantic_attrs_are_unique and inferred_role and self._record_inferred_role(inferred_role))
+        effective_role = source_role or (inferred_role if role_was_inferred else "")
         redundant_unaddressable = bool(
             source_required
-            and (
-                not source_id
-                or (valid_source_id and not source_role and not has_role_attribute)
-            )
+            and not role_was_inferred
+            and (not source_id or (valid_source_id and not source_role and not has_role_attribute))
             and has_covered_required_ancestor
             and semantic_attrs_are_unique
             and self._record_required_attribute_removal()
         )
-        valid_required = bool(
-            source_required and not redundant_unaddressable and valid_source_id and effective_role
-        )
+        valid_required = bool(source_required and not redundant_unaddressable and valid_source_id and effective_role)
         if push:
             stable_required_container = valid_required and tag.lower() in _STABLE_REQUIRED_CONTAINER_TAGS
             contextual_html = tag.lower() in _CONTEXTUAL_HTML_TAGS
-            self.open_elements.append((tag.lower(), stable_required_container, contextual_html))
+            valid_required_table = valid_required and tag.lower() == "table"
+            valid_required_table_cell = bool(tag.lower() in {"td", "th"} and self._has_open_required_table_row_for_cell())
+            self.open_elements.append(
+                (
+                    tag.lower(),
+                    stable_required_container,
+                    contextual_html,
+                    valid_required_table,
+                    valid_required_table_cell,
+                )
+            )
             if stable_required_container:
                 self.valid_required_depth += 1
             if contextual_html:
                 self.contextual_html_depth += 1
+            if valid_required_table:
+                self.valid_required_table_depth += 1
+
+    def _has_open_required_table_row_for_cell(self) -> bool:
+        if not self.allow_required_table_coverage:
+            return False
+        required_table_index = next(
+            (index for index in range(len(self.open_elements) - 1, -1, -1) if self.open_elements[index][3]),
+            None,
+        )
+        if required_table_index is None:
+            return False
+        lineage = [element[0] for element in self.open_elements[required_table_index + 1 :]]
+        return lineage in (
+            ["tr"],
+            ["thead", "tr"],
+            ["tbody", "tr"],
+            ["tfoot", "tr"],
+        )
+
+    def _is_direct_child_of_required_table_cell(self) -> bool:
+        if not self.open_elements:
+            return False
+        tag, _valid, _context, _required_table, required_cell = self.open_elements[-1]
+        return tag in {"td", "th"} and required_cell
 
     def _record_required_attribute_removal(self) -> bool:
         raw_tag = self.get_starttag_text() or ""
-        attributes = [
-            (start, end)
-            for name, value, start, end in _start_tag_attributes(raw_tag)
-            if name == "data-deck-required" and value.strip().lower() == "true"
-        ]
+        attributes = [(start, end) for name, value, start, end in _start_tag_attributes(raw_tag) if name == "data-deck-required" and value.strip().lower() == "true"]
         if len(attributes) != 1:
             return False
         start, end = attributes[0]
@@ -345,32 +567,34 @@ class _RequiredSemanticNormalizer(HTMLParser):
         self.removed_required_count += 1
         return True
 
-    def _record_default_role(self) -> bool:
+    def _record_inferred_role(self, role: str) -> bool:
         raw_tag = self.get_starttag_text() or ""
         closing = re.search(r"\s*/?>$", raw_tag)
         if closing is None:
             return False
-        normalized_tag = (
-            f'{raw_tag[: closing.start()]} data-deck-role="content"'
-            f"{raw_tag[closing.start() :]}"
-        )
+        normalized_tag = f'{raw_tag[: closing.start()]} data-deck-role="{role}"{raw_tag[closing.start() :]}'
         if not self._record_tag_replacement(raw_tag, normalized_tag):
             return False
-        self.defaulted_role_count += 1
+        self.inferred_role_count += 1
         return True
 
     def _record_tag_replacement(self, raw_tag: str, normalized_tag: str) -> bool:
         if normalized_tag == raw_tag:
             return False
-        line, column = self.getpos()
-        if line <= 0 or line > len(self.line_offsets):
+        start = self._current_start_offset()
+        if start < 0:
             return False
-        start = self.line_offsets[line - 1] + column
         end = start + len(raw_tag)
         if self.source[start:end] != raw_tag:
             return False
         self.replacements.append((start, end, normalized_tag))
         return True
+
+    def _current_start_offset(self) -> int:
+        line, column = self.getpos()
+        if line <= 0 or line > len(self.line_offsets):
+            return -1
+        return self.line_offsets[line - 1] + column
 
     def handle_endtag(self, tag: str) -> None:
         clean_tag = tag.lower()
@@ -379,10 +603,9 @@ class _RequiredSemanticNormalizer(HTMLParser):
                 continue
             removed = self.open_elements[index:]
             del self.open_elements[index:]
-            self.valid_required_depth -= sum(1 for _tag, valid, _context in removed if valid)
-            self.contextual_html_depth -= sum(
-                1 for _tag, _valid, contextual in removed if contextual
-            )
+            self.valid_required_depth -= sum(1 for _tag, valid, _context, _table, _cell in removed if valid)
+            self.contextual_html_depth -= sum(1 for _tag, _valid, contextual, _table, _cell in removed if contextual)
+            self.valid_required_table_depth -= sum(1 for _tag, _valid, _context, required_table, _cell in removed if required_table)
             return
 
 
@@ -396,15 +619,18 @@ def validate_and_sanitize_slide_html(
     if not source.strip():
         validation.errors.append("html_source is required")
         return source, validation
-    source, defaulted_role_count, removed_required_count = _normalize_required_semantics(source)
-    if defaulted_role_count:
-        validation.warnings.append(
-            f'defaulted {defaulted_role_count} required data-deck-role marker(s) to "content"'
-        )
+    (
+        source,
+        inferred_role_count,
+        removed_required_count,
+        canonical_table_structure,
+    ) = _normalize_required_semantics(source)
+    if inferred_role_count:
+        validation.warnings.append(f"inferred {inferred_role_count} missing required data-deck-role marker(s)")
     if removed_required_count:
-        validation.warnings.append(
-            f"removed {removed_required_count} redundant nested data-deck-required marker(s)"
-        )
+        validation.warnings.append(f"removed {removed_required_count} redundant nested data-deck-required marker(s)")
+    if not canonical_table_structure:
+        validation.errors.append("table structure must use explicit canonical table, section, row, and cell nesting")
     scanner = _HtmlScanner()
     try:
         scanner.feed(source)
@@ -429,7 +655,7 @@ def validate_and_sanitize_slide_html(
     _validate_css(scanner.styles, validation)
     _validate_image_refs(validation.image_refs, allowed_asset_refs, validation)
     sanitized = _sanitize_css(source)
-    validation.sanitized = bool(defaulted_role_count or removed_required_count) or sanitized != source
+    validation.sanitized = bool(inferred_role_count or removed_required_count) or sanitized != source
     validation.valid = not validation.errors
     return sanitized, validation
 
@@ -450,28 +676,122 @@ def validation_summary(results: list[HtmlSourceValidation]) -> dict[str, Any]:
     }
 
 
-def _normalize_required_semantics(source: str) -> tuple[str, int, int]:
+def _normalize_required_semantics(source: str) -> tuple[str, int, int, bool]:
     """Normalize only semantics that retain deterministic required coverage.
 
-    An authored ``card`` container with a valid stable ID receives the neutral
-    ``content`` role when the role attribute is absent. An incomplete nested
-    marker is removed only when a stable, fully valid required container already
-    covers its descendants and no contextual or optional-end-tag HTML parser
-    state can reparent the node. All other incomplete semantics remain untouched
-    and retain validation errors.
+    A required element with a valid stable ID receives a role only when its
+    authored tag or component class determines one unambiguously. An incomplete
+    nested marker is removed only when a stable, fully valid required container
+    covers its descendants and no contextual or optional-end-tag parser state can
+    reparent the node. A valid required table also covers descendants inside a
+    structurally explicit row and cell. All other incomplete semantics remain
+    untouched and retain validation errors.
     """
 
-    normalizer = _RequiredSemanticNormalizer(source)
+    table_validator = _CanonicalTableStructureValidator()
+    try:
+        table_validator.feed(source)
+        table_validator.close()
+    except Exception:  # noqa: BLE001 - conservative normalization fallback.
+        table_validator.valid = False
+    canonical_table_structure = table_validator.valid and not table_validator.stack
+    table_text_covered_starts: set[int] = set()
+    if canonical_table_structure:
+        table_text_collector = _TableParagraphCoverageCollector(source)
+        try:
+            table_text_collector.feed(source)
+            table_text_collector.close()
+        except Exception:  # noqa: BLE001 - conservative normalization fallback.
+            table_text_collector.covered_starts.clear()
+        table_text_covered_starts = table_text_collector.covered_starts
+    normalizer = _RequiredSemanticNormalizer(
+        source,
+        allow_required_table_coverage=canonical_table_structure,
+        table_text_covered_starts=table_text_covered_starts,
+    )
     try:
         normalizer.feed(source)
     except Exception:  # noqa: BLE001 - validation will report parser failures later.
-        return source, 0, 0
+        return source, 0, 0, canonical_table_structure
     if not normalizer.replacements:
-        return source, 0, 0
+        return source, 0, 0, canonical_table_structure
     normalized = source
     for start, end, replacement in reversed(normalizer.replacements):
         normalized = f"{normalized[:start]}{replacement}{normalized[end:]}"
-    return normalized, normalizer.defaulted_role_count, normalizer.removed_required_count
+    return (
+        normalized,
+        normalizer.inferred_role_count,
+        normalizer.removed_required_count,
+        canonical_table_structure,
+    )
+
+
+def _inferred_required_role(
+    tag: str,
+    class_tokens: set[str],
+    *,
+    inside_table: bool,
+) -> str | None:
+    if inside_table:
+        return "narrative" if tag == "p" else None
+    if tag in _HEADING_TAGS:
+        return "title"
+    if tag in {"p", "li"}:
+        return "narrative"
+    if tag == "table":
+        return "comparison"
+    class_roles = {role for class_name, role in (("node-box", "diagram"), ("card", "content")) if class_name in class_tokens}
+    return next(iter(class_roles)) if len(class_roles) == 1 else None
+
+
+def _paragraph_attrs_are_statically_textual(
+    attrs: list[tuple[str, str | None]],
+) -> bool:
+    attr_map: dict[str, str] = {}
+    attr_counts: dict[str, int] = {}
+    for raw_name, raw_value in attrs:
+        name = raw_name.lower()
+        attr_map.setdefault(name, raw_value or "")
+        attr_counts[name] = attr_counts.get(name, 0) + 1
+    if any(attr_counts.get(name, 0) > 1 for name in {"class", "hidden", "style"}):
+        return False
+    if attr_map.get("class", "").strip() or "hidden" in attr_map or "inert" in attr_map:
+        return False
+    if attr_map.get("aria-hidden", "").strip().lower() == "true":
+        return False
+    style = attr_map.get("style", "")
+    if not style.strip():
+        return True
+    declarations = tinycss2.parse_declaration_list(
+        style,
+        skip_comments=True,
+        skip_whitespace=True,
+    )
+    for declaration in declarations:
+        if declaration.type != "declaration":
+            return False
+        name = declaration.lower_name
+        value = tinycss2.serialize(declaration.value).strip().lower()
+        if name not in _TABLE_PARAGRAPH_TEXT_STYLE_PROPERTIES or not value or "var(" in value:
+            return False
+        if name in {"font-size", "line-height"}:
+            match = _POSITIVE_TEXT_MEASURE_RE.fullmatch(value)
+            if match is None or float(match.group("number")) <= 0:
+                return False
+        if name == "color":
+            color_tokens = [
+                token
+                for token in declaration.value
+                if token.type not in {"comment", "whitespace"}
+            ]
+            color = parse_color(color_tokens[0]) if len(color_tokens) == 1 else None
+            if color is None or not hasattr(color, "alpha") or color.alpha <= 0:
+                return False
+        if name.startswith("margin") and not all(
+            _ZERO_MEASURE_RE.fullmatch(part) for part in value.split()
+        ):
+            return False
+    return True
 
 
 def _start_tag_attributes(raw_tag: str) -> list[tuple[str, str, int, int]]:
