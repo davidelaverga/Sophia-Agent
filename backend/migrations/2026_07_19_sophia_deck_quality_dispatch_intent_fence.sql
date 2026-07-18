@@ -19,6 +19,8 @@ DECLARE
     v_anon OID := pg_catalog.to_regrole('anon');
     v_authenticated OID := pg_catalog.to_regrole('authenticated');
     v_service_role OID := pg_catalog.to_regrole('service_role');
+    v_server_major INTEGER :=
+        current_setting('server_version_num')::INTEGER / 10000;
     v_relation_hash TEXT;
     v_type_hash TEXT;
     v_table_acl_hash TEXT;
@@ -32,6 +34,7 @@ DECLARE
     v_routines_hash TEXT;
 BEGIN
     IF v_expected_owner IS NULL
+       OR v_server_major NOT IN (15, 16, 17)
        OR v_executor_owner IS DISTINCT FROM v_expected_owner
        OR v_anon IS NULL
        OR v_authenticated IS NULL
@@ -189,7 +192,7 @@ BEGIN
                                    attribute.attcompression::INTEGER,
                                    attribute.attidentity::INTEGER,
                                    attribute.attgenerated::INTEGER,
-                                   attribute.attstattarget,
+                                   COALESCE(attribute.attstattarget, -1),
                                    attribute.attndims,
                                    attribute.attinhcount,
                                    attribute.attislocal,
@@ -647,8 +650,12 @@ BEGIN
                 'b94d81cab3cd8c3b5d52688d25d13140db436c5e84919bb42837efc7d4b7c7af'
             AND v_type_hash =
                 'ae1919ddfe81e006aaedfef1093405cd85dd52527bb68202c485ac82fef89613'
-            AND v_table_acl_hash =
-                'a8da39f5eed4051f8b01b095e5f335018f24f451cc941003aa5e389660e468bf'
+            AND v_table_acl_hash = CASE v_server_major
+                WHEN 17 THEN
+                    'd588b45201221b60a38b2c4254af121ad1c3c2ce27c50d899c8d47bf8f868795'
+                ELSE
+                    'a8da39f5eed4051f8b01b095e5f335018f24f451cc941003aa5e389660e468bf'
+            END
             AND v_columns_hash =
                 '5e1910787719dab7c6990a09561f777697ddd29e30f71a344bbeead60a4eb7b4'
             AND v_constraints_hash =
@@ -670,8 +677,12 @@ BEGIN
                 '072ca06532205ef065af9490c3dd3213385504eb3998e2534a939967853e4222'
             AND v_type_hash =
                 'ae1919ddfe81e006aaedfef1093405cd85dd52527bb68202c485ac82fef89613'
-            AND v_table_acl_hash =
-                'a8da39f5eed4051f8b01b095e5f335018f24f451cc941003aa5e389660e468bf'
+            AND v_table_acl_hash = CASE v_server_major
+                WHEN 17 THEN
+                    'd588b45201221b60a38b2c4254af121ad1c3c2ce27c50d899c8d47bf8f868795'
+                ELSE
+                    'a8da39f5eed4051f8b01b095e5f335018f24f451cc941003aa5e389660e468bf'
+            END
             AND v_columns_hash =
                 '025892f2c4330b247df11a1eeac457ed8b60e16d27286b141a9d293a600519af'
             AND v_constraints_hash =
@@ -1063,6 +1074,8 @@ DO $migration_postflight$
 DECLARE
     v_table_oid OID :=
         'public.sophia_deck_quality_shadow_runs'::REGCLASS;
+    v_server_major INTEGER :=
+        current_setting('server_version_num')::INTEGER / 10000;
     v_relation_hash TEXT;
     v_type_hash TEXT;
     v_table_acl_hash TEXT;
@@ -1174,7 +1187,7 @@ BEGIN
                        attribute.attcompression::INTEGER,
                        attribute.attidentity::INTEGER,
                        attribute.attgenerated::INTEGER,
-                       attribute.attstattarget,
+                       COALESCE(attribute.attstattarget, -1),
                        attribute.attndims,
                        attribute.attinhcount,
                        attribute.attislocal,
@@ -1539,8 +1552,12 @@ BEGIN
             '072ca06532205ef065af9490c3dd3213385504eb3998e2534a939967853e4222'
         AND v_type_hash =
             'ae1919ddfe81e006aaedfef1093405cd85dd52527bb68202c485ac82fef89613'
-        AND v_table_acl_hash =
-            'a8da39f5eed4051f8b01b095e5f335018f24f451cc941003aa5e389660e468bf'
+        AND v_table_acl_hash = CASE v_server_major
+            WHEN 17 THEN
+                'd588b45201221b60a38b2c4254af121ad1c3c2ce27c50d899c8d47bf8f868795'
+            ELSE
+                'a8da39f5eed4051f8b01b095e5f335018f24f451cc941003aa5e389660e468bf'
+        END
         AND v_columns_hash =
             '025892f2c4330b247df11a1eeac457ed8b60e16d27286b141a9d293a600519af'
         AND v_constraints_hash =

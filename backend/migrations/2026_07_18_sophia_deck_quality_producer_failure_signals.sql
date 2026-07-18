@@ -16,6 +16,11 @@ DECLARE
     v_namespace_oid OID;
     v_executor_owner OID;
     v_expected_owner OID;
+    v_server_major INTEGER :=
+        current_setting('server_version_num')::INTEGER / 10000;
+    v_expected_table_acl_count INTEGER := CASE
+        WHEN v_server_major = 17 THEN 8 ELSE 7
+    END;
     v_relation_oid OID := to_regclass(
         'public.sophia_deck_quality_producer_failure_signals'
     );
@@ -63,6 +68,7 @@ BEGIN
      WHERE role.rolname = 'postgres';
 
     IF to_regrole('anon') IS NULL
+       OR v_server_major NOT IN (15, 16, 17)
        OR to_regrole('authenticated') IS NULL
        OR to_regrole('service_role') IS NULL
        OR v_executor_owner <> v_expected_owner
@@ -155,16 +161,16 @@ BEGIN
       FROM pg_catalog.pg_type AS type
      WHERE type.oid = v_type_oid;
 
-    SELECT count(*) = 7
+    SELECT count(*) = v_expected_table_acl_count
            AND count(*) FILTER (
                WHERE acl.grantee = v_expected_owner
                  AND acl.grantor = v_expected_owner
                  AND NOT acl.is_grantable
                  AND acl.privilege_type = ANY (ARRAY[
                      'INSERT', 'SELECT', 'UPDATE', 'DELETE', 'TRUNCATE',
-                     'REFERENCES', 'TRIGGER'
+                     'REFERENCES', 'TRIGGER', 'MAINTAIN'
                  ]::TEXT[])
-           ) = 7
+           ) = v_expected_table_acl_count
       INTO v_table_acl_valid
       FROM pg_catalog.pg_class AS relation
       CROSS JOIN LATERAL pg_catalog.aclexplode(relation.relacl) AS acl
@@ -196,7 +202,7 @@ BEGIN
                                attribute.attcompression::INTEGER,
                                attribute.attidentity::INTEGER,
                                attribute.attgenerated::INTEGER,
-                               attribute.attstattarget,
+                               COALESCE(attribute.attstattarget, -1),
                                attribute.attndims,
                                attribute.attinhcount,
                                attribute.attislocal,
@@ -954,11 +960,16 @@ GRANT EXECUTE ON FUNCTION
     TO service_role;
 
 -- Recompute the complete table/type/catalog fingerprint plus the installed
--- routine identities, PG16 definitions, bodies, owners, hardened search_path,
+-- routine identities, supported-major definitions, bodies, owners, hardened search_path,
 -- SECURITY DEFINER bits, and exact two-principal ACLs before commit.
 DO $postflight$
 DECLARE
     v_expected_owner OID := to_regrole('postgres');
+    v_server_major INTEGER :=
+        current_setting('server_version_num')::INTEGER / 10000;
+    v_expected_table_acl_count INTEGER := CASE
+        WHEN v_server_major = 17 THEN 8 ELSE 7
+    END;
     v_record_oid OID := to_regprocedure(
         'public.sophia_record_deck_quality_producer_failure_signal(text,text,text,text,text,text,text,text,text)'
     );
@@ -1037,16 +1048,16 @@ BEGIN
       FROM pg_catalog.pg_type AS type
      WHERE type.oid = v_type_oid;
 
-    SELECT count(*) = 7
+    SELECT count(*) = v_expected_table_acl_count
            AND count(*) FILTER (
                WHERE acl.grantee = v_expected_owner
                  AND acl.grantor = v_expected_owner
                  AND NOT acl.is_grantable
                  AND acl.privilege_type = ANY (ARRAY[
                      'INSERT', 'SELECT', 'UPDATE', 'DELETE', 'TRUNCATE',
-                     'REFERENCES', 'TRIGGER'
+                     'REFERENCES', 'TRIGGER', 'MAINTAIN'
                  ]::TEXT[])
-           ) = 7
+           ) = v_expected_table_acl_count
       INTO v_table_acl_valid
       FROM pg_catalog.pg_class AS relation
       CROSS JOIN LATERAL pg_catalog.aclexplode(relation.relacl) AS acl
@@ -1078,7 +1089,7 @@ BEGIN
                                attribute.attcompression::INTEGER,
                                attribute.attidentity::INTEGER,
                                attribute.attgenerated::INTEGER,
-                               attribute.attstattarget,
+                               COALESCE(attribute.attstattarget, -1),
                                attribute.attndims,
                                attribute.attinhcount,
                                attribute.attislocal,

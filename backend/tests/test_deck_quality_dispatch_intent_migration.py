@@ -19,6 +19,11 @@ def test_dispatch_intent_migration_is_forward_only_and_fail_closed() -> None:
     assert "sophia_deck_quality_dispatch_intent_shape" in sql
     assert "deck_quality_dispatch_intent_unknown_fingerprint" in sql
     assert "deck_quality_dispatch_intent_environment_invalid" in sql
+    assert "v_server_major NOT IN (15, 16, 17)" in sql
+    assert sql.count("COALESCE(attribute.attstattarget, -1)") == 2
+    assert sql.count(
+        "d588b45201221b60a38b2c4254af121ad1c3c2ce27c50d899c8d47bf8f868795"
+    ) == 3
     assert "deck_quality_dispatch_intent_postflight_failed" in sql
     assert (
         "LOCK TABLE public.sophia_deck_quality_shadow_runs\n"

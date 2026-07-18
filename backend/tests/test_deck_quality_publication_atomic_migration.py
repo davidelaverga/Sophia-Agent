@@ -23,6 +23,11 @@ def test_forward_atomic_publication_migration_is_fail_closed_and_idempotent() ->
     assert "LOCK TABLE public.sophia_deck_quality_publications\n    IN ACCESS EXCLUSIVE MODE;" in sql
     assert "deck_quality_publication_atomic_migration_unknown_fingerprint" in sql
     assert "deck_quality_publication_atomic_migration_environment_invalid" in sql
+    assert "v_server_major NOT IN (15, 16, 17)" in sql
+    assert sql.count("COALESCE(attribute.attstattarget, -1)") == 2
+    assert sql.count(
+        "d588b45201221b60a38b2c4254af121ad1c3c2ce27c50d899c8d47bf8f868795"
+    ) == 2
     assert "DO $migration_postflight$" in sql
     assert (
         "deck_quality_publication_atomic_migration_postflight_failed" in sql

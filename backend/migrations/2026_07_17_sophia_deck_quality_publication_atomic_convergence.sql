@@ -37,6 +37,8 @@ DECLARE
     v_commit_owner OID;
     v_ready_owner OID;
     v_executor_owner OID;
+    v_server_major INTEGER :=
+        current_setting('server_version_num')::INTEGER / 10000;
     v_source_attributes_valid BOOLEAN := false;
     v_request_attributes_valid BOOLEAN := false;
     v_commit_attributes_valid BOOLEAN := false;
@@ -69,6 +71,7 @@ BEGIN
      WHERE role.rolname = current_user;
 
     IF current_user <> 'postgres'
+       OR v_server_major NOT IN (15, 16, 17)
        OR to_regrole('anon') IS NULL
        OR to_regrole('authenticated') IS NULL
        OR to_regrole('service_role') IS NULL
@@ -191,7 +194,7 @@ BEGIN
                        attribute.attcompression::INTEGER,
                        attribute.attidentity::INTEGER,
                        attribute.attgenerated::INTEGER,
-                       attribute.attstattarget,
+                       COALESCE(attribute.attstattarget, -1),
                        attribute.attndims,
                        attribute.attinhcount,
                        attribute.attislocal,
@@ -773,8 +776,12 @@ BEGIN
             'cc7129153cc85a265e920560063fe632d7f59bfb3dc665af068d876685cb3757'
         AND v_type_hash =
             'ae1919ddfe81e006aaedfef1093405cd85dd52527bb68202c485ac82fef89613'
-        AND v_table_acl_hash =
-            'a8da39f5eed4051f8b01b095e5f335018f24f451cc941003aa5e389660e468bf'
+        AND v_table_acl_hash = CASE v_server_major
+            WHEN 17 THEN
+                'd588b45201221b60a38b2c4254af121ad1c3c2ce27c50d899c8d47bf8f868795'
+            ELSE
+                'a8da39f5eed4051f8b01b095e5f335018f24f451cc941003aa5e389660e468bf'
+        END
         AND v_columns_hash =
             '396d5e8ed627d13fc9b02a63357a2c29ced78a2aa6f47ba350f09e608d1a7c18'
         AND v_constraints_hash =
@@ -1203,6 +1210,8 @@ REVOKE ALL ON FUNCTION public.sophia_deck_quality_publication_source_path_valid(
 -- exact v2 catalog state before commit; a later replay is not a repair path.
 DO $migration_postflight$
 DECLARE
+    v_server_major INTEGER :=
+        current_setting('server_version_num')::INTEGER / 10000;
     v_relation_hash TEXT;
     v_type_hash TEXT;
     v_table_acl_hash TEXT;
@@ -1322,7 +1331,7 @@ BEGIN
                            attribute.attcompression::INTEGER,
                            attribute.attidentity::INTEGER,
                            attribute.attgenerated::INTEGER,
-                           attribute.attstattarget,
+                           COALESCE(attribute.attstattarget, -1),
                            attribute.attndims,
                            attribute.attinhcount,
                            attribute.attislocal,
@@ -1726,8 +1735,12 @@ BEGIN
             'cc7129153cc85a265e920560063fe632d7f59bfb3dc665af068d876685cb3757'
         AND v_type_hash =
             'ae1919ddfe81e006aaedfef1093405cd85dd52527bb68202c485ac82fef89613'
-        AND v_table_acl_hash =
-            'a8da39f5eed4051f8b01b095e5f335018f24f451cc941003aa5e389660e468bf'
+        AND v_table_acl_hash = CASE v_server_major
+            WHEN 17 THEN
+                'd588b45201221b60a38b2c4254af121ad1c3c2ce27c50d899c8d47bf8f868795'
+            ELSE
+                'a8da39f5eed4051f8b01b095e5f335018f24f451cc941003aa5e389660e468bf'
+        END
         AND v_columns_hash =
             '396d5e8ed627d13fc9b02a63357a2c29ced78a2aa6f47ba350f09e608d1a7c18'
         AND v_constraints_hash =

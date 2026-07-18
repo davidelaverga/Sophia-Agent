@@ -14,7 +14,7 @@ HISTORICAL_MIGRATIONS = {
     "2026_07_16_sophia_deck_quality_publications.sql":
         "52fc6d563bd85bb35ae2c92ffcd9b0a261e896ceeef3dcc8b751cf46557c1635",
     "2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql":
-        "d2439af5768f5fb14f174a0e77ea4cc39ba3ed44c6c932f9de08d109debb5162",
+        "f2fb0817f7d7d6d2b42a63ba135a0e46cf521c68c1a5c2b06af2b2367e611d08",
 }
 
 
@@ -29,6 +29,9 @@ def test_forward_failure_signal_migration_is_independent_and_service_role_only()
     assert guard_end < sql.index("COMMENT ON TABLE")
     assert guard_end < sql.index("CREATE OR REPLACE FUNCTION")
     assert "deck_quality_producer_failure_signal_unknown_fingerprint" in sql
+    assert "v_server_major NOT IN (15, 16, 17)" in sql
+    assert sql.count("COALESCE(attribute.attstattarget, -1)") == 2
+    assert sql.count("'REFERENCES', 'TRIGGER', 'MAINTAIN'") == 2
     assert "v_named_routine_count <> 3" in sql
     assert "v_columns_hash" in sql
     assert "v_constraints_hash" in sql

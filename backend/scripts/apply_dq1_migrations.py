@@ -18,9 +18,9 @@ RESUMABLE_START_MIGRATION = "2026_07_17_sophia_deck_quality_publication_atomic_c
 MIGRATION_SHA256 = {
     "2026_07_15_sophia_deck_quality_shadow_runs.sql": ("328f10ae75f2f1b0f39523621621abe3802ddf98d660a1c70b69c3b5b64c0dfb"),
     "2026_07_16_sophia_deck_quality_publications.sql": ("52fc6d563bd85bb35ae2c92ffcd9b0a261e896ceeef3dcc8b751cf46557c1635"),
-    "2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql": ("d2439af5768f5fb14f174a0e77ea4cc39ba3ed44c6c932f9de08d109debb5162"),
-    "2026_07_18_sophia_deck_quality_producer_failure_signals.sql": ("4594e48cbbc12454b1b1d50ce66d0c73aa2b5b1093f3c9e18020802c3e13c556"),
-    "2026_07_19_sophia_deck_quality_dispatch_intent_fence.sql": ("955a975c578d755cb655afdfd2437d8bf0eb4246fc48e34fc8bc905a5286f4b5"),
+    "2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql": ("f2fb0817f7d7d6d2b42a63ba135a0e46cf521c68c1a5c2b06af2b2367e611d08"),
+    "2026_07_18_sophia_deck_quality_producer_failure_signals.sql": ("b52191c224d803e3d7d1ceed8b48b8b7857b0c3d148178c8622ae91a6bd81e66"),
+    "2026_07_19_sophia_deck_quality_dispatch_intent_fence.sql": ("7be71d13814d5c9c9753286aeb840dd1d92b406e936a14a265af1bb5d8d1b761"),
 }
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
