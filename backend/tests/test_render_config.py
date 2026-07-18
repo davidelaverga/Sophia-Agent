@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import yaml
@@ -38,33 +39,64 @@ def test_production_dq1_is_exact_canary_shadow_with_no_delivery_authority() -> N
         "max_quality_cost_usd": 0.60,
         "max_quality_wall_clock_seconds": 300,
     }
-    dq_deployment = next(
-        model
-        for model in production["models"]
-        if model["name"] == "openai-gpt-5-6-sol"
-    )
+    dq_deployment = next(model for model in production["models"] if model["name"] == "openai-gpt-5-6-sol")
     assert dq_deployment["access_scope"] == "route_only"
 
 
-def test_production_dq2_authority_defaults_closed_with_locked_routes() -> None:
+def test_production_dq2_authority_is_exact_canary_with_locked_mutation_foundation() -> None:
     config_path = Path(__file__).resolve().parents[2] / "config.production.yaml"
     production = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+    foundation = production["build_foundation"]
     design_lift = production["deck_design_lift"]
 
-    assert design_lift["enabled"] is False
-    assert design_lift["mode"] == "off"
+    assert foundation == {
+        "enabled": True,
+        "manifest_mode": "canary_enforce",
+        "enforce_canary_user_ids": "$SOPHIA_DECK_QUALITY_CANARY_USER_IDS",
+        "enable_mutation_transactions": True,
+    }
+    assert design_lift["enabled"] is True
+    assert design_lift["mode"] == "production_canary"
+    assert design_lift["scope"] == "canary"
     assert design_lift["canary_user_ids"] == "$SOPHIA_DECK_QUALITY_CANARY_USER_IDS"
+    assert design_lift["canary_user_ids"] == production["deck_quality"]["canary_user_ids"]
     assert design_lift["max_repairs"] == 1
     assert design_lift["max_judge_calls"] == 4
     assert design_lift["max_repair_calls"] == 1
+    assert design_lift["max_campaign_cost_usd"] == 3.00
     assert design_lift["affect_delivery"] is False
     assert design_lift["promote_improved_candidate"] is True
+    assert design_lift["require_manifest_enforce"] is True
+    assert design_lift["require_mutation_transactions"] is True
+    assert design_lift["require_mechanical_pass_before_commit"] is True
+    assert design_lift["require_second_judge_approval"] is True
+    assert design_lift["require_deterministic_improvement"] is True
 
     repair_route = production["model_routes"]["deck.repair.executor"]
     assert repair_route["fallbacks"] == []
     assert repair_route["max_failovers"] == 0
     assert repair_route["profile"] == "deck-repair-executor-v1"
     assert production["harness_profiles"]["deck-repair-executor-v1"]["max_retries"] == 0
+
+
+def test_langgraph_exposes_dq2_only_through_the_private_http_app() -> None:
+    langgraph_path = Path(__file__).resolve().parents[1] / "langgraph.json"
+    config = json.loads(langgraph_path.read_text(encoding="utf-8"))
+    graphs = config["graphs"]
+
+    assert "sophia_deck_design_lift" not in graphs
+    assert {
+        "lead_agent",
+        "sophia_companion",
+        "sophia_builder",
+        "sophia_deck_quality_shadow",
+    }.issubset(graphs)
+    assert "auth" not in config
+    assert config["http"] == {
+        "app": "deerflow.sophia.deck_design_lift.http_app:app",
+        "configurable_headers": {"excludes": ["x-sophia-deck-lift-*"]},
+        "logging_headers": {"excludes": ["x-sophia-deck-lift-*"]},
+    }
 
 
 def test_gateway_declares_artifact_registry_supabase_config() -> None:
@@ -84,10 +116,7 @@ def test_langgraph_and_gateway_agree_on_artifact_bucket() -> None:
     # SAME bucket — otherwise the gateway cannot serve what the builder produced.
     gateway = _service_env("sophia-gateway")
     langgraph = _service_env("sophia-langgraph")
-    assert (
-        gateway["SUPABASE_BUILDER_BUCKET"]["value"]
-        == langgraph["SUPABASE_BUILDER_BUCKET"]["value"]
-    )
+    assert gateway["SUPABASE_BUILDER_BUCKET"]["value"] == langgraph["SUPABASE_BUILDER_BUCKET"]["value"]
     # Builder must durably upload (not best-effort) in production so the
     # registry-backed gateway always has the bytes.
     assert langgraph["SOPHIA_ARTIFACT_REGISTRY_STORE"]["value"] == "supabase"

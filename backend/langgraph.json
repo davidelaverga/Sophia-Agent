@@ -11,6 +11,15 @@
     "sophia_builder": "deerflow.agents.sophia_agent.builder_agent:make_sophia_builder",
     "sophia_deck_quality_shadow": "deerflow.sophia.deck_quality.graph:make_deck_quality_shadow_graph"
   },
+  "http": {
+    "app": "deerflow.sophia.deck_design_lift.http_app:app",
+    "configurable_headers": {
+      "excludes": ["x-sophia-deck-lift-*"]
+    },
+    "logging_headers": {
+      "excludes": ["x-sophia-deck-lift-*"]
+    }
+  },
   "checkpointer": {
     "path": "./packages/harness/deerflow/agents/checkpointer/async_provider.py:make_checkpointer"
   }

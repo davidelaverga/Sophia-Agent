@@ -87,6 +87,15 @@ harness_profiles:
       store: false
       max_completion_tokens: 12000
 
+# DQ-2 may mutate only through the enforced manifest/CAS foundation and its
+# durable transaction RPCs. These values are validated again during LangGraph
+# startup before the service becomes ready.
+build_foundation:
+  enabled: true
+  manifest_mode: canary_enforce
+  enforce_canary_user_ids: $SOPHIA_DECK_QUALITY_CANARY_USER_IDS
+  enable_mutation_transactions: true
+
 # Amendment 002 reopens DQ-1 with a durable pre-delivery outbox. Admission is
 # still exact-canary only; all user-visible and repair authorities remain
 # locked off. The environment value is dashboard-managed on both services.
@@ -112,11 +121,11 @@ deck_quality:
   max_quality_cost_usd: 0.60
   max_quality_wall_clock_seconds: 300
 
-# DQ-2 is a separate authority and remains closed until its durable mutation
-# schema, graph, and production admission tests are deployed together.
+# DQ-2 is a separate, exact-canary authority. Startup remains fail-closed until
+# its durable mutation schema, storage probes, and locked routes all validate.
 deck_design_lift:
-  enabled: false
-  mode: "off"
+  enabled: true
+  mode: "production_canary"
   scope: canary
   canary_user_ids: $SOPHIA_DECK_QUALITY_CANARY_USER_IDS
   judge_route: deck.judge.visual
