@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageFont
 from pptx import Presentation
+from pptx.enum.shapes import MSO_SHAPE
 from pptx.util import Inches, Pt
 
 from deerflow.sophia.deck_native import DeckNativeService, native_mechanical_report
@@ -314,6 +315,105 @@ def test_deck_native_lint_fix_promotes_every_remaining_issue_to_residue(
         (1, "s7"),
         (2, "s11"),
     }
+
+
+def test_deck_native_lint_fix_repairs_compatible_alignment_geometry(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "production-alignment.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    for index, left in enumerate((1.0, 4.5, 8.0, 11.5)):
+        shape = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(left),
+            Inches(3.13),
+            Inches(2.9),
+            Inches(3.88),
+        )
+        shape.name = f"alignment-peer-{index}"
+    target = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(15.0),
+        Inches(3.13),
+        Inches(2.9),
+        Inches(3.8),
+    )
+    target.name = "production-alignment-target"
+    presentation.save(output)
+
+    service = DeckNativeService()
+    fixed = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.lint_issue_count_before == 1
+    assert fixed.fix_applied_count == 1
+    assert fixed.issue_kinds == {"align-y": 1}
+    assert fixed.residue_count == 0
+    repaired = Presentation(output)
+    repaired_target = next(shape for shape in repaired.slides[0].shapes if shape.name == "production-alignment-target")
+    assert repaired_target.top.inches == pytest.approx(3.13, abs=0.01)
+    assert repaired_target.height.inches == pytest.approx(3.88, abs=0.01)
+
+    clean = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+    assert clean.lint_issue_count_before == 0
+    assert clean.fix_applied_count == 0
+    assert clean.residue_count == 0
+
+
+def test_deck_native_lint_fix_grows_small_overflow_inside_containing_panel(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "production-contained-overflow.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    panel = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.25),
+        Inches(8.54),
+        Inches(18.04),
+        Inches(1.95),
+    )
+    panel.name = "production-container"
+    text = slide.shapes.add_textbox(
+        Inches(2.49),
+        Inches(8.9),
+        Inches(9.56),
+        Inches(0.33),
+    )
+    text.name = "production-small-overflow"
+    frame = text.text_frame
+    frame.margin_left = 0
+    frame.margin_right = 0
+    frame.margin_top = Inches(0.05)
+    frame.margin_bottom = Inches(0.05)
+    paragraph = frame.paragraphs[0]
+    paragraph.text = "Caution requests explicit confirmation."
+    paragraph.line_spacing = Pt(21)
+    paragraph.runs[0].font.size = Pt(18)
+    presentation.save(output)
+
+    service = DeckNativeService()
+    fixed = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.lint_issue_count_before == 1
+    assert fixed.fix_applied_count == 1
+    assert fixed.issue_kinds == {"grow": 1}
+    assert fixed.residue_count == 0
+    repaired = Presentation(output)
+    repaired_text = next(shape for shape in repaired.slides[0].shapes if shape.name == "production-small-overflow")
+    assert repaired_text.height.inches == pytest.approx(0.44, abs=0.01)
+    assert repaired_text.text_frame.paragraphs[0].runs[0].font.size.pt == 18
+
+    clean = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+    assert clean.lint_issue_count_before == 0
+    assert clean.fix_applied_count == 0
+    assert clean.residue_count == 0
 
 
 def test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow(

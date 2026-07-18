@@ -2327,6 +2327,16 @@ MIN_FONT_SCALE = 0.6
 MIN_FONT_PT = 10.0
 SLIDE_MARGIN_IN = 0.1
 BG_AREA_FRACTION = 0.6  # shapes covering >60% of the slide don't block growth
+GEOMETRY_EPS_IN = 0.01
+
+_ALIGNMENT_ROLE = {
+    "left": ("x", 0.0),
+    "hcenter": ("x", 0.5),
+    "right": ("x", 1.0),
+    "top": ("y", 0.0),
+    "vcenter": ("y", 0.5),
+    "bottom": ("y", 1.0),
+}
 
 
 def _effective_font_pt(para, fallback):
@@ -2354,6 +2364,106 @@ def _scale_font(shape, scale, default_pt):
     return changed
 
 
+def _contains_proposed_text_rect(outer, *, left, top, width, height):
+    """Whether a non-content shape safely encloses a proposed text growth."""
+    if outer.is_text or outer.is_table or outer.type == "PICTURE":
+        return False
+    return (
+        outer.left <= left + GEOMETRY_EPS_IN
+        and outer.top <= top + GEOMETRY_EPS_IN
+        and outer.left + outer.width + GEOMETRY_EPS_IN >= left + width
+        and outer.top + outer.height + GEOMETRY_EPS_IN >= top + height
+    )
+
+
+def _alignment_coordinate(rec, role):
+    if role == "left":
+        return rec.left
+    if role == "hcenter":
+        return rec.left + rec.width / 2.0
+    if role == "right":
+        return rec.left + rec.width
+    if role == "top":
+        return rec.top
+    if role == "vcenter":
+        return rec.top + rec.height / 2.0
+    if role == "bottom":
+        return rec.top + rec.height
+    return None
+
+
+def _alignment_geometry(rec, recs, *, slide_w, slide_h):
+    """Repair only a size near-miss proven by shared peers and an exact anchor."""
+    if not rec.misaligned or float(getattr(rec.shape, "rotation", 0) or 0) % 360:
+        return None
+    role_items = {
+        str(item.get("edge") or ""): item
+        for item in rec.misaligned
+        if str(item.get("edge") or "") in _ALIGNMENT_ROLE
+    }
+    if len(role_items) != len(rec.misaligned):
+        return None
+    patterns = {
+        frozenset(("right", "hcenter")): ("x", "left"),
+        frozenset(("left", "hcenter")): ("x", "right"),
+        frozenset(("bottom", "vcenter")): ("y", "top"),
+        frozenset(("top", "vcenter")): ("y", "bottom"),
+    }
+    pattern = patterns.get(frozenset(role_items))
+    if pattern is None:
+        return None
+    axis, anchor_role = pattern
+
+    peer_sets = []
+    constraints = []
+    for role, item in role_items.items():
+        peers = frozenset(str(peer) for peer in item.get("with") or [] if str(peer))
+        if len(peers) < ALIGN_MIN_CLUSTER:
+            return None
+        peer_sets.append(peers)
+        try:
+            constraints.append((_ALIGNMENT_ROLE[role][1], float(item["target"])))
+        except (KeyError, TypeError, ValueError):
+            return None
+    if any(peers != peer_sets[0] for peers in peer_sets[1:]):
+        return None
+
+    peer_anchor_coordinates = []
+    for peer_id in peer_sets[0]:
+        peer = recs.get(peer_id)
+        coordinate = _alignment_coordinate(peer, anchor_role) if peer is not None else None
+        if coordinate is None:
+            return None
+        peer_anchor_coordinates.append(coordinate)
+    peer_anchor = sum(peer_anchor_coordinates) / len(peer_anchor_coordinates)
+    if any(abs(value - peer_anchor) > ALIGN_EPS for value in peer_anchor_coordinates):
+        return None
+    current_anchor = _alignment_coordinate(rec, anchor_role)
+    if current_anchor is None or abs(current_anchor - peer_anchor) > ALIGN_EPS:
+        return None
+
+    (factor_a, target_a), (factor_b, target_b) = constraints
+    if factor_a == factor_b:
+        return None
+    extent = (target_b - target_a) / (factor_b - factor_a)
+    origin = target_a - factor_a * extent
+    current_origin = rec.left if axis == "x" else rec.top
+    current_extent = rec.width if axis == "x" else rec.height
+    slide_extent = slide_w if axis == "x" else slide_h
+    solved_anchor = origin if anchor_role in {"left", "top"} else origin + extent
+    if extent <= 0 or abs(solved_anchor - current_anchor) > ALIGN_EPS:
+        return None
+    if any(abs(origin + factor * extent - target) > ALIGN_EPS for factor, target in constraints):
+        return None
+    if abs(origin - current_origin) > ALIGN_BAND + ALIGN_EPS:
+        return None
+    if abs(extent - current_extent) > 2 * (ALIGN_BAND + ALIGN_EPS):
+        return None
+    if origin < 0 or origin + extent > slide_extent:
+        return None
+    return axis, origin, extent
+
+
 def cmd_fix(args):
     if not args.slides and not args.all:
         sys.exit(
@@ -2375,6 +2485,7 @@ def cmd_fix(args):
 
     fixed, residue = [], []
     for slide_idx, recs in midx.items():
+        z_order = {shape_id: index for index, shape_id in enumerate(recs)}
         for sid, r in recs.items():
             iss = rec_issues(r)
             if not iss:
@@ -2385,16 +2496,25 @@ def cmd_fix(args):
             sh = er.shape
 
             ov = iss.get("frame_overflow_bottom")
-            if ov is not None and ov > 0.1:
+            if ov is not None:
                 # (a) grow if free space below
                 needed = ov + 0.05
                 bottom = r.top + r.height
+                proposed_height = r.height + needed
                 blocked = False
                 for osid, o in midx[slide_idx].items():
                     if osid == sid or osid == r.group or o.group == sid:
                         continue
                     if o.width * o.height > BG_AREA_FRACTION * slide_area:
                         continue  # background art doesn't block
+                    if z_order.get(osid, -1) < z_order.get(sid, -1) and _contains_proposed_text_rect(
+                        o,
+                        left=r.left,
+                        top=r.top,
+                        width=r.width,
+                        height=proposed_height,
+                    ):
+                        continue  # an enclosing card is a container, not a collision
                     h_overlap = min(r.left + r.width, o.left + o.width) - max(r.left, o.left)
                     v_intersect = (o.top < bottom + needed + 0.1) and (o.top + o.height > bottom)
                     if h_overlap > 0.1 and v_intersect:
@@ -2432,6 +2552,28 @@ def cmd_fix(args):
                                       "detail": "font x%.2f (%s)" % (scale,
                                           ", ".join("%g->%g" % (a, b) for a, b in changed[:4])
                                           + ("…" if len(changed) > 4 else ""))})
+
+            if r.misaligned and not (set(iss) - {"misaligned", "warnings"}):
+                geometry = _alignment_geometry(r, recs, slide_w=slide_w, slide_h=slide_h)
+                if geometry is not None:
+                    axis, new_origin, new_extent = geometry
+                    if axis == "x":
+                        new_left, new_width = new_origin, new_extent
+                        sh.left = int(er.tf.child_x(Inches(new_left)))
+                        sh.width = int(Inches(new_width) / er.tf.sx)
+                        changed = "left,width"
+                    else:
+                        new_top, new_height = new_origin, new_extent
+                        sh.top = int(er.tf.child_y(Inches(new_top)))
+                        sh.height = int(Inches(new_height) / er.tf.sy)
+                        changed = "top,height"
+                    fixed.append({
+                        "slide": slide_idx,
+                        "shape": sid,
+                        "action": "align-%s" % axis,
+                        "was": max(float(item.get("off") or 0) for item in r.misaligned),
+                        "detail": "set %s from same-peer grid constraints" % changed,
+                    })
 
             for key, axis in (("slide_overflow_right", "x"), ("slide_overflow_bottom", "y")):
                 ovs = iss.get(key)
@@ -2494,14 +2636,29 @@ def cmd_fix(args):
         shutil.copy2(args.file, out_path)
     remaining = collect_issue_map(out_path, only_slides=only)
 
-    # honesty pass: re-measure — anything still (nearly) as broken as before is residue, not fixed
+    # honesty pass: every producer-reported remaining issue is residue, not fixed
     confirmed = []
     for f in fixed:
         rem = remaining.get((f["slide"], f["shape"]), {})
-        key = "frame_overflow_bottom" if f["action"] in ("grow", "shrink-font") else (
-            "slide_overflow_right" if f["action"] in ("nudge-left", "fit-width") else "slide_overflow_bottom")
+        if f["action"] in ("grow", "shrink-font"):
+            key = "frame_overflow_bottom"
+        elif f["action"] in ("nudge-left", "fit-width"):
+            key = "slide_overflow_right"
+        elif f["action"] in ("align-x", "align-y"):
+            key = "misaligned"
+        else:
+            key = "slide_overflow_bottom"
         still = rem.get(key)
-        if still is not None and still > 0.12:
+        if still is not None and key == "misaligned":
+            details = [str(item) for item in still]
+            residue.append({
+                "slide": f["slide"], "shape": f["shape"],
+                "kind": "misaligned",
+                "details": details,
+                "issue": details[0] if details else "shape remains off its inferred alignment grid",
+                "suggest": "align the source element to the intended peer edge or centerline",
+            })
+        elif still is not None:
             residue.append({
                 "slide": f["slide"], "shape": f["shape"],
                 "kind": "repair_still_failing",
