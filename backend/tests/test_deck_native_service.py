@@ -15,6 +15,62 @@ from pptx.util import Inches, Pt
 from deerflow.sophia.deck_native import DeckNativeService, native_mechanical_report
 from deerflow.sophia.deck_native import service as native_service_module
 
+PROJECT_ROOT = Path(__file__).resolve().parents[2]
+HTML2PATCH_PATH = (
+    PROJECT_ROOT
+    / "third_party/hands_on_deck/skills/hands-on-deck/scripts/html2patch.py"
+)
+
+
+def _html2patch_module():
+    spec = importlib.util.spec_from_file_location("deck_native_html2patch", HTML2PATCH_PATH)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def _compiler_text_item(
+    *,
+    x: float,
+    y: float,
+    width: float,
+    height: float = 60,
+    align: str = "left",
+    font: str = "Arial",
+    text: str = "Grid label",
+) -> dict:
+    return {
+        "type": "text",
+        "box": {"x": x, "y": y, "w": width, "h": height},
+        "rotation": 0,
+        "paragraphs": [
+            {
+                "runs": [
+                    {
+                        "text": text,
+                        "style": {
+                            "font": font,
+                            "sizePx": 24,
+                            "color": "111827",
+                            "alpha": 1,
+                            "bold": False,
+                            "italic": False,
+                            "underline": False,
+                            "link": None,
+                        },
+                    }
+                ]
+            }
+        ],
+        "meta": {
+            "align": align,
+            "lineHeightPx": 28,
+            "fontSizePx": 24,
+            "padding": [0, 0, 0, 0],
+        },
+    }
+
 
 def test_deck_native_preflight_reports_missing_scripts(tmp_path: Path) -> None:
     service = DeckNativeService(scripts_dir=tmp_path / "missing-scripts")
@@ -218,6 +274,155 @@ def test_deck_native_apply_inspect_render_and_diff(tmp_path: Path) -> None:
     assert diff["changed"] is True
 
 
+def test_html2patch_clamps_text_metric_cushion_to_source_layout(tmp_path: Path) -> None:
+    module = _html2patch_module()
+    columns = [
+        _compiler_text_item(x=96, y=200, width=480, text="Baseline"),
+        _compiler_text_item(x=576, y=200, width=480, text="Mechanism"),
+        _compiler_text_item(x=1056, y=200, width=480, text="Outcome"),
+    ]
+    centered = _compiler_text_item(x=200, y=40, width=400, align="center", text="Centered")
+    right = _compiler_text_item(x=800, y=360, width=400, align="right", text="Right")
+    serif = _compiler_text_item(x=200, y=500, width=400, font="Georgia", text="Serif")
+    slide_edge = _compiler_text_item(x=1600, y=650, width=320, text="Edge")
+    extract = {
+        "body": {"w": 1920, "h": 1080},
+        "items": [*columns, centered, right, serif, slide_edge],
+    }
+
+    operations = module.compile_page(
+        extract,
+        0,
+        tmp_path / "slide.html",
+        tmp_path,
+        "s1",
+        [],
+        {"schema_version": "sophia-deck-source-map/v1", "slides": {}},
+    )
+
+    first, middle, last, centered_op, right_op, serif_op, edge_op = operations
+    assert first["at"][0] + first["size"][0] == pytest.approx(middle["at"][0])
+    assert middle["at"][0] + middle["size"][0] == pytest.approx(last["at"][0])
+    assert first["size"][0] == pytest.approx(5.0)
+    assert middle["size"][0] == pytest.approx(5.0)
+    assert last["size"][0] == pytest.approx(5.1)
+    assert centered_op["at"][0] + centered_op["size"][0] / 2 == pytest.approx(
+        400 / 96,
+        abs=0.001,
+    )
+    assert centered_op["size"][0] == pytest.approx(4.25)
+    assert right_op["at"][0] + right_op["size"][0] == pytest.approx(1200 / 96)
+    assert right_op["size"][0] == pytest.approx(4.25)
+    assert serif_op["size"][0] == pytest.approx(416 / 96, abs=0.001)
+    assert edge_op["size"][0] == pytest.approx(320 / 96, abs=0.001)
+    assert {
+        operation["text"][0]["font_size"]
+        for operation in operations
+    } == {18.0}
+
+    base = tmp_path / "compiler-base.pptx"
+    patch = tmp_path / "compiler.patch.json"
+    output = tmp_path / "compiler-output.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    presentation.slides.add_slide(presentation.slide_layouts[6])
+    presentation.save(base)
+    patch.write_text(json.dumps({"ops": operations}), encoding="utf-8")
+    service = DeckNativeService()
+    applied = service.apply_patch(
+        base_deck_path=str(base),
+        patch_path=str(patch),
+        output_path=str(output),
+        fix=False,
+    )
+    linted = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+    assert applied.success is True
+    assert linted.residue_count == 0
+    compiled = Presentation(output)
+    assert {
+        run.font.size.pt
+        for shape in compiled.slides[0].shapes
+        if shape.has_text_frame
+        for paragraph in shape.text_frame.paragraphs
+        for run in paragraph.runs
+    } == {18.0}
+
+
+def test_html2patch_does_not_increase_source_authored_text_overlap(tmp_path: Path) -> None:
+    module = _html2patch_module()
+    left = _compiler_text_item(x=100, y=100, width=300, text="Left")
+    right = _compiler_text_item(x=390, y=100, width=300, text="Right")
+    operations = module.compile_page(
+        {"body": {"w": 1920, "h": 1080}, "items": [left, right]},
+        0,
+        tmp_path / "slide.html",
+        tmp_path,
+        "s1",
+        [],
+        {"schema_version": "sophia-deck-source-map/v1", "slides": {}},
+    )
+
+    left_op, right_op = operations
+    compiled_overlap = (
+        left_op["at"][0] + left_op["size"][0] - right_op["at"][0]
+    )
+    assert compiled_overlap == pytest.approx(10 / 96, abs=0.001)
+    assert left_op["size"][0] == pytest.approx(300 / 96, abs=0.001)
+
+
+def test_html2patch_splits_peer_gap_between_facing_expansions(tmp_path: Path) -> None:
+    module = _html2patch_module()
+    centered_left = _compiler_text_item(
+        x=100,
+        y=100,
+        width=400,
+        align="center",
+        text="Centered left",
+    )
+    centered_right = _compiler_text_item(
+        x=506,
+        y=100,
+        width=400,
+        align="center",
+        text="Centered right",
+    )
+    left_facing = _compiler_text_item(
+        x=100,
+        y=300,
+        width=400,
+        align="left",
+        text="Left aligned",
+    )
+    right_facing = _compiler_text_item(
+        x=506,
+        y=300,
+        width=400,
+        align="right",
+        text="Right aligned",
+    )
+    operations = module.compile_page(
+        {
+            "body": {"w": 1920, "h": 1080},
+            "items": [centered_left, centered_right, left_facing, right_facing],
+        },
+        0,
+        tmp_path / "slide.html",
+        tmp_path,
+        "s1",
+        [],
+        {"schema_version": "sophia-deck-source-map/v1", "slides": {}},
+    )
+
+    center_left_op, center_right_op, left_op, right_op = operations
+    assert center_left_op["at"][0] + center_left_op["size"][0] <= center_right_op["at"][0] + 0.001
+    assert left_op["at"][0] + left_op["size"][0] <= right_op["at"][0] + 0.001
+    assert {
+        operation["text"][0]["font_size"]
+        for operation in operations
+    } == {18.0}
+
+
 def test_deck_native_invalid_patch_fails_atomically(tmp_path: Path) -> None:
     base = tmp_path / "base.pptx"
     patch = tmp_path / "invalid.patch.json"
@@ -361,6 +566,320 @@ def test_deck_native_lint_fix_repairs_compatible_alignment_geometry(
     assert clean.lint_issue_count_before == 0
     assert clean.fix_applied_count == 0
     assert clean.residue_count == 0
+
+
+def test_deck_native_lint_fix_translates_single_proven_text_edge(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "single-edge-alignment.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    def add_text(name: str, left: float, top: float) -> None:
+        shape = slide.shapes.add_textbox(
+            Inches(left),
+            Inches(top),
+            Inches(7.91667),
+            Inches(0.6),
+        )
+        shape.name = name
+        shape.text = name
+        shape.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+
+    for index, top in enumerate((2.0, 3.0, 4.0), start=1):
+        add_text(f"peer-{index}", 2.042, top)
+    add_text("single-edge-target", 2.0, 1.0)
+    presentation.save(output)
+
+    service = DeckNativeService()
+    fixed = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.fix_applied_count == 1
+    assert fixed.issue_kinds == {"align-x": 1}
+    assert fixed.residue_count == 0
+    repaired = Presentation(output)
+    target = next(shape for shape in repaired.slides[0].shapes if shape.name == "single-edge-target")
+    assert target.left.inches == pytest.approx(2.042, abs=0.001)
+    assert target.text_frame.paragraphs[0].runs[0].font.size.pt == 18
+
+    clean = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+    assert clean.lint_issue_count_before == 0
+    assert clean.fix_applied_count == 0
+    assert clean.residue_count == 0
+
+
+def test_deck_native_lint_fix_coordinates_shared_text_seam(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "shared-text-seam.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    def add_text(name: str, left: float, top: float, width: float) -> None:
+        shape = slide.shapes.add_textbox(
+            Inches(left),
+            Inches(top),
+            Inches(width),
+            Inches(0.6),
+        )
+        shape.name = name
+        shape.text = name
+        shape.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+
+    add_text("left-header", 7.0, 1.0, 5.76)
+    add_text("seam-target", 12.76, 1.0, 6.01078)
+    for index, top in enumerate((2.0, 3.0, 4.0, 5.0), start=1):
+        add_text(f"row-peer-{index}", 12.669, top, 6.10178)
+    presentation.save(output)
+    original = Presentation(output)
+    original_target = next(shape for shape in original.slides[0].shapes if shape.name == "seam-target")
+    original_right = original_target.left.inches + original_target.width.inches
+
+    service = DeckNativeService()
+    fixed = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.fix_applied_count == 1
+    assert fixed.issue_kinds == {"align-x-seam": 1}
+    assert fixed.residue_count == 0
+    repaired = Presentation(output)
+    left = next(shape for shape in repaired.slides[0].shapes if shape.name == "left-header")
+    target = next(shape for shape in repaired.slides[0].shapes if shape.name == "seam-target")
+    assert left.left.inches + left.width.inches == pytest.approx(12.669, abs=0.001)
+    assert target.left.inches == pytest.approx(12.669, abs=0.001)
+    assert target.left.inches + target.width.inches == pytest.approx(original_right, abs=0.001)
+    assert left.text_frame.paragraphs[0].runs[0].font.size.pt == 18
+    assert target.text_frame.paragraphs[0].runs[0].font.size.pt == 18
+
+    clean = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+    assert clean.lint_issue_count_before == 0
+    assert clean.fix_applied_count == 0
+    assert clean.residue_count == 0
+
+
+def test_deck_native_lint_fix_rolls_back_unsafe_single_edge_translation(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "unsafe-single-edge.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    def add_text(name: str, left: float, top: float, width: float, height: float = 0.6) -> None:
+        shape = slide.shapes.add_textbox(
+            Inches(left), Inches(top), Inches(width), Inches(height)
+        )
+        shape.name = name
+        shape.text = name
+        shape.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+
+    add_text("different-height-neighbor", 3.0, 1.0, 1.96, height=0.8)
+    add_text("unsafe-target", 5.0, 1.0, 3.0)
+    for index, top in enumerate((2.0, 3.0, 4.0), start=1):
+        add_text(f"unsafe-peer-{index}", 4.9, top, 3.0)
+    presentation.save(output)
+    before = Presentation(output)
+    before_target = next(shape for shape in before.slides[0].shapes if shape.name == "unsafe-target")
+    before_left_emu = before_target.left
+    before_width_emu = before_target.width
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_count == 1
+    assert fixed.residue_kinds == {"misaligned": 1}
+    repaired = Presentation(output)
+    target = next(shape for shape in repaired.slides[0].shapes if shape.name == "unsafe-target")
+    assert target.left == before_left_emu
+    assert target.width == before_width_emu
+    assert target.text_frame.paragraphs[0].runs[0].font.size.pt == 18
+
+
+def test_deck_native_lint_fix_preserves_authored_gutter_during_left_snap(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "authored-gutter.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    def add_text(name: str, left: float, top: float, width: float) -> None:
+        shape = slide.shapes.add_textbox(
+            Inches(left), Inches(top), Inches(width), Inches(0.6)
+        )
+        shape.name = name
+        shape.text = name
+        shape.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+
+    add_text("gutter-neighbor", 7.0, 1.0, 5.669)
+    add_text("gutter-target", 12.76, 1.0, 6.01078)
+    for index, top in enumerate((2.0, 3.0, 4.0), start=1):
+        add_text(f"gutter-peer-{index}", 12.669, top, 6.10178)
+    presentation.save(output)
+    before = Presentation(output)
+    before_target = next(shape for shape in before.slides[0].shapes if shape.name == "gutter-target")
+    before_left = before_target.left
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_kinds.get("misaligned", 0) >= 1
+    repaired = Presentation(output)
+    target = next(shape for shape in repaired.slides[0].shapes if shape.name == "gutter-target")
+    assert target.left == before_left
+
+
+def test_deck_native_lint_fix_preserves_original_text_container(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "contained-translation.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(2.0),
+        Inches(1.0),
+        Inches(7.91667),
+        Inches(0.6),
+    ).name = "target-container"
+
+    def add_text(name: str, left: float, top: float) -> None:
+        shape = slide.shapes.add_textbox(
+            Inches(left), Inches(top), Inches(7.91667), Inches(0.6)
+        )
+        shape.name = name
+        shape.text = name
+        shape.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+
+    add_text("contained-target", 2.0, 1.0)
+    for index, top in enumerate((2.0, 3.0, 4.0), start=1):
+        add_text(f"contained-peer-{index}", 2.042, top)
+    presentation.save(output)
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_kinds.get("misaligned", 0) >= 1
+    repaired = Presentation(output)
+    target = next(shape for shape in repaired.slides[0].shapes if shape.name == "contained-target")
+    assert target.left.inches == pytest.approx(2.0, abs=0.001)
+
+
+def test_deck_native_lint_fix_does_not_compose_seam_with_grown_neighbor(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "grown-seam-neighbor.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    neighbor = slide.shapes.add_textbox(
+        Inches(7.0), Inches(1.0), Inches(5.76), Inches(0.33)
+    )
+    neighbor.name = "grown-neighbor"
+    neighbor.text_frame.margin_left = 0
+    neighbor.text_frame.margin_right = 0
+    neighbor.text_frame.margin_top = Inches(0.05)
+    neighbor.text_frame.margin_bottom = Inches(0.05)
+    neighbor.text = "Caution requests explicit confirmation."
+    neighbor.text_frame.paragraphs[0].line_spacing = Pt(21)
+    neighbor.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+
+    def add_text(name: str, left: float, top: float, width: float) -> None:
+        shape = slide.shapes.add_textbox(
+            Inches(left), Inches(top), Inches(width), Inches(0.33)
+        )
+        shape.name = name
+        shape.text = name
+        shape.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+
+    add_text("grown-neighbor-target", 12.76, 1.0, 6.01078)
+    for index, top in enumerate((2.0, 3.0, 4.0), start=1):
+        add_text(f"grown-neighbor-peer-{index}", 12.669, top, 6.10178)
+    presentation.save(output)
+    before = Presentation(output)
+    before_target = next(shape for shape in before.slides[0].shapes if shape.name == "grown-neighbor-target")
+    before_target_left = before_target.left
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.issue_kinds == {"grow": 1}
+    assert fixed.residue_kinds == {"misaligned": 1}
+    repaired = Presentation(output)
+    target = next(shape for shape in repaired.slides[0].shapes if shape.name == "grown-neighbor-target")
+    grown = next(shape for shape in repaired.slides[0].shapes if shape.name == "grown-neighbor")
+    assert target.left == before_target_left
+    assert grown.height.inches > 0.33
+
+
+def test_deck_native_lint_fix_rolls_back_seam_that_would_wrap_text(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    font_dir = home / "Library/Fonts"
+    font_dir.mkdir(parents=True)
+    embedded_font = ImageFont.load_default(size=12).path
+    assert hasattr(embedded_font, "getvalue")
+    (font_dir / "CanarySans.ttf").write_bytes(embedded_font.getvalue())
+    monkeypatch.setenv("HOME", str(home))
+
+    output = tmp_path / "wrapping-seam.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    neighbor = slide.shapes.add_textbox(
+        Inches(7.0), Inches(1.0), Inches(5.76), Inches(0.35)
+    )
+    neighbor.name = "wrap-neighbor"
+    neighbor.text_frame.margin_left = 0
+    neighbor.text_frame.margin_right = 0
+    neighbor.text_frame.margin_top = 0
+    neighbor.text_frame.margin_bottom = 0
+    neighbor.text = "W" * 23 + " x"
+    neighbor.text_frame.paragraphs[0].runs[0].font.name = "CanarySans"
+    neighbor.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+
+    def add_text(name: str, left: float, top: float, width: float) -> None:
+        shape = slide.shapes.add_textbox(
+            Inches(left), Inches(top), Inches(width), Inches(0.35)
+        )
+        shape.name = name
+        shape.text = name
+        shape.text_frame.paragraphs[0].runs[0].font.name = "CanarySans"
+        shape.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+
+    add_text("wrap-target", 12.76, 1.0, 6.01078)
+    for index, top in enumerate((2.0, 3.0, 4.0), start=1):
+        add_text(f"wrap-peer-{index}", 12.669, top, 6.10178)
+    presentation.save(output)
+    before = Presentation(output)
+    before_neighbor = next(shape for shape in before.slides[0].shapes if shape.name == "wrap-neighbor")
+    before_target = next(shape for shape in before.slides[0].shapes if shape.name == "wrap-target")
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_kinds == {"misaligned": 1}
+    repaired = Presentation(output)
+    repaired_neighbor = next(shape for shape in repaired.slides[0].shapes if shape.name == "wrap-neighbor")
+    repaired_target = next(shape for shape in repaired.slides[0].shapes if shape.name == "wrap-target")
+    assert repaired_neighbor.width == before_neighbor.width
+    assert repaired_target.left == before_target.left
+    assert repaired_neighbor.text_frame.paragraphs[0].runs[0].font.size.pt == 18
 
 
 def test_deck_native_lint_fix_grows_small_overflow_inside_containing_panel(

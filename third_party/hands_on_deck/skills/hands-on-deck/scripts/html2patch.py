@@ -462,8 +462,7 @@ EXTRACT_JS = r"""
 
 
 # Faces whose PowerPoint metrics run widest of the browser's. A re-wrapped
-# line is the worst drift there is: the last line clips or hides under
-# whatever sits below, so these get double the width safety margin.
+# line is the worst drift there is, so isolated boxes retain a larger cushion.
 SERIF_FACES = {
     "georgia", "times", "times new roman", "palatino", "palatino linotype",
     "garamond", "book antiqua", "baskerville", "didot", "cambria",
@@ -533,22 +532,97 @@ def run_to_spec(run):
     return spec
 
 
-def text_block_ops(item, slide_ref, name, warnings):
+def _text_width_clearance(item, items, slide_width_px=None):
+    """Directional room for metric drift without changing source layout.
+
+    Clearance is constrained by the slide, every strict containing
+    painted box, and half of each gap to a vertically intersecting text peer
+    (the peer owns the other half). Source-authored overlap is preserved, but
+    receives no additional growth on that side.
+    """
+    if item.get("rotation"):
+        return 0.0, 0.0
+    box = item["box"]
+    left = max(0.0, float(box["x"]))
+    right = float("inf")
+    if slide_width_px is not None:
+        right = max(
+            0.0,
+            float(slide_width_px) - float(box["x"]) - float(box["w"]),
+        )
+
+    top = float(box["y"])
+    bottom = top + float(box["h"])
+    x = float(box["x"])
+    x2 = x + float(box["w"])
+
+    for candidate in items:
+        if candidate is item or candidate.get("type") != "box":
+            continue
+        outer = candidate.get("box") or {}
+        try:
+            ox = float(outer["x"])
+            oy = float(outer["y"])
+            ox2 = ox + float(outer["w"])
+            oy2 = oy + float(outer["h"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        strictly_larger = float(outer["w"]) * float(outer["h"]) > float(box["w"]) * float(box["h"]) + 1.0
+        if strictly_larger and ox <= x + 0.5 and oy <= top + 0.5 and ox2 >= x2 - 0.5 and oy2 >= bottom - 0.5:
+            left = min(left, max(0.0, x - ox))
+            right = min(right, max(0.0, ox2 - x2))
+
+    for peer in items:
+        if peer is item or peer.get("type") != "text":
+            continue
+        other = peer.get("box") or {}
+        try:
+            peer_x = float(other["x"])
+            peer_top = float(other["y"])
+            peer_x2 = peer_x + float(other["w"])
+            peer_bottom = peer_top + float(other["h"])
+        except (KeyError, TypeError, ValueError):
+            continue
+        if min(bottom, peer_bottom) - max(top, peer_top) <= 0.5:
+            continue
+        if peer.get("rotation"):
+            return 0.0, 0.0
+        if peer_x2 <= x + 0.5:
+            left = min(left, max(0.0, x - peer_x2) / 2.0)
+        elif peer_x >= x2 - 0.5:
+            right = min(right, max(0.0, peer_x - x2) / 2.0)
+        else:
+            # The authored text boxes already overlap. Never make that overlap
+            # worse, but leave it intact so native lint can report it honestly.
+            if peer_x <= x:
+                left = 0.0
+            if peer_x2 >= x2:
+                right = 0.0
+
+    return left, right
+
+
+def text_block_ops(item, slide_ref, name, warnings, width_clearance=None):
     """One add-shape textbox op for a text/list item."""
     meta = item["meta"]
     box = dict(item["box"])
     paras = item["paragraphs"]
 
-    # PPT draws text a touch wider than the browser, and serif faces drift the
-    # most — enough to re-wrap a line, and the re-wrapped last line clips or
-    # hides under whatever sits below. Widen EVERY box in the direction that
-    # keeps the anchored edge still, so PPT-side wrap points match the browser's.
+    # Preserve the old PowerPoint metric cushion only where the source layout
+    # proves there is room for it. Directional clamping keeps adjacent grid
+    # columns and containing cards authoritative while isolated text retains
+    # wrap-drift protection.
     fonts = {(r["style"]["font"] or "").lower() for p in paras for r in p["runs"]}
-    extra = box["w"] * (0.04 if fonts & SERIF_FACES else 0.02)
+    desired_extra = box["w"] * (0.04 if fonts & SERIF_FACES else 0.02)
+    left_room, right_room = width_clearance or (float("inf"), float("inf"))
     if meta["align"] == "center":
+        extra = min(desired_extra, 2 * left_room, 2 * right_room)
         box["x"] -= extra / 2
     elif meta["align"] == "right":
+        extra = min(desired_extra, left_room)
         box["x"] -= extra
+    else:
+        extra = min(desired_extra, right_room)
     box["w"] += extra
 
     if any(r["style"].get("alpha", 1) < 1 for p in paras for r in p["runs"]):
@@ -818,7 +892,15 @@ def compile_page(extract, slide_ref, html_path, tmpdir, prefix, warnings, source
                 continue
             emitted = [picture_op(p, item["box"], item.get("fit", "fill"), slide_ref, item_name(item, "image"))]
         elif item["type"] == "text":
-            emitted = text_block_ops(item, slide_ref, item_name(item, "text"), warnings)
+            slide_width_px = (extract.get("body") or {}).get("w")
+            clearance = _text_width_clearance(item, extract["items"], slide_width_px)
+            emitted = text_block_ops(
+                item,
+                slide_ref,
+                item_name(item, "text"),
+                warnings,
+                width_clearance=clearance,
+            )
         elif item["type"] == "box":
             emitted = box_ops(item, slide_ref, item_name(item, "box"), warnings)
         elif item["type"] == "table":
