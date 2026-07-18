@@ -910,6 +910,8 @@ def test_gate_confirmed_overflow_is_source_addressable_and_parent_local() -> Non
     assert "OVERFLOW slide:4" in message
     assert 'data-deck-id="compare-divider","compare-motive"' in message
     assert "local_left=target_canvas_left-parent_canvas_left" in message
+    assert "set box-sizing:border-box on that exact data-deck-id only" in message
+    assert "never add a global or universal box-sizing reset" in message
     assert "do not enlarge or reposition its parent" in message
 
 
@@ -1116,10 +1118,13 @@ def test_reversed_overlap_residue_pair_is_deduplicated() -> None:
 
     assert instruction is not None
     assert instruction["overlap_repair_target_count"] == 1
+    assert instruction["overflow_repair_target_count"] == 0
     target = instruction["repair_targets"][0]
     assert target["pair"] == ["s13", "s7"]
     assert target["source_ids"] == ["compare-static", "compare-vs"]
     assert instruction["repair_message"].count("OVERLAP slide:3") == 1
+    assert "box-sizing:border-box on that exact source element only" in instruction["repair_message"]
+    assert "never add a global or universal box-sizing reset" in instruction["repair_message"]
     assert "move s7 left" in instruction["repair_message"]
 
 

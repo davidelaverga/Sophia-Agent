@@ -974,7 +974,9 @@ def _overlap_repair_line(index: int, target: dict[str, Any]) -> str:
     pair_detail = details or pair
     return (
         f"{index}. OVERLAP {target.get('selector') or 'deck'} area {target.get('area')}: {pair_detail}; "
-        f"hint {suggestion}. Separate in source CSS without deleting content."
+        f"hint {suggestion}. Separate in source CSS without deleting content. If moving or resizing an "
+        "explicitly sized target with padding or a border, set box-sizing:border-box on that exact source "
+        "element only; never add a global or universal box-sizing reset, and leave unrelated geometry unchanged."
     )
 
 
@@ -1007,7 +1009,10 @@ def _overflow_repair_line(index: int, target: dict[str, Any]) -> str:
         "Edit that exact data-deck-id so non-bleed geometry stays inside 1920x1080. Native/inventory "
         "geometry is canvas-global, but child left/top inside a positioned parent are parent-local: "
         "local_left=target_canvas_left-parent_canvas_left and local_top=target_canvas_top-parent_canvas_top. "
-        "Correct a nested child offset first; do not enlarge or reposition its parent merely to mask overflow."
+        "If that explicitly sized target has padding or a border, first set box-sizing:border-box on that "
+        "exact data-deck-id only so those additions stay within its declared width/height; never add a global "
+        "or universal box-sizing reset. Otherwise correct the exact target's size or a nested child offset. "
+        "Then do not enlarge or reposition its parent merely to mask overflow, and leave unrelated geometry unchanged."
     )
 
 
