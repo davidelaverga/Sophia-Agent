@@ -28,6 +28,18 @@ _COMMIT_LINE = re.compile(r"[ \t]*COMMIT[ \t]*;[ \t]*(?:--[^\r\n]*)?", re.IGNORE
 _COMMENTS_ONLY = re.compile(r"(?:\s|--[^\r\n]*(?:\r?\n|$)|/\*.*?\*/)*", re.DOTALL)
 _SQLSTATE = re.compile(r"[0-9A-Z]{5}")
 
+_SAFE_MIGRATION_FAILURE_REASONS = {
+    "2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql": frozenset(
+        {
+            "deck_quality_publication_atomic_migration_environment_invalid",
+            "deck_quality_publication_atomic_migration_unknown_fingerprint",
+            "deck_quality_publication_atomic_migration_legacy_rows_present",
+            "deck_quality_publication_atomic_migration_existing_rows_invalid",
+            "deck_quality_publication_atomic_migration_postflight_failed",
+        }
+    ),
+}
+
 _DATABASE_SANITY_SQL = """
 SELECT
     current_database() = 'postgres',
@@ -126,6 +138,15 @@ def _safe_sqlstate(exc: BaseException) -> str:
     return value if isinstance(value, str) and _SQLSTATE.fullmatch(value) else "unknown"
 
 
+def _safe_migration_failure_reason(filename: str, exc: BaseException) -> str:
+    """Return only an explicitly allowlisted static migration failure code."""
+
+    diagnostic = getattr(exc, "diag", None)
+    message = getattr(diagnostic, "message_primary", None)
+    allowed = _SAFE_MIGRATION_FAILURE_REASONS.get(filename, frozenset())
+    return message if isinstance(message, str) and message in allowed else "unknown"
+
+
 def _safe_connection_reason(exc: BaseException) -> str:
     """Reduce driver/network detail to a static, non-secret operator code."""
 
@@ -186,6 +207,7 @@ def _apply_migrations(connection: Any, migrations: tuple[tuple[str, str], ...]) 
                 "migration_failed",
                 error_type=type(exc).__name__,
                 filename=filename,
+                reason=_safe_migration_failure_reason(filename, exc),
                 sqlstate=_safe_sqlstate(exc),
             )
             return False

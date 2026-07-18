@@ -128,6 +128,7 @@ class FakeConnection:
 
 class FakeDatabaseError(Exception):
     sqlstate = "55000"
+    diag = SimpleNamespace(message_primary="deck_quality_publication_atomic_migration_unknown_fingerprint")
 
 
 @pytest.mark.parametrize(
@@ -145,6 +146,33 @@ class FakeDatabaseError(Exception):
 )
 def test_connection_failures_emit_only_static_reason_codes(message: str, reason: str) -> None:
     assert runner._safe_connection_reason(RuntimeError(message)) == reason
+
+
+@pytest.mark.parametrize(
+    ("filename", "message", "reason"),
+    (
+        (
+            "2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql",
+            "deck_quality_publication_atomic_migration_unknown_fingerprint",
+            "deck_quality_publication_atomic_migration_unknown_fingerprint",
+        ),
+        (
+            "2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql",
+            "provider detail that must not be logged",
+            "unknown",
+        ),
+        (
+            "other.sql",
+            "deck_quality_publication_atomic_migration_unknown_fingerprint",
+            "unknown",
+        ),
+    ),
+)
+def test_migration_failures_emit_only_file_scoped_static_reason_codes(filename: str, message: str, reason: str) -> None:
+    error = RuntimeError("secret-bearing fallback")
+    error.diag = SimpleNamespace(message_primary=message)  # type: ignore[attr-defined]
+
+    assert runner._safe_migration_failure_reason(filename, error) == reason
 
 
 def test_each_migration_gets_its_own_locked_transaction(capsys: pytest.CaptureFixture[str]) -> None:
@@ -180,6 +208,7 @@ def test_first_failure_rolls_back_and_stops(capsys: pytest.CaptureFixture[str]) 
         "error_type": "FakeDatabaseError",
         "event": "migration_failed",
         "filename": "two.sql",
+        "reason": "unknown",
         "sqlstate": "55000",
     }
 
