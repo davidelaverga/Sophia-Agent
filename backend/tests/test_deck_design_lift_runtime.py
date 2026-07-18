@@ -3,8 +3,10 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import json
+import threading
 from decimal import Decimal
 
+import anyio
 import pytest
 
 from deerflow.sophia.build_manifest import (
@@ -13,21 +15,29 @@ from deerflow.sophia.build_manifest import (
     BuildManifestConcurrentModification,
     InMemoryBuildManifestStore,
 )
-from deerflow.sophia.build_mutation import InMemoryBuildMutationStore
+from deerflow.sophia.build_mutation import (
+    BuildMutationTransaction,
+    InMemoryBuildMutationStore,
+)
 from deerflow.sophia.build_versions import BuildArtifactVersion
+from deerflow.sophia.deck_design_lift.compiler import compile_repair_program
 from deerflow.sophia.deck_design_lift.runtime import (
     BlindDeckJudgmentRequest,
     DeckDesignLiftRequest,
     DeckDesignLiftRuntime,
+    DeckDesignLiftRuntimeError,
     InitialRenderedJudgment,
     RepairInvocationRequest,
     StagedDeckCandidate,
+    _RenewableMutationLease,
+    new_dq2_lease_owner,
 )
 from deerflow.sophia.deck_design_lift.schemas import (
     ContentPreservationProof,
     DeckRepairCandidate,
     JudgmentRepairFinding,
     LocalityProof,
+    RepairCompilerInput,
     RepairRenderEvidence,
     SelectorSourceAuthorization,
     SkillRef,
@@ -447,6 +457,75 @@ class TrackingMutationStore(InMemoryBuildMutationStore):
         return super().transition(transaction, expected_status=expected_status)
 
 
+class ThreadRecordingMutationStore(TrackingMutationStore):
+    def __init__(self) -> None:
+        super().__init__()
+        self.thread_calls: list[tuple[str, int]] = []
+
+    def _record_thread(self, operation: str) -> None:
+        self.thread_calls.append((operation, threading.get_ident()))
+
+    def create(self, transaction):
+        self._record_thread("create")
+        return super().create(transaction)
+
+    def load(self, *, transaction_id, user_id):
+        self._record_thread("load")
+        return super().load(transaction_id=transaction_id, user_id=user_id)
+
+    def acquire_lease(
+        self,
+        *,
+        transaction_id,
+        user_id,
+        lease_owner,
+        lease_seconds=120,
+    ):
+        self._record_thread("acquire_lease")
+        return super().acquire_lease(
+            transaction_id=transaction_id,
+            user_id=user_id,
+            lease_owner=lease_owner,
+            lease_seconds=lease_seconds,
+        )
+
+    def renew_lease(self, transaction, *, lease_seconds=120):
+        self._record_thread("renew_lease")
+        return super().renew_lease(transaction, lease_seconds=lease_seconds)
+
+    def transition(self, transaction, *, expected_status):
+        self._record_thread("transition")
+        return super().transition(transaction, expected_status=expected_status)
+
+
+class CrashAfterPersistMutationStore(TrackingMutationStore):
+    def __init__(self, *, target_status: str) -> None:
+        super().__init__()
+        self.target_status = target_status
+        self.did_crash = False
+
+    def transition(self, transaction, *, expected_status):
+        persisted = super().transition(
+            transaction,
+            expected_status=expected_status,
+        )
+        if persisted.status == self.target_status and not self.did_crash:
+            self.did_crash = True
+            raise SimulatedWorkerCrash()
+        return persisted
+
+
+def _expire_mutation_lease(
+    mutations: InMemoryBuildMutationStore,
+    transaction: BuildMutationTransaction,
+) -> None:
+    key = (transaction.user_id, transaction.transaction_id)
+    mutations._items[key] = transaction.model_copy(
+        update={"lease_expires_at": "2000-01-01T00:00:00+00:00"},
+        deep=True,
+    )
+
+
 class FakeAtomicCommitter:
     """Test-only coordinator; production uses the single Supabase commit RPC."""
 
@@ -478,6 +557,7 @@ class FakeAtomicCommitter:
         self.calls.append(
             {
                 "transaction": transaction,
+                "thread_id": threading.get_ident(),
                 "manifest_object_path": manifest_object_path,
                 "manifest_hash": manifest_hash,
                 "acceptance": acceptance,
@@ -546,6 +626,7 @@ def _runtime(
     commit_conflict=False,
     commit_crash=False,
     commit_response_loss=False,
+    lease_heartbeat_interval_seconds=30.0,
 ):
     manifests = manifest_store or InMemoryBuildManifestStore()
     try:
@@ -573,6 +654,7 @@ def _runtime(
             repair_executor=repair,
             materializer=materializer,
             atomic_committer=atomic_committer,
+            lease_heartbeat_interval_seconds=lease_heartbeat_interval_seconds,
         ),
         manifests,
         mutations,
@@ -632,6 +714,269 @@ def test_production_shaped_five_slide_runtime_commits_one_approved_repair() -> N
     assert atomic_call["manifest_object_path"].endswith("/foundation/.builder/builds/build-psi-001/manifest/manifest-r2.json")
 
 
+def test_sync_mutation_boundaries_never_run_on_event_loop_thread() -> None:
+    mutations = ThreadRecordingMutationStore()
+    runtime, _manifests, _mutations, _mechanics, _judge, _repair, _materializer = _runtime(
+        mutation_store=mutations,
+    )
+
+    async def scenario() -> tuple[int, object]:
+        event_loop_thread = threading.get_ident()
+        return event_loop_thread, await runtime.run(_request())
+
+    event_loop_thread, result = _run(scenario())
+
+    assert result.terminal_code == "candidate_committed"
+    assert {operation for operation, _thread in mutations.thread_calls} >= {
+        "create",
+        "renew_lease",
+        "transition",
+    }
+    assert all(thread_id != event_loop_thread for _operation, thread_id in mutations.thread_calls)
+    assert runtime._atomic_committer.calls[0]["thread_id"] != event_loop_thread
+
+
+def test_server_lease_owner_is_unique_and_operation_scoped() -> None:
+    operation_id = "operation-dq2-001"
+    expected_scope = hashlib.sha256(operation_id.encode()).hexdigest()[:16]
+
+    first = new_dq2_lease_owner(operation_id)
+    second = new_dq2_lease_owner(operation_id)
+
+    assert first != second
+    assert first.startswith(f"dq2:{expected_scope}:")
+    assert len(first) <= 128
+
+
+@pytest.mark.parametrize("terminal_status", ["committed", "rolled_back", "failed"])
+def test_heartbeat_exits_without_renewing_a_terminal_transaction(
+    terminal_status: str,
+) -> None:
+    class TerminalRejectingStore(InMemoryBuildMutationStore):
+        def __init__(self) -> None:
+            super().__init__()
+            self.renew_calls = 0
+
+        def renew_lease(self, transaction, *, lease_seconds=120):
+            self.renew_calls += 1
+            if transaction.status in {"committed", "rolled_back", "failed"}:
+                raise AssertionError("terminal transaction must not renew")
+            return super().renew_lease(transaction, lease_seconds=lease_seconds)
+
+    store = TerminalRejectingStore()
+    transaction = BuildMutationTransaction.prepare(
+        build_id="build-terminal-001",
+        user_id="user-canary-001",
+        operation_id="operation-terminal-001",
+        expected_manifest_revision=1,
+        lease_owner="worker-terminal-001",
+    ).model_copy(update={"status": terminal_status})
+    lease = _RenewableMutationLease(
+        store=store,
+        transaction=transaction,
+        lease_seconds=120,
+        heartbeat_interval_seconds=0.001,
+    )
+
+    async def run_heartbeat() -> None:
+        with anyio.CancelScope() as work_scope:
+            await lease.heartbeat(work_scope)
+
+    _run(run_heartbeat())
+
+    assert store.renew_calls == 0
+
+
+def test_heartbeat_lease_loss_cancels_stale_worker_before_cleanup() -> None:
+    class BlockingRepair:
+        def __init__(self) -> None:
+            self.started = asyncio.Event()
+            self.cancelled = False
+
+        async def invoke_once(self, _request):
+            self.started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                self.cancelled = True
+
+    repair = BlockingRepair()
+    mutations = TrackingMutationStore()
+    materializer = FakeMaterializer()
+    runtime, _manifests, _mutations, _mechanics, _judge, _repair, _materializer = _runtime(
+        mutation_store=mutations,
+        repair=repair,
+        materializer=materializer,
+        lease_heartbeat_interval_seconds=0.005,
+    )
+
+    async def race() -> None:
+        task = asyncio.create_task(runtime.run(_request()))
+        await asyncio.wait_for(repair.started.wait(), timeout=1)
+        stale = next(iter(mutations._items.values())).model_copy(deep=True)
+        _expire_mutation_lease(mutations, stale)
+        takeover = mutations.acquire_lease(
+            transaction_id=stale.transaction_id,
+            user_id=stale.user_id,
+            lease_owner="worker-render-takeover",
+            lease_seconds=120,
+        )
+
+        with pytest.raises(
+            DeckDesignLiftRuntimeError,
+            match="heartbeat lost ownership",
+        ):
+            await asyncio.wait_for(task, timeout=1)
+
+        durable = mutations.load(
+            transaction_id=stale.transaction_id,
+            user_id=stale.user_id,
+        )
+        assert durable.lease_owner == takeover.lease_owner
+        assert durable.status == "prepared"
+
+    _run(race())
+
+    assert repair.cancelled is True
+    assert materializer.rollback_calls == 0
+
+
+def test_runtime_accepts_exact_shared_style_dependency_closure() -> None:
+    baseline = _baseline_manifest().model_copy(update={"manifest_revision": 1}, deep=True)
+    finding = JudgmentRepairFinding(
+        target_selector="deck-style:root",
+        failure_code="default_look_gravity",
+        observation="The same generic visual system is visible across the deck.",
+        render_evidence=(
+            RepairRenderEvidence(
+                selector="slide:1",
+                path="renders/slide-1.png",
+                sha256=HASH,
+            ),
+            RepairRenderEvidence(
+                selector="slide:2",
+                path="renders/slide-2.png",
+                sha256=OTHER_HASH,
+            ),
+        ),
+        requested_source_roles=("deck_css",),
+        retained_content=("Preserve every PSI claim and the five-slide sequence.",),
+        skill_refs=(_skill(),),
+    )
+    decision = ShadowDecision(
+        result="needs_revision",
+        reason_codes=("critical_score_below_floor",),
+        weighted_score=Decimal("2.4"),
+        critical_score_floor=3,
+        failure_codes=("default_look_gravity",),
+        evidence_selectors=("slide:1", "slide:2"),
+        rubric_hash=HASH,
+        policy_hash=OTHER_HASH,
+    )
+    program = compile_repair_program(
+        RepairCompilerInput(
+            build_id=baseline.build_id,
+            initial_quality_run_id="quality-initial-001",
+            initial_manifest_revision=1,
+            initial_decision=decision,
+            source_authorizations=(
+                SelectorSourceAuthorization(
+                    selector="deck-style:root",
+                    source_roles=("deck_css",),
+                ),
+            ),
+            findings=(finding,),
+            rubric_version="sophia-deck-rubric/v1",
+            instrument_hash=HASH,
+        )
+    )
+    expected_versions = {component.selector: component.current_version_id for component in baseline.components}
+    transaction = BuildMutationTransaction.prepare(
+        build_id=baseline.build_id,
+        user_id=baseline.user_id,
+        operation_id="operation-dq2-001",
+        expected_manifest_revision=1,
+        lease_owner="worker-render-001",
+        owner_thread_id=baseline.thread_id,
+        expected_artifact_version_id="artifact-initial-001",
+        expected_artifact_hash=HASH,
+        expected_component_versions=expected_versions,
+        authorized_selectors=list(program.authorized_selectors),
+        campaign_run_id="campaign-dq2-001",
+        authorized_source_roles={"deck-style:root": ["deck_css"]},
+        repair_program_hash=program.program_hash,
+        initial_quality_run_id="quality-initial-001",
+        gate_evidence={"deck_design_lift_runtime": {"schema_version": "sophia-deck-design-lift-checkpoint/v1"}},
+    )
+    changed_components = [
+        component.model_copy(
+            update={"current_version_id": f"{component.selector.replace(':', '-')}-quality-v2"},
+            deep=True,
+        )
+        for component in baseline.components
+    ]
+    candidate_manifest = baseline.model_copy(
+        update={
+            "manifest_revision": 2,
+            "current_artifact_version_id": "artifact-candidate-001",
+            "components": changed_components,
+            "format_extensions": {"deck": {"current_pptx_hash": OTHER_HASH}},
+        },
+        deep=True,
+    )
+    artifact = _artifact(candidate=True)
+    prefix = "artifacts/user-canary-001/thread-canary-001/foundation/.builder/builds/build-psi-001/"
+    staged = StagedDeckCandidate(
+        artifact=artifact,
+        candidate_manifest=candidate_manifest,
+        manifest_object_path=f"{prefix}manifest/manifest-r2.json",
+        manifest_hash=hashlib.sha256(
+            json.dumps(
+                candidate_manifest.model_dump(mode="json"),
+                sort_keys=True,
+                separators=(",", ":"),
+                ensure_ascii=True,
+            ).encode()
+        ).hexdigest(),
+        staged_object_paths=(
+            artifact.storage_object_path,
+            f"{prefix}manifest/manifest-r2.json",
+        ),
+        candidate_version_ids=(
+            artifact.version_id,
+            *(component.current_version_id for component in changed_components),
+        ),
+        locality=LocalityProof(
+            authorized_selectors=("deck-style:root",),
+            changed_component_versions=tuple(component.selector for component in changed_components),
+            unchanged_component_versions=(),
+            shared_dependency_changed=True,
+        ),
+        content=ContentPreservationProof(
+            brief_preserved=True,
+            initial_slide_count=5,
+            candidate_slide_count=5,
+            required_content_preserved=True,
+            factual_content_preserved=True,
+            native_editability_preserved=True,
+        ),
+    )
+
+    DeckDesignLiftRuntime._validate_staged_candidate(
+        _request(
+            source_authorizations=(
+                SelectorSourceAuthorization(
+                    selector="deck-style:root",
+                    source_roles=("deck_css",),
+                ),
+            )
+        ),
+        transaction,
+        program,
+        staged,
+    )
+
+
 def test_runtime_refuses_any_non_atomic_manifest_commit_configuration() -> None:
     manifests = InMemoryBuildManifestStore()
     manifests.create(_baseline_manifest())
@@ -659,7 +1004,7 @@ def test_candidate_manifest_path_substitution_fails_before_atomic_commit() -> No
             transaction_id=result.transaction_id,
             user_id="user-canary-001",
         ).status
-        == "failed"
+        == "rolled_back"
     )
     assert runtime._atomic_committer.calls == []
 
@@ -677,7 +1022,7 @@ def test_candidate_object_path_escape_fails_before_staging_transition() -> None:
             transaction_id=result.transaction_id,
             user_id="user-canary-001",
         ).status
-        == "failed"
+        == "rolled_back"
     )
     assert runtime._atomic_committer.calls == []
 
@@ -717,7 +1062,13 @@ def test_unauthorized_model_update_rolls_back_without_materialization() -> None:
     assert materializer.staged == {}
     assert materializer.rollback_calls == 1
     assert manifests.load(build_id="build-psi-001", user_id="user-canary-001").current_artifact_version_id == "artifact-initial-001"
-    assert mutations.load(transaction_id=result.transaction_id, user_id="user-canary-001").status == "failed"
+    assert (
+        mutations.load(
+            transaction_id=result.transaction_id,
+            user_id="user-canary-001",
+        ).status
+        == "rolled_back"
+    )
 
 
 def test_candidate_mechanical_failure_never_reaches_second_judgment() -> None:
@@ -815,7 +1166,176 @@ def test_restart_after_model_call_reuses_invoke_once_result_no_second_repair() -
     assert manifests.load(build_id="build-psi-001", user_id="user-canary-001").manifest_revision == 2
 
 
-def test_restart_after_atomic_commit_replays_committed_transaction_without_split_write() -> None:
+@pytest.mark.parametrize("crash_status", ["staged", "verified"])
+def test_worker_sweep_recovers_crash_without_a_second_repair(
+    crash_status: str,
+) -> None:
+    mutations = CrashAfterPersistMutationStore(target_status=crash_status)
+    repair = InvokeOnceRepair()
+    runtime, manifests, mutations, _mechanics, judge, repair, _materializer = _runtime(
+        mutation_store=mutations,
+        repair=repair,
+    )
+    request = _request()
+
+    with pytest.raises(SimulatedWorkerCrash):
+        _run(runtime.run(request))
+
+    transaction = next(iter(mutations._items.values())).model_copy(deep=True)
+    assert transaction.status == crash_status
+    assert repair.model_calls == 1
+    _expire_mutation_lease(mutations, transaction)
+
+    recovered_id = _run(
+        runtime.recover_incomplete(
+            campaign_run_id=request.campaign_run_id,
+            experiment_id=request.experiment_id,
+            build_id=request.build_id,
+            user_id=request.user_id,
+            operation_id=request.operation_id,
+            lease_owner="worker-render-002",
+            lease_seconds=900,
+            limit=10,
+        )
+    )
+    assert recovered_id == transaction.transaction_id
+
+    result = _run(
+        runtime.run(
+            request.model_copy(
+                update={
+                    "transaction_id": recovered_id,
+                    "lease_owner": "worker-render-002",
+                }
+            )
+        )
+    )
+
+    assert result.terminal_code == "candidate_committed"
+    assert repair.model_calls == 1
+    assert len(judge.initial_calls) == 1
+    assert len(judge.candidate_calls) == 1
+    assert (
+        manifests.load(
+            build_id="build-psi-001",
+            user_id="user-canary-001",
+        ).manifest_revision
+        == 2
+    )
+
+
+def test_worker_sweep_ignores_expired_legacy_row_beside_matching_dq2() -> None:
+    mutations = CrashAfterPersistMutationStore(target_status="staged")
+    runtime, _manifests, mutations, _mechanics, _judge, _repair, materializer = _runtime(
+        mutation_store=mutations,
+    )
+    request = _request()
+
+    with pytest.raises(SimulatedWorkerCrash):
+        _run(runtime.run(request))
+
+    dq2 = next(iter(mutations._items.values())).model_copy(deep=True)
+    _expire_mutation_lease(mutations, dq2)
+    legacy = BuildMutationTransaction.model_validate(
+        {
+            "transaction_id": "legacy-transaction-001",
+            "build_id": request.build_id,
+            "user_id": request.user_id,
+            "operation_id": "legacy-operation-001",
+            "expected_manifest_revision": 1,
+            "lease_owner": "legacy-worker-001",
+            "lease_expires_at": "2000-01-01T00:00:00+00:00",
+        }
+    )
+    mutations.create(legacy)
+    partial_dq2 = legacy.model_copy(
+        update={
+            "transaction_id": "partial-dq2-transaction-001",
+            "operation_id": "partial-dq2-operation-001",
+            "campaign_run_id": "partial-campaign-001",
+            "authorized_selectors": ["slide:1"],
+        }
+    )
+    partial_key = (partial_dq2.user_id, partial_dq2.transaction_id)
+    mutations._items[partial_key] = partial_dq2.model_copy(deep=True)
+    mutations._operations[
+        (
+            partial_dq2.user_id,
+            partial_dq2.build_id,
+            partial_dq2.operation_id,
+        )
+    ] = partial_key
+
+    recovered_id = _run(
+        runtime.recover_incomplete(
+            campaign_run_id=request.campaign_run_id,
+            experiment_id=request.experiment_id,
+            build_id=request.build_id,
+            user_id=request.user_id,
+            operation_id=request.operation_id,
+            lease_owner="worker-render-002",
+            lease_seconds=900,
+            limit=10,
+        )
+    )
+
+    assert recovered_id == dq2.transaction_id
+    assert (
+        mutations.load(
+            transaction_id=legacy.transaction_id,
+            user_id=legacy.user_id,
+        )
+        == legacy
+    )
+    assert (
+        mutations.load(
+            transaction_id=partial_dq2.transaction_id,
+            user_id=partial_dq2.user_id,
+        )
+        == partial_dq2
+    )
+    assert materializer.rollback_calls == 0
+
+
+def test_worker_sweep_rolls_back_expired_unrelated_candidate() -> None:
+    mutations = CrashAfterPersistMutationStore(target_status="staged")
+    runtime, _manifests, mutations, _mechanics, _judge, repair, materializer = _runtime(
+        mutation_store=mutations,
+    )
+    request = _request()
+
+    with pytest.raises(SimulatedWorkerCrash):
+        _run(runtime.run(request))
+
+    transaction = next(iter(mutations._items.values())).model_copy(deep=True)
+    _expire_mutation_lease(mutations, transaction)
+
+    recovered_id = _run(
+        runtime.recover_incomplete(
+            campaign_run_id="campaign-dq2-002",
+            experiment_id="experiment-dq2-002",
+            build_id=request.build_id,
+            user_id=request.user_id,
+            operation_id="operation-dq2-002",
+            lease_owner="worker-render-002",
+            lease_seconds=900,
+            limit=10,
+        )
+    )
+
+    assert recovered_id is None
+    assert repair.model_calls == 1
+    assert materializer.rollback_calls == 1
+    assert (
+        mutations.load(
+            transaction_id=transaction.transaction_id,
+            user_id=request.user_id,
+        ).status
+        == "rolled_back"
+    )
+
+
+def test_worker_sweep_resolves_committed_transaction_when_caller_lost_its_id() -> None:
     runtime, manifests, mutations, _mechanics, judge, repair, _materializer = _runtime(commit_crash=True)
     request = _request()
 
@@ -827,7 +1347,40 @@ def test_restart_after_atomic_commit_replays_committed_transaction_without_split
     assert committed.committed_manifest_revision == 2
     assert manifests.load(build_id="build-psi-001", user_id="user-canary-001").manifest_revision == 2
 
-    resumed = request.model_copy(update={"transaction_id": committed.transaction_id})
+    with pytest.raises(DeckDesignLiftRuntimeError, match="conflicting campaign identity"):
+        _run(
+            runtime.recover_incomplete(
+                campaign_run_id="campaign-dq2-002",
+                experiment_id=request.experiment_id,
+                build_id=request.build_id,
+                user_id=request.user_id,
+                operation_id=request.operation_id,
+                lease_owner="worker-render-002",
+                lease_seconds=900,
+                limit=10,
+            )
+        )
+
+    recovered_id = _run(
+        runtime.recover_incomplete(
+            campaign_run_id=request.campaign_run_id,
+            experiment_id=request.experiment_id,
+            build_id=request.build_id,
+            user_id=request.user_id,
+            operation_id=request.operation_id,
+            lease_owner="worker-render-002",
+            lease_seconds=900,
+            limit=10,
+        )
+    )
+    assert recovered_id == committed.transaction_id
+
+    resumed = request.model_copy(
+        update={
+            "transaction_id": recovered_id,
+            "lease_owner": "worker-render-002",
+        }
+    )
     result = _run(runtime.run(resumed))
 
     assert result.terminal_code == "candidate_committed"

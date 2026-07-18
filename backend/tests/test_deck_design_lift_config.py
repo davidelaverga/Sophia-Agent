@@ -15,6 +15,9 @@ from deerflow.sophia.build_runtime.startup import (
     BuildFoundationStartupError,
     audit_deck_design_lift_builder_service_startup,
 )
+from deerflow.sophia.builder_event_auth import BUILDER_EVENT_HMAC_SECRET_ENV
+
+_INVOCATION_SECRET = "0123456789abcdef0123456789abcdef"
 
 
 def _plan(*, route: str, profile: str, capabilities: frozenset[str] | None = None) -> ResolvedModelPlan:
@@ -88,6 +91,7 @@ def test_startup_audit_requires_enforced_manifest_mutations_and_locked_routes() 
             judge_plan=judge,
             repair_plan=repair,
             manifest_mode="shadow",
+            enforce_canary_user_ids=frozenset(),
             mutation_transactions_enabled=True,
         )
     with pytest.raises(DeckDesignLiftConfigError, match="mutation transactions"):
@@ -95,7 +99,8 @@ def test_startup_audit_requires_enforced_manifest_mutations_and_locked_routes() 
             config,
             judge_plan=judge,
             repair_plan=repair,
-            manifest_mode="enforce",
+            manifest_mode="canary_enforce",
+            enforce_canary_user_ids=config.canary_user_ids,
             mutation_transactions_enabled=False,
         )
 
@@ -103,9 +108,30 @@ def test_startup_audit_requires_enforced_manifest_mutations_and_locked_routes() 
         config,
         judge_plan=judge,
         repair_plan=repair,
-        manifest_mode="enforce",
+        manifest_mode="canary_enforce",
+        enforce_canary_user_ids=config.canary_user_ids,
         mutation_transactions_enabled=True,
     )
+
+    with pytest.raises(DeckDesignLiftConfigError, match="scopes must match"):
+        audit_deck_design_lift_startup(
+            config,
+            judge_plan=judge,
+            repair_plan=repair,
+            manifest_mode="canary_enforce",
+            enforce_canary_user_ids=frozenset({"different-canary"}),
+            mutation_transactions_enabled=True,
+        )
+
+    with pytest.raises(DeckDesignLiftConfigError, match="exact-canary"):
+        audit_deck_design_lift_startup(
+            config,
+            judge_plan=judge,
+            repair_plan=repair,
+            manifest_mode="enforce",
+            enforce_canary_user_ids=frozenset(),
+            mutation_transactions_enabled=True,
+        )
 
 
 def test_startup_audit_rejects_capability_or_profile_drift() -> None:
@@ -121,7 +147,8 @@ def test_startup_audit_rejects_capability_or_profile_drift() -> None:
             config,
             judge_plan=judge,
             repair_plan=weak_repair,
-            manifest_mode="enforce",
+            manifest_mode="canary_enforce",
+            enforce_canary_user_ids=config.canary_user_ids,
             mutation_transactions_enabled=True,
         )
 
@@ -133,12 +160,15 @@ def test_service_startup_audit_proves_routes_storage_and_mutation_rpcs(
     from deerflow.sophia.build_runtime import startup
     from deerflow.sophia.storage import build_mutation_store
 
+    monkeypatch.setenv(BUILDER_EVENT_HMAC_SECRET_ENV, _INVOCATION_SECRET)
+
     canaries = frozenset({"canary-user"})
     config = SimpleNamespace(
         deck_design_lift=_enabled(),
         deck_quality=SimpleNamespace(enabled=True, canary_user_ids=canaries),
         build_foundation=SimpleNamespace(
-            manifest_mode="enforce",
+            manifest_mode="canary_enforce",
+            enforce_canary_user_ids=canaries,
             enable_mutation_transactions=True,
         ),
     )
@@ -173,12 +203,27 @@ def test_service_startup_audit_proves_routes_storage_and_mutation_rpcs(
     assert calls == ["probe", "close"]
 
 
+def test_service_startup_rejects_missing_private_invocation_auth(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv(BUILDER_EVENT_HMAC_SECRET_ENV, raising=False)
+    config = SimpleNamespace(deck_design_lift=_enabled())
+
+    with pytest.raises(
+        BuildFoundationStartupError,
+        match="private invocation authentication",
+    ):
+        audit_deck_design_lift_builder_service_startup(config=config)
+
+
 def test_service_startup_audit_rejects_scope_drift_and_missing_rpc_surface(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from deerflow.models import route_resolver
     from deerflow.sophia.build_runtime import startup
     from deerflow.sophia.storage import build_mutation_store
+
+    monkeypatch.setenv(BUILDER_EVENT_HMAC_SECRET_ENV, _INVOCATION_SECRET)
 
     config = SimpleNamespace(
         deck_design_lift=_enabled(),
@@ -187,7 +232,8 @@ def test_service_startup_audit_rejects_scope_drift_and_missing_rpc_surface(
             canary_user_ids=frozenset({"different-canary"}),
         ),
         build_foundation=SimpleNamespace(
-            manifest_mode="enforce",
+            manifest_mode="canary_enforce",
+            enforce_canary_user_ids=frozenset({"canary-user"}),
             enable_mutation_transactions=True,
         ),
     )

@@ -477,6 +477,23 @@ AS $$
        AND transaction.user_id = p_user_id;
 $$;
 
+CREATE OR REPLACE FUNCTION public.sophia_get_build_mutation_transaction_by_operation(
+    p_build_id TEXT,
+    p_user_id TEXT,
+    p_operation_id TEXT
+) RETURNS SETOF public.sophia_build_mutation_transactions
+LANGUAGE sql
+STABLE
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+    SELECT transaction.*
+      FROM public.sophia_build_mutation_transactions AS transaction
+     WHERE transaction.build_id = p_build_id
+       AND transaction.user_id = p_user_id
+       AND transaction.operation_id = p_operation_id;
+$$;
+
 CREATE OR REPLACE FUNCTION public.sophia_acquire_build_mutation_lease(
     p_transaction_id TEXT,
     p_user_id TEXT,
@@ -543,6 +560,88 @@ BEGIN
        AND transaction.user_id = p_user_id
     RETURNING transaction.* INTO v_transaction;
 
+    RETURN NEXT v_transaction;
+END;
+$$;
+
+CREATE OR REPLACE FUNCTION public.sophia_renew_build_mutation_lease(
+    p_transaction_id TEXT,
+    p_user_id TEXT,
+    p_lease_owner TEXT,
+    p_expected_lease_expires_at TIMESTAMPTZ,
+    p_lease_seconds INTEGER DEFAULT 120
+) RETURNS SETOF public.sophia_build_mutation_transactions
+LANGUAGE plpgsql
+SECURITY DEFINER
+SET search_path = public, pg_temp
+AS $$
+DECLARE
+    v_lease_expires_at TIMESTAMPTZ;
+    v_now TIMESTAMPTZ;
+    v_transaction public.sophia_build_mutation_transactions%ROWTYPE;
+BEGIN
+    IF p_transaction_id IS NULL OR btrim(p_transaction_id) = ''
+       OR p_user_id IS NULL OR btrim(p_user_id) = ''
+       OR p_lease_owner IS NULL OR btrim(p_lease_owner) = ''
+       OR char_length(p_lease_owner) > 256
+       OR p_expected_lease_expires_at IS NULL
+       OR NOT isfinite(p_expected_lease_expires_at)
+       OR p_lease_seconds IS NULL
+       OR p_lease_seconds NOT BETWEEN 1 AND 900 THEN
+        RAISE EXCEPTION 'build_mutation_lease_request_invalid'
+            USING ERRCODE = '22023';
+    END IF;
+
+    SELECT transaction.*
+      INTO v_transaction
+      FROM public.sophia_build_mutation_transactions AS transaction
+     WHERE transaction.transaction_id = p_transaction_id
+       AND transaction.user_id = p_user_id
+     FOR UPDATE;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'build_mutation_not_found'
+            USING ERRCODE = 'P0002';
+    END IF;
+    IF v_transaction.status IN ('committed', 'rolled_back', 'failed') THEN
+        RAISE EXCEPTION 'build_mutation_terminal'
+            USING ERRCODE = '55000';
+    END IF;
+
+    v_now := clock_timestamp();
+    IF v_transaction.lease_owner IS DISTINCT FROM p_lease_owner
+       OR v_transaction.lease_expires_at
+            IS DISTINCT FROM p_expected_lease_expires_at
+       OR v_transaction.lease_expires_at <= v_now THEN
+        RAISE EXCEPTION 'build_mutation_stale_lease'
+            USING ERRCODE = '40001';
+    END IF;
+
+    v_lease_expires_at := GREATEST(
+        v_now + make_interval(secs => p_lease_seconds),
+        v_transaction.lease_expires_at + INTERVAL '1 microsecond'
+    );
+    UPDATE public.sophia_build_mutation_transactions AS transaction
+       SET lease_expires_at = v_lease_expires_at,
+           transaction_payload = jsonb_set(
+               transaction.transaction_payload,
+               '{lease_expires_at}',
+               to_jsonb(v_lease_expires_at),
+               true
+           ),
+           updated_at = clock_timestamp()
+     WHERE transaction.transaction_id = p_transaction_id
+       AND transaction.user_id = p_user_id
+       AND transaction.status = v_transaction.status
+       AND transaction.lease_owner = p_lease_owner
+       AND transaction.lease_expires_at = p_expected_lease_expires_at
+       AND transaction.lease_expires_at > clock_timestamp()
+    RETURNING transaction.* INTO v_transaction;
+
+    IF NOT FOUND THEN
+        RAISE EXCEPTION 'build_mutation_stale_lease'
+            USING ERRCODE = '40001';
+    END IF;
     RETURN NEXT v_transaction;
 END;
 $$;
@@ -920,6 +1019,224 @@ BEGIN
            AND transaction.build_id = p_build_id
            AND transaction.status NOT IN ('committed', 'rolled_back', 'failed')
            AND transaction.lease_expires_at <= clock_timestamp()
+           -- The table deliberately retains valid pre-DQ-2 rows.  Recovery is
+           -- a DQ-2 controller boundary and must never claim those rows.
+           AND jsonb_typeof(
+               transaction.transaction_payload -> 'campaign_run_id'
+           ) = 'string'
+           AND NULLIF(btrim(
+               transaction.transaction_payload ->> 'campaign_run_id'
+           ), '') IS NOT NULL
+           AND char_length(
+               transaction.transaction_payload ->> 'campaign_run_id'
+           ) <= 512
+           AND jsonb_typeof(
+               transaction.transaction_payload -> 'owner_thread_id'
+           ) = 'string'
+           AND COALESCE(
+               transaction.transaction_payload ->> 'owner_thread_id', ''
+           ) ~ '^[A-Za-z0-9][A-Za-z0-9._=-]{0,127}$'
+           AND jsonb_typeof(
+               transaction.transaction_payload -> 'initial_quality_run_id'
+           ) = 'string'
+           AND NULLIF(btrim(
+               transaction.transaction_payload ->> 'initial_quality_run_id'
+           ), '') IS NOT NULL
+           AND char_length(
+               transaction.transaction_payload ->> 'initial_quality_run_id'
+           ) <= 512
+           AND jsonb_typeof(
+               transaction.transaction_payload -> 'repair_program_hash'
+           ) = 'string'
+           AND COALESCE(
+               transaction.transaction_payload ->> 'repair_program_hash', ''
+           ) ~ '^[0-9a-f]{64}$'
+           AND jsonb_typeof(
+               transaction.transaction_payload
+                   -> 'expected_artifact_version_id'
+           ) = 'string'
+           AND NULLIF(btrim(
+               transaction.transaction_payload
+                   ->> 'expected_artifact_version_id'
+           ), '') IS NOT NULL
+           AND char_length(
+               transaction.transaction_payload
+                   ->> 'expected_artifact_version_id'
+           ) <= 512
+           AND jsonb_typeof(
+               transaction.transaction_payload -> 'expected_artifact_hash'
+           ) = 'string'
+           AND COALESCE(
+               transaction.transaction_payload ->> 'expected_artifact_hash', ''
+           ) ~ '^[0-9a-f]{64}$'
+           AND CASE
+               WHEN jsonb_typeof(
+                   transaction.transaction_payload
+                       -> 'expected_component_versions'
+               ) = 'object' THEN
+                   transaction.transaction_payload
+                       -> 'expected_component_versions' <> '{}'::JSONB
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM jsonb_each(
+                             transaction.transaction_payload
+                                 -> 'expected_component_versions'
+                         ) AS component(selector, version)
+                        WHERE NULLIF(btrim(component.selector), '') IS NULL
+                           OR char_length(component.selector) > 512
+                           OR jsonb_typeof(component.version) <> 'string'
+                           OR NULLIF(
+                               btrim(component.version #>> '{}'), ''
+                           ) IS NULL
+                           OR char_length(component.version #>> '{}') > 512
+                   )
+               ELSE false
+           END
+           AND CASE
+               WHEN jsonb_typeof(
+                   transaction.transaction_payload -> 'authorized_selectors'
+               ) = 'array' THEN
+                   transaction.transaction_payload
+                       -> 'authorized_selectors' <> '[]'::JSONB
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM jsonb_array_elements(
+                             transaction.transaction_payload
+                                 -> 'authorized_selectors'
+                         ) AS selector(value)
+                        WHERE jsonb_typeof(selector.value) <> 'string'
+                           OR NULLIF(
+                               btrim(selector.value #>> '{}'), ''
+                           ) IS NULL
+                           OR char_length(selector.value #>> '{}') > 512
+                   )
+                   AND (
+                       SELECT count(*) = count(DISTINCT selector.value #>> '{}')
+                         FROM jsonb_array_elements(
+                             transaction.transaction_payload
+                                 -> 'authorized_selectors'
+                         ) AS selector(value)
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM jsonb_array_elements_text(
+                             transaction.transaction_payload
+                                 -> 'authorized_selectors'
+                         ) AS selector(value)
+                        WHERE NOT (
+                            transaction.transaction_payload
+                                -> 'expected_component_versions'
+                                ? selector.value
+                        )
+                   )
+               ELSE false
+           END
+           AND CASE
+               WHEN jsonb_typeof(
+                   transaction.transaction_payload -> 'authorized_source_roles'
+               ) = 'object'
+               AND jsonb_typeof(
+                   transaction.transaction_payload -> 'authorized_selectors'
+               ) = 'array' THEN
+                   transaction.transaction_payload
+                       -> 'authorized_source_roles' <> '{}'::JSONB
+                   AND (
+                       SELECT count(*)
+                         FROM jsonb_object_keys(
+                             transaction.transaction_payload
+                                 -> 'authorized_source_roles'
+                         ) AS source_role(selector)
+                   ) = (
+                       SELECT count(*)
+                         FROM jsonb_array_elements(
+                             transaction.transaction_payload
+                                 -> 'authorized_selectors'
+                         ) AS selector(value)
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM jsonb_array_elements_text(
+                             transaction.transaction_payload
+                                 -> 'authorized_selectors'
+                         ) AS selector(value)
+                        WHERE NOT (
+                            transaction.transaction_payload
+                                -> 'authorized_source_roles'
+                                ? selector.value
+                        )
+                   )
+                   AND NOT EXISTS (
+                       SELECT 1
+                         FROM jsonb_each(
+                             transaction.transaction_payload
+                                 -> 'authorized_source_roles'
+                         ) AS role(selector, roles)
+                        WHERE CASE
+                            WHEN jsonb_typeof(role.roles) = 'array' THEN
+                                jsonb_array_length(role.roles) = 0
+                                OR EXISTS (
+                                    SELECT 1
+                                      FROM jsonb_array_elements(
+                                          role.roles
+                                      ) AS source_role(value)
+                                     WHERE jsonb_typeof(source_role.value)
+                                            <> 'string'
+                                        OR NULLIF(btrim(
+                                            source_role.value #>> '{}'
+                                        ), '') IS NULL
+                                        OR char_length(
+                                            source_role.value #>> '{}'
+                                        ) > 256
+                                )
+                                OR (
+                                    SELECT count(*) <>
+                                            count(DISTINCT source_role.value #>> '{}')
+                                      FROM jsonb_array_elements(
+                                          role.roles
+                                      ) AS source_role(value)
+                                )
+                            ELSE true
+                        END
+                   )
+               ELSE false
+           END
+           AND jsonb_typeof(
+               transaction.transaction_payload -> 'gate_evidence'
+           ) = 'object'
+           AND transaction.transaction_payload -> 'gate_evidence' <> '{}'::JSONB
+           AND CASE
+               WHEN transaction.transaction_payload
+                       ->> 'candidate_quality_run_id' IS NULL
+                    AND transaction.transaction_payload
+                       ->> 'comparison_hash' IS NULL THEN
+                   transaction.status NOT IN ('verified', 'committing')
+               WHEN (
+                   jsonb_typeof(
+                       transaction.transaction_payload
+                           -> 'candidate_quality_run_id'
+                   ) = 'string'
+                   AND jsonb_typeof(
+                       transaction.transaction_payload -> 'comparison_hash'
+                   ) = 'string'
+                   AND
+                   NULLIF(btrim(
+                       transaction.transaction_payload
+                           ->> 'candidate_quality_run_id'
+                   ), '') IS NOT NULL
+                   AND char_length(
+                       transaction.transaction_payload
+                           ->> 'candidate_quality_run_id'
+                   ) <= 512
+                   AND transaction.transaction_payload
+                           ->> 'candidate_quality_run_id'
+                       IS DISTINCT FROM transaction.transaction_payload
+                           ->> 'initial_quality_run_id'
+                   AND COALESCE(
+                       transaction.transaction_payload ->> 'comparison_hash', ''
+                   ) ~ '^[0-9a-f]{64}$'
+               ) THEN true
+               ELSE false
+           END
          ORDER BY transaction.updated_at, transaction.transaction_id
          LIMIT p_limit
          FOR UPDATE SKIP LOCKED
@@ -1299,8 +1616,14 @@ ALTER FUNCTION public.sophia_create_build_mutation_transaction(TEXT, JSONB)
     OWNER TO postgres;
 ALTER FUNCTION public.sophia_get_build_mutation_transaction(TEXT, TEXT)
     OWNER TO postgres;
+ALTER FUNCTION public.sophia_get_build_mutation_transaction_by_operation(
+    TEXT, TEXT, TEXT
+) OWNER TO postgres;
 ALTER FUNCTION public.sophia_acquire_build_mutation_lease(TEXT, TEXT, TEXT, INTEGER)
     OWNER TO postgres;
+ALTER FUNCTION public.sophia_renew_build_mutation_lease(
+    TEXT, TEXT, TEXT, TIMESTAMPTZ, INTEGER
+) OWNER TO postgres;
 ALTER FUNCTION public.sophia_transition_build_mutation_transaction(
     TEXT, TEXT, TEXT, TEXT, TEXT, JSONB
 ) OWNER TO postgres;
@@ -1318,8 +1641,14 @@ REVOKE ALL ON FUNCTION public.sophia_create_build_mutation_transaction(TEXT, JSO
     FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.sophia_get_build_mutation_transaction(TEXT, TEXT)
     FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.sophia_get_build_mutation_transaction_by_operation(
+    TEXT, TEXT, TEXT
+) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.sophia_acquire_build_mutation_lease(TEXT, TEXT, TEXT, INTEGER)
     FROM PUBLIC, anon, authenticated, service_role;
+REVOKE ALL ON FUNCTION public.sophia_renew_build_mutation_lease(
+    TEXT, TEXT, TEXT, TIMESTAMPTZ, INTEGER
+) FROM PUBLIC, anon, authenticated, service_role;
 REVOKE ALL ON FUNCTION public.sophia_transition_build_mutation_transaction(
     TEXT, TEXT, TEXT, TEXT, TEXT, JSONB
 ) FROM PUBLIC, anon, authenticated, service_role;
@@ -1347,7 +1676,9 @@ BEGIN
            AND procedure.proname IN (
                 'sophia_create_build_mutation_transaction',
                 'sophia_get_build_mutation_transaction',
+                'sophia_get_build_mutation_transaction_by_operation',
                 'sophia_acquire_build_mutation_lease',
+                'sophia_renew_build_mutation_lease',
                 'sophia_transition_build_mutation_transaction',
                 'sophia_recover_build_mutation_transactions',
                 'sophia_get_build_manifest_head',
@@ -1377,8 +1708,14 @@ GRANT EXECUTE ON FUNCTION public.sophia_create_build_mutation_transaction(TEXT, 
     TO service_role;
 GRANT EXECUTE ON FUNCTION public.sophia_get_build_mutation_transaction(TEXT, TEXT)
     TO service_role;
+GRANT EXECUTE ON FUNCTION public.sophia_get_build_mutation_transaction_by_operation(
+    TEXT, TEXT, TEXT
+) TO service_role;
 GRANT EXECUTE ON FUNCTION public.sophia_acquire_build_mutation_lease(TEXT, TEXT, TEXT, INTEGER)
     TO service_role;
+GRANT EXECUTE ON FUNCTION public.sophia_renew_build_mutation_lease(
+    TEXT, TEXT, TEXT, TIMESTAMPTZ, INTEGER
+) TO service_role;
 GRANT EXECUTE ON FUNCTION public.sophia_transition_build_mutation_transaction(
     TEXT, TEXT, TEXT, TEXT, TEXT, JSONB
 ) TO service_role;
@@ -1436,7 +1773,9 @@ BEGIN
        AND procedure.proname IN (
             'sophia_create_build_mutation_transaction',
             'sophia_get_build_mutation_transaction',
+            'sophia_get_build_mutation_transaction_by_operation',
             'sophia_acquire_build_mutation_lease',
+            'sophia_renew_build_mutation_lease',
             'sophia_transition_build_mutation_transaction',
             'sophia_recover_build_mutation_transactions',
             'sophia_get_build_manifest_head',
@@ -1446,7 +1785,7 @@ BEGIN
        AND procedure.proowner = 'postgres'::REGROLE
        AND procedure.proconfig @> ARRAY['search_path=public, pg_temp']::TEXT[];
 
-    SELECT count(*) = 7
+    SELECT count(*) = 9
            AND bool_and(
                pg_catalog.has_function_privilege(
                    'service_role', procedure.oid, 'EXECUTE'
@@ -1479,7 +1818,9 @@ BEGIN
        AND procedure.proname IN (
             'sophia_create_build_mutation_transaction',
             'sophia_get_build_mutation_transaction',
+            'sophia_get_build_mutation_transaction_by_operation',
             'sophia_acquire_build_mutation_lease',
+            'sophia_renew_build_mutation_lease',
             'sophia_transition_build_mutation_transaction',
             'sophia_recover_build_mutation_transactions',
             'sophia_get_build_manifest_head',
@@ -1489,7 +1830,7 @@ BEGIN
     IF v_table_secure IS DISTINCT FROM true
        OR v_table_acl_secure IS DISTINCT FROM true
        OR v_policy_count <> 0
-       OR v_function_count <> 7
+       OR v_function_count <> 9
        OR v_function_acl_secure IS DISTINCT FROM true THEN
         RAISE EXCEPTION 'build_mutation_postflight_failed'
             USING ERRCODE = '42501';

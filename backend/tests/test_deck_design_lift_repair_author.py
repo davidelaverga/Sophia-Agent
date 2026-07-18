@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import threading
 from types import SimpleNamespace
 from typing import Any
 
@@ -30,6 +31,10 @@ from deerflow.sophia.deck_design_lift.repair_author import (
     RepairSourceContext,
     projected_repair_campaign_cost_usd,
     repair_preflight_admitted,
+)
+from deerflow.sophia.deck_design_lift.repair_tracing import (
+    SafeDeckRepairTraceInput,
+    SafeDeckRepairTraceOutput,
 )
 from deerflow.sophia.deck_design_lift.runtime import RepairInvocationRequest
 from deerflow.sophia.deck_design_lift.schemas import (
@@ -367,20 +372,49 @@ class FakeTwoPhaseInvoker:
         return self.result
 
 
+class FakeTraceSpan:
+    def __init__(self) -> None:
+        self.already_terminal = False
+        self.outputs: list[SafeDeckRepairTraceOutput] = []
+
+    def finish(self, output: SafeDeckRepairTraceOutput) -> None:
+        self.outputs.append(output)
+
+
+class FakeTraceFactory:
+    def __init__(self) -> None:
+        self.inputs: list[SafeDeckRepairTraceInput] = []
+        self.spans: list[FakeTraceSpan] = []
+        self.error: Exception | None = None
+        self.already_terminal = False
+
+    def __call__(self, trace_input: SafeDeckRepairTraceInput) -> FakeTraceSpan:
+        self.inputs.append(trace_input)
+        if self.error is not None:
+            raise self.error
+        span = FakeTraceSpan()
+        span.already_terminal = self.already_terminal
+        self.spans.append(span)
+        return span
+
+
 def _author(
     *,
     request: RepairInvocationRequest | None = None,
     context: object | None = None,
     invoker: FakeTwoPhaseInvoker | None = None,
+    trace_factory: FakeTraceFactory | None = None,
 ) -> tuple[ProductionDeckRepairAuthor, FakeContextLoader, FakeTwoPhaseInvoker]:
     request = request or _request()
     loader = FakeContextLoader(context if context is not None else _context(request=request))
     resolved_invoker = invoker or FakeTwoPhaseInvoker()
+    resolved_trace_factory = trace_factory or FakeTraceFactory()
     return (
         ProductionDeckRepairAuthor(
             context_loader=loader,
             invoker=resolved_invoker,
             plan=_plan(),
+            trace_factory=resolved_trace_factory,
         ),
         loader,
         resolved_invoker,
@@ -395,13 +429,29 @@ def _assert_code(error: pytest.ExceptionInfo[DeckRepairAuthorError], code: str) 
 
 def test_exact_context_builds_bounded_multimodal_prompt_and_one_create() -> None:
     request = _request()
-    author, loader, invoker = _author(request=request)
+    traces = FakeTraceFactory()
+    author, loader, invoker = _author(request=request, trace_factory=traces)
 
     result = _run(author(request))
 
     assert result.candidate == _candidate()
     assert loader.calls == [request]
     assert len(invoker.prepare_calls) == len(invoker.count_calls) == len(invoker.invoke_calls) == 1
+    assert len(traces.inputs) == len(traces.spans) == 1
+    assert traces.inputs[0].campaign_run_id == request.campaign_run_id
+    assert traces.inputs[0].initial_quality_run_id == request.program.initial_quality_run_id
+    assert traces.inputs[0].program_hash == request.program.program_hash
+    assert traces.inputs[0].payload_hash == invoker.prepared.payload_hash
+    assert traces.inputs[0].plan_hash == invoker.prepared.plan_hash
+    assert traces.spans[0].outputs == [
+        SafeDeckRepairTraceOutput(
+            status="completed",
+            latency_ms=100,
+            input_tokens=200,
+            output_tokens=50,
+            total_tokens=250,
+        )
+    ]
     prepare = invoker.prepare_calls[0]
     assert prepare["canary_user_id"] == request.user_id
     assert prepare["plan"] == _plan()
@@ -427,6 +477,49 @@ def test_exact_context_builds_bounded_multimodal_prompt_and_one_create() -> None
         '"rationale"',
     ):
         assert forbidden not in prompt_text
+
+
+def test_safe_trace_network_work_runs_off_the_async_event_loop() -> None:
+    request = _request()
+
+    class ThreadRecordingSpan(FakeTraceSpan):
+        def __init__(self) -> None:
+            super().__init__()
+            self.finish_thread_id: int | None = None
+
+        def finish(self, output: SafeDeckRepairTraceOutput) -> None:
+            self.finish_thread_id = threading.get_ident()
+            super().finish(output)
+
+    class ThreadRecordingFactory(FakeTraceFactory):
+        def __init__(self) -> None:
+            super().__init__()
+            self.factory_thread_id: int | None = None
+            self.span = ThreadRecordingSpan()
+
+        def __call__(self, trace_input: SafeDeckRepairTraceInput) -> ThreadRecordingSpan:
+            self.factory_thread_id = threading.get_ident()
+            self.inputs.append(trace_input)
+            self.spans.append(self.span)
+            return self.span
+
+    traces = ThreadRecordingFactory()
+    author, _loader, invoker = _author(
+        request=request,
+        trace_factory=traces,
+    )
+
+    async def invoke() -> tuple[DeckRepairInvocationResult, int]:
+        event_loop_thread_id = threading.get_ident()
+        return await author(request), event_loop_thread_id
+
+    result, event_loop_thread_id = _run(invoke())
+
+    assert result == invoker.result
+    assert traces.factory_thread_id is not None
+    assert traces.span.finish_thread_id is not None
+    assert traces.factory_thread_id != event_loop_thread_id
+    assert traces.span.finish_thread_id != event_loop_thread_id
 
 
 def test_cost_projection_reserves_both_dq1_runs_and_rejects_without_create() -> None:
@@ -532,3 +625,49 @@ def test_raw_loader_or_provider_errors_are_sanitized(stage: str) -> None:
     assert "SECRET_PROMPT_IMAGE_SOURCE_PROVIDER_PAYLOAD" not in str(error.value)
     if stage in {"loader", "prepare", "count"}:
         assert invoker.invoke_calls == []
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+def test_trace_admission_failure_never_spends_provider_call(terminal: bool) -> None:
+    request = _request()
+    traces = FakeTraceFactory()
+    if terminal:
+        traces.already_terminal = True
+    else:
+        traces.error = RuntimeError("Authorization: Bearer raw-secret https://private.example/context")
+    author, _loader, invoker = _author(
+        request=request,
+        trace_factory=traces,
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "repair_unavailable")
+    assert invoker.invoke_calls == []
+
+
+def test_provider_failure_emits_only_controlled_trace_failure() -> None:
+    request = _request()
+    traces = FakeTraceFactory()
+    invoker = FakeTwoPhaseInvoker()
+    invoker.invoke_error = RuntimeError("SECRET_CONTEXT_SOURCE_MESSAGES_CANDIDATE_PROVIDER_PAYLOAD")
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=invoker,
+        trace_factory=traces,
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "repair_unavailable")
+    assert len(invoker.invoke_calls) == 1
+    assert len(traces.spans) == 1
+    output = traces.spans[0].outputs[0]
+    assert output.status == "error"
+    assert output.input_tokens == invoker.input_tokens
+    assert output.output_tokens is None
+    assert output.total_tokens is None
+    assert output.error_code == "repair_unavailable"
+    assert "SECRET_CONTEXT" not in repr(output)

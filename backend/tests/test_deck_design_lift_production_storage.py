@@ -229,6 +229,7 @@ def test_factory_builds_verified_five_slide_request_from_safe_ids() -> None:
         "notes",
     )
     assert request.instrument_hash == canonical_sha256(_lock())
+    assert request.lease_seconds == 120
 
 
 def test_repository_rejects_noncanonical_or_tampered_manifest() -> None:

@@ -15,7 +15,7 @@ EXPECTED_POOLER_HOST = "aws-1-us-west-1.pooler.supabase.com"
 EXPECTED_POOLER_PORT = 5432
 ADVISORY_LOCK_ID = 4913762560351058
 MIGRATION_FILENAME = "2026_07_20_sophia_build_mutation_transactions.sql"
-MIGRATION_SHA256 = "90fc8815aa630b74b16303a17cf2a712b2eca8e767573bd2f48b458a2017ace5"
+MIGRATION_SHA256 = "1766769548e00a87a8664297f20ec1d0bb2ea007b4e0efbb82caa4235f85c28e"
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
 _BEGIN_LINE = re.compile(r"[ \t]*BEGIN[ \t]*;[ \t]*(?:--[^\r\n]*)?", re.IGNORECASE)

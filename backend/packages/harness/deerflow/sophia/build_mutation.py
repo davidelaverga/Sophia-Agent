@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, Literal, Protocol
 
@@ -79,6 +80,21 @@ def _is_dq2(transaction: BuildMutationTransaction) -> bool:
             bool(transaction.expected_component_versions),
         )
     )
+
+
+def _is_recoverable_dq2(transaction: BuildMutationTransaction) -> bool:
+    """Return true only for a complete durable DQ-2 transaction identity."""
+
+    if not _is_dq2(transaction) or not transaction.gate_evidence:
+        return False
+    try:
+        _require_dq2_identity(
+            transaction,
+            comparison_required=transaction.status in {"verified", "committing"},
+        )
+    except ValueError:
+        return False
+    return True
 
 
 def _same_frozen_identity(
@@ -247,12 +263,25 @@ class BuildMutationTransaction(BaseModel):
 class BuildMutationStore(Protocol):
     def create(self, transaction: BuildMutationTransaction) -> BuildMutationTransaction: ...
     def load(self, *, transaction_id: str, user_id: str) -> BuildMutationTransaction: ...
+    def load_by_operation(
+        self,
+        *,
+        build_id: str,
+        user_id: str,
+        operation_id: str,
+    ) -> BuildMutationTransaction | None: ...
     def acquire_lease(
         self,
         *,
         transaction_id: str,
         user_id: str,
         lease_owner: str,
+        lease_seconds: int = 120,
+    ) -> BuildMutationTransaction: ...
+    def renew_lease(
+        self,
+        transaction: BuildMutationTransaction,
+        *,
         lease_seconds: int = 120,
     ) -> BuildMutationTransaction: ...
     def transition(self, transaction: BuildMutationTransaction, *, expected_status: str) -> BuildMutationTransaction: ...
@@ -284,9 +313,20 @@ class DurableBuildMutationStore(BuildMutationStore, Protocol):
 
 
 class InMemoryBuildMutationStore:
-    def __init__(self) -> None:
+    def __init__(
+        self,
+        *,
+        clock: Callable[[], datetime] | None = None,
+    ) -> None:
         self._items: dict[tuple[str, str], BuildMutationTransaction] = {}
         self._operations: dict[tuple[str, str, str], tuple[str, str]] = {}
+        self._clock = clock or (lambda: datetime.now(UTC))
+
+    def _now(self) -> datetime:
+        now = self._clock()
+        if now.tzinfo is None or now.utcoffset() is None:
+            raise ValueError("build_mutation_clock_invalid")
+        return now.astimezone(UTC)
 
     def create(self, transaction: BuildMutationTransaction) -> BuildMutationTransaction:
         transaction = BuildMutationTransaction.model_validate(transaction.model_dump(mode="json"))
@@ -317,7 +357,7 @@ class InMemoryBuildMutationStore:
                 raise ValueError("build_mutation_new_staged_identity_invalid")
             if not transaction.gate_evidence:
                 raise ValueError("build_mutation_initial_evidence_required")
-            now = datetime.now(UTC)
+            now = self._now()
             expires_at = _aware_timestamp(transaction.lease_expires_at)
             if not now < expires_at <= now + timedelta(seconds=MAX_MUTATION_LEASE_SECONDS):
                 raise ValueError("build_mutation_initial_lease_invalid")
@@ -327,6 +367,18 @@ class InMemoryBuildMutationStore:
 
     def load(self, *, transaction_id: str, user_id: str) -> BuildMutationTransaction:
         return self._items[(user_id, transaction_id)].model_copy(deep=True)
+
+    def load_by_operation(
+        self,
+        *,
+        build_id: str,
+        user_id: str,
+        operation_id: str,
+    ) -> BuildMutationTransaction | None:
+        key = self._operations.get((user_id, build_id, operation_id))
+        if key is None:
+            return None
+        return self._items[key].model_copy(deep=True)
 
     def acquire_lease(
         self,
@@ -340,7 +392,7 @@ class InMemoryBuildMutationStore:
         key = (user_id, transaction_id)
         current = self._items[key]
         expires_at = _aware_timestamp(current.lease_expires_at)
-        now = datetime.now(UTC)
+        now = self._now()
         if current.status in _TERMINAL_STATUSES:
             raise ValueError("build_mutation_terminal")
         if current.lease_owner != lease_owner and expires_at > now:
@@ -353,6 +405,44 @@ class InMemoryBuildMutationStore:
         )
         self._items[key] = leased
         return leased.model_copy(deep=True)
+
+    def renew_lease(
+        self,
+        transaction: BuildMutationTransaction,
+        *,
+        lease_seconds: int = 120,
+    ) -> BuildMutationTransaction:
+        """Renew only the exact, still-live lease snapshot held by a worker.
+
+        Unlike ``acquire_lease``, renewal can never reclaim an expired lease.
+        The expected expiry is the fencing token, so an old heartbeat cannot
+        overwrite a later renewal or a recovery worker's lease.
+        """
+
+        transaction = BuildMutationTransaction.model_validate(transaction.model_dump(mode="json"))
+        _require_lease_request(
+            lease_owner=transaction.lease_owner,
+            lease_seconds=lease_seconds,
+        )
+        key = (transaction.user_id, transaction.transaction_id)
+        current = self._items[key]
+        now = self._now()
+        if current.status in _TERMINAL_STATUSES:
+            raise ValueError("build_mutation_terminal")
+        if current.lease_owner != transaction.lease_owner or _aware_timestamp(current.lease_expires_at) != _aware_timestamp(transaction.lease_expires_at) or _aware_timestamp(current.lease_expires_at) <= now:
+            raise ValueError("build_mutation_stale_lease")
+        renewed = current.model_copy(
+            update={
+                "lease_expires_at": (
+                    max(
+                        now + timedelta(seconds=lease_seconds),
+                        _aware_timestamp(current.lease_expires_at) + timedelta(microseconds=1),
+                    )
+                ).isoformat(),
+            }
+        )
+        self._items[key] = renewed
+        return renewed.model_copy(deep=True)
 
     def transition(self, transaction: BuildMutationTransaction, *, expected_status: str) -> BuildMutationTransaction:
         transaction = BuildMutationTransaction.model_validate(transaction.model_dump(mode="json"))
@@ -385,11 +475,23 @@ class InMemoryBuildMutationStore:
             ):
                 raise ValueError("build_mutation_prepared_staged_identity_invalid")
             if expected_status != "prepared":
-                _require_staged_identity(current)
+                current_has_staged_identity = bool(
+                    current.staged_object_paths
+                    or current.candidate_version_ids
+                    or current.candidate_manifest_object_path is not None
+                    or current.candidate_manifest_hash is not None
+                    or current.candidate_artifact_version_id is not None
+                    or current.candidate_artifact_hash is not None
+                )
+                if current_has_staged_identity:
+                    _require_staged_identity(current)
+                elif expected_status != "rolling_back":
+                    raise ValueError("build_mutation_staged_identity_missing")
                 if not _same_staged_identity(current, transaction):
                     raise ValueError("build_mutation_staged_identity_changed")
-                _require_staged_identity(transaction)
-            if current.lease_owner != transaction.lease_owner or _aware_timestamp(current.lease_expires_at) != _aware_timestamp(transaction.lease_expires_at) or _aware_timestamp(current.lease_expires_at) <= datetime.now(UTC):
+                if current_has_staged_identity:
+                    _require_staged_identity(transaction)
+            if current.lease_owner != transaction.lease_owner or _aware_timestamp(current.lease_expires_at) != _aware_timestamp(transaction.lease_expires_at) or _aware_timestamp(current.lease_expires_at) <= self._now():
                 raise ValueError("build_mutation_stale_lease")
             if (current.candidate_quality_run_id is not None and current.candidate_quality_run_id != transaction.candidate_quality_run_id) or (current.comparison_hash is not None and current.comparison_hash != transaction.comparison_hash):
                 raise ValueError("build_mutation_identity_changed")
@@ -475,9 +577,11 @@ class InMemoryBuildMutationStore:
         _require_lease_request(lease_owner=lease_owner, lease_seconds=lease_seconds)
         if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 100:
             raise ValueError("build_mutation_recovery_limit_invalid")
-        incomplete = [transaction.model_copy(deep=True) for (owner, _), transaction in self._items.items() if owner == user_id and transaction.build_id == build_id and transaction.status not in _TERMINAL_STATUSES]
+        incomplete = [
+            transaction.model_copy(deep=True) for (owner, _), transaction in self._items.items() if owner == user_id and transaction.build_id == build_id and transaction.status not in _TERMINAL_STATUSES and _is_recoverable_dq2(transaction)
+        ]
         recovered: list[BuildMutationTransaction] = []
-        now = datetime.now(UTC)
+        now = self._now()
         for transaction in incomplete:
             if len(recovered) >= limit:
                 break

@@ -1108,6 +1108,65 @@ def test_bundle_replay_prefers_archive_after_inbox_retirement(
     assert objects.reads[reads_before_replay:] == [(archive_path, publisher._MAX_PRODUCER_BUNDLE_BYTES)]
 
 
+def test_bound_source_pack_replay_rejects_changed_current_source(
+    tmp_path,
+) -> None:
+    artifact_bytes = b"accepted pptx bytes"
+    _prepare_files(tmp_path, artifact_bytes)
+    prepared = publisher.prepare_deck_quality_publication(
+        config=_config(),
+        state=_state(tmp_path),
+        artifact=_artifact(artifact_bytes),
+        completion_payload=_payload(),
+    )
+    assert prepared is not None
+    instrument = _instrument()
+    objects = _MemoryObjects(prepared.artifact_storage_object_path, artifact_bytes)
+    first_pack, first_source_bytes = publisher.capture_deck_quality_source_pack(
+        prepared=prepared,
+        instrument=instrument,
+    )
+    first = publisher.persist_deck_quality_producer_bundle(
+        prepared=prepared,
+        instrument=instrument,
+        object_store=objects,
+        source_pack=first_pack,
+        source_pack_bytes=first_source_bytes,
+    )
+
+    build_path = tmp_path / "outputs" / "deck_build" / "build.json"
+    changed_build = json.loads(build_path.read_bytes())
+    changed_build["retained_provenance"] = "changed-after-publication"
+    build_path.write_text(json.dumps(changed_build), encoding="utf-8")
+    current_pack, current_source_bytes = publisher.capture_deck_quality_source_pack(
+        prepared=prepared,
+        instrument=instrument,
+    )
+    assert current_pack.artifact_sha256 == first_pack.artifact_sha256
+    assert current_source_bytes != first_source_bytes
+
+    with pytest.raises(
+        publisher.DeckQualityPublicationError,
+        match="producer_source_persistence_conflict",
+    ):
+        publisher.persist_deck_quality_producer_bundle(
+            prepared=prepared,
+            instrument=instrument,
+            object_store=objects,
+            source_pack=current_pack,
+            source_pack_bytes=current_source_bytes,
+        )
+
+    decoded = publisher.decode_deck_quality_producer_bundle(
+        objects.objects[first.bundle_object_path],
+        expected_quality_run_id=first.quality_run_id,
+    )
+    assert decoded.manifest.source_pack_sha256 == hashlib.sha256(
+        first_source_bytes
+    ).hexdigest()
+    assert objects.objects[decoded.manifest.source_pack_object_path] == first_source_bytes
+
+
 def test_failure_marker_is_deterministic_content_free_and_create_only() -> None:
     artifact = _artifact()
     payload = _payload()

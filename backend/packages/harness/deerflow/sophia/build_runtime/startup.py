@@ -149,6 +149,18 @@ def audit_deck_design_lift_builder_service_startup(*, config: AppConfig) -> None
     if deck_design_lift is None or not deck_design_lift.enabled:
         return
 
+    # This is the first enabled-DQ-2 audit.  Prove the private invocation
+    # credential before resolving model routes or opening any storage client.
+    from deerflow.sophia.deck_design_lift.invocation_auth import (
+        DeckDesignLiftInvocationAuthenticationError,
+        probe_deck_design_lift_invocation_auth,
+    )
+
+    try:
+        probe_deck_design_lift_invocation_auth()
+    except DeckDesignLiftInvocationAuthenticationError:
+        raise BuildFoundationStartupError("enabled DQ-2 requires private invocation authentication") from None
+
     deck_quality = getattr(config, "deck_quality", None)
     if deck_quality is None or not deck_quality.enabled:
         raise BuildFoundationStartupError("enabled DQ-2 requires the DQ-1 rendered observer")
@@ -181,6 +193,7 @@ def audit_deck_design_lift_builder_service_startup(*, config: AppConfig) -> None
             judge_plan=judge_plan,
             repair_plan=repair_plan,
             manifest_mode=foundation.manifest_mode,
+            enforce_canary_user_ids=foundation.enforce_canary_user_ids,
             mutation_transactions_enabled=foundation.enable_mutation_transactions,
         )
     except (DeckDesignLiftConfigError, ModelRouteResolutionError) as exc:
@@ -222,7 +235,7 @@ def audit_build_foundation(*, tools: Iterable[Any], config: AppConfig) -> None:
         schema = prepare.get_input_schema().model_json_schema()
         if "runtime" in (schema.get("properties") or {}):
             raise BuildFoundationStartupError("prepare_deck_build exposes runtime in model-facing schema")
-    if foundation.manifest_mode == "enforce":
+    if foundation.manifest_mode in {"enforce", "canary_enforce"}:
         if BuildFoundationStoreConfig.from_env() is None:
             raise BuildFoundationStartupError("manifest enforcement requires Supabase Postgres RPC configuration")
         if not supabase_artifact_store.is_configured():

@@ -14,10 +14,12 @@ import base64
 import hashlib
 import io
 import json
+import time
 from collections.abc import Awaitable
 from decimal import Decimal
 from typing import Annotated, Any, Literal, Protocol
 
+import anyio
 from langchain_core.messages import HumanMessage, SystemMessage
 from PIL import Image
 from pydantic import (
@@ -38,6 +40,11 @@ from deerflow.sophia.deck_design_lift.invoker import (
     DeckRepairInputTokenCount,
     DeckRepairInvocationResult,
     PreparedDeckRepairRequest,
+)
+from deerflow.sophia.deck_design_lift.repair_tracing import (
+    DeckRepairTraceFactory,
+    SafeDeckRepairTraceOutput,
+    safe_deck_repair_trace_input,
 )
 from deerflow.sophia.deck_design_lift.runtime import RepairInvocationRequest
 from deerflow.sophia.deck_design_lift.schemas import (
@@ -652,6 +659,7 @@ class ProductionDeckRepairAuthor:
         context_loader: RepairAuthorContextLoader,
         invoker: RepairAuthorModelInvoker,
         plan: ResolvedModelPlan,
+        trace_factory: DeckRepairTraceFactory,
     ) -> None:
         if not callable(getattr(context_loader, "load", None)):
             raise ValueError("repair author requires a strict context loader")
@@ -659,9 +667,12 @@ class ProductionDeckRepairAuthor:
             raise ValueError("repair author requires the two-phase model invoker")
         if not isinstance(plan, ResolvedModelPlan):
             raise ValueError("repair author requires a resolved model plan")
+        if not callable(trace_factory):
+            raise ValueError("repair author requires safe trace authority")
         self._contexts = context_loader
         self._invoker = invoker
         self._plan = plan
+        self._trace_factory = trace_factory
 
     async def __call__(
         self,
@@ -702,20 +713,86 @@ class ProductionDeckRepairAuthor:
         if not admitted:
             raise DeckRepairAuthorError("repair_cost_rejected")
         try:
+            trace_input = safe_deck_repair_trace_input(
+                request=request,
+                payload_hash=prepared.payload_hash,
+                plan_hash=prepared.plan_hash,
+            )
+            trace = await anyio.to_thread.run_sync(
+                self._trace_factory,
+                trace_input,
+            )
+            if trace.already_terminal:
+                raise ValueError
+        except Exception:
+            # Trace admission must be durable before the one allowed provider
+            # invocation.  No exception content crosses this boundary.
+            raise DeckRepairAuthorError("repair_unavailable") from None
+        invoke_started = time.monotonic()
+        try:
             result = await self._invoker.invoke(
                 request=prepared,
                 plan=self._plan,
                 preflight=preflight,
             )
         except Exception:
+            latency_ms = min(
+                round((time.monotonic() - invoke_started) * 1000),
+                15 * 60 * 1_000,
+            )
+            try:
+                await anyio.to_thread.run_sync(
+                    trace.finish,
+                    SafeDeckRepairTraceOutput(
+                        status="error",
+                        latency_ms=latency_ms,
+                        input_tokens=preflight.input_tokens,
+                        error_code="repair_unavailable",
+                    ),
+                )
+            except Exception:
+                pass
             raise DeckRepairAuthorError("repair_unavailable") from None
-        return _validate_invocation_result(
-            result=result,
-            request=request,
-            context=context,
-            prepared=prepared,
-            preflight=preflight,
-        )
+        try:
+            validated = _validate_invocation_result(
+                result=result,
+                request=request,
+                context=context,
+                prepared=prepared,
+                preflight=preflight,
+            )
+        except DeckRepairAuthorError as error:
+            latency_ms = min(
+                round((time.monotonic() - invoke_started) * 1000),
+                15 * 60 * 1_000,
+            )
+            try:
+                await anyio.to_thread.run_sync(
+                    trace.finish,
+                    SafeDeckRepairTraceOutput(
+                        status="error",
+                        latency_ms=latency_ms,
+                        input_tokens=preflight.input_tokens,
+                        error_code=("candidate_invalid" if error.code == "candidate_invalid" else "repair_unavailable"),
+                    ),
+                )
+            except Exception:
+                pass
+            raise
+        try:
+            await anyio.to_thread.run_sync(
+                trace.finish,
+                SafeDeckRepairTraceOutput(
+                    status="completed",
+                    latency_ms=validated.metrics.latency_ms,
+                    input_tokens=validated.metrics.input_tokens,
+                    output_tokens=validated.metrics.output_tokens,
+                    total_tokens=validated.metrics.total_tokens,
+                ),
+            )
+        except Exception:
+            raise DeckRepairAuthorError("repair_unavailable") from None
+        return validated
 
 
 __all__ = [

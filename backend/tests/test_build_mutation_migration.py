@@ -35,7 +35,9 @@ def test_mutation_rpcs_are_lease_status_cas_fenced_and_service_role_only() -> No
     functions = (
         "sophia_create_build_mutation_transaction",
         "sophia_get_build_mutation_transaction",
+        "sophia_get_build_mutation_transaction_by_operation",
         "sophia_acquire_build_mutation_lease",
+        "sophia_renew_build_mutation_lease",
         "sophia_transition_build_mutation_transaction",
         "sophia_recover_build_mutation_transactions",
         "sophia_get_build_manifest_head",
@@ -47,9 +49,9 @@ def test_mutation_rpcs_are_lease_status_cas_fenced_and_service_role_only() -> No
         assert f"ALTER FUNCTION public.{function}" in sql
         assert f"REVOKE ALL ON FUNCTION public.{function}" in sql
         assert f"GRANT EXECUTE ON FUNCTION public.{function}" in sql
-    assert sql.count("SECURITY DEFINER") == 7
-    assert sql.count("SET search_path = public, pg_temp") == 7
-    assert sql.count("TO service_role;") == 7
+    assert sql.count("SECURITY DEFINER") == 9
+    assert sql.count("SET search_path = public, pg_temp") == 9
+    assert sql.count("TO service_role;") == 9
     assert "GRANT SELECT ON TABLE public.sophia_build_mutation_transactions" not in sql
     assert ("REVOKE ALL ON TABLE public.sophia_build_mutation_transactions FROM PUBLIC;") in sql
     assert "DO $table_acl_convergence$" in sql
@@ -62,6 +64,8 @@ def test_mutation_rpcs_are_lease_status_cas_fenced_and_service_role_only() -> No
     assert "transaction.status = p_expected_status" in sql
     assert "transaction.lease_owner = p_lease_owner" in sql
     assert "transaction.lease_expires_at > clock_timestamp()" in sql
+    assert "p_expected_lease_expires_at TIMESTAMPTZ" in sql
+    assert "transaction.lease_expires_at = p_expected_lease_expires_at" in sql
     assert "p_expected_status = 'prepared'" in sql
     assert "p_new_status IN ('staged', 'rolling_back', 'failed')" in sql
     assert "p_expected_status = 'staged'" in sql
@@ -99,6 +103,60 @@ def test_mutation_rpc_requires_and_preserves_dq2_evidence_identity() -> None:
     assert "p_new_status IN ('verified', 'committing', 'committed')" in sql
     assert "repair_program_hash', '')\n            !~ '^[0-9a-f]{64}$'" in sql
     assert "comparison_hash'\n                    !~ '^[0-9a-f]{64}$'" in sql
+
+
+def test_operation_lookup_includes_terminal_transactions_by_exact_unique_identity() -> None:
+    sql = MIGRATION.read_text(encoding="utf-8")
+    lookup = sql.split(
+        "CREATE OR REPLACE FUNCTION public.sophia_get_build_mutation_transaction_by_operation",
+        maxsplit=1,
+    )[1].split(
+        "CREATE OR REPLACE FUNCTION public.sophia_acquire_build_mutation_lease",
+        maxsplit=1,
+    )[0]
+
+    assert "transaction.build_id = p_build_id" in lookup
+    assert "transaction.user_id = p_user_id" in lookup
+    assert "transaction.operation_id = p_operation_id" in lookup
+    assert "transaction.status" not in lookup
+
+
+def test_recovery_claims_only_complete_dq2_evidence_rows() -> None:
+    sql = MIGRATION.read_text(encoding="utf-8")
+    recovery = sql.split(
+        "CREATE OR REPLACE FUNCTION public.sophia_recover_build_mutation_transactions",
+        maxsplit=1,
+    )[1].split(
+        "CREATE OR REPLACE FUNCTION public.sophia_get_build_manifest_head",
+        maxsplit=1,
+    )[0]
+
+    for field in (
+        "campaign_run_id",
+        "owner_thread_id",
+        "initial_quality_run_id",
+        "repair_program_hash",
+        "expected_artifact_version_id",
+        "expected_artifact_hash",
+        "expected_component_versions",
+        "authorized_selectors",
+        "authorized_source_roles",
+        "gate_evidence",
+    ):
+        assert f"'{field}'" in recovery
+    assert "transaction.status NOT IN ('verified', 'committing')" in recovery
+    assert "candidate_quality_run_id" in recovery
+    assert "comparison_hash" in recovery
+    assert "count(DISTINCT selector.value #>> '{}')" in recovery
+    assert "jsonb_object_keys(" in recovery
+    assert "jsonb_each(" in recovery
+    assert "'expected_component_versions'" in recovery
+    assert "'authorized_source_roles'" in recovery
+    assert recovery.count("? selector.value") == 2
+    assert "jsonb_array_length(role.roles) = 0" in recovery
+    assert "count(DISTINCT source_role.value #>> '{}')" in recovery
+    assert "jsonb_typeof(component.version) <> 'string'" in recovery
+    assert "jsonb_typeof(source_role.value)" in recovery
 
 
 def test_atomic_commit_cas_updates_head_registry_outbox_and_transaction_together() -> None:

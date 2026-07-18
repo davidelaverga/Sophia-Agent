@@ -1109,6 +1109,45 @@ def _source_pack_matches_intent(
     )
 
 
+_SourcePackBinding = tuple[DeckQualitySourcePack, bytes]
+
+
+def _validated_source_pack_binding(
+    *,
+    source_pack: DeckQualitySourcePack | None,
+    source_pack_bytes: bytes | None,
+    intent: DeckQualityProducerIntent,
+) -> _SourcePackBinding | None:
+    if source_pack is None and source_pack_bytes is None:
+        return None
+    if (
+        not isinstance(source_pack, DeckQualitySourcePack)
+        or not isinstance(source_pack_bytes, bytes)
+        or not 0 < len(source_pack_bytes) <= _MAX_SOURCE_PACK_BYTES
+        or canonical_json_bytes(source_pack) != source_pack_bytes
+        or not _source_pack_matches_intent(source_pack, intent)
+    ):
+        raise DeckQualityPublicationError("producer_bundle_source_identity_mismatch")
+    return source_pack, source_pack_bytes
+
+
+def _require_decoded_source_pack_binding(
+    decoded: DecodedDeckQualityProducerBundle,
+    binding: _SourcePackBinding,
+) -> None:
+    _pack, source_pack_bytes = binding
+    source_hash = hashlib.sha256(source_pack_bytes).hexdigest()
+    if any(
+        (
+            decoded.manifest.source_pack_sha256 != source_hash,
+            decoded.manifest.source_pack_size_bytes != len(source_pack_bytes),
+            decoded.descriptor.source_pack_sha256 != source_hash,
+            decoded.descriptor.source_pack_size_bytes != len(source_pack_bytes),
+        )
+    ):
+        raise DeckQualityPublicationError("producer_source_persistence_conflict")
+
+
 def _prepared_matches_intent(
     *,
     prepared: PreparedDeckQualityPublication,
@@ -1250,6 +1289,26 @@ def _read_object_bounded(
     return content
 
 
+def _verify_bound_source_pack(
+    *,
+    decoded: DecodedDeckQualityProducerBundle,
+    binding: _SourcePackBinding | None,
+    object_store: ImmutableObjectUploader,
+) -> None:
+    if binding is None:
+        return
+    _pack, source_pack_bytes = binding
+    _require_decoded_source_pack_binding(decoded, binding)
+    stored_source = _read_object_bounded(
+        object_store,
+        decoded.manifest.source_pack_object_path,
+        max_bytes=_MAX_SOURCE_PACK_BYTES,
+        error_code="producer_source_persistence_failed",
+    )
+    if stored_source != source_pack_bytes:
+        raise DeckQualityPublicationError("producer_source_persistence_conflict")
+
+
 def _receipt_from_descriptor(
     descriptor: DeckQualityProducerBundleDescriptor,
 ) -> DeckQualityProducerBundleReceipt:
@@ -1316,6 +1375,26 @@ async def _async_read_object_bounded(
     if content is not None and (not isinstance(content, bytes) or len(content) > max_bytes):
         raise DeckQualityPublicationError(error_code)
     return content
+
+
+async def _async_verify_bound_source_pack(
+    *,
+    decoded: DecodedDeckQualityProducerBundle,
+    binding: _SourcePackBinding | None,
+    object_store: AsyncSupabaseImmutableObjectStore,
+) -> None:
+    if binding is None:
+        return
+    _pack, source_pack_bytes = binding
+    _require_decoded_source_pack_binding(decoded, binding)
+    stored_source = await _async_read_object_bounded(
+        object_store,
+        decoded.manifest.source_pack_object_path,
+        max_bytes=_MAX_SOURCE_PACK_BYTES,
+        error_code="producer_source_persistence_failed",
+    )
+    if stored_source != source_pack_bytes:
+        raise DeckQualityPublicationError("producer_source_persistence_conflict")
 
 
 def _require_async_protocol_time(deadline: float) -> None:
@@ -1409,6 +1488,7 @@ async def _persist_owned_producer_bundle_protocol(
     instrument: DeckQualityRuntimeInstrument,
     object_store: AsyncSupabaseImmutableObjectStore,
     deadline: float,
+    source_pack_binding: _SourcePackBinding | None = None,
 ) -> DeckQualityProducerBundleReceipt:
     object_path = deck_quality_producer_bundle_path(intent.quality_run_id)
     archive_path = deck_quality_producer_archive_path(intent.quality_run_id)
@@ -1420,16 +1500,19 @@ async def _persist_owned_producer_bundle_protocol(
         error_code="producer_bundle_recovery_failed",
     )
     if archived is not None:
-        receipt = _receipt_from_descriptor(
-            _verify_existing_producer_bundle(
-                content=archived,
-                object_path=archive_path,
-                intent=intent,
-                instrument=instrument,
-            ).descriptor
+        decoded = _verify_existing_producer_bundle(
+            content=archived,
+            object_path=archive_path,
+            intent=intent,
+            instrument=instrument,
+        )
+        await _async_verify_bound_source_pack(
+            decoded=decoded,
+            binding=source_pack_binding,
+            object_store=object_store,
         )
         _require_async_protocol_time(deadline)
-        return receipt
+        return _receipt_from_descriptor(decoded.descriptor)
 
     existing = await _async_read_object_bounded(
         object_store,
@@ -1438,24 +1521,31 @@ async def _persist_owned_producer_bundle_protocol(
         error_code="producer_bundle_recovery_failed",
     )
     if existing is not None:
-        receipt = _receipt_from_descriptor(
-            _verify_existing_producer_bundle(
-                content=existing,
-                object_path=object_path,
-                intent=intent,
-                instrument=instrument,
-            ).descriptor
+        decoded = _verify_existing_producer_bundle(
+            content=existing,
+            object_path=object_path,
+            intent=intent,
+            instrument=instrument,
+        )
+        await _async_verify_bound_source_pack(
+            decoded=decoded,
+            binding=source_pack_binding,
+            object_store=object_store,
         )
         _require_async_protocol_time(deadline)
-        return receipt
+        return _receipt_from_descriptor(decoded.descriptor)
 
-    pack, source_pack_bytes = await _capture_source_pack_off_loop(
-        prepared=prepared,
-        instrument=instrument,
-    )
+    if source_pack_binding is None:
+        pack, source_pack_bytes = await _capture_source_pack_off_loop(
+            prepared=prepared,
+            instrument=instrument,
+        )
+        _require_async_protocol_time(deadline)
+        if not _source_pack_matches_intent(pack, intent):
+            raise DeckQualityPublicationError("producer_bundle_source_identity_mismatch")
+    else:
+        pack, source_pack_bytes = source_pack_binding
     _require_async_protocol_time(deadline)
-    if not _source_pack_matches_intent(pack, intent):
-        raise DeckQualityPublicationError("producer_bundle_source_identity_mismatch")
     source_path = deck_quality_source_pack_path(
         user_id=pack.user_id,
         thread_id=pack.thread_id,
@@ -1535,6 +1625,7 @@ async def _recover_owned_producer_bundle_after_timeout(
     instrument: DeckQualityRuntimeInstrument,
     object_store: AsyncSupabaseImmutableObjectStore,
     deadline: float,
+    source_pack_binding: _SourcePackBinding | None = None,
 ) -> DeckQualityProducerBundleReceipt | None:
     """Resolve a create that may have committed before response cancellation."""
 
@@ -1550,16 +1641,19 @@ async def _recover_owned_producer_bundle_after_timeout(
         )
         if content is None:
             continue
-        receipt = _receipt_from_descriptor(
-            _verify_existing_producer_bundle(
-                content=content,
-                object_path=object_path,
-                intent=intent,
-                instrument=instrument,
-            ).descriptor
+        decoded = _verify_existing_producer_bundle(
+            content=content,
+            object_path=object_path,
+            intent=intent,
+            instrument=instrument,
+        )
+        await _async_verify_bound_source_pack(
+            decoded=decoded,
+            binding=source_pack_binding,
+            object_store=object_store,
         )
         _require_async_protocol_time(deadline)
-        return receipt
+        return _receipt_from_descriptor(decoded.descriptor)
     return None
 
 
@@ -1569,6 +1663,7 @@ async def _persist_owned_producer_bundle(
     intent: DeckQualityProducerIntent,
     instrument: DeckQualityRuntimeInstrument,
     deadline: float | None,
+    source_pack_binding: _SourcePackBinding | None = None,
 ) -> DeckQualityProducerBundleReceipt:
     loop = asyncio.get_running_loop()
     absolute_deadline = (
@@ -1593,6 +1688,7 @@ async def _persist_owned_producer_bundle(
                     instrument=instrument,
                     object_store=object_store,
                     deadline=primary_deadline,
+                    source_pack_binding=source_pack_binding,
                 )
         except TimeoutError:
             try:
@@ -1602,6 +1698,7 @@ async def _persist_owned_producer_bundle(
                         instrument=instrument,
                         object_store=object_store,
                         deadline=operation_deadline,
+                        source_pack_binding=source_pack_binding,
                     )
             except TimeoutError:
                 recovered = None
@@ -1622,12 +1719,17 @@ def persist_deck_quality_producer_bundle(
     intent: DeckQualityProducerIntent | None = None,
     deadline: float | None = None,
     object_store: ImmutableObjectUploader | None = None,
+    source_pack: DeckQualitySourcePack | None = None,
+    source_pack_bytes: bytes | None = None,
 ) -> DeckQualityProducerBundleReceipt:
     """Durably commit immutable artifact/source references for recovery.
 
     The globally indexed bundle is the producer outbox. The gateway can
     discover and reconcile it after either process restarts, without relying
     on a builder-side database transaction or the terminal-delivery webhook.
+    Supplying ``source_pack`` and its canonical bytes binds replay to that
+    exact current capture: both the outbox hash/size references and the stored
+    private source object are reverified before an existing receipt is reused.
     """
 
     if deadline is not None and (
@@ -1647,6 +1749,11 @@ def persist_deck_quality_producer_bundle(
         instrument=instrument,
     ):
         raise DeckQualityPublicationError("producer_bundle_identity_mismatch")
+    source_pack_binding = _validated_source_pack_binding(
+        source_pack=source_pack,
+        source_pack_bytes=source_pack_bytes,
+        intent=producer_intent,
+    )
     if object_store is None:
         # The live builder invokes this synchronous boundary from its dedicated
         # middleware worker thread. ``asyncio.run`` gives the production path a
@@ -1658,6 +1765,7 @@ def persist_deck_quality_producer_bundle(
                 intent=producer_intent,
                 instrument=instrument,
                 deadline=float(deadline) if deadline is not None else None,
+                source_pack_binding=source_pack_binding,
             )
         )
     store = object_store
@@ -1678,14 +1786,18 @@ def persist_deck_quality_producer_bundle(
         error_code="producer_bundle_recovery_failed",
     )
     if archived is not None:
-        return _receipt_from_descriptor(
-            _verify_existing_producer_bundle(
-                content=archived,
-                object_path=archive_path,
-                intent=producer_intent,
-                instrument=instrument,
-            ).descriptor
+        decoded = _verify_existing_producer_bundle(
+            content=archived,
+            object_path=archive_path,
+            intent=producer_intent,
+            instrument=instrument,
         )
+        _verify_bound_source_pack(
+            decoded=decoded,
+            binding=source_pack_binding,
+            object_store=store,
+        )
+        return _receipt_from_descriptor(decoded.descriptor)
 
     # A live inbox replay is second and still precedes all local/source
     # reads. It covers producer response loss before gateway acknowledgement.
@@ -1696,21 +1808,28 @@ def persist_deck_quality_producer_bundle(
         error_code="producer_bundle_recovery_failed",
     )
     if existing is not None:
-        return _receipt_from_descriptor(
-            _verify_existing_producer_bundle(
-                content=existing,
-                object_path=object_path,
-                intent=producer_intent,
-                instrument=instrument,
-            ).descriptor
+        decoded = _verify_existing_producer_bundle(
+            content=existing,
+            object_path=object_path,
+            intent=producer_intent,
+            instrument=instrument,
         )
+        _verify_bound_source_pack(
+            decoded=decoded,
+            binding=source_pack_binding,
+            object_store=store,
+        )
+        return _receipt_from_descriptor(decoded.descriptor)
 
-    pack, source_pack_bytes = capture_deck_quality_source_pack(
-        prepared=prepared,
-        instrument=instrument,
-    )
-    if not _source_pack_matches_intent(pack, producer_intent):
-        raise DeckQualityPublicationError("producer_bundle_source_identity_mismatch")
+    if source_pack_binding is None:
+        pack, captured_source_pack_bytes = capture_deck_quality_source_pack(
+            prepared=prepared,
+            instrument=instrument,
+        )
+        if not _source_pack_matches_intent(pack, producer_intent):
+            raise DeckQualityPublicationError("producer_bundle_source_identity_mismatch")
+    else:
+        pack, captured_source_pack_bytes = source_pack_binding
     source_path = deck_quality_source_pack_path(
         user_id=pack.user_id,
         thread_id=pack.thread_id,
@@ -1721,7 +1840,7 @@ def persist_deck_quality_producer_bundle(
     try:
         source_outcome = store.create_if_absent(
             source_path,
-            source_pack_bytes,
+            captured_source_pack_bytes,
             content_type="application/json",
         )
     except Exception:
@@ -1736,13 +1855,13 @@ def persist_deck_quality_producer_bundle(
         )
         if stored_source is None:
             raise DeckQualityPublicationError("producer_source_persistence_failed")
-        if stored_source != source_pack_bytes:
+        if stored_source != captured_source_pack_bytes:
             raise DeckQualityPublicationError("producer_source_persistence_conflict")
     elif source_outcome != "created":
         raise DeckQualityPublicationError("producer_source_persistence_failed")
     encoded, descriptor = encode_deck_quality_producer_bundle(
         pack=pack,
-        source_pack_bytes=source_pack_bytes,
+        source_pack_bytes=captured_source_pack_bytes,
     )
     create_error = False
     try:

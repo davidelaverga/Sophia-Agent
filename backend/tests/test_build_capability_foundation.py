@@ -10,6 +10,7 @@ import pytest
 from langchain_core.messages import AIMessage
 
 from deerflow.agents.sophia_agent.middlewares.build_deadline import BuildDeadlineMiddleware
+from deerflow.config.build_foundation_config import BuildFoundationConfig
 from deerflow.config.model_config import ModelConfig
 from deerflow.config.model_route_config import HarnessProfileConfig, ModelRouteConfig
 from deerflow.models.route_resolver import ModelRouteResolutionError, ModelRouteResolver
@@ -30,6 +31,7 @@ from deerflow.sophia.build_runtime.events import (
 from deerflow.sophia.build_runtime.identity import component_id, new_build_id, new_operation_id, new_version_id
 from deerflow.sophia.build_runtime.metrics import derive_prepare_metrics
 from deerflow.sophia.build_runtime.startup import (
+    BuildFoundationStartupError,
     audit_build_foundation,
     audit_deck_quality_builder_service_startup,
 )
@@ -138,7 +140,7 @@ def test_runtime_event_scope_uses_configurable_and_metadata_without_context() ->
         config={
             "configurable": {"thread_id": "thread-config"},
             "metadata": {"user_id": "user-metadata"},
-        },
+        }
     )
     configure_default_event_sink(sink)
     try:
@@ -173,7 +175,7 @@ def test_deadline_cancels_model_without_provider_retry(monkeypatch) -> None:
             "builder_budget": {"tier": "presentation", "terminal_reserve_seconds": 0},
             "builder_task_kickoff_ms": int(time.time() * 1000) - 100,
             "builder_deadline_epoch_ms": int(time.time() * 1000) + 20,
-        }
+        },
     )
     monkeypatch.setattr(
         "deerflow.agents.sophia_agent.middlewares.build_deadline.fire_completion_webhook_from_artifact",
@@ -262,6 +264,31 @@ def test_startup_reuses_process_event_sink(monkeypatch) -> None:
         configure_default_event_sink(None)
 
     assert calls == 1
+
+
+def test_canary_manifest_enforcement_requires_durable_foundation_dependencies(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.sophia.build_runtime import startup
+
+    config = SimpleNamespace(
+        build_foundation=BuildFoundationConfig(
+            manifest_mode="canary_enforce",
+            enforce_canary_user_ids={"canary-user"},
+            persist_event_journal=False,
+        ),
+        model_routes={},
+    )
+    monkeypatch.setattr(startup, "validate_expected_supabase_project", lambda: None)
+    monkeypatch.setattr(
+        startup.BuildFoundationStoreConfig,
+        "from_env",
+        classmethod(lambda _cls: None),
+    )
+    monkeypatch.setattr(startup.supabase_artifact_store, "is_configured", lambda: True)
+
+    with pytest.raises(BuildFoundationStartupError, match="manifest enforcement requires"):
+        audit_build_foundation(tools=[], config=config)
 
 
 def test_ordinary_builder_construction_has_zero_dq_startup_validation(

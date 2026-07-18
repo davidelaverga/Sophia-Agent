@@ -44,10 +44,11 @@ def _write_immutable_json(path: Path, payload: dict[str, Any]) -> str:
 
 def materialize_deck_foundation(deck: Any, runtime: Any) -> None:
     config = _foundation_config(runtime)
-    if not config.enabled or config.manifest_mode == "off":
-        return
     user_id = str(deck.user_id or "").strip()
-    if config.manifest_mode == "enforce" and not user_id:
+    manifest_mode = config.effective_manifest_mode(user_id)
+    if not config.enabled or manifest_mode == "off":
+        return
+    if manifest_mode == "enforce" and not user_id:
         raise BuildFoundationPersistenceError("enforce-mode build requires user_id")
     user_id = user_id or "shadow-unknown-user"
     root = _outputs_root(runtime)
@@ -76,7 +77,7 @@ def materialize_deck_foundation(deck: Any, runtime: Any) -> None:
     deck.logical_artifact_id = logical_artifact_id
     deck.current_artifact_version_id = artifact_version_id
     deck.foundation_status = "shadow_written"
-    if config.manifest_mode == "enforce":
+    if manifest_mode == "enforce":
         _enforce_manifest(
             deck=deck,
             runtime=runtime,
@@ -322,10 +323,11 @@ def _artifact_hash(virtual_path: str | None, runtime: Any) -> str | None:
 
 def materialize_deck_foundation_safely(deck: Any, runtime: Any) -> None:
     config = _foundation_config(runtime)
+    manifest_mode = config.effective_manifest_mode(str(deck.user_id or "").strip())
     try:
         materialize_deck_foundation(deck, runtime)
     except Exception as exc:
-        if config.manifest_mode == "enforce":
+        if manifest_mode == "enforce":
             raise
         deck.foundation_status = "shadow_failed"
         deck.foundation_warning = type(exc).__name__

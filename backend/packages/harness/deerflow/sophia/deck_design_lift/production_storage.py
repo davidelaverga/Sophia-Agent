@@ -13,8 +13,10 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass
+from functools import partial
 from typing import Any, NoReturn
 
+import anyio
 from pydantic import ValidationError
 
 from deerflow.sophia.build_manifest import (
@@ -25,7 +27,10 @@ from deerflow.sophia.build_manifest import (
 from deerflow.sophia.build_mutation import BuildMutationTransaction
 from deerflow.sophia.build_versions import BuildArtifactVersion
 from deerflow.sophia.deck_design_lift.materializer import BaselineManifestHead
-from deerflow.sophia.deck_design_lift.runtime import DeckDesignLiftRequest
+from deerflow.sophia.deck_design_lift.runtime import (
+    DQ2_RENEWABLE_LEASE_SECONDS,
+    DeckDesignLiftRequest,
+)
 from deerflow.sophia.deck_design_lift.schemas import SelectorSourceAuthorization
 from deerflow.sophia.deck_quality.canonical import canonical_json_bytes, canonical_sha256
 from deerflow.sophia.deck_quality.instrument import DeckQualityRuntimeInstrument
@@ -384,25 +389,38 @@ class ProductionDeckDesignLiftRequestFactory:
         if user_id not in self._canary_user_ids:
             _fail("canary_scope_mismatch")
         if transaction_id is None:
-            verified = self._manifests.load_verified_head(
-                build_id=build_id,
-                user_id=user_id,
+            verified = await anyio.to_thread.run_sync(
+                partial(
+                    self._manifests.load_verified_head,
+                    build_id=build_id,
+                    user_id=user_id,
+                )
             )
             if verified.manifest.manifest_revision != 1:
                 _fail("fresh_baseline_required")
         else:
             try:
-                transaction = self._mutations.load(
-                    transaction_id=transaction_id,
-                    user_id=user_id,
+                transaction = await anyio.to_thread.run_sync(
+                    partial(
+                        self._mutations.load,
+                        transaction_id=transaction_id,
+                        user_id=user_id,
+                    )
                 )
             except Exception:
                 _fail("transaction_unavailable")
             if transaction.build_id != build_id or transaction.campaign_run_id != campaign_run_id or transaction.operation_id != operation_id:
                 _fail("transaction_scope_mismatch")
-            verified = self._manifests.load_verified_revision_for_transaction(transaction)
+            verified = await anyio.to_thread.run_sync(
+                self._manifests.load_verified_revision_for_transaction,
+                transaction,
+            )
         manifest = verified.manifest
         instrument_hash = canonical_sha256(self._instrument.lock)
+        initial_artifact = await anyio.to_thread.run_sync(
+            self._verified_artifact,
+            manifest,
+        )
         return DeckDesignLiftRequest(
             campaign_run_id=campaign_run_id,
             experiment_id=experiment_id,
@@ -411,7 +429,7 @@ class ProductionDeckDesignLiftRequestFactory:
             operation_id=operation_id,
             lease_owner=lease_owner,
             expected_manifest_revision=manifest.manifest_revision,
-            initial_artifact=self._verified_artifact(manifest),
+            initial_artifact=initial_artifact,
             source_authorizations=_source_authorizations(manifest),
             rubric_version=self._instrument.lock.rubric_version,
             instrument_hash=instrument_hash,
@@ -422,7 +440,7 @@ class ProductionDeckDesignLiftRequestFactory:
             ),
             additional_must_not=("Do not turn the PSI control-loop mechanism into generic decorative containers.",),
             transaction_id=transaction_id,
-            lease_seconds=900,
+            lease_seconds=DQ2_RENEWABLE_LEASE_SECONDS,
         )
 
 

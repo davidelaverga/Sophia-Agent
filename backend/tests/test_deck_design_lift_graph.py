@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass
 
 import pytest
@@ -9,6 +10,7 @@ from deerflow.sophia.deck_design_lift.graph import (
     DeckDesignLiftGraphError,
     DeckDesignLiftGraphRuntime,
     compile_deck_design_lift_graph,
+    make_deck_design_lift_graph,
 )
 from deerflow.sophia.deck_design_lift.runtime import (
     DeckDesignLiftRequest,
@@ -72,15 +74,27 @@ def _state(**updates: object) -> dict[str, object]:
 class _Factory:
     request: DeckDesignLiftRequest
     calls: int = 0
+    transaction_ids: list[str | None] | None = None
 
-    async def build_request(self, **_kwargs: object) -> DeckDesignLiftRequest:
+    async def build_request(self, **kwargs: object) -> DeckDesignLiftRequest:
         self.calls += 1
-        return self.request
+        transaction_id = kwargs.get("transaction_id")
+        assert isinstance(transaction_id, str) or transaction_id is None
+        if self.transaction_ids is None:
+            self.transaction_ids = []
+        self.transaction_ids.append(transaction_id)
+        return self.request.model_copy(update={"transaction_id": transaction_id})
 
 
 @dataclass
 class _Controller:
     calls: int = 0
+    recovery_calls: int = 0
+    recovered_transaction_id: str | None = None
+
+    async def recover_incomplete(self, **_kwargs: object) -> str | None:
+        self.recovery_calls += 1
+        return self.recovered_transaction_id
 
     async def run(self, request: DeckDesignLiftRequest) -> DeckDesignLiftResult:
         self.calls += 1
@@ -91,6 +105,7 @@ class _Controller:
             operation_id=request.operation_id,
             disposition="NO_REPAIR_NEEDED",
             terminal_code="no_repair_needed",
+            transaction_id=request.transaction_id,
             initial_quality_run_id="quality_initial_01",
         )
 
@@ -110,7 +125,9 @@ async def test_graph_runs_only_safe_identifiers_and_projects_safe_result() -> No
     result = await graph.ainvoke(_state())
 
     assert factory.calls == 1
+    assert factory.transaction_ids == [None]
     assert controller.calls == 1
+    assert controller.recovery_calls == 1
     assert result["disposition"] == "NO_REPAIR_NEEDED"
     assert result["terminal_code"] == "no_repair_needed"
     assert result["initial_quality_run_id"] == "quality_initial_01"
@@ -154,6 +171,47 @@ async def test_graph_rejects_request_factory_identity_drift() -> None:
     assert controller.calls == 0
 
 
+@pytest.mark.anyio
+async def test_graph_recovers_matching_transaction_before_request_loading() -> None:
+    transaction_id = "transaction-recovered-0001"
+    factory = _Factory(_request())
+    controller = _Controller(recovered_transaction_id=transaction_id)
+    graph = compile_deck_design_lift_graph(
+        DeckDesignLiftGraphRuntime(
+            controller=controller,
+            request_factory=factory,
+            canary_user_ids=frozenset({CANARY}),
+        )
+    )
+
+    result = await graph.ainvoke(_state())
+
+    assert controller.recovery_calls == 1
+    assert factory.transaction_ids == [transaction_id]
+    assert result["transaction_id"] == transaction_id
+    assert result["terminal_code"] == "no_repair_needed"
+
+
+@pytest.mark.anyio
+async def test_graph_skips_recovery_for_explicit_transaction() -> None:
+    transaction_id = "transaction-explicit-0001"
+    factory = _Factory(_request())
+    controller = _Controller()
+    graph = compile_deck_design_lift_graph(
+        DeckDesignLiftGraphRuntime(
+            controller=controller,
+            request_factory=factory,
+            canary_user_ids=frozenset({CANARY}),
+        )
+    )
+
+    result = await graph.ainvoke(_state(transaction_id=transaction_id))
+
+    assert controller.recovery_calls == 0
+    assert factory.transaction_ids == [transaction_id]
+    assert result["terminal_code"] == "no_repair_needed"
+
+
 def test_graph_runtime_rejects_open_scope_and_unlocked_deadline() -> None:
     with pytest.raises(ValueError, match="exact canary"):
         DeckDesignLiftGraphRuntime(
@@ -168,3 +226,39 @@ def test_graph_runtime_rejects_open_scope_and_unlocked_deadline() -> None:
             canary_user_ids=frozenset({CANARY}),
             timeout_seconds=299,
         )
+
+
+@pytest.mark.anyio
+async def test_registered_factory_closes_request_scoped_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.sophia.deck_design_lift import runner
+
+    closed: list[str] = []
+    factory_threads: list[int] = []
+    event_loop_thread = threading.get_ident()
+
+    class _ManagedRuntime(DeckDesignLiftGraphRuntime):
+        async def aclose(self) -> None:
+            closed.append("closed")
+
+    runtime = _ManagedRuntime(
+        controller=_Controller(),
+        request_factory=_Factory(_request()),
+        canary_user_ids=frozenset({CANARY}),
+    )
+
+    def configured_runtime() -> _ManagedRuntime:
+        factory_threads.append(threading.get_ident())
+        return runtime
+
+    monkeypatch.setattr(runner, "configured_graph_runtime", configured_runtime)
+
+    async with make_deck_design_lift_graph({}) as graph:
+        assert closed == []
+        result = await graph.ainvoke(_state())
+        assert result["terminal_code"] == "no_repair_needed"
+
+    assert closed == ["closed"]
+    assert len(factory_threads) == 1
+    assert factory_threads[0] != event_loop_thread

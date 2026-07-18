@@ -24,7 +24,9 @@ _REQUIRED_RPC_PATHS = frozenset(
     {
         "/rpc/sophia_create_build_mutation_transaction",
         "/rpc/sophia_get_build_mutation_transaction",
+        "/rpc/sophia_get_build_mutation_transaction_by_operation",
         "/rpc/sophia_acquire_build_mutation_lease",
+        "/rpc/sophia_renew_build_mutation_lease",
         "/rpc/sophia_transition_build_mutation_transaction",
         "/rpc/sophia_recover_build_mutation_transactions",
         "/rpc/sophia_get_build_manifest_head",
@@ -260,8 +262,16 @@ class SupabaseBuildMutationStore:
             if operation == "sophia_commit_build_mutation_manifest":
                 if safe_error_code in _MANIFEST_CONFLICT_CODES:
                     raise BuildManifestConcurrentModification("build_manifest_concurrent_modification") from None
-                if safe_error_code in _STALE_LEASE_CODES:
-                    raise BuildMutationPersistenceStaleLeaseError("build mutation atomic commit lease is stale") from None
+            if (
+                operation
+                in {
+                    "sophia_commit_build_mutation_manifest",
+                    "sophia_renew_build_mutation_lease",
+                    "sophia_transition_build_mutation_transaction",
+                }
+                and safe_error_code in _STALE_LEASE_CODES
+            ):
+                raise BuildMutationPersistenceStaleLeaseError("build mutation lease is stale") from None
             raise BuildMutationPersistenceRpcError(operation, status_code=response.status_code) from None
         if not response.content:
             raise BuildMutationPersistenceProtocolError(f"build mutation persistence RPC returned no record operation={operation}")
@@ -393,6 +403,33 @@ class SupabaseBuildMutationStore:
             raise BuildMutationPersistenceProtocolError("build mutation load response escaped the transaction scope")
         return loaded
 
+    def load_by_operation(
+        self,
+        *,
+        build_id: str,
+        user_id: str,
+        operation_id: str,
+    ) -> BuildMutationTransaction | None:
+        """Resolve the unique durable transaction for one operation identity."""
+
+        self._require_canary(user_id)
+        operation = "sophia_get_build_mutation_transaction_by_operation"
+        result = self._rpc(
+            operation,
+            {
+                "p_build_id": build_id,
+                "p_user_id": user_id,
+                "p_operation_id": operation_id,
+            },
+        )
+        records = self._records(operation, result, maximum=1)
+        if not records:
+            return None
+        loaded = records[0]
+        if loaded.build_id != build_id or loaded.user_id != user_id or loaded.operation_id != operation_id:
+            raise BuildMutationPersistenceProtocolError("build mutation operation lookup escaped the operation scope")
+        return loaded
+
     def load_manifest_head(self, *, build_id: str, user_id: str) -> BuildMutationManifestHead:
         self._require_canary(user_id)
         operation = "sophia_get_build_manifest_head"
@@ -513,6 +550,40 @@ class SupabaseBuildMutationStore:
             raise BuildMutationPersistenceProtocolError("build mutation lease response escaped the transaction scope")
         return leased
 
+    def renew_lease(
+        self,
+        transaction: BuildMutationTransaction,
+        *,
+        lease_seconds: int = 120,
+    ) -> BuildMutationTransaction:
+        """CAS-renew the exact live lease represented by ``transaction``."""
+
+        self._require_canary(transaction.user_id)
+        transaction = _validated_transaction(transaction)
+        self._require_lease_request(
+            lease_owner=transaction.lease_owner,
+            lease_seconds=lease_seconds,
+        )
+        operation = "sophia_renew_build_mutation_lease"
+        result = self._rpc(
+            operation,
+            {
+                "p_transaction_id": transaction.transaction_id,
+                "p_user_id": transaction.user_id,
+                "p_lease_owner": transaction.lease_owner,
+                "p_expected_lease_expires_at": transaction.lease_expires_at,
+                "p_lease_seconds": lease_seconds,
+            },
+        )
+        renewed = self._one(operation, result)
+        expected = transaction.model_dump(mode="json")
+        actual = renewed.model_dump(mode="json")
+        expected.pop("lease_expires_at")
+        actual.pop("lease_expires_at")
+        if expected != actual or _aware_timestamp(renewed.lease_expires_at) <= _aware_timestamp(transaction.lease_expires_at):
+            raise BuildMutationPersistenceProtocolError("build mutation renewal response escaped the lease CAS scope")
+        return renewed
+
     def transition(
         self,
         transaction: BuildMutationTransaction,
@@ -573,6 +644,13 @@ class SupabaseBuildMutationStore:
             },
         )
         recovered = self._records(operation, result, maximum=limit)
+        for transaction in recovered:
+            _require_dq2_evidence(
+                transaction,
+                comparison_required=transaction.status in {"verified", "committing"},
+            )
+            if not transaction.gate_evidence:
+                raise BuildMutationPersistenceProtocolError("build mutation recovery returned a non-DQ-2 transaction")
         if any(transaction.user_id != user_id or transaction.build_id != build_id or transaction.lease_owner != lease_owner for transaction in recovered):
             raise BuildMutationPersistenceProtocolError("build mutation recovery response escaped the build scope")
         return recovered

@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import hashlib
 import json
-from typing import Annotated, Literal, Protocol, cast
+import uuid
+from collections.abc import Awaitable, Callable
+from functools import partial
+from typing import Annotated, Literal, Protocol, TypeVar, cast
 
+import anyio
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
 from deerflow.sophia.artifact_acceptance import ArtifactAcceptedPayload
@@ -53,6 +57,31 @@ CorrelationId = Annotated[
 
 _CHECKPOINT_KEY = "deck_design_lift_runtime"
 _CHECKPOINT_SCHEMA = "sophia-deck-design-lift-checkpoint/v1"
+DQ2_RENEWABLE_LEASE_SECONDS = 120
+DQ2_LEASE_HEARTBEAT_INTERVAL_SECONDS = 30.0
+_TERMINAL_MUTATION_STATUSES = frozenset({"committed", "rolled_back", "failed"})
+
+_T = TypeVar("_T")
+
+
+def new_dq2_lease_owner(operation_id: str) -> str:
+    """Return a unique, content-free owner scoped to one operation.
+
+    The internal production route should call this instead of accepting a
+    reusable worker name from a client.  Only a short hash of the operation is
+    retained so the owner remains within the graph's correlation-ID contract.
+    """
+
+    if not isinstance(operation_id, str) or not operation_id:
+        raise ValueError("DQ-2 lease operation identity is invalid")
+    operation_scope = hashlib.sha256(operation_id.encode("utf-8")).hexdigest()[:16]
+    return f"dq2:{operation_scope}:{uuid.uuid4().hex}"
+
+
+def _renewable_lease_seconds(requested: int) -> int:
+    """Keep a crashed worker's lease well inside the campaign deadline."""
+
+    return min(requested, DQ2_RENEWABLE_LEASE_SECONDS)
 
 
 class _StrictFrozenModel(BaseModel):
@@ -217,6 +246,7 @@ RuntimeTerminalCode = Literal[
     "quality_run_not_fresh",
     "repair_not_approved",
     "manifest_concurrent_modification",
+    "startup_recovery_rollback",
 ]
 
 
@@ -403,6 +433,174 @@ def _authorized_roles(program: DeckRepairProgram) -> dict[str, list[str]]:
     return {selector: list(program.authorized_source_roles[selector]) for selector in program.authorized_selectors}
 
 
+def _same_except_lease_expiry(
+    left: BuildMutationTransaction,
+    right: BuildMutationTransaction,
+) -> bool:
+    left_payload = left.model_dump(mode="json")
+    right_payload = right.model_dump(mode="json")
+    left_payload.pop("lease_expires_at")
+    right_payload.pop("lease_expires_at")
+    return left_payload == right_payload
+
+
+class _RenewableMutationLease:
+    """Serialize heartbeat renewal with every durable mutation boundary."""
+
+    def __init__(
+        self,
+        *,
+        store: BuildMutationStore,
+        transaction: BuildMutationTransaction,
+        lease_seconds: int,
+        heartbeat_interval_seconds: float,
+    ) -> None:
+        self._store = store
+        self._current = transaction
+        self._lease_seconds = _renewable_lease_seconds(lease_seconds)
+        self._heartbeat_interval_seconds = min(
+            heartbeat_interval_seconds,
+            max(0.1, self._lease_seconds / 3),
+        )
+        self._lock = anyio.Lock()
+        self._stop = anyio.Event()
+        self.failure: Exception | None = None
+
+    def stop(self) -> None:
+        self._stop.set()
+
+    def _aligned(self, transaction: BuildMutationTransaction) -> BuildMutationTransaction:
+        if not _same_except_lease_expiry(transaction, self._current):
+            raise DeckDesignLiftRuntimeError("mutation lease snapshot escaped the durable transaction")
+        return _transaction_copy(
+            transaction,
+            lease_owner=self._current.lease_owner,
+            lease_expires_at=self._current.lease_expires_at,
+        )
+
+    async def _renew_locked(
+        self,
+        transaction: BuildMutationTransaction,
+    ) -> BuildMutationTransaction:
+        aligned = self._aligned(transaction)
+        try:
+            renewed = await anyio.to_thread.run_sync(
+                partial(
+                    self._store.renew_lease,
+                    aligned,
+                    lease_seconds=self._lease_seconds,
+                )
+            )
+        except Exception:
+            raise DeckDesignLiftRuntimeError("mutation lease renewal failed closed") from None
+        if not _same_except_lease_expiry(aligned, renewed):
+            raise DeckDesignLiftRuntimeError("mutation lease renewal escaped the transaction")
+        self._current = renewed
+        return renewed
+
+    async def fence(
+        self,
+        transaction: BuildMutationTransaction,
+    ) -> BuildMutationTransaction:
+        """Prove ownership now and advance the expiry fencing token."""
+
+        async with self._lock:
+            return await self._renew_locked(transaction)
+
+    async def transition(
+        self,
+        transaction: BuildMutationTransaction,
+        *,
+        expected_status: str,
+    ) -> BuildMutationTransaction:
+        """Run a status CAS against the latest heartbeat expiry token."""
+
+        async with self._lock:
+            if self._current.status != expected_status:
+                raise DeckDesignLiftRuntimeError("mutation transition used a stale local status")
+            if transaction.transaction_id != self._current.transaction_id or transaction.user_id != self._current.user_id or transaction.lease_owner != self._current.lease_owner:
+                raise DeckDesignLiftRuntimeError("mutation transition escaped the lease identity")
+            candidate = _transaction_copy(
+                transaction,
+                lease_owner=self._current.lease_owner,
+                lease_expires_at=self._current.lease_expires_at,
+            )
+            try:
+                transitioned = await anyio.to_thread.run_sync(
+                    partial(
+                        self._store.transition,
+                        candidate,
+                        expected_status=expected_status,
+                    )
+                )
+            except Exception:
+                raise DeckDesignLiftRuntimeError("mutation transition failed closed") from None
+            self._current = transitioned
+            return transitioned
+
+    async def commit_or_recover(
+        self,
+        transaction: BuildMutationTransaction,
+        *,
+        committer: AtomicDeckManifestCommitter,
+        manifest: BuildManifest,
+        manifest_object_path: str,
+        manifest_hash: str,
+        acceptance: ArtifactAcceptedPayload,
+    ) -> BuildMutationTransaction:
+        """Hold the renewal lock across commit and response-loss recovery."""
+
+        async with self._lock:
+            aligned = self._aligned(transaction)
+            try:
+                committed = await anyio.to_thread.run_sync(
+                    partial(
+                        committer.commit_manifest,
+                        aligned,
+                        manifest=manifest,
+                        manifest_object_path=manifest_object_path,
+                        manifest_hash=manifest_hash,
+                        acceptance=acceptance,
+                    )
+                )
+            except BuildManifestConcurrentModification:
+                raise
+            except Exception:
+                try:
+                    recovered = await anyio.to_thread.run_sync(
+                        partial(
+                            self._store.load,
+                            transaction_id=aligned.transaction_id,
+                            user_id=aligned.user_id,
+                        )
+                    )
+                except Exception:
+                    raise DeckDesignLiftRuntimeError("atomic manifest commit outcome could not be recovered") from None
+                if recovered.status != "committed":
+                    raise DeckDesignLiftRuntimeError("atomic manifest commit remains safely unconfirmed") from None
+                committed = recovered
+            self._current = committed
+            return committed
+
+    async def heartbeat(self, work_scope: anyio.CancelScope) -> None:
+        """Renew until work finishes; cancel work as soon as fencing is lost."""
+
+        while True:
+            with anyio.move_on_after(self._heartbeat_interval_seconds):
+                await self._stop.wait()
+            if self._stop.is_set():
+                return
+            try:
+                async with self._lock:
+                    if self._current.status in _TERMINAL_MUTATION_STATUSES:
+                        return
+                    await self._renew_locked(self._current)
+            except Exception as exc:
+                self.failure = exc
+                work_scope.cancel()
+                return
+
+
 class DeckDesignLiftRuntime:
     """Strict one-repair DQ-2 transaction orchestrator.
 
@@ -421,6 +619,7 @@ class DeckDesignLiftRuntime:
         repair_executor: DeckRepairExecutor,
         materializer: DeckCandidateMaterializer,
         atomic_committer: AtomicDeckManifestCommitter | None = None,
+        lease_heartbeat_interval_seconds: float = DQ2_LEASE_HEARTBEAT_INTERVAL_SECONDS,
     ) -> None:
         resolved_committer = atomic_committer or mutation_store
         if not callable(getattr(resolved_committer, "commit_manifest", None)):
@@ -432,24 +631,179 @@ class DeckDesignLiftRuntime:
         self._judge = judge
         self._repair = repair_executor
         self._materializer = materializer
+        if lease_heartbeat_interval_seconds <= 0:
+            raise ValueError("DQ-2 lease heartbeat interval must be positive")
+        self._lease_heartbeat_interval_seconds = lease_heartbeat_interval_seconds
+
+    async def _with_renewable_lease(
+        self,
+        transaction: BuildMutationTransaction,
+        *,
+        lease_seconds: int,
+        operation: Callable[
+            [_RenewableMutationLease, BuildMutationTransaction],
+            Awaitable[_T],
+        ],
+    ) -> _T:
+        lease = _RenewableMutationLease(
+            store=self._mutations,
+            transaction=transaction,
+            lease_seconds=lease_seconds,
+            heartbeat_interval_seconds=self._lease_heartbeat_interval_seconds,
+        )
+        completed = False
+        result: _T | None = None
+        work_error: BaseException | None = None
+        async with anyio.create_task_group() as task_group:
+            try:
+                with anyio.CancelScope() as work_scope:
+                    task_group.start_soon(lease.heartbeat, work_scope)
+                    try:
+                        transaction = await lease.fence(transaction)
+                        result = await operation(lease, transaction)
+                        completed = True
+                    except BaseException as exc:
+                        work_error = exc
+            finally:
+                lease.stop()
+                task_group.cancel_scope.cancel()
+        if lease.failure is not None:
+            raise DeckDesignLiftRuntimeError("mutation lease heartbeat lost ownership") from None
+        if work_error is not None:
+            raise work_error
+        if not completed:
+            raise DeckDesignLiftRuntimeError("mutation lease work was cancelled before a safe boundary")
+        return cast(_T, result)
+
+    async def recover_incomplete(
+        self,
+        *,
+        campaign_run_id: str,
+        experiment_id: str,
+        build_id: str,
+        user_id: str,
+        operation_id: str,
+        lease_owner: str,
+        lease_seconds: int = 900,
+        limit: int = 50,
+    ) -> str | None:
+        """Claim one expired campaign transaction and clean stale siblings.
+
+        The graph calls this bounded worker sweep before assembling a request.
+        Only an exact campaign/experiment/operation match may resume.  Every
+        other expired transaction claimed for the build is deterministically
+        rolled back before the matching transaction is returned or a new
+        operation is allowed to start.
+        """
+
+        def matches_campaign(transaction: BuildMutationTransaction) -> bool:
+            checkpoint = transaction.gate_evidence.get(_CHECKPOINT_KEY)
+            return bool(
+                transaction.operation_id == operation_id
+                and transaction.campaign_run_id == campaign_run_id
+                and isinstance(checkpoint, dict)
+                and checkpoint.get("schema_version") == _CHECKPOINT_SCHEMA
+                and checkpoint.get("campaign_run_id") == campaign_run_id
+                and checkpoint.get("experiment_id") == experiment_id
+            )
+
+        effective_lease_seconds = _renewable_lease_seconds(lease_seconds)
+        existing = await anyio.to_thread.run_sync(
+            partial(
+                self._mutations.load_by_operation,
+                build_id=build_id,
+                user_id=user_id,
+                operation_id=operation_id,
+            )
+        )
+        if existing is not None:
+            if existing.build_id != build_id or existing.user_id != user_id or existing.operation_id != operation_id:
+                raise DeckDesignLiftRuntimeError("operation lookup escaped the requested build scope")
+            if existing.status in {"committed", "rolled_back", "failed"}:
+                if not matches_campaign(existing):
+                    raise DeckDesignLiftRuntimeError("operation lookup found a conflicting campaign identity")
+                return existing.transaction_id
+
+        recovered = await anyio.to_thread.run_sync(
+            partial(
+                self._mutations.recover_incomplete,
+                build_id=build_id,
+                user_id=user_id,
+                lease_owner=lease_owner,
+                lease_seconds=effective_lease_seconds,
+                limit=limit,
+            )
+        )
+        exact: list[BuildMutationTransaction] = []
+        operation_conflict = existing is not None and not matches_campaign(existing)
+        for transaction in recovered:
+            if transaction.build_id != build_id or transaction.user_id != user_id or transaction.lease_owner != lease_owner or transaction.status in {"committed", "rolled_back", "failed"}:
+                raise DeckDesignLiftRuntimeError("recovery sweep escaped the claimed build scope")
+            matches_operation = transaction.operation_id == operation_id
+            if matches_campaign(transaction):
+                exact.append(transaction)
+                continue
+            operation_conflict = operation_conflict or matches_operation
+            await self._with_renewable_lease(
+                transaction,
+                lease_seconds=effective_lease_seconds,
+                operation=self._rollback_recovered,
+            )
+        if len(exact) > 1:
+            for transaction in exact:
+                await self._with_renewable_lease(
+                    transaction,
+                    lease_seconds=effective_lease_seconds,
+                    operation=self._rollback_recovered,
+                )
+            raise DeckDesignLiftRuntimeError("recovery sweep found duplicate campaign operations")
+        if operation_conflict:
+            if exact:
+                await self._with_renewable_lease(
+                    exact[0],
+                    lease_seconds=effective_lease_seconds,
+                    operation=self._rollback_recovered,
+                )
+            raise DeckDesignLiftRuntimeError("recovery sweep found a conflicting operation identity")
+        if len(recovered) == limit and not exact and existing is None:
+            raise DeckDesignLiftRuntimeError("recovery sweep reached its bounded transaction limit")
+        if exact:
+            return exact[0].transaction_id
+        return existing.transaction_id if existing is not None else None
 
     async def run(self, request: DeckDesignLiftRequest) -> DeckDesignLiftResult:
+        effective_lease_seconds = _renewable_lease_seconds(request.lease_seconds)
         if request.transaction_id is not None:
-            transaction = self._mutations.load(
-                transaction_id=request.transaction_id,
-                user_id=request.user_id,
+            transaction = await anyio.to_thread.run_sync(
+                partial(
+                    self._mutations.load,
+                    transaction_id=request.transaction_id,
+                    user_id=request.user_id,
+                )
             )
             self._validate_transaction_scope(transaction, request)
             if transaction.status not in {"committed", "rolled_back", "failed"}:
-                transaction = self._mutations.acquire_lease(
-                    transaction_id=transaction.transaction_id,
-                    user_id=request.user_id,
-                    lease_owner=request.lease_owner,
-                    lease_seconds=request.lease_seconds,
+                transaction = await anyio.to_thread.run_sync(
+                    partial(
+                        self._mutations.acquire_lease,
+                        transaction_id=transaction.transaction_id,
+                        user_id=request.user_id,
+                        lease_owner=request.lease_owner,
+                        lease_seconds=effective_lease_seconds,
+                    )
                 )
-            return await self._resume(request, transaction)
+                return await self._with_renewable_lease(
+                    transaction,
+                    lease_seconds=effective_lease_seconds,
+                    operation=lambda lease, leased: self._resume(
+                        request,
+                        leased,
+                        lease,
+                    ),
+                )
+            return await self._resume(request, transaction, None)
 
-        baseline = self._load_and_validate_baseline(request)
+        baseline = await self._load_and_validate_baseline(request)
         initial_mechanics = await self._mechanics.verify(
             artifact=request.initial_artifact,
             campaign_run_id=request.campaign_run_id,
@@ -526,7 +880,7 @@ class DeckDesignLiftRuntime:
             operation_id=request.operation_id,
             expected_manifest_revision=request.expected_manifest_revision,
             lease_owner=request.lease_owner,
-            lease_seconds=request.lease_seconds,
+            lease_seconds=effective_lease_seconds,
             owner_thread_id=baseline.thread_id,
             expected_artifact_version_id=request.initial_artifact.version_id,
             expected_artifact_hash=request.initial_artifact.artifact_hash,
@@ -541,22 +895,71 @@ class DeckDesignLiftRuntime:
             prepared,
             gate_evidence={_CHECKPOINT_KEY: checkpoint},
         )
-        transaction = self._mutations.create(prepared)
+        transaction = await anyio.to_thread.run_sync(
+            self._mutations.create,
+            prepared,
+        )
         self._validate_transaction_scope(transaction, request)
-        return await self._resume(request, transaction)
+        if transaction.transaction_id != prepared.transaction_id:
+            if transaction.status in {"committed", "rolled_back", "failed"}:
+                return await self._resume(request, transaction, None)
+            transaction = await anyio.to_thread.run_sync(
+                partial(
+                    self._mutations.acquire_lease,
+                    transaction_id=transaction.transaction_id,
+                    user_id=request.user_id,
+                    lease_owner=request.lease_owner,
+                    lease_seconds=effective_lease_seconds,
+                )
+            )
+        return await self._with_renewable_lease(
+            transaction,
+            lease_seconds=effective_lease_seconds,
+            operation=lambda lease, leased: self._resume(
+                request,
+                leased,
+                lease,
+            ),
+        )
+
+    async def _rollback_recovered(
+        self,
+        lease: _RenewableMutationLease,
+        transaction: BuildMutationTransaction,
+    ) -> BuildMutationTransaction:
+        """Move a claimed non-current transaction to a durable safe terminal."""
+
+        code = "startup_recovery_rollback"
+        recovery_action = "retain_initial_manifest_and_gc_unreferenced_candidate"
+        if transaction.status != "rolling_back":
+            transaction = await lease.transition(
+                _transaction_copy(
+                    transaction,
+                    status="rolling_back",
+                    failure_code=code,
+                    recovery_action=recovery_action,
+                ),
+                expected_status=transaction.status,
+            )
+        return await self._finish_rollback(lease, transaction)
 
     async def _resume(
         self,
         request: DeckDesignLiftRequest,
         transaction: BuildMutationTransaction,
+        lease: _RenewableMutationLease | None,
     ) -> DeckDesignLiftResult:
         if transaction.status == "committed":
             return self._committed_result(request, transaction)
         if transaction.status in {"rolled_back", "failed"}:
             return self._rolled_back_result(request, transaction)
         if transaction.status == "rolling_back":
-            transaction = await self._finish_rollback(transaction)
+            if lease is None:
+                raise DeckDesignLiftRuntimeError("nonterminal transaction is missing a renewable lease")
+            transaction = await self._finish_rollback(lease, transaction)
             return self._rolled_back_result(request, transaction)
+        if lease is None:
+            raise DeckDesignLiftRuntimeError("nonterminal transaction is missing a renewable lease")
 
         program = _program_from_checkpoint(transaction)
         initial = _initial_from_checkpoint(transaction)
@@ -580,6 +983,7 @@ class DeckDesignLiftRuntime:
             except Exception:
                 return await self._rollback_result(
                     request,
+                    lease,
                     transaction,
                     code="repair_invocation_failed",
                     disposition="FAILED_SAFELY",
@@ -589,10 +993,12 @@ class DeckDesignLiftRuntime:
             except (RepairProgramRejected, ValueError):
                 return await self._rollback_result(
                     request,
+                    lease,
                     transaction,
                     code="candidate_rejected",
                     disposition="FAILED_SAFELY",
                 )
+            transaction = await lease.fence(transaction)
             try:
                 staged = await self._materializer.stage(
                     transaction=transaction,
@@ -603,11 +1009,13 @@ class DeckDesignLiftRuntime:
             except Exception:
                 return await self._rollback_result(
                     request,
+                    lease,
                     transaction,
                     code="candidate_materialization_failed",
                     disposition="FAILED_SAFELY",
                 )
-            transaction = self._mutations.transition(
+            transaction = await lease.fence(transaction)
+            transaction = await lease.transition(
                 _transaction_copy(
                     transaction,
                     status="staged",
@@ -625,10 +1033,12 @@ class DeckDesignLiftRuntime:
                 ),
                 expected_status="prepared",
             )
+            transaction = await lease.fence(transaction)
 
         if transaction.status == "staged":
             staged = await self._load_and_validate_staged(
                 request,
+                lease,
                 transaction,
                 program,
             )
@@ -640,6 +1050,7 @@ class DeckDesignLiftRuntime:
             if candidate_mechanics.status != "passed":
                 return await self._rollback_result(
                     request,
+                    lease,
                     transaction,
                     code="candidate_mechanics_failed",
                     disposition="REPAIR_NOT_APPROVED",
@@ -658,6 +1069,7 @@ class DeckDesignLiftRuntime:
             except Exception:
                 return await self._rollback_result(
                     request,
+                    lease,
                     transaction,
                     code="candidate_judgment_failed",
                     disposition="FAILED_SAFELY",
@@ -665,6 +1077,7 @@ class DeckDesignLiftRuntime:
             if candidate_quality.quality_run_id == initial.evidence.quality_run_id:
                 return await self._rollback_result(
                     request,
+                    lease,
                     transaction,
                     code="quality_run_not_fresh",
                     disposition="FAILED_SAFELY",
@@ -694,13 +1107,14 @@ class DeckDesignLiftRuntime:
                 )
                 return await self._rollback_result(
                     request,
+                    lease,
                     transaction,
                     code="repair_not_approved",
                     disposition="REPAIR_NOT_APPROVED",
                 )
 
             comparison_hash = canonical_sha256(comparison.model_dump(mode="json"))
-            transaction = self._mutations.transition(
+            transaction = await lease.transition(
                 _transaction_copy(
                     transaction,
                     status="verified",
@@ -717,16 +1131,19 @@ class DeckDesignLiftRuntime:
                 ),
                 expected_status="staged",
             )
+            transaction = await lease.fence(transaction)
 
         if transaction.status == "verified":
-            transaction = self._mutations.transition(
+            transaction = await lease.transition(
                 _transaction_copy(transaction, status="committing"),
                 expected_status="verified",
             )
+            transaction = await lease.fence(transaction)
 
         if transaction.status == "committing":
             staged = await self._load_and_validate_staged(
                 request,
+                lease,
                 transaction,
                 program,
             )
@@ -734,13 +1151,15 @@ class DeckDesignLiftRuntime:
             if comparison.result != "approved_improvement":
                 raise DeckDesignLiftRuntimeError("committing transaction lacks approved comparison")
             try:
-                transaction = self._commit_manifest_atomically(
+                transaction = await self._commit_manifest_atomically(
+                    lease,
                     transaction,
                     staged,
                 )
             except BuildManifestConcurrentModification:
                 return await self._rollback_result(
                     request,
+                    lease,
                     transaction,
                     code="manifest_concurrent_modification",
                     disposition="FAILED_SAFELY",
@@ -751,11 +1170,17 @@ class DeckDesignLiftRuntime:
 
         raise DeckDesignLiftRuntimeError(f"unsupported DQ-2 transaction status: {transaction.status}")
 
-    def _load_and_validate_baseline(
+    async def _load_and_validate_baseline(
         self,
         request: DeckDesignLiftRequest,
     ) -> BuildManifest:
-        manifest = self._manifests.load(build_id=request.build_id, user_id=request.user_id)
+        manifest = await anyio.to_thread.run_sync(
+            partial(
+                self._manifests.load,
+                build_id=request.build_id,
+                user_id=request.user_id,
+            )
+        )
         if manifest.manifest_revision != request.expected_manifest_revision or manifest.current_artifact_version_id != request.initial_artifact.version_id or manifest.build_id != request.build_id or manifest.user_id != request.user_id:
             raise BuildManifestConcurrentModification("initial manifest identity does not match the campaign request")
         return manifest
@@ -836,10 +1261,13 @@ class DeckDesignLiftRuntime:
     async def _load_and_validate_staged(
         self,
         request: DeckDesignLiftRequest,
+        lease: _RenewableMutationLease,
         transaction: BuildMutationTransaction,
         program: DeckRepairProgram,
     ) -> StagedDeckCandidate:
+        transaction = await lease.fence(transaction)
         staged = await self._materializer.load_staged(transaction=transaction)
+        transaction = await lease.fence(transaction)
         self._validate_staged_candidate(request, transaction, program, staged)
         if (
             transaction.staged_object_paths != list(staged.staged_object_paths)
@@ -941,8 +1369,9 @@ class DeckDesignLiftRuntime:
             if comparison.candidate_artifact_version_id != staged.artifact.version_id:
                 raise DeckDesignLiftRuntimeError("candidate artifact does not match the approved comparison")
 
-    def _commit_manifest_atomically(
+    async def _commit_manifest_atomically(
         self,
+        lease: _RenewableMutationLease,
         transaction: BuildMutationTransaction,
         staged: StagedDeckCandidate,
     ) -> BuildMutationTransaction:
@@ -957,31 +1386,15 @@ class DeckDesignLiftRuntime:
             storage_object_path=staged.artifact.storage_object_path,
             origin="quality_repair",
         )
-        try:
-            committed = self._atomic_committer.commit_manifest(
-                transaction,
-                manifest=manifest,
-                manifest_object_path=staged.manifest_object_path,
-                manifest_hash=staged.manifest_hash,
-                acceptance=acceptance,
-            )
-        except BuildManifestConcurrentModification:
-            raise
-        except Exception:
-            # A lost RPC response may follow a fully committed database
-            # transaction.  Read the durable mutation before declaring the
-            # outcome unknown; never perform a split fallback commit.
-            try:
-                recovered = self._mutations.load(
-                    transaction_id=transaction.transaction_id,
-                    user_id=transaction.user_id,
-                )
-            except Exception:
-                raise DeckDesignLiftRuntimeError("atomic manifest commit outcome could not be recovered") from None
-            if recovered.status == "committed":
-                committed = recovered
-            else:
-                raise DeckDesignLiftRuntimeError("atomic manifest commit remains safely unconfirmed") from None
+        transaction = await lease.fence(transaction)
+        committed = await lease.commit_or_recover(
+            transaction,
+            committer=self._atomic_committer,
+            manifest=manifest,
+            manifest_object_path=staged.manifest_object_path,
+            manifest_hash=staged.manifest_hash,
+            acceptance=acceptance,
+        )
         expected_revision = transaction.expected_manifest_revision + 1
         if (
             committed.status != "committed"
@@ -998,43 +1411,24 @@ class DeckDesignLiftRuntime:
     async def _rollback_result(
         self,
         request: DeckDesignLiftRequest,
+        lease: _RenewableMutationLease,
         transaction: BuildMutationTransaction,
         *,
         code: RuntimeTerminalCode,
         disposition: RuntimeDisposition,
     ) -> DeckDesignLiftResult:
-        if transaction.status == "prepared":
-            try:
-                await self._materializer.rollback(transaction=transaction)
-            except Exception:
-                raise DeckDesignLiftRuntimeError("pre-stage candidate cleanup did not reach a safe state") from None
-            transaction = self._mutations.transition(
-                _transaction_copy(
-                    transaction,
-                    status="failed",
-                    failure_code=code,
-                    recovery_action=("retain_initial_manifest_and_gc_unreferenced_candidate"),
-                ),
-                expected_status="prepared",
-            )
-            return self._result(
-                request,
-                disposition=disposition,
-                terminal_code=code,
-                transaction=transaction,
-                initial_quality_run_id=transaction.initial_quality_run_id,
-            )
         rolling = _transaction_copy(
             transaction,
             status="rolling_back",
             failure_code=code,
             recovery_action="retain_initial_manifest_and_gc_unreferenced_candidate",
         )
-        transaction = self._mutations.transition(
+        transaction = await lease.transition(
             rolling,
             expected_status=transaction.status,
         )
-        transaction = await self._finish_rollback(transaction)
+        transaction = await lease.fence(transaction)
+        transaction = await self._finish_rollback(lease, transaction)
         return self._result(
             request,
             disposition=disposition,
@@ -1047,15 +1441,18 @@ class DeckDesignLiftRuntime:
 
     async def _finish_rollback(
         self,
+        lease: _RenewableMutationLease,
         transaction: BuildMutationTransaction,
     ) -> BuildMutationTransaction:
         if transaction.status != "rolling_back":
             raise DeckDesignLiftRuntimeError("rollback resumed from an invalid status")
+        transaction = await lease.fence(transaction)
         try:
             await self._materializer.rollback(transaction=transaction)
         except Exception:
             raise DeckDesignLiftRuntimeError("candidate rollback did not reach a safe state") from None
-        return self._mutations.transition(
+        transaction = await lease.fence(transaction)
+        return await lease.transition(
             _transaction_copy(transaction, status="rolled_back"),
             expected_status="rolling_back",
         )
@@ -1092,6 +1489,7 @@ class DeckDesignLiftRuntime:
             "quality_run_not_fresh",
             "repair_not_approved",
             "manifest_concurrent_modification",
+            "startup_recovery_rollback",
         }:
             raise DeckDesignLiftRuntimeError("rolled-back transaction has an unknown failure code")
         disposition: RuntimeDisposition = "REPAIR_NOT_APPROVED" if code in {"candidate_mechanics_failed", "repair_not_approved"} else "FAILED_SAFELY"
@@ -1143,9 +1541,12 @@ __all__ = [
     "DeckMechanics",
     "DeckQualityJudge",
     "DeckRepairExecutor",
+    "DQ2_LEASE_HEARTBEAT_INTERVAL_SECONDS",
+    "DQ2_RENEWABLE_LEASE_SECONDS",
     "InitialRenderedJudgment",
     "RepairInvocationRequest",
     "RuntimeDisposition",
     "RuntimeTerminalCode",
     "StagedDeckCandidate",
+    "new_dq2_lease_owner",
 ]

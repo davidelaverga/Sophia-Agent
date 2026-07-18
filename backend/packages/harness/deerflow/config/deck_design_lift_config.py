@@ -83,14 +83,17 @@ def audit_deck_design_lift_startup(
     judge_plan: ResolvedModelPlan | None,
     repair_plan: ResolvedModelPlan | None,
     manifest_mode: str,
+    enforce_canary_user_ids: frozenset[str],
     mutation_transactions_enabled: bool,
 ) -> None:
     """Fail closed before an enabled DQ-2 process can accept campaign work."""
 
     if not config.enabled:
         return
-    if manifest_mode != "enforce":
-        raise DeckDesignLiftConfigError("enabled DQ-2 requires manifest enforcement")
+    if manifest_mode != "canary_enforce":
+        raise DeckDesignLiftConfigError("enabled DQ-2 requires exact-canary manifest enforcement")
+    if enforce_canary_user_ids != config.canary_user_ids:
+        raise DeckDesignLiftConfigError("DQ-2 and foundation exact canary scopes must match")
     if not mutation_transactions_enabled:
         raise DeckDesignLiftConfigError("enabled DQ-2 requires durable mutation transactions")
     for label, route_name, profile_name, plan in (
