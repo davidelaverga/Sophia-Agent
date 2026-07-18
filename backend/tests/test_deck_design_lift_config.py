@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
+from types import SimpleNamespace
 
 import pytest
 
@@ -10,6 +11,10 @@ from deerflow.config.deck_design_lift_config import (
     audit_deck_design_lift_startup,
 )
 from deerflow.config.model_route_config import ResolvedModelPlan
+from deerflow.sophia.build_runtime.startup import (
+    BuildFoundationStartupError,
+    audit_deck_design_lift_builder_service_startup,
+)
 
 
 def _plan(*, route: str, profile: str, capabilities: frozenset[str] | None = None) -> ResolvedModelPlan:
@@ -119,3 +124,105 @@ def test_startup_audit_rejects_capability_or_profile_drift() -> None:
             manifest_mode="enforce",
             mutation_transactions_enabled=True,
         )
+
+
+def test_service_startup_audit_proves_routes_storage_and_mutation_rpcs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.models import route_resolver
+    from deerflow.sophia.build_runtime import startup
+    from deerflow.sophia.storage import build_mutation_store
+
+    canaries = frozenset({"canary-user"})
+    config = SimpleNamespace(
+        deck_design_lift=_enabled(),
+        deck_quality=SimpleNamespace(enabled=True, canary_user_ids=canaries),
+        build_foundation=SimpleNamespace(
+            manifest_mode="enforce",
+            enable_mutation_transactions=True,
+        ),
+    )
+    calls: list[str] = []
+
+    class _Resolver:
+        def __init__(self, resolved_config: object) -> None:
+            assert resolved_config is config
+
+        def resolve(self, *, route_name: str) -> ResolvedModelPlan:
+            profile = "deck-visual-judge-v2" if route_name == "deck.judge.visual" else "deck-repair-executor-v1"
+            return _plan(route=route_name, profile=profile)
+
+    class _Store:
+        def probe(self) -> None:
+            calls.append("probe")
+
+        def close(self) -> None:
+            calls.append("close")
+
+    monkeypatch.setattr(route_resolver, "ModelRouteResolver", _Resolver)
+    monkeypatch.setattr(startup, "validate_expected_supabase_project", lambda: None)
+    monkeypatch.setattr(startup.supabase_artifact_store, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        build_mutation_store,
+        "configured_build_mutation_store",
+        lambda *, canary_user_ids: (_Store() if canary_user_ids == canaries else None),
+    )
+
+    audit_deck_design_lift_builder_service_startup(config=config)
+
+    assert calls == ["probe", "close"]
+
+
+def test_service_startup_audit_rejects_scope_drift_and_missing_rpc_surface(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.models import route_resolver
+    from deerflow.sophia.build_runtime import startup
+    from deerflow.sophia.storage import build_mutation_store
+
+    config = SimpleNamespace(
+        deck_design_lift=_enabled(),
+        deck_quality=SimpleNamespace(
+            enabled=True,
+            canary_user_ids=frozenset({"different-canary"}),
+        ),
+        build_foundation=SimpleNamespace(
+            manifest_mode="enforce",
+            enable_mutation_transactions=True,
+        ),
+    )
+    with pytest.raises(BuildFoundationStartupError, match="scopes must match"):
+        audit_deck_design_lift_builder_service_startup(config=config)
+
+    config.deck_quality.canary_user_ids = frozenset({"canary-user"})
+
+    class _Resolver:
+        def __init__(self, _config: object) -> None:
+            pass
+
+        def resolve(self, *, route_name: str) -> ResolvedModelPlan:
+            profile = "deck-visual-judge-v2" if route_name == "deck.judge.visual" else "deck-repair-executor-v1"
+            return _plan(route=route_name, profile=profile)
+
+    class _Store:
+        closed = False
+
+        def probe(self) -> None:
+            raise RuntimeError("missing RPC")
+
+        def close(self) -> None:
+            self.closed = True
+
+    store = _Store()
+    monkeypatch.setattr(route_resolver, "ModelRouteResolver", _Resolver)
+    monkeypatch.setattr(startup, "validate_expected_supabase_project", lambda: None)
+    monkeypatch.setattr(startup.supabase_artifact_store, "is_configured", lambda: True)
+    monkeypatch.setattr(
+        build_mutation_store,
+        "configured_build_mutation_store",
+        lambda **_kwargs: store,
+    )
+
+    with pytest.raises(BuildFoundationStartupError, match="transaction RPCs"):
+        audit_deck_design_lift_builder_service_startup(config=config)
+    assert store.closed is True

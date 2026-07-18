@@ -44,36 +44,28 @@ def probe_deck_quality_failure_signal_gateway_auth(
         producer_failure_hmac_probe_signal,
     )
 
-    signal = producer_failure_hmac_probe_signal(
-        canary_scope_proof=builder_event_canary_scope_proof(
-            canary_user_ids
-        )
-    )
+    signal = producer_failure_hmac_probe_signal(canary_scope_proof=builder_event_canary_scope_proof(canary_user_ids))
     body = encode_builder_event_body(signal.model_dump(mode="json"))
     headers = signed_builder_event_headers(body)
-    gateway_url = os.getenv(
-        "SOPHIA_GATEWAY_URL",
-        _DEFAULT_GATEWAY_URL,
-    ).strip().rstrip("/")
-    if not gateway_url:
-        raise BuilderEventAuthenticationError(
-            "builder_event_gateway_auth_unavailable"
+    gateway_url = (
+        os.getenv(
+            "SOPHIA_GATEWAY_URL",
+            _DEFAULT_GATEWAY_URL,
         )
+        .strip()
+        .rstrip("/")
+    )
+    if not gateway_url:
+        raise BuilderEventAuthenticationError("builder_event_gateway_auth_unavailable")
     try:
-        with httpx.Client(
-            timeout=httpx.Timeout(
-                _FAILURE_SIGNAL_AUTH_PROBE_TIMEOUT_SECONDS
-            )
-        ) as client:
+        with httpx.Client(timeout=httpx.Timeout(_FAILURE_SIGNAL_AUTH_PROBE_TIMEOUT_SECONDS)) as client:
             response = client.post(
                 f"{gateway_url}{_PRODUCER_FAILURE_SIGNAL_PATH}",
                 content=body,
                 headers=headers,
             )
     except (httpx.HTTPError, OSError, RuntimeError, ValueError):
-        raise BuilderEventAuthenticationError(
-            "builder_event_gateway_auth_unavailable"
-        ) from None
+        raise BuilderEventAuthenticationError("builder_event_gateway_auth_unavailable") from None
     if response.status_code == 403:
         verify_builder_event_probe_ack(
             body,
@@ -81,20 +73,12 @@ def probe_deck_quality_failure_signal_gateway_auth(
         )
         return
     if response.status_code == 401:
-        raise BuilderEventAuthenticationError(
-            "builder_event_gateway_auth_mismatch"
-        )
+        raise BuilderEventAuthenticationError("builder_event_gateway_auth_mismatch")
     if response.status_code == 409:
-        raise BuilderEventAuthenticationError(
-            "builder_event_gateway_canary_scope_mismatch"
-        )
+        raise BuilderEventAuthenticationError("builder_event_gateway_canary_scope_mismatch")
     if response.status_code == 503:
-        raise BuilderEventAuthenticationError(
-            "builder_event_gateway_auth_unavailable"
-        )
-    raise BuilderEventAuthenticationError(
-        "builder_event_gateway_auth_protocol_invalid"
-    )
+        raise BuilderEventAuthenticationError("builder_event_gateway_auth_unavailable")
+    raise BuilderEventAuthenticationError("builder_event_gateway_auth_protocol_invalid")
 
 
 def audit_deck_quality_builder_service_startup(*, config: AppConfig) -> None:
@@ -104,6 +88,8 @@ def audit_deck_quality_builder_service_startup(*, config: AppConfig) -> None:
     factory. It may compile locked static inputs, inspect credential presence,
     validate storage configuration, and probe the authenticated gateway.
     """
+
+    audit_deck_design_lift_builder_service_startup(config=config)
 
     deck_quality = getattr(config, "deck_quality", None)
     if deck_quality is None or not deck_quality.enabled:
@@ -121,64 +107,104 @@ def audit_deck_quality_builder_service_startup(*, config: AppConfig) -> None:
     try:
         probe_builder_event_auth()
     except BuilderEventAuthenticationError:
-        raise BuildFoundationStartupError(
-            "enabled deck quality producer requires builder-event authentication"
-        ) from None
+        raise BuildFoundationStartupError("enabled deck quality producer requires builder-event authentication") from None
     try:
         probe_deck_quality_failure_signal_gateway_auth(
             canary_user_ids=deck_quality.canary_user_ids,
         )
     except BuilderEventAuthenticationError as exc:
         if exc.code == "builder_event_gateway_auth_mismatch":
-            message = (
-                "enabled deck quality producer and gateway builder-event "
-                "authentication secrets do not match"
-            )
+            message = "enabled deck quality producer and gateway builder-event authentication secrets do not match"
         elif exc.code == "builder_event_gateway_canary_scope_mismatch":
-            message = (
-                "enabled deck quality producer and gateway exact canary "
-                "scopes do not match"
-            )
+            message = "enabled deck quality producer and gateway exact canary scopes do not match"
         else:
-            message = (
-                "enabled deck quality producer requires an available "
-                "authenticated gateway failure-signal endpoint"
-            )
+            message = "enabled deck quality producer requires an available authenticated gateway failure-signal endpoint"
         raise BuildFoundationStartupError(message) from None
     if not supabase_artifact_store.is_configured():
-        raise BuildFoundationStartupError(
-            "enabled deck quality producer requires durable object storage"
-        )
+        raise BuildFoundationStartupError("enabled deck quality producer requires durable object storage")
     dq_provider_key = os.getenv(
         "SOPHIA_DECK_QUALITY_OPENAI_API_KEY",
         "",
     ).strip()
     if not dq_provider_key:
-        raise BuildFoundationStartupError(
-            "enabled deck quality judge requires its isolated provider credential"
-        )
+        raise BuildFoundationStartupError("enabled deck quality judge requires its isolated provider credential")
     baseline_provider_key = os.getenv("OPENAI_API_KEY", "").strip()
     if not baseline_provider_key:
-        raise BuildFoundationStartupError(
-            "enabled deck quality judge requires the baseline builder provider credential"
-        )
+        raise BuildFoundationStartupError("enabled deck quality judge requires the baseline builder provider credential")
     credentials_match = hmac.compare_digest(
         dq_provider_key.encode("utf-8"),
         baseline_provider_key.encode("utf-8"),
     )
-    allow_shared_provider_credential = bool(
-        getattr(deck_quality, "allow_shared_provider_credential", False)
-    )
+    allow_shared_provider_credential = bool(getattr(deck_quality, "allow_shared_provider_credential", False))
     if credentials_match and not allow_shared_provider_credential:
-        raise BuildFoundationStartupError(
-            "deck quality and baseline builder provider credentials must be distinct"
-        )
+        raise BuildFoundationStartupError("deck quality and baseline builder provider credentials must be distinct")
     if credentials_match:
-        logger.warning(
-            "Deck quality provider credential is operator-authorized for shared "
-            "billing authority; DQ route and exact-canary isolation remain enabled "
-            "credentialValueExcluded=true"
+        logger.warning("Deck quality provider credential is operator-authorized for shared billing authority; DQ route and exact-canary isolation remain enabled credentialValueExcluded=true")
+
+
+def audit_deck_design_lift_builder_service_startup(*, config: AppConfig) -> None:
+    """Fail closed before exposing the production DQ-2 canary authority."""
+
+    deck_design_lift = getattr(config, "deck_design_lift", None)
+    if deck_design_lift is None or not deck_design_lift.enabled:
+        return
+
+    deck_quality = getattr(config, "deck_quality", None)
+    if deck_quality is None or not deck_quality.enabled:
+        raise BuildFoundationStartupError("enabled DQ-2 requires the DQ-1 rendered observer")
+    if frozenset(deck_design_lift.canary_user_ids) != frozenset(deck_quality.canary_user_ids):
+        raise BuildFoundationStartupError("enabled DQ-2 and DQ-1 exact canary scopes must match")
+
+    foundation = getattr(config, "build_foundation", None)
+    if foundation is None:
+        raise BuildFoundationStartupError("enabled DQ-2 requires the build foundation")
+
+    from deerflow.config.deck_design_lift_config import (
+        DeckDesignLiftConfigError,
+        audit_deck_design_lift_startup,
+    )
+    from deerflow.models.route_resolver import (
+        ModelRouteResolutionError,
+        ModelRouteResolver,
+    )
+
+    try:
+        resolver = ModelRouteResolver(config)
+        judge_plan = resolver.resolve(
+            route_name=deck_design_lift.judge_route,
         )
+        repair_plan = resolver.resolve(
+            route_name=deck_design_lift.repair_route,
+        )
+        audit_deck_design_lift_startup(
+            deck_design_lift,
+            judge_plan=judge_plan,
+            repair_plan=repair_plan,
+            manifest_mode=foundation.manifest_mode,
+            mutation_transactions_enabled=foundation.enable_mutation_transactions,
+        )
+    except (DeckDesignLiftConfigError, ModelRouteResolutionError) as exc:
+        raise BuildFoundationStartupError(str(exc)) from None
+
+    validate_expected_supabase_project()
+    if not supabase_artifact_store.is_configured():
+        raise BuildFoundationStartupError("enabled DQ-2 requires durable object storage")
+
+    from deerflow.sophia.storage.build_mutation_store import (
+        configured_build_mutation_store,
+    )
+
+    store = configured_build_mutation_store(
+        canary_user_ids=deck_design_lift.canary_user_ids,
+    )
+    if store is None:
+        raise BuildFoundationStartupError("enabled DQ-2 requires durable mutation persistence credentials")
+    try:
+        store.probe()
+    except Exception:
+        raise BuildFoundationStartupError("enabled DQ-2 requires the durable mutation transaction RPCs") from None
+    finally:
+        store.close()
 
 
 def audit_build_foundation(*, tools: Iterable[Any], config: AppConfig) -> None:
@@ -192,9 +218,7 @@ def audit_build_foundation(*, tools: Iterable[Any], config: AppConfig) -> None:
     if prepare is not None:
         injected = set(getattr(prepare, "_injected_args_keys", frozenset()))
         if injected != {"runtime"}:
-            raise BuildFoundationStartupError(
-                f"prepare_deck_build runtime injection invariant failed: {sorted(injected)}"
-            )
+            raise BuildFoundationStartupError(f"prepare_deck_build runtime injection invariant failed: {sorted(injected)}")
         schema = prepare.get_input_schema().model_json_schema()
         if "runtime" in (schema.get("properties") or {}):
             raise BuildFoundationStartupError("prepare_deck_build exposes runtime in model-facing schema")
@@ -207,14 +231,8 @@ def audit_build_foundation(*, tools: Iterable[Any], config: AppConfig) -> None:
         sink = configure_default_event_sink_once(configured_build_foundation_store)
         probe = getattr(sink, "probe", None)
         if callable(probe) and not probe():
-            logger.error(
-                "Build foundation startup readiness degraded: durable event table/RPC unavailable payloadExcluded=true"
-            )
-    enabled_routes = {
-        name: route
-        for name, route in config.model_routes.items()
-        if name in {"deck.judge.visual", "deck.finding.localizer", "deck.repair.executor", "deck.repair.advisor"}
-    }
+            logger.error("Build foundation startup readiness degraded: durable event table/RPC unavailable payloadExcluded=true")
+    enabled_routes = {name: route for name, route in config.model_routes.items() if name in {"deck.judge.visual", "deck.finding.localizer", "deck.repair.executor", "deck.repair.advisor"}}
     for route_name, route in enabled_routes.items():
         if config.get_model_deployment(route.primary) is None:
             raise BuildFoundationStartupError(f"model route {route_name} references missing deployment {route.primary}")

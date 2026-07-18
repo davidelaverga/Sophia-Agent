@@ -12,13 +12,21 @@ from deerflow.reflection import resolve_class
 
 logger = logging.getLogger(__name__)
 _INTERNAL_ROUTE_CAPABILITY_SEAL = object()
+_InternalModelRoutePurpose = Literal[
+    "deck_quality_judge",
+    "deck_design_lift_repair",
+]
+_INTERNAL_ROUTE_ADMISSIONS: dict[_InternalModelRoutePurpose, tuple[str, str]] = {
+    "deck_quality_judge": ("deck.judge.visual", "openai-gpt-5-6-sol"),
+    "deck_design_lift_repair": ("deck.repair.executor", "openai-gpt-5-6-sol"),
+}
 
 
 @dataclass(frozen=True, slots=True)
 class InternalModelRouteCapability:
     """Non-serializable authority for one exact internal route plan."""
 
-    purpose: Literal["deck_quality_judge"]
+    purpose: _InternalModelRoutePurpose
     route_name: str
     deployment_name: str
     plan_hash: str
@@ -28,14 +36,13 @@ class InternalModelRouteCapability:
 def _issue_internal_model_route_capability(
     plan: ResolvedModelPlan,
     *,
-    purpose: Literal["deck_quality_judge"],
+    purpose: _InternalModelRoutePurpose,
 ) -> InternalModelRouteCapability:
     """Mint route-only authority inside an already-admitted internal path."""
 
-    if (
-        purpose != "deck_quality_judge"
-        or plan.route_name != "deck.judge.visual"
-        or plan.deployment_name != "openai-gpt-5-6-sol"
+    if _INTERNAL_ROUTE_ADMISSIONS.get(purpose) != (
+        plan.route_name,
+        plan.deployment_name,
     ):
         raise ValueError("internal model route capability is not admissible")
     return InternalModelRouteCapability(
@@ -77,14 +84,8 @@ def _create_configured_chat_model(
     )
     # Compute effective when_thinking_enabled by merging in the `thinking` shortcut field.
     # The `thinking` shortcut is equivalent to setting when_thinking_enabled["thinking"].
-    has_thinking_settings = (model_config.when_thinking_enabled is not None) or (
-        model_config.thinking is not None
-    )
-    effective_wte: dict = (
-        dict(model_config.when_thinking_enabled)
-        if model_config.when_thinking_enabled
-        else {}
-    )
+    has_thinking_settings = (model_config.when_thinking_enabled is not None) or (model_config.thinking is not None)
+    effective_wte: dict = dict(model_config.when_thinking_enabled) if model_config.when_thinking_enabled else {}
     if model_config.thinking is not None:
         merged_thinking = {
             **(effective_wte.get("thinking") or {}),
@@ -93,10 +94,7 @@ def _create_configured_chat_model(
         effective_wte = {**effective_wte, "thinking": merged_thinking}
     if thinking_enabled and has_thinking_settings:
         if not model_config.supports_thinking:
-            raise ValueError(
-                f"Model {name} does not support thinking. Set `supports_thinking` "
-                "to true in the `config.yaml` to enable thinking."
-            ) from None
+            raise ValueError(f"Model {name} does not support thinking. Set `supports_thinking` to true in the `config.yaml` to enable thinking.") from None
         if effective_wte:
             model_settings_from_config.update(effective_wte)
     if not thinking_enabled and has_thinking_settings:
@@ -180,7 +178,11 @@ def create_internal_route_chat_model(
     if (
         not isinstance(capability, InternalModelRouteCapability)
         or capability._seal is not _INTERNAL_ROUTE_CAPABILITY_SEAL
-        or capability.purpose != "deck_quality_judge"
+        or _INTERNAL_ROUTE_ADMISSIONS.get(capability.purpose)
+        != (
+            capability.route_name,
+            capability.deployment_name,
+        )
         or capability.route_name != plan.route_name
         or capability.deployment_name != plan.deployment_name
         or capability.plan_hash != plan.plan_hash
