@@ -14,6 +14,7 @@ EXPECTED_PROJECT_REF = "vlxnwmyvhchwbousrdzc"
 EXPECTED_POOLER_HOST = "aws-1-us-west-1.pooler.supabase.com"
 EXPECTED_POOLER_PORT = 5432
 ADVISORY_LOCK_ID = 4913762560351058
+RESUMABLE_START_MIGRATION = "2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql"
 MIGRATION_SHA256 = {
     "2026_07_15_sophia_deck_quality_shadow_runs.sql": ("328f10ae75f2f1b0f39523621621abe3802ddf98d660a1c70b69c3b5b64c0dfb"),
     "2026_07_16_sophia_deck_quality_publications.sql": ("52fc6d563bd85bb35ae2c92ffcd9b0a261e896ceeef3dcc8b751cf46557c1635"),
@@ -38,6 +39,20 @@ _SAFE_MIGRATION_FAILURE_REASONS = {
             "deck_quality_publication_atomic_migration_postflight_failed",
         }
     ),
+    "2026_07_18_sophia_deck_quality_producer_failure_signals.sql": frozenset(
+        {
+            "deck_quality_producer_failure_signal_environment_invalid",
+            "deck_quality_producer_failure_signal_unknown_fingerprint",
+            "deck_quality_producer_failure_signal_postflight_failed",
+        }
+    ),
+    "2026_07_19_sophia_deck_quality_dispatch_intent_fence.sql": frozenset(
+        {
+            "deck_quality_dispatch_intent_environment_invalid",
+            "deck_quality_dispatch_intent_unknown_fingerprint",
+            "deck_quality_dispatch_intent_postflight_failed",
+        }
+    ),
 }
 
 _DATABASE_SANITY_SQL = """
@@ -60,6 +75,24 @@ SELECT
         'public.sophia_append_build_event(text,text,text,text,timestamptz,jsonb)'
     ) IS NOT NULL,
     pg_catalog.has_schema_privilege(current_user, 'public', 'CREATE')
+"""
+
+_DATABASE_RESUME_SANITY_SQL = """
+SELECT
+    pg_catalog.to_regclass('public.sophia_deck_quality_shadow_runs') IS NOT NULL,
+    pg_catalog.to_regprocedure(
+        'public.sophia_get_deck_quality_shadow_run(text)'
+    ) IS NOT NULL,
+    pg_catalog.to_regclass('public.sophia_deck_quality_publications') IS NOT NULL,
+    pg_catalog.to_regprocedure(
+        'public.sophia_deck_quality_publication_source_path_valid(text,text,text,text,text,text)'
+    ) IS NOT NULL,
+    pg_catalog.to_regprocedure(
+        'public.sophia_request_deck_quality_publication(text,text,text,text,text,text,jsonb,text,text,text,text,jsonb,text,text,text,text,text,text,text,text,text,bigint,text,text,integer,timestamptz,integer,timestamptz)'
+    ) IS NOT NULL,
+    pg_catalog.to_regprocedure(
+        'public.sophia_commit_deck_quality_publication_inputs(text,text,text)'
+    ) IS NOT NULL
 """
 
 
@@ -133,6 +166,20 @@ def _load_migrations(migrations_dir: Path = _MIGRATIONS_DIR) -> tuple[tuple[str,
     return tuple(loaded)
 
 
+def _select_migrations(migrations: tuple[tuple[str, str], ...], argv: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
+    if not argv:
+        return migrations
+    if argv != ("--resume-at", RESUMABLE_START_MIGRATION):
+        raise RunnerError("migration_resume_argument_invalid")
+    start_index = next(
+        (index for index, item in enumerate(migrations) if item[0] == RESUMABLE_START_MIGRATION),
+        None,
+    )
+    if start_index is None:
+        raise RunnerError("migration_resume_target_missing")
+    return migrations[start_index:]
+
+
 def _safe_sqlstate(exc: BaseException) -> str:
     value = getattr(exc, "sqlstate", None)
     return value if isinstance(value, str) and _SQLSTATE.fullmatch(value) else "unknown"
@@ -188,6 +235,16 @@ def _database_sanity_check(connection: Any) -> None:
         raise RunnerError("database_identity_or_schema_invalid")
 
 
+def _database_resume_sanity_check(connection: Any) -> None:
+    """Require predecessor surfaces before the one supported resume point."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(_DATABASE_RESUME_SANITY_SQL)
+        row = cursor.fetchone()
+    if not row or len(row) != 6 or not all(value is True for value in row):
+        raise RunnerError("database_resume_predecessor_invalid")
+
+
 def _apply_migrations(connection: Any, migrations: tuple[tuple[str, str], ...]) -> bool:
     for filename, sql in migrations:
         _log("migration_started", filename=filename)
@@ -215,10 +272,10 @@ def _apply_migrations(connection: Any, migrations: tuple[tuple[str, str], ...]) 
     return True
 
 
-def main() -> int:
+def main(argv: tuple[str, ...] = ()) -> int:
     try:
         database_url = _validate_database_url(os.environ.get("DATABASE_URL"))
-        migrations = _load_migrations()
+        migrations = _select_migrations(_load_migrations(), argv)
     except RunnerError as exc:
         _log("migration_preflight_failed", reason=exc.args[0])
         return 2
@@ -238,6 +295,9 @@ def main() -> int:
             cursor_factory=psycopg.ClientCursor,
         ) as connection:
             _database_sanity_check(connection)
+            if migrations[0][0] == RESUMABLE_START_MIGRATION:
+                _database_resume_sanity_check(connection)
+                _log("migration_resume_validated", filename=RESUMABLE_START_MIGRATION)
             if not _apply_migrations(connection, migrations):
                 return 1
     except RunnerError as exc:
@@ -257,4 +317,6 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    import sys
+
+    raise SystemExit(main(tuple(sys.argv[1:])))

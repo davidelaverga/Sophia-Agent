@@ -55,6 +55,21 @@ def test_migration_allowlist_and_hashes_match_repository_files() -> None:
     assert all(not sql.rstrip().upper().endswith("COMMIT;") for _filename, sql in loaded)
 
 
+def test_only_atomic_convergence_is_an_allowed_resume_point() -> None:
+    loaded = runner._load_migrations()
+    selected = runner._select_migrations(loaded, ("--resume-at", runner.RESUMABLE_START_MIGRATION))
+
+    assert [filename for filename, _sql in selected] == list(runner.MIGRATION_SHA256)[2:]
+    for argv in (
+        ("--resume-at", list(runner.MIGRATION_SHA256)[1]),
+        ("--resume-at", list(runner.MIGRATION_SHA256)[3]),
+        ("--unknown", runner.RESUMABLE_START_MIGRATION),
+        ("--resume-at",),
+    ):
+        with pytest.raises(runner.RunnerError, match="^migration_resume_argument_invalid$"):
+            runner._select_migrations(loaded, argv)
+
+
 def test_transaction_wrapper_must_be_single_and_top_level() -> None:
     assert runner._strip_transaction_wrapper("-- header\nBEGIN;\nSELECT 1;\nCOMMIT;\n") == "SELECT 1;\n"
 
@@ -72,6 +87,7 @@ def test_transaction_wrapper_must_be_single_and_top_level() -> None:
 class FakeCursor:
     def __init__(self, connection: FakeConnection) -> None:
         self.connection = connection
+        self.last_sql = ""
 
     def __enter__(self) -> FakeCursor:
         return self
@@ -80,12 +96,14 @@ class FakeCursor:
         return None
 
     def execute(self, sql: str, params: tuple[int] | None = None) -> None:
+        self.last_sql = sql
         self.connection.executions.append((sql, params))
         if sql in self.connection.fail_sql:
             raise FakeDatabaseError
 
-    @staticmethod
-    def fetchone() -> tuple[bool, ...]:
+    def fetchone(self) -> tuple[bool, ...]:
+        if self.last_sql == runner._DATABASE_RESUME_SANITY_SQL:
+            return (True,) * 6
         return (True,) * 14
 
 
@@ -242,6 +260,31 @@ def test_main_validates_sanity_then_uses_client_cursor(monkeypatch, capsys: pyte
         "event": "migration_run_succeeded",
         "migration_count": 5,
     }
+
+
+def test_main_resume_validates_predecessors_and_starts_at_atomic_convergence(monkeypatch, capsys: pytest.CaptureFixture[str]) -> None:
+    connection = FakeConnection()
+
+    monkeypatch.setenv("DATABASE_URL", VALID_DATABASE_URL)
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *_args, **_kwargs: connection, ClientCursor=object()),
+    )
+
+    assert runner.main(("--resume-at", runner.RESUMABLE_START_MIGRATION)) == 0
+
+    assert connection.executions[:2] == [
+        (runner._DATABASE_SANITY_SQL, None),
+        (runner._DATABASE_RESUME_SANITY_SQL, None),
+    ]
+    assert connection.transactions_started == 3
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert events[0] == {
+        "event": "migration_resume_validated",
+        "filename": runner.RESUMABLE_START_MIGRATION,
+    }
+    assert events[-1] == {"event": "migration_run_succeeded", "migration_count": 3}
 
 
 def test_main_never_imports_driver_for_invalid_configuration(monkeypatch, capsys: pytest.CaptureFixture[str]) -> None:
