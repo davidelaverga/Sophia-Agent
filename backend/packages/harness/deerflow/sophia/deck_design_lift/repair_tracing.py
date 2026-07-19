@@ -294,6 +294,15 @@ def derive_deck_repair_trace_run_id(
     return uuid5(_TRACE_ID_NAMESPACE, identity)
 
 
+def _root_dotted_order(*, start_time: datetime, run_id: UUID) -> str:
+    """Return LangSmith's canonical root-run ordering key."""
+
+    if not isinstance(start_time, datetime) or start_time.tzinfo is None or start_time.utcoffset() is None or not isinstance(run_id, UUID):
+        raise TypeError("safe repair trace ordering identity is invalid")
+    normalized = start_time.astimezone(UTC)
+    return normalized.strftime("%Y%m%dT%H%M%S%fZ") + str(run_id)
+
+
 def _safe_model_dump(
     value: _SafeTraceModel,
     expected_type: type[_SafeTraceModel],
@@ -424,6 +433,7 @@ class SafeDeckRepairTrace:
         try:
             extra = getattr(remote, "extra", None)
             outputs = getattr(remote, "outputs", None)
+            remote_start_time = getattr(remote, "start_time", None)
             ended = getattr(remote, "end_time", None) is not None
             terminal_valid = False
             if ended and isinstance(outputs, Mapping):
@@ -438,6 +448,11 @@ class SafeDeckRepairTrace:
                 and getattr(remote, "run_type", None) == "chain"
                 and _safe_remote_uuid(getattr(remote, "trace_id", None)) == self._run_id
                 and getattr(remote, "parent_run_id", None) is None
+                and getattr(remote, "dotted_order", None)
+                == _root_dotted_order(
+                    start_time=remote_start_time,
+                    run_id=self._run_id,
+                )
                 and _safe_remote_uuid(getattr(remote, "session_id", None)) == self._project_id
                 and getattr(remote, "inputs", None) == self._input
                 and extra == {"metadata": self._metadata}
@@ -455,6 +470,7 @@ class SafeDeckRepairTrace:
 
     def _create_remote(self) -> None:
         failed = False
+        start_time = datetime.now(UTC)
         try:
             self._client.create_run(
                 name=_TRACE_NAME,
@@ -464,7 +480,11 @@ class SafeDeckRepairTrace:
                 id=self._run_id,
                 trace_id=self._run_id,
                 parent_run_id=None,
-                start_time=datetime.now(UTC),
+                start_time=start_time,
+                dotted_order=_root_dotted_order(
+                    start_time=start_time,
+                    run_id=self._run_id,
+                ),
                 extra={"metadata": self._metadata},
                 tags=list(_TRACE_TAGS),
                 attachments={},

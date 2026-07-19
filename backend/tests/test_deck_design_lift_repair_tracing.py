@@ -93,6 +93,8 @@ class CapturingClient:
             run_type=run_type,
             trace_id=UUID(str(kwargs["trace_id"])),
             parent_run_id=kwargs.get("parent_run_id"),
+            start_time=kwargs.get("start_time"),
+            dotted_order=kwargs.get("dotted_order"),
             session_id=self.project_id,
             inputs=deepcopy(inputs),
             outputs=None,
@@ -213,6 +215,7 @@ def test_success_trace_emits_only_exact_ids_hashes_and_metrics() -> None:
     assert set(create) == {
         "attachments",
         "dangerously_allow_filesystem",
+        "dotted_order",
         "events",
         "extra",
         "id",
@@ -225,6 +228,10 @@ def test_success_trace_emits_only_exact_ids_hashes_and_metrics() -> None:
         "tags",
         "trace_id",
     }
+    assert create["dotted_order"] == (
+        create["start_time"].strftime("%Y%m%dT%H%M%S%fZ")
+        + str(create["id"])
+    )
     assert set(create["inputs"]) == {
         "schema_version",
         "campaign_run_id",
@@ -440,6 +447,17 @@ def test_remote_project_identity_and_runtime_metadata_fail_closed() -> None:
     client.tracing_queue = object()
     with pytest.raises(TypeError, match="buffered"):
         _trace(client)
+
+
+def test_remote_root_ordering_identity_is_required() -> None:
+    client = CapturingClient()
+    trace_input = _trace_input()
+    _trace(client, trace_input)
+    run_id = derive_deck_repair_trace_run_id(trace_input)
+    client.stored_runs[run_id].dotted_order = f"wrong.{run_id}"
+
+    with pytest.raises(SafeDeckRepairTraceEmissionError, match="remote state"):
+        _trace(client, trace_input)
 
 
 def test_configured_factory_requires_explicit_eu_client_and_project_env(
