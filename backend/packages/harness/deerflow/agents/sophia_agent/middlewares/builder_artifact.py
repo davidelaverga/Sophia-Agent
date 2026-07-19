@@ -11735,16 +11735,44 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         }
 
     @staticmethod
-    def _prepare_repair_attempt_count(state: dict[str, Any]) -> int:
-        """Return the single repair budget, honoring legacy queued state."""
+    def _prepare_schema_correction_attempt_count(state: dict[str, Any]) -> int:
+        """Return whether the one typed-argument correction was already used."""
 
         diagnostics = _pptx_diagnostics(state)
+        return int(bool(int(diagnostics.get("prepare_schema_failure_count", 0) or 0)))
+
+    @staticmethod
+    def _prepare_repair_attempt_count(state: dict[str, Any]) -> int:
+        """Return the service-quality repair count, excluding schema correction."""
+
+        diagnostics = _pptx_diagnostics(state)
+        schema_correction_used = (
+            BuilderArtifactMiddleware._prepare_schema_correction_attempt_count(state)
+        )
+        ir_repair_count = int(
+            bool(int(state.get("builder_deck_ir_repair_attempt_count", 0) or 0))
+        )
+        creative_repair_count = int(
+            bool(int(state.get("builder_deck_creative_repair_attempt_count", 0) or 0))
+        )
+        global_repair_count = int(
+            bool(int(state.get("builder_deck_prepare_repair_attempt_count", 0) or 0))
+        )
+        if schema_correction_used and not ir_repair_count and not creative_repair_count:
+            # Before the budgets were separated, a schema-only correction also
+            # set the global repair counter. Do not let queued legacy state
+            # consume the independent service-quality repair.
+            global_repair_count = 0
+        legacy_diagnostic_repair = int(
+            not schema_correction_used
+            and bool(diagnostics.get("prepare_retry_executed"))
+            and int(diagnostics.get("prepare_repair_count", 0) or 0) > 0
+        )
         return max(
-            int(state.get("builder_deck_prepare_repair_attempt_count", 0) or 0),
-            int(bool(int(state.get("builder_deck_ir_repair_attempt_count", 0) or 0))),
-            int(bool(int(state.get("builder_deck_creative_repair_attempt_count", 0) or 0))),
-            int(bool(int(diagnostics.get("prepare_schema_failure_count", 0) or 0))),
-            int(bool(diagnostics.get("prepare_retry_executed"))),
+            global_repair_count,
+            ir_repair_count,
+            creative_repair_count,
+            legacy_diagnostic_repair,
         )
 
     @staticmethod
@@ -11767,10 +11795,14 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         missing = int(payload.get("missing_visual_count") if payload.get("missing_visual_count") is not None else max(0, expected - min(successful, referenced)))
         quality_status = str(payload.get("quality_status") or ("passed" if success else "failed"))
         creative_plan_accepted = bool(str(payload.get("creative_plan_path") or "").strip())
-        repair_count = BuilderArtifactMiddleware._prepare_repair_attempt_count(request.state or {})
-        retry_executed = repair_count > 0
+        state = request.state or {}
+        repair_count = BuilderArtifactMiddleware._prepare_repair_attempt_count(state)
+        schema_correction_count = (
+            BuilderArtifactMiddleware._prepare_schema_correction_attempt_count(state)
+        )
+        retry_executed = repair_count > 0 or schema_correction_count > 0
         failure_code = payload.get("failure_code") or (None if success else status_reason or "deck_build_failed")
-        prior_diagnostics = _pptx_diagnostics(request.state or {})
+        prior_diagnostics = _pptx_diagnostics(state)
         root_failure_code = payload.get("root_failure_code") or prior_diagnostics.get("deck_root_failure_code") or (failure_code if not success else None)
         root_failure_summary = payload.get("root_failure_summary") or prior_diagnostics.get("deck_root_failure_summary") or (payload.get("failure_summary") if not success else None)
         image_generation_status = str(payload.get("image_generation_status") or ("success" if success else "failed"))
@@ -12071,6 +12103,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         state = request.state or {}
         diagnostics = _pptx_diagnostics(state)
         repair_attempt_count = self._prepare_repair_attempt_count(state)
+        schema_correction_count = self._prepare_schema_correction_attempt_count(state)
         tool_call = getattr(request, "tool_call", {})
         raw_args = tool_call.get("args") if isinstance(tool_call, dict) else None
         validation_summary = prepare_deck_build_validation_summary(raw_args) if raw_args is not None else ""
@@ -12082,16 +12115,16 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             "prepare_execution_count": 1,
             "prepare_result_count": 1,
             "prepare_schema_failure_count": 1,
-            "deck_status": "failed_terminal" if repair_attempt_count >= 1 else "repair_pending",
+            "deck_status": "failed_terminal" if schema_correction_count >= 1 else "repair_pending",
             "deck_failure_code": "deck_prepare_argument_invalid",
             "deck_root_failure_code": diagnostics.get("deck_root_failure_code") or "deck_prepare_argument_invalid",
             "deck_root_failure_summary": diagnostics.get("deck_root_failure_summary") or validation_summary or default_summary,
             "last_prepare_failure_code": "deck_prepare_argument_invalid",
             "last_prepare_failure_summary": validation_summary or default_summary,
             "prepare_repair_count": repair_attempt_count,
-            "prepare_retry_executed": repair_attempt_count > 0,
+            "prepare_retry_executed": schema_correction_count > 0 or repair_attempt_count > 0,
         }
-        if repair_attempt_count < 1:
+        if schema_correction_count < 1:
             repair_message = (
                 "Repair the prepare_deck_build arguments using compact_model_html_v2 and the canonical typed schema. "
                 "Pass creative_plan as a JSON object, not a JSON-encoded string; include every required creative_plan "
@@ -12106,10 +12139,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     "messages": [result],
                     "builder_pptx_diagnostics": {
                         **schema_delta,
-                        "prepare_repair_count": 1,
+                        "prepare_repair_count": repair_attempt_count,
                         "prepare_retry_executed": True,
                     },
-                    "builder_deck_prepare_repair_attempt_count": 1,
                     "builder_deck_prepare_phase": "retry_pending",
                     "builder_deck_prepare_repair_message": repair_message,
                     "builder_deck_prepare_repair_prompt_injected": False,
@@ -12119,7 +12151,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         failure_payload = {
             "success": False,
             "failure_code": "deck_prepare_retry_exhausted",
-            "failure_summary": "prepare_deck_build exhausted its single repair after typed argument validation failed.",
+            "failure_summary": "prepare_deck_build exhausted its one typed-argument correction.",
             "root_failure_code": schema_delta["deck_root_failure_code"],
             "root_failure_summary": schema_delta["deck_root_failure_summary"],
             "last_prepare_failure_code": schema_delta["last_prepare_failure_code"],
@@ -12171,7 +12203,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         failure_payload = {
             "success": False,
             "failure_code": "deck_prepare_retry_exhausted",
-            "failure_summary": "prepare_deck_build exhausted its single structured repair.",
+            "failure_summary": "prepare_deck_build exhausted its one service-quality repair.",
             "root_failure_code": terminal_delta["deck_root_failure_code"],
             "root_failure_summary": terminal_delta["deck_root_failure_summary"],
             "last_prepare_failure_code": last_failure_code,
@@ -12928,12 +12960,24 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         emitted_count = int(diagnostics.get("prepare_emitted_call_count") or diagnostics.get("prepare_call_count") or 0)
         service_result_count = int(diagnostics.get("prepare_service_result_count", 0) or 0)
         parallel_call_count = int(diagnostics.get("prepare_parallel_call_count", 0) or 0)
-        if parallel_call_count <= 1 and emitted_count <= 2 and service_result_count < 2:
+        schema_correction_count = self._prepare_schema_correction_attempt_count(request.state or {})
+        repair_attempt_count = self._prepare_repair_attempt_count(request.state or {})
+        max_emitted_count = 1 + schema_correction_count + repair_attempt_count
+        max_service_result_count = 1 + repair_attempt_count
+        if (
+            parallel_call_count <= 1
+            and emitted_count <= max_emitted_count
+            and service_result_count < max_service_result_count
+        ):
             return None
         root_failure_code = diagnostics.get("deck_root_failure_code") or diagnostics.get("deck_failure_code")
         root_failure_summary = diagnostics.get("deck_root_failure_summary")
         failure_code = "deck_prepare_parallel_calls_forbidden" if parallel_call_count > 1 else "deck_prepare_retry_exhausted"
-        failure_summary = "prepare_deck_build calls must be sequential; multiple calls were emitted in one model turn." if parallel_call_count > 1 else "prepare_deck_build already used its one bounded repair attempt."
+        failure_summary = (
+            "prepare_deck_build calls must be sequential; multiple calls were emitted in one model turn."
+            if parallel_call_count > 1
+            else "prepare_deck_build already used its bounded schema and service-quality correction attempts."
+        )
         payload = {
             "success": False,
             "failure_code": failure_code,

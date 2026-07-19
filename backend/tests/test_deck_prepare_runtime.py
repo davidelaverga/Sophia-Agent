@@ -246,52 +246,113 @@ def test_parallel_prepare_calls_terminalize_before_tool_node(
     assert all(message.status == "error" for message in results)
 
 
-def test_schema_repair_then_service_failure_exhausts_global_retry(
+@pytest.mark.parametrize(
+    ("schema_first", "expected_root_failure"),
+    [
+        (True, "deck_prepare_argument_invalid"),
+        (False, "deck_mechanical_gate_failed"),
+    ],
+)
+def test_schema_and_quality_corrections_have_independent_budgets(
     tmp_path: Path,
     monkeypatch,
+    schema_first: bool,
+    expected_root_failure: str,
 ) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "deck.pptx").write_bytes(b"pptx")
+
     class _RejectedDeckResult:
         success = False
         retryable = True
-        failure_code = "deck_slide_html_invalid"
-        repair_instruction = {"repair_message": "Remove opacity."}
+        failure_code = "deck_mechanical_gate_failed"
+        repair_instruction = {"repair_message": "Move the overlapping native shape on slide 2."}
 
         def to_dict(self) -> dict[str, Any]:
             return {
                 "success": False,
                 "failure_code": self.failure_code,
-                "failure_summary": "slides[0].html_body uses lossy CSS property opacity.",
+                "failure_summary": "Native lint/fix left a material shape overlap.",
                 "retryable": True,
                 "repair_instruction": self.repair_instruction,
                 "slide_count": 3,
                 "quality_status": "failed",
             }
 
+    class _AcceptedDeckResult:
+        success = True
+        retryable = False
+        failure_code = None
+
+        def __init__(self, output_path: str) -> None:
+            self.output_path = output_path
+
+        def to_dict(self) -> dict[str, Any]:
+            return {
+                "success": True,
+                "build_id": "deck-1",
+                "deck_build_path": "/mnt/user-data/outputs/deck_build/build.json",
+                "creative_plan_path": "/mnt/user-data/outputs/deck_build/creative_plan.json",
+                "pptx_path": self.output_path,
+                "deck_route": "deck_creative_html_native",
+                "deck_compile_mode": "native_html2patch",
+                "slide_count": 3,
+                "expected_visual_count": 0,
+                "successful_visual_count": 0,
+                "referenced_visual_count": 0,
+                "missing_visual_count": 0,
+                "quality_status": "passed",
+                "native_editability_score": 1.0,
+                "native_text_shape_count": 9,
+                "picture_shape_count": 0,
+                "full_slide_picture_count": 0,
+            }
+
+    service_calls: list[dict[str, Any]] = []
+
+    class _SequenceService:
+        def prepare_and_build(self, **kwargs: Any) -> Any:
+            service_calls.append(kwargs)
+            if len(service_calls) == 1:
+                return _RejectedDeckResult()
+            return _AcceptedDeckResult(str(kwargs["output_path"]))
+
     invalid_args = _compact_prepare_args(creative_plan="{malformed-json")
     valid_args = _compact_prepare_args(creative_plan=_creative_plan())
-    model = _PrepareSequenceModel(
-        [
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"id": "schema-1", "name": "prepare_deck_build", "args": invalid_args}
-                ],
-            ),
-            AIMessage(
-                content="",
-                tool_calls=[
-                    {"id": "service-2", "name": "prepare_deck_build", "args": valid_args}
-                ],
-            ),
-        ]
+    repaired_args = {
+        **_compact_prepare_args(creative_plan=_creative_plan()),
+        "deck_title": "Runtime Control Repaired",
+    }
+    schema_call = AIMessage(
+        content="",
+        tool_calls=[{"id": "schema-invalid", "name": "prepare_deck_build", "args": invalid_args}],
     )
+    service_call = AIMessage(
+        content="",
+        tool_calls=[{"id": "service-initial", "name": "prepare_deck_build", "args": valid_args}],
+    )
+    repaired_call = AIMessage(
+        content="",
+        tool_calls=[{"id": "service-repaired", "name": "prepare_deck_build", "args": repaired_args}],
+    )
+    model = _PrepareSequenceModel([schema_call, service_call, repaired_call] if schema_first else [service_call, schema_call, repaired_call])
     monkeypatch.setattr(BuilderArtifactMiddleware, "_upload_fallback_and_fire", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        BuilderArtifactMiddleware,
+        "_attach_pptx_canvas_preview",
+        staticmethod(lambda artifact, _state: artifact),
+    )
+    monkeypatch.setattr(
+        artifact_module,
+        "_apply_visual_missing_quality_metadata",
+        lambda artifact, _state: artifact,
+    )
     with monkeypatch.context() as patch_context:
-        service = type("Service", (), {"prepare_and_build": lambda self, **kwargs: _RejectedDeckResult()})()
         # Keep the decorated production tool and replace only its service boundary.
         patch_context.setattr(
             "deerflow.sophia.tools.prepare_deck_build.DeckBuildService",
-            lambda **kwargs: service,
+            lambda **kwargs: _SequenceService(),
         )
         agent = create_agent(
             model=model,
@@ -306,7 +367,7 @@ def test_schema_repair_then_service_failure_exhausts_global_retry(
                 "delegation_context": {"task_type": "presentation", "task": "Build a PPTX"},
                 "allow_web_research": False,
                 "thread_data": {
-                    "outputs_path": str(tmp_path / "outputs"),
+                    "outputs_path": str(outputs),
                     "workspace_path": str(tmp_path / "workspace"),
                 },
             },
@@ -314,15 +375,24 @@ def test_schema_repair_then_service_failure_exhausts_global_retry(
         )
 
     artifact = result["builder_result"]
-    assert artifact["failure_code"] == "deck_prepare_retry_exhausted"
-    assert artifact["root_failure_code"] == "deck_prepare_argument_invalid"
-    assert artifact["last_prepare_failure_code"] == "deck_slide_html_invalid"
-    assert artifact["prepare_emitted_call_count"] == 2
-    assert artifact["prepare_execution_count"] == 2
-    assert artifact["prepare_service_call_count"] == 1
-    assert artifact["prepare_result_count"] == 2
+    assert artifact["status"] == "completed"
+    assert artifact["artifact_path"] == "/mnt/user-data/outputs/deck.pptx"
+    assert artifact["root_failure_code"] == expected_root_failure
+    assert artifact["last_prepare_failure_code"] is None
+    assert artifact["prepare_call_count"] == 3
+    assert artifact["prepare_emitted_call_count"] == 3
+    assert artifact["prepare_execution_count"] == 3
+    assert artifact["prepare_normalized_call_count"] == 2
+    assert artifact["prepare_schema_failure_count"] == 1
+    assert artifact["prepare_service_call_count"] == 2
+    assert artifact["prepare_service_result_count"] == 2
+    assert artifact["prepare_result_count"] == 3
     assert artifact["prepare_repair_count"] == 1
     assert artifact["prepare_retry_executed"] is True
+    assert len(service_calls) == 2
+    assert service_calls[-1]["deck_title"] == "Runtime Control Repaired"
+    assert result["builder_last_deck_creative_failure"]["failure_code"] == "deck_mechanical_gate_failed"
+    assert model._responses == []
 
 
 def test_retryable_prepare_runs_one_real_retry_then_finalizes(

@@ -1807,8 +1807,11 @@ def test_prepare_deck_build_schema_failure_gets_one_bounded_retry(tmp_path: Path
     diagnostics = command.update["builder_pptx_diagnostics"]
     assert diagnostics["prepare_schema_failure_count"] == 1
     assert diagnostics["prepare_result_count"] == 1
+    assert diagnostics["prepare_repair_count"] == 0
+    assert diagnostics["prepare_retry_executed"] is True
     assert "prepare_service_call_count" not in diagnostics
     assert diagnostics["deck_root_failure_code"] == "deck_prepare_argument_invalid"
+    assert "builder_deck_prepare_repair_attempt_count" not in command.update
 
 
 def test_prepare_schema_retry_recovers_all_size_targets_without_tool_metadata(
@@ -1941,15 +1944,21 @@ def test_prepare_deck_build_second_schema_failure_preserves_root_cause(
     assert artifact["root_failure_code"] == "deck_prepare_argument_invalid"
     assert artifact["root_failure_summary"] == "The first call omitted headline_intent."
     assert artifact["last_prepare_failure_code"] == "deck_prepare_argument_invalid"
-    assert artifact["prepare_repair_count"] == 1
+    assert artifact["prepare_repair_count"] == 0
+    assert artifact["prepare_schema_failure_count"] == 2
+    assert artifact.get("prepare_service_call_count") in {None, 0}
 
 
 def test_third_prepare_call_is_rejected_before_service_execution(tmp_path: Path, monkeypatch) -> None:
     runtime = _runtime(tmp_path / "outputs")
+    runtime.state["builder_deck_prepare_repair_attempt_count"] = 1
+    runtime.state["builder_deck_creative_repair_attempt_count"] = 1
     runtime.state["builder_pptx_diagnostics"] = {
         "prepare_emitted_call_count": 3,
         "prepare_call_count": 3,
-        "prepare_service_result_count": 2,
+        "prepare_service_result_count": 1,
+        "prepare_repair_count": 1,
+        "prepare_retry_executed": True,
         "deck_root_failure_code": "deck_creative_plan_invalid",
         "deck_root_failure_summary": "The first plan failed critique validation.",
     }
@@ -1967,6 +1976,141 @@ def test_third_prepare_call_is_rejected_before_service_execution(tmp_path: Path,
     assert command.update["builder_result"]["failure_code"] == "deck_prepare_retry_exhausted"
     assert command.update["builder_result"]["root_failure_code"] == "deck_creative_plan_invalid"
     assert "prepare_call_count" not in command.update["builder_pptx_diagnostics"]
+
+
+def test_third_prepare_call_after_schema_failure_is_allowed_for_quality_repair(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state.update(
+        {
+            "builder_deck_prepare_repair_attempt_count": 1,
+            "builder_deck_creative_repair_attempt_count": 1,
+            "builder_pptx_diagnostics": {
+                "prepare_emitted_call_count": 3,
+                "prepare_call_count": 3,
+                "prepare_schema_failure_count": 1,
+                "prepare_service_result_count": 1,
+                "prepare_repair_count": 1,
+                "prepare_retry_executed": True,
+            },
+        }
+    )
+    request = SimpleNamespace(
+        tool_call={"id": "tc-third", "name": "prepare_deck_build", "args": {}},
+        state=runtime.state,
+        runtime=runtime,
+    )
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_exhausted_command(request)
+
+    assert command is None
+
+
+def test_fourth_prepare_call_is_rejected_after_both_corrections(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state.update(
+        {
+            "builder_deck_prepare_repair_attempt_count": 1,
+            "builder_deck_creative_repair_attempt_count": 1,
+            "builder_pptx_diagnostics": {
+                "prepare_emitted_call_count": 4,
+                "prepare_call_count": 4,
+                "prepare_schema_failure_count": 1,
+                "prepare_service_result_count": 1,
+                "prepare_repair_count": 1,
+                "prepare_retry_executed": True,
+                "deck_root_failure_code": "deck_prepare_argument_invalid",
+                "deck_root_failure_summary": "The first call failed typed validation.",
+            },
+        }
+    )
+    request = SimpleNamespace(
+        tool_call={"id": "tc-fourth", "name": "prepare_deck_build", "args": {}},
+        state=runtime.state,
+        runtime=runtime,
+    )
+    monkeypatch.setattr(
+        BuilderArtifactMiddleware,
+        "_upload_fallback_and_fire",
+        lambda *args, **kwargs: None,
+    )
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_exhausted_command(request)
+
+    assert command is not None
+    assert command.goto == "end"
+    artifact = command.update["builder_result"]
+    assert artifact["failure_code"] == "deck_prepare_retry_exhausted"
+    assert artifact["root_failure_code"] == "deck_prepare_argument_invalid"
+
+
+def test_second_service_result_is_rejected_after_quality_budget_is_spent(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state.update(
+        {
+            "builder_deck_prepare_repair_attempt_count": 1,
+            "builder_deck_creative_repair_attempt_count": 1,
+            "builder_pptx_diagnostics": {
+                "prepare_emitted_call_count": 3,
+                "prepare_call_count": 3,
+                "prepare_schema_failure_count": 1,
+                "prepare_service_result_count": 2,
+                "prepare_repair_count": 1,
+                "prepare_retry_executed": True,
+            },
+        }
+    )
+    request = SimpleNamespace(
+        tool_call={"id": "tc-after-service-cap", "name": "prepare_deck_build", "args": {}},
+        state=runtime.state,
+        runtime=runtime,
+    )
+    monkeypatch.setattr(
+        BuilderArtifactMiddleware,
+        "_upload_fallback_and_fire",
+        lambda *args, **kwargs: None,
+    )
+
+    command = BuilderArtifactMiddleware()._prepare_deck_build_exhausted_command(request)
+
+    assert command is not None
+    assert command.goto == "end"
+    assert command.update["builder_result"]["failure_code"] == "deck_prepare_retry_exhausted"
+
+
+def test_legacy_schema_only_retry_state_does_not_consume_quality_repair() -> None:
+    state = {
+        "builder_deck_prepare_repair_attempt_count": 1,
+        "builder_pptx_diagnostics": {
+            "prepare_schema_failure_count": 1,
+            "prepare_repair_count": 1,
+            "prepare_retry_executed": True,
+        },
+    }
+
+    repair_count = BuilderArtifactMiddleware._prepare_repair_attempt_count(state)
+
+    assert repair_count == 0
+
+
+def test_legacy_service_retry_state_still_consumes_quality_repair() -> None:
+    state = {
+        "builder_pptx_diagnostics": {
+            "prepare_repair_count": 1,
+            "prepare_retry_executed": True,
+        },
+    }
+
+    repair_count = BuilderArtifactMiddleware._prepare_repair_attempt_count(state)
+
+    assert repair_count == 1
 
 
 def test_parallel_prepare_calls_are_rejected_before_service_execution(tmp_path: Path, monkeypatch) -> None:
