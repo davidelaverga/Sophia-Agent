@@ -55,6 +55,7 @@ class CapturingClient:
         self.create_attempts: list[dict[str, Any]] = []
         self.update_attempts: list[dict[str, Any]] = []
         self.read_attempts: list[UUID] = []
+        self.list_attempts: list[tuple[UUID, ...]] = []
         self.project_attempts: list[str] = []
         self.flush_attempts: list[float | None] = []
         self.stored_runs: dict[UUID, SimpleNamespace] = {}
@@ -65,6 +66,7 @@ class CapturingClient:
         self.missing_projects: set[str] = set()
         self.flush_error: BaseException | None = None
         self.on_flush: Any = None
+        self.on_list: Any = None
 
     @staticmethod
     def project_id(project_name: str) -> UUID:
@@ -83,6 +85,23 @@ class CapturingClient:
         if normalized not in self.stored_runs:
             raise LangSmithNotFoundError("private run lookup response")
         return deepcopy(self.stored_runs[normalized])
+
+    def list_runs(
+        self,
+        *,
+        project_id: UUID,
+        run_ids: tuple[UUID, ...],
+        select: tuple[str, ...],
+        limit: int,
+    ) -> Any:
+        assert isinstance(project_id, UUID)
+        assert {"id", "inputs", "outputs", "extra", "s3_urls"}.issubset(select)
+        normalized = tuple(UUID(str(run_id)) for run_id in run_ids)
+        assert limit == len(normalized)
+        self.list_attempts.append(normalized)
+        if self.on_list is not None:
+            self.on_list(self)
+        return iter(deepcopy(self.stored_runs[run_id]) for run_id in normalized if run_id in self.stored_runs)
 
     def create_run(self, **kwargs: Any) -> None:
         self.create_attempts.append(dict(kwargs))
@@ -579,7 +598,8 @@ def test_full_new_emission_uses_safe_sdk_surfaces_and_exact_remote_readback() ->
     expected_ids = [identity.root_run_id, *(item.run_id for item in identity.operation_run_ids)]
     assert primary.project_attempts == ["dq1-canary"]
     assert primary.flush_attempts == [15.0]
-    assert primary.read_attempts[-9:] == expected_ids
+    assert primary.read_attempts == []
+    assert primary.list_attempts == [tuple(expected_ids), tuple(expected_ids)]
     assert set(primary.stored_runs) == set(expected_ids)
     assert all(primary.stored_runs[run_id].end_time is not None for run_id in expected_ids)
     assert all(set(payload) == {"run_id", "outputs", "error", "end_time"} for payload in primary.update_attempts)
@@ -604,6 +624,8 @@ def test_full_completed_trace_replay_performs_no_duplicate_writes() -> None:
     identity = derive_quality_trace_run_identity(root_input)
     expected_ids = {identity.root_run_id, *(item.run_id for item in identity.operation_run_ids)}
     assert set(client.stored_runs) == expected_ids
+    assert client.read_attempts == []
+    assert len(client.list_attempts) == 4
 
 
 def test_full_trace_accepts_only_langsmith_server_run_depth_and_replays() -> None:
@@ -611,9 +633,7 @@ def test_full_trace_accepts_only_langsmith_server_run_depth_and_replays() -> Non
 
     def inject_run_depth(current: CapturingClient) -> None:
         for remote in current.stored_runs.values():
-            remote.extra["metadata"]["ls_run_depth"] = (
-                0 if remote.parent_run_id is None else 1
-            )
+            remote.extra["metadata"]["ls_run_depth"] = 0 if remote.parent_run_id is None else 1
 
     client.on_flush = inject_run_depth
     root_input = SafeQualityTraceRootInput.model_validate(_root_values())
@@ -640,9 +660,7 @@ def test_langsmith_server_metadata_enrichment_stays_fail_closed(
 
     def mutate_remote(current: CapturingClient) -> None:
         for remote in current.stored_runs.values():
-            remote.extra["metadata"]["ls_run_depth"] = (
-                0 if remote.parent_run_id is None else 1
-            )
+            remote.extra["metadata"]["ls_run_depth"] = 0 if remote.parent_run_id is None else 1
         root_metadata = current.stored_runs[identity.root_run_id].extra["metadata"]
         if mutation == "wrong_depth":
             root_metadata["ls_run_depth"] = 1
@@ -728,7 +746,7 @@ def test_missing_operation_in_post_flush_readback_fails_closed() -> None:
     identity = derive_quality_trace_run_identity(root_input)
     missing_id = identity.operation_run_id("deck.quality.evidence")
     client.on_flush = lambda current: current.stored_runs.pop(missing_id)
-    trace = _trace(root_input, client)
+    trace = _trace(root_input, client, flush_timeout_seconds=0.01)
     _emit_completed_trace(trace)
 
     with pytest.raises(SafeQualityTraceEmissionError) as raised:
@@ -737,6 +755,30 @@ def test_missing_operation_in_post_flush_readback_fails_closed() -> None:
     assert str(raised.value) == "safe quality trace remote state is missing"
     assert raised.value.__cause__ is None
     assert "evidence" not in str(raised.value)
+
+
+def test_post_flush_batch_read_retries_one_incomplete_projection() -> None:
+    client = CapturingClient()
+    root_input = SafeQualityTraceRootInput.model_validate(_root_values())
+    identity = derive_quality_trace_run_identity(root_input)
+    delayed_id = identity.operation_run_id("deck.quality.evidence")
+    delayed: SimpleNamespace | None = None
+
+    def delay_once(current: CapturingClient) -> None:
+        nonlocal delayed
+        if len(current.list_attempts) == 2:
+            delayed = current.stored_runs.pop(delayed_id)
+        elif delayed is not None:
+            current.stored_runs[delayed_id] = delayed
+            delayed = None
+
+    client.on_list = delay_once
+    trace = _trace(root_input, client, flush_timeout_seconds=0.25)
+    _emit_completed_trace(trace)
+    trace.finish(_root_output(trace))
+
+    assert len(client.list_attempts) == 3
+    assert client.read_attempts == []
 
 
 @pytest.mark.parametrize("mutation", ["project", "tree", "output"])

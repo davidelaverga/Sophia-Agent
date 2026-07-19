@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -613,6 +614,22 @@ class SafeQualityTraceEmissionError(RuntimeError):
 
 DEFAULT_QUALITY_TRACE_FLUSH_TIMEOUT_SECONDS = 15.0
 MAX_QUALITY_TRACE_FLUSH_TIMEOUT_SECONDS = 30.0
+_REMOTE_RUN_SELECT = (
+    "id",
+    "name",
+    "run_type",
+    "trace_id",
+    "parent_run_id",
+    "session_id",
+    "inputs",
+    "outputs",
+    "extra",
+    "tags",
+    "events",
+    "error",
+    "end_time",
+    "s3_urls",
+)
 
 
 def sanitize_quality_trace_error(
@@ -681,7 +698,14 @@ class _ExpectedRemoteRun:
 def _required_trace_client(client: object) -> object:
     if client is None:
         raise TypeError("an explicit LangSmith client is required")
-    required_methods = ("create_run", "flush", "read_project", "read_run", "update_run")
+    required_methods = (
+        "create_run",
+        "flush",
+        "list_runs",
+        "read_project",
+        "read_run",
+        "update_run",
+    )
     if any(not callable(getattr(client, method, None)) for method in required_methods):
         raise TypeError("an explicit LangSmith client with read, write, and flush support is required")
     if getattr(client, "_omit_traced_runtime_info", None) is not True:
@@ -727,14 +751,7 @@ def _remote_metadata_matches(
         return False
     depth = metadata.get("ls_run_depth")
     expected_depth = 0 if expected.parent_run_id is None else 1
-    return (
-        type(depth) is int
-        and depth == expected_depth
-        and all(
-            metadata.get(key) == value
-            for key, value in expected.metadata.items()
-        )
-    )
+    return type(depth) is int and depth == expected_depth and all(metadata.get(key) == value for key, value in expected.metadata.items())
 
 
 class SafeQualityOperationSpan:
@@ -829,6 +846,7 @@ class SafeQualityTrace:
         self._expected_runs: dict[UUID, _ExpectedRemoteRun] = {}
         self._expected_outputs: dict[UUID, tuple[dict[str, Any], str | None]] = {}
         self._locally_created_run_ids: set[UUID] = set()
+        self._observed_remote_terminals: dict[UUID, tuple[dict[str, Any], str | None] | None] = {}
         self._pending_root_payload: dict[str, Any] | None = None
         self._pending_root_native_error: str | None = None
         if self._root.parent_run_id is not None:
@@ -845,6 +863,11 @@ class SafeQualityTrace:
             tags=("sophia_deck_quality", "dq1_safe_trace"),
         )
         self._expected_runs[root_expected.run_id] = root_expected
+        all_run_ids = (
+            self._run_identity.root_run_id,
+            *(item.run_id for item in self._run_identity.operation_run_ids),
+        )
+        self._remote_run_cache = self._read_remote_runs(all_run_ids)
         self._root_was_complete = self._ensure_remote_run(self._root, root_expected)
 
     def _read_and_validate_project(self) -> UUID:
@@ -875,6 +898,48 @@ class SafeQualityTrace:
         if read_failed:
             raise SafeQualityTraceEmissionError("safe quality trace remote read failed") from None
         return remote
+
+    def _read_remote_runs(self, run_ids: Sequence[UUID]) -> dict[UUID, object]:
+        """Read the exact deterministic tree in one bounded LangSmith request."""
+
+        requested = tuple(run_ids)
+        if not requested or len(requested) > 1 + len(REQUIRED_QUALITY_TRACE_OPERATIONS):
+            raise SafeQualityTraceEmissionError("safe quality trace readback coverage is invalid")
+        remote_runs: list[object] | None = None
+        read_failed = False
+        try:
+            remote_runs = list(
+                self._client.list_runs(
+                    project_id=self._project_id,
+                    run_ids=requested,
+                    select=_REMOTE_RUN_SELECT,
+                    limit=len(requested),
+                )
+            )
+        except Exception:
+            read_failed = True
+        if read_failed or remote_runs is None:
+            raise SafeQualityTraceEmissionError("safe quality trace remote read failed") from None
+        result: dict[UUID, object] = {}
+        requested_ids = set(requested)
+        for remote in remote_runs:
+            run_id = _safe_remote_id(getattr(remote, "id", None))
+            if run_id is None or run_id not in requested_ids or run_id in result:
+                raise SafeQualityTraceEmissionError("safe quality trace remote state is invalid") from None
+            try:
+                if getattr(remote, "attachments", None) or getattr(remote, "events", None):
+                    raise ValueError
+                extra = getattr(remote, "extra", None)
+                metadata = extra.get("metadata") if isinstance(extra, Mapping) else None
+                _reject_unsafe_trace_value(getattr(remote, "inputs", None))
+                _reject_unsafe_trace_value(getattr(remote, "outputs", None))
+                _reject_unsafe_trace_value(metadata)
+                _reject_unsafe_trace_value(getattr(remote, "tags", None))
+                _reject_unsafe_trace_value(getattr(remote, "error", None), field_name="error")
+            except Exception:
+                raise SafeQualityTraceEmissionError("safe quality trace remote state is invalid") from None
+            result[run_id] = remote
+        return result
 
     def _validate_remote_structure(self, remote: object, expected: _ExpectedRemoteRun) -> bool | None:
         try:
@@ -910,9 +975,19 @@ class SafeQualityTrace:
         *,
         allow_create: bool = True,
     ) -> bool:
-        remote = self._read_remote_run(expected.run_id)
+        remote = self._remote_run_cache.pop(expected.run_id, None)
         if remote is not None:
             remote_state = self._validate_remote_structure(remote, expected)
+            if remote_state:
+                raw_outputs = getattr(remote, "outputs", None)
+                if not isinstance(raw_outputs, Mapping):
+                    raise SafeQualityTraceEmissionError("safe quality trace remote state is invalid") from None
+                self._observed_remote_terminals[expected.run_id] = (
+                    dict(raw_outputs),
+                    getattr(remote, "error", None),
+                )
+            else:
+                self._observed_remote_terminals[expected.run_id] = None
             del remote
             if remote_state is None:
                 raise SafeQualityTraceEmissionError("safe quality trace remote state is invalid") from None
@@ -930,6 +1005,16 @@ class SafeQualityTrace:
                 message = "safe quality trace creation failed" if expected.parent_run_id is None else "safe quality operation trace creation failed"
                 raise SafeQualityTraceEmissionError(message) from None
             remote_state = self._validate_remote_structure(remote, expected)
+            if remote_state:
+                raw_outputs = getattr(remote, "outputs", None)
+                if not isinstance(raw_outputs, Mapping):
+                    raise SafeQualityTraceEmissionError("safe quality trace remote state is invalid") from None
+                self._observed_remote_terminals[expected.run_id] = (
+                    dict(raw_outputs),
+                    getattr(remote, "error", None),
+                )
+            else:
+                self._observed_remote_terminals[expected.run_id] = None
             del remote
             if remote_state is None:
                 raise SafeQualityTraceEmissionError("safe quality trace remote state is invalid") from None
@@ -947,16 +1032,11 @@ class SafeQualityTrace:
         self._expected_outputs[run_id] = desired
 
         if run_id not in self._locally_created_run_ids:
-            remote = self._read_remote_run(run_id)
-            if remote is None:
+            if run_id not in self._observed_remote_terminals:
                 raise SafeQualityTraceEmissionError("safe quality trace remote state is missing") from None
-            remote_state = self._validate_remote_structure(remote, expected)
-            terminal_matches = getattr(remote, "outputs", None) == outputs and getattr(remote, "error", None) == native_error
-            del remote
-            if remote_state is None:
-                raise SafeQualityTraceEmissionError("safe quality trace remote state is invalid") from None
-            if remote_state:
-                if not terminal_matches:
+            observed_terminal = self._observed_remote_terminals[run_id]
+            if observed_terminal is not None:
+                if observed_terminal != desired:
                     raise SafeQualityTraceEmissionError("safe quality trace remote terminal state is invalid") from None
                 return
 
@@ -998,18 +1078,37 @@ class SafeQualityTrace:
             raise SafeQualityTraceEmissionError("safe quality trace readback coverage is invalid")
         if set(self._expected_outputs) != set(self._expected_runs):
             raise SafeQualityTraceEmissionError("safe quality trace readback coverage is invalid")
-        for run_id, expected in self._expected_runs.items():
-            remote = self._read_remote_run(run_id)
-            if remote is None:
+        deadline = time.monotonic() + self._flush_timeout_seconds
+        retry_delay = 0.05
+        while True:
+            try:
+                remote_runs = self._read_remote_runs(tuple(self._expected_runs))
+            except SafeQualityTraceEmissionError as exc:
+                if str(exc) != "safe quality trace remote read failed" or time.monotonic() >= deadline:
+                    raise
+                time.sleep(min(retry_delay, max(0.0, deadline - time.monotonic())))
+                retry_delay = min(retry_delay * 2, 1.0)
+                continue
+            incomplete = set(remote_runs) != set(self._expected_runs)
+            if not incomplete:
+                for run_id, expected in self._expected_runs.items():
+                    remote = remote_runs[run_id]
+                    remote_state = self._validate_remote_structure(remote, expected)
+                    outputs, native_error = self._expected_outputs[run_id]
+                    terminal_matches = getattr(remote, "outputs", None) == outputs and getattr(remote, "error", None) == native_error
+                    if remote_state is None:
+                        raise SafeQualityTraceEmissionError("safe quality trace remote state is invalid") from None
+                    if remote_state is False:
+                        incomplete = True
+                        continue
+                    if not terminal_matches:
+                        raise SafeQualityTraceEmissionError("safe quality trace remote terminal state is invalid") from None
+            if not incomplete:
+                return
+            if time.monotonic() >= deadline:
                 raise SafeQualityTraceEmissionError("safe quality trace remote state is missing") from None
-            remote_state = self._validate_remote_structure(remote, expected)
-            outputs, native_error = self._expected_outputs[run_id]
-            terminal_matches = getattr(remote, "outputs", None) == outputs and getattr(remote, "error", None) == native_error
-            del remote
-            if remote_state is not True:
-                raise SafeQualityTraceEmissionError("safe quality trace remote state is invalid") from None
-            if not terminal_matches:
-                raise SafeQualityTraceEmissionError("safe quality trace remote terminal state is invalid") from None
+            time.sleep(min(retry_delay, max(0.0, deadline - time.monotonic())))
+            retry_delay = min(retry_delay * 2, 1.0)
 
     @property
     def run_id(self) -> str:
