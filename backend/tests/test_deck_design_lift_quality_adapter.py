@@ -68,10 +68,11 @@ from deerflow.sophia.storage.supabase_artifact_store import (
 
 NOW = datetime(2026, 7, 17, 12, 0, tzinfo=UTC)
 USER_ID = "canary-user"
-THREAD_ID = "thread-0001"
+THREAD_ID = "parent-thread-0001"
+OWNER_THREAD_ID = "builder-thread-0001"
 BUILD_ID = "build-0001"
 LOGICAL_ID = "artifact-0001"
-TASK_ID = "task-0001"
+TASK_ID = OWNER_THREAD_ID
 BUILDER_RUN_ID = "builder-run-0001"
 BUILDER_TRACE_ID = "builder-trace-0001"
 SLIDE_SELECTORS = ("slide:1", "slide:2", "slide:3", "slide:4")
@@ -242,7 +243,7 @@ def _fixture(
         manifest_revision=2,
         artifact_path=artifact_path,
         artifact_hash=artifact_hash,
-        storage_object_path=(f"artifacts/{USER_ID}/{THREAD_ID}/foundation/.builder/builds/{BUILD_ID}/artifacts/{artifact_version_id}/psi-deck.pptx"),
+        storage_object_path=(f"artifacts/{USER_ID}/{OWNER_THREAD_ID}/foundation/.builder/builds/{BUILD_ID}/artifacts/{artifact_version_id}/psi-deck.pptx"),
         verified=True,
         created_at=artifact_created_at.isoformat(),
     )
@@ -683,7 +684,7 @@ def _fixture(
         manifest_revision=artifact.manifest_revision,
         build_id=BUILD_ID,
         user_id=USER_ID,
-        thread_id=THREAD_ID,
+        thread_id=OWNER_THREAD_ID,
         format="pptx",
         status="complete",
         logical_artifact_id=LOGICAL_ID,
@@ -950,6 +951,11 @@ async def test_candidate_rejects_a_run_requested_before_candidate_creation() -> 
     [
         ({"user_id": "other-user"}, {}, "quality_run_identity_mismatch"),
         ({"artifact_hash": "f" * 64}, {}, "quality_run_identity_mismatch"),
+        (
+            {"thread_id": "other-parent", "task_id": "other-builder"},
+            {},
+            "quality_run_identity_mismatch",
+        ),
         ({}, {"manifest_revision": 3}, "artifact_manifest_identity_mismatch"),
     ],
 )

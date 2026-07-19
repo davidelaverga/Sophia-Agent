@@ -254,7 +254,7 @@ def _validate_quality_snapshot(
         or row.instrument_identity_hash != request.program.instrument_hash
         or row.rubric_version != request.program.rubric_version
         or row.user_id != request.user_id
-        or row.thread_id != request.thread_id
+        or request.thread_id not in {row.thread_id, row.task_id}
         or row.build_id != request.build_id
         or row.artifact_version_id != request.initial_artifact_version_id
         or row.manifest_revision != request.program.initial_manifest_revision
@@ -267,12 +267,15 @@ def _validate_quality_snapshot(
         or evidence_manifest.snapshot_id != row.quality_run_id
         or evidence_manifest.build_id != request.build_id
         or evidence_manifest.user_id != request.user_id
-        or evidence_manifest.thread_id != request.thread_id
+        or evidence_manifest.task_id != row.task_id
+        or evidence_manifest.thread_id != row.thread_id
+        or bundle.thread_id != row.thread_id
         or evidence_manifest.artifact_version_id != request.initial_artifact_version_id
         or evidence_manifest.artifact_manifest_revision != request.program.initial_manifest_revision
         or snapshot.campaign_id != "DQ-1"
         or snapshot.build_id != request.build_id
         or snapshot.user_id != request.user_id
+        or snapshot.task_id != row.task_id
         or snapshot.logical_artifact_id != manifest.logical_artifact_id
         or snapshot.artifact_version_id != request.initial_artifact_version_id
         or snapshot.manifest_revision != request.program.initial_manifest_revision

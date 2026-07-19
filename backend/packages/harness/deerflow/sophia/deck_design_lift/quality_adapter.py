@@ -706,7 +706,13 @@ class DurableDeckQualityEvidenceAdapter:
             or row.campaign_id != _DQ1_CAMPAIGN_ID
             or row.scope_kind != "canary"
             or row.user_id != manifest.user_id
-            or row.thread_id != manifest.thread_id
+            # Normal builder completion publishes DQ-1 under the parent
+            # companion thread while ``task_id`` is the builder thread that
+            # owns the foundation manifest. Legacy/direct publications may
+            # already be builder-thread scoped. Require one authenticated
+            # completion identity to own the manifest; row.thread_id remains
+            # bound to the immutable evidence objects below.
+            or manifest.thread_id not in {row.thread_id, row.task_id}
             or row.build_id != artifact.build_id
             or row.logical_artifact_id != artifact.logical_artifact_id
             or row.artifact_version_id != artifact.version_id

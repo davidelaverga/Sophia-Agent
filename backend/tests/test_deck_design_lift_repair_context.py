@@ -4,7 +4,7 @@ import asyncio
 import hashlib
 import io
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from decimal import Decimal
 from types import SimpleNamespace
 
@@ -70,6 +70,7 @@ from deerflow.sophia.deck_quality.snapshot import (
 
 USER_ID = "canary-user-001"
 THREAD_ID = "thread-canary-001"
+PARENT_THREAD_ID = "parent-thread-canary-001"
 BUILD_ID = "build-psi-001"
 ARTIFACT_ID = "artifact-initial-001"
 LOGICAL_ID = "logical-psi-001"
@@ -292,7 +293,12 @@ def _fixture() -> Fixture:
     manifest_path = f"{object_root}/manifest/manifest-r1.json"
     manifest_bytes = canonical_json_bytes(manifest)
 
-    quality_root = f"{object_root}/quality/{QUALITY_RUN_ID}"
+    quality_object_root = foundation_object_root(
+        user_id=USER_ID,
+        thread_id=PARENT_THREAD_ID,
+        build_id=BUILD_ID,
+    )
+    quality_root = f"{quality_object_root}/quality/{QUALITY_RUN_ID}"
     render_bytes = {selector: _png((20 * index, 30, 40)) for index, selector in enumerate(SELECTORS, start=1)}
     render_paths = {selector: f"{quality_root}/renders/slide-{index:04d}.png" for index, selector in enumerate(SELECTORS, start=1)}
     render_hashes = {selector: hashlib.sha256(render_bytes[selector]).hexdigest() for selector in SELECTORS}
@@ -348,7 +354,7 @@ def _fixture() -> Fixture:
         campaign_id="DQ-1",
         build_id=BUILD_ID,
         user_id=USER_ID,
-        task_id="task-psi-001",
+        task_id=THREAD_ID,
         builder_run_id="builder-run-psi-001",
         parent_builder_trace_id="builder-trace-psi-001",
         logical_artifact_id=LOGICAL_ID,
@@ -377,7 +383,7 @@ def _fixture() -> Fixture:
     evidence_bundle_path = f"{quality_root}/evidence_bundle.json"
     evidence_bundle = SnapshotEvidenceBundle(
         quality_run_id=QUALITY_RUN_ID,
-        thread_id=THREAD_ID,
+        thread_id=PARENT_THREAD_ID,
         artifact=artifact_reference,
         build_record={"build_id": BUILD_ID, "slide_count": 5},
         snapshot=snapshot,
@@ -409,8 +415,8 @@ def _fixture() -> Fixture:
         snapshot_id=QUALITY_RUN_ID,
         build_id=BUILD_ID,
         user_id=USER_ID,
-        thread_id=THREAD_ID,
-        task_id="task-psi-001",
+        thread_id=PARENT_THREAD_ID,
+        task_id=THREAD_ID,
         builder_run_id="builder-run-psi-001",
         parent_builder_trace_id="builder-trace-psi-001",
         logical_artifact_id=LOGICAL_ID,
@@ -463,7 +469,8 @@ def _fixture() -> Fixture:
         instrument_identity_hash=INSTRUMENT_HASH,
         rubric_version=RUBRIC_VERSION,
         user_id=USER_ID,
-        thread_id=THREAD_ID,
+        thread_id=PARENT_THREAD_ID,
+        task_id=THREAD_ID,
         build_id=BUILD_ID,
         artifact_version_id=ARTIFACT_ID,
         manifest_revision=1,
@@ -634,6 +641,35 @@ def test_request_identity_mismatch_stops_before_quality_or_source_reads() -> Non
     assert error.value.code == "context_invalid"
     assert fixture.quality.calls == []
     assert all(path != fixture.source_path for path, _limit in fixture.objects.calls)
+
+
+@pytest.mark.parametrize("kind", ["unrelated_owner", "evidence_parent_mismatch"])
+def test_quality_owner_bridge_fails_closed_on_unrelated_identity(kind: str) -> None:
+    fixture = _fixture()
+    authenticated = fixture.quality.authenticated
+    if kind == "unrelated_owner":
+        authenticated = replace(
+            authenticated,
+            row=authenticated.row.model_copy(
+                update={
+                    "thread_id": "unrelated-parent-thread",
+                    "task_id": "unrelated-builder-thread",
+                }
+            ),
+        )
+    else:
+        authenticated = replace(
+            authenticated,
+            evidence_manifest=authenticated.evidence_manifest.model_copy(
+                update={"thread_id": "different-parent-thread"}
+            ),
+        )
+    fixture.quality.authenticated = authenticated
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(fixture.loader.load(fixture.request))
+
+    assert error.value.code == "context_invalid"
 
 
 @pytest.mark.parametrize("kind", ["source", "render", "skill"])

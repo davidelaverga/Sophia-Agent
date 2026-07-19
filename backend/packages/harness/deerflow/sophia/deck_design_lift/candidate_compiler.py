@@ -276,7 +276,9 @@ def baseline_from_authenticated_snapshot(
             or row.build_id != manifest.build_id
             or snapshot.build_id != manifest.build_id
             or row.user_id != manifest.user_id
-            or row.thread_id != manifest.thread_id
+            or manifest.thread_id not in {row.thread_id, row.task_id}
+            or row.task_id != evidence_manifest.task_id
+            or row.thread_id != evidence_manifest.thread_id
             or row.logical_artifact_id != manifest.logical_artifact_id
             or row.artifact_version_id != manifest.current_artifact_version_id
             or row.manifest_revision != manifest.manifest_revision
@@ -285,7 +287,7 @@ def baseline_from_authenticated_snapshot(
         return DeckCandidateBaseline(
             build_id=row.build_id,
             user_id=row.user_id,
-            thread_id=row.thread_id,
+            thread_id=manifest.thread_id,
             task_id=row.task_id or evidence_manifest.task_id,
             builder_run_id=row.builder_run_id or evidence_manifest.builder_run_id,
             parent_builder_trace_id=(row.parent_builder_trace_id or evidence_manifest.parent_builder_trace_id),

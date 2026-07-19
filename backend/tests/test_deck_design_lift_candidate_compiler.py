@@ -36,6 +36,7 @@ from deerflow.sophia.deck_design_lift.candidate_compiler import (
     DeckCandidateCompilationError,
     DurableCandidateDq1Publisher,
     ProductionDeckCandidateCompiler,
+    baseline_from_authenticated_snapshot,
 )
 from deerflow.sophia.deck_design_lift.materializer import (
     DeckCandidateCompileRequest,
@@ -676,6 +677,100 @@ class _FakeDeckService:
                 "lint_fix_success": True,
                 "lint_residue_count": 0,
             },
+        )
+
+
+def test_authenticated_parent_thread_snapshot_projects_builder_manifest_owner() -> None:
+    instrument = _instrument()
+    expected = _baseline(instrument)
+    manifest = _manifest(_source_values())
+    parent_thread_id = "parent_companion_thread_01"
+    evidence_manifest = SimpleNamespace(
+        quality_run_id=INITIAL_QUALITY_RUN_ID,
+        thread_id=parent_thread_id,
+        task_id=THREAD_ID,
+        selectors=tuple(item.selector for item in expected.renders),
+        render_hashes={item.selector: item.sha256 for item in expected.renders},
+    )
+    authenticated = SimpleNamespace(
+        row=SimpleNamespace(
+            quality_run_id=INITIAL_QUALITY_RUN_ID,
+            build_id=BUILD_ID,
+            user_id=USER_ID,
+            thread_id=parent_thread_id,
+            task_id=THREAD_ID,
+            builder_run_id=expected.builder_run_id,
+            parent_builder_trace_id=expected.parent_builder_trace_id,
+            logical_artifact_id=expected.logical_artifact_id,
+            artifact_version_id=expected.initial_artifact_version_id,
+            manifest_revision=expected.initial_manifest_revision,
+        ),
+        manifest=manifest,
+        evidence_manifest=evidence_manifest,
+        evidence_bundle=SimpleNamespace(
+            build_record=expected.build_record,
+            snapshot=SimpleNamespace(
+                build_id=BUILD_ID,
+                brief=SimpleNamespace(request=expected.task_brief),
+                creative_plan=expected.creative_plan_record,
+                design_plan=expected.design_plan_record,
+                visible_text=expected.visible_text,
+            ),
+        ),
+    )
+
+    projected = baseline_from_authenticated_snapshot(
+        authenticated,
+        instrument=instrument,
+        render_contents={item.selector: item.content for item in expected.renders},
+    )
+
+    assert projected.thread_id == manifest.thread_id == THREAD_ID
+    assert projected.task_id == THREAD_ID
+
+
+def test_authenticated_snapshot_rejects_unrelated_parent_and_task_owner() -> None:
+    instrument = _instrument()
+    expected = _baseline(instrument)
+    manifest = _manifest(_source_values())
+    authenticated = SimpleNamespace(
+        row=SimpleNamespace(
+            quality_run_id=INITIAL_QUALITY_RUN_ID,
+            build_id=BUILD_ID,
+            user_id=USER_ID,
+            thread_id="unrelated_parent_thread_01",
+            task_id="unrelated_builder_thread_01",
+            builder_run_id=expected.builder_run_id,
+            parent_builder_trace_id=expected.parent_builder_trace_id,
+            logical_artifact_id=expected.logical_artifact_id,
+            artifact_version_id=expected.initial_artifact_version_id,
+            manifest_revision=expected.initial_manifest_revision,
+        ),
+        manifest=manifest,
+        evidence_manifest=SimpleNamespace(
+            quality_run_id=INITIAL_QUALITY_RUN_ID,
+            thread_id="unrelated_parent_thread_01",
+            task_id="unrelated_builder_thread_01",
+            selectors=tuple(item.selector for item in expected.renders),
+            render_hashes={item.selector: item.sha256 for item in expected.renders},
+        ),
+        evidence_bundle=SimpleNamespace(
+            build_record=expected.build_record,
+            snapshot=SimpleNamespace(
+                build_id=BUILD_ID,
+                brief=SimpleNamespace(request=expected.task_brief),
+                creative_plan=expected.creative_plan_record,
+                design_plan=expected.design_plan_record,
+                visible_text=expected.visible_text,
+            ),
+        ),
+    )
+
+    with pytest.raises(DeckCandidateCompilationError, match="baseline_invalid"):
+        baseline_from_authenticated_snapshot(
+            authenticated,
+            instrument=instrument,
+            render_contents={item.selector: item.content for item in expected.renders},
         )
 
 
