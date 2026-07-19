@@ -246,8 +246,9 @@ def test_success_trace_emits_only_exact_ids_hashes_and_metrics() -> None:
         "plan_hash",
     }
     metadata = create["extra"]["metadata"]
-    assert set(metadata) == {*set(create["inputs"]), "operation"}
+    assert set(metadata) == {*set(create["inputs"]), "operation", "ls_run_depth"}
     assert metadata["operation"] == "deck.repair.author"
+    assert metadata["ls_run_depth"] == 0
     assert create["attachments"] == {}
     assert create["events"] == []
     assert create["dangerously_allow_filesystem"] is False

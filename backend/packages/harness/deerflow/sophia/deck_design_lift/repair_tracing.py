@@ -192,6 +192,7 @@ class SafeDeckRepairTraceMetadata(_SafeTraceModel):
 
     schema_version: Literal["deck-repair-safe-trace-metadata/v1"] = "deck-repair-safe-trace-metadata/v1"
     operation: Literal["deck.repair.author"] = "deck.repair.author"
+    ls_run_depth: Literal[0] = 0
     campaign_run_id: SafeIdentifier
     experiment_id: SafeIdentifier
     build_id: SafeIdentifier
@@ -316,6 +317,7 @@ def _safe_model_dump(
 
 def _trace_metadata(trace_input: SafeDeckRepairTraceInput) -> dict[str, Any]:
     metadata = SafeDeckRepairTraceMetadata(
+        ls_run_depth=0,
         campaign_run_id=trace_input.campaign_run_id,
         experiment_id=trace_input.experiment_id,
         build_id=trace_input.build_id,
