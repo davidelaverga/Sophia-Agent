@@ -90,6 +90,8 @@ class DeckQualityDispatchStore(Protocol):
 
     async def unresolved_dispatches(self, *, limit: int = 100) -> tuple[str, ...]: ...
 
+    async def recover_expired_finalizing(self, *, limit: int = 100) -> int: ...
+
     async def finish(
         self,
         lease: QualityRunLease,
@@ -812,6 +814,18 @@ class DeckQualityDispatcher:
         )
 
     async def _refresh_unresolved(self) -> None:
+        recovered = await self._store_call(
+            "recover_expired_finalizing",
+            limit=100,
+        )
+        if (
+            isinstance(recovered, bool)
+            or not isinstance(recovered, int)
+            or not 0 <= recovered <= 100
+        ):
+            raise RuntimeError(
+                "deck quality expired recovery result is invalid"
+            )
         lister = getattr(self._store, "unresolved_dispatches", None)
         if callable(lister):
             persisted = await self._call_maybe_async(lister, limit=100)

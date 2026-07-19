@@ -607,6 +607,12 @@ class QualityRunRecord(_FrozenModel):
         terminal = self.state in {"completed", "failed", "stale"}
         if terminal != (self.finished_at is not None):
             raise ValueError("quality run terminal timestamp is inconsistent")
+        trace_grace_recovered = (
+            self.state in {"failed", "stale"}
+            and self.finished_at is not None
+            and self.finished_at >= self.trace_deadline_at
+            and self.finished_at == self.updated_at
+        )
         if (self.completion_owner is None) != (self.completion_token is None):
             raise ValueError("quality run completion fence is incomplete")
         if self.state == "completed" and self.completion_owner is None:
@@ -626,7 +632,10 @@ class QualityRunRecord(_FrozenModel):
             if self.state in {"failed", "stale"}:
                 if self.pending_terminal_state != self.state:
                     raise ValueError("quality run terminal state conflicts with its precursor")
-                if self.terminal_trace_payload_hash is None:
+                if (
+                    self.terminal_trace_payload_hash is None
+                    and not trace_grace_recovered
+                ):
                     raise ValueError("terminal quality failure is missing its trace payload hash")
         if (self.safe_trace_root_input is None) != (self.safe_trace_root_input_hash is None):
             raise ValueError("quality run safe trace root binding is incomplete")
@@ -654,11 +663,18 @@ class QualityRunRecord(_FrozenModel):
             }
             if any(root.get(key) != expected for key, expected in expected_root_identity.items()):
                 raise ValueError("quality run safe trace root identity is inconsistent")
-        if self.state in {"completed", "failed", "stale"} and self.safe_trace_root_input is None:
+        if (
+            self.state in {"completed", "failed", "stale"}
+            and self.safe_trace_root_input is None
+            and not trace_grace_recovered
+        ):
             raise ValueError("terminal quality run is missing its safe trace root binding")
         if self.state == "finalizing" and not trace_pending and self.safe_trace_root_input is None:
             raise ValueError("prepared quality completion is missing its safe trace root binding")
-        if trace_pending and self.terminal_trace_payload_hash is not None and self.safe_trace_root_input is None:
+        if (
+            self.terminal_trace_payload_hash is not None
+            and self.safe_trace_root_input is None
+        ):
             raise ValueError("prepared terminal trace is missing its safe root binding")
         if self.state in {"finalizing", "completed"} and not trace_pending:
             if self.decision_result is None:
@@ -678,7 +694,7 @@ class QualityRunRecord(_FrozenModel):
                 raise ValueError("trace-pending quality run has inconsistent terminal precursor")
         if self.state == "completed" and self.stage is not QualityRunStage.PERSISTED_AND_TRACED:
             raise ValueError("completed quality run is not persisted and traced")
-        if terminal:
+        if terminal and not trace_grace_recovered:
             _completion_trace_ids(self.trace_ids)
         expected_input_path = _expected_input_manifest_path(
             user_id=self.user_id,
@@ -797,6 +813,7 @@ class SupabaseDeckQualityRunRpcClient:
             "/rpc/sophia_claim_deck_quality_shadow_runs",
             "/rpc/sophia_begin_deck_quality_shadow_dispatch",
             "/rpc/sophia_resolve_deck_quality_shadow_dispatch",
+            "/rpc/sophia_recover_expired_deck_quality_shadow_runs",
             "/rpc/sophia_list_unresolved_deck_quality_shadow_dispatches",
             "/rpc/sophia_renew_deck_quality_shadow_lease",
             "/rpc/sophia_release_deck_quality_shadow_lease",
@@ -1015,6 +1032,23 @@ class SupabaseDeckQualityRunStore:
                 "deck quality unresolved dispatch response contains duplicates"
             )
         return tuple(quality_run_ids)
+
+    async def recover_expired_finalizing(self, *, limit: int = 100) -> int:
+        if not 1 <= limit <= 100:
+            raise ValueError("expired quality recovery limit is invalid")
+        raw = await self._rpc.call(
+            "sophia_recover_expired_deck_quality_shadow_runs",
+            {"p_limit": limit},
+        )
+        if (
+            isinstance(raw, bool)
+            or not isinstance(raw, int)
+            or not 0 <= raw <= limit
+        ):
+            raise DeckQualityPersistenceProtocolError(
+                "deck quality expired recovery response is invalid"
+            )
+        return raw
 
     async def release(self, lease: QualityRunLease) -> QualityRunRecord:
         return await self._one("sophia_release_deck_quality_shadow_lease", lease.rpc_payload())

@@ -44,12 +44,18 @@ _DISPATCH_INTENT_MIGRATION = (
     / "migrations"
     / "2026_07_19_sophia_deck_quality_dispatch_intent_fence.sql"
 )
+_TRACE_GRACE_RECOVERY_MIGRATION = (
+    _BACKEND
+    / "migrations"
+    / "2026_07_21_sophia_deck_quality_trace_grace_recovery.sql"
+)
 _MIGRATIONS = (
     _QUALITY_MIGRATION,
     _PUBLICATION_MIGRATION,
     _PUBLICATION_ATOMIC_MIGRATION,
     _PRODUCER_FAILURE_MIGRATION,
     _DISPATCH_INTENT_MIGRATION,
+    _TRACE_GRACE_RECOVERY_MIGRATION,
 )
 _POSTGRES_CONTAINER = os.getenv("DQ1_POSTGRES_CONTAINER")
 
@@ -107,8 +113,7 @@ def _psql(
     return completed
 
 
-@pytest.fixture
-def postgres_db() -> Iterator[str]:
+def _postgres_database(migrations: tuple[Path, ...]) -> Iterator[str]:
     database = f"dq1_it_{uuid.uuid4().hex[:16]}"
     role_sql = """
 DO $$ BEGIN CREATE ROLE anon NOLOGIN; EXCEPTION WHEN duplicate_object THEN NULL; END $$;
@@ -118,7 +123,7 @@ DO $$ BEGIN CREATE ROLE service_role NOLOGIN; EXCEPTION WHEN duplicate_object TH
     _psql("postgres", role_sql)
     _psql("postgres", f'CREATE DATABASE "{database}"')
     try:
-        for migration in _MIGRATIONS:
+        for migration in migrations:
             _psql(database, migration.read_text(), script=True)
         yield database
     finally:
@@ -131,6 +136,16 @@ DO $$ BEGIN CREATE ROLE service_role NOLOGIN; EXCEPTION WHEN duplicate_object TH
             check=False,
         )
         _psql("postgres", f'DROP DATABASE IF EXISTS "{database}"', check=False)
+
+
+@pytest.fixture
+def postgres_db() -> Iterator[str]:
+    yield from _postgres_database(_MIGRATIONS)
+
+
+@pytest.fixture
+def postgres_db_through_dispatch_intent() -> Iterator[str]:
+    yield from _postgres_database(_MIGRATIONS[:-1])
 
 
 def _function_ddl(sql: str, name: str, next_name: str) -> str:
@@ -1225,8 +1240,9 @@ SELECT count(*)
 
 
 def test_dispatch_intent_migration_installs_exact_owned_service_role_contract(
-    postgres_db: str,
+    postgres_db_through_dispatch_intent: str,
 ) -> None:
+    postgres_db = postgres_db_through_dispatch_intent
     signatures = (
         (
             "sophia_begin_deck_quality_shadow_dispatch",
@@ -1308,9 +1324,60 @@ SELECT count(*)
     assert _dispatch_catalog_snapshot(postgres_db) == before_replay
 
 
-def test_dispatch_intent_postflight_rolls_back_drifted_replay(
+def test_trace_grace_recovery_rpc_is_owned_and_service_role_only(
     postgres_db: str,
 ) -> None:
+    signature = (
+        "public.sophia_recover_expired_deck_quality_shadow_runs(integer)"
+    )
+    identity = _psql(
+        postgres_db,
+        f"""
+SELECT
+  procedure.proname,
+  pg_get_userbyid(procedure.proowner),
+  procedure.prosecdef,
+  array_to_string(procedure.proconfig, ',')
+FROM pg_proc AS procedure
+WHERE procedure.oid = '{signature}'::regprocedure;
+""",
+    ).stdout.strip()
+    assert identity == (
+        "sophia_recover_expired_deck_quality_shadow_runs|"
+        "postgres|t|search_path=public"
+    )
+
+    privileges = _psql(
+        postgres_db,
+        f"""
+SELECT
+  has_function_privilege('anon', '{signature}', 'EXECUTE'),
+  has_function_privilege('authenticated', '{signature}', 'EXECUTE'),
+  has_function_privilege('service_role', '{signature}', 'EXECUTE'),
+  has_table_privilege(
+      'service_role',
+      'public.sophia_deck_quality_shadow_runs',
+      'SELECT'
+  );
+""",
+    ).stdout.strip()
+    assert privileges == "f|f|t|f"
+
+    denied = _psql(
+        postgres_db,
+        (
+            "SET ROLE anon; SELECT "
+            "public.sophia_recover_expired_deck_quality_shadow_runs(1);"
+        ),
+        check=False,
+    )
+    assert denied.returncode != 0
+
+
+def test_dispatch_intent_postflight_rolls_back_drifted_replay(
+    postgres_db_through_dispatch_intent: str,
+) -> None:
+    postgres_db = postgres_db_through_dispatch_intent
     migration = _DISPATCH_INTENT_MIGRATION.read_text(encoding="utf-8")
     drifted = migration.replace(
         "'shadow_dispatch_prelaunch'",
@@ -2956,11 +3023,94 @@ WHERE run.quality_run_id = {_sql_literal(grace_id)};
     ).stdout.strip()
     assert after_grace == "finalizing|failed||||"
 
-    terminal_incomplete = _psql(
+    _psql(
+        postgres_db,
+        f"""
+UPDATE public.sophia_deck_quality_shadow_runs
+SET lease_epoch = 1,
+    dispatch_intent_epoch = 1,
+    dispatch_intent_attempt_count = 0,
+    dispatch_intent_token = 'dq1-dispatch:trace-grace-recovery',
+    dispatch_intent_status = 'unresolved',
+    dispatch_intent_at = statement_timestamp()
+WHERE quality_run_id = {_sql_literal(grace_id)};
+""",
+    )
+    unresolved_before = _psql(
+        postgres_db,
+        (
+            "SET ROLE service_role; SELECT quality_run_id FROM "
+            "public.sophia_list_unresolved_deck_quality_shadow_dispatches(100) "
+            f"WHERE quality_run_id = {_sql_literal(grace_id)}; RESET ROLE;"
+        ),
+    ).stdout.strip()
+    assert unresolved_before == grace_id
+
+    recovered_count = _psql(
+        postgres_db,
+        (
+            "SET ROLE service_role; SELECT "
+            "public.sophia_recover_expired_deck_quality_shadow_runs(100); "
+            "RESET ROLE;"
+        ),
+    ).stdout.strip()
+    assert recovered_count == "1"
+    recovered = _psql(
+        postgres_db,
+        (
+            "SELECT state, pending_terminal_state, terminal_trace_payload_hash, "
+            "safe_trace_root_input_hash, lease_owner, "
+            "last_error_code, last_error_stage, "
+            "finished_at >= trace_deadline_at "
+            "FROM public.sophia_deck_quality_shadow_runs "
+            f"WHERE quality_run_id = {_sql_literal(grace_id)};"
+        ),
+    ).stdout.strip()
+    assert recovered == (
+        "failed|failed||||run_deadline_exceeded|run_deadline|t"
+    )
+    assert (
+        _psql(
+            postgres_db,
+            (
+                "SET ROLE service_role; SELECT "
+                "public.sophia_recover_expired_deck_quality_shadow_runs(100); "
+                "SELECT quality_run_id FROM "
+                "public.sophia_list_unresolved_deck_quality_shadow_dispatches(100) "
+                f"WHERE quality_run_id = {_sql_literal(grace_id)}; RESET ROLE;"
+            ),
+        ).stdout.strip()
+        == "0"
+    )
+
+    ordinary_terminal_incomplete = _psql(
         postgres_db,
         """
 SELECT count(*) FROM public.sophia_deck_quality_shadow_runs
 WHERE state IN ('completed', 'failed', 'stale')
+  AND NOT (
+      state IN ('failed', 'stale')
+      AND finished_at >= trace_deadline_at
+  )
+  AND (
+      safe_trace_root_input IS NULL
+      OR safe_trace_root_input_hash IS NULL
+      OR NOT (trace_ids ?& ARRAY[
+          'quality_trace_id', 'quality_root_run_id', 'dispatch_run_id',
+          'snapshot_run_id', 'evidence_run_id', 'blind_visual_run_id',
+          'mechanical_projection_run_id', 'plan_realization_run_id',
+          'adjudicate_run_id', 'shadow_persist_run_id'
+      ])
+);
+""",
+    ).stdout.strip()
+    assert ordinary_terminal_incomplete == "0"
+    recovered_terminal_incomplete = _psql(
+        postgres_db,
+        """
+SELECT count(*) FROM public.sophia_deck_quality_shadow_runs
+WHERE state IN ('failed', 'stale')
+  AND finished_at >= trace_deadline_at
   AND (
       safe_trace_root_input IS NULL
       OR safe_trace_root_input_hash IS NULL
@@ -2973,4 +3123,4 @@ WHERE state IN ('completed', 'failed', 'stale')
   );
 """,
     ).stdout.strip()
-    assert terminal_incomplete == "0"
+    assert recovered_terminal_incomplete == "1"

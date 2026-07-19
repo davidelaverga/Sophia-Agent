@@ -15,12 +15,14 @@ EXPECTED_POOLER_HOST = "aws-1-us-west-1.pooler.supabase.com"
 EXPECTED_POOLER_PORT = 5432
 ADVISORY_LOCK_ID = 4913762560351058
 RESUMABLE_START_MIGRATION = "2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql"
+RECOVERY_START_MIGRATION = "2026_07_21_sophia_deck_quality_trace_grace_recovery.sql"
 MIGRATION_SHA256 = {
     "2026_07_15_sophia_deck_quality_shadow_runs.sql": ("328f10ae75f2f1b0f39523621621abe3802ddf98d660a1c70b69c3b5b64c0dfb"),
     "2026_07_16_sophia_deck_quality_publications.sql": ("52fc6d563bd85bb35ae2c92ffcd9b0a261e896ceeef3dcc8b751cf46557c1635"),
     "2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql": ("f2fb0817f7d7d6d2b42a63ba135a0e46cf521c68c1a5c2b06af2b2367e611d08"),
     "2026_07_18_sophia_deck_quality_producer_failure_signals.sql": ("b52191c224d803e3d7d1ceed8b48b8b7857b0c3d148178c8622ae91a6bd81e66"),
     "2026_07_19_sophia_deck_quality_dispatch_intent_fence.sql": ("7be71d13814d5c9c9753286aeb840dd1d92b406e936a14a265af1bb5d8d1b761"),
+    "2026_07_21_sophia_deck_quality_trace_grace_recovery.sql": ("d8d4facfa2ae33e273a67a7f2e1e1585bec4d7dc0b88aa4b222f953bb42202f5"),
 }
 
 _MIGRATIONS_DIR = Path(__file__).resolve().parents[1] / "migrations"
@@ -51,6 +53,13 @@ _SAFE_MIGRATION_FAILURE_REASONS = {
             "deck_quality_dispatch_intent_environment_invalid",
             "deck_quality_dispatch_intent_unknown_fingerprint",
             "deck_quality_dispatch_intent_postflight_failed",
+        }
+    ),
+    "2026_07_21_sophia_deck_quality_trace_grace_recovery.sql": frozenset(
+        {
+            "deck_quality_trace_grace_recovery_environment_invalid",
+            "deck_quality_trace_grace_recovery_unknown_fingerprint",
+            "deck_quality_trace_grace_recovery_postflight_failed",
         }
     ),
 }
@@ -93,6 +102,41 @@ SELECT
     pg_catalog.to_regprocedure(
         'public.sophia_commit_deck_quality_publication_inputs(text,text,text)'
     ) IS NOT NULL
+"""
+
+_DATABASE_RECOVERY_RESUME_SANITY_SQL = """
+SELECT
+    pg_catalog.to_regclass(
+        'public.sophia_deck_quality_shadow_runs'
+    ) IS NOT NULL,
+    pg_catalog.to_regprocedure(
+        'public.sophia_begin_deck_quality_shadow_dispatch(text,text,bigint,text)'
+    ) IS NOT NULL,
+    pg_catalog.to_regprocedure(
+        'public.sophia_resolve_deck_quality_shadow_dispatch(text,text,text)'
+    ) IS NOT NULL,
+    pg_catalog.to_regprocedure(
+        'public.sophia_list_unresolved_deck_quality_shadow_dispatches(integer)'
+    ) IS NOT NULL,
+    EXISTS (
+        SELECT 1
+          FROM pg_catalog.pg_constraint
+         WHERE conrelid =
+               pg_catalog.to_regclass(
+                   'public.sophia_deck_quality_shadow_runs'
+               )
+           AND conname = 'sophia_deck_quality_dispatch_intent_shape'
+    ),
+    EXISTS (
+        SELECT 1
+          FROM pg_catalog.pg_attribute
+         WHERE attrelid =
+               pg_catalog.to_regclass(
+                   'public.sophia_deck_quality_shadow_runs'
+               )
+           AND attname = 'dispatch_resolved_at'
+           AND NOT attisdropped
+    )
 """
 
 
@@ -169,10 +213,14 @@ def _load_migrations(migrations_dir: Path = _MIGRATIONS_DIR) -> tuple[tuple[str,
 def _select_migrations(migrations: tuple[tuple[str, str], ...], argv: tuple[str, ...]) -> tuple[tuple[str, str], ...]:
     if not argv:
         return migrations
-    if argv != ("--resume-at", RESUMABLE_START_MIGRATION):
+    if len(argv) != 2 or argv[0] != "--resume-at" or argv[1] not in {
+        RESUMABLE_START_MIGRATION,
+        RECOVERY_START_MIGRATION,
+    }:
         raise RunnerError("migration_resume_argument_invalid")
+    resume_at = argv[1]
     start_index = next(
-        (index for index, item in enumerate(migrations) if item[0] == RESUMABLE_START_MIGRATION),
+        (index for index, item in enumerate(migrations) if item[0] == resume_at),
         None,
     )
     if start_index is None:
@@ -245,6 +293,16 @@ def _database_resume_sanity_check(connection: Any) -> None:
         raise RunnerError("database_resume_predecessor_invalid")
 
 
+def _database_recovery_resume_sanity_check(connection: Any) -> None:
+    """Require the dispatch-intent predecessor before 07/21-only resume."""
+
+    with connection.cursor() as cursor:
+        cursor.execute(_DATABASE_RECOVERY_RESUME_SANITY_SQL)
+        row = cursor.fetchone()
+    if not row or len(row) != 6 or not all(value is True for value in row):
+        raise RunnerError("database_recovery_resume_predecessor_invalid")
+
+
 def _apply_migrations(connection: Any, migrations: tuple[tuple[str, str], ...]) -> bool:
     for filename, sql in migrations:
         _log("migration_started", filename=filename)
@@ -298,6 +356,9 @@ def main(argv: tuple[str, ...] = ()) -> int:
             if migrations[0][0] == RESUMABLE_START_MIGRATION:
                 _database_resume_sanity_check(connection)
                 _log("migration_resume_validated", filename=RESUMABLE_START_MIGRATION)
+            elif migrations[0][0] == RECOVERY_START_MIGRATION:
+                _database_recovery_resume_sanity_check(connection)
+                _log("migration_resume_validated", filename=RECOVERY_START_MIGRATION)
             if not _apply_migrations(connection, migrations):
                 return 1
     except RunnerError as exc:

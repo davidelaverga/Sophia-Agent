@@ -534,6 +534,77 @@ class _FakeRpc:
         )
         return [self._copy(row)]
 
+    def sophia_recover_expired_deck_quality_shadow_runs(
+        self,
+        payload: dict[str, object],
+    ) -> int:
+        limit = int(payload["p_limit"])
+        if not 1 <= limit <= 100:
+            raise DeckQualityPersistenceRpcError(
+                "sophia_recover_expired_deck_quality_shadow_runs",
+                status_code=400,
+            )
+        eligible = sorted(
+            (
+                row
+                for row in self.rows.values()
+                if row["state"] == "finalizing"
+                and row["trace_deadline_at"] <= self.now  # type: ignore[operator]
+                and (
+                    row["lease_expires_at"] is None
+                    or row["lease_expires_at"] <= self.now  # type: ignore[operator]
+                )
+                and (
+                    row["pending_terminal_state"] in {"failed", "stale"}
+                    or (
+                        row["pending_terminal_state"] is None
+                        and row["decision_result"] is not None
+                        and row["stage"] == "adjudicated"
+                        and {"decision", "safe_metrics", "run"}.issubset(
+                            row["stage_artifact_hashes"]  # type: ignore[arg-type]
+                        )
+                    )
+                )
+            ),
+            key=lambda row: (
+                row["trace_deadline_at"],
+                row["requested_at"],
+                row["quality_run_id"],
+            ),
+        )
+        for row in eligible[:limit]:
+            precursor = row["pending_terminal_state"] is not None
+            terminal_state = row["pending_terminal_state"] or "failed"
+            row.update(
+                state=terminal_state,
+                pending_terminal_state=terminal_state,
+                next_attempt_at=min(
+                    row["next_attempt_at"],
+                    row["run_deadline_at"],
+                ),
+                lease_owner=None,
+                lease_expires_at=None,
+                claim_token=None,
+                claim_hash=None,
+                error_count=int(row["error_count"]) + int(not precursor),
+                last_error_code=(
+                    row["last_error_code"]
+                    if precursor
+                    else QualityRunErrorCode.QUALITY_PERSISTENCE_ERROR.value
+                ),
+                last_error_stage=(
+                    row["last_error_stage"]
+                    if precursor
+                    else "trace_deadline"
+                ),
+                last_error_at=(
+                    row["last_error_at"] if precursor else self.now
+                ),
+                finished_at=self.now,
+                updated_at=self.now,
+            )
+        return min(len(eligible), limit)
+
     def sophia_list_unresolved_deck_quality_shadow_dispatches(
         self,
         payload: dict[str, object],
@@ -1555,7 +1626,7 @@ def test_deadline_reaper_terminalizes_pending_retry_and_running_rows_without_rec
     anyio.run(scenario)
 
 
-def test_trace_grace_expiry_leaves_a_valid_unleased_nonterminal_precursor() -> None:
+def test_trace_grace_recovery_terminalizes_precursor_and_is_idempotent() -> None:
     async def scenario() -> None:
         rpc = _FakeRpc()
         store = SupabaseDeckQualityRunStore(rpc)
@@ -1565,19 +1636,309 @@ def test_trace_grace_expiry_leaves_a_valid_unleased_nonterminal_precursor() -> N
                 run_deadline_at=rpc.now + timedelta(seconds=10),
             )
         )
-        rpc.advance(131)
-
-        assert await _claim(store, lease_owner="after-trace-grace") == ()
-        precursor = await store.get(requested.quality_run_id)
-        assert precursor is not None
+        rpc.advance(11)
+        rpc._prepare_trace_pending_rows()
+        precursor_row = rpc.rows[requested.quality_run_id]
+        precursor_row.update(
+            lease_epoch=1,
+            dispatch_intent_epoch=1,
+            dispatch_intent_attempt_count=0,
+            dispatch_intent_token="dq1-dispatch:expired-precursor",
+            dispatch_intent_status="unresolved",
+            dispatch_intent_at=rpc.now,
+        )
+        precursor = QualityRunRecord.model_validate(precursor_row)
         assert precursor.state == "finalizing"
         assert precursor.pending_terminal_state == "failed"
-        assert precursor.last_error_code is QualityRunErrorCode.RUN_DEADLINE_EXCEEDED
-        assert precursor.terminal_trace_payload_hash is None
-        assert precursor.safe_trace_root_input is None
-        assert precursor.lease_owner is None
         assert precursor.finished_at is None
-        assert precursor.next_attempt_at == precursor.trace_deadline_at
+        assert await store.unresolved_dispatches() == (
+            requested.quality_run_id,
+        )
+
+        rpc.advance(120)
+        assert await _claim(store, lease_owner="after-trace-grace") == ()
+        assert await store.recover_expired_finalizing() == 1
+        recovered = await store.get(requested.quality_run_id)
+        assert recovered is not None
+        assert recovered.state == "failed"
+        assert recovered.pending_terminal_state == "failed"
+        assert recovered.last_error_code is QualityRunErrorCode.RUN_DEADLINE_EXCEEDED
+        assert recovered.terminal_trace_payload_hash is None
+        assert recovered.safe_trace_root_input is None
+        assert recovered.lease_owner is None
+        assert recovered.finished_at is not None
+        assert recovered.finished_at >= recovered.trace_deadline_at
+        assert recovered.next_attempt_at == recovered.run_deadline_at
+        assert recovered.dispatch_intent_status == "unresolved"
+        assert await store.unresolved_dispatches() == ()
+        assert await store.recover_expired_finalizing() == 0
+
+    anyio.run(scenario)
+
+
+def test_record_trace_grace_exception_is_narrow_and_hash_remains_root_bound() -> None:
+    rpc = _FakeRpc()
+    requested = anyio.run(
+        SupabaseDeckQualityRunStore(rpc).request,
+        _request(
+            artifact_version_id="artifact-version-model-trace-grace",
+            run_deadline_at=rpc.now + timedelta(seconds=10),
+        ),
+    )
+    row = copy.deepcopy(rpc.rows[requested.quality_run_id])
+    row.update(
+        state="failed",
+        pending_terminal_state="failed",
+        error_count=1,
+        last_error_code=QualityRunErrorCode.RUN_DEADLINE_EXCEEDED.value,
+        last_error_stage="run_deadline",
+        last_error_at=row["run_deadline_at"],
+        finished_at=row["run_deadline_at"],
+        next_attempt_at=row["run_deadline_at"],
+    )
+
+    with pytest.raises(ValidationError, match="trace payload hash"):
+        QualityRunRecord.model_validate(row)
+
+    row["finished_at"] = row["trace_deadline_at"]
+    with pytest.raises(ValidationError, match="trace payload hash"):
+        QualityRunRecord.model_validate(row)
+
+    row["updated_at"] = row["trace_deadline_at"]
+    recovered = QualityRunRecord.model_validate(row)
+    assert recovered.state == "failed"
+
+    row["terminal_trace_payload_hash"] = "a" * 64
+    with pytest.raises(ValidationError, match="safe root binding"):
+        QualityRunRecord.model_validate(row)
+
+
+def test_recovery_preserves_three_finalizing_evidence_shapes_and_respects_limit() -> None:
+    async def scenario() -> None:
+        rpc = _FakeRpc()
+        store = SupabaseDeckQualityRunStore(rpc)
+        expired: list[QualityRunRecord] = []
+        for suffix in ("attempt", "coverage", "prepared"):
+            expired.append(
+                await store.request(
+                    _request(
+                        artifact_version_id=f"artifact-version-recovery-{suffix}",
+                        artifact_hash={
+                            "attempt": "a",
+                            "coverage": "b",
+                            "prepared": "c",
+                        }[suffix]
+                        * 64,
+                        run_deadline_at=rpc.now + timedelta(seconds=10),
+                    )
+                )
+            )
+        live = await store.request(
+            _request(
+                artifact_version_id="artifact-version-recovery-live",
+                artifact_hash="d" * 64,
+                run_deadline_at=rpc.now + timedelta(minutes=10),
+            )
+        )
+
+        for index, record in enumerate((*expired, live), start=1):
+            row = rpc.rows[record.quality_run_id]
+            row.update(
+                state="finalizing",
+                attempt_count=min(index, int(row["max_attempts"])),
+                next_attempt_at=row["trace_deadline_at"],
+                lease_owner=None,
+                lease_epoch=index,
+                lease_expires_at=None,
+                claim_token=None,
+                claim_hash=None,
+                dispatch_intent_epoch=index,
+                dispatch_intent_attempt_count=min(
+                    index,
+                    int(row["max_attempts"]),
+                ),
+                dispatch_intent_token=f"dq1-dispatch:recovery-{index}",
+                dispatch_intent_status="unresolved",
+                dispatch_recovery_proof_hash=f"{index:064x}",
+                dispatch_intent_at=rpc.now,
+                dispatch_resolved_at=None,
+                started_at=rpc.now,
+                updated_at=rpc.now,
+            )
+
+        attempt_row = rpc.rows[expired[0].quality_run_id]
+        attempt_row.update(
+            pending_terminal_state="failed",
+            error_count=1,
+            last_error_code=QualityRunErrorCode.ATTEMPT_LIMIT_EXHAUSTED.value,
+            last_error_stage="attempt_limit",
+            last_error_at=rpc.now,
+        )
+
+        coverage_row = rpc.rows[expired[1].quality_run_id]
+        coverage_path = _evidence_path(expired[1])
+        coverage_row.update(
+            stage="snapshot_loaded",
+            stage_rank=10,
+            evidence_manifest_object_path=coverage_path,
+            evidence_manifest_hash="4" * 64,
+            pending_terminal_state="failed",
+            error_count=2,
+            last_error_code=QualityRunErrorCode.COVERAGE_ERROR.value,
+            last_error_stage="snapshot_loaded",
+            last_error_at=rpc.now,
+            safe_metrics={"source_count": 5},
+            trace_ids={"dispatch_run_id": "dispatch-coverage"},
+            stage_artifact_hashes={"source_snapshot": "5" * 64},
+        )
+
+        prepared_row = rpc.rows[expired[2].quality_run_id]
+        prepared_path = _evidence_path(expired[2])
+        root = _trace_root(expired[2])
+        prepared_row.update(
+            stage="adjudicated",
+            stage_rank=60,
+            evidence_manifest_object_path=prepared_path,
+            evidence_manifest_hash="6" * 64,
+            pending_terminal_state=None,
+            decision_result=QualityRunDecision.FAILED_TO_JUDGE.value,
+            decision_failure_codes=["cost_admission_rejected"],
+            decision_weighted_score=Decimal("1.5"),
+            safe_metrics={"judge_calls": 0},
+            trace_ids=_trace_ids("prepared-recovery"),
+            stage_artifact_hashes={
+                "source_snapshot": "7" * 64,
+                "evidence_manifest": "6" * 64,
+                "assessment_a_visual": "8" * 64,
+                "assessment_b_mechanical": "9" * 64,
+                "assessment_c_plan_realization": "a" * 64,
+                "decision": "b" * 64,
+                "safe_metrics": "c" * 64,
+                "run": "d" * 64,
+            },
+            safe_trace_root_input=root,
+            safe_trace_root_input_hash=safe_trace_root_input_hash(root),
+            error_count=2,
+            last_error_code=QualityRunErrorCode.JUDGE_UNAVAILABLE.value,
+            last_error_stage="blind_assessed",
+            last_error_at=rpc.now,
+        )
+
+        live_row = rpc.rows[live.quality_run_id]
+        live_row.update(
+            pending_terminal_state="failed",
+            error_count=1,
+            last_error_code=QualityRunErrorCode.JUDGE_UNAVAILABLE.value,
+            last_error_stage="blind_assessed",
+            last_error_at=rpc.now,
+        )
+
+        for record in (*expired, live):
+            QualityRunRecord.model_validate(rpc.rows[record.quality_run_id])
+
+        preserved_fields = (
+            "stage",
+            "stage_rank",
+            "dispatch_intent_epoch",
+            "dispatch_intent_attempt_count",
+            "dispatch_intent_token",
+            "dispatch_intent_status",
+            "dispatch_recovery_proof_hash",
+            "dispatch_intent_at",
+            "dispatch_resolved_at",
+            "decision_result",
+            "decision_failure_codes",
+            "decision_weighted_score",
+            "safe_metrics",
+            "trace_ids",
+            "stage_artifact_hashes",
+            "evidence_manifest_object_path",
+            "evidence_manifest_hash",
+            "safe_trace_root_input",
+            "safe_trace_root_input_hash",
+            "terminal_trace_payload_hash",
+        )
+        before = {
+            record.quality_run_id: {
+                field: copy.deepcopy(rpc.rows[record.quality_run_id][field])
+                for field in preserved_fields
+            }
+            for record in expired
+        }
+
+        rpc.advance(131)
+        assert await store.recover_expired_finalizing(limit=2) == 2
+        assert await store.recover_expired_finalizing(limit=2) == 1
+        assert await store.recover_expired_finalizing(limit=2) == 0
+
+        for record in expired:
+            recovered = await store.get(record.quality_run_id)
+            assert recovered is not None
+            assert recovered.state == "failed"
+            assert recovered.finished_at == rpc.now
+            assert {
+                field: copy.deepcopy(rpc.rows[record.quality_run_id][field])
+                for field in preserved_fields
+            } == before[record.quality_run_id]
+        prepared = await store.get(expired[2].quality_run_id)
+        assert prepared is not None
+        assert prepared.last_error_code is QualityRunErrorCode.QUALITY_PERSISTENCE_ERROR
+        assert prepared.last_error_stage == "trace_deadline"
+        assert prepared.error_count == 3
+        assert rpc.rows[expired[0].quality_run_id]["last_error_code"] == (
+            QualityRunErrorCode.ATTEMPT_LIMIT_EXHAUSTED.value
+        )
+        assert rpc.rows[expired[1].quality_run_id]["last_error_code"] == (
+            QualityRunErrorCode.COVERAGE_ERROR.value
+        )
+
+        untouched = await store.get(live.quality_run_id)
+        assert untouched is not None
+        assert untouched.state == "finalizing"
+        assert untouched.finished_at is None
+        assert await store.unresolved_dispatches() == (live.quality_run_id,)
+
+        with pytest.raises(ValueError, match="recovery limit"):
+            await store.recover_expired_finalizing(limit=0)
+        with pytest.raises(ValueError, match="recovery limit"):
+            await store.recover_expired_finalizing(limit=101)
+
+    anyio.run(scenario)
+
+
+def test_recovery_scalar_response_is_exact_and_bounded() -> None:
+    class _ResponseRpc:
+        def __init__(self, response: object) -> None:
+            self.response = response
+            self.calls: list[tuple[str, Mapping[str, object]]] = []
+
+        async def call(
+            self,
+            operation: str,
+            payload: Mapping[str, object],
+        ) -> object:
+            self.calls.append((operation, payload))
+            return self.response
+
+    async def scenario() -> None:
+        rpc = _ResponseRpc(2)
+        store = SupabaseDeckQualityRunStore(rpc)
+        assert await store.recover_expired_finalizing(limit=3) == 2
+        assert rpc.calls == [
+            (
+                "sophia_recover_expired_deck_quality_shadow_runs",
+                {"p_limit": 3},
+            )
+        ]
+
+        for invalid in (True, -1, 4, "2", [2], None):
+            with pytest.raises(
+                DeckQualityPersistenceProtocolError,
+                match="recovery response",
+            ):
+                await SupabaseDeckQualityRunStore(
+                    _ResponseRpc(invalid)
+                ).recover_expired_finalizing(limit=3)
 
     anyio.run(scenario)
 

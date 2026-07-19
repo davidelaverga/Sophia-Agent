@@ -46,6 +46,7 @@ def test_migration_allowlist_and_hashes_match_repository_files() -> None:
         "2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql",
         "2026_07_18_sophia_deck_quality_producer_failure_signals.sql",
         "2026_07_19_sophia_deck_quality_dispatch_intent_fence.sql",
+        "2026_07_21_sophia_deck_quality_trace_grace_recovery.sql",
     )
 
     loaded = runner._load_migrations()
@@ -55,11 +56,18 @@ def test_migration_allowlist_and_hashes_match_repository_files() -> None:
     assert all(not sql.rstrip().upper().endswith("COMMIT;") for _filename, sql in loaded)
 
 
-def test_only_atomic_convergence_is_an_allowed_resume_point() -> None:
+def test_only_atomic_convergence_and_recovery_are_allowed_resume_points() -> None:
     loaded = runner._load_migrations()
     selected = runner._select_migrations(loaded, ("--resume-at", runner.RESUMABLE_START_MIGRATION))
+    recovery_only = runner._select_migrations(
+        loaded,
+        ("--resume-at", runner.RECOVERY_START_MIGRATION),
+    )
 
     assert [filename for filename, _sql in selected] == list(runner.MIGRATION_SHA256)[2:]
+    assert [filename for filename, _sql in recovery_only] == [
+        runner.RECOVERY_START_MIGRATION
+    ]
     for argv in (
         ("--resume-at", list(runner.MIGRATION_SHA256)[1]),
         ("--resume-at", list(runner.MIGRATION_SHA256)[3]),
@@ -101,8 +109,13 @@ class FakeCursor:
         if sql in self.connection.fail_sql:
             raise FakeDatabaseError
 
-    def fetchone(self) -> tuple[bool, ...]:
-        if self.last_sql == runner._DATABASE_RESUME_SANITY_SQL:
+    def fetchone(self) -> tuple[bool, ...] | None:
+        if self.last_sql in self.connection.fetchone_by_sql:
+            return self.connection.fetchone_by_sql[self.last_sql]
+        if self.last_sql in {
+            runner._DATABASE_RESUME_SANITY_SQL,
+            runner._DATABASE_RECOVERY_RESUME_SANITY_SQL,
+        }:
             return (True,) * 6
         return (True,) * 14
 
@@ -124,9 +137,15 @@ class FakeTransaction:
 
 
 class FakeConnection:
-    def __init__(self, *, fail_sql: set[str] | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        fail_sql: set[str] | None = None,
+        fetchone_by_sql: dict[str, tuple[bool, ...] | None] | None = None,
+    ) -> None:
         self.executions: list[tuple[str, tuple[int] | None]] = []
         self.fail_sql = fail_sql or set()
+        self.fetchone_by_sql = fetchone_by_sql or {}
         self.transactions_started = 0
         self.transactions_committed = 0
         self.transactions_rolled_back = 0
@@ -178,6 +197,11 @@ def test_connection_failures_emit_only_static_reason_codes(message: str, reason:
             "2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql",
             "provider detail that must not be logged",
             "unknown",
+        ),
+        (
+            "2026_07_21_sophia_deck_quality_trace_grace_recovery.sql",
+            "deck_quality_trace_grace_recovery_postflight_failed",
+            "deck_quality_trace_grace_recovery_postflight_failed",
         ),
         (
             "other.sql",
@@ -255,10 +279,10 @@ def test_main_validates_sanity_then_uses_client_cursor(monkeypatch, capsys: pyte
         "cursor_factory": client_cursor,
     }
     assert connection.executions[0] == (runner._DATABASE_SANITY_SQL, None)
-    assert connection.transactions_started == 5
+    assert connection.transactions_started == 6
     assert json.loads(capsys.readouterr().out.splitlines()[-1]) == {
         "event": "migration_run_succeeded",
-        "migration_count": 5,
+        "migration_count": 6,
     }
 
 
@@ -278,13 +302,75 @@ def test_main_resume_validates_predecessors_and_starts_at_atomic_convergence(mon
         (runner._DATABASE_SANITY_SQL, None),
         (runner._DATABASE_RESUME_SANITY_SQL, None),
     ]
-    assert connection.transactions_started == 3
+    assert connection.transactions_started == 4
     events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
     assert events[0] == {
         "event": "migration_resume_validated",
         "filename": runner.RESUMABLE_START_MIGRATION,
     }
-    assert events[-1] == {"event": "migration_run_succeeded", "migration_count": 3}
+    assert events[-1] == {"event": "migration_run_succeeded", "migration_count": 4}
+
+
+def test_main_recovery_resume_validates_dispatch_predecessor_and_runs_only_recovery(
+    monkeypatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    connection = FakeConnection()
+
+    monkeypatch.setenv("DATABASE_URL", VALID_DATABASE_URL)
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(
+            connect=lambda *_args, **_kwargs: connection,
+            ClientCursor=object(),
+        ),
+    )
+
+    assert runner.main(
+        ("--resume-at", runner.RECOVERY_START_MIGRATION)
+    ) == 0
+
+    assert connection.executions[:2] == [
+        (runner._DATABASE_SANITY_SQL, None),
+        (runner._DATABASE_RECOVERY_RESUME_SANITY_SQL, None),
+    ]
+    assert connection.transactions_started == 1
+    events = [json.loads(line) for line in capsys.readouterr().out.splitlines()]
+    assert events[0] == {
+        "event": "migration_resume_validated",
+        "filename": runner.RECOVERY_START_MIGRATION,
+    }
+    assert events[-1] == {
+        "event": "migration_run_succeeded",
+        "migration_count": 1,
+    }
+
+
+def test_recovery_resume_missing_predecessor_uses_static_failure() -> None:
+    connection = FakeConnection(
+        fetchone_by_sql={
+            runner._DATABASE_RECOVERY_RESUME_SANITY_SQL: (
+                False,
+                False,
+                False,
+                False,
+                False,
+                False,
+            )
+        }
+    )
+
+    with pytest.raises(
+        runner.RunnerError,
+        match="^database_recovery_resume_predecessor_invalid$",
+    ):
+        runner._database_recovery_resume_sanity_check(connection)
+
+    assert "::REGCLASS" not in runner._DATABASE_RECOVERY_RESUME_SANITY_SQL
+    assert runner._DATABASE_RECOVERY_RESUME_SANITY_SQL.count(
+        "pg_catalog.to_regclass("
+    ) == 3
 
 
 def test_main_never_imports_driver_for_invalid_configuration(monkeypatch, capsys: pytest.CaptureFixture[str]) -> None:

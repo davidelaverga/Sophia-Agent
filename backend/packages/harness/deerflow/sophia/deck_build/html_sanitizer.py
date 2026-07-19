@@ -141,6 +141,12 @@ _POSITIVE_TEXT_MEASURE_RE = re.compile(
     re.I,
 )
 _ZERO_MEASURE_RE = re.compile(r"^[+-]?0(?:\.0+)?(?:px|pt|em|rem|%)?$", re.I)
+_POSITION_OFFSET_PROPERTIES = frozenset({"bottom", "inset", "left", "right", "top"})
+_NON_STATIC_POSITION_VALUES = frozenset({"absolute", "fixed", "relative", "sticky"})
+_SIMPLE_POSITION_SELECTOR_RE = re.compile(
+    r"^(?P<tag>\*|[-_a-zA-Z][-_a-zA-Z0-9]*)?"
+    r"(?P<qualifiers>(?:[.#][-_a-zA-Z][-_a-zA-Z0-9]*)*)$"
+)
 
 
 def assemble_compact_slide_html(
@@ -191,6 +197,14 @@ class HtmlSourceValidation:
         return asdict(self)
 
 
+@dataclass(frozen=True)
+class _PositionRule:
+    selector: str
+    value: str
+    important: bool
+    order: int
+
+
 class _HtmlScanner(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
@@ -203,8 +217,12 @@ class _HtmlScanner(HTMLParser):
         self.body_attrs: dict[str, str] = {}
         self.main_attrs: dict[str, str] = {}
         self.source_elements: list[dict[str, Any]] = []
+        self.inline_style_elements: list[dict[str, Any]] = []
+        self.style_blocks: list[dict[str, Any]] = []
         self.in_style = False
         self.in_harness_style = False
+        self.current_style_attrs: dict[str, str] | None = None
+        self.current_style_parts: list[str] = []
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
         clean_tag = tag.lower()
@@ -223,7 +241,11 @@ class _HtmlScanner(HTMLParser):
         if clean_tag == "style":
             self.in_style = True
             self.in_harness_style = attr_map.get("data-deck-harness", "").lower() == "true"
+            self.current_style_attrs = attr_map
+            self.current_style_parts = []
         self._record_source_element(clean_tag, attr_map)
+        if attr_map.get("style", "").strip():
+            self.inline_style_elements.append({"tag": clean_tag, "attrs": attr_map})
 
     def _scan_attributes(
         self,
@@ -269,13 +291,23 @@ class _HtmlScanner(HTMLParser):
             )
 
     def handle_endtag(self, tag: str) -> None:
-        if tag.lower() == "style":
+        clean_tag = tag.lower()
+        if clean_tag == "style":
+            self.style_blocks.append(
+                {
+                    "css": "".join(self.current_style_parts),
+                    "attrs": self.current_style_attrs or {},
+                }
+            )
             self.in_style = False
             self.in_harness_style = False
+            self.current_style_attrs = None
+            self.current_style_parts = []
 
     def handle_data(self, data: str) -> None:
         if self.in_style:
             self.styles.append(data)
+            self.current_style_parts.append(data)
             if not self.in_harness_style:
                 self.author_styles.append(data)
 
@@ -652,6 +684,7 @@ def validate_and_sanitize_slide_html(
     _validate_source_elements(scanner.source_elements, validation)
     _validate_canvas(source, scanner, validation)
     _validate_background(scanner, validation)
+    _validate_position_offsets(scanner.inline_style_elements, scanner.style_blocks, validation)
     _validate_css(scanner.styles, validation)
     _validate_image_refs(validation.image_refs, allowed_asset_refs, validation)
     sanitized = _sanitize_css(source)
@@ -889,6 +922,362 @@ def _validate_css(styles: list[str], validation: HtmlSourceValidation) -> None:
         validation.warnings.append("CSS contains fragile decorative effects that may be sanitized")
     if "position: fixed" in css.lower():
         validation.errors.append("position: fixed overlays are forbidden")
+
+
+def _validate_position_offsets(
+    elements: list[dict[str, Any]],
+    style_blocks: list[dict[str, Any]],
+    validation: HtmlSourceValidation,
+) -> None:
+    """Reject authored offsets that cannot affect a statically positioned element."""
+
+    position_rules, unsupported_rules = _position_rules(style_blocks)
+    for element in elements:
+        attrs = element["attrs"]
+        inline_style = attrs.get("style", "")
+        offset_properties = _active_offset_properties(inline_style)
+        if not offset_properties:
+            continue
+
+        winner = _matching_position_winner(
+            tag=str(element["tag"]),
+            attrs=attrs,
+            inline_style=inline_style,
+            rules=position_rules,
+        )
+        uncertain_override = _has_uncertain_position_override(
+            winner=winner,
+            unsupported_rules=unsupported_rules,
+            tag=str(element["tag"]),
+            attrs=attrs,
+        )
+        if winner is not None and winner[1] in _NON_STATIC_POSITION_VALUES and not uncertain_override:
+            continue
+
+        identifier = _position_element_identifier(str(element["tag"]), attrs)
+        properties = "/".join(sorted(offset_properties))
+        validation.errors.append(
+            "ineffective_position_offset: "
+            f"{identifier} uses {properties} without a non-static position; "
+            "add position:absolute or position:relative to that exact element or its matching class"
+        )
+
+
+def _active_offset_properties(style: str) -> set[str]:
+    winners: dict[str, tuple[str, bool]] = {}
+    for declaration in tinycss2.parse_declaration_list(style, skip_comments=True, skip_whitespace=True):
+        if getattr(declaration, "type", None) != "declaration":
+            continue
+        name = str(declaration.lower_name)
+        important = bool(getattr(declaration, "important", False))
+        if name == "all":
+            value = tinycss2.serialize(declaration.value).strip().lower()
+            reset_value = "auto" if value in {"initial", "revert", "unset"} else "unknown"
+            for property_name in _POSITION_OFFSET_PROPERTIES:
+                _cascade_inline_value(winners, property_name, reset_value, important)
+            continue
+        if name not in _POSITION_OFFSET_PROPERTIES:
+            continue
+        value = tinycss2.serialize(declaration.value).strip().lower()
+        _cascade_inline_value(winners, name, value, important)
+    return {name for name, (value, _important) in winners.items() if value and value != "auto"}
+
+
+def _cascade_inline_value(
+    winners: dict[str, tuple[str, bool]],
+    property_name: str,
+    value: str,
+    important: bool,
+) -> None:
+    current = winners.get(property_name)
+    if current is not None and current[1] and not important:
+        return
+    winners[property_name] = (value, important)
+
+
+def _position_rules(style_blocks: list[dict[str, Any]]) -> tuple[list[_PositionRule], list[_PositionRule]]:
+    rules: list[_PositionRule] = []
+    unsupported: list[_PositionRule] = []
+    order = 0
+    for block in style_blocks:
+        attrs = block.get("attrs") or {}
+        media_query = str(attrs.get("media") or "")
+        if not _media_query_applies_to_screen(media_query):
+            continue
+        parsed = tinycss2.parse_stylesheet(str(block.get("css") or ""), skip_comments=True, skip_whitespace=True)
+        if not _media_query_is_unconditional_screen(media_query):
+            order = _collect_unsupported_position_rules(parsed, unsupported=unsupported, order=order)
+            continue
+        order = _collect_position_rules(parsed, rules=rules, unsupported=unsupported, order=order)
+    return rules, unsupported
+
+
+def _collect_position_rules(
+    nodes: list[object],
+    *,
+    rules: list[_PositionRule],
+    unsupported: list[_PositionRule],
+    order: int,
+) -> int:
+    for rule in nodes:
+        rule_type = getattr(rule, "type", None)
+        if rule_type == "qualified-rule":
+            effects = _position_effect_declarations(rule.content)
+            selectors = _split_selector_groups(rule.prelude)
+            for value, important in effects:
+                for selector in selectors:
+                    target = rules if _position_selector_compounds(selector) is not None else unsupported
+                    target.append(_PositionRule(selector=selector, value=value, important=important, order=order))
+                order += 1
+            continue
+        if rule_type != "at-rule" or not getattr(rule, "content", None):
+            continue
+        nested = tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True)
+        keyword = str(getattr(rule, "lower_at_keyword", ""))
+        if keyword == "media":
+            query = tinycss2.serialize(rule.prelude).strip()
+            if _media_query_is_unconditional_screen(query):
+                order = _collect_position_rules(nested, rules=rules, unsupported=unsupported, order=order)
+            elif _media_query_applies_to_screen(query):
+                order = _collect_unsupported_position_rules(nested, unsupported=unsupported, order=order)
+            continue
+        order = _collect_unsupported_position_rules(nested, unsupported=unsupported, order=order)
+    return order
+
+
+def _collect_unsupported_position_rules(
+    nodes: list[object],
+    *,
+    unsupported: list[_PositionRule],
+    order: int,
+) -> int:
+    for rule in nodes:
+        rule_type = getattr(rule, "type", None)
+        if rule_type == "qualified-rule":
+            for value, important in _position_effect_declarations(rule.content):
+                unsupported.append(_PositionRule(selector="*", value=value, important=important, order=order))
+                order += 1
+            continue
+        if rule_type == "at-rule" and getattr(rule, "content", None):
+            nested = tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True)
+            order = _collect_unsupported_position_rules(nested, unsupported=unsupported, order=order)
+    return order
+
+
+def _position_effect_declarations(tokens: list[object]) -> list[tuple[str, bool]]:
+    effects: list[tuple[str, bool]] = []
+    for declaration in tinycss2.parse_declaration_list(tokens, skip_comments=True, skip_whitespace=True):
+        if getattr(declaration, "type", None) != "declaration":
+            continue
+        name = str(declaration.lower_name)
+        if name not in {"all", "position"}:
+            continue
+        value = tinycss2.serialize(declaration.value).strip().lower()
+        if name == "all":
+            value = "static" if value in {"initial", "revert", "unset"} else "unknown"
+        effects.append((value, bool(getattr(declaration, "important", False))))
+    return effects
+
+
+def _media_query_applies_to_screen(media_query: str) -> bool:
+    if not media_query.strip():
+        return True
+    for query in media_query.split(","):
+        normalized = query.strip().lower()
+        identifiers = re.findall(r"[a-z][a-z0-9_-]*", normalized)
+        negated = bool(identifiers and identifiers[0] == "not")
+        media_type = next((item for item in identifiers if item in {"all", "print", "screen", "speech"}), None)
+        if negated:
+            if re.fullmatch(r"not\s+(?:screen|all)", normalized):
+                continue
+            # `not` negates the whole query. A typed query with any feature
+            # condition can therefore become true on the fixed screen canvas.
+            return True
+        if media_type is None:
+            # A feature-only query, including `not (<feature>)`, can apply to
+            # the fixed screen canvas. Treat it as conditional, never absent.
+            return True
+        if media_type in {"all", "screen"}:
+            return True
+    return False
+
+
+def _media_query_is_unconditional_screen(media_query: str) -> bool:
+    if not media_query.strip():
+        return True
+    return any(
+        re.sub(r"^only\s+", "", query.strip().lower()) in {"all", "screen"}
+        for query in media_query.split(",")
+    )
+
+
+def _split_selector_groups(tokens: list[object]) -> list[str]:
+    groups: list[str] = []
+    current: list[object] = []
+    for token in tokens:
+        if getattr(token, "type", None) == "literal" and getattr(token, "value", None) == ",":
+            selector = tinycss2.serialize(current).strip()
+            if selector:
+                groups.append(selector)
+            current = []
+            continue
+        current.append(token)
+    selector = tinycss2.serialize(current).strip()
+    if selector:
+        groups.append(selector)
+    return groups
+
+
+def _matching_position_winner(
+    *,
+    tag: str,
+    attrs: dict[str, str],
+    inline_style: str,
+    rules: list[_PositionRule],
+) -> tuple[tuple[int, int, int, int, int, int], str, bool] | None:
+    winner: tuple[tuple[int, int, int, int, int, int], str, bool] | None = None
+    for rule in rules:
+        specificity = _position_selector_match(
+            rule.selector,
+            tag=tag,
+            attrs=attrs,
+        )
+        if specificity is None:
+            continue
+        priority = (int(rule.important), 0, *specificity, rule.order)
+        candidate = (priority, rule.value, False)
+        if winner is None or candidate[0] >= winner[0]:
+            winner = candidate
+    inline_order = max((rule.order for rule in rules), default=-1) + 1
+    for value, important in _position_effect_declarations(
+        tinycss2.parse_component_value_list(inline_style)
+    ):
+        priority = (int(important), 1, 0, 0, 0, inline_order)
+        candidate = (priority, value, True)
+        if winner is None or candidate[0] >= winner[0]:
+            winner = candidate
+        inline_order += 1
+    return winner
+
+
+def _position_selector_match(
+    selector: str,
+    *,
+    tag: str,
+    attrs: dict[str, str],
+) -> tuple[int, int, int] | None:
+    compounds = _position_selector_compounds(selector)
+    if compounds is None or not _position_compound_matches(compounds[-1], tag=tag, attrs=attrs):
+        return None
+    match = _SIMPLE_POSITION_SELECTOR_RE.fullmatch(compounds[0])
+    assert match is not None
+    qualifiers = match.group("qualifiers") or ""
+    return (
+        qualifiers.count("#"),
+        qualifiers.count("."),
+        int(match.group("tag") not in {None, "*"}),
+    )
+
+
+def _position_selector_compounds(selector: str) -> list[str] | None:
+    if any(character in selector for character in ">+~[]:"):
+        return None
+    compounds = selector.split()
+    if len(compounds) != 1 or any(_SIMPLE_POSITION_SELECTOR_RE.fullmatch(compound) is None for compound in compounds):
+        return None
+    match = _SIMPLE_POSITION_SELECTOR_RE.fullmatch(compounds[0])
+    if match is None or match.group("tag") == "*":
+        return None
+    return compounds
+
+
+def _position_compound_matches(compound: str, *, tag: str, attrs: dict[str, str]) -> bool:
+    match = _SIMPLE_POSITION_SELECTOR_RE.fullmatch(compound)
+    if match is None:
+        return False
+    expected_tag = (match.group("tag") or "").lower()
+    if expected_tag not in {"", "*", tag}:
+        return False
+    element_id = attrs.get("id", "")
+    classes = set(attrs.get("class", "").split())
+    for prefix, name in re.findall(r"([.#])([-_a-zA-Z][-_a-zA-Z0-9]*)", match.group("qualifiers") or ""):
+        if prefix == "#" and element_id != name:
+            return False
+        if prefix == "." and name not in classes:
+            return False
+    return True
+
+
+def _has_uncertain_position_override(
+    *,
+    winner: tuple[tuple[int, int, int, int, int, int], str, bool] | None,
+    unsupported_rules: list[_PositionRule],
+    tag: str,
+    attrs: dict[str, str],
+) -> bool:
+    potential = [
+        rule
+        for rule in unsupported_rules
+        if _unsupported_position_selector_may_match(rule.selector, tag=tag, attrs=attrs)
+    ]
+    if not potential:
+        return False
+    if winner is None:
+        return True
+    if winner[1] in _NON_STATIC_POSITION_VALUES and all(
+        rule.value in _NON_STATIC_POSITION_VALUES for rule in potential
+    ):
+        return False
+    winner_important = bool(winner[0][0])
+    winner_inline = winner[2]
+    if winner_inline:
+        return not winner_important and any(rule.important for rule in potential)
+    return any(rule.important or not winner_important for rule in potential)
+
+
+def _unsupported_position_selector_may_match(
+    selector: str,
+    *,
+    tag: str,
+    attrs: dict[str, str],
+) -> bool:
+    if selector == "*":
+        return True
+    if ":" in selector or "[" in selector:
+        # Pseudo-class functions and attribute selectors can contain selector
+        # fragments that do not describe the outer target. Without a complete
+        # selector engine, they cannot safely be ruled out as overrides.
+        return True
+    rightmost = re.split(r"[\s>+~]+", selector.strip())[-1]
+    tag_match = re.match(r"^([-_a-zA-Z][-_a-zA-Z0-9]*|\*)", rightmost)
+    if tag_match and tag_match.group(0) not in {"*", tag}:
+        return False
+    ids = re.findall(r"#([-_a-zA-Z][-_a-zA-Z0-9]*)", rightmost)
+    if ids and attrs.get("id", "") not in ids:
+        return False
+    classes = set(re.findall(r"\.([-_a-zA-Z][-_a-zA-Z0-9]*)", rightmost))
+    if classes and not classes.issubset(set(attrs.get("class", "").split())):
+        return False
+    attribute_names = {
+        item.lower()
+        for item in re.findall(r"\[\s*([-_:a-zA-Z][-_:.a-zA-Z0-9]*)", rightmost)
+    }
+    if attribute_names and not attribute_names.issubset(attrs):
+        return False
+    return True
+
+
+def _position_element_identifier(tag: str, attrs: dict[str, str]) -> str:
+    source_id = attrs.get("data-deck-id", "").strip()
+    if source_id:
+        return f"data-deck-id {safe_excerpt(source_id, limit=80)}"
+    element_id = attrs.get("id", "").strip()
+    if element_id:
+        return f"id {safe_excerpt(element_id, limit=80)}"
+    classes = attrs.get("class", "").split()
+    if classes:
+        return f"class {safe_excerpt(classes[0], limit=80)}"
+    return f"<{tag}>"
 
 
 def _validate_source_elements(elements: list[dict[str, Any]], validation: HtmlSourceValidation) -> None:

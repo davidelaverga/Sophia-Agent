@@ -545,6 +545,252 @@ html, body { width: 1920px; height: 1080px; background: #FFFFFF; }
     assert result.valid is True
 
 
+def test_rejects_inline_offsets_without_effective_position() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; } .card { box-sizing: border-box; }",
+        html_body="""
+<div class="card" style="left:120px; top:470px; width:1680px; height:430px"
+     data-deck-id="cover-body" data-deck-role="content">Body</div>
+""",
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert (
+        "ineffective_position_offset: data-deck-id cover-body uses left/top without a non-static position; "
+        "add position:absolute or position:relative to that exact element or its matching class"
+    ) in result.errors
+
+
+def test_accepts_inline_offsets_with_matching_class_position() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=(
+            ".slide-root { background: #101828; } "
+            ".card, .unused { position: absolute; box-sizing: border-box; }"
+        ),
+        html_body='<div class="card" style="left:120px; top:470px">Body</div>',
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+
+
+def test_accepts_inline_offsets_with_inline_position() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; }",
+        html_body='<div style="position:relative; inset-inline-start:120px; top:470px">Body</div>',
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+
+
+def test_inline_static_position_overrides_matching_class_for_offset_validation() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; } .card { position:absolute; }",
+        html_body=(
+            '<div class="card" style="position:static; left:120px" '
+            'data-deck-id="body">Body</div>'
+        ),
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert any("ineffective_position_offset: data-deck-id body uses left" in error for error in result.errors)
+
+
+def test_unrelated_or_descendant_position_rule_does_not_license_inline_offsets() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=(
+            ".slide-root { background: #101828; } "
+            ".other { position:absolute; } .wrapper .card { position:absolute; }"
+        ),
+        html_body='<div class="card" style="left:120px">Body</div>',
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert any("ineffective_position_offset: class card uses left" in error for error in result.errors)
+
+
+def test_later_matching_descendant_rule_can_reset_position_to_static() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=(
+            ".slide-root { background: #101828; } "
+            ".card { position:absolute; } .wrapper .card { position:static; }"
+        ),
+        html_body='<section class="wrapper"><div class="card" style="left:120px">Body</div></section>',
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert any("ineffective_position_offset: class card uses left" in error for error in result.errors)
+
+
+def test_pseudo_class_static_override_cannot_be_ruled_out_by_argument_classes() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=(
+            ".slide-root { background: #101828; } "
+            ".card { position:absolute; } .card:not(.disabled) { position:static; }"
+        ),
+        html_body='<div class="card" style="left:120px">Body</div>',
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert any("ineffective_position_offset: class card uses left" in error for error in result.errors)
+
+
+def test_conditional_negated_feature_static_override_is_conservative() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=(
+            ".slide-root { background: #101828; } .card { position:absolute; } "
+            "@media not (min-width:3000px) { .card { position:static; } }"
+        ),
+        html_body='<div class="card" style="left:120px">Body</div>',
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert any("ineffective_position_offset: class card uses left" in error for error in result.errors)
+
+
+def test_negated_screen_query_with_feature_can_apply_after_whole_query_negation() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=(
+            ".slide-root { background: #101828; } .card { position:absolute; } "
+            "@media not screen and (min-width:3000px) { .card { position:static; } }"
+        ),
+        html_body='<div class="card" style="left:120px">Body</div>',
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert any("ineffective_position_offset: class card uses left" in error for error in result.errors)
+
+
+def test_complex_rules_cannot_make_known_non_static_position_inert() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=(
+            ".slide-root { background: #101828; } .card { position:absolute; } "
+            ".wrapper .card { position:relative; }"
+        ),
+        html_body=(
+            '<section class="wrapper"><div class="card" style="left:120px">'
+            "Body</div></section>"
+        ),
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+
+
+def test_only_screen_position_rule_is_unconditional_for_screen_canvas() -> None:
+    html = """<!doctype html><html><head>
+<style media="only screen">.card { position:absolute; }</style>
+<style>html, body { width:1920px; height:1080px; background:#101828; }</style>
+</head><body><main><div class="card" style="left:120px">Body</div></main></body></html>"""
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+
+
+def test_css_all_reset_invalidates_a_previous_position_rule() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=(
+            ".slide-root { background: #101828; } "
+            ".card { position:absolute; } .card { all:initial; }"
+        ),
+        html_body='<div class="card" style="left:120px">Body</div>',
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert any("ineffective_position_offset: class card uses left" in error for error in result.errors)
+
+
+def test_inline_all_reset_invalidates_a_previous_inline_position() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; }",
+        html_body='<div style="position:absolute; all:initial; left:120px">Body</div>',
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert any("ineffective_position_offset: <div> uses left" in error for error in result.errors)
+
+
+def test_print_only_position_rule_does_not_license_screen_offsets() -> None:
+    html = """<!doctype html><html><head>
+<style media="print">.card { position:absolute; }</style>
+<style>html, body { width:1920px; height:1080px; background:#101828; }</style>
+</head><body><main><div class="card" style="left:120px">Body</div></main></body></html>"""
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert any("ineffective_position_offset: class card uses left" in error for error in result.errors)
+
+
+def test_later_harness_style_position_reset_is_not_ignored() -> None:
+    html = """<!doctype html><html><head>
+<style>html, body { width:1920px; height:1080px; background:#101828; } .card { position:absolute; }</style>
+<style data-deck-harness="true">.card { position:static; }</style>
+</head><body><main><div class="card" style="left:120px">Body</div></main></body></html>"""
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert any("ineffective_position_offset: class card uses left" in error for error in result.errors)
+
+
+def test_complex_attribute_selector_is_not_accepted_as_position_proof() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background:#101828; } [data-x] { position:absolute; }",
+        html_body='<div data-x="true" style="left:120px">Body</div>',
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is False
+    assert any("ineffective_position_offset: <div> uses left" in error for error in result.errors)
+
+
+def test_logical_inset_without_physical_offset_is_outside_narrow_position_contract() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background:#101828; }",
+        html_body='<div style="inset-inline-start:120px; width:400px">Body</div>',
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+
+
+def test_position_offset_validation_ignores_auto_or_absent_offsets() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; } .card { box-sizing:border-box; }",
+        html_body='<div class="card" style="left:auto; width:400px">Body</div>',
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+
+
 def test_compact_background_uses_author_css_after_harness_rule() -> None:
     html = assemble_compact_slide_html(
         deck_stylesheet="main { background: #101828; text-transform: uppercase; }",

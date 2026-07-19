@@ -305,11 +305,13 @@ class FakeStore:
         lose_first_claim_response: bool = False,
         begin_error: Exception | None = None,
         resolve_error: Exception | None = None,
+        recover_error: Exception | None = None,
     ) -> None:
         self.records = records
         self.lose_first_claim_response = lose_first_claim_response
         self.begin_error = begin_error
         self.resolve_error = resolve_error
+        self.recover_error = recover_error
         self.claim_calls: list[dict[str, Any]] = []
         self.retries: list[dict[str, Any]] = []
         self.begin_calls: list[dict[str, Any]] = []
@@ -322,6 +324,9 @@ class FakeStore:
             for record in records
         }
         self.get_calls: list[str] = []
+        self.recover_calls: list[int] = []
+        self.unresolved_calls: list[int] = []
+        self.refresh_events: list[str] = []
 
     async def probe(self) -> None:
         self.probe_count += 1
@@ -451,6 +456,8 @@ class FakeStore:
         return record
 
     async def unresolved_dispatches(self, *, limit: int = 100) -> tuple[str, ...]:
+        self.unresolved_calls.append(limit)
+        self.refresh_events.append("list")
         unresolved = tuple(
             record.quality_run_id
             for record in self.current.values()
@@ -459,6 +466,76 @@ class FakeStore:
             in {"prepared", "unresolved", "reconciled"}
         )
         return unresolved[:limit]
+
+    async def recover_expired_finalizing(self, *, limit: int = 100) -> int:
+        self.recover_calls.append(limit)
+        self.refresh_events.append("recover")
+        if self.recover_error is not None:
+            raise self.recover_error
+        now = datetime.now(UTC)
+        eligible = sorted(
+            (
+                record
+                for record in self.current.values()
+                if record.state == "finalizing"
+                and record.trace_deadline_at <= now
+                and (
+                    record.lease_expires_at is None
+                    or record.lease_expires_at <= now
+                )
+                and (
+                    record.pending_terminal_state in {"failed", "stale"}
+                    or (
+                        record.pending_terminal_state is None
+                        and record.decision_result is not None
+                        and record.stage is QualityRunStage.ADJUDICATED
+                        and {"decision", "safe_metrics", "run"}.issubset(
+                            record.stage_artifact_hashes
+                        )
+                    )
+                )
+            ),
+            key=lambda record: (
+                record.trace_deadline_at,
+                record.requested_at,
+                record.quality_run_id,
+            ),
+        )
+        for record in eligible[:limit]:
+            precursor = record.pending_terminal_state is not None
+            terminal_state = record.pending_terminal_state or "failed"
+            self.current[record.quality_run_id] = QualityRunRecord.model_validate(
+                {
+                    **record.model_dump(mode="python"),
+                    "state": terminal_state,
+                    "pending_terminal_state": terminal_state,
+                    "next_attempt_at": min(
+                        record.next_attempt_at,
+                        record.run_deadline_at,
+                    ),
+                    "lease_owner": None,
+                    "lease_expires_at": None,
+                    "claim_token": None,
+                    "claim_hash": None,
+                    "error_count": record.error_count + int(not precursor),
+                    "last_error_code": (
+                        record.last_error_code
+                        if precursor
+                        else QualityRunErrorCode.QUALITY_PERSISTENCE_ERROR
+                    ),
+                    "last_error_stage": (
+                        record.last_error_stage
+                        if precursor
+                        else "trace_deadline"
+                    ),
+                    "last_error_at": (
+                        record.last_error_at if precursor else now
+                    ),
+                    "finished_at": now,
+                    "updated_at": now,
+                }
+            )
+        return min(len(eligible), limit)
 
     async def retry(self, lease: QualityRunLease, **kwargs: Any) -> QualityRunRecord:
         self.retries.append({"lease": lease, **kwargs})
@@ -1594,6 +1671,209 @@ async def test_terminal_row_resolution_clears_latched_ambiguity() -> None:
 
 
 @pytest.mark.anyio
+async def test_expired_finalizing_dispatch_is_recovered_before_listing_and_restart() -> None:
+    now = datetime.now(UTC)
+    requested_at = now - timedelta(minutes=20)
+    base = _record(
+        attempt_count=5,
+        dispatch_intent_status="unresolved",
+        dispatch_intent_epoch=1,
+        dispatch_intent_attempt_count=5,
+        dispatch_intent_at=requested_at + timedelta(minutes=1),
+    )
+    payload = base.model_dump(mode="python")
+    payload.update(
+        {
+            "state": "finalizing",
+            "requested_at": requested_at,
+            "started_at": requested_at + timedelta(seconds=1),
+            "run_deadline_at": requested_at + timedelta(minutes=15),
+            "trace_deadline_at": requested_at + timedelta(minutes=17),
+            "next_attempt_at": requested_at + timedelta(minutes=17),
+            "lease_owner": None,
+            "lease_expires_at": None,
+            "claim_token": None,
+            "claim_hash": None,
+            "pending_terminal_state": "failed",
+            "last_error_code": QualityRunErrorCode.ATTEMPT_LIMIT_EXHAUSTED,
+            "last_error_stage": "attempt_limit",
+            "last_error_at": requested_at + timedelta(minutes=15),
+        }
+    )
+    expired = QualityRunRecord.model_validate(payload)
+
+    store = FakeStore((expired,))
+    store.records = ()
+    runs = FakeRuns()
+    dispatcher = _dispatcher(store, runs, poll_seconds=0.01)
+    dispatcher.start()
+    try:
+        readiness = await _wait_for_readiness(dispatcher, status="ready")
+    finally:
+        await dispatcher.stop()
+
+    assert readiness["status"] == "ready"
+    recovered = store.current[expired.quality_run_id]
+    assert recovered.state == "failed"
+    assert recovered.finished_at is not None
+    assert recovered.finished_at >= recovered.trace_deadline_at
+    assert store.refresh_events[:2] == ["recover", "list"]
+    assert store.recover_calls
+    assert store.get_calls == []
+    assert runs.create_calls == []
+    assert expired.quality_run_id not in repr(readiness)
+
+    restarted = _dispatcher(store, runs, poll_seconds=0.01)
+    restarted.start()
+    try:
+        restart_readiness = await _wait_for_readiness(
+            restarted,
+            status="ready",
+        )
+    finally:
+        await restarted.stop()
+    assert restart_readiness["status"] == "ready"
+    assert runs.create_calls == []
+
+
+@pytest.mark.anyio
+async def test_recovery_drains_more_than_one_unresolved_page_before_restart_ready() -> None:
+    from deerflow.sophia.deck_quality.idempotency import derive_quality_run_id
+
+    now = datetime.now(UTC)
+    requested_at = now - timedelta(minutes=20)
+    records: list[QualityRunRecord] = []
+    for index in range(101):
+        artifact_version_id = f"artifact-version-expired-{index}"
+        quality_run_id = derive_quality_run_id(
+            artifact_version_id=artifact_version_id,
+            campaign_id="DQ-1",
+            instrument=_instrument(),
+        )
+        payload = _record(
+            attempt_count=5,
+            dispatch_intent_status="unresolved",
+            dispatch_intent_epoch=1,
+            dispatch_intent_attempt_count=5,
+            dispatch_intent_token=f"dq1-dispatch:expired-{index}",
+            dispatch_intent_at=requested_at + timedelta(minutes=1),
+        ).model_dump(mode="python")
+        payload.update(
+            {
+                "quality_run_id": quality_run_id,
+                "artifact_version_id": artifact_version_id,
+                "artifact_hash": f"{index + 1:064x}",
+                "input_manifest_object_path": (
+                    "artifacts/canary-user/thread/foundation/.builder/builds/"
+                    f"build-1/quality/{quality_run_id}/input_bundle/manifest.json"
+                ),
+                "state": "finalizing",
+                "requested_at": requested_at,
+                "started_at": requested_at + timedelta(seconds=1),
+                "run_deadline_at": requested_at + timedelta(minutes=15),
+                "trace_deadline_at": requested_at + timedelta(minutes=17),
+                "next_attempt_at": requested_at + timedelta(minutes=17),
+                "lease_owner": None,
+                "lease_expires_at": None,
+                "claim_token": None,
+                "claim_hash": None,
+                "pending_terminal_state": "failed",
+                "last_error_code": (
+                    QualityRunErrorCode.ATTEMPT_LIMIT_EXHAUSTED
+                ),
+                "last_error_stage": "attempt_limit",
+                "last_error_at": requested_at + timedelta(minutes=15),
+            }
+        )
+        records.append(QualityRunRecord.model_validate(payload))
+
+    store = FakeStore(tuple(records))
+    store.records = ()
+    runs = FakeRuns()
+    dispatcher = _dispatcher(store, runs)
+
+    assert (await dispatcher.run_once()).claimed == 0
+    assert sum(
+        record.state in {"failed", "stale"}
+        for record in store.current.values()
+    ) == 100
+    assert dispatcher._unresolved_counts()["unresolved"] == 1
+
+    assert (await dispatcher.run_once()).claimed == 0
+    assert all(
+        record.state in {"failed", "stale"}
+        for record in store.current.values()
+    )
+    assert dispatcher._unresolved_outcomes == {}
+    assert store.recover_calls[:2] == [100, 100]
+    assert runs.create_calls == []
+
+    restarted = _dispatcher(store, runs, poll_seconds=0.01)
+    restarted.start()
+    try:
+        readiness = await _wait_for_readiness(restarted, status="ready")
+    finally:
+        await restarted.stop()
+    assert readiness["status"] == "ready"
+    assert runs.create_calls == []
+
+
+@pytest.mark.anyio
+async def test_expired_recovery_failure_keeps_dispatcher_degraded() -> None:
+    store = FakeStore((), recover_error=RuntimeError("database unavailable"))
+    dispatcher = _dispatcher(store, FakeRuns(), poll_seconds=0.01)
+
+    dispatcher.start()
+    try:
+        readiness = await _wait_for_readiness(
+            dispatcher,
+            status="degraded",
+            reason="cycle_failed",
+        )
+    finally:
+        await dispatcher.stop()
+
+    assert readiness["error_type"] == "RuntimeError"
+    assert store.recover_calls
+    assert store.unresolved_calls == []
+    assert store.claim_calls == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("invalid", (True, -1, 101, "0", None))
+async def test_invalid_expired_recovery_result_fails_closed_before_listing(
+    invalid: object,
+) -> None:
+    class _InvalidRecoveryStore(FakeStore):
+        async def recover_expired_finalizing(
+            self,
+            *,
+            limit: int = 100,
+        ) -> Any:
+            self.recover_calls.append(limit)
+            self.refresh_events.append("recover")
+            return invalid
+
+    store = _InvalidRecoveryStore(())
+    dispatcher = _dispatcher(store, FakeRuns(), poll_seconds=0.01)
+
+    dispatcher.start()
+    try:
+        readiness = await _wait_for_readiness(
+            dispatcher,
+            status="degraded",
+            reason="cycle_failed",
+        )
+    finally:
+        await dispatcher.stop()
+
+    assert readiness["error_type"] == "RuntimeError"
+    assert store.recover_calls
+    assert store.unresolved_calls == []
+    assert store.claim_calls == []
+
+
+@pytest.mark.anyio
 async def test_rejected_dispatch_latches_content_free_degraded_readiness() -> None:
     record = _record(user_id="ordinary-user")
     store = FakeStore((record,))
@@ -1630,6 +1910,14 @@ async def test_stop_cancels_sync_blocking_claim_without_event_loop_hang() -> Non
 
     class _BlockingSyncStore:
         closed = False
+
+        def recover_expired_finalizing(self, *, limit: int = 100) -> int:
+            assert limit == 100
+            return 0
+
+        def unresolved_dispatches(self, *, limit: int = 100) -> tuple[str, ...]:
+            assert limit == 100
+            return ()
 
         def claim(self, **_kwargs: Any) -> tuple[QualityRunRecord, ...]:
             claim_started.set()
