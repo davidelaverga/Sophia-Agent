@@ -22,6 +22,7 @@ import pytest
 from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder_artifact_module
 from deerflow.sophia import builder_events
 from deerflow.sophia.builder_event_auth import BUILDER_EVENT_HMAC_SECRET_ENV
+from deerflow.sophia.deck_quality import publisher as deck_quality_publisher
 
 _BUILDER_EVENT_SECRET = "builder-event-test-secret-" + "a" * 40
 
@@ -1462,7 +1463,9 @@ def test_exact_canary_is_durable_before_thread_start_and_only_posts_baseline(
     persist_failure.assert_not_called()
 
 
-def test_quality_persistence_exception_still_schedules_identical_baseline() -> None:
+def test_quality_persistence_exception_still_schedules_identical_baseline(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
     baseline = _quality_completion_payload(
         artifact_path="mnt/user-data/outputs/deck.pptx",
         artifact_type="presentation",
@@ -1477,7 +1480,9 @@ def test_quality_persistence_exception_still_schedules_identical_baseline() -> N
 
     def fail_marker(**_kwargs) -> None:
         order.append("failure-marker")
-        raise RuntimeError("storage unavailable")
+        raise deck_quality_publisher.DeckQualityPublicationError(
+            "producer_failure_deadline_exceeded"
+        )
 
     def send_signal(**_kwargs) -> bool:
         order.append("failure-signal")
@@ -1521,7 +1526,9 @@ def test_quality_persistence_exception_still_schedules_identical_baseline() -> N
         ),
         patch(
             "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_bundle",
-            side_effect=RuntimeError("database unavailable"),
+            side_effect=deck_quality_publisher.DeckQualityPublicationError(
+                "private_payload_must_not_be_logged"
+            ),
         ) as persist_bundle,
         patch(
             "deerflow.sophia.deck_quality.publisher.persist_deck_quality_producer_failure",
@@ -1533,15 +1540,16 @@ def test_quality_persistence_exception_still_schedules_identical_baseline() -> N
             side_effect=send_signal,
         ) as failure_signal,
     ):
-        result = builder_events.fire_completion_webhook_from_artifact(
-            state=_quality_state(),
-            runtime=_make_runtime(
-                builder_thread_id="builder-task",
-                builder_run_id="builder-run",
-            ),
-            artifact=_quality_artifact(),
-            status="completed",
-        )
+        with caplog.at_level("WARNING"):
+            result = builder_events.fire_completion_webhook_from_artifact(
+                state=_quality_state(),
+                runtime=_make_runtime(
+                    builder_thread_id="builder-task",
+                    builder_run_id="builder-run",
+                ),
+                artifact=_quality_artifact(),
+                status="completed",
+            )
 
     assert result is True
     assert baseline == baseline_before
@@ -1558,7 +1566,7 @@ def test_quality_persistence_exception_still_schedules_identical_baseline() -> N
         prepared=prepared,
         instrument=instrument,
         intent=_quality_intent(),
-        deadline=101.15,
+        deadline=104.5,
     )
     post.assert_not_called()
     persist_failure.assert_called_once_with(
@@ -1569,12 +1577,12 @@ def test_quality_persistence_exception_still_schedules_identical_baseline() -> N
         prepared=prepared,
         instrument=instrument,
         intent=_quality_intent(),
-        deadline=101.5,
+        deadline=106.5,
     )
     failure_signal.assert_called_once()
     signal_arguments = dict(failure_signal.call_args.kwargs)
     deadline = signal_arguments.pop("deadline")
-    assert deadline == 102.0
+    assert deadline == 108.0
     assert signal_arguments == {
         "candidate_digest": "d" * 64,
         "user_id": "alice",
@@ -1582,6 +1590,25 @@ def test_quality_persistence_exception_still_schedules_identical_baseline() -> N
         "upstream_failure_code": "producer_bundle_unavailable",
         "quality_run_id": _QUALITY_RUN_ID,
     }
+    assert "error_code=unclassified" in caplog.text
+    assert "error_code=producer_failure_deadline_exceeded" in caplog.text
+    assert "private_payload_must_not_be_logged" not in caplog.text
+
+
+def test_default_producer_deadline_allocates_locked_stage_budgets() -> None:
+    assert builder_events._PRODUCER_PREDELIVERY_DEADLINE_SECONDS == 8.0
+    assert builder_events._PRODUCER_FAILURE_MARKER_RESERVE_SECONDS == 2.0
+    assert builder_events._PRODUCER_FAILURE_SIGNAL_RESERVE_SECONDS == 1.5
+    assert (
+        builder_events._PRODUCER_PREDELIVERY_DEADLINE_SECONDS
+        - builder_events._PRODUCER_FAILURE_MARKER_RESERVE_SECONDS
+        - builder_events._PRODUCER_FAILURE_SIGNAL_RESERVE_SECONDS
+    ) == 4.5
+    assert deck_quality_publisher._PRODUCER_PROTOCOL_TIMEOUT_SECONDS == 4.5
+    assert deck_quality_publisher._FAILURE_PROTOCOL_TIMEOUT_SECONDS == 2.0
+    assert (
+        deck_quality_publisher._PRODUCER_AMBIGUITY_RESERVE_SECONDS == 0.75
+    )
 
 
 def test_independent_failure_signal_retries_response_loss_with_same_body_new_nonce(

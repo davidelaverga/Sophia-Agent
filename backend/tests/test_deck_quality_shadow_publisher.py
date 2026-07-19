@@ -1219,6 +1219,41 @@ def test_failure_marker_is_deterministic_content_free_and_create_only() -> None:
     assert b"error_type" not in encoded
 
 
+def test_arbitration_record_is_canonical_strict_and_content_free() -> None:
+    record = publisher.DeckQualityProducerArbitrationRecord(
+        candidate_digest="d" * 64,
+        quality_run_id="quality_" + "e" * 64,
+    )
+    encoded = publisher.canonical_json_bytes(record)
+
+    assert json.loads(encoded) == {
+        "campaign_id": "DQ-1",
+        "candidate_digest": "d" * 64,
+        "quality_run_id": "quality_" + "e" * 64,
+        "schema_version": "deck-quality-producer-arbitration/v1",
+    }
+    with pytest.raises(ValueError):
+        publisher.DeckQualityProducerArbitrationRecord.model_validate(
+            {**json.loads(encoded), "private": "must not be accepted"}
+        )
+
+
+def test_safe_publication_error_code_is_allowlisted() -> None:
+    assert publisher.safe_deck_quality_publication_error_code(
+        publisher.DeckQualityPublicationError(
+            "producer_bundle_deadline_exceeded"
+        )
+    ) == "producer_bundle_deadline_exceeded"
+    assert publisher.safe_deck_quality_publication_error_code(
+        publisher.DeckQualityPublicationError(
+            "private_payload_must_not_leak"
+        )
+    ) == "unclassified"
+    assert publisher.safe_deck_quality_publication_error_code(
+        RuntimeError("private payload")
+    ) == "unclassified"
+
+
 def test_owned_producer_protocol_has_one_cancellable_absolute_deadline(
     tmp_path,
     monkeypatch,
@@ -1414,6 +1449,129 @@ def test_owned_failure_marker_has_reserved_absolute_deadline(tmp_path, monkeypat
         )
 
     assert time.monotonic() - started < 0.2
+    assert store.closed is True
+
+
+@pytest.mark.parametrize("dribble_cleanup", (False, True))
+def test_failure_protocol_archive_outcome_is_independent_of_sentinel_cleanup(
+    tmp_path,
+    monkeypatch,
+    dribble_cleanup: bool,
+) -> None:
+    artifact_bytes = b"accepted pptx bytes"
+    _prepare_files(tmp_path, artifact_bytes)
+    prepared = publisher.prepare_deck_quality_publication(
+        config=_config(),
+        state=_state(tmp_path),
+        artifact=_artifact(artifact_bytes),
+        completion_payload=_payload(),
+    )
+    assert prepared is not None
+    instrument = _instrument()
+    intent = publisher.build_deck_quality_producer_intent(
+        prepared=prepared,
+        instrument=instrument,
+    )
+    pack, source_bytes = publisher.capture_deck_quality_source_pack(
+        prepared=prepared,
+        instrument=instrument,
+    )
+    bundle, _descriptor = publisher.encode_deck_quality_producer_bundle(
+        pack=pack,
+        source_pack_bytes=source_bytes,
+    )
+    inbox_path = publisher.deck_quality_producer_bundle_path(
+        intent.quality_run_id
+    )
+    archive_path = publisher.deck_quality_producer_archive_path(
+        intent.quality_run_id
+    )
+
+    class _ArchiveWinsRaceStore:
+        def __init__(self) -> None:
+            self.objects: dict[str, bytes] = {}
+            self.deletes: list[str] = []
+            self.closed = False
+            self.inbox_reads = 0
+
+        async def read_bounded(
+            self,
+            object_path: str,
+            *,
+            max_bytes: int,
+        ) -> bytes | None:
+            if object_path == inbox_path:
+                self.inbox_reads += 1
+                if dribble_cleanup and self.inbox_reads > 1:
+                    while True:
+                        await asyncio.sleep(0.001)
+            content = self.objects.get(object_path)
+            if content is not None and len(content) > max_bytes:
+                raise RuntimeError("oversized")
+            return content
+
+        async def create_if_absent(
+            self,
+            object_path: str,
+            content: bytes,
+            *,
+            content_type: str,
+        ) -> str:
+            del content_type
+            if object_path in self.objects:
+                return "exists"
+            self.objects[object_path] = content
+            if object_path == inbox_path:
+                # The gateway archives and retires the late full bundle after
+                # the failure protocol's first archive read but before its
+                # moved-archive fence.
+                self.objects[archive_path] = bundle
+            return "created"
+
+        async def delete_if_present(self, object_path: str) -> str:
+            self.deletes.append(object_path)
+            return (
+                "deleted"
+                if self.objects.pop(object_path, None) is not None
+                else "missing"
+            )
+
+        async def aclose(self) -> None:
+            self.closed = True
+
+    store = _ArchiveWinsRaceStore()
+    monkeypatch.setattr(
+        publisher,
+        "AsyncSupabaseImmutableObjectStore",
+        lambda: store,
+    )
+    candidate_digest = publisher.derive_deck_quality_candidate_digest(
+        artifact=_artifact(artifact_bytes),
+        completion_payload=_payload(),
+    )
+
+    started = time.monotonic()
+    with pytest.raises(
+        publisher.DeckQualityPublicationError,
+        match="^producer_bundle_already_durable$",
+    ):
+        publisher.persist_deck_quality_producer_failure(
+            candidate_digest=candidate_digest,
+            failure_stage="producer_bundle",
+            failure_code="producer_bundle_unavailable",
+            quality_run_id=intent.quality_run_id,
+            prepared=prepared,
+            instrument=instrument,
+            intent=intent,
+        )
+
+    assert time.monotonic() - started < 0.2
+    if dribble_cleanup:
+        assert set(store.objects) == {archive_path, inbox_path}
+        assert store.deletes == []
+    else:
+        assert store.objects == {archive_path: bundle}
+        assert store.deletes == [inbox_path]
     assert store.closed is True
 
 

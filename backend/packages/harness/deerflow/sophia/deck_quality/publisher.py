@@ -49,15 +49,18 @@ _MAX_PRODUCER_BUNDLE_BYTES = 64 * 1024
 # caller-owned absolute deadline covers the *whole* native-async storage
 # protocol, including every sequential request and a continuously dribbling
 # response. The failure marker receives a separate reserved slice so an outbox
-# timeout can still leave content-free evidence without delaying delivery past
-# the canary-only 1.5-second worst-case ceiling.
-_PRODUCER_PROTOCOL_TIMEOUT_SECONDS = 1.0
-_FAILURE_PROTOCOL_TIMEOUT_SECONDS = 0.35
-_PRODUCER_AMBIGUITY_RESERVE_SECONDS = 0.25
+# timeout can still leave content-free evidence. The live exact-canary caller
+# assigns these same stage budgets inside one eight-second pre-delivery ceiling;
+# ordinary builds never enter this boundary.
+_PRODUCER_PROTOCOL_TIMEOUT_SECONDS = 4.5
+_FAILURE_PROTOCOL_TIMEOUT_SECONDS = 2.0
+_PRODUCER_AMBIGUITY_RESERVE_SECONDS = 0.75
 _ASYNC_STORE_CLOSE_TIMEOUT_SECONDS = 0.025
-_MAX_PREDELIVERY_STORAGE_STALL_SECONDS = 1.5
+_ARBITRATION_CLEANUP_TIMEOUT_SECONDS = 0.005
+_MAX_PREDELIVERY_STORAGE_STALL_SECONDS = 6.55
 assert _PRODUCER_PROTOCOL_TIMEOUT_SECONDS + _FAILURE_PROTOCOL_TIMEOUT_SECONDS + 2 * _ASYNC_STORE_CLOSE_TIMEOUT_SECONDS <= _MAX_PREDELIVERY_STORAGE_STALL_SECONDS
 assert 0 < _PRODUCER_AMBIGUITY_RESERVE_SECONDS < _PRODUCER_PROTOCOL_TIMEOUT_SECONDS
+assert 0 < _ARBITRATION_CLEANUP_TIMEOUT_SECONDS < _ASYNC_STORE_CLOSE_TIMEOUT_SECONDS
 _SHA256_PATTERN = r"^[0-9a-f]{64}$"
 _QUALITY_RUN_PATTERN = re.compile(r"^quality_[0-9a-f]{64}$")
 _DIGEST_PATTERN = re.compile(r"^[0-9a-f]{64}$")
@@ -74,6 +77,46 @@ class DeckQualityPublicationError(RuntimeError):
     def __init__(self, code: str) -> None:
         super().__init__(code)
         self.code = code
+
+
+_SAFE_PUBLICATION_ERROR_CODES: Final = frozenset(
+    {
+        "blind_brief_incomplete",
+        "build_record_unavailable",
+        "creative_plan_unavailable",
+        "design_plan_unavailable",
+        "producer_bundle_already_durable",
+        "producer_bundle_conflict",
+        "producer_bundle_deadline_exceeded",
+        "producer_bundle_identity_mismatch",
+        "producer_bundle_invalid",
+        "producer_bundle_noncanonical",
+        "producer_bundle_path_mismatch",
+        "producer_bundle_persistence_failed",
+        "producer_bundle_recovery_failed",
+        "producer_bundle_run_mismatch",
+        "producer_bundle_source_identity_mismatch",
+        "producer_failure_deadline_exceeded",
+        "producer_failure_invalid",
+        "producer_failure_persistence_conflict",
+        "producer_failure_persistence_failed",
+        "producer_source_persistence_conflict",
+        "producer_source_persistence_failed",
+        "source_pack_input_oversized",
+        "source_pack_oversized",
+    }
+)
+
+
+def safe_deck_quality_publication_error_code(error: BaseException) -> str:
+    """Return only a locked content-free producer error code for logging."""
+
+    if (
+        isinstance(error, DeckQualityPublicationError)
+        and error.code in _SAFE_PUBLICATION_ERROR_CODES
+    ):
+        return error.code
+    return "unclassified"
 
 
 class PreparedDeckQualityPublication(BaseModel):
@@ -353,6 +396,19 @@ class DeckQualityProducerBundleReceipt(BaseModel):
     bundle_size_bytes: int = Field(gt=0, le=_MAX_PRODUCER_BUNDLE_BYTES)
 
 
+class DeckQualityProducerArbitrationRecord(BaseModel):
+    """Neutral create-only inbox winner while producer failure is recorded."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deck-quality-producer-arbitration/v1"] = (
+        "deck-quality-producer-arbitration/v1"
+    )
+    campaign_id: Literal["DQ-1"] = "DQ-1"
+    candidate_digest: str = Field(pattern=_SHA256_PATTERN)
+    quality_run_id: str = Field(pattern=r"^quality_[0-9a-f]{64}$")
+
+
 DeckQualityProducerFailureStage = Literal[
     "candidate_metadata",
     "instrument",
@@ -450,6 +506,8 @@ DeckQualityProducerQuarantineReason = Literal[
     "scope_invalid",
     "identity_conflict",
     "storage_conflict",
+    "arbitration_orphaned",
+    "arbitration_observation_invalid",
 ]
 
 
@@ -1898,6 +1956,38 @@ def persist_deck_quality_producer_bundle(
     return _receipt_from_descriptor(decoded.descriptor)
 
 
+async def _retire_exact_arbitration_sentinel(
+    *,
+    object_store: AsyncSupabaseImmutableObjectStore,
+    inbox_path: str,
+    arbitration: bytes,
+) -> None:
+    """Best-effort removal of this protocol's redundant exact sentinel.
+
+    A verified archive is already the authoritative producer outcome. Cleanup
+    must never turn that success into an independent failure signal, so a
+    transport error is left for the gateway's archive-aware reconciler.
+    """
+
+    try:
+        async with asyncio.timeout(_ARBITRATION_CLEANUP_TIMEOUT_SECONDS):
+            current = await object_store.read_bounded(
+                inbox_path,
+                max_bytes=_MAX_PRODUCER_BUNDLE_BYTES,
+            )
+            if current != arbitration:
+                return
+            await object_store.delete_if_present(inbox_path)
+            remaining = await object_store.read_bounded(
+                inbox_path,
+                max_bytes=_MAX_PRODUCER_BUNDLE_BYTES,
+            )
+            if remaining is not None and remaining != arbitration:
+                return
+    except Exception:
+        return
+
+
 async def _persist_owned_producer_failure_protocol(
     *,
     encoded: bytes,
@@ -1908,6 +1998,13 @@ async def _persist_owned_producer_failure_protocol(
 ) -> DeckQualityProducerFailureDescriptor:
     if intent is not None and instrument is not None:
         archive_path = deck_quality_producer_archive_path(intent.quality_run_id)
+        inbox_path = deck_quality_producer_bundle_path(intent.quality_run_id)
+        arbitration = canonical_json_bytes(
+            DeckQualityProducerArbitrationRecord(
+                candidate_digest=descriptor.candidate_digest,
+                quality_run_id=intent.quality_run_id,
+            )
+        )
         archived = await _async_read_object_bounded(
             object_store,
             archive_path,
@@ -1935,15 +2032,6 @@ async def _persist_owned_producer_failure_protocol(
         # create-only write wins (full bundle or content-free failure record)
         # is the only possible durable outcome at that key, eliminating the
         # late-visibility race between independent paths.
-        inbox_path = deck_quality_producer_bundle_path(intent.quality_run_id)
-        arbitration = canonical_json_bytes(
-            {
-                "campaign_id": "DQ-1",
-                "candidate_digest": descriptor.candidate_digest,
-                "quality_run_id": intent.quality_run_id,
-                "schema_version": "deck-quality-producer-arbitration/v1",
-            }
-        )
         try:
             await object_store.create_if_absent(
                 inbox_path,
@@ -2054,6 +2142,7 @@ async def _persist_owned_producer_failure(
     )
     object_store = AsyncSupabaseImmutableObjectStore()
     try:
+        already_durable: DeckQualityPublicationError | None = None
         try:
             async with asyncio.timeout_at(operation_deadline):
                 return await _persist_owned_producer_failure_protocol(
@@ -2065,6 +2154,30 @@ async def _persist_owned_producer_failure(
                 )
         except TimeoutError:
             raise DeckQualityPublicationError("producer_failure_deadline_exceeded") from None
+        except DeckQualityPublicationError as exc:
+            if exc.code != "producer_bundle_already_durable":
+                raise
+            already_durable = exc
+        # The exact archive decision has already exited the authoritative
+        # operation timeout. Cleanup is a tiny, independently bounded hygiene
+        # attempt and cannot turn that success into a false failure signal.
+        if already_durable is not None:
+            if intent is not None:
+                arbitration = canonical_json_bytes(
+                    DeckQualityProducerArbitrationRecord(
+                        candidate_digest=descriptor.candidate_digest,
+                        quality_run_id=intent.quality_run_id,
+                    )
+                )
+                await _retire_exact_arbitration_sentinel(
+                    object_store=object_store,
+                    inbox_path=deck_quality_producer_bundle_path(
+                        intent.quality_run_id
+                    ),
+                    arbitration=arbitration,
+                )
+            raise already_durable
+        raise RuntimeError("producer failure protocol returned no outcome")
     finally:
         await _bounded_async_store_close(
             object_store,

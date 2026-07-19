@@ -69,6 +69,7 @@ _ROLE_CONTENT_TYPES = {
     "assembled": "text/html; charset=utf-8",
     "deck_css": "text/css; charset=utf-8",
 }
+_PRODUCTION_THREAD_SOURCE_ROOT = "/app/backend/.deer-flow/threads"
 _PPTX_CONTENT_TYPE = "application/vnd.openxmlformats-officedocument.presentationml.presentation"
 _JSON_CONTENT_TYPE = "application/json"
 _FORBIDDEN_RECORD_KEYS = frozenset(
@@ -446,16 +447,30 @@ def _require_canonical_object_path(path: str) -> str:
     return normalized
 
 
-def _map_source_path(path: str, *, object_root: str, build_id: str) -> str:
+def _map_source_path(
+    path: str,
+    *,
+    object_root: str,
+    build_id: str,
+    thread_id: str,
+) -> str:
     if not isinstance(path, str) or not path or len(path) > 4_096 or "\\" in path:
         raise DeckCandidateMaterializationError("source_path_invalid")
     canonical_prefix = f"{object_root}/"
     if path.startswith(canonical_prefix):
         return _require_canonical_object_path(path)
-    legacy_prefix = f"/mnt/user-data/outputs/.builder/builds/{build_id}/"
-    if not path.startswith(legacy_prefix):
+
+    admitted_prefixes = (
+        f"/mnt/user-data/outputs/.builder/builds/{build_id}/",
+        (f"{_PRODUCTION_THREAD_SOURCE_ROOT}/{thread_id}/user-data/outputs/.builder/builds/{build_id}/"),
+    )
+    source_prefix = next(
+        (prefix for prefix in admitted_prefixes if path.startswith(prefix)),
+        None,
+    )
+    if source_prefix is None:
         raise DeckCandidateMaterializationError("source_path_invalid")
-    suffix = path[len(legacy_prefix) :]
+    suffix = path[len(source_prefix) :]
     parts = suffix.split("/")
     if not suffix or any(part in {"", ".", ".."} for part in parts):
         raise DeckCandidateMaterializationError("source_path_invalid")
@@ -719,6 +734,7 @@ class DurableDeckCandidateMaterializer:
                     component.source_roles[role],
                     object_root=object_root,
                     build_id=transaction.build_id,
+                    thread_id=str(transaction.owner_thread_id),
                 )
                 if path in seen_paths:
                     raise DeckCandidateMaterializationError("source_path_invalid")

@@ -74,6 +74,11 @@ def _object_source_path(component_id: str, version_id: str, filename: str) -> st
     return f"{OBJECT_ROOT}/components/{component_id}/versions/{version_id}/{filename}"
 
 
+def _production_host_source_path(path: str, *, thread_id: str = THREAD_ID, build_id: str = BUILD_ID) -> str:
+    suffix = path.split(f"/.builder/builds/{BUILD_ID}/", 1)[1]
+    return f"/app/backend/.deer-flow/threads/{thread_id}/user-data/outputs/.builder/builds/{build_id}/{suffix}"
+
+
 def _component(
     selector: str,
     index: int,
@@ -733,6 +738,81 @@ def test_exact_underscore_scope_is_accepted_but_traversal_and_neighbor_prefix_ar
                     candidate=fixture.candidate,
                 )
             )
+
+
+def test_exact_production_host_thread_sources_map_to_hash_verified_canonical_objects() -> None:
+    fixture = _fixture()
+    components = []
+    for component in fixture.manifest.components:
+        roles = {role: _production_host_source_path(path) for role, path in component.source_roles.items()}
+        components.append(
+            component.model_copy(
+                update={
+                    "source_path": roles.get("body") or roles.get("deck_css"),
+                    "source_roles": roles,
+                },
+                deep=True,
+            )
+        )
+    _replace_manifest(
+        fixture,
+        fixture.manifest.model_copy(update={"components": components}, deep=True),
+    )
+
+    staged = _run(
+        fixture.materializer().stage(
+            transaction=fixture.transaction,
+            program=fixture.program,
+            candidate=fixture.candidate,
+        )
+    )
+
+    assert staged.manifest_object_path == f"{OBJECT_ROOT}/manifest/manifest-r2.json"
+    request = fixture.compiler.calls[0]
+    assert all(source.object_path.startswith(f"{OBJECT_ROOT}/") for source in request.sources)
+    assert all(source.source_hash == _sha(source.content) for source in request.sources)
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    (
+        _production_host_source_path(
+            _legacy_source_path("component_slide_1", "component_version_slide_1_01", "body.html"),
+            thread_id="thread_neighbor_01",
+        ),
+        _production_host_source_path(
+            _legacy_source_path("component_slide_1", "component_version_slide_1_01", "body.html"),
+            build_id="build_neighbor_01",
+        ),
+        ("/srv/app/backend/.deer-flow/threads/thread_canary_01/user-data/outputs/.builder/builds/build_psi_01/components/component_slide_1/versions/component_version_slide_1_01/body.html"),
+        ("/app/backend/.deer-flow/threads/thread_canary_01/user-data/outputs/.builder/builds/build_psi_01/components/component_slide_1/versions/../body.html"),
+        ("/app/backend/.deer-flow/threads/thread_canary_01/user-data/outputs/.builder/builds/build_psi_01/components//component_slide_1/versions/component_version_slide_1_01/body.html"),
+    ),
+)
+def test_production_host_source_mapping_rejects_scope_drift_and_traversal(
+    unsafe_path: str,
+) -> None:
+    fixture = _fixture()
+    components = list(fixture.manifest.components)
+    slide = components[1]
+    roles = dict(slide.source_roles)
+    roles["body"] = unsafe_path
+    components[1] = slide.model_copy(update={"source_roles": roles}, deep=True)
+    _replace_manifest(
+        fixture,
+        fixture.manifest.model_copy(update={"components": components}, deep=True),
+    )
+
+    with pytest.raises(DeckCandidateMaterializationError, match="^source_path_invalid$"):
+        _run(
+            fixture.materializer().stage(
+                transaction=fixture.transaction,
+                program=fixture.program,
+                candidate=fixture.candidate,
+            )
+        )
+    assert fixture.compiler.calls == []
+    assert fixture.store.create_calls == []
 
 
 def _mechanical_failure_mutator(

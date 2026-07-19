@@ -59,9 +59,9 @@ _PRODUCER_FAILURE_SIGNAL_PATH = "/internal/deck-quality-producer-failures"
 _PRODUCER_FAILURE_SIGNAL_TIMEOUT_SECONDS = 1.0
 _PRODUCER_FAILURE_SIGNAL_CLOSE_TIMEOUT_SECONDS = 0.025
 _PRODUCER_FAILURE_SIGNAL_MAX_ATTEMPTS = 2
-_PRODUCER_PREDELIVERY_DEADLINE_SECONDS = 2.0
-_PRODUCER_FAILURE_MARKER_RESERVE_SECONDS = 0.35
-_PRODUCER_FAILURE_SIGNAL_RESERVE_SECONDS = 0.5
+_PRODUCER_PREDELIVERY_DEADLINE_SECONDS = 8.0
+_PRODUCER_FAILURE_MARKER_RESERVE_SECONDS = 2.0
+_PRODUCER_FAILURE_SIGNAL_RESERVE_SECONDS = 1.5
 assert (
     _PRODUCER_FAILURE_MARKER_RESERVE_SECONDS
     + _PRODUCER_FAILURE_SIGNAL_RESERVE_SECONDS
@@ -1332,6 +1332,7 @@ def _persist_deck_quality_before_delivery(
     from deerflow.sophia.deck_quality.publisher import (
         derive_deck_quality_candidate_digest,
         is_deck_quality_publication_candidate,
+        safe_deck_quality_publication_error_code,
     )
 
     config = get_app_config()
@@ -1420,11 +1421,13 @@ def _persist_deck_quality_before_delivery(
             return receipt
 
     logger.warning(
-        "[Builder] DQ-1 producer bundle unavailable task_id=%s run_id=%s stage=%s error_type=%s",
+        "[Builder] DQ-1 producer bundle unavailable task_id=%s run_id=%s "
+        "stage=%s error_type=%s error_code=%s",
         completion_payload.get("task_id"),
         completion_payload.get("run_id"),
         snapshot.failure_stage,
         failure_exc.__class__.__name__,
+        safe_deck_quality_publication_error_code(failure_exc),
     )
     if snapshot.candidate_digest is None:
         return None
@@ -1458,11 +1461,13 @@ def _persist_deck_quality_before_delivery(
         )
     except Exception as marker_exc:  # noqa: BLE001 - best-effort evidence only
         logger.warning(
-            "[Builder] DQ-1 producer failure marker unavailable task_id=%s run_id=%s stage=%s error_type=%s",
+            "[Builder] DQ-1 producer failure marker unavailable task_id=%s "
+            "run_id=%s stage=%s error_type=%s error_code=%s",
             completion_payload.get("task_id"),
             completion_payload.get("run_id"),
             snapshot.failure_stage,
             marker_exc.__class__.__name__,
+            safe_deck_quality_publication_error_code(marker_exc),
         )
         marker_error_code = getattr(marker_exc, "code", None)
         if marker_error_code != "producer_bundle_already_durable":

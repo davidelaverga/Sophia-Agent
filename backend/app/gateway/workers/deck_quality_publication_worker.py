@@ -20,13 +20,13 @@ import re
 import socket
 import tempfile
 import uuid
-from collections.abc import Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal, Protocol
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from deerflow.config.deck_quality_config import DeckQualityConfig
 from deerflow.sophia.deck_quality.canonical import canonical_json_bytes, canonical_sha256
@@ -43,13 +43,17 @@ from deerflow.sophia.deck_quality.publication_persistence import (
 from deerflow.sophia.deck_quality.publisher import (
     DECK_QUALITY_PRODUCER_FAILURE_PREFIX,
     DECK_QUALITY_PRODUCER_PREFIX,
+    DeckQualityProducerArbitrationRecord,
+    DeckQualityProducerFailureRecord,
     DeckQualityProducerOutboxManifest,
     DeckQualityProducerQuarantineReason,
     DeckQualitySourcePack,
     deck_quality_producer_archive_path,
+    deck_quality_producer_failure_path,
     deck_quality_producer_oversize_quarantine_path,
     deck_quality_producer_quarantine_path,
     decode_deck_quality_producer_bundle,
+    derive_deck_quality_candidate_digest,
     parse_deck_quality_producer_bundle_path,
 )
 from deerflow.sophia.deck_quality.schemas import QualityInstrumentLock
@@ -88,6 +92,14 @@ _PRODUCER_RECONCILE_TIMEOUT_SECONDS = 15.0
 _WORKER_RPC_TIMEOUT_SECONDS = 20.0
 _WORKER_STOP_TIMEOUT_SECONDS = 5.0
 _PRODUCER_REJECTION_PREFIX = "dq1/producer-rejections/v1"
+_PRODUCER_ARBITRATION_SCHEMA_VERSION = "deck-quality-producer-arbitration/v1"
+_PRODUCER_ARBITRATION_OBSERVATION_PREFIX = (
+    "dq1/producer-arbitration-observations/v1"
+)
+_PRODUCER_ARBITRATION_GRACE_SECONDS = 60
+_PRODUCER_ARBITRATION_CLOCK_SKEW_SECONDS = 5
+_MAX_PRODUCER_FAILURE_BYTES = 16 * 1024
+_MAX_PRODUCER_ARBITRATION_OBSERVATION_BYTES = 2 * 1024
 _WORKER_ATTR = "_deck_quality_publication_worker"
 _SAFE_TOKEN_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}$")
 
@@ -196,6 +208,42 @@ class _PermanentProducerObjectConflict(RuntimeError):
         super().__init__("producer_object_conflict")
 
 
+ProducerQuarantineSubstage = Literal[
+    "quarantine_write",
+    "rejection_write",
+    "inbox_retire",
+]
+
+
+class _ProducerQuarantineError(RuntimeError):
+    """Content-free location and type for a failed quarantine operation."""
+
+    def __init__(
+        self,
+        *,
+        substage: ProducerQuarantineSubstage,
+        error_type: str,
+    ) -> None:
+        self.substage = substage
+        self.error_type = error_type
+        super().__init__(f"{substage}:{error_type}")
+
+
+class _ProducerArbitrationObservation(BaseModel):
+    """Durable first-seen fence for a marker-missing neutral sentinel."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema_version: Literal["deck-quality-producer-arbitration-observation/v1"] = (
+        "deck-quality-producer-arbitration-observation/v1"
+    )
+    campaign_id: Literal["DQ-1"] = "DQ-1"
+    candidate_digest: str = Field(pattern=r"^[0-9a-f]{64}$")
+    quality_run_id: str = Field(pattern=r"^quality_[0-9a-f]{64}$")
+    sentinel_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+    first_observed_unix_seconds: int = Field(ge=0)
+
+
 @dataclass(frozen=True)
 class PublicationCycleResult:
     producer_seen: int = 0
@@ -217,6 +265,77 @@ def _default_owner() -> str:
 
 def _default_claim_token() -> str:
     return f"dq1-pub-claim:{uuid.uuid4().hex}"
+
+
+def _safe_error_type(error: BaseException) -> str:
+    name = error.__class__.__name__
+    if re.fullmatch(r"[A-Za-z][A-Za-z0-9_]{0,127}", name):
+        return name
+    return "Exception"
+
+
+def _quarantine_log_fields(error: BaseException) -> tuple[str, str]:
+    if isinstance(error, _ProducerQuarantineError):
+        return error.substage, error.error_type
+    return "operation", _safe_error_type(error)
+
+
+def _strict_arbitration_record(
+    content: bytes,
+    *,
+    expected_quality_run_id: str,
+) -> DeckQualityProducerArbitrationRecord | None:
+    """Decode only an explicitly tagged, canonical arbitration sentinel."""
+
+    try:
+        raw = json.loads(content)
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if (
+        not isinstance(raw, dict)
+        or raw.get("schema_version") != _PRODUCER_ARBITRATION_SCHEMA_VERSION
+    ):
+        return None
+    try:
+        record = DeckQualityProducerArbitrationRecord.model_validate(raw)
+    except ValidationError:
+        raise _PermanentProducerBundleError("bundle_invalid") from None
+    if (
+        record.quality_run_id != expected_quality_run_id
+        or canonical_json_bytes(record) != content
+    ):
+        raise _PermanentProducerBundleError("bundle_invalid")
+    return record
+
+
+def _outbox_candidate_digest(
+    manifest: DeckQualityProducerOutboxManifest,
+) -> str:
+    """Rebuild the content-free candidate identity carried by an outbox."""
+
+    return derive_deck_quality_candidate_digest(
+        artifact={
+            "deck_build_id": manifest.build_id,
+            "logical_artifact_id": manifest.logical_artifact_id,
+            "current_artifact_version_id": manifest.artifact_version_id,
+            "artifact_sha256": manifest.artifact_sha256,
+        },
+        completion_payload={
+            "user_id": manifest.user_id,
+            "thread_id": manifest.thread_id,
+            "task_id": manifest.task_id,
+            "run_id": manifest.builder_run_id,
+        },
+    )
+
+
+def _arbitration_observation_path(sentinel_sha256: str) -> str:
+    if re.fullmatch(r"[0-9a-f]{64}", sentinel_sha256) is None:
+        raise ValueError("producer arbitration observation digest is invalid")
+    return (
+        f"{_PRODUCER_ARBITRATION_OBSERVATION_PREFIX}/"
+        f"{sentinel_sha256}.json"
+    )
 
 
 def _operation_token(
@@ -890,6 +1009,21 @@ class DeckQualityPublicationWorker:
             raise RuntimeError("producer inbox object is unavailable")
         return content
 
+    async def _quarantine_step(
+        self,
+        substage: ProducerQuarantineSubstage,
+        operation: Awaitable[None],
+    ) -> None:
+        try:
+            await operation
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:
+            raise _ProducerQuarantineError(
+                substage=substage,
+                error_type=_safe_error_type(exc),
+            ) from None
+
     async def _quarantine_and_retire(
         self,
         *,
@@ -902,16 +1036,25 @@ class DeckQualityPublicationWorker:
             reason=reason,
             content_sha256=hashlib.sha256(content).hexdigest(),
         )
-        await self._write_exact_producer_object(
-            object_path=quarantine_path,
-            content=content,
+        await self._quarantine_step(
+            "quarantine_write",
+            self._write_exact_producer_object(
+                object_path=quarantine_path,
+                content=content,
+            ),
         )
-        await self._write_rejection_evidence(
-            inbox_path=object_path,
-            reason=reason,
-            observed_content=content,
+        await self._quarantine_step(
+            "rejection_write",
+            self._write_rejection_evidence(
+                inbox_path=object_path,
+                reason=reason,
+                observed_content=content,
+            ),
         )
-        await self._retire_inbox(object_path)
+        await self._quarantine_step(
+            "inbox_retire",
+            self._retire_inbox(object_path),
+        )
 
     async def _write_rejection_evidence(
         self,
@@ -967,17 +1110,26 @@ class DeckQualityPublicationWorker:
                 "read_limit_bytes": _MAX_PRODUCER_BUNDLE_BYTES,
             }
         )
-        await self._write_exact_producer_object(
-            object_path=manifest_path,
-            content=manifest,
-            content_type="application/json",
-            max_bytes=2 * 1024,
+        await self._quarantine_step(
+            "quarantine_write",
+            self._write_exact_producer_object(
+                object_path=manifest_path,
+                content=manifest,
+                content_type="application/json",
+                max_bytes=2 * 1024,
+            ),
         )
-        await self._write_rejection_evidence(
-            inbox_path=object_path,
-            reason="producer_bundle_read_limit_exceeded",
+        await self._quarantine_step(
+            "rejection_write",
+            self._write_rejection_evidence(
+                inbox_path=object_path,
+                reason="producer_bundle_read_limit_exceeded",
+            ),
         )
-        await self._retire_inbox(object_path)
+        await self._quarantine_step(
+            "inbox_retire",
+            self._retire_inbox(object_path),
+        )
 
     async def _quarantine_conflict_and_retire(
         self,
@@ -997,18 +1149,216 @@ class DeckQualityPublicationWorker:
             reason="storage_conflict",
             content_sha256=inbox_digest,
         )
-        await self._write_exact_producer_object(
-            object_path=quarantine_path,
-            content=inbox_content,
+        await self._quarantine_step(
+            "quarantine_write",
+            self._write_exact_producer_object(
+                object_path=quarantine_path,
+                content=inbox_content,
+            ),
         )
-        await self._write_rejection_evidence(
-            inbox_path=inbox_path,
-            reason="storage_conflict",
-            observed_content=inbox_content,
-            conflicting_path=conflict.object_path,
-            conflicting_content=conflict.content,
+        await self._quarantine_step(
+            "rejection_write",
+            self._write_rejection_evidence(
+                inbox_path=inbox_path,
+                reason="storage_conflict",
+                observed_content=inbox_content,
+                conflicting_path=conflict.object_path,
+                conflicting_content=conflict.content,
+            ),
         )
-        await self._retire_inbox(inbox_path)
+        await self._quarantine_step(
+            "inbox_retire",
+            self._retire_inbox(inbox_path),
+        )
+
+    async def _archive_matches_arbitration(
+        self,
+        record: DeckQualityProducerArbitrationRecord,
+    ) -> bool:
+        """Return whether the canonical archive proves this sentinel redundant."""
+
+        archive_path = deck_quality_producer_archive_path(record.quality_run_id)
+        try:
+            archived = await self._object_call(
+                "read_bounded",
+                archive_path,
+                max_bytes=_MAX_PRODUCER_BUNDLE_BYTES,
+            )
+        except ArtifactObjectSizeError:
+            return False
+        except Exception:
+            raise RuntimeError("producer arbitration archive read failed") from None
+        if archived is None:
+            return False
+        if not isinstance(archived, bytes):
+            raise RuntimeError("producer arbitration archive has an invalid shape")
+        try:
+            decoded = decode_deck_quality_producer_bundle(
+                archived,
+                expected_quality_run_id=record.quality_run_id,
+                expected_object_path=archive_path,
+            )
+        except Exception:
+            return False
+        manifest = decoded.manifest
+        return bool(
+            manifest.campaign_id == "DQ-1"
+            and manifest.user_id in self._config.canary_user_ids
+            and manifest.instrument_identity_hash == self._instrument_hash
+            and _outbox_candidate_digest(manifest) == record.candidate_digest
+        )
+
+    async def _load_or_create_arbitration_observation(
+        self,
+        record: DeckQualityProducerArbitrationRecord,
+    ) -> _ProducerArbitrationObservation:
+        sentinel = canonical_json_bytes(record)
+        sentinel_sha256 = hashlib.sha256(sentinel).hexdigest()
+        observation_path = _arbitration_observation_path(sentinel_sha256)
+        try:
+            stored = await self._object_call(
+                "read_bounded",
+                observation_path,
+                max_bytes=_MAX_PRODUCER_ARBITRATION_OBSERVATION_BYTES,
+            )
+        except ArtifactObjectSizeError:
+            raise _PermanentProducerBundleError(
+                "arbitration_observation_invalid"
+            ) from None
+        except Exception:
+            raise RuntimeError(
+                "producer arbitration observation read failed"
+            ) from None
+        if stored is None:
+            observed_at = self._clock()
+            if observed_at.tzinfo is None:
+                raise RuntimeError("producer arbitration clock is not timezone-aware")
+            observation = _ProducerArbitrationObservation(
+                candidate_digest=record.candidate_digest,
+                quality_run_id=record.quality_run_id,
+                sentinel_sha256=sentinel_sha256,
+                first_observed_unix_seconds=int(observed_at.timestamp()),
+            )
+            encoded = canonical_json_bytes(observation)
+            try:
+                outcome = await self._object_call(
+                    "create_if_absent",
+                    observation_path,
+                    encoded,
+                    content_type="application/json",
+                )
+            except Exception:
+                outcome = "ambiguous"
+            try:
+                stored = await self._object_call(
+                    "read_bounded",
+                    observation_path,
+                    max_bytes=_MAX_PRODUCER_ARBITRATION_OBSERVATION_BYTES,
+                )
+            except ArtifactObjectSizeError:
+                raise _PermanentProducerBundleError(
+                    "arbitration_observation_invalid"
+                ) from None
+            except Exception:
+                raise RuntimeError(
+                    "producer arbitration observation persistence failed"
+                ) from None
+            if outcome not in {"created", "exists", "ambiguous"}:
+                raise RuntimeError(
+                    "producer arbitration observation persistence failed"
+                )
+        if not isinstance(stored, bytes):
+            if stored is None:
+                raise RuntimeError("producer arbitration observation is unavailable")
+            raise _PermanentProducerBundleError(
+                "arbitration_observation_invalid"
+            )
+        try:
+            observation = _ProducerArbitrationObservation.model_validate_json(
+                stored
+            )
+        except (TypeError, ValueError):
+            raise _PermanentProducerBundleError(
+                "arbitration_observation_invalid"
+            ) from None
+        if (
+            canonical_json_bytes(observation) != stored
+            or observation.candidate_digest != record.candidate_digest
+            or observation.quality_run_id != record.quality_run_id
+            or observation.sentinel_sha256 != sentinel_sha256
+        ):
+            raise _PermanentProducerBundleError(
+                "arbitration_observation_invalid"
+            )
+        return observation
+
+    async def _reconcile_arbitration_sentinel(
+        self,
+        *,
+        object_path: str,
+        record: DeckQualityProducerArbitrationRecord,
+    ) -> None:
+        if await self._archive_matches_arbitration(record):
+            await self._retire_inbox(object_path)
+            return
+        failure_path = deck_quality_producer_failure_path(
+            record.candidate_digest
+        )
+        try:
+            failure_content = await self._object_call(
+                "read_bounded",
+                failure_path,
+                max_bytes=_MAX_PRODUCER_FAILURE_BYTES,
+            )
+        except ArtifactObjectSizeError:
+            raise _PermanentProducerBundleError("bundle_invalid") from None
+        except Exception:
+            raise RuntimeError(
+                "producer arbitration failure marker read failed"
+            ) from None
+        if failure_content is None:
+            # The producer writes the neutral sentinel before the exact marker.
+            # A durable first-seen fence gives normal object visibility time to
+            # converge. Once its bounded grace expires, quarantine preserves the
+            # neutral bytes without fabricating a publication or resolving the
+            # independent DB failure signal.
+            observation = await self._load_or_create_arbitration_observation(
+                record
+            )
+            observed_at = self._clock()
+            if observed_at.tzinfo is None:
+                raise RuntimeError("producer arbitration clock is not timezone-aware")
+            age_seconds = (
+                int(observed_at.timestamp())
+                - observation.first_observed_unix_seconds
+            )
+            if age_seconds < -_PRODUCER_ARBITRATION_CLOCK_SKEW_SECONDS:
+                raise _PermanentProducerBundleError(
+                    "arbitration_observation_invalid"
+                )
+            age_seconds = max(0, age_seconds)
+            if age_seconds >= _PRODUCER_ARBITRATION_GRACE_SECONDS:
+                raise _PermanentProducerBundleError("arbitration_orphaned")
+            raise RuntimeError(
+                "producer arbitration failure marker unavailable"
+            )
+        if not isinstance(failure_content, bytes):
+            raise _PermanentProducerBundleError("bundle_invalid")
+        try:
+            failure = DeckQualityProducerFailureRecord.model_validate_json(
+                failure_content
+            )
+        except (TypeError, ValueError):
+            raise _PermanentProducerBundleError("bundle_invalid") from None
+        if (
+            canonical_json_bytes(failure) != failure_content
+            or failure.candidate_digest != record.candidate_digest
+            or failure.quality_run_id != record.quality_run_id
+            or failure.failure_stage != "producer_bundle"
+            or failure.failure_code != "producer_bundle_unavailable"
+        ):
+            raise _PermanentProducerBundleError("bundle_invalid")
+        await self._retire_inbox(object_path)
 
     async def _reconcile_producer_bundle(
         self,
@@ -1016,7 +1366,17 @@ class DeckQualityPublicationWorker:
         object_path: str,
         quality_run_id: str,
         content: bytes,
-    ) -> PublicationRecord:
+    ) -> PublicationRecord | None:
+        arbitration = _strict_arbitration_record(
+            content,
+            expected_quality_run_id=quality_run_id,
+        )
+        if arbitration is not None:
+            await self._reconcile_arbitration_sentinel(
+                object_path=object_path,
+                record=arbitration,
+            )
+            return None
         try:
             decoded = decode_deck_quality_producer_bundle(
                 content,
@@ -1171,25 +1531,38 @@ class DeckQualityPublicationWorker:
                     quality_run_id = parse_deck_quality_producer_bundle_path(object_path)
                     if quality_run_id is None:
                         raise _PermanentProducerBundleError("path_invalid")
-                    await self._reconcile_producer_bundle(
+                    producer_record = await self._reconcile_producer_bundle(
                         object_path=object_path,
                         quality_run_id=quality_run_id,
                         content=content,
                     )
                 reconciled += 1
-                logger.info(
-                    "DQ1 producer reconciled quality_run_id=%s contentExcluded=true",
-                    quality_run_id,
-                )
+                if producer_record is None:
+                    logger.warning(
+                        "DQ1 producer arbitration reconciled "
+                        "quality_run_id=%s contentExcluded=true",
+                        quality_run_id,
+                    )
+                else:
+                    logger.info(
+                        "DQ1 producer reconciled quality_run_id=%s "
+                        "contentExcluded=true",
+                        quality_run_id,
+                    )
             except _OversizedProducerInboxError:
                 try:
                     async with asyncio.timeout(_PRODUCER_RECONCILE_TIMEOUT_SECONDS):
                         await self._quarantine_oversized_and_retire(object_path)
                 except Exception as quarantine_exc:
                     failed += 1
+                    substage, error_type = _quarantine_log_fields(
+                        quarantine_exc
+                    )
                     logger.error(
-                        "DQ1 oversized producer quarantine failed error_type=%s contentExcluded=true",
-                        quarantine_exc.__class__.__name__,
+                        "DQ1 oversized producer quarantine failed "
+                        "substage=%s error_type=%s contentExcluded=true",
+                        substage,
+                        error_type,
                         exc_info=False,
                     )
                 else:
@@ -1208,9 +1581,14 @@ class DeckQualityPublicationWorker:
                         )
                 except Exception as quarantine_exc:
                     failed += 1
+                    substage, error_type = _quarantine_log_fields(
+                        quarantine_exc
+                    )
                     logger.error(
-                        "DQ1 producer conflict quarantine failed error_type=%s contentExcluded=true",
-                        quarantine_exc.__class__.__name__,
+                        "DQ1 producer conflict quarantine failed substage=%s "
+                        "error_type=%s contentExcluded=true",
+                        substage,
+                        error_type,
                         exc_info=False,
                     )
                 else:
@@ -1228,9 +1606,14 @@ class DeckQualityPublicationWorker:
                             reason=exc.reason,
                         )
                 except Exception as quarantine_exc:
+                    substage, error_type = _quarantine_log_fields(
+                        quarantine_exc
+                    )
                     logger.error(
-                        "DQ1 producer quarantine failed error_type=%s contentExcluded=true",
-                        quarantine_exc.__class__.__name__,
+                        "DQ1 producer quarantine failed substage=%s "
+                        "error_type=%s contentExcluded=true",
+                        substage,
+                        error_type,
                         exc_info=False,
                     )
                     failed += 1
@@ -1503,6 +1886,9 @@ class DeckQualityPublicationWorker:
             producer_quarantined,
             producer_failed,
         ) = await self._reconcile_producers()
+        # These immutable paths are historical audit evidence. Current queue
+        # failures and quarantines drive liveness; path presence alone must not
+        # make every later clean cycle unhealthy forever.
         producer_failure_evidence = len(await self._failure_evidence_paths())
         claim_token = self._next_claim_token()
         records = await self._claim(claim_token)
@@ -1555,8 +1941,8 @@ class DeckQualityPublicationWorker:
                 cycle = await self.run_once()
                 if cycle.producer_failed:
                     raise RuntimeError("producer reconciliation failed")
-                if cycle.producer_quarantined or cycle.producer_failure_evidence:
-                    raise RuntimeError("producer failure evidence is unresolved")
+                if cycle.producer_quarantined:
+                    raise RuntimeError("producer quarantine observed")
                 self._last_cycle_success_at = self._clock()
                 self._last_cycle_error_at = None
                 self._last_cycle_error_type = None

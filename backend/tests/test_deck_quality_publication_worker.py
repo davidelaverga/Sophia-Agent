@@ -36,10 +36,14 @@ from deerflow.sophia.deck_quality.publication_persistence import (
     expected_publication_source_pack_path,
 )
 from deerflow.sophia.deck_quality.publisher import (
+    DeckQualityProducerArbitrationRecord,
+    DeckQualityProducerFailureRecord,
     DeckQualitySourceHashes,
     DeckQualitySourcePack,
     deck_quality_immutable_artifact_snapshot_path,
     deck_quality_producer_archive_path,
+    deck_quality_producer_failure_path,
+    derive_deck_quality_candidate_digest,
     encode_deck_quality_producer_bundle,
 )
 from deerflow.sophia.deck_quality.schemas import BlindBrief, QualityInstrumentLock
@@ -992,6 +996,398 @@ async def test_worker_reconciles_durable_producer_bundle_before_claim(
 
 
 @pytest.mark.anyio
+async def test_arbitration_sentinel_waits_for_exact_failure_marker_then_retires(
+    tmp_path: Path,
+) -> None:
+    worker, store, objects, pack, _artifact, inbox_path, _source = (
+        _producer_setup(tmp_path)
+    )
+    candidate_digest = "f" * 64
+    sentinel = canonical_json_bytes(
+        DeckQualityProducerArbitrationRecord(
+            candidate_digest=candidate_digest,
+            quality_run_id=pack.quality_run_id,
+        )
+    )
+    objects.objects[inbox_path] = sentinel
+
+    first = await worker.run_once()
+
+    assert first.producer_seen == 1
+    assert first.producer_reconciled == 0
+    assert first.producer_quarantined == 0
+    assert first.producer_failed == 1
+    assert inbox_path in objects.objects
+    assert store.request_calls == []
+    assert not any(
+        path.startswith("dq1/producer-quarantine/v1/")
+        or path.startswith("dq1/producer-rejections/v1/")
+        for path in objects.objects
+    )
+
+    failure_path = deck_quality_producer_failure_path(candidate_digest)
+    objects.objects[failure_path] = canonical_json_bytes(
+        DeckQualityProducerFailureRecord(
+            candidate_digest=candidate_digest,
+            quality_run_id=pack.quality_run_id,
+            failure_stage="producer_bundle",
+            failure_code="producer_bundle_unavailable",
+        )
+    )
+    restarted = DeckQualityPublicationWorker(
+        config=_config(),
+        instrument=_instrument(),
+        store=store,  # type: ignore[arg-type]
+        object_store=objects,
+        lease_owner="producer-arbitration-restart",
+        materialization_root=tmp_path / "producer-arbitration-restart",
+        claim_token_factory=lambda: "producer-arbitration-restart-token",
+        clock=lambda: store.now,
+    )
+
+    second = await restarted.run_once()
+
+    assert second.producer_seen == 1
+    assert second.producer_reconciled == 1
+    assert second.producer_quarantined == 0
+    assert second.producer_failed == 0
+    assert second.producer_failure_evidence == 1
+    assert inbox_path not in objects.objects
+    assert objects.objects[failure_path]
+    assert (
+        deck_quality_producer_archive_path(pack.quality_run_id)
+        not in objects.objects
+    )
+    assert store.request_calls == []
+
+
+@pytest.mark.anyio
+async def test_arbitration_sentinel_retires_against_exact_valid_archive(
+    tmp_path: Path,
+) -> None:
+    worker, store, objects, pack, _artifact, inbox_path, _source = (
+        _producer_setup(tmp_path)
+    )
+    archived_bundle = objects.objects[inbox_path]
+    candidate_digest = derive_deck_quality_candidate_digest(
+        artifact={
+            "deck_build_id": pack.build_id,
+            "logical_artifact_id": pack.logical_artifact_id,
+            "current_artifact_version_id": pack.artifact_version_id,
+            "artifact_sha256": pack.artifact_sha256,
+        },
+        completion_payload={
+            "user_id": pack.user_id,
+            "thread_id": pack.thread_id,
+            "task_id": pack.task_id,
+            "run_id": pack.builder_run_id,
+        },
+    )
+    objects.objects[deck_quality_producer_archive_path(pack.quality_run_id)] = (
+        archived_bundle
+    )
+    objects.objects[inbox_path] = canonical_json_bytes(
+        DeckQualityProducerArbitrationRecord(
+            candidate_digest=candidate_digest,
+            quality_run_id=pack.quality_run_id,
+        )
+    )
+
+    result = await worker.run_once()
+
+    assert result.producer_seen == 1
+    assert result.producer_reconciled == 1
+    assert result.producer_quarantined == 0
+    assert result.producer_failed == 0
+    assert inbox_path not in objects.objects
+    assert objects.objects[deck_quality_producer_archive_path(pack.quality_run_id)] == archived_bundle
+    assert store.request_calls == []
+    assert not any(
+        path.startswith("dq1/producer-arbitration-observations/v1/")
+        for path in objects.objects
+    )
+
+
+@pytest.mark.anyio
+async def test_arbitration_observation_tolerates_bounded_clock_skew(
+    tmp_path: Path,
+) -> None:
+    worker, store, objects, pack, _artifact, inbox_path, _source = (
+        _producer_setup(tmp_path)
+    )
+    candidate_digest = "f" * 64
+    sentinel = canonical_json_bytes(
+        DeckQualityProducerArbitrationRecord(
+            candidate_digest=candidate_digest,
+            quality_run_id=pack.quality_run_id,
+        )
+    )
+    sentinel_sha256 = hashlib.sha256(sentinel).hexdigest()
+    observation_path = (
+        "dq1/producer-arbitration-observations/v1/"
+        f"{sentinel_sha256}.json"
+    )
+    objects.objects[inbox_path] = sentinel
+    objects.objects[observation_path] = canonical_json_bytes(
+        {
+            "schema_version": (
+                "deck-quality-producer-arbitration-observation/v1"
+            ),
+            "campaign_id": "DQ-1",
+            "candidate_digest": candidate_digest,
+            "quality_run_id": pack.quality_run_id,
+            "sentinel_sha256": sentinel_sha256,
+            "first_observed_unix_seconds": int(store.now.timestamp()) + 5,
+        }
+    )
+
+    result = await worker.run_once()
+
+    assert result.producer_seen == 1
+    assert result.producer_failed == 1
+    assert result.producer_quarantined == 0
+    assert inbox_path in objects.objects
+    assert observation_path in objects.objects
+    assert not any(
+        path.startswith("dq1/producer-quarantine/v1/")
+        for path in objects.objects
+    )
+
+
+@pytest.mark.anyio
+async def test_marker_missing_arbitration_page_is_durably_quarantined_after_grace(
+    tmp_path: Path,
+) -> None:
+    worker, store, objects, _pack, _artifact, valid_path, _source = (
+        _producer_setup(tmp_path)
+    )
+    orphan_paths: set[str] = set()
+    for index in range(32):
+        quality_run_id = f"quality_{index:064x}"
+        path = f"dq1/producer-inbox/v1/{quality_run_id}.bin"
+        orphan_paths.add(path)
+        objects.objects[path] = canonical_json_bytes(
+            DeckQualityProducerArbitrationRecord(
+                candidate_digest=f"{index:064x}",
+                quality_run_id=quality_run_id,
+            )
+        )
+
+    first = await worker.run_once()
+
+    assert first.producer_seen == 32
+    assert first.producer_failed == 32
+    assert first.producer_quarantined == 0
+    assert valid_path in objects.objects
+    assert orphan_paths.issubset(objects.objects)
+    assert len(
+        [
+            path
+            for path in objects.objects
+            if path.startswith("dq1/producer-arbitration-observations/v1/")
+        ]
+    ) == 32
+
+    after_grace_worker = DeckQualityPublicationWorker(
+        config=_config(),
+        instrument=_instrument(),
+        store=store,  # type: ignore[arg-type]
+        object_store=objects,
+        lease_owner="producer-arbitration-after-grace",
+        materialization_root=tmp_path / "producer-arbitration-after-grace",
+        claim_token_factory=lambda: "producer-arbitration-after-grace-token",
+        clock=lambda: store.now + timedelta(seconds=60),
+    )
+    second = await after_grace_worker.run_once()
+
+    assert second.producer_seen == 32
+    assert second.producer_failed == 0
+    assert second.producer_quarantined == 32
+    assert orphan_paths.isdisjoint(objects.objects)
+    assert valid_path in objects.objects
+    assert len(
+        [
+            path
+            for path in objects.objects
+            if path.startswith(
+                "dq1/producer-quarantine/v1/arbitration_orphaned/"
+            )
+        ]
+    ) == 32
+
+    valid_worker = DeckQualityPublicationWorker(
+        config=_config(),
+        instrument=_instrument(),
+        store=store,  # type: ignore[arg-type]
+        object_store=objects,
+        lease_owner="producer-arbitration-valid",
+        materialization_root=tmp_path / "producer-arbitration-valid",
+        claim_token_factory=lambda: "producer-arbitration-valid-token",
+        clock=lambda: store.now,
+    )
+    third = await valid_worker.run_once()
+
+    assert third.producer_seen == 1
+    assert third.producer_reconciled == 1
+    assert third.producer_failed == 0
+    assert valid_path not in objects.objects
+
+
+@pytest.mark.anyio
+async def test_poisoned_arbitration_observation_page_cannot_starve_valid_bundle(
+    tmp_path: Path,
+) -> None:
+    worker, store, objects, _pack, _artifact, valid_path, _source = (
+        _producer_setup(tmp_path)
+    )
+    orphan_paths: set[str] = set()
+    observation_paths: set[str] = set()
+    now_seconds = int(store.now.timestamp())
+    for index in range(32):
+        quality_run_id = f"quality_{index:064x}"
+        candidate_digest = f"{index:064x}"
+        path = f"dq1/producer-inbox/v1/{quality_run_id}.bin"
+        sentinel = canonical_json_bytes(
+            DeckQualityProducerArbitrationRecord(
+                candidate_digest=candidate_digest,
+                quality_run_id=quality_run_id,
+            )
+        )
+        sentinel_sha256 = hashlib.sha256(sentinel).hexdigest()
+        observation_path = (
+            "dq1/producer-arbitration-observations/v1/"
+            f"{sentinel_sha256}.json"
+        )
+        orphan_paths.add(path)
+        observation_paths.add(observation_path)
+        objects.objects[path] = sentinel
+        if index % 4 == 0:
+            objects.objects[observation_path] = b"x" * (2 * 1024 + 1)
+        elif index % 4 == 1:
+            objects.objects[observation_path] = b"{"
+        else:
+            observation = {
+                "schema_version": (
+                    "deck-quality-producer-arbitration-observation/v1"
+                ),
+                "campaign_id": "DQ-1",
+                "candidate_digest": candidate_digest,
+                "quality_run_id": quality_run_id,
+                "sentinel_sha256": sentinel_sha256,
+                "first_observed_unix_seconds": now_seconds,
+            }
+            if index % 4 == 2:
+                observation["sentinel_sha256"] = "e" * 64
+            else:
+                observation["first_observed_unix_seconds"] = (
+                    now_seconds + 3_600
+                )
+            objects.objects[observation_path] = canonical_json_bytes(
+                observation
+            )
+
+    first = await worker.run_once()
+
+    assert first.producer_seen == 32
+    assert first.producer_failed == 0
+    assert first.producer_quarantined == 32
+    assert orphan_paths.isdisjoint(objects.objects)
+    assert observation_paths.issubset(objects.objects)
+    assert valid_path in objects.objects
+    assert len(
+        [
+            path
+            for path in objects.objects
+            if path.startswith(
+                "dq1/producer-quarantine/v1/"
+                "arbitration_observation_invalid/"
+            )
+        ]
+    ) == 32
+
+    valid_worker = DeckQualityPublicationWorker(
+        config=_config(),
+        instrument=_instrument(),
+        store=store,  # type: ignore[arg-type]
+        object_store=objects,
+        lease_owner="producer-arbitration-after-poison",
+        materialization_root=tmp_path / "producer-arbitration-after-poison",
+        claim_token_factory=lambda: "producer-arbitration-after-poison-token",
+        clock=lambda: store.now,
+    )
+    second = await valid_worker.run_once()
+
+    assert second.producer_seen == 1
+    assert second.producer_reconciled == 1
+    assert second.producer_failed == 0
+    assert valid_path not in objects.objects
+
+
+@pytest.mark.anyio
+async def test_arbitration_sentinel_rejects_mismatched_failure_marker(
+    tmp_path: Path,
+) -> None:
+    worker, store, objects, pack, _artifact, inbox_path, _source = (
+        _producer_setup(tmp_path)
+    )
+    candidate_digest = "f" * 64
+    objects.objects[inbox_path] = canonical_json_bytes(
+        DeckQualityProducerArbitrationRecord(
+            candidate_digest=candidate_digest,
+            quality_run_id=pack.quality_run_id,
+        )
+    )
+    failure_path = deck_quality_producer_failure_path(candidate_digest)
+    objects.objects[failure_path] = canonical_json_bytes(
+        DeckQualityProducerFailureRecord(
+            candidate_digest=candidate_digest,
+            quality_run_id="quality_" + "9" * 64,
+            failure_stage="producer_bundle",
+            failure_code="producer_bundle_unavailable",
+        )
+    )
+
+    result = await worker.run_once()
+
+    assert result.producer_reconciled == 0
+    assert result.producer_quarantined == 1
+    assert result.producer_failed == 0
+    assert inbox_path not in objects.objects
+    assert store.request_calls == []
+    assert any(
+        path.startswith("dq1/producer-quarantine/v1/bundle_invalid/")
+        for path in objects.objects
+    )
+    assert any(
+        path.startswith("dq1/producer-rejections/v1/")
+        for path in objects.objects
+    )
+
+
+@pytest.mark.anyio
+async def test_arbitration_sentinel_must_be_canonical(
+    tmp_path: Path,
+) -> None:
+    worker, store, objects, pack, _artifact, inbox_path, _source = (
+        _producer_setup(tmp_path)
+    )
+    objects.objects[inbox_path] = canonical_json_bytes(
+        DeckQualityProducerArbitrationRecord(
+            candidate_digest="f" * 64,
+            quality_run_id=pack.quality_run_id,
+        )
+    ) + b"\n"
+
+    result = await worker.run_once()
+
+    assert result.producer_reconciled == 0
+    assert result.producer_quarantined == 1
+    assert result.producer_failed == 0
+    assert inbox_path not in objects.objects
+    assert store.request_calls == []
+
+
+@pytest.mark.anyio
 async def test_producer_reconciliation_fences_create_and_rpc_response_loss_and_restart(
     tmp_path: Path,
 ) -> None:
@@ -1198,6 +1594,30 @@ async def test_worker_rejects_tampered_producer_bundle_without_materialization(
     assert objects.creates[1][0].startswith("dq1/producer-rejections/v1/")
     assert objects.creates[1][1] == "application/json"
     assert producer_path not in objects.objects
+
+
+@pytest.mark.anyio
+async def test_quarantine_failure_logs_only_safe_substage_and_type(
+    tmp_path: Path,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    worker, _store, objects, _pack_value, _artifact, inbox_path, _source = (
+        _producer_setup(tmp_path)
+    )
+    bundle = objects.objects[inbox_path]
+    objects.objects[inbox_path] = bundle[:-1] + bytes((bundle[-1] ^ 1,))
+    objects.fail_delete_once.add(inbox_path)
+
+    with caplog.at_level("ERROR"):
+        result = await worker.run_once()
+
+    assert result.producer_quarantined == 0
+    assert result.producer_failed == 1
+    assert (
+        "producer quarantine failed substage=inbox_retire "
+        "error_type=RuntimeError contentExcluded=true"
+    ) in caplog.text
+    assert "simulated delete failure before commit" not in caplog.text
 
 
 @pytest.mark.anyio
@@ -1536,30 +1956,36 @@ async def test_worker_live_readiness_degrades_while_retryable_inbox_failure_rema
 
 
 @pytest.mark.anyio
-async def test_worker_live_readiness_stays_degraded_for_persisted_failure_evidence(
+async def test_worker_live_readiness_treats_persisted_failure_evidence_as_audit_history(
     tmp_path: Path,
 ) -> None:
-    worker, _store, objects, _pack, _artifact, inbox_path, _source = (
+    worker, _store, objects, pack, _artifact, inbox_path, _source = (
         _producer_setup(tmp_path)
     )
     objects.objects.pop(inbox_path)
-    objects.objects["dq1/producer-failures/v1/candidate.json"] = b"{}"
+    candidate_digest = "f" * 64
+    failure_path = deck_quality_producer_failure_path(candidate_digest)
+    objects.objects[failure_path] = canonical_json_bytes(
+        DeckQualityProducerFailureRecord(
+            candidate_digest=candidate_digest,
+            quality_run_id=pack.quality_run_id,
+            failure_stage="producer_bundle",
+            failure_code="producer_bundle_unavailable",
+        )
+    )
 
     worker.start()
     try:
         for _attempt in range(100):
             readiness = worker.readiness()
-            if readiness.get("reason") == "cycle_failed":
+            if readiness.get("status") == "ready":
                 break
             await asyncio.sleep(0.01)
         else:
-            pytest.fail("worker did not expose persistent producer failure evidence")
+            pytest.fail("worker did not publish a healthy audit-only cycle")
 
-        assert readiness == {
-            "status": "degraded",
-            "reason": "cycle_failed",
-            "error_type": "RuntimeError",
-        }
+        assert readiness["status"] == "ready"
+        assert failure_path in objects.objects
     finally:
         await worker.stop()
 
