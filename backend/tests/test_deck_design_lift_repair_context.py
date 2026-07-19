@@ -32,6 +32,7 @@ from deerflow.sophia.deck_design_lift.repair_author import (
 )
 from deerflow.sophia.deck_design_lift.repair_context import (
     ProductionRepairAuthorContextLoader,
+    _read_object,
 )
 from deerflow.sophia.deck_design_lift.runtime import (
     InitialRenderedJudgment,
@@ -629,6 +630,32 @@ def test_loads_exact_durable_manifest_snapshot_sources_and_skill_context() -> No
     assert all(thread_id != threading.get_ident() for thread_id in fixture.mutations.thread_ids)
     assert fixture.objects.thread_ids
     assert all(thread_id != threading.get_ident() for thread_id in fixture.objects.thread_ids)
+
+
+def test_empty_manifest_source_is_admitted_only_at_the_source_boundary() -> None:
+    objects = FakeObjectStore({"artifacts/source.css": b""})
+
+    assert (
+        _run(
+            _read_object(
+                objects,  # type: ignore[arg-type]
+                "artifacts/source.css",
+                max_bytes=MAX_REPAIR_CONTEXT_SOURCE_BYTES,
+                allow_empty=True,
+            )
+        )
+        == b""
+    )
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(
+            _read_object(
+                objects,  # type: ignore[arg-type]
+                "artifacts/source.css",
+                max_bytes=MAX_REPAIR_CONTEXT_SOURCE_BYTES,
+            )
+        )
+
+    assert error.value.code == "context_unavailable"
 
 
 def test_request_identity_mismatch_stops_before_quality_or_source_reads() -> None:

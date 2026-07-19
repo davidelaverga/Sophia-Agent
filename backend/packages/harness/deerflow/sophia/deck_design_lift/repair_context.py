@@ -296,6 +296,7 @@ async def _read_object(
     object_path: str,
     *,
     max_bytes: int,
+    allow_empty: bool = False,
 ) -> bytes:
     try:
         raw = await _call_maybe_async(
@@ -305,7 +306,7 @@ async def _read_object(
         )
     except Exception:
         _unavailable()
-    if not isinstance(raw, bytes) or not raw or len(raw) > max_bytes:
+    if not isinstance(raw, bytes) or (not raw and not allow_empty) or len(raw) > max_bytes:
         _unavailable()
     return raw
 
@@ -467,6 +468,7 @@ async def _load_sources(
                     source_path,
                     object_root=object_root,
                     build_id=request.build_id,
+                    thread_id=request.thread_id,
                 )
             except DeckDesignLiftProductionStorageError:
                 _invalid()
@@ -474,6 +476,7 @@ async def _load_sources(
                 object_store,
                 durable_path,
                 max_bytes=MAX_REPAIR_CONTEXT_SOURCE_BYTES,
+                allow_empty=True,
             )
             contexts.append(
                 await _run_sync(
@@ -606,6 +609,7 @@ async def _load_assets(
                 component.asset_paths[0],
                 object_root=object_root,
                 build_id=request.build_id,
+                thread_id=request.thread_id,
             )
         except DeckDesignLiftProductionStorageError:
             _invalid()

@@ -43,6 +43,8 @@ from deerflow.sophia.storage.supabase_artifact_store import (
 
 MAX_PRODUCTION_MANIFEST_BYTES = 2 * 1024 * 1024
 MAX_PRODUCTION_PPTX_BYTES = 100 * 1024 * 1024
+_MAX_SOURCE_PATH_LENGTH = 4_096
+_PRODUCTION_THREAD_SOURCE_ROOT = "/app/backend/.deer-flow/threads"
 _WRITABLE_SLIDE_ROLES = ("body", "slide_css", "notes")
 
 
@@ -90,14 +92,24 @@ def canonical_manifest_source_path(
     *,
     object_root: str,
     build_id: str,
+    thread_id: str,
 ) -> str:
     """Map an immutable local foundation source to its uploaded object key."""
 
-    if not isinstance(source_path, str) or not source_path.strip() or "\x00" in source_path or "\\" in source_path:
+    if not isinstance(source_path, str) or not source_path.strip() or len(source_path) > _MAX_SOURCE_PATH_LENGTH or "\x00" in source_path or "\\" in source_path:
+        _fail("source_path_invalid")
+    canonical_build_id = _canonical_segment(build_id, default="build")
+    canonical_thread_id = _canonical_segment(thread_id, default="thread")
+    try:
+        canonical_root = normalize_object_path(object_root)
+    except ValueError:
+        _fail("source_path_invalid")
+    if canonical_root != object_root:
         _fail("source_path_invalid")
     local_prefixes = (
-        f"/mnt/user-data/outputs/.builder/builds/{build_id}/",
-        f".builder/builds/{build_id}/",
+        f"/mnt/user-data/outputs/.builder/builds/{canonical_build_id}/",
+        f".builder/builds/{canonical_build_id}/",
+        (f"{_PRODUCTION_THREAD_SOURCE_ROOT}/{canonical_thread_id}/user-data/outputs/.builder/builds/{canonical_build_id}/"),
     )
     relative: str | None = None
     for prefix in local_prefixes:
@@ -105,15 +117,22 @@ def canonical_manifest_source_path(
             relative = source_path.removeprefix(prefix)
             break
     if relative is not None:
+        parts = relative.split("/")
+        if not relative or any(part in {"", ".", ".."} for part in parts):
+            _fail("source_path_invalid")
         try:
-            return normalize_object_path(f"{object_root}/{relative}")
+            mapped = f"{canonical_root}/{relative}"
+            normalized = normalize_object_path(mapped)
         except ValueError:
             _fail("source_path_invalid")
+        if normalized != mapped:
+            _fail("source_path_invalid")
+        return normalized
     try:
         normalized = normalize_object_path(source_path)
     except ValueError:
         _fail("source_path_invalid")
-    if not normalized.startswith(f"{object_root}/"):
+    if normalized != source_path or not normalized.startswith(f"{canonical_root}/"):
         _fail("source_path_invalid")
     return normalized
 

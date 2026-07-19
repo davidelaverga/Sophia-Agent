@@ -447,6 +447,7 @@ def _baseline_asset_descriptors(
                     component.asset_paths[0],
                     object_root=object_root,
                     build_id=request.build_id,
+                    thread_id=request.thread_id,
                 ),
             )
         )

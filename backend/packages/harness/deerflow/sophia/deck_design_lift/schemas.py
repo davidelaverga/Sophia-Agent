@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from decimal import Decimal
-from typing import Annotated, Any, Literal
+from typing import Annotated, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
@@ -303,8 +303,12 @@ class AssetUpdate(StrictFrozenModel):
 
 
 class DeckRepairCandidate(StrictFrozenModel):
-    creative_plan_patch: dict[str, Any] | None = None
-    design_plan_patch: dict[str, Any] | None = None
+    # The production DQ-2 compiler freezes both plans and admits only
+    # manifest-addressed source/asset updates.  Keep these explicit nulls in
+    # the wire shape so the provider schema is strict-JSON-schema compatible
+    # instead of advertising unsupported free-form objects.
+    creative_plan_patch: None = None
+    design_plan_patch: None = None
     source_updates: tuple[SourceUpdate, ...] = ()
     asset_updates: tuple[AssetUpdate, ...] = ()
     rationale: str = Field(min_length=1, max_length=20_000)

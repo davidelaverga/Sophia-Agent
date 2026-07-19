@@ -309,13 +309,53 @@ def test_canonical_manifest_source_path_maps_only_the_build_root() -> None:
         f"/mnt/user-data/outputs/.builder/builds/{BUILD_ID}/components/c1/versions/v1/body.html",
         object_root=root,
         build_id=BUILD_ID,
+        thread_id=THREAD_ID,
     )
     assert mapped == f"{root}/components/c1/versions/v1/body.html"
+
+    production_mapped = canonical_manifest_source_path(
+        f"/app/backend/.deer-flow/threads/{THREAD_ID}/user-data/outputs/.builder/builds/{BUILD_ID}/components/c1/versions/v1/body.html",
+        object_root=root,
+        build_id=BUILD_ID,
+        thread_id=THREAD_ID,
+    )
+    assert production_mapped == mapped
 
     with pytest.raises(DeckDesignLiftProductionStorageError) as error:
         canonical_manifest_source_path(
             "/mnt/user-data/outputs/.builder/builds/other/components/c1/body.html",
             object_root=root,
             build_id=BUILD_ID,
+            thread_id=THREAD_ID,
         )
+    assert error.value.code == "source_path_invalid"
+
+
+@pytest.mark.parametrize(
+    "unsafe_path",
+    (
+        f"/app/backend/.deer-flow/threads/neighbor-thread/user-data/outputs/.builder/builds/{BUILD_ID}/components/c1/versions/v1/body.html",
+        f"/app/backend/.deer-flow/threads/{THREAD_ID}/user-data/outputs/.builder/builds/neighbor-build/components/c1/versions/v1/body.html",
+        f"/srv/app/backend/.deer-flow/threads/{THREAD_ID}/user-data/outputs/.builder/builds/{BUILD_ID}/components/c1/versions/v1/body.html",
+        f"/app/backend/.deer-flow/threads/{THREAD_ID}/user-data/outputs/.builder/builds/{BUILD_ID}/components/c1/versions/../body.html",
+        f"/app/backend/.deer-flow/threads/{THREAD_ID}/user-data/outputs/.builder/builds/{BUILD_ID}/components//c1/versions/v1/body.html",
+    ),
+)
+def test_canonical_manifest_source_path_rejects_production_scope_drift(
+    unsafe_path: str,
+) -> None:
+    root = foundation_object_root(
+        user_id=USER_ID,
+        thread_id=THREAD_ID,
+        build_id=BUILD_ID,
+    )
+
+    with pytest.raises(DeckDesignLiftProductionStorageError) as error:
+        canonical_manifest_source_path(
+            unsafe_path,
+            object_root=root,
+            build_id=BUILD_ID,
+            thread_id=THREAD_ID,
+        )
+
     assert error.value.code == "source_path_invalid"

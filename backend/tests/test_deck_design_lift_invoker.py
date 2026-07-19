@@ -433,7 +433,22 @@ def test_real_pinned_chatopenai_builds_the_locked_repair_payload(
     assert payload["max_output_tokens"] == 12_000
     assert payload["text"]["format"]["name"] == "DeckRepairCandidate"
     assert payload["text"]["format"]["strict"] is True
-    assert payload["text"]["format"]["schema"]["additionalProperties"] is False
+    schema = payload["text"]["format"]["schema"]
+    assert schema["additionalProperties"] is False
+    assert schema["properties"]["creative_plan_patch"]["type"] == "null"
+    assert schema["properties"]["design_plan_patch"]["type"] == "null"
+
+    def assert_every_object_is_closed(value: object) -> None:
+        if isinstance(value, dict):
+            if value.get("type") == "object":
+                assert value.get("additionalProperties") is False
+            for nested in value.values():
+                assert_every_object_is_closed(nested)
+        elif isinstance(value, list):
+            for nested in value:
+                assert_every_object_is_closed(nested)
+
+    assert_every_object_is_closed(schema)
     assert "conversation" not in payload
     assert "previous_response_id" not in payload
     assert "PRIVATE_REPAIR_INPUT" not in repr(request)
