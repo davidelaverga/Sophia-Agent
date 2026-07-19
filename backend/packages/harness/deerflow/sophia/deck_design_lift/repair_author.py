@@ -667,7 +667,9 @@ class ProductionDeckRepairAuthor:
             raise ValueError("repair author requires the two-phase model invoker")
         if not isinstance(plan, ResolvedModelPlan):
             raise ValueError("repair author requires a resolved model plan")
-        if not callable(trace_factory):
+        if not callable(trace_factory) or not callable(
+            getattr(trace_factory, "open_existing", None)
+        ):
             raise ValueError("repair author requires safe trace authority")
         self._contexts = context_loader
         self._invoker = invoker
@@ -779,20 +781,49 @@ class ProductionDeckRepairAuthor:
             except Exception:
                 pass
             raise
+        return validated
+
+    async def complete_success_trace(
+        self,
+        request: RepairInvocationRequest,
+        result: DeckRepairInvocationResult,
+    ) -> None:
+        """Terminalize the pre-admitted trace for one durable result.
+
+        ``DurableDeckRepairExecutor`` calls this only after exact canonical
+        result readback.  Reopening is existing-only so a successful provider
+        call can never be backfilled with a trace that was not admitted before
+        invocation.
+        """
+
+        if not isinstance(request, RepairInvocationRequest) or not isinstance(
+            result,
+            DeckRepairInvocationResult,
+        ):
+            raise DeckRepairAuthorError("repair_unavailable")
+        metrics = result.metrics
         try:
+            trace_input = safe_deck_repair_trace_input(
+                request=request,
+                payload_hash=metrics.payload_hash,
+                plan_hash=metrics.plan_hash,
+            )
+            trace = await anyio.to_thread.run_sync(
+                self._trace_factory.open_existing,
+                trace_input,
+            )
             await anyio.to_thread.run_sync(
                 trace.finish,
                 SafeDeckRepairTraceOutput(
                     status="completed",
-                    latency_ms=validated.metrics.latency_ms,
-                    input_tokens=validated.metrics.input_tokens,
-                    output_tokens=validated.metrics.output_tokens,
-                    total_tokens=validated.metrics.total_tokens,
+                    latency_ms=metrics.latency_ms,
+                    input_tokens=metrics.input_tokens,
+                    output_tokens=metrics.output_tokens,
+                    total_tokens=metrics.total_tokens,
                 ),
             )
         except Exception:
             raise DeckRepairAuthorError("repair_unavailable") from None
-        return validated
 
 
 __all__ = [

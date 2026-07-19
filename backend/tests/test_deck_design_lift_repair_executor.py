@@ -17,7 +17,10 @@ from deerflow.sophia.deck_design_lift.repair_executor import (
     DurableDeckRepairExecutor,
     repair_invocation_object_paths,
 )
-from deerflow.sophia.deck_design_lift.runtime import RepairInvocationRequest
+from deerflow.sophia.deck_design_lift.runtime import (
+    DeckRepairTraceCompletionPending,
+    RepairInvocationRequest,
+)
 from deerflow.sophia.deck_design_lift.schemas import (
     DeckRepairCandidate,
     DeckRepairProgram,
@@ -138,13 +141,18 @@ class RecordingAuthor:
         candidate: DeckRepairCandidate | None = None,
         metrics: DeckRepairInvocationMetrics | None = None,
         error: BaseException | None = None,
+        trace_error: Exception | None = None,
     ) -> None:
         self.result = DeckRepairInvocationResult(
             candidate=candidate or _candidate(),
             metrics=metrics or _metrics(),
         )
         self.error = error
+        self.trace_error = trace_error
         self.calls: list[RepairInvocationRequest] = []
+        self.trace_calls: list[
+            tuple[RepairInvocationRequest, DeckRepairInvocationResult]
+        ] = []
         self.private_provider_payload = PRIVATE_PROVIDER_PAYLOAD
 
     async def __call__(
@@ -155,6 +163,15 @@ class RecordingAuthor:
         if self.error is not None:
             raise self.error
         return self.result
+
+    async def complete_success_trace(
+        self,
+        request: RepairInvocationRequest,
+        result: DeckRepairInvocationResult,
+    ) -> None:
+        self.trace_calls.append((request, result))
+        if self.trace_error is not None:
+            raise self.trace_error
 
 
 class InMemoryAsyncImmutableObjectStore:
@@ -214,6 +231,7 @@ def test_success_persists_only_canonical_intent_structured_result_and_safe_metri
 
     assert candidate == _candidate()
     assert author.calls == [request]
+    assert author.trace_calls == [(request, author.result)]
     assert paths.intent == ("artifacts/user-canary-001/thread-canary-001/foundation/.builder/builds/build-psi-001/deck_design_lift/transactions/transaction-dq2-001/repair_call/operation-dq2-001/intent.json")
     assert paths.result == paths.intent.replace("intent.json", "result.json")
     assert [call[0] for call in store.create_calls] == [paths.intent, paths.result]
@@ -269,7 +287,75 @@ def test_valid_result_replay_returns_without_a_second_author_call() -> None:
     assert _run(replay.invoke_once(request)) == _candidate()
     assert len(first_author.calls) == 1
     assert replay_author.calls == []
+    assert len(first_author.trace_calls) == 1
+    assert len(replay_author.trace_calls) == 1
     assert len(store.create_calls) == 2
+
+
+def test_result_is_durable_before_trace_completion_and_replay_never_calls_author() -> None:
+    request = _request()
+    paths = repair_invocation_object_paths(request)
+    store = InMemoryAsyncImmutableObjectStore()
+
+    class PersistFirstAuthor(RecordingAuthor):
+        async def complete_success_trace(
+            self,
+            request: RepairInvocationRequest,
+            result: DeckRepairInvocationResult,
+        ) -> None:
+            assert paths.result in store.objects
+            await super().complete_success_trace(request, result)
+
+    first_author = PersistFirstAuthor(
+        trace_error=RuntimeError("private trace transport failure")
+    )
+    first = DurableDeckRepairExecutor(object_store=store, author=first_author)
+
+    with pytest.raises(DeckRepairTraceCompletionPending) as pending:
+        _run(first.invoke_once(request))
+
+    assert str(pending.value) == "repair success trace completion is pending"
+    assert paths.result in store.objects
+    assert first_author.calls == [request]
+    assert len(first_author.trace_calls) == 1
+
+    replay_author = RecordingAuthor(error=AssertionError("must not be called"))
+    replay = DurableDeckRepairExecutor(object_store=store, author=replay_author)
+
+    assert _run(replay.invoke_once(request)) == _candidate()
+    assert replay_author.calls == []
+    assert len(replay_author.trace_calls) == 1
+    assert len(store.create_calls) == 2
+
+
+def test_persisted_result_with_trace_conflict_never_reaches_candidate_or_provider() -> None:
+    request = _request()
+    store = InMemoryAsyncImmutableObjectStore()
+    first_author = RecordingAuthor(trace_error=RuntimeError("terminal conflict"))
+
+    with pytest.raises(DeckRepairTraceCompletionPending):
+        _run(
+            DurableDeckRepairExecutor(
+                object_store=store,
+                author=first_author,
+            ).invoke_once(request)
+        )
+
+    replay_author = RecordingAuthor(
+        error=AssertionError("must not be called"),
+        trace_error=RuntimeError("terminal conflict"),
+    )
+    with pytest.raises(DeckRepairTraceCompletionPending):
+        _run(
+            DurableDeckRepairExecutor(
+                object_store=store,
+                author=replay_author,
+            ).invoke_once(request)
+        )
+
+    assert first_author.calls == [request]
+    assert replay_author.calls == []
+    assert len(replay_author.trace_calls) == 1
 
 
 def test_intent_create_response_loss_is_ambiguous_and_never_calls_author() -> None:

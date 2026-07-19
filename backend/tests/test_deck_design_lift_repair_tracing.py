@@ -44,6 +44,8 @@ class CapturingClient:
         self.fail_update = False
         self.fail_read = False
         self.fail_flush = False
+        self.transient_read_failures = 0
+        self.terminal_stale_reads = 0
         self.project_id = _PROJECT_ID
         self.project_name = _PROJECT_NAME
         self.closed = False
@@ -63,9 +65,18 @@ class CapturingClient:
         self.read_attempts.append(normalized)
         if self.fail_read:
             raise RuntimeError("Traceback: Authorization Bearer private-secret raw-context")
+        if self.transient_read_failures:
+            self.transient_read_failures -= 1
+            raise RuntimeError("private transient read response")
         if normalized not in self.stored_runs:
             raise LangSmithNotFoundError("private lookup response")
-        return deepcopy(self.stored_runs[normalized])
+        remote = deepcopy(self.stored_runs[normalized])
+        if self.terminal_stale_reads and remote.end_time is not None:
+            self.terminal_stale_reads -= 1
+            remote.outputs = None
+            remote.error = None
+            remote.end_time = None
+        return remote
 
     def create_run(
         self,
@@ -389,6 +400,63 @@ def test_create_and_update_commit_then_error_are_reconciled_idempotently() -> No
 
     with pytest.raises(SafeDeckRepairTraceEmissionError, match="conflicts"):
         _trace(client, trace_input).finish(_success_output(latency_ms=876))
+
+
+def test_terminal_readback_retries_exact_pending_and_transient_reads(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tracing_module,
+        "_TERMINAL_READBACK_DELAYS_SECONDS",
+        (0.0, 0.0, 0.0, 0.0),
+    )
+    client = CapturingClient()
+    trace = _trace(client)
+    client.terminal_stale_reads = 2
+    client.transient_read_failures = 1
+
+    trace.finish(_success_output())
+
+    assert trace.already_terminal is True
+    assert len(client.update_attempts) == 1
+    assert client.terminal_stale_reads == 0
+    assert client.transient_read_failures == 0
+
+
+def test_terminal_readback_exhaustion_keeps_one_update_and_fails_safely(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tracing_module,
+        "_TERMINAL_READBACK_DELAYS_SECONDS",
+        (0.0, 0.0, 0.0),
+    )
+    client = CapturingClient()
+    trace = _trace(client)
+    client.terminal_stale_reads = 10
+
+    with pytest.raises(SafeDeckRepairTraceEmissionError, match="readback"):
+        trace.finish(_success_output())
+
+    assert len(client.update_attempts) == 1
+    assert client.terminal_stale_reads == 7
+    assert client.stored_runs[derive_deck_repair_trace_run_id(_trace_input())].end_time is not None
+
+
+def test_open_existing_missing_trace_fails_without_creating() -> None:
+    client = CapturingClient()
+
+    with pytest.raises(SafeDeckRepairTraceEmissionError, match="pre-admitted"):
+        SafeDeckRepairTrace(
+            _trace_input(),
+            client=client,
+            project_name=_PROJECT_NAME,
+            expected_project_id=_PROJECT_ID,
+            require_existing=True,
+        )
+
+    assert client.create_attempts == []
+    assert client.update_attempts == []
 
 
 @pytest.mark.parametrize("stage", ["create", "read", "update", "flush"])

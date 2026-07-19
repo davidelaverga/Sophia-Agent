@@ -376,14 +376,18 @@ class FakeTraceSpan:
     def __init__(self) -> None:
         self.already_terminal = False
         self.outputs: list[SafeDeckRepairTraceOutput] = []
+        self.finish_error: Exception | None = None
 
     def finish(self, output: SafeDeckRepairTraceOutput) -> None:
+        if self.finish_error is not None:
+            raise self.finish_error
         self.outputs.append(output)
 
 
 class FakeTraceFactory:
     def __init__(self) -> None:
         self.inputs: list[SafeDeckRepairTraceInput] = []
+        self.open_existing_inputs: list[SafeDeckRepairTraceInput] = []
         self.spans: list[FakeTraceSpan] = []
         self.error: Exception | None = None
         self.already_terminal = False
@@ -396,6 +400,15 @@ class FakeTraceFactory:
         span.already_terminal = self.already_terminal
         self.spans.append(span)
         return span
+
+    def open_existing(
+        self,
+        trace_input: SafeDeckRepairTraceInput,
+    ) -> FakeTraceSpan:
+        self.open_existing_inputs.append(trace_input)
+        if self.error is not None or not self.spans:
+            raise self.error or RuntimeError("trace admission is missing")
+        return self.spans[-1]
 
 
 def _author(
@@ -443,6 +456,11 @@ def test_exact_context_builds_bounded_multimodal_prompt_and_one_create() -> None
     assert traces.inputs[0].program_hash == request.program.program_hash
     assert traces.inputs[0].payload_hash == invoker.prepared.payload_hash
     assert traces.inputs[0].plan_hash == invoker.prepared.plan_hash
+    assert traces.spans[0].outputs == []
+
+    _run(author.complete_success_trace(request, result))
+
+    assert traces.open_existing_inputs == traces.inputs
     assert traces.spans[0].outputs == [
         SafeDeckRepairTraceOutput(
             status="completed",
@@ -511,7 +529,9 @@ def test_safe_trace_network_work_runs_off_the_async_event_loop() -> None:
 
     async def invoke() -> tuple[DeckRepairInvocationResult, int]:
         event_loop_thread_id = threading.get_ident()
-        return await author(request), event_loop_thread_id
+        result = await author(request)
+        await author.complete_success_trace(request, result)
+        return result, event_loop_thread_id
 
     result, event_loop_thread_id = _run(invoke())
 

@@ -26,6 +26,7 @@ from deerflow.sophia.deck_design_lift.runtime import (
     DeckDesignLiftRequest,
     DeckDesignLiftRuntime,
     DeckDesignLiftRuntimeError,
+    DeckRepairTraceCompletionPending,
     InitialRenderedJudgment,
     RepairInvocationRequest,
     StagedDeckCandidate,
@@ -323,6 +324,21 @@ class InvokeOnceRepair:
                 self.crash_after_first_model_call = False
                 raise SimulatedWorkerCrash()
         return self.cached[request.operation_id]
+
+
+class TracePendingOnceRepair:
+    def __init__(self) -> None:
+        self.candidate = _candidate()
+        self.invocation_calls = 0
+        self.provider_calls = 1
+
+    async def invoke_once(self, _request: RepairInvocationRequest):
+        self.invocation_calls += 1
+        if self.invocation_calls == 1:
+            raise DeckRepairTraceCompletionPending(
+                "repair success trace completion is pending"
+            )
+        return self.candidate
 
 
 class FakeMaterializer:
@@ -1164,6 +1180,41 @@ def test_restart_after_model_call_reuses_invoke_once_result_no_second_repair() -
     assert len(judge.initial_calls) == 1
     assert len(judge.candidate_calls) == 1
     assert manifests.load(build_id="build-psi-001", user_id="user-canary-001").manifest_revision == 2
+
+
+def test_trace_completion_pending_preserves_prepared_transaction_for_exact_recovery() -> None:
+    repair = TracePendingOnceRepair()
+    runtime, manifests, mutations, _mechanics, judge, _repair, materializer = _runtime(
+        repair=repair,
+    )
+    request = _request()
+
+    with pytest.raises(
+        DeckDesignLiftRuntimeError,
+        match="durable repair result is awaiting trace completion",
+    ):
+        _run(runtime.run(request))
+
+    transaction = next(iter(mutations._items.values())).model_copy(deep=True)
+    assert transaction.status == "prepared"
+    assert materializer.staged == {}
+    assert materializer.rollback_calls == 0
+    assert judge.candidate_calls == []
+    assert manifests.load(
+        build_id="build-psi-001",
+        user_id="user-canary-001",
+    ).manifest_revision == 1
+
+    resumed = request.model_copy(
+        update={"transaction_id": transaction.transaction_id}
+    )
+    result = _run(runtime.run(resumed))
+
+    assert result.terminal_code == "candidate_committed"
+    assert repair.invocation_calls == 2
+    assert repair.provider_calls == 1
+    assert len(judge.initial_calls) == 1
+    assert len(judge.candidate_calls) == 1
 
 
 @pytest.mark.parametrize("crash_status", ["staged", "verified"])

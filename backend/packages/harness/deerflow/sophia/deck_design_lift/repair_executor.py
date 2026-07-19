@@ -12,7 +12,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Annotated, Literal, Protocol
 
@@ -22,7 +21,10 @@ from deerflow.sophia.deck_design_lift.invoker import (
     DeckRepairInvocationMetrics,
     DeckRepairInvocationResult,
 )
-from deerflow.sophia.deck_design_lift.runtime import RepairInvocationRequest
+from deerflow.sophia.deck_design_lift.runtime import (
+    DeckRepairTraceCompletionPending,
+    RepairInvocationRequest,
+)
 from deerflow.sophia.deck_design_lift.schemas import DeckRepairCandidate
 from deerflow.sophia.deck_quality.canonical import (
     canonical_json_bytes,
@@ -98,10 +100,17 @@ class AsyncImmutableObjectStore(Protocol):
     ) -> Literal["created", "exists"]: ...
 
 
-DeckRepairAuthor = Callable[
-    [RepairInvocationRequest],
-    Awaitable[DeckRepairInvocationResult],
-]
+class DeckRepairAuthor(Protocol):
+    async def __call__(
+        self,
+        request: RepairInvocationRequest,
+    ) -> DeckRepairInvocationResult: ...
+
+    async def complete_success_trace(
+        self,
+        request: RepairInvocationRequest,
+        result: DeckRepairInvocationResult,
+    ) -> None: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -309,6 +318,23 @@ def _result_artifact(
         raise DeckRepairInvokeOnceError("author_result_invalid") from None
 
 
+def _invocation_result(
+    artifact: _RepairInvocationResultArtifact,
+) -> DeckRepairInvocationResult:
+    """Rehydrate only the exact allowlisted result persisted by the fence."""
+
+    try:
+        metrics = DeckRepairInvocationMetrics(
+            **artifact.metrics.model_dump(mode="python")
+        )
+        return DeckRepairInvocationResult(
+            candidate=artifact.candidate,
+            metrics=metrics,
+        )
+    except Exception:
+        raise DeckRepairInvokeOnceError("result_invalid") from None
+
+
 class DurableDeckRepairExecutor:
     """Object-store-backed, transaction-scoped one-call repair executor."""
 
@@ -320,7 +346,9 @@ class DurableDeckRepairExecutor:
     ) -> None:
         if not callable(getattr(object_store, "read_bounded", None)) or not callable(getattr(object_store, "create_if_absent", None)):
             raise ValueError("repair executor requires an async immutable object store")
-        if not callable(author):
+        if not callable(author) or not callable(
+            getattr(author, "complete_success_trace", None)
+        ):
             raise ValueError("repair executor requires one repair author")
         self._objects = object_store
         self._author = author
@@ -409,6 +437,23 @@ class DurableDeckRepairExecutor:
             expected_bytes=expected_bytes,
         )
 
+    async def _complete_persisted_result(
+        self,
+        request: RepairInvocationRequest,
+        artifact: _RepairInvocationResultArtifact,
+    ) -> DeckRepairCandidate:
+        result = _invocation_result(artifact)
+        try:
+            await self._author.complete_success_trace(request, result)
+        except Exception:
+            # The result is already exact and durable.  Preserve the prepared
+            # transaction so recovery can retry this trace-only boundary while
+            # the invoke-once provider fence remains consumed.
+            raise DeckRepairTraceCompletionPending(
+                "repair success trace completion is pending"
+            ) from None
+        return artifact.candidate
+
     async def invoke_once(
         self,
         request: RepairInvocationRequest,
@@ -433,7 +478,7 @@ class DurableDeckRepairExecutor:
                 intent_hash=intent_hash,
             )
             if persisted is not None:
-                return persisted.candidate
+                return await self._complete_persisted_result(request, persisted)
             raise DeckRepairInvokeOnceError("invocation_ambiguous")
 
         # A result can never safely stand alone.  Check before claiming the
@@ -478,7 +523,7 @@ class DurableDeckRepairExecutor:
                 intent_hash=intent_hash,
             )
             if persisted is not None:
-                return persisted.candidate
+                return await self._complete_persisted_result(request, persisted)
             raise DeckRepairInvokeOnceError("invocation_ambiguous")
 
         try:
@@ -510,7 +555,7 @@ class DurableDeckRepairExecutor:
                 expected_bytes=result_bytes,
             )
             if persisted is not None:
-                return persisted.candidate
+                return await self._complete_persisted_result(request, persisted)
             raise DeckRepairInvokeOnceError("result_persistence_ambiguous") from None
         if result_outcome not in {"created", "exists"}:
             raise DeckRepairInvokeOnceError("result_persistence_ambiguous")
@@ -523,7 +568,7 @@ class DurableDeckRepairExecutor:
         )
         if persisted is None:
             raise DeckRepairInvokeOnceError("result_persistence_ambiguous")
-        return persisted.candidate
+        return await self._complete_persisted_result(request, persisted)
 
 
 __all__ = [

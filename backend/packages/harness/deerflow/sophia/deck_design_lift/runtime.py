@@ -92,6 +92,10 @@ class DeckDesignLiftRuntimeError(RuntimeError):
     """The runtime could not prove that it reached a durable safe state."""
 
 
+class DeckRepairTraceCompletionPending(RuntimeError):
+    """A durable repair result exists but its success trace is not yet proven."""
+
+
 class InitialRenderedJudgment(_StrictFrozenModel):
     evidence: VersionQualityEvidence
     decision: ShadowDecision
@@ -980,6 +984,14 @@ class DeckDesignLiftRuntime:
                         program=program,
                     )
                 )
+            except DeckRepairTraceCompletionPending:
+                # The canonical repair result is durable and the invoke-once
+                # provider fence is consumed.  Leave the transaction prepared
+                # so an exact recovery can retry trace completion only; no
+                # candidate may reach materialization until that succeeds.
+                raise DeckDesignLiftRuntimeError(
+                    "durable repair result is awaiting trace completion"
+                ) from None
             except Exception:
                 return await self._rollback_result(
                     request,
@@ -1538,6 +1550,7 @@ __all__ = [
     "DeckDesignLiftResult",
     "DeckDesignLiftRuntime",
     "DeckDesignLiftRuntimeError",
+    "DeckRepairTraceCompletionPending",
     "DeckMechanics",
     "DeckQualityJudge",
     "DeckRepairExecutor",

@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime
 from math import isfinite
@@ -34,6 +35,7 @@ _MAX_OUTPUT_TOKENS = 12_000
 _MAX_LATENCY_MS = 15 * 60 * 1_000
 _DEFAULT_FLUSH_TIMEOUT_SECONDS = 15.0
 _MAX_FLUSH_TIMEOUT_SECONDS = 30.0
+_TERMINAL_READBACK_DELAYS_SECONDS = (0.0, 0.2, 0.5, 1.0, 2.0)
 
 SafeIdentifier = Annotated[
     str,
@@ -248,6 +250,11 @@ class DeckRepairTraceFactory(Protocol):
         trace_input: SafeDeckRepairTraceInput,
     ) -> DeckRepairTraceSpan: ...
 
+    def open_existing(
+        self,
+        trace_input: SafeDeckRepairTraceInput,
+    ) -> DeckRepairTraceSpan: ...
+
 
 def safe_deck_repair_trace_input(
     *,
@@ -378,6 +385,7 @@ class SafeDeckRepairTrace:
         project_name: SafeIdentifier,
         expected_project_id: UUID | None = None,
         flush_timeout_seconds: float = _DEFAULT_FLUSH_TIMEOUT_SECONDS,
+        require_existing: bool = False,
     ) -> None:
         self._input = _safe_model_dump(trace_input, SafeDeckRepairTraceInput)
         _reject_unsafe_trace_value(project_name, field_name="project_name")
@@ -385,6 +393,8 @@ class SafeDeckRepairTrace:
             raise ValueError("repair trace project must be a safe identifier")
         if expected_project_id is not None and not isinstance(expected_project_id, UUID):
             raise TypeError("expected project identity must be a UUID")
+        if type(require_existing) is not bool:
+            raise TypeError("repair trace existing-run requirement must be boolean")
         self._client = _required_trace_client(client)
         self._project_name = project_name
         self._flush_timeout_seconds = _validated_flush_timeout(flush_timeout_seconds)
@@ -395,6 +405,10 @@ class SafeDeckRepairTrace:
         self._pending_error: str | None = None
         remote = self._read_remote()
         if remote is None:
+            if require_existing:
+                raise SafeDeckRepairTraceEmissionError(
+                    "safe repair trace pre-admitted run is missing"
+                )
             self._create_remote()
             remote = self._read_remote()
             if remote is None:
@@ -517,6 +531,37 @@ class SafeDeckRepairTrace:
     ) -> bool:
         return self._validate_remote(remote) and getattr(remote, "outputs", None) == output and getattr(remote, "error", None) == native_error
 
+    def _reconcile_terminal(
+        self,
+        *,
+        output: dict[str, Any],
+        native_error: str | None,
+        exhausted_message: str,
+    ) -> None:
+        """Bounded exact readback for LangSmith's eventually consistent run GET."""
+
+        for delay_seconds in _TERMINAL_READBACK_DELAYS_SECONDS:
+            if delay_seconds:
+                time.sleep(delay_seconds)
+            try:
+                remote = self._read_remote()
+            except SafeDeckRepairTraceEmissionError:
+                # SDK/network read failures carry no trusted state. Retry the
+                # deterministic run ID within the bounded reconciliation window.
+                continue
+            if remote is None:
+                continue
+            terminal = self._validate_remote(remote)
+            if not terminal:
+                # A structurally exact pending run is a permissible stale read.
+                continue
+            if getattr(remote, "outputs", None) != output or getattr(remote, "error", None) != native_error:
+                raise SafeDeckRepairTraceEmissionError(
+                    "safe repair trace terminal state conflicts"
+                ) from None
+            return
+        raise SafeDeckRepairTraceEmissionError(exhausted_message) from None
+
     def _flush(self) -> None:
         try:
             self._client.flush(timeout=self._flush_timeout_seconds)
@@ -533,13 +578,11 @@ class SafeDeckRepairTrace:
             raise SafeDeckRepairTraceEmissionError("safe repair trace retry payload changed")
 
         if self._already_terminal:
-            remote = self._read_remote()
-            if remote is None or not self._terminal_matches(
-                remote,
+            self._reconcile_terminal(
                 output=payload,
                 native_error=native_error,
-            ):
-                raise SafeDeckRepairTraceEmissionError("safe repair trace terminal state conflicts") from None
+                exhausted_message="safe repair trace terminal state conflicts",
+            )
             self._flush()
             return
 
@@ -556,22 +599,21 @@ class SafeDeckRepairTrace:
             )
         except Exception:
             update_failed = True
-        remote = self._read_remote()
-        if remote is None or not self._terminal_matches(
-            remote,
+        self._reconcile_terminal(
             output=payload,
             native_error=native_error,
-        ):
-            message = "safe repair trace update failed" if update_failed else "safe repair trace terminal readback failed"
-            raise SafeDeckRepairTraceEmissionError(message) from None
+            exhausted_message=(
+                "safe repair trace update failed"
+                if update_failed
+                else "safe repair trace terminal readback failed"
+            ),
+        )
         self._flush()
-        remote = self._read_remote()
-        if remote is None or not self._terminal_matches(
-            remote,
+        self._reconcile_terminal(
             output=payload,
             native_error=native_error,
-        ):
-            raise SafeDeckRepairTraceEmissionError("safe repair trace terminal verification failed") from None
+            exhausted_message="safe repair trace terminal verification failed",
+        )
         self._already_terminal = True
 
 
@@ -625,6 +667,18 @@ class ConfiguredDeckRepairTraceFactory:
             client=self._client,
             project_name=self._project_name,
             expected_project_id=self._expected_project_id,
+        )
+
+    def open_existing(
+        self,
+        trace_input: SafeDeckRepairTraceInput,
+    ) -> SafeDeckRepairTrace:
+        return SafeDeckRepairTrace(
+            trace_input,
+            client=self._client,
+            project_name=self._project_name,
+            expected_project_id=self._expected_project_id,
+            require_existing=True,
         )
 
     def close(self) -> None:
