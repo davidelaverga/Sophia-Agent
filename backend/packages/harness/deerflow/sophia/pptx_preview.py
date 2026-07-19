@@ -17,7 +17,9 @@ Deployment requirement:
 from __future__ import annotations
 
 import logging
+import os
 import shutil
+import stat
 import subprocess  # noqa: S404 — invoking soffice by absolute path
 import tempfile
 from pathlib import Path
@@ -43,6 +45,54 @@ def soffice_available() -> bool:
     return shutil.which("soffice") is not None
 
 
+def _stage_regular_file(source: Path, target: Path) -> None:
+    """Copy one stable, single-link source without following its final path."""
+
+    source_lstat = source.lstat()
+    if (
+        not stat.S_ISREG(source_lstat.st_mode)
+        or source_lstat.st_nlink != 1
+    ):
+        raise OSError("preview source is not a single-link regular file")
+    read_flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+    read_flags |= getattr(os, "O_NOFOLLOW", 0)
+    source_fd = os.open(source, read_flags)
+    target_fd: int | None = None
+    try:
+        before = os.fstat(source_fd)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or (before.st_dev, before.st_ino)
+            != (source_lstat.st_dev, source_lstat.st_ino)
+        ):
+            raise OSError("preview source changed before staging")
+        write_flags = (
+            os.O_WRONLY
+            | os.O_CREAT
+            | os.O_EXCL
+            | getattr(os, "O_CLOEXEC", 0)
+            | getattr(os, "O_NOFOLLOW", 0)
+        )
+        target_fd = os.open(target, write_flags, 0o600)
+        with os.fdopen(source_fd, "rb", closefd=False) as source_stream:
+            with os.fdopen(target_fd, "wb", closefd=False) as target_stream:
+                shutil.copyfileobj(source_stream, target_stream)
+                target_stream.flush()
+        after = os.fstat(source_fd)
+        staged = os.fstat(target_fd)
+        stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (
+            any(getattr(before, field) != getattr(after, field) for field in stable_fields)
+            or staged.st_size != before.st_size
+        ):
+            raise OSError("preview source changed while staging")
+    finally:
+        os.close(source_fd)
+        if target_fd is not None:
+            os.close(target_fd)
+
+
 def maybe_render_pptx_preview(
     pptx_path: Path,
     *,
@@ -54,8 +104,6 @@ def maybe_render_pptx_preview(
     raises — preview generation must not affect build completion.
     """
     try:
-        if not pptx_path.is_file():
-            return None
         soffice = shutil.which("soffice")
         if soffice is None:
             logger.info(
@@ -67,9 +115,13 @@ def maybe_render_pptx_preview(
         target = preview_path_for(pptx_path)
         # LibreOffice writes <stem>.pdf into --outdir; convert in a temp dir
         # and move into place so we never clobber a legitimate <stem>.pdf
-        # deliverable in outputs/.
+        # deliverable in outputs/. Stage the source in that private workdir as
+        # well: DQ-1 materializations live below a root-owned 0700 temp root,
+        # which the isolated LibreOffice UID must not be allowed to traverse.
         timeout = max(1, min(_SOFFICE_TIMEOUT_SECONDS, int(timeout_seconds or _SOFFICE_TIMEOUT_SECONDS)))
         with tempfile.TemporaryDirectory(prefix="pptx-preview-") as tmp_dir:
+            staged_source = Path(tmp_dir) / "source.pptx"
+            _stage_regular_file(pptx_path, staged_source)
             completed = run_process_group(
                 [
                     soffice,
@@ -79,13 +131,14 @@ def maybe_render_pptx_preview(
                     "pdf",
                     "--outdir",
                     tmp_dir,
-                    str(pptx_path),
+                    str(staged_source),
                 ],
                 timeout=timeout,
+                private_read_dirs=[staged_source],
                 writable_dirs=[tmp_dir],
                 identity_paths=[pptx_path],
             )
-            produced = Path(tmp_dir) / (pptx_path.stem + ".pdf")
+            produced = Path(tmp_dir) / "source.pdf"
             if completed.returncode != 0 or not produced.is_file():
                 logger.warning(
                     "[PptxPreview] conversion failed returncode=%s stderr=%s",

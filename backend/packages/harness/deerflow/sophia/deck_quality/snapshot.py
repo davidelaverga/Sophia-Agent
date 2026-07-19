@@ -5,8 +5,10 @@ import hmac
 import io
 import json
 import math
+import os
 import re
 import shutil
+import stat
 import subprocess  # noqa: S404 - fixed arguments and a path-resolved pdftoppm binary
 import tempfile
 import zipfile
@@ -561,23 +563,55 @@ def _read_required_file(
     scope_root: Path | None = None,
     max_bytes: int | None = None,
 ) -> bytes:
+    descriptor: int | None = None
     try:
         resolved = path.resolve(strict=True)
         if scope_root is not None:
             root = scope_root.resolve(strict=True)
             if root != resolved and root not in resolved.parents:
                 raise SnapshotMissingEvidenceError(f"required {role} evidence is outside the declared outputs root")
-            if path.absolute() != resolved:
-                raise SnapshotMissingEvidenceError(f"required {role} evidence cannot use a symlink")
-        size = resolved.stat().st_size
+        source_lstat = path.lstat()
+        if (
+            not stat.S_ISREG(source_lstat.st_mode)
+            or source_lstat.st_nlink != 1
+        ):
+            raise SnapshotMissingEvidenceError(
+                f"required {role} evidence is not a single-link regular file"
+            )
+        flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0)
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        descriptor = os.open(path, flags)
+        before = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(before.st_mode)
+            or before.st_nlink != 1
+            or (before.st_dev, before.st_ino)
+            != (source_lstat.st_dev, source_lstat.st_ino)
+        ):
+            raise SnapshotStaleError(
+                f"required {role} evidence changed before it was read"
+            )
+        size = before.st_size
         if size <= 0:
             raise SnapshotMissingEvidenceError(f"required {role} evidence is empty")
         if max_bytes is not None and size > max_bytes:
             raise SnapshotCoverageError(f"required {role} evidence exceeds its byte budget")
-        content = resolved.read_bytes()
+        with os.fdopen(descriptor, "rb", closefd=False) as stream:
+            content = stream.read()
+        after = os.fstat(descriptor)
     except OSError as exc:
         raise SnapshotMissingEvidenceError(f"required {role} evidence is missing") from exc
-    if len(content) != size:
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+    stable_fields = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+    if (
+        len(content) != size
+        or any(
+            getattr(before, field) != getattr(after, field)
+            for field in stable_fields
+        )
+    ):
         raise SnapshotStaleError(f"required {role} evidence changed while it was read")
     return content
 
@@ -631,13 +665,15 @@ def rasterize_preview_pdf(pdf_path: Path) -> tuple[bytes, ...]:
     if executable is None:
         raise SnapshotMissingEvidenceError("pdftoppm is unavailable for lossless render evidence")
     binary = str(Path(executable).resolve())
-    source = pdf_path.resolve()
-    if not source.is_file():
-        raise SnapshotMissingEvidenceError("preview PDF evidence is missing")
+    source = pdf_path.absolute()
+    source_bytes = _read_required_file(
+        pdf_path,
+        role="preview PDF",
+        scope_root=pdf_path.parent,
+        max_bytes=_MAX_ACCEPTED_PREVIEW_PDF_BYTES,
+    )
     try:
-        if source.stat().st_size > _MAX_ACCEPTED_PREVIEW_PDF_BYTES:
-            raise SnapshotCoverageError("preview PDF exceeds its byte budget")
-        document = PdfReader(source, strict=True)
+        document = PdfReader(io.BytesIO(source_bytes), strict=True)
         if document.is_encrypted or not 1 <= len(document.pages) <= _MAX_RENDER_PAGES:
             raise SnapshotCoverageError("preview PDF page coverage exceeds the direct render budget")
         total_pixels = 0
@@ -661,6 +697,8 @@ def rasterize_preview_pdf(pdf_path: Path) -> tuple[bytes, ...]:
         raise SnapshotCoverageError("preview PDF structure is invalid") from exc
     try:
         with tempfile.TemporaryDirectory(prefix="dq1-pdf-raster-") as directory:
+            staged_source = Path(directory) / "source.pdf"
+            staged_source.write_bytes(source_bytes)
             prefix = Path(directory) / "page"
             completed = run_process_group(
                 [
@@ -668,10 +706,11 @@ def rasterize_preview_pdf(pdf_path: Path) -> tuple[bytes, ...]:
                     "-png",
                     "-scale-to",
                     str(_PDFTOPPM_MAX_DIMENSION),
-                    str(source),
+                    str(staged_source),
                     str(prefix),
                 ],
                 timeout=_PDFTOPPM_TIMEOUT_SECONDS,
+                private_read_dirs=[staged_source],
                 writable_dirs=[directory],
                 identity_paths=[source],
             )

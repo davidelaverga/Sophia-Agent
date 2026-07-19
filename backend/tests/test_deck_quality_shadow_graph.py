@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+from langgraph.checkpoint.memory import InMemorySaver
 from PIL import Image
 from pypdf import PdfWriter
 
@@ -1327,7 +1328,11 @@ async def test_over_direct_budget_fails_coverage_before_provider_intent(
         reject_direct_evidence,
     )
 
-    output = await compile_registered_deck_quality_shadow_graph(runtime).ainvoke(_dispatch_payload(store))
+    payload = _dispatch_payload(store)
+    output = await _invoke_registered_graph(
+        compile_registered_deck_quality_shadow_graph(runtime),
+        payload,
+    )
 
     assert output["state"] == "failed"
     assert output["error_code"] == "coverage_error"
@@ -1366,7 +1371,11 @@ async def test_snapshot_terminal_failure_requires_exact_safe_trace_ack(
     else:
         store.row = store.row.model_copy(update={"artifact_hash": "0" * 64})
 
-    output = await compile_registered_deck_quality_shadow_graph(runtime).ainvoke(_dispatch_payload(store))
+    payload = _dispatch_payload(store)
+    output = await _invoke_registered_graph(
+        compile_registered_deck_quality_shadow_graph(runtime),
+        payload,
+    )
 
     assert output["state"] == expected_state
     assert output["error_code"] == expected_code
@@ -1416,7 +1425,11 @@ async def test_early_failure_never_terminalizes_before_remote_trace_ack(
         return trace
 
     first_runtime = replace(runtime, trace_factory=failing_trace_factory)
-    first = await compile_registered_deck_quality_shadow_graph(first_runtime).ainvoke(_dispatch_payload(store))
+    payload = _dispatch_payload(store)
+    first = await _invoke_registered_graph(
+        compile_registered_deck_quality_shadow_graph(first_runtime),
+        payload,
+    )
 
     assert first["state"] == "finalizing"
     assert store.row.finished_at is None
@@ -1452,7 +1465,11 @@ async def test_early_failure_never_terminalizes_before_remote_trace_ack(
         gateway_deployed_sha="5" * 40,
         langgraph_deployed_sha="6" * 40,
     )
-    second = await compile_registered_deck_quality_shadow_graph(second_runtime).ainvoke(_dispatch_payload(store, gateway_sha="5" * 40))
+    payload = _dispatch_payload(store, gateway_sha="5" * 40)
+    second = await _invoke_registered_graph(
+        compile_registered_deck_quality_shadow_graph(second_runtime),
+        payload,
+    )
 
     assert second["state"] == "failed"
     assert store.row.terminal_trace_payload_hash == prepared_payload_hash
@@ -1987,6 +2004,19 @@ def _dispatch_payload(
     }
 
 
+async def _invoke_registered_graph(
+    graph: Any,
+    payload: dict[str, object],
+    *,
+    config: dict[str, object] | None = None,
+) -> dict[str, object]:
+    return await graph.ainvoke(
+        payload,
+        config=config,
+        context=payload,
+    )
+
+
 def test_configured_trace_factory_is_dedicated_nonbatching_and_workspace_optional(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2122,7 +2152,8 @@ async def test_registered_four_field_dispatch_bootstraps_and_completes(
     _instrument_value, _objects, store, invoker, _traces, runtime = _setup(tmp_path)
     graph = compile_registered_deck_quality_shadow_graph(runtime)
 
-    output = await graph.ainvoke(_dispatch_payload(store))
+    payload = _dispatch_payload(store)
+    output = await _invoke_registered_graph(graph, payload)
 
     assert output["state"] == "completed"
     assert output["decision_result"] == "satisfied"
@@ -2138,11 +2169,93 @@ async def test_registered_retryable_failure_persists_retry_state(
     objects.fail_reads = True
     graph = compile_registered_deck_quality_shadow_graph(runtime)
 
-    output = await graph.ainvoke(_dispatch_payload(store))
+    payload = _dispatch_payload(store)
+    output = await _invoke_registered_graph(graph, payload)
 
     assert output["state"] == "retry_wait"
     assert output["error_code"] == "quality_persistence_error"
     assert store.row.lease_owner is None
+
+
+@pytest.mark.anyio
+async def test_registered_retry_reuses_thread_without_revalidating_checkpoint_output(
+    tmp_path: Path,
+) -> None:
+    _instrument_value, objects, store, invoker, _traces, runtime = _setup(
+        tmp_path
+    )
+    objects.fail_reads = True
+    graph = compile_registered_deck_quality_shadow_graph(runtime)
+    graph.checkpointer = InMemorySaver()
+    config = {"configurable": {"thread_id": "dq1-retry-thread"}}
+
+    first_payload = _dispatch_payload(store)
+    first = await _invoke_registered_graph(
+        graph,
+        first_payload,
+        config=config,
+    )
+
+    assert first["state"] == "retry_wait"
+    assert first["error_code"] == "quality_persistence_error"
+    assert store.row.lease_owner is None
+
+    objects.fail_reads = False
+    store.row = store.row.model_copy(
+        update={
+            "state": "running",
+            "lease_owner": "worker-02",
+            "lease_epoch": store.row.lease_epoch + 1,
+            "lease_expires_at": store.row.run_deadline_at,
+            "claim_token": "claim-02",
+            "claim_hash": "8" * 64,
+            "attempt_count": store.row.attempt_count + 1,
+        }
+    )
+    second_payload = _dispatch_payload(store)
+
+    second = await _invoke_registered_graph(
+        graph,
+        second_payload,
+        config=config,
+    )
+
+    assert second["state"] == "completed"
+    assert invoker.blind_calls == 1
+    assert invoker.plan_calls == 1
+
+
+@pytest.mark.anyio
+async def test_registered_dispatch_requires_exact_per_run_context(
+    tmp_path: Path,
+) -> None:
+    _instrument_value, objects, store, invoker, traces, runtime = _setup(
+        tmp_path
+    )
+    payload = _dispatch_payload(store)
+    baseline_reads = objects.read_count
+
+    for invalid_context in (
+        None,
+        {**payload, "state": "retry_wait"},
+        {**payload, "lease_epoch": int(payload["lease_epoch"]) + 1},
+    ):
+        with pytest.raises(DeckQualityGraphError) as captured:
+            await compile_registered_deck_quality_shadow_graph(runtime).ainvoke(
+                payload,
+                context=invalid_context,
+            )
+
+        assert (
+            captured.value.code
+            is QualityRunErrorCode.SHADOW_DISPATCH_UNAVAILABLE
+        )
+        assert captured.value.stage == "shadow_dispatch"
+
+    assert objects.read_count == baseline_reads
+    assert invoker.blind_calls == 0
+    assert invoker.plan_calls == 0
+    assert traces == []
 
 
 @pytest.mark.anyio
@@ -2162,7 +2275,11 @@ async def test_prepared_success_trace_replays_through_grace_without_raw_graph_or
         return trace
 
     first_runtime = replace(runtime, trace_factory=failing_trace_factory)
-    first_output = await compile_registered_deck_quality_shadow_graph(first_runtime).ainvoke(_dispatch_payload(store))
+    payload = _dispatch_payload(store)
+    first_output = await _invoke_registered_graph(
+        compile_registered_deck_quality_shadow_graph(first_runtime),
+        payload,
+    )
 
     assert first_output["state"] == "finalizing"
     assert first_output["error_code"] == "quality_persistence_error"
@@ -2254,9 +2371,11 @@ async def test_prepared_success_trace_ack_loss_inside_grace_preserves_success_pa
         return trace
 
     first_runtime = replace(runtime, trace_factory=failing_trace_factory)
-    first = await compile_registered_deck_quality_shadow_graph(
-        first_runtime
-    ).ainvoke(_dispatch_payload(store))
+    payload = _dispatch_payload(store)
+    first = await _invoke_registered_graph(
+        compile_registered_deck_quality_shadow_graph(first_runtime),
+        payload,
+    )
     assert first["state"] == "finalizing"
     assert store.row.pending_terminal_state is None
     assert store.row.decision_result is QualityRunDecision.SATISFIED
@@ -2303,7 +2422,8 @@ async def test_registered_nonretryable_gateway_mismatch_persists_failed_state(
     _instrument_value, objects, store, invoker, traces, runtime = _setup(tmp_path)
     graph = compile_registered_deck_quality_shadow_graph(runtime)
 
-    output = await graph.ainvoke(_dispatch_payload(store, gateway_sha="4" * 40))
+    payload = _dispatch_payload(store, gateway_sha="4" * 40)
+    output = await _invoke_registered_graph(graph, payload)
 
     assert output["state"] == "failed"
     assert output["error_code"] == "shadow_dispatch_unavailable"
@@ -2332,7 +2452,10 @@ async def test_registered_dispatch_preflight_rejection_is_safely_traced(
         "dispatch_preflight_error": preflight_error,
     }
 
-    output = await compile_registered_deck_quality_shadow_graph(runtime).ainvoke(payload)
+    output = await _invoke_registered_graph(
+        compile_registered_deck_quality_shadow_graph(runtime),
+        payload,
+    )
 
     assert output["state"] == "failed"
     assert output["error_code"] == "shadow_dispatch_unavailable"

@@ -3,7 +3,10 @@ from __future__ import annotations
 import hashlib
 import io
 import json
+import os
+import platform
 import shutil
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -927,7 +930,7 @@ def test_snapshot_loader_rejects_remote_or_local_render_mismatch(
         )
 
 
-def test_pdf_rasterizer_uses_fixed_resolved_bounded_poppler_command(
+def test_pdf_rasterizer_stages_source_in_fixed_resolved_bounded_poppler_command(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -944,11 +947,20 @@ def test_pdf_rasterizer_uses_fixed_resolved_bounded_poppler_command(
         lambda binary: "/opt/poppler/bin/pdftoppm" if binary == "pdftoppm" else None,
     )
 
-    def fake_run(command: list[str], *, timeout: int, writable_dirs, identity_paths):
+    def fake_run(
+        command: list[str],
+        *,
+        timeout: int,
+        private_read_dirs,
+        writable_dirs,
+        identity_paths,
+    ):
         captured["command"] = command
         captured["timeout"] = timeout
+        captured["private_read_dirs"] = private_read_dirs
         captured["writable_dirs"] = writable_dirs
         captured["identity_paths"] = identity_paths
+        captured["staged_bytes"] = Path(command[-2]).read_bytes()
         prefix = Path(command[-1])
         prefix.with_name(prefix.name + "-1.png").write_bytes(png)
         return SimpleNamespace(returncode=0, stdout="", stderr="")
@@ -958,13 +970,75 @@ def test_pdf_rasterizer_uses_fixed_resolved_bounded_poppler_command(
     rendered = rasterize_preview_pdf(preview)
 
     assert rendered == (png,)
-    assert captured["command"] == [
+    command = captured["command"]
+    assert isinstance(command, list)
+    staged_source = Path(command[-2])
+    assert command == [
         "/opt/poppler/bin/pdftoppm",
         "-png",
         "-scale-to",
         "2200",
-        str(preview.resolve()),
-        captured["command"][-1],  # type: ignore[index]
+        str(staged_source),
+        command[-1],
     ]
+    assert staged_source == Path(command[-1]).parent / "source.pdf"
+    assert captured["staged_bytes"] == preview.read_bytes()
     assert captured["timeout"] == 180
+    assert captured["private_read_dirs"] == [staged_source]
     assert len(captured["writable_dirs"]) == 1  # type: ignore[arg-type]
+    assert captured["writable_dirs"] == [str(staged_source.parent)]
+    assert captured["identity_paths"] == [preview.resolve()]
+
+
+def test_pdf_rasterizer_rejects_symlink_before_privileged_staging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_preview = tmp_path / "real.pdf"
+    writer = PdfWriter()
+    writer.add_blank_page(width=720, height=405)
+    with real_preview.open("wb") as stream:
+        writer.write(stream)
+    linked_preview = tmp_path / "linked.pdf"
+    linked_preview.symlink_to(real_preview)
+    monkeypatch.setattr(
+        snapshot_module.shutil,
+        "which",
+        lambda binary: "/opt/poppler/bin/pdftoppm"
+        if binary == "pdftoppm"
+        else None,
+    )
+    monkeypatch.setattr(
+        snapshot_module,
+        "run_process_group",
+        lambda *_args, **_kwargs: pytest.fail("renderer must not run"),
+    )
+
+    with pytest.raises(SnapshotMissingEvidenceError):
+        rasterize_preview_pdf(linked_preview)
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux"
+    or not hasattr(os, "geteuid")
+    or os.geteuid() != 0
+    or shutil.which("pdftoppm") is None
+    or shutil.which("setpriv") is None,
+    reason="requires the real root-Linux Poppler identity boundary",
+)
+def test_real_root_linux_pdf_rasterizer_reads_source_below_private_ancestor() -> None:
+    private_root = Path(tempfile.mkdtemp(prefix="dq1-private-pdf-source-"))
+    private_root.chmod(0o700)
+    try:
+        preview = private_root / "private.preview.pdf"
+        writer = PdfWriter()
+        writer.add_blank_page(width=720, height=405)
+        with preview.open("wb") as stream:
+            writer.write(stream)
+
+        rendered = rasterize_preview_pdf(preview)
+
+        assert len(rendered) == 1
+        assert rendered[0].startswith(b"\x89PNG\r\n\x1a\n")
+    finally:
+        shutil.rmtree(private_root, ignore_errors=True)

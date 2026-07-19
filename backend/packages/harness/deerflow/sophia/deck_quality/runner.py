@@ -9,6 +9,7 @@ from urllib.parse import urlsplit
 
 import anyio
 from langgraph.graph import END, START, StateGraph
+from langgraph.runtime import Runtime
 from langsmith import Client as LangSmithClient
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -85,6 +86,14 @@ class _DispatchEnvelope(BaseModel):
     lease_epoch: int = Field(ge=1)
     gateway_deployed_sha: str = Field(pattern=r"^[0-9a-f]{40}$")
     dispatch_preflight_error: Literal["scope_mismatch", "instrument_mismatch"] | None = None
+
+
+class DeckQualityDispatchContext(TypedDict, total=False):
+    quality_run_id: str
+    lease_owner: str
+    lease_epoch: int
+    gateway_deployed_sha: str
+    dispatch_preflight_error: str | None
 
 
 class DeckQualityDispatchState(TypedDict, total=False):
@@ -609,11 +618,30 @@ class DeckQualityShadowRunner:
     async def dispatch(
         self,
         payload: DeckQualityDispatchState,
+        runtime: Runtime[DeckQualityDispatchContext],
     ) -> DeckQualityDispatchState:
         """Guard the registered four-field gateway contract end to end."""
 
         try:
-            envelope = _DispatchEnvelope.model_validate(payload)
+            # LangGraph merges a thread's prior checkpoint into ``payload``.
+            # DQ-1 intentionally reuses one deterministic thread across
+            # durable retry epochs, so prior result channels such as ``state``
+            # and ``error_code`` are expected there.  The gateway duplicates
+            # the exact current dispatch envelope into per-run context; unlike
+            # state, context is never inherited from the previous checkpoint.
+            # Bind its required fields back to the current state values so a
+            # caller cannot pair a valid context with a different lease.
+            envelope = _DispatchEnvelope.model_validate(runtime.context)
+            if any(
+                payload.get(field) != getattr(envelope, field)
+                for field in (
+                    "quality_run_id",
+                    "lease_owner",
+                    "lease_epoch",
+                    "gateway_deployed_sha",
+                )
+            ):
+                raise ValueError("dispatch context does not match current state")
         except Exception:
             raise DeckQualityGraphError(
                 QualityRunErrorCode.SHADOW_DISPATCH_UNAVAILABLE,
@@ -676,7 +704,10 @@ def compile_registered_deck_quality_shadow_graph(
     """Registered wrapper that always persists retry or terminal failures."""
 
     runner = DeckQualityShadowRunner(runtime)
-    builder = StateGraph(DeckQualityDispatchState)
+    builder = StateGraph(
+        DeckQualityDispatchState,
+        context_schema=DeckQualityDispatchContext,
+    )
     builder.add_node("guarded_shadow_run", runner.dispatch)
     builder.add_edge(START, "guarded_shadow_run")
     builder.add_edge("guarded_shadow_run", END)
