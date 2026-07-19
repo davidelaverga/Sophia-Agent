@@ -60,7 +60,7 @@ def test_original_slide_patch_budget_accepts_locked_geometry_and_rejects_more(
     for index in range(1, 6):
         path = tmp_path / f"slide-{index}.png"
         path.write_bytes(b"slide")
-        slides.append((f"slide:{index}", path.as_posix(), 2200, 1238))
+        slides.append((f"slide:{index}", path.as_posix(), 2048, 1152))
 
     usage = _validate_direct_evidence_budget(
         expected_slide_count=5,
@@ -74,7 +74,7 @@ def test_original_slide_patch_budget_accepts_locked_geometry_and_rejects_more(
     assert usage.slide_count == 5
 
     over_budget = tuple(
-        (selector, path, width, 1279)
+        (selector, path, width, 1345)
         for selector, path, width, _height in slides
     )
     with pytest.raises(DirectEvidenceBudgetError, match="original-patch"):

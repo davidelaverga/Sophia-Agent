@@ -24,6 +24,9 @@ from pypdf import PdfReader
 from deerflow.sophia.deck_quality.brief import sanitize_current_request
 from deerflow.sophia.deck_quality.canonical import canonical_json_bytes, canonical_sha256
 from deerflow.sophia.deck_quality.contact_sheet import create_contact_sheet
+from deerflow.sophia.deck_quality.messages import (
+    DIRECT_EVIDENCE_MAX_SLIDE_DIMENSION,
+)
 from deerflow.sophia.deck_quality.schemas import (
     BlindBrief,
     ImageEvidence,
@@ -44,7 +47,7 @@ from deerflow.sophia.storage.supabase_artifact_store import (
 
 _QUALITY_RUN_RE = re.compile(r"^quality_[0-9a-f]{64}$")
 _SAFE_BUILD_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$")
-_PDFTOPPM_MAX_DIMENSION = 2200
+_PDFTOPPM_MAX_DIMENSION = DIRECT_EVIDENCE_MAX_SLIDE_DIMENSION
 _PDFTOPPM_TIMEOUT_SECONDS = 180
 _MAX_ACCEPTED_PPTX_BYTES = 32 * 1024 * 1024
 _MAX_ACCEPTED_PREVIEW_PDF_BYTES = 32 * 1024 * 1024

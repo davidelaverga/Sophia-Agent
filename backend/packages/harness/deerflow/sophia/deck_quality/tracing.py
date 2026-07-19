@@ -713,6 +713,30 @@ def _safe_remote_id(value: object) -> UUID | None:
         return None
 
 
+def _remote_metadata_matches(
+    metadata: object,
+    expected: _ExpectedRemoteRun,
+) -> bool:
+    """Accept only the exact safe metadata plus LangSmith's tree-depth field."""
+
+    if not isinstance(metadata, Mapping):
+        return False
+    if dict(metadata) == expected.metadata:
+        return True
+    if set(metadata) != {*expected.metadata, "ls_run_depth"}:
+        return False
+    depth = metadata.get("ls_run_depth")
+    expected_depth = 0 if expected.parent_run_id is None else 1
+    return (
+        type(depth) is int
+        and depth == expected_depth
+        and all(
+            metadata.get(key) == value
+            for key, value in expected.metadata.items()
+        )
+    )
+
+
 class SafeQualityOperationSpan:
     def __init__(
         self,
@@ -867,7 +891,7 @@ class SafeQualityTrace:
                 and ((_safe_remote_id(getattr(remote, "parent_run_id", None)) == expected.parent_run_id) if expected.parent_run_id is not None else getattr(remote, "parent_run_id", None) is None)
                 and _safe_remote_id(getattr(remote, "session_id", None)) == self._project_id
                 and getattr(remote, "inputs", None) == expected.inputs
-                and metadata == expected.metadata
+                and _remote_metadata_matches(metadata, expected)
                 and tuple(getattr(remote, "tags", None) or ()) == expected.tags
                 and not getattr(remote, "attachments", None)
                 and not getattr(remote, "events", None)

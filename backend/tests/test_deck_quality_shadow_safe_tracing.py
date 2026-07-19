@@ -606,6 +606,60 @@ def test_full_completed_trace_replay_performs_no_duplicate_writes() -> None:
     assert set(client.stored_runs) == expected_ids
 
 
+def test_full_trace_accepts_only_langsmith_server_run_depth_and_replays() -> None:
+    client = CapturingClient()
+
+    def inject_run_depth(current: CapturingClient) -> None:
+        for remote in current.stored_runs.values():
+            remote.extra["metadata"]["ls_run_depth"] = (
+                0 if remote.parent_run_id is None else 1
+            )
+
+    client.on_flush = inject_run_depth
+    root_input = SafeQualityTraceRootInput.model_validate(_root_values())
+    first = _trace(root_input, client)
+    _emit_completed_trace(first)
+    first.finish(_root_output(first))
+
+    replay = _trace(root_input, client)
+    _emit_completed_trace(replay)
+    replay.finish(_root_output(replay))
+
+    assert len(client.create_attempts) == 9
+    assert len(client.update_attempts) == 9
+    assert client.flush_attempts == [15.0, 15.0]
+
+
+@pytest.mark.parametrize("mutation", ["wrong_depth", "unexpected_key"])
+def test_langsmith_server_metadata_enrichment_stays_fail_closed(
+    mutation: str,
+) -> None:
+    client = CapturingClient()
+    root_input = SafeQualityTraceRootInput.model_validate(_root_values())
+    identity = derive_quality_trace_run_identity(root_input)
+
+    def mutate_remote(current: CapturingClient) -> None:
+        for remote in current.stored_runs.values():
+            remote.extra["metadata"]["ls_run_depth"] = (
+                0 if remote.parent_run_id is None else 1
+            )
+        root_metadata = current.stored_runs[identity.root_run_id].extra["metadata"]
+        if mutation == "wrong_depth":
+            root_metadata["ls_run_depth"] = 1
+        else:
+            root_metadata["unexpected_remote_field"] = "unsafe"
+
+    client.on_flush = mutate_remote
+    trace = _trace(root_input, client)
+    _emit_completed_trace(trace)
+
+    with pytest.raises(
+        SafeQualityTraceEmissionError,
+        match="safe quality trace remote state is invalid",
+    ):
+        trace.finish(_root_output(trace))
+
+
 def test_partial_prior_trace_is_reconciled_without_duplicate_create_or_update() -> None:
     client = CapturingClient()
     root_input = SafeQualityTraceRootInput.model_validate(_root_values())

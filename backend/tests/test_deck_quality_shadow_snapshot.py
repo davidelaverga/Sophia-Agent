@@ -407,7 +407,7 @@ def test_post_row_render_source_is_committed_before_real_evidence_rendering(
         "slide:2",
     )
     assert all(
-        max(image.width, image.height) == 2200
+        max(image.width, image.height) == 2048
         for image in loaded_evidence.snapshot.renders.slides
     )
     assert max(
@@ -977,7 +977,7 @@ def test_pdf_rasterizer_stages_source_in_fixed_resolved_bounded_poppler_command(
         "/opt/poppler/bin/pdftoppm",
         "-png",
         "-scale-to",
-        "2200",
+        "2048",
         str(staged_source),
         command[-1],
     ]

@@ -15,13 +15,13 @@ from deerflow.sophia.deck_quality.schemas import BlindVisualEvidence, PlanRealiz
 DIRECT_EVIDENCE_BUDGET_VERSION = "dq1-direct-evidence-v2"
 DIRECT_EVIDENCE_MAX_SLIDES = 5
 # Calibrated with the official GPT-5.6 input-token counter against the complete
-# five-slide Appendix-A A/C payloads. A 2200x1238 original-detail slide set plus
-# a bounded 2048px high-detail contact sheet counts 22,633 / 23,671 input
-# tokens. The aggregate original-patch guard rejects unpriced geometry before
-# the exact remote token-count preflight.
+# five-slide Appendix-A A/C payloads. Individual renders use a 2048px long side
+# to preserve original-detail evidence while leaving deterministic headroom
+# under the locked two-call cost ceiling. The aggregate original-patch guard
+# rejects unpriced geometry before the exact remote token-count preflight.
 DIRECT_EVIDENCE_MAX_IMAGE_BYTES = 1024 * 1024
 DIRECT_EVIDENCE_MAX_TOTAL_IMAGE_BYTES = 3 * 1024 * 1024
-DIRECT_EVIDENCE_MAX_SLIDE_DIMENSION = 2200
+DIRECT_EVIDENCE_MAX_SLIDE_DIMENSION = 2048
 DIRECT_EVIDENCE_MAX_CONTACT_SHEET_DIMENSION = 2048
 DIRECT_EVIDENCE_MAX_ORIGINAL_SLIDE_PATCHES = 13_500
 DIRECT_EVIDENCE_MAX_SLIDE_PIXELS = DIRECT_EVIDENCE_MAX_SLIDE_DIMENSION**2

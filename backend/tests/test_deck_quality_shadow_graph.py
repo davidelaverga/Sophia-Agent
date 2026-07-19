@@ -1497,7 +1497,14 @@ def test_direct_evidence_byte_and_pixel_boundaries_are_exact(tmp_path: Path) -> 
     usage = _validate_direct_evidence_budget(
         expected_slide_count=1,
         selectors=("slide:1",),
-        slides=(("slide:1", slide.as_posix(), 2200, 1238),),
+        slides=(
+            (
+                "slide:1",
+                slide.as_posix(),
+                DIRECT_EVIDENCE_MAX_SLIDE_DIMENSION,
+                1152,
+            ),
+        ),
         contact_sheet=(contact.as_posix(), 2048, 2048),
         text_payload={"bounded": True},
     )
@@ -1510,7 +1517,14 @@ def test_direct_evidence_byte_and_pixel_boundaries_are_exact(tmp_path: Path) -> 
         _validate_direct_evidence_budget(
             expected_slide_count=1,
             selectors=("slide:1",),
-            slides=(("slide:1", slide.as_posix(), 2200, 1238),),
+            slides=(
+                (
+                    "slide:1",
+                    slide.as_posix(),
+                    DIRECT_EVIDENCE_MAX_SLIDE_DIMENSION,
+                    1152,
+                ),
+            ),
             contact_sheet=(contact.as_posix(), 2048, 2048),
             text_payload={"bounded": True},
         )
