@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import re
 import shutil
 import subprocess  # noqa: S404 - fixed vendored scripts with sanitized args.
@@ -10,6 +11,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from deerflow.sandbox_identity import user_data_root_for_path
 from deerflow.sophia.deck_native.errors import DeckNativePathError
 from deerflow.sophia.deck_native.models import (
     NativeDeckInspectResult,
@@ -71,7 +73,11 @@ class DeckNativeService:
         command = [self._python, str(self._deck_cli), str(pptx), "inspect", "-o", str(raw_json_path)]
         if slide is not None:
             command.extend(["--slide", str(slide)])
-        completed = self._run(command, writable_files=[raw_json_path])
+        completed = self._run(
+            command,
+            writable_files=[raw_json_path],
+            readable_paths=[pptx],
+        )
         if completed.returncode != 0:
             return NativeDeckInspectResult(
                 success=False,
@@ -143,7 +149,11 @@ class DeckNativeService:
             "--source-map",
             str(source_map),
         ]
-        completed = self._run(command, writable_files=[patch, source_map])
+        completed = self._run(
+            command,
+            writable_files=[patch, source_map],
+            readable_paths=[*html, base],
+        )
         if completed.returncode != 0:
             patch.unlink(missing_ok=True)
             source_map.unlink(missing_ok=True)
@@ -189,7 +199,11 @@ class DeckNativeService:
         ]
         if fix:
             command.append("--fix")
-        completed = self._run(command, writable_files=[output])
+        completed = self._run(
+            command,
+            writable_files=[output],
+            readable_paths=[base, patch],
+        )
         if completed.returncode != 0 or not output.is_file():
             output.unlink(missing_ok=True)
             return NativeDeckPatchResult(
@@ -222,7 +236,11 @@ class DeckNativeService:
             command.extend(["--slides", ",".join(str(slide) for slide in touched)])
         else:
             command.append("--all")
-        completed = self._run(command, writable_files=[pptx])
+        completed = self._run(
+            command,
+            writable_files=[pptx],
+            readable_paths=[pptx],
+        )
         if completed.returncode != 0:
             return NativeDeckLintFixResult(
                 success=False,
@@ -258,7 +276,11 @@ class DeckNativeService:
                 shutil.copy2(pptx, retry_pptx)
                 retry_command = list(command)
                 retry_command[2] = str(retry_pptx)
-                retry = self._run(retry_command, writable_files=[retry_pptx])
+                retry = self._run(
+                    retry_command,
+                    writable_files=[retry_pptx],
+                    readable_paths=[retry_pptx],
+                )
                 if retry.returncode != 0:
                     return NativeDeckLintFixResult(
                         success=False,
@@ -323,6 +345,7 @@ class DeckNativeService:
             command,
             timeout=_RENDER_TIMEOUT_SECONDS,
             writable_dirs=[render_dir],
+            readable_paths=[pptx],
         )
         rendered = len(list(render_dir.glob("slide-*.jpg")))
         complete, expected_label = _render_completeness(rendered, valid_slides)
@@ -337,7 +360,10 @@ class DeckNativeService:
     def diff(self, *, before_path: str, after_path: str) -> dict[str, Any]:
         before = _path_arg(before_path, "before_path", suffix=".pptx", must_exist=True)
         after = _path_arg(after_path, "after_path", suffix=".pptx", must_exist=True)
-        completed = self._run([self._python, str(self._deck_cli), str(before), "diff", str(after)])
+        completed = self._run(
+            [self._python, str(self._deck_cli), str(before), "diff", str(after)],
+            readable_paths=[before, after],
+        )
         text = (completed.stdout or completed.stderr or "").strip()
         return {
             "success": completed.returncode == 0,
@@ -353,6 +379,7 @@ class DeckNativeService:
         timeout: int = _CLI_TIMEOUT_SECONDS,
         writable_files: list[Path] | None = None,
         writable_dirs: list[Path] | None = None,
+        readable_paths: list[Path] | None = None,
     ) -> subprocess.CompletedProcess[str]:
         _ensure_script(command[1])
         if self._deadline_epoch_ms is not None:
@@ -372,6 +399,8 @@ class DeckNativeService:
                 cwd=self._scripts_dir,
                 writable_files=writable_files or (),
                 writable_dirs=writable_dirs or (),
+                private_read_dirs=_private_read_roots(readable_paths or []),
+                identity_paths=readable_paths or (),
             )
         except subprocess.TimeoutExpired as exc:
             stdout = exc.stdout if isinstance(exc.stdout, str) else ""
@@ -386,6 +415,62 @@ class DeckNativeService:
                 else f"hands-on-deck subprocess timed out after {timeout}s"
             )
             return subprocess.CompletedProcess(command, 124, stdout=stdout, stderr=f"{timeout_message}\n{stderr}".strip())
+
+
+def _private_read_roots(paths: list[Path]) -> list[Path]:
+    """Return the smallest trusted roots that make native inputs readable.
+
+    Root-owned ``TemporaryDirectory`` workspaces are mode 0700 in production.
+    Granting only an input's immediate directory would still leave that parent
+    unreachable after the native subprocess drops privileges.  For a path
+    below a system temporary directory, expose exactly its top-level temporary
+    workspace.  Elsewhere, expose only the input's immediate directory.  The
+    process boundary rejects broad roots, symlinks, and unsupported files.
+    """
+
+    temporary_roots = sorted(
+        {
+            Path(os.path.abspath(tempfile.gettempdir())),
+            Path("/tmp"),
+            Path("/var/tmp"),
+        },
+        key=lambda item: len(item.parts),
+        reverse=True,
+    )
+    roots: list[Path] = []
+    for value in paths:
+        path = Path(os.path.abspath(os.fspath(value)))
+        root = path.parent
+        if user_data_root_for_path(path) is not None:
+            # ``identity_paths`` selects the stable per-thread UID/GID, whose
+            # canonical user-data ancestors are already traversable.
+            temporary_roots_for_path: list[Path] = []
+        else:
+            temporary_roots_for_path = temporary_roots
+        for temporary_root in temporary_roots_for_path:
+            try:
+                relative = path.relative_to(temporary_root)
+            except ValueError:
+                continue
+            if not relative.parts:
+                raise DeckNativePathError(f"refusing an over-broad native input grant: {temporary_root}")
+            candidate = temporary_root / relative.parts[0]
+            if candidate == path and not candidate.is_dir():
+                # A file directly inside a shared temporary directory needs no
+                # parent traversal grant; expose only that existing file.
+                if not candidate.exists():
+                    raise DeckNativePathError(f"native input grant does not exist: {candidate}")
+                root = candidate
+            else:
+                root = candidate
+            break
+        if root in {Path(root.anchor), Path("/tmp"), Path("/var/tmp")}:
+            raise DeckNativePathError(f"refusing an over-broad native input grant: {root}")
+        if any(root == existing or root.is_relative_to(existing) for existing in roots):
+            continue
+        roots = [existing for existing in roots if not existing.is_relative_to(root)]
+        roots.append(root)
+    return roots
 
 
 def _ensure_script(path: str) -> None:

@@ -127,13 +127,24 @@ def test_deck_native_subprocess_timeout_uses_process_group_runner(
     script.write_text("raise SystemExit(0)\n", encoding="utf-8")
     captured: dict = {}
 
-    def _timeout(command, *, timeout, cwd, writable_files, writable_dirs):
+    def _timeout(
+        command,
+        *,
+        timeout,
+        cwd,
+        writable_files,
+        writable_dirs,
+        private_read_dirs,
+        identity_paths,
+    ):
         captured.update(
             command=command,
             timeout=timeout,
             cwd=cwd,
             writable_files=writable_files,
             writable_dirs=writable_dirs,
+            private_read_dirs=private_read_dirs,
+            identity_paths=identity_paths,
         )
         raise subprocess.TimeoutExpired(command, timeout, output="partial", stderr="hung child")
 
@@ -147,6 +158,8 @@ def test_deck_native_subprocess_timeout_uses_process_group_runner(
         "cwd": tmp_path,
         "writable_files": (),
         "writable_dirs": (),
+        "private_read_dirs": [],
+        "identity_paths": (),
     }
     assert result.returncode == 124
     assert result.stdout == "partial"
@@ -162,13 +175,24 @@ def test_deck_native_default_subprocess_timeout_supports_long_decks(
     script.write_text("raise SystemExit(0)\n", encoding="utf-8")
     captured: dict = {}
 
-    def _complete(command, *, timeout, cwd, writable_files, writable_dirs):
+    def _complete(
+        command,
+        *,
+        timeout,
+        cwd,
+        writable_files,
+        writable_dirs,
+        private_read_dirs,
+        identity_paths,
+    ):
         captured.update(
             command=command,
             timeout=timeout,
             cwd=cwd,
             writable_files=writable_files,
             writable_dirs=writable_dirs,
+            private_read_dirs=private_read_dirs,
+            identity_paths=identity_paths,
         )
         return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
 
@@ -178,6 +202,61 @@ def test_deck_native_default_subprocess_timeout_supports_long_decks(
 
     assert result.returncode == 0
     assert captured["timeout"] == 600
+
+
+def test_deck_native_collapses_private_inputs_to_one_root_private_temp_workspace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    temporary_root = tmp_path / "system-temp"
+    workspace = temporary_root / "sophia-dq2-candidate-proof"
+    html = workspace / "outputs" / "slides" / "slide-1.html"
+    base = workspace / "outputs" / ".builder" / "deck_native" / "base.pptx"
+    html.parent.mkdir(parents=True)
+    base.parent.mkdir(parents=True)
+    html.write_text("<html></html>", encoding="utf-8")
+    base.write_bytes(b"pptx")
+    monkeypatch.setattr(native_service_module.tempfile, "gettempdir", lambda: str(temporary_root))
+
+    assert native_service_module._private_read_roots([html, base]) == [workspace]
+
+
+def test_deck_native_html2patch_forwards_private_temp_workspace_and_input_identity(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    temporary_root = tmp_path / "system-temp"
+    workspace = temporary_root / "sophia-dq2-candidate-proof"
+    html = workspace / "outputs" / "slides" / "slide-1.html"
+    base = workspace / "outputs" / ".builder" / "deck_native" / "base.pptx"
+    patch = workspace / "outputs" / ".builder" / "deck_native" / "deck.patch.json"
+    scripts = tmp_path / "scripts"
+    html.parent.mkdir(parents=True)
+    base.parent.mkdir(parents=True)
+    scripts.mkdir()
+    html.write_text("<html></html>", encoding="utf-8")
+    base.write_bytes(b"pptx")
+    (scripts / "deck.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    (scripts / "html2patch.py").write_text("raise SystemExit(0)\n", encoding="utf-8")
+    captured: dict[str, object] = {}
+    monkeypatch.setattr(native_service_module.tempfile, "gettempdir", lambda: str(temporary_root))
+
+    def _complete(command, **kwargs):
+        captured.update(kwargs)
+        patch.write_text('{"ops": []}', encoding="utf-8")
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(native_service_module, "run_process_group", _complete)
+
+    result = DeckNativeService(scripts_dir=scripts).html_to_patch(
+        html_paths=[str(html)],
+        base_deck_path=str(base),
+        output_patch_path=str(patch),
+    )
+
+    assert result.success is True
+    assert captured["private_read_dirs"] == [workspace]
+    assert captured["identity_paths"] == [html, base]
 
 
 def test_deck_native_render_clears_stale_images_before_counting_success(
