@@ -2387,7 +2387,10 @@ def cmd_apply(args):
 
 MIN_FONT_SCALE = 0.6
 MIN_FONT_PT = 10.0
+COMPACT_FONT_FLOOR_PT = 15.0
+REQUIRED_FONT_FLOOR_PT = 18.0
 SLIDE_MARGIN_IN = 0.1
+CONTAINER_TEXT_PADDING_IN = 0.1
 BG_AREA_FRACTION = 0.6  # shapes covering >60% of the slide don't block growth
 GEOMETRY_EPS_IN = 0.01
 
@@ -2433,9 +2436,16 @@ def _scale_font(shape, scale, default_pt):
             eff = float(run.font.size.pt) if run.font.size is not None else paragraph_default
             # Round down to the nearest half point so the saved run stays on
             # the fitting side of the estimator's wrap threshold.
-            new = max(MIN_FONT_PT, math.floor(eff * scale * 2) / 2)
-            run.font.size = Pt(new)
-            changed.append((eff, new))
+            if eff >= REQUIRED_FONT_FLOOR_PT:
+                floor = REQUIRED_FONT_FLOOR_PT
+            elif eff >= COMPACT_FONT_FLOOR_PT:
+                floor = COMPACT_FONT_FLOOR_PT
+            else:
+                floor = eff
+            new = min(eff, max(floor, math.floor(eff * scale * 2) / 2))
+            if new < eff:
+                run.font.size = Pt(new)
+                changed.append((eff, new))
     return changed
 
 
@@ -2449,6 +2459,102 @@ def _contains_proposed_text_rect(outer, *, left, top, width, height):
         and outer.left + outer.width + GEOMETRY_EPS_IN >= left + width
         and outer.top + outer.height + GEOMETRY_EPS_IN >= top + height
     )
+
+
+def _container_text_width_growth(
+    rec,
+    recs,
+    *,
+    z_order,
+    slide_w,
+    slide_h,
+    slide_area,
+):
+    """Use safe card padding before shrinking text below readability floors."""
+    if (
+        not rec.is_text
+        or rec.is_table
+        or rec.group is not None
+        or rec.misaligned
+        or float(getattr(rec.shape, "rotation", 0) or 0) % 360
+    ):
+        return None
+    target_z = z_order.get(rec.sid, -1)
+    containers = []
+    for sid, outer in recs.items():
+        if (
+            sid == rec.sid
+            or outer.type != "AUTO_SHAPE"
+            or outer.is_text
+            or outer.is_table
+            or outer.group is not None
+            or float(getattr(outer.shape, "rotation", 0) or 0) % 360
+            or z_order.get(sid, target_z) >= target_z
+            or outer.width * outer.height > BG_AREA_FRACTION * slide_area
+            or not _contains_proposed_text_rect(
+                outer,
+                left=rec.left,
+                top=rec.top,
+                width=rec.width,
+                height=rec.height,
+            )
+        ):
+            continue
+        containers.append((outer.width * outer.height, sid, outer))
+    if not containers:
+        return None
+    _area, container_sid, container = min(containers, key=lambda item: item[0])
+    left_gap = max(0.0, rec.left - container.left)
+    right_gap = max(0.0, container.left + container.width - rec.left - rec.width)
+    new_left = container.left + min(left_gap, CONTAINER_TEXT_PADDING_IN)
+    new_right = container.left + container.width - min(
+        right_gap,
+        CONTAINER_TEXT_PADDING_IN,
+    )
+    new_width = new_right - new_left
+    if (
+        new_width <= rec.width + GEOMETRY_EPS_IN
+        or new_left < 0
+        or new_right > slide_w
+        or rec.top < 0
+        or rec.top + rec.height > slide_h
+    ):
+        return None
+
+    for sid, other in recs.items():
+        if sid in {rec.sid, container_sid} or other.group == rec.sid:
+            continue
+        if other.width * other.height > BG_AREA_FRACTION * slide_area:
+            continue
+        if z_order.get(sid, target_z) < target_z and _contains_proposed_text_rect(
+            other,
+            left=new_left,
+            top=rec.top,
+            width=new_width,
+            height=rec.height,
+        ):
+            continue
+        other_left, other_top, other_width, other_height = _absolute_rect(other)
+        proposed_overlap = max(
+            0.0,
+            min(new_right, other_left + other_width) - max(new_left, other_left),
+        ) * max(
+            0.0,
+            min(rec.top + rec.height, other_top + other_height)
+            - max(rec.top, other_top),
+        )
+        original_overlap = max(
+            0.0,
+            min(rec.left + rec.width, other_left + other_width)
+            - max(rec.left, other_left),
+        ) * max(
+            0.0,
+            min(rec.top + rec.height, other_top + other_height)
+            - max(rec.top, other_top),
+        )
+        if proposed_overlap > original_overlap + 1e-6:
+            return None
+    return new_left, new_width, container_sid
 
 
 def _alignment_coordinate(rec, role):
@@ -3107,6 +3213,7 @@ def cmd_fix(args):
 
     fixed, residue = [], []
     alignment_changes = []
+    overflow_geometry_changes = []
     geometry_touched = set()
     for slide_idx, recs in midx.items():
         z_order = {shape_id: index for index, shape_id in enumerate(recs)}
@@ -3144,10 +3251,42 @@ def cmd_fix(args):
                     if h_overlap > 0.1 and v_intersect:
                         blocked = True
                         break
+                width_growth = None
+                if blocked:
+                    width_growth = _container_text_width_growth(
+                        r,
+                        recs,
+                        z_order=z_order,
+                        slide_w=slide_w,
+                        slide_h=slide_h,
+                        slide_area=slide_area,
+                    )
                 if not blocked and bottom + needed <= slide_h - SLIDE_MARGIN_IN:
                     sh.height = (sh.height or 0) + int(Inches(needed) / er.tf.sy)
                     fixed.append({"slide": slide_idx, "shape": sid, "action": "grow", "was": ov,
                                   "detail": 'height +%.2f" (text overflowed %.2f")' % (needed, ov)})
+                    geometry_touched.add((slide_idx, sid))
+                elif width_growth is not None:
+                    new_left, new_width, container_sid = width_growth
+                    originals = [(sh, sh.left, sh.top, sh.width, sh.height)]
+                    sh.left = int(er.tf.child_x(Inches(new_left)))
+                    sh.width = int(Inches(new_width) / er.tf.sx)
+                    fixed_entry = {
+                        "slide": slide_idx,
+                        "shape": sid,
+                        "action": "widen-in-container",
+                        "was": ov,
+                        "detail": 'width +%.2f" within %s card padding'
+                        % (new_width - r.width, container_sid),
+                    }
+                    fixed.append(fixed_entry)
+                    overflow_geometry_changes.append({
+                        "slide": slide_idx,
+                        "targets": {sid},
+                        "affected": {sid},
+                        "originals": originals,
+                        "fixed": fixed_entry,
+                    })
                     geometry_touched.add((slide_idx, sid))
                 else:
                     # (b) shrink-to-fit via explicit font scaling
@@ -3168,8 +3307,8 @@ def cmd_fix(args):
                         residue.append({
                             "slide": slide_idx, "shape": sid,
                             "kind": "frame_overflow",
-                            "issue": 'text overflows %.2f" but the font is already at the readability floor (%gpt)'
-                                     % (ov, MIN_FONT_PT),
+                            "issue": 'text overflows %.2f" but the font is already at its readability floor'
+                                     % ov,
                             "suggest": "shorten the text with set-text, or resize/move the shape",
                         })
                     else:
@@ -3467,6 +3606,52 @@ def cmd_fix(args):
         shutil.copy2(args.file, out_path)
     remaining = collect_issue_map(out_path, only_slides=only)
 
+    # Container-bounded width repairs are transactional. Roll them back if the
+    # combined saved slide introduces overlap, overflow, alignment, occlusion,
+    # or containment regressions anywhere on that slide.
+    if overflow_geometry_changes:
+        post_index = build_index(Presentation(out_path), measure=True, only_slides=only)
+        unsafe_slides = {}
+        for slide_idx in {change["slide"] for change in overflow_geometry_changes}:
+            targets = set().union(*(
+                change["targets"]
+                for change in overflow_geometry_changes
+                if change["slide"] == slide_idx
+            ))
+            affected = set().union(*(
+                change["affected"]
+                for change in overflow_geometry_changes
+                if change["slide"] == slide_idx
+            ))
+            reason = _alignment_transaction_failure(
+                midx.get(slide_idx, {}),
+                post_index.get(slide_idx, {}),
+                targets,
+                affected_sids=affected,
+            )
+            if reason:
+                unsafe_slides[slide_idx] = reason
+        if unsafe_slides:
+            for change in overflow_geometry_changes:
+                reason = unsafe_slides.get(change["slide"])
+                if not reason:
+                    continue
+                for shape, left, top, width, height in change["originals"]:
+                    shape.left, shape.top, shape.width, shape.height = left, top, width, height
+                fixed[:] = [item for item in fixed if item is not change["fixed"]]
+                residue.append({
+                    "slide": change["slide"],
+                    "shape": next(iter(change["targets"])),
+                    "kind": "frame_overflow",
+                    "issue": "container width transaction rejected: %s" % reason,
+                    "suggest": "widen or resize the source text frame without introducing collateral changes",
+                })
+            if fixed or str(out_path) == str(args.file):
+                prs.save(out_path)
+            else:
+                shutil.copy2(args.file, out_path)
+            remaining = collect_issue_map(out_path, only_slides=only)
+
     # Single-edge translations are transactional. Measure the combined saved
     # result and restore exact original EMUs for every target/seam neighbor if
     # any issue anywhere on that slide is introduced or made worse.
@@ -3517,7 +3702,7 @@ def cmd_fix(args):
     confirmed = []
     for f in fixed:
         rem = remaining.get((f["slide"], f["shape"]), {})
-        if f["action"] in ("grow", "shrink-font"):
+        if f["action"] in ("grow", "shrink-font", "widen-in-container"):
             key = "frame_overflow_bottom"
         elif f["action"] in ("nudge-left", "fit-width"):
             key = "slide_overflow_right"

@@ -868,8 +868,131 @@ def test_deck_native_scale_font_never_increases_sub_floor_line_spacing() -> None
 
     assert paragraph.line_spacing.pt == pytest.approx(8)
     assert paragraph.line_spacing.pt <= 8
-    assert paragraph.runs[0].font.size.pt == pytest.approx(10)
+    assert paragraph.runs[0].font.size.pt == pytest.approx(12)
     assert (8.0, 10.0) not in changes
+    assert changes == []
+
+
+def test_deck_native_scale_font_preserves_mechanical_typography_floors() -> None:
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    shape = slide.shapes.add_textbox(
+        Inches(1),
+        Inches(1),
+        Inches(5),
+        Inches(1),
+    )
+    paragraph = shape.text_frame.paragraphs[0]
+    paragraph.text = "Required narrative remains readable"
+    paragraph.line_spacing = Pt(24.3)
+    paragraph.runs[0].font.size = Pt(18)
+
+    changes = _deck_module()._scale_font(shape, 0.94, 14)
+
+    assert paragraph.runs[0].font.size.pt == pytest.approx(18)
+    assert paragraph.line_spacing.pt == pytest.approx(22.5)
+    assert (24.3, 22.5) in changes
+    assert all(before != pytest.approx(18) for before, _after in changes)
+
+
+@pytest.mark.parametrize(
+    ("authored_pt", "expected_pt"),
+    ((20, 18), (17, 15), (15, 15), (14, 14)),
+)
+def test_deck_native_scale_font_uses_descending_authored_size_tiers(
+    authored_pt: float,
+    expected_pt: float,
+) -> None:
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    shape = slide.shapes.add_textbox(
+        Inches(1),
+        Inches(1),
+        Inches(5),
+        Inches(1),
+    )
+    paragraph = shape.text_frame.paragraphs[0]
+    paragraph.text = "Tiered typography"
+    paragraph.runs[0].font.size = Pt(authored_pt)
+
+    _deck_module()._scale_font(shape, 0.6, 14)
+
+    assert paragraph.runs[0].font.size.pt == pytest.approx(expected_pt)
+
+
+def test_deck_native_lint_fix_widens_text_within_card_before_shrinking(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    home = tmp_path / "home"
+    font_dir = home / "Library/Fonts"
+    font_dir.mkdir(parents=True)
+    embedded_font = ImageFont.load_default(size=12).path
+    assert hasattr(embedded_font, "getvalue")
+    (font_dir / "ContainerSans.ttf").write_bytes(embedded_font.getvalue())
+    monkeypatch.setenv("HOME", str(home))
+
+    output = tmp_path / "container-width-overflow.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    card = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1),
+        Inches(1),
+        Inches(3.125),
+        Inches(1.979),
+    )
+    card.name = "action-card"
+    header = slide.shapes.add_textbox(
+        Inches(1.271),
+        Inches(1.521),
+        Inches(2.635),
+        Inches(0.337),
+    )
+    header.name = "action-card-heading"
+    header.text = "4 · ACTION"
+    header.text_frame.paragraphs[0].runs[0].font.name = "ContainerSans"
+    header.text_frame.paragraphs[0].runs[0].font.size = Pt(16)
+    body = slide.shapes.add_textbox(
+        Inches(1.271),
+        Inches(2.109),
+        Inches(2.635),
+        Inches(0.675),
+    )
+    body.name = "action-card-body"
+    body.text_frame.margin_left = 0
+    body.text_frame.margin_right = 0
+    body.text_frame.margin_top = 0
+    body.text_frame.margin_bottom = 0
+    paragraph = body.text_frame.paragraphs[0]
+    paragraph.text = "Executes highest-weighted motive"
+    paragraph.line_spacing = Pt(24.3)
+    paragraph.runs[0].font.name = "ContainerSans"
+    paragraph.runs[0].font.size = Pt(18)
+    presentation.save(output)
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.issue_kinds == {"widen-in-container": 1}
+    assert fixed.residue_count == 0
+    repaired = Presentation(output)
+    repaired_body = next(
+        shape for shape in repaired.slides[0].shapes if shape.name == "action-card-body"
+    )
+    repaired_run = repaired_body.text_frame.paragraphs[0].runs[0]
+    assert repaired_run.font.size.pt == pytest.approx(18)
+    assert repaired_body.left.inches == pytest.approx(1.1, abs=0.002)
+    assert repaired_body.width.inches == pytest.approx(2.92, abs=0.002)
+    assert repaired_body.left >= card.left
+    assert repaired_body.left + repaired_body.width <= card.left + card.width
+
+    clean = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+    assert clean.lint_issue_count_before == 0
+    assert clean.fix_applied_count == 0
+    assert clean.residue_count == 0
 
 
 def test_deck_native_lint_fix_repairs_compatible_alignment_geometry(
