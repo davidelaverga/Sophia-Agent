@@ -290,7 +290,11 @@ def _candidate(*, expected_source_hash: str = SOURCE_HASH) -> DeckRepairCandidat
                 selector="slide:1",
                 source_role="body",
                 expected_source_hash=expected_source_hash,
-                content="<section><h1>Repaired PSI control loop</h1></section>",
+                content=(
+                    '<section class="mechanism"><div>'
+                    "<h1><span>Current PSI</span> <em>control loop</em></h1>"
+                    "</div></section>"
+                ),
             ),
         ),
         rationale="Strengthen the frozen PSI mechanism without collateral edits.",
@@ -527,11 +531,62 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "literal px values for left, top, width, and height" in system_prompt
     assert "native peer edges or centerlines" in system_prompt
     assert "transforms, calc(), or percentage values" in system_prompt
+    assert (
+        "preserve the exact normalized visible HTML token sequence"
+        in system_prompt
+    )
+    assert (
+        "Do not add, remove, or rewrite visible glyphs, symbols, labels, or words"
+        in system_prompt
+    )
+    assert (
+        "Markup restructuring is allowed only at token boundaries"
+        in system_prompt
+    )
+    assert "do not split or merge a token or change token order" in system_prompt
+    assert "script, style, and template content is excluded" in system_prompt
+    assert "do not use inline style, hidden, or aria-hidden attributes" in system_prompt
+    assert "do not add script, style, or template elements" in system_prompt
+    assert "Do not hide semantic content with HTML attributes or CSS" in system_prompt
+    assert "clip it, move it off-canvas" in system_prompt
+    assert "CSS-generated content" in system_prompt
+    assert "Do not use CSS text-transform" in system_prompt
+    assert "Do not change generated list-marker semantics" in system_prompt
+    assert "list-style, list-style-type, or list-style-image" in system_prompt
+    assert "use only the safe literal forms" in system_prompt
+    assert "do not use var(), calc(), inheritance, or ambiguous values" in system_prompt
+    assert "Ordinary overflow and layout declarations are allowed" in system_prompt
 
     payload_text = messages[1].content[0]["text"]
     payload = json.loads(payload_text.removeprefix("Allowed repair context JSON:\n"))
     assert payload["repair_constraints"]["compiler_contract"] == {
         "authoring_contract": "compact_model_html_v2",
+        "body": {
+            "source_role": "body",
+            "content_policy": "preserve_exact_normalized_token_sequence",
+            "token_normalization": "unicode_nfkc_per_html_data_chunk_then_ordered_unicode_word_or_symbol_tokens",
+            "excluded_content_elements": ["script", "style", "template"],
+            "forbidden_elements": ["script", "style", "template"],
+            "forbidden_attributes": ["aria-hidden", "hidden", "style"],
+            "forbidden_visible_token_changes": [
+                "add",
+                "remove",
+                "rewrite",
+                "reorder",
+            ],
+            "markup_restructuring_rule": (
+                "allowed_at_token_boundaries_only_without_token_split_merge_or_reorder"
+            ),
+            "forbidden_semantic_content_concealment": [
+                "hide",
+                "clip",
+                "off_canvas",
+                "css_generated_content",
+            ],
+            "visible_structural_tokens": {
+                "list_item": "ordered_or_unordered_container_kind",
+            },
+        },
         "slide_css": {
             "source_role": "slide_css",
             "max_utf8_bytes": 1_024,
@@ -539,8 +594,325 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
             "geometry_value_format": "literal_px",
             "alignment_rule": "exact_native_peer_edges_or_centers",
             "forbidden_geometry_forms": ["transform", "calc()", "percentage"],
+            "forbidden_text_declarations": {
+                "content": {
+                    "allowed_single_identifiers": ["none", "normal"],
+                },
+                "display": {
+                    "allowed_single_identifiers": [
+                        "block",
+                        "contents",
+                        "flex",
+                        "flow-root",
+                        "grid",
+                        "initial",
+                        "inline",
+                        "inline-block",
+                        "list-item",
+                        "table",
+                    ],
+                },
+                "visibility": {
+                    "allowed_single_identifiers": ["initial", "visible"],
+                },
+                "opacity": {
+                    "allowed_single_token_types": ["number", "percentage"],
+                    "minimum_exclusive": 0,
+                },
+                "font_size": {
+                    "allowed_single_token_types": ["dimension", "percentage"],
+                    "minimum_exclusive": 0,
+                },
+                "color": {
+                    "parser": "css_color_3",
+                    "minimum_alpha_exclusive": 0,
+                    "variables_or_unparsed_values_allowed": False,
+                },
+                "text_transform": {
+                    "allowed_single_identifiers": ["none"],
+                },
+                "list_style": {"allowed": False},
+                "list_style_type": {"allowed": False},
+                "list_style_image": {"allowed": False},
+            },
+            "forbidden_semantic_content_concealment": [
+                "hide",
+                "clip",
+                "off_canvas",
+                "css_generated_content",
+            ],
+            "ordinary_overflow_and_layout_allowed": True,
         },
     }
+
+
+def test_body_candidate_accepts_split_or_merged_markup_with_token_sequence_preserved() -> None:
+    request = _request()
+    accepted = _candidate()
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=accepted),
+    )
+
+    assert _run(author(request)).candidate == accepted
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "candidate_text",
+    [
+        "<section hidden><h1>Current PSI control loop</h1></section>",
+        '<section aria-hidden="true"><h1>Current PSI control loop</h1></section>',
+        '<section style="display:none"><h1>Current PSI control loop</h1></section>',
+        '<section style="visibility:hidden"><h1>Current PSI control loop</h1></section>',
+        '<section style="visibility:collapse"><h1>Current PSI control loop</h1></section>',
+        '<section style="opacity:0%"><h1>Current PSI control loop</h1></section>',
+        '<section style="opacity:var(--alpha)"><h1>Current PSI control loop</h1></section>',
+        '<section style="font-size:0px"><h1>Current PSI control loop</h1></section>',
+        '<section style="font-size:calc(0px)"><h1>Current PSI control loop</h1></section>',
+        '<section style="color:transparent"><h1>Current PSI control loop</h1></section>',
+        '<section style="color:rgba(0,0,0,0)"><h1>Current PSI control loop</h1></section>',
+        '<section style="color:#0000"><h1>Current PSI control loop</h1></section>',
+        '<section style="text-transform:uppercase"><h1>Current PSI control loop</h1></section>',
+        "<section><h1 hidden/>Current PSI control loop</section>",
+    ],
+    ids=(
+        "hidden",
+        "aria-hidden",
+        "display-none",
+        "visibility-hidden",
+        "visibility-collapse",
+        "opacity-zero",
+        "opacity-variable",
+        "font-size-zero",
+        "font-size-calculation",
+        "transparent-color",
+        "rgba-alpha-zero",
+        "hex-alpha-zero",
+        "inline-text-transform",
+        "hidden-self-closing-nonvoid",
+    ),
+)
+def test_body_candidate_rejects_hiding_baseline_visible_text(
+    candidate_text: str,
+) -> None:
+    request = _request()
+    candidate = DeckRepairCandidate(
+        source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="body",
+                expected_source_hash=SOURCE_HASH,
+                content=candidate_text,
+            ),
+        ),
+        rationale="Keep the baseline content while changing its presentation.",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "injected_node",
+    [
+        '<p aria-hidden="true">INJECTED COPY</p>',
+        '<p style="text-transform:uppercase">INJECTED COPY</p>',
+        '<p style="--a:1;opacity:var(--a)">INJECTED COPY</p>',
+        '<p style="font-size:calc(12px)">INJECTED COPY</p>',
+        '<p style="color:var(--ink)">INJECTED COPY</p>',
+        '<style>.x::before{content:"INJECTED COPY"}</style>',
+        '<script>document.body.dataset.copy="INJECTED COPY"</script>',
+        '<template><p>INJECTED COPY</p></template>',
+    ],
+    ids=(
+        "aria-hidden",
+        "inline-text-transform",
+        "inline-opacity-variable",
+        "inline-font-size-calculation",
+        "inline-color-variable",
+        "embedded-style",
+        "embedded-script",
+        "embedded-template",
+    ),
+)
+def test_body_candidate_rejects_visible_injected_copy_cloaks(
+    injected_node: str,
+) -> None:
+    request = _request()
+    candidate = DeckRepairCandidate(
+        source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="body",
+                expected_source_hash=SOURCE_HASH,
+                content=SOURCE_TEXT + injected_node,
+            ),
+        ),
+        rationale="Do not cloak additional visible content.",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "candidate_text",
+    [
+        "<section><h1>Current PSI + control loop</h1></section>",
+        "<section><h1>Current PSI feedback loop</h1></section>",
+        "<section><h1>Current PSI loop</h1></section>",
+        "<section><h1>PSI Current control loop</h1></section>",
+    ],
+    ids=("symbol-insertion", "rewrite", "removal", "order-change"),
+)
+def test_body_candidate_rejects_visible_token_sequence_changes(
+    candidate_text: str,
+) -> None:
+    request = _request()
+    context = _context(request=request)
+    candidate = DeckRepairCandidate(
+        source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="body",
+                expected_source_hash=SOURCE_HASH,
+                content=candidate_text,
+            ),
+        ),
+        rationale="Change structure only while retaining visible content.",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("source_text", "candidate_text"),
+    [
+        (
+            SOURCE_TEXT,
+            "<section><h1>Current PSI con<span>trol</span> loop</h1></section>",
+        ),
+        (
+            "<section><h1>Current PSI con<span>trol</span> loop</h1></section>",
+            SOURCE_TEXT,
+        ),
+    ],
+    ids=("token-split", "token-merge"),
+)
+def test_body_candidate_rejects_token_boundary_changes_across_markup(
+    source_text: str,
+    candidate_text: str,
+) -> None:
+    request = _request()
+    context = _context(request=request)
+    source_hash = hashlib.sha256(source_text.encode()).hexdigest()
+    source = context.authorized_sources[0].model_copy(
+        update={"manifest_source_hash": source_hash, "text": source_text}
+    )
+    context = context.model_copy(update={"authorized_sources": (source,)})
+    candidate = DeckRepairCandidate(
+        source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="body",
+                expected_source_hash=source_hash,
+                content=candidate_text,
+            ),
+        ),
+        rationale="Restructure markup without changing token boundaries.",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("source_text", "candidate_text"),
+    [
+        (
+            "<section><p>One</p></section>",
+            "<section><ul><li>One</li></ul></section>",
+        ),
+        (
+            "<section><p>One</p></section>",
+            "<section><ol><li>One</li></ol></section>",
+        ),
+        (
+            "<section><ul><li>One</li></ul></section>",
+            "<section><ol><li>One</li></ol></section>",
+        ),
+        (
+            "<section><ul><li>One</li></ul></section>",
+            '<section><ul style="list-style:none"><li>One</li></ul></section>',
+        ),
+    ],
+    ids=("paragraph-to-ul", "paragraph-to-ol", "ul-to-ol", "inline-list-style"),
+)
+def test_body_candidate_rejects_list_marker_semantic_changes(
+    source_text: str,
+    candidate_text: str,
+) -> None:
+    request = _request()
+    context = _context(request=request)
+    source_hash = hashlib.sha256(source_text.encode()).hexdigest()
+    source = context.authorized_sources[0].model_copy(
+        update={"manifest_source_hash": source_hash, "text": source_text}
+    )
+    context = context.model_copy(update={"authorized_sources": (source,)})
+    candidate = DeckRepairCandidate(
+        source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="body",
+                expected_source_hash=source_hash,
+                content=candidate_text,
+            ),
+        ),
+        rationale="Keep visible copy while preserving list marker semantics.",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert len(invoker.invoke_calls) == 1
 
 
 def test_slide_css_candidate_must_fit_existing_compact_v2_byte_limit() -> None:
@@ -581,6 +953,157 @@ def test_slide_css_candidate_must_fit_existing_compact_v2_byte_limit() -> None:
         request=request,
         context=context,
         invoker=FakeTwoPhaseInvoker(candidate=oversized),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_allows_non_concealing_content_values_and_ordinary_layout() -> None:
+    request = _request(program=_program(source_role="slide_css"))
+    context = _context(request=request)
+    accepted = DeckRepairCandidate(
+        source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="slide_css",
+                expected_source_hash=SLIDE_CSS_HASH,
+                content=(
+                    SLIDE_CSS_TEXT
+                    + ".frame{overflow:hidden;position:absolute;content:normal;"
+                    "display:flex;visibility:visible;text-transform:none;"
+                    "opacity:1;font-size:12px;"
+                    "color:rgba(0,0,0,.5)}.frame::before{content:none}"
+                ),
+            ),
+        ),
+        rationale="Use ordinary layout without concealing or transforming text.",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=accepted),
+    )
+
+    assert _run(author(request)).candidate == accepted
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        'content:"+"',
+        "display:none",
+        "display:var(--display)",
+        "visibility:hidden",
+        "visibility:collapse",
+        "visibility:var(--visibility)",
+        "visibility:inherit",
+        "opacity:.0",
+        "opacity:-.1",
+        "opacity:var(--alpha)",
+        "opacity:calc(1 - 1)",
+        "font-size:0rem",
+        "font-size:-1px",
+        "font-size:var(--size)",
+        "font-size:calc(12px - 12px)",
+        "color:transparent",
+        "color:rgba(0,0,0,0)",
+        "color:#0000",
+        "color:#00000000",
+        "color:var(--ink)",
+        "text-transform:uppercase",
+        "list-style:none",
+        "list-style-type:decimal",
+        'list-style-image:url("marker.svg")',
+    ],
+    ids=(
+        "generated-content",
+        "display-none",
+        "display-variable",
+        "visibility-hidden",
+        "visibility-collapse",
+        "visibility-variable",
+        "visibility-inherit",
+        "opacity-zero",
+        "opacity-negative",
+        "opacity-variable",
+        "opacity-calculation",
+        "font-size-zero",
+        "font-size-negative",
+        "font-size-variable",
+        "font-size-calculation",
+        "transparent-color",
+        "rgba-alpha-zero",
+        "short-hex-alpha-zero",
+        "long-hex-alpha-zero",
+        "color-variable",
+        "text-transform",
+        "list-style",
+        "list-style-type",
+        "list-style-image",
+    ),
+)
+def test_slide_css_candidate_rejects_text_hiding_generation_or_transform(
+    declaration: str,
+) -> None:
+    request = _request(program=_program(source_role="slide_css"))
+    context = _context(request=request)
+    candidate = DeckRepairCandidate(
+        source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="slide_css",
+                expected_source_hash=SLIDE_CSS_HASH,
+                content=SLIDE_CSS_TEXT + f".candidate{{{declaration}}}",
+            ),
+        ),
+        rationale="Keep visible text unchanged while adjusting the slide style.",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "nested_css",
+    [
+        ".outer{& .inner{opacity:0}}",
+        "@media (min-width:1px){.outer{& .inner{color:#0000}}}",
+    ],
+    ids=("nested-qualified", "nested-qualified-in-media"),
+)
+def test_slide_css_candidate_rejects_nested_concealment(
+    nested_css: str,
+) -> None:
+    request = _request(program=_program(source_role="slide_css"))
+    context = _context(request=request)
+    candidate = DeckRepairCandidate(
+        source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="slide_css",
+                expected_source_hash=SLIDE_CSS_HASH,
+                content=SLIDE_CSS_TEXT + nested_css,
+            ),
+        ),
+        rationale="Keep nested CSS from concealing visible text.",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
     with pytest.raises(DeckRepairAuthorError) as error:
