@@ -45,6 +45,8 @@ class CapturingClient:
         self.fail_read = False
         self.fail_flush = False
         self.transient_read_failures = 0
+        self.creation_transient_read_failures = 0
+        self.creation_stale_reads = 0
         self.terminal_stale_reads = 0
         self.project_id = _PROJECT_ID
         self.project_name = _PROJECT_NAME
@@ -70,6 +72,12 @@ class CapturingClient:
             raise RuntimeError("private transient read response")
         if normalized not in self.stored_runs:
             raise LangSmithNotFoundError("private lookup response")
+        if self.creation_transient_read_failures:
+            self.creation_transient_read_failures -= 1
+            raise RuntimeError("private transient creation read response")
+        if self.creation_stale_reads:
+            self.creation_stale_reads -= 1
+            raise LangSmithNotFoundError("private stale creation lookup response")
         remote = deepcopy(self.stored_runs[normalized])
         if self.terminal_stale_reads and remote.end_time is not None:
             self.terminal_stale_reads -= 1
@@ -400,6 +408,48 @@ def test_create_and_update_commit_then_error_are_reconciled_idempotently() -> No
 
     with pytest.raises(SafeDeckRepairTraceEmissionError, match="conflicts"):
         _trace(client, trace_input).finish(_success_output(latency_ms=876))
+
+
+def test_creation_readback_retries_exact_run_without_duplicate_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tracing_module,
+        "_CREATION_READBACK_DELAYS_SECONDS",
+        (0.0, 0.0, 0.0, 0.0),
+    )
+    client = CapturingClient()
+    client.commit_then_fail_create = True
+    client.creation_transient_read_failures = 1
+    client.creation_stale_reads = 2
+
+    trace = _trace(client)
+
+    assert trace.already_terminal is False
+    assert len(client.create_attempts) == 1
+    assert client.creation_transient_read_failures == 0
+    assert client.creation_stale_reads == 0
+    assert client.update_attempts == []
+
+
+def test_creation_readback_exhaustion_fails_closed_after_one_create(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        tracing_module,
+        "_CREATION_READBACK_DELAYS_SECONDS",
+        (0.0, 0.0, 0.0),
+    )
+    client = CapturingClient()
+    client.creation_stale_reads = 10
+
+    with pytest.raises(SafeDeckRepairTraceEmissionError, match="creation readback"):
+        _trace(client)
+
+    assert len(client.create_attempts) == 1
+    assert client.creation_stale_reads == 7
+    assert client.update_attempts == []
+    assert len(client.stored_runs) == 1
 
 
 def test_terminal_readback_retries_exact_pending_and_transient_reads(

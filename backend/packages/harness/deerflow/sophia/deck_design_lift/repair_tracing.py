@@ -35,6 +35,7 @@ _MAX_OUTPUT_TOKENS = 12_000
 _MAX_LATENCY_MS = 15 * 60 * 1_000
 _DEFAULT_FLUSH_TIMEOUT_SECONDS = 15.0
 _MAX_FLUSH_TIMEOUT_SECONDS = 30.0
+_CREATION_READBACK_DELAYS_SECONDS = (0.0, 0.2, 0.5, 1.0, 2.0)
 _TERMINAL_READBACK_DELAYS_SECONDS = (0.0, 0.2, 0.5, 1.0, 2.0)
 
 SafeIdentifier = Annotated[
@@ -409,10 +410,7 @@ class SafeDeckRepairTrace:
                 raise SafeDeckRepairTraceEmissionError(
                     "safe repair trace pre-admitted run is missing"
                 )
-            self._create_remote()
-            remote = self._read_remote()
-            if remote is None:
-                raise SafeDeckRepairTraceEmissionError("safe repair trace creation was not durable")
+            remote = self._create_remote()
         self._already_terminal = self._validate_remote(remote)
 
     @property
@@ -484,8 +482,7 @@ class SafeDeckRepairTrace:
             raise SafeDeckRepairTraceEmissionError("safe repair trace remote state is invalid") from None
         return ended
 
-    def _create_remote(self) -> None:
-        failed = False
+    def _create_remote(self) -> object:
         start_time = datetime.now(UTC)
         try:
             self._client.create_run(
@@ -508,13 +505,23 @@ class SafeDeckRepairTrace:
                 dangerously_allow_filesystem=False,
             )
         except Exception:
-            failed = True
-        remote = self._read_remote()
-        if remote is None:
-            raise SafeDeckRepairTraceEmissionError("safe repair trace creation failed") from None
-        self._validate_remote(remote)
-        if failed:
-            return
+            # A transport failure can follow a committed create. Reconcile only
+            # the deterministic run ID; never issue a second create attempt.
+            pass
+        for delay_seconds in _CREATION_READBACK_DELAYS_SECONDS:
+            if delay_seconds:
+                time.sleep(delay_seconds)
+            try:
+                remote = self._read_remote()
+            except SafeDeckRepairTraceEmissionError:
+                continue
+            if remote is None:
+                continue
+            self._validate_remote(remote)
+            return remote
+        raise SafeDeckRepairTraceEmissionError(
+            "safe repair trace creation readback failed"
+        ) from None
 
     @staticmethod
     def _native_error(output: SafeDeckRepairTraceOutput) -> str | None:
