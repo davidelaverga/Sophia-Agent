@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import io
+import json
 import threading
 from types import SimpleNamespace
 from typing import Any
@@ -29,6 +30,7 @@ from deerflow.sophia.deck_design_lift.repair_author import (
     RepairPlanContext,
     RepairSkillExcerptContext,
     RepairSourceContext,
+    build_repair_author_messages,
     projected_repair_campaign_cost_usd,
     repair_preflight_admitted,
 )
@@ -56,6 +58,7 @@ OTHER_HASH = "b" * 64
 MANIFEST_HASH = "c" * 64
 SKILL_SOURCE_HASH = "d" * 64
 SOURCE_TEXT = "<section><h1>Current PSI control loop</h1></section>"
+SLIDE_CSS_TEXT = ".mechanism{left:80px;top:120px;width:640px;height:320px}"
 SKILL_EXCERPT = "Use one subject-specific mechanism visual and preserve factual text."
 
 
@@ -74,6 +77,7 @@ RENDER_BYTES = _png_bytes(color="navy")
 CONTACT_HASH = hashlib.sha256(CONTACT_BYTES).hexdigest()
 RENDER_HASH = hashlib.sha256(RENDER_BYTES).hexdigest()
 SOURCE_HASH = hashlib.sha256(SOURCE_TEXT.encode()).hexdigest()
+SLIDE_CSS_HASH = hashlib.sha256(SLIDE_CSS_TEXT.encode()).hexdigest()
 SKILL_EXCERPT_HASH = hashlib.sha256(SKILL_EXCERPT.encode()).hexdigest()
 
 
@@ -112,7 +116,11 @@ def _plan() -> ResolvedModelPlan:
     )
 
 
-def _program(*, render_hash: str = RENDER_HASH) -> DeckRepairProgram:
+def _program(
+    *,
+    render_hash: str = RENDER_HASH,
+    source_role: str = "body",
+) -> DeckRepairProgram:
     render = RepairRenderEvidence(
         selector="slide:1",
         path="renders/slide-1.png",
@@ -131,7 +139,7 @@ def _program(*, render_hash: str = RENDER_HASH) -> DeckRepairProgram:
         "repair_attempt": 1,
         "plan_revision_allowed": False,
         "authorized_selectors": ("slide:1",),
-        "authorized_source_roles": {"slide:1": ("body",)},
+        "authorized_source_roles": {"slide:1": (source_role,)},
         "deck_instruction": "Repair only the frozen PSI mechanism slide.",
         "selector_repairs": (
             SelectorRepair(
@@ -180,6 +188,9 @@ def _context(*, request: RepairInvocationRequest | None = None) -> RepairAuthorC
     creative = {"story": "observe, integrate, act", "slide_count": 5}
     design = {"signature": "control-loop trace", "palette": ["ink", "cyan"]}
     metadata = {"role": "mechanism-photo", "semantic_text": False}
+    source_role = request.program.authorized_source_roles["slide:1"][0]
+    source_text = SLIDE_CSS_TEXT if source_role == "slide_css" else SOURCE_TEXT
+    source_hash = hashlib.sha256(source_text.encode()).hexdigest()
     return RepairAuthorContext(
         identity=RepairAuthorContextIdentity(
             campaign_run_id=request.campaign_run_id,
@@ -239,11 +250,11 @@ def _context(*, request: RepairInvocationRequest | None = None) -> RepairAuthorC
                 manifest_revision=request.program.initial_manifest_revision,
                 manifest_hash=MANIFEST_HASH,
                 selector="slide:1",
-                source_role="body",
+                source_role=source_role,
                 component_version_id="slide-1-version-001",
-                manifest_source_path="versions/slide-1/body.html",
-                manifest_source_hash=SOURCE_HASH,
-                text=SOURCE_TEXT,
+                manifest_source_path=f"versions/slide-1/{source_role}.txt",
+                manifest_source_hash=source_hash,
+                text=source_text,
             ),
         ),
         owned_assets=(
@@ -284,6 +295,13 @@ def _candidate(*, expected_source_hash: str = SOURCE_HASH) -> DeckRepairCandidat
         ),
         rationale="Strengthen the frozen PSI mechanism without collateral edits.",
     )
+
+
+def _sized_slide_css(size_bytes: int) -> str:
+    prefix = SLIDE_CSS_TEXT + "/*"
+    suffix = "*/"
+    assert size_bytes >= len((prefix + suffix).encode())
+    return prefix + ("x" * (size_bytes - len(prefix.encode()) - len(suffix.encode()))) + suffix
 
 
 def _prepared() -> PreparedDeckRepairRequest:
@@ -495,6 +513,81 @@ def test_exact_context_builds_bounded_multimodal_prompt_and_one_create() -> None
         '"rationale"',
     ):
         assert forbidden not in prompt_text
+
+
+def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -> None:
+    request = _request(program=_program(source_role="slide_css"))
+    messages = build_repair_author_messages(
+        context=_context(request=request),
+        program=request.program,
+    )
+
+    system_prompt = messages[0].content
+    assert "compact_model_html_v2 limit of 1024 UTF-8 bytes" in system_prompt
+    assert "literal px values for left, top, width, and height" in system_prompt
+    assert "native peer edges or centerlines" in system_prompt
+    assert "transforms, calc(), or percentage values" in system_prompt
+
+    payload_text = messages[1].content[0]["text"]
+    payload = json.loads(payload_text.removeprefix("Allowed repair context JSON:\n"))
+    assert payload["repair_constraints"]["compiler_contract"] == {
+        "authoring_contract": "compact_model_html_v2",
+        "slide_css": {
+            "source_role": "slide_css",
+            "max_utf8_bytes": 1_024,
+            "geometry_properties": ["left", "top", "width", "height"],
+            "geometry_value_format": "literal_px",
+            "alignment_rule": "exact_native_peer_edges_or_centers",
+            "forbidden_geometry_forms": ["transform", "calc()", "percentage"],
+        },
+    }
+
+
+def test_slide_css_candidate_must_fit_existing_compact_v2_byte_limit() -> None:
+    request = _request(program=_program(source_role="slide_css"))
+    context = _context(request=request)
+    accepted = DeckRepairCandidate(
+        source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="slide_css",
+                expected_source_hash=SLIDE_CSS_HASH,
+                content=_sized_slide_css(1_024),
+            ),
+        ),
+        rationale="Keep the repair inside the frozen compiler contract.",
+    )
+    author, _loader, _invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=accepted),
+    )
+
+    assert _run(author(request)).candidate == accepted
+
+    oversized_content = SLIDE_CSS_TEXT + "/*" + ("é" * 483) + "*/"
+    assert len(oversized_content) < 1_024
+    assert len(oversized_content.encode("utf-8")) == 1_026
+    oversized = accepted.model_copy(
+        update={
+            "source_updates": (
+                accepted.source_updates[0].model_copy(
+                    update={"content": oversized_content}
+                ),
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=oversized),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert len(invoker.invoke_calls) == 1
 
 
 def test_safe_trace_network_work_runs_off_the_async_event_loop() -> None:
