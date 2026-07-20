@@ -301,6 +301,57 @@ Path(os.environ['PROBE_OUTPUT']).write_text(
     platform.system() != "Linux" or not hasattr(os, "geteuid") or os.geteuid() != 0,
     reason="requires a real root Linux process",
 )
+def test_real_linux_private_read_copy_is_mutable_without_source_write_access() -> None:
+    if shutil.which("setpriv") is None:
+        pytest.fail("root Linux runtime is missing required setpriv")
+    workspace = Path(tempfile.mkdtemp(prefix="dq1-private-copy-proof-"))
+    source = workspace / "source.txt"
+    output_dir = workspace / "output"
+    copied = output_dir / "copy.txt"
+    source.write_text("trusted-source", encoding="utf-8")
+    source.chmod(0o600)
+    output_dir.mkdir(mode=0o700)
+    workspace.chmod(0o700)
+    probe = """
+import os
+import shutil
+from pathlib import Path
+source = Path(os.environ['PROBE_SOURCE'])
+copied = Path(os.environ['PROBE_COPY'])
+try:
+    source.write_text('tampered', encoding='utf-8')
+except PermissionError:
+    source_write = 'denied'
+else:
+    source_write = 'allowed'
+shutil.copy2(source, copied)
+copied.write_text('mutable-copy', encoding='utf-8')
+print(source_write)
+"""
+    env = process_group.trusted_subprocess_env()
+    env.update({"PROBE_SOURCE": str(source), "PROBE_COPY": str(copied)})
+
+    try:
+        completed = process_group.run_process_group(
+            [sys.executable, "-c", probe],
+            timeout=10,
+            env=env,
+            private_read_dirs=[workspace],
+            writable_dirs=[output_dir],
+        )
+
+        assert completed.returncode == 0, completed.stderr
+        assert completed.stdout.strip() == "denied"
+        assert source.read_text(encoding="utf-8") == "trusted-source"
+        assert copied.read_text(encoding="utf-8") == "mutable-copy"
+    finally:
+        shutil.rmtree(workspace, ignore_errors=True)
+
+
+@pytest.mark.skipif(
+    platform.system() != "Linux" or not hasattr(os, "geteuid") or os.geteuid() != 0,
+    reason="requires a real root Linux process",
+)
 def test_real_linux_concurrent_children_cannot_read_each_other_environ() -> None:
     first_state = Path(tempfile.gettempdir()) / f"dq1-first-child-{os.getpid()}.txt"
     second_state = Path(tempfile.gettempdir()) / f"dq1-second-child-{os.getpid()}.txt"

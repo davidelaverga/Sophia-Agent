@@ -385,7 +385,10 @@ def _grant_private_read_tree(value: str | Path, *, gid: int) -> list[_ReadGrant]
                 mode = 0o710
             elif stat.S_ISREG(info.st_mode) and info.st_nlink == 1:
                 directory = False
-                mode = 0o440
+                # The dropped child remains group-read-only.  Keeping owner
+                # write allows shutil.copy2() to preserve a mode that is still
+                # writable when the destination is owned by that child.
+                mode = 0o640
             else:
                 raise RuntimeError(
                     f"private read snapshot contains an unsupported file: {candidate}"
