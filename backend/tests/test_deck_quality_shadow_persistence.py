@@ -28,6 +28,7 @@ from deerflow.sophia.deck_quality.persistence import (
     QualityRunTerminalState,
     SupabaseDeckQualityRunRpcClient,
     SupabaseDeckQualityRunStore,
+    persisted_decision_weighted_score,
     safe_trace_root_input_hash,
 )
 from deerflow.sophia.deck_quality.schemas import QualityInstrumentLock
@@ -36,6 +37,14 @@ from deerflow.sophia.storage.supabase_artifact_store import safe_object_path_seg
 MIGRATION = Path(__file__).resolve().parents[1] / "migrations" / "2026_07_15_sophia_deck_quality_shadow_runs.sql"
 TEST_NOW = datetime.now(UTC).replace(microsecond=0)
 _CLAIM_SEQUENCE = itertools.count(1)
+
+
+def test_weighted_score_projection_matches_float_transport_and_database_scale() -> None:
+    exact = Decimal("2.00000049999999999")
+
+    assert float(exact) == 2.0000005
+    assert persisted_decision_weighted_score(exact) == Decimal("2.000001")
+    assert persisted_decision_weighted_score(Decimal(7) / Decimal(3)) == Decimal("2.333333")
 
 
 def _instrument() -> QualityInstrumentLock:

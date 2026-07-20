@@ -60,6 +60,7 @@ from deerflow.sophia.deck_quality.persistence import (
     QualityRunRecord,
     QualityRunStage,
     QualityRunTerminalState,
+    persisted_decision_weighted_score,
 )
 from deerflow.sophia.deck_quality.persistence import (
     safe_trace_root_input_hash as compute_safe_trace_root_input_hash,
@@ -3253,7 +3254,8 @@ async def replay_prepared_completion_trace(
         or row.decision_result is not QualityRunDecision(decision.result)
         or row.decision_failure_codes
         != _safe_failure_codes(decision.failure_codes)
-        or row.decision_weighted_score != decision.weighted_score
+        or row.decision_weighted_score
+        != persisted_decision_weighted_score(decision.weighted_score)
     ):
         raise DeckQualityGraphError(
             QualityRunErrorCode.ARTIFACT_SNAPSHOT_STALE,

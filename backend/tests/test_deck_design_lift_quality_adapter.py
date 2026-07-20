@@ -29,6 +29,7 @@ from deerflow.sophia.deck_quality.idempotency import derive_quality_run_id
 from deerflow.sophia.deck_quality.persistence import (
     REQUIRED_TRACE_ID_KEYS,
     STAGE_RANK,
+    QualityRunDecision,
     QualityRunRecord,
     QualityRunStage,
     safe_trace_root_input_hash,
@@ -1106,6 +1107,67 @@ async def test_decision_is_recomputed_from_persisted_assessments() -> None:
 
     with pytest.raises(DeckQualityEvidenceAdapterError, match="quality_decision_mismatch"):
         await adapter.judge_initial(fixture.request)
+
+
+@pytest.mark.anyio
+async def test_persisted_six_decimal_score_authenticates_repeating_decision() -> None:
+    fixture = _fixture()
+    visual_path = fixture.paths["assessment_a_visual"]
+    decision_path = fixture.paths["decision"]
+    visual_stage = _AssessmentAArtifact.model_validate_json(fixture.objects[visual_path])
+    assert visual_stage.assessment is not None
+    scores = list(visual_stage.assessment.criterion_scores)
+    scores[0] = scores[0].model_copy(update={"score": 3})
+    visual = visual_stage.assessment.model_copy(update={"criterion_scores": tuple(scores)})
+    changed_visual = canonical_json_bytes(visual_stage.model_copy(update={"assessment": visual}))
+
+    bundle = SnapshotEvidenceBundle.model_validate_json(fixture.objects[fixture.paths["evidence_bundle"]])
+    mechanical_stage = _MechanicalArtifact.model_validate_json(fixture.objects[fixture.paths["assessment_b_mechanical"]])
+    plan_stage = _AssessmentCArtifact.model_validate_json(fixture.objects[fixture.paths["assessment_c_plan_realization"]])
+    assert plan_stage.assessment is not None
+    plan_inputs = derive_plan_realization_inputs(
+        creative_plan=bundle.snapshot.creative_plan,
+        design_plan=bundle.snapshot.design_plan,
+        selectors=tuple(str(item) for item in bundle.snapshot.renders.selectors),
+        explicit_style_constraints=bundle.snapshot.brief.explicit_brand_style_constraints,
+    )
+    decision = adjudicate_shadow_result(
+        coverage=prove_coverage(bundle.snapshot, visual),
+        visual=visual,
+        mechanical=mechanical_stage.projection,
+        plan=plan_stage.assessment,
+        criteria=fixture.instrument.all_criteria,
+        expected_plan_commitment_ids=tuple(item.commitment_id for item in plan_inputs.commitments),
+        rubric_hash=fixture.instrument.blind_rubric.rubric_hash,
+        policy=fixture.instrument.policy,
+    )
+    assert decision.weighted_score == Decimal(7) / Decimal(3)
+    changed_decision = canonical_json_bytes(decision)
+    persisted_score = Decimal("2.333333")
+    row = fixture.row.model_copy(
+        update={
+            "decision_result": QualityRunDecision(decision.result),
+            "decision_failure_codes": decision.failure_codes,
+            "decision_weighted_score": persisted_score,
+            "stage_artifact_hashes": {
+                **fixture.row.stage_artifact_hashes,
+                "assessment_a_visual": _digest_bytes(changed_visual),
+                "decision": _digest_bytes(changed_decision),
+            },
+        }
+    )
+    objects = FakeObjects(
+        {
+            **fixture.objects,
+            visual_path: changed_visual,
+            decision_path: changed_decision,
+        }
+    )
+    adapter, *_ = _adapter(fixture, responses=[row], objects=objects)
+
+    result = await adapter.judge_initial(fixture.request)
+
+    assert result.evidence.weighted_score == decision.weighted_score
 
 
 @pytest.mark.anyio

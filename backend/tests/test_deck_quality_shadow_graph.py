@@ -47,6 +47,7 @@ from deerflow.sophia.deck_quality.persistence import (
     QualityRunRecord,
     QualityRunStage,
     QualityRunTerminalState,
+    persisted_decision_weighted_score,
 )
 from deerflow.sophia.deck_quality.persistence import (
     safe_trace_root_input_hash as compute_safe_trace_root_input_hash,
@@ -665,7 +666,9 @@ class MemoryStore:
             "state": "finalizing",
             "decision_result": decision_result,
             "decision_failure_codes": decision_failure_codes,
-            "decision_weighted_score": decision_weighted_score,
+            "decision_weighted_score": persisted_decision_weighted_score(
+                decision_weighted_score
+            ),
             "safe_metrics": {**self.row.safe_metrics, **safe_metrics},
             "trace_ids": {**self.row.trace_ids, **trace_ids},
             "stage_artifact_hashes": {
@@ -789,7 +792,9 @@ class MemoryStore:
                 "finished_at": self.row.updated_at,
                 "decision_result": decision_result,
                 "decision_failure_codes": decision_failure_codes,
-                "decision_weighted_score": decision_weighted_score,
+                "decision_weighted_score": persisted_decision_weighted_score(
+                    decision_weighted_score
+                ),
                 "last_error_code": error_code,
                 "last_error_stage": error_stage,
                 "safe_metrics": safe_metrics or {},
@@ -840,6 +845,8 @@ class FakeInvoker:
         self.plan_input_tokens = 100
         self.count_error_for: type[Any] | None = None
         self.events: list[str] = []
+        self.blind_score = 4
+        self.plan_score = 4
 
     def prepare_request(
         self,
@@ -898,7 +905,11 @@ class FakeInvoker:
         score = CriterionScore(
             criterion_id=("subject_specificity" if schema is BlindVisualAssessment else "signature_realization"),
             applicable=True,
-            score=4,
+            score=(
+                self.blind_score
+                if schema is BlindVisualAssessment
+                else self.plan_score
+            ),
             rationale="The rendered evidence supports this score.",
             evidence_selectors=(selectors[0],),
         )
@@ -2277,6 +2288,22 @@ async def test_prepared_success_trace_replays_through_grace_without_raw_graph_or
     tmp_path: Path,
 ) -> None:
     _instrument_value, objects, store, invoker, traces, runtime = _setup(tmp_path)
+    weighted_plan = runtime.instrument.plan_rubric.criteria[0].model_copy(
+        update={"weight": Decimal("2")}
+    )
+    repeating_instrument = runtime.instrument.model_copy(
+        update={
+            "plan_rubric": runtime.instrument.plan_rubric.model_copy(
+                update={"criteria": (weighted_plan,)}
+            ),
+            "all_criteria": (
+                runtime.instrument.blind_rubric.criteria[0],
+                weighted_plan,
+            ),
+        }
+    )
+    invoker.plan_score = 3
+    runtime = replace(runtime, instrument=repeating_instrument)
 
     class _TraceAckFailure(FakeTrace):
         def finish(self, output: Any) -> None:
@@ -2299,6 +2326,7 @@ async def test_prepared_success_trace_replays_through_grace_without_raw_graph_or
     assert first_output["error_code"] == "quality_persistence_error"
     assert store.row.lease_owner is None
     assert store.row.stage is QualityRunStage.ADJUDICATED
+    assert store.row.decision_weighted_score == Decimal("3.333333")
     assert store.row.safe_trace_root_input is not None
     assert store.row.safe_trace_root_input_hash is not None
     assert invoker.blind_calls == 1

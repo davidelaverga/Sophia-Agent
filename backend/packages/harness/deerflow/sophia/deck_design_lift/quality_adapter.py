@@ -33,7 +33,10 @@ from deerflow.sophia.deck_quality.graph import (
     _MechanicalArtifact,
 )
 from deerflow.sophia.deck_quality.idempotency import derive_quality_run_id
-from deerflow.sophia.deck_quality.persistence import QualityRunRecord
+from deerflow.sophia.deck_quality.persistence import (
+    QualityRunRecord,
+    persisted_decision_weighted_score,
+)
 from deerflow.sophia.deck_quality.plan import derive_plan_realization_inputs
 from deerflow.sophia.deck_quality.schemas import (
     AdjudicationPolicy,
@@ -1035,7 +1038,7 @@ class DurableDeckQualityEvidenceAdapter:
             or row.decision_result is None
             or row.decision_result.value != decision.result
             or row.decision_failure_codes != decision.failure_codes
-            or row.decision_weighted_score != decision.weighted_score
+            or row.decision_weighted_score != persisted_decision_weighted_score(decision.weighted_score)
         ):
             raise DeckQualityEvidenceAdapterError("quality_decision_mismatch")
 

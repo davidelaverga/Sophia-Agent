@@ -6,7 +6,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from datetime import UTC, datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_HALF_UP, Decimal
 from enum import StrEnum
 from typing import Any, Literal, Protocol, Self, runtime_checkable
 
@@ -59,6 +59,7 @@ REQUIRED_TRACE_ID_KEYS = frozenset(
 )
 _QUALITY_RUN_HORIZON = timedelta(minutes=15)
 _TRACE_TERMINAL_GRACE = timedelta(minutes=2)
+_PERSISTED_WEIGHTED_SCORE_QUANTUM = Decimal("0.000001")
 _SAFE_TRACE_ROOT_KEYS = (
     "schema_version",
     "campaign_id",
@@ -84,6 +85,25 @@ _SAFE_TRACE_ROOT_KEYS = (
     "gateway_deployed_sha",
     "langgraph_deployed_sha",
 )
+
+
+def persisted_decision_weighted_score(value: Decimal | float | None) -> Decimal | None:
+    """Project a score through the JSON-number and ``NUMERIC(8, 6)`` boundary."""
+
+    if value is None:
+        return None
+    if isinstance(value, bool):
+        raise ValueError("decision weighted score must be numeric")
+    try:
+        transported = float(value)
+    except (TypeError, ValueError, OverflowError):
+        raise ValueError("decision weighted score must be numeric") from None
+    if not math.isfinite(transported) or not 0 <= transported <= 5:
+        raise ValueError("decision weighted score must be finite and between 0 and 5")
+    return Decimal(str(transported)).quantize(
+        _PERSISTED_WEIGHTED_SCORE_QUANTUM,
+        rounding=ROUND_HALF_UP,
+    )
 
 
 class DeckQualityPersistenceError(RuntimeError):
@@ -1137,9 +1157,8 @@ class SupabaseDeckQualityRunStore:
             raise ValueError("failed or stale quality runs require a safe error code")
         if _SHA256_RE.fullmatch(terminal_trace_payload_hash) is None:
             raise ValueError("terminal trace payload hash is invalid")
-        score = None if decision_weighted_score is None else float(decision_weighted_score)
-        if score is not None and (not math.isfinite(score) or not 0 <= score <= 5):
-            raise ValueError("decision weighted score must be finite and between 0 and 5")
+        persisted_score = persisted_decision_weighted_score(decision_weighted_score)
+        score = None if persisted_score is None else float(persisted_score)
         return await self._one(
             "sophia_finish_deck_quality_shadow_run",
             {
@@ -1205,9 +1224,8 @@ class SupabaseDeckQualityRunStore:
     ) -> QualityRunRecord:
         """Durably prepare a successful result while retaining the fenced lease."""
 
-        score = None if decision_weighted_score is None else float(decision_weighted_score)
-        if score is not None and (not math.isfinite(score) or not 0 <= score <= 5):
-            raise ValueError("decision weighted score must be finite and between 0 and 5")
+        persisted_score = persisted_decision_weighted_score(decision_weighted_score)
+        score = None if persisted_score is None else float(persisted_score)
         artifact_hashes = _safe_stage_artifact_hashes(stage_artifact_hashes)
         if not {"decision", "safe_metrics", "run"}.issubset(artifact_hashes):
             raise ValueError("prepared completion requires decision, safe_metrics, and run hashes")
