@@ -60,6 +60,53 @@ _CHECKPOINT_SCHEMA = "sophia-deck-design-lift-checkpoint/v1"
 DQ2_RENEWABLE_LEASE_SECONDS = 120
 DQ2_LEASE_HEARTBEAT_INTERVAL_SECONDS = 30.0
 _TERMINAL_MUTATION_STATUSES = frozenset({"committed", "rolled_back", "failed"})
+_SAFE_MATERIALIZATION_ERROR_CODES = frozenset(
+    {
+        "invalid_scope",
+        "stale_manifest",
+        "manifest_missing",
+        "manifest_invalid",
+        "manifest_hash_mismatch",
+        "source_path_invalid",
+        "source_missing",
+        "source_invalid",
+        "source_hash_mismatch",
+        "candidate_writes_invalid",
+        "candidate_write_hash_mismatch",
+        "unsupported_candidate_change",
+        "compiler_failed",
+        "compiler_result_invalid",
+        "proof_invalid",
+        "storage_unavailable",
+        "immutable_conflict",
+        "staged_record_missing",
+        "staged_record_invalid",
+    }
+)
+_SAFE_COMPILER_ERROR_CODES = frozenset(
+    {
+        "baseline_unavailable",
+        "baseline_invalid",
+        "identity_mismatch",
+        "instrument_mismatch",
+        "source_graph_invalid",
+        "source_hash_mismatch",
+        "source_decode_failed",
+        "plan_revision_forbidden",
+        "baseline_asset_missing",
+        "baseline_asset_invalid",
+        "service_failed",
+        "service_result_invalid",
+        "candidate_artifact_invalid",
+        "plan_changed",
+        "derived_source_invalid",
+        "mechanical_gate_failed",
+        "native_inventory_changed",
+        "render_collateral_changed",
+        "content_changed",
+        "publication_failed",
+    }
+)
 
 _T = TypeVar("_T")
 
@@ -1018,7 +1065,28 @@ class DeckDesignLiftRuntime:
                     candidate=candidate,
                 )
                 self._validate_staged_candidate(request, transaction, program, staged)
-            except Exception:
+            except Exception as error:
+                materialization_error_code = getattr(error, "code", None)
+                compiler_error_code = getattr(error, "detail_code", None)
+                transaction = _transaction_copy(
+                    transaction,
+                    gate_evidence=_checkpoint_update(
+                        transaction,
+                        materialization_error_code=(
+                            materialization_error_code
+                            if isinstance(materialization_error_code, str)
+                            and materialization_error_code
+                            in _SAFE_MATERIALIZATION_ERROR_CODES
+                            else "unclassified"
+                        ),
+                        compiler_error_code=(
+                            compiler_error_code
+                            if isinstance(compiler_error_code, str)
+                            and compiler_error_code in _SAFE_COMPILER_ERROR_CODES
+                            else None
+                        ),
+                    ),
+                )
                 return await self._rollback_result(
                     request,
                     lease,

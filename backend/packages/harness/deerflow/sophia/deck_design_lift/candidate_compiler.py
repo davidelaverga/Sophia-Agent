@@ -926,6 +926,11 @@ def _validate_service_result(
     if not isinstance(result, DeckBuildResult):
         raise DeckCandidateCompilationError("service_result_invalid")
     if not result.success:
+        if "deck_mechanical_gate_failed" in {
+            result.failure_code,
+            result.root_failure_code,
+        }:
+            raise DeckCandidateCompilationError("mechanical_gate_failed")
         raise DeckCandidateCompilationError("service_failed")
     if (
         result.build_id != request.build_id

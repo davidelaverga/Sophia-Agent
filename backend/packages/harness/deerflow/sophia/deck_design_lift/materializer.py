@@ -118,12 +118,49 @@ MaterializationErrorCode = Literal[
     "staged_record_invalid",
 ]
 
+_SAFE_COMPILER_DETAIL_CODES = frozenset(
+    {
+        "baseline_unavailable",
+        "baseline_invalid",
+        "identity_mismatch",
+        "instrument_mismatch",
+        "source_graph_invalid",
+        "source_hash_mismatch",
+        "source_decode_failed",
+        "plan_revision_forbidden",
+        "baseline_asset_missing",
+        "baseline_asset_invalid",
+        "service_failed",
+        "service_result_invalid",
+        "candidate_artifact_invalid",
+        "plan_changed",
+        "derived_source_invalid",
+        "mechanical_gate_failed",
+        "native_inventory_changed",
+        "render_collateral_changed",
+        "content_changed",
+        "publication_failed",
+    }
+)
+
 
 class DeckCandidateMaterializationError(RuntimeError):
     """A content-free materialization failure safe to persist or trace."""
 
-    def __init__(self, code: MaterializationErrorCode) -> None:
+    def __init__(
+        self,
+        code: MaterializationErrorCode,
+        *,
+        detail_code: str | None = None,
+    ) -> None:
         self.code = code
+        self.detail_code = (
+            detail_code
+            if code == "compiler_failed"
+            and isinstance(detail_code, str)
+            and detail_code in _SAFE_COMPILER_DETAIL_CODES
+            else None
+        )
         super().__init__(code)
 
 
@@ -1265,8 +1302,11 @@ class DurableDeckCandidateMaterializer:
             compilation = raw_compilation if isinstance(raw_compilation, DeckCandidateCompilation) else DeckCandidateCompilation.model_validate(raw_compilation)
         except DeckCandidateMaterializationError:
             raise
-        except Exception:
-            raise DeckCandidateMaterializationError("compiler_failed") from None
+        except Exception as error:
+            raise DeckCandidateMaterializationError(
+                "compiler_failed",
+                detail_code=getattr(error, "code", None),
+            ) from None
         records = self._validate_compilation(
             compilation,
             request=compile_request,

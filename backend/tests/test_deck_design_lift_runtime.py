@@ -463,6 +463,24 @@ class EscapedCandidateObjectMaterializer(FakeMaterializer):
         return escaped
 
 
+class CompilerFailedMaterializer(FakeMaterializer):
+    async def stage(self, *, transaction, program, candidate):
+        del transaction, program, candidate
+        error = RuntimeError("unsafe raw compiler detail")
+        error.code = "compiler_failed"  # type: ignore[attr-defined]
+        error.detail_code = "mechanical_gate_failed"  # type: ignore[attr-defined]
+        raise error
+
+
+class MalformedErrorMetadataMaterializer(FakeMaterializer):
+    async def stage(self, *, transaction, program, candidate):
+        del transaction, program, candidate
+        error = RuntimeError("unsafe raw compiler detail")
+        error.code = []  # type: ignore[attr-defined]
+        error.detail_code = {}  # type: ignore[attr-defined]
+        raise error
+
+
 class TrackingMutationStore(InMemoryBuildMutationStore):
     def __init__(self) -> None:
         super().__init__()
@@ -1041,6 +1059,45 @@ def test_candidate_object_path_escape_fails_before_staging_transition() -> None:
         == "rolled_back"
     )
     assert runtime._atomic_committer.calls == []
+
+
+def test_materialization_failure_persists_only_content_free_error_codes() -> None:
+    runtime, _manifests, mutations, _mechanics, _judge, _repair, _materializer = (
+        _runtime(materializer=CompilerFailedMaterializer())
+    )
+
+    result = _run(runtime.run(_request()))
+
+    assert result.terminal_code == "candidate_materialization_failed"
+    transaction = mutations.load(
+        transaction_id=result.transaction_id,
+        user_id="user-canary-001",
+    )
+    checkpoint = transaction.gate_evidence["deck_design_lift_runtime"]
+    assert checkpoint["materialization_error_code"] == "compiler_failed"
+    assert checkpoint["compiler_error_code"] == "mechanical_gate_failed"
+    assert "unsafe raw compiler detail" not in json.dumps(
+        transaction.gate_evidence,
+        sort_keys=True,
+    )
+
+
+def test_materialization_failure_normalizes_unhashable_error_metadata() -> None:
+    runtime, _manifests, mutations, _mechanics, _judge, _repair, _materializer = (
+        _runtime(materializer=MalformedErrorMetadataMaterializer())
+    )
+
+    result = _run(runtime.run(_request()))
+
+    assert result.terminal_code == "candidate_materialization_failed"
+    transaction = mutations.load(
+        transaction_id=result.transaction_id,
+        user_id="user-canary-001",
+    )
+    checkpoint = transaction.gate_evidence["deck_design_lift_runtime"]
+    assert checkpoint["materialization_error_code"] == "unclassified"
+    assert checkpoint["compiler_error_code"] is None
+    assert transaction.status == "rolled_back"
 
 
 def test_initial_satisfied_is_control_and_never_prepares_or_repairs() -> None:

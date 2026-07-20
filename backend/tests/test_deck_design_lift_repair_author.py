@@ -583,6 +583,8 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "clip it, move it off-canvas" in system_prompt
     assert "CSS-generated content" in system_prompt
     assert "Do not use CSS text-transform or the all shorthand" in system_prompt
+    assert "Do not set font or font-family in slide_css" in system_prompt
+    assert "Do not use rejected or lossy native CSS properties" in system_prompt
     assert "Do not change generated list-marker semantics" in system_prompt
     assert "list-style, list-style-type, or list-style-image" in system_prompt
     assert "use only the safe literal forms" in system_prompt
@@ -634,6 +636,22 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
             "geometry_value_format": "literal_px",
             "alignment_rule": "exact_native_peer_edges_or_centers",
             "forbidden_geometry_forms": ["transform", "calc()", "percentage"],
+            "forbidden_native_properties": [
+                "animation",
+                "animation-name",
+                "backdrop-filter",
+                "background-blend-mode",
+                "box-shadow",
+                "filter",
+                "font",
+                "font-family",
+                "letter-spacing",
+                "mix-blend-mode",
+                "opacity",
+                "position-fixed",
+                "text-shadow",
+                "transition",
+            ],
             "forbidden_text_declarations": {
                 "content": {
                     "allowed_single_identifiers": ["none", "normal"],
@@ -656,8 +674,7 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                     "allowed_single_identifiers": ["initial", "visible"],
                 },
                 "opacity": {
-                    "allowed_single_token_types": ["number", "percentage"],
-                    "minimum_exclusive": 0,
+                    "allowed": False,
                 },
                 "font_size": {
                     "allowed_single_token_types": ["dimension", "percentage"],
@@ -1209,7 +1226,7 @@ def test_slide_css_allows_non_concealing_content_values_and_ordinary_layout() ->
                     SLIDE_CSS_TEXT
                     + "section{overflow:hidden;position:absolute;content:normal;"
                     "display:flex;visibility:visible;"
-                    "opacity:1;font-size:12px;"
+                    "font-size:12px;"
                     "color:rgba(0,0,0,.5)}"
                 ),
             ),
@@ -1224,6 +1241,57 @@ def test_slide_css_allows_non_concealing_content_values_and_ordinary_layout() ->
 
     assert _run(author(request)).candidate == accepted
     assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "opacity:1",
+        "box-shadow:0 1px 2px #000",
+        "text-shadow:0 1px #000",
+        "letter-spacing:1px",
+        "filter:blur(1px)",
+        "font-family:Inter",
+        "font:700 20px Inter",
+        "transition:all 1s",
+    ],
+)
+def test_slide_css_candidate_rejects_native_lossy_or_font_overrides(
+    declaration: str,
+) -> None:
+    request = _request(program=_program())
+    context = _context(request=request)
+    candidate = _candidate()
+    candidate = candidate.model_copy(
+        update={
+            "source_updates": (
+                candidate.source_updates[0],
+                candidate.source_updates[1].model_copy(
+                    update={
+                        "content": SLIDE_CSS_TEXT
+                        + f"section{{{declaration}}}"
+                    }
+                ),
+            )
+        }
+    )
+    traces = FakeTraceFactory()
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+        trace_factory=traces,
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+    assert traces.spans[0].outputs[0].error_code == (
+        "candidate_source_contract_invalid"
+    )
 
 
 @pytest.mark.parametrize(

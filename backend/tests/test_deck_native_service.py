@@ -568,6 +568,71 @@ def test_deck_native_lint_fix_repairs_compatible_alignment_geometry(
     assert clean.residue_count == 0
 
 
+def test_deck_native_lint_ignores_thin_divider_thickness_near_peer_grid(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "thin-divider-thickness-grid.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    for index, left in enumerate((1.0, 4.0, 7.0, 10.0, 13.0), start=1):
+        peer = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(left),
+            Inches(4.42),
+            Inches(2.0),
+            Inches(1.0),
+        )
+        peer.name = f"bottom-grid-peer-{index}"
+
+    panel = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.25),
+        Inches(5.42),
+        Inches(17.5),
+        Inches(1.98),
+    )
+    panel.name = "enclosing-panel"
+    divider = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.25),
+        Inches(5.42),
+        Inches(17.5),
+        Inches(0.10),
+    )
+    divider.name = "contained-divider"
+    presentation.save(output)
+    before = Presentation(output)
+    before_divider = next(
+        shape for shape in before.slides[0].shapes if shape.name == "contained-divider"
+    )
+    before_geometry = (
+        before_divider.left,
+        before_divider.top,
+        before_divider.width,
+        before_divider.height,
+    )
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.lint_issue_count_before == 0
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_count == 0
+    repaired = Presentation(output)
+    repaired_divider = next(
+        shape for shape in repaired.slides[0].shapes if shape.name == "contained-divider"
+    )
+    assert (
+        repaired_divider.left,
+        repaired_divider.top,
+        repaired_divider.width,
+        repaired_divider.height,
+    ) == before_geometry
+
+
 def test_deck_native_lint_fix_translates_single_proven_text_edge(
     tmp_path: Path,
 ) -> None:

@@ -272,12 +272,74 @@ def _alignment_edges(rec, slide_w, slide_h):
     return edges
 
 
+def _is_container_edge_decoration(sid, rec, recs):
+    """Whether a thin shape is an attached border of a larger container.
+
+    An attached border is decoration, not an independent grid box. In
+    particular, inferring a near-miss from its 0.10" thickness can move it away
+    from the panel edge it belongs to. Free-standing accents remain eligible
+    for alignment because they do not span and touch a containing shape.
+    """
+    if (
+        rec.type != "AUTO_SHAPE"
+        or rec.is_text
+        or rec.is_table
+        or rec.group is not None
+        or ((rec.width < ALIGN_MIN_DIM) == (rec.height < ALIGN_MIN_DIM))
+    ):
+        return False
+    rec_right = rec.left + rec.width
+    rec_bottom = rec.top + rec.height
+    horizontal = rec.height < ALIGN_MIN_DIM
+    for outer_sid, outer in recs.items():
+        if (
+            outer_sid == sid
+            or outer.type != "AUTO_SHAPE"
+            or outer.group is not None
+        ):
+            continue
+        outer_right = outer.left + outer.width
+        outer_bottom = outer.top + outer.height
+        if (
+            outer.left > rec.left + ALIGN_EPS
+            or outer.top > rec.top + ALIGN_EPS
+            or outer_right + ALIGN_EPS < rec_right
+            or outer_bottom + ALIGN_EPS < rec_bottom
+        ):
+            continue
+        if horizontal:
+            larger = outer.height > rec.height + ALIGN_EPS
+            spans = (
+                abs(rec.left - outer.left) <= ALIGN_EPS
+                and abs(rec_right - outer_right) <= ALIGN_EPS
+            )
+            touches = (
+                abs(rec.top - outer.top) <= ALIGN_EPS
+                or abs(rec_bottom - outer_bottom) <= ALIGN_EPS
+            )
+        else:
+            larger = outer.width > rec.width + ALIGN_EPS
+            spans = (
+                abs(rec.top - outer.top) <= ALIGN_EPS
+                and abs(rec_bottom - outer_bottom) <= ALIGN_EPS
+            )
+            touches = (
+                abs(rec.left - outer.left) <= ALIGN_EPS
+                or abs(rec_right - outer_right) <= ALIGN_EPS
+            )
+        if larger and spans and touches:
+            return True
+    return False
+
+
 def _detect_alignment(recs, slide_w, slide_h):
     """Stamp rec.misaligned for edges that sit in a tolerance band beside a
     populated same-role gridline but not on it. Clusters per (axis) role so a
     suggestion is unambiguous (right edge vs the right-edge gridline)."""
     by_role = {}
     for sid, r in recs.items():
+        if _is_container_edge_decoration(sid, r, recs):
+            continue
         for role, coord in _alignment_edges(r, slide_w, slide_h).items():
             by_role.setdefault(role, []).append((sid, coord))
     for role, items in by_role.items():

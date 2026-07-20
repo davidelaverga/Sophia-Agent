@@ -524,6 +524,55 @@ def test_restart_after_ambiguous_create_replays_exact_bytes() -> None:
     assert len(fixture.compiler.calls) == 2
 
 
+def test_compiler_failure_preserves_only_allowlisted_detail_code() -> None:
+    class CompilerFailure(RuntimeError):
+        code = "mechanical_gate_failed"
+
+    def fail_compile(
+        _compilation: DeckCandidateCompilation,
+        _request: DeckCandidateCompileRequest,
+    ) -> DeckCandidateCompilation:
+        raise CompilerFailure("unsafe raw compiler detail")
+
+    fixture = _fixture()
+    fixture.compiler.mutator = fail_compile
+
+    with pytest.raises(DeckCandidateMaterializationError) as error:
+        _run(
+            fixture.materializer().stage(
+                transaction=fixture.transaction,
+                program=fixture.program,
+                candidate=fixture.candidate,
+            )
+        )
+
+    assert error.value.code == "compiler_failed"
+    assert error.value.detail_code == "mechanical_gate_failed"
+    assert str(error.value) == "compiler_failed"
+    assert "unsafe raw compiler detail" not in str(error.value)
+    assert (
+        DeckCandidateMaterializationError(
+            "compiler_failed",
+            detail_code="unsafe_unclassified_detail",
+        ).detail_code
+        is None
+    )
+    assert (
+        DeckCandidateMaterializationError(
+            "proof_invalid",
+            detail_code="mechanical_gate_failed",
+        ).detail_code
+        is None
+    )
+    assert (
+        DeckCandidateMaterializationError(
+            "compiler_failed",
+            detail_code=[],  # type: ignore[arg-type]
+        ).detail_code
+        is None
+    )
+
+
 def test_existing_conflicting_candidate_object_fails_closed() -> None:
     fixture = _fixture()
     materializer = fixture.materializer()

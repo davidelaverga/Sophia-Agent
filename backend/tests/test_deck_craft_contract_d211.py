@@ -18,6 +18,7 @@ from deerflow.sophia.deck_build.compiler_capabilities import (
     SUPPORTED_CSS_FEATURES,
     lossy_css_in_html,
     rejected_css_in_html,
+    unsupported_css_in_html,
     unsupported_tags_in_html,
 )
 from deerflow.sophia.deck_build.models import DeckSlideCompositionPlan, DeckSlideSpec
@@ -203,6 +204,21 @@ def test_compiler_capabilities_recurse_into_nested_css_at_rules() -> None:
 
     assert lossy_css_in_html(source) == ["opacity"]
     assert rejected_css_in_html(source) == ["filter", "transform"]
+
+
+def test_compiler_capabilities_reject_active_css_asset_constructs() -> None:
+    source = """<html><style>
+    @import url("https://example.invalid/deck.css");
+    @font-face { font-family: Remote; src: u\\72l("font.woff2"); }
+    .hero { background-image: image-set(url("hero.png") 1x); }
+    </style><body><main></main></body></html>"""
+
+    assert unsupported_css_in_html(source) == [
+        "@font-face",
+        "@import",
+        "image-set",
+        "url",
+    ]
 
 
 def test_compact_v2_profile_is_required_in_model_schema_and_bounded() -> None:

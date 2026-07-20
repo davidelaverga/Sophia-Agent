@@ -708,6 +708,28 @@ class _FakeDeckService:
         )
 
 
+def test_failed_native_mechanical_service_maps_to_specific_compiler_code() -> None:
+    instrument = _instrument()
+    request = _request(instrument)
+    result = DeckBuildResult(
+        success=False,
+        build_id=BUILD_ID,
+        deck_build_path="/mnt/user-data/outputs/deck_build/build.json",
+        failure_code="deck_mechanical_gate_failed",
+    )
+
+    with pytest.raises(DeckCandidateCompilationError) as error:
+        candidate_module._validate_service_result(
+            result,
+            request=request,
+            slide_count=2,
+            output_path="/mnt/user-data/outputs/candidate.pptx",
+            authoring_contract="compact_model_html_v2",
+        )
+
+    assert error.value.code == "mechanical_gate_failed"
+
+
 def test_authenticated_parent_thread_snapshot_projects_builder_manifest_owner() -> None:
     instrument = _instrument()
     expected = _baseline(instrument)

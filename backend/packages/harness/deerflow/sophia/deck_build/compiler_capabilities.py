@@ -174,6 +174,7 @@ def compiler_capability_prompt_excerpt() -> str:
         f"Use only native PPTX-compatible HTML/CSS: {supported}. "
         f"Rejected tags include: {rejected}. Inline SVG is unsupported. Meta tags may declare UTF-8 charset only. "
         f"Do not use rejected CSS properties: {rejected_css}. Do not use lossy CSS properties: {lossy}. "
+        "Do not use @import, @font-face, CSS url(...), or image-set(...). "
         "For transform, rotate(...) is the only supported operation; do not translate, scale, or skew. "
         "The Sophia canvas is 1920x1080 CSS px with an opaque background."
     )
@@ -225,7 +226,51 @@ def lossy_css_in_html(source: str) -> list[str]:
 
 
 def unsupported_css_in_html(source: str) -> list[str]:
-    return rejected_css_in_html(source)
+    return sorted(set(rejected_css_in_html(source)) | set(_unsafe_css_constructs(source)))
+
+
+def _unsafe_css_constructs(source: str) -> list[str]:
+    """Return decoded CSS constructs that can load or declare external assets."""
+
+    found: set[str] = set()
+
+    def visit(tokens: list[object]) -> None:
+        for token in tokens:
+            token_type = str(getattr(token, "type", ""))
+            if token_type == "url":
+                found.add("url")
+            elif token_type == "function":
+                name = str(
+                    getattr(token, "lower_name", getattr(token, "name", ""))
+                ).lower()
+                if name == "url":
+                    found.add("url")
+                elif name in {"image-set", "-webkit-image-set"}:
+                    found.add("image-set")
+            elif token_type == "at-keyword":
+                name = str(getattr(token, "value", "")).lower()
+                if name in {"import", "font-face"}:
+                    found.add(f"@{name}")
+
+            for child_name in ("arguments", "content"):
+                children = getattr(token, child_name, None)
+                if children:
+                    visit(list(children))
+
+    css_fragments = list(_STYLE_BLOCK_RE.findall(source or ""))
+    css_fragments.extend(
+        attribute for _quote, attribute in _STYLE_ATTRIBUTE_RE.findall(source or "")
+    )
+    for fragment in css_fragments:
+        visit(
+            list(
+                tinycss2.parse_component_value_list(
+                    fragment,
+                    skip_comments=True,
+                )
+            )
+        )
+    return sorted(found)
 
 
 def _css_declarations(source: str) -> list[_CssDeclaration]:
