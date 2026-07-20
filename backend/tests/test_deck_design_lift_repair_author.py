@@ -58,7 +58,7 @@ OTHER_HASH = "b" * 64
 MANIFEST_HASH = "c" * 64
 SKILL_SOURCE_HASH = "d" * 64
 SOURCE_TEXT = "<section><h1>Current PSI control loop</h1></section>"
-SLIDE_CSS_TEXT = ".mechanism{left:80px;top:120px;width:640px;height:320px}"
+SLIDE_CSS_TEXT = "section{left:80px;top:120px;width:640px;height:320px}"
 SKILL_EXCERPT = "Use one subject-specific mechanism visual and preserve factual text."
 
 
@@ -119,8 +119,9 @@ def _plan() -> ResolvedModelPlan:
 def _program(
     *,
     render_hash: str = RENDER_HASH,
-    source_role: str = "body",
+    source_roles: tuple[str, ...] | None = None,
 ) -> DeckRepairProgram:
+    authorized_roles = source_roles or ("body", "slide_css")
     render = RepairRenderEvidence(
         selector="slide:1",
         path="renders/slide-1.png",
@@ -139,7 +140,7 @@ def _program(
         "repair_attempt": 1,
         "plan_revision_allowed": False,
         "authorized_selectors": ("slide:1",),
-        "authorized_source_roles": {"slide:1": (source_role,)},
+        "authorized_source_roles": {"slide:1": authorized_roles},
         "deck_instruction": "Repair only the frozen PSI mechanism slide.",
         "selector_repairs": (
             SelectorRepair(
@@ -188,9 +189,22 @@ def _context(*, request: RepairInvocationRequest | None = None) -> RepairAuthorC
     creative = {"story": "observe, integrate, act", "slide_count": 5}
     design = {"signature": "control-loop trace", "palette": ["ink", "cyan"]}
     metadata = {"role": "mechanism-photo", "semantic_text": False}
-    source_role = request.program.authorized_source_roles["slide:1"][0]
-    source_text = SLIDE_CSS_TEXT if source_role == "slide_css" else SOURCE_TEXT
-    source_hash = hashlib.sha256(source_text.encode()).hexdigest()
+    sources = tuple(
+        RepairSourceContext(
+            build_id=request.build_id,
+            manifest_revision=request.program.initial_manifest_revision,
+            manifest_hash=MANIFEST_HASH,
+            selector="slide:1",
+            source_role=source_role,
+            component_version_id="slide-1-version-001",
+            manifest_source_path=f"versions/slide-1/{source_role}.txt",
+            manifest_source_hash=(
+                SLIDE_CSS_HASH if source_role == "slide_css" else SOURCE_HASH
+            ),
+            text=(SLIDE_CSS_TEXT if source_role == "slide_css" else SOURCE_TEXT),
+        )
+        for source_role in request.program.authorized_source_roles["slide:1"]
+    )
     return RepairAuthorContext(
         identity=RepairAuthorContextIdentity(
             campaign_run_id=request.campaign_run_id,
@@ -244,19 +258,7 @@ def _context(*, request: RepairInvocationRequest | None = None) -> RepairAuthorC
                 png_bytes=RENDER_BYTES,
             ),
         ),
-        authorized_sources=(
-            RepairSourceContext(
-                build_id=request.build_id,
-                manifest_revision=request.program.initial_manifest_revision,
-                manifest_hash=MANIFEST_HASH,
-                selector="slide:1",
-                source_role=source_role,
-                component_version_id="slide-1-version-001",
-                manifest_source_path=f"versions/slide-1/{source_role}.txt",
-                manifest_source_hash=source_hash,
-                text=source_text,
-            ),
-        ),
+        authorized_sources=sources,
         owned_assets=(
             RepairOwnedAssetContext(
                 build_id=request.build_id,
@@ -295,6 +297,12 @@ def _candidate(*, expected_source_hash: str = SOURCE_HASH) -> DeckRepairCandidat
                     "<h1><span>Current PSI</span> <em>control loop</em></h1>"
                     "</div></section>"
                 ),
+            ),
+            SourceUpdate(
+                selector="slide:1",
+                source_role="slide_css",
+                expected_source_hash=SLIDE_CSS_HASH,
+                content=SLIDE_CSS_TEXT,
             ),
         ),
         rationale="Strengthen the frozen PSI mechanism without collateral edits.",
@@ -469,7 +477,10 @@ def test_exact_context_builds_bounded_multimodal_prompt_and_one_create() -> None
 
     result = _run(author(request))
 
-    assert result.candidate == _candidate()
+    assert result.candidate != _candidate()
+    assert result.candidate.rationale == _candidate().rationale
+    assert result.candidate.source_updates[0].content == SOURCE_TEXT
+    assert invoker.result.candidate == _candidate()
     assert loader.calls == [request]
     assert len(invoker.prepare_calls) == len(invoker.count_calls) == len(invoker.invoke_calls) == 1
     assert len(traces.inputs) == len(traces.spans) == 1
@@ -520,7 +531,7 @@ def test_exact_context_builds_bounded_multimodal_prompt_and_one_create() -> None
 
 
 def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -> None:
-    request = _request(program=_program(source_role="slide_css"))
+    request = _request(program=_program())
     messages = build_repair_author_messages(
         context=_context(request=request),
         program=request.program,
@@ -531,16 +542,19 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "literal px values for left, top, width, and height" in system_prompt
     assert "native peer edges or centerlines" in system_prompt
     assert "transforms, calc(), or percentage values" in system_prompt
-    assert (
-        "preserve the exact normalized visible HTML token sequence"
-        in system_prompt
-    )
+    assert "copy its current manifest source byte-for-byte" in system_prompt
+    assert "pins body content to the authenticated manifest bytes" in system_prompt
+    assert "express every visible repair in the authorized slide_css" in system_prompt
+    assert "target only tags, classes, and IDs listed" in system_prompt
+    assert "body_selector_inventory" in system_prompt
+    assert "Do not restructure body markup or attributes" in system_prompt
+    assert "preserve the exact normalized visible HTML token sequence" in system_prompt
     assert (
         "Do not add, remove, or rewrite visible glyphs, symbols, labels, or words"
         in system_prompt
     )
     assert (
-        "Markup restructuring is allowed only at token boundaries"
+        "Body output must still preserve the exact normalized visible HTML token sequence"
         in system_prompt
     )
     assert "do not split or merge a token or change token order" in system_prompt
@@ -550,7 +564,7 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "Do not hide semantic content with HTML attributes or CSS" in system_prompt
     assert "clip it, move it off-canvas" in system_prompt
     assert "CSS-generated content" in system_prompt
-    assert "Do not use CSS text-transform" in system_prompt
+    assert "Do not use CSS text-transform or the all shorthand" in system_prompt
     assert "Do not change generated list-marker semantics" in system_prompt
     assert "list-style, list-style-type, or list-style-image" in system_prompt
     assert "use only the safe literal forms" in system_prompt
@@ -559,11 +573,21 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
 
     payload_text = messages[1].content[0]["text"]
     payload = json.loads(payload_text.removeprefix("Allowed repair context JSON:\n"))
+    assert payload["body_selector_inventory"] == {
+        "slide:1": {
+            "tags": ["h1", "section"],
+            "classes": [],
+            "ids": [],
+        }
+    }
     assert payload["repair_constraints"]["compiler_contract"] == {
         "authoring_contract": "compact_model_html_v2",
         "body": {
             "source_role": "body",
-            "content_policy": "preserve_exact_normalized_token_sequence",
+            "model_output_policy": "copy_exact_manifest_source_bytes",
+            "author_boundary_policy": "replace_with_authenticated_manifest_source_bytes",
+            "visual_repair_channel": "slide_css_only_using_existing_body_selectors",
+            "content_policy": "preserve_exact_normalized_token_sequence_before_canonicalization",
             "token_normalization": "unicode_nfkc_per_html_data_chunk_then_ordered_unicode_word_or_symbol_tokens",
             "excluded_content_elements": ["script", "style", "template"],
             "forbidden_elements": ["script", "style", "template"],
@@ -574,9 +598,7 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                 "rewrite",
                 "reorder",
             ],
-            "markup_restructuring_rule": (
-                "allowed_at_token_boundaries_only_without_token_split_merge_or_reorder"
-            ),
+            "markup_restructuring_rule": "forbidden",
             "forbidden_semantic_content_concealment": [
                 "hide",
                 "clip",
@@ -629,8 +651,9 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                     "variables_or_unparsed_values_allowed": False,
                 },
                 "text_transform": {
-                    "allowed_single_identifiers": ["none"],
+                    "allowed": False,
                 },
+                "all": {"allowed": False},
                 "list_style": {"allowed": False},
                 "list_style_type": {"allowed": False},
                 "list_style_image": {"allowed": False},
@@ -646,7 +669,28 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     }
 
 
-def test_body_candidate_accepts_split_or_merged_markup_with_token_sequence_preserved() -> None:
+def test_body_selector_inventory_is_exact_and_content_free() -> None:
+    request = _request(
+        program=_program(source_roles=("body", "slide_css")),
+    )
+    messages = build_repair_author_messages(
+        context=_context(request=request),
+        program=request.program,
+    )
+
+    payload_text = messages[1].content[0]["text"]
+    payload = json.loads(payload_text.removeprefix("Allowed repair context JSON:\n"))
+
+    assert payload["body_selector_inventory"] == {
+        "slide:1": {
+            "tags": ["h1", "section"],
+            "classes": [],
+            "ids": [],
+        }
+    }
+
+
+def test_body_candidate_with_preserved_tokens_is_pinned_to_manifest_source() -> None:
     request = _request()
     accepted = _candidate()
     author, _loader, invoker = _author(
@@ -654,8 +698,166 @@ def test_body_candidate_accepts_split_or_merged_markup_with_token_sequence_prese
         invoker=FakeTwoPhaseInvoker(candidate=accepted),
     )
 
-    assert _run(author(request)).candidate == accepted
+    result = _run(author(request))
+
+    assert result.candidate != accepted
+    assert result.candidate.rationale == accepted.rationale
+    assert result.candidate.source_updates[0].content == SOURCE_TEXT
+    assert invoker.result.candidate == accepted
     assert len(invoker.invoke_calls) == 1
+
+
+def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:
+    request = _request(
+        program=_program(source_roles=("body", "slide_css")),
+    )
+    model_css = (
+        "section{left:96px;top:112px;width:704px;height:336px;display:grid}"
+    )
+    authored = DeckRepairCandidate(
+        source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="body",
+                expected_source_hash=SOURCE_HASH,
+                content=(
+                    '<section class="mechanism"><div>'
+                    "<h1><span>Current PSI</span> <em>control loop</em></h1>"
+                    "</div></section>"
+                ),
+            ),
+            SourceUpdate(
+                selector="slide:1",
+                source_role="slide_css",
+                expected_source_hash=SLIDE_CSS_HASH,
+                content=model_css,
+            ),
+        ),
+        rationale="Strengthen hierarchy through existing native layout styling.",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=authored),
+    )
+
+    result = _run(author(request))
+
+    assert len(invoker.invoke_calls) == 1
+    assert result.metrics is invoker.result.metrics
+    assert result.candidate.rationale == authored.rationale
+    assert tuple(
+        (update.source_role, update.expected_source_hash, update.content)
+        for update in result.candidate.source_updates
+    ) == (
+        ("body", SOURCE_HASH, SOURCE_TEXT),
+        ("slide_css", SLIDE_CSS_HASH, model_css),
+    )
+    assert invoker.result.candidate == authored
+
+
+@pytest.mark.parametrize(
+    ("model_css", "case"),
+    [
+        (
+            ".model-only{left:96px;top:112px;width:704px;height:336px}",
+            "unknown-selector",
+        ),
+        (
+            "aside:not(section){left:96px;top:112px;width:704px;height:336px}",
+            "nonmatching-tag-predicate",
+        ),
+        (
+            ".model-only,section{left:96px;top:112px;width:704px;height:336px}",
+            "partially-unmatched-selector-list",
+        ),
+        ("section{color:#0B1F3A}", "no-effective-geometry"),
+    ],
+)
+def test_css_repair_must_target_manifest_dom_with_geometry(
+    model_css: str,
+    case: str,
+) -> None:
+    del case
+    request = _request()
+    candidate = _candidate().model_copy(
+        update={
+            "source_updates": (
+                _candidate().source_updates[0],
+                _candidate().source_updates[1].model_copy(
+                    update={"content": model_css}
+                ),
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_css_repair_accepts_existing_manifest_class_and_id_selectors() -> None:
+    request = _request()
+    body = '<section id="mechanism" class="frame panel"><h1>Current PSI control loop</h1></section>'
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    context = _context(request=request)
+    body_source = context.authorized_sources[0].model_copy(
+        update={"manifest_source_hash": body_hash, "text": body}
+    )
+    context = context.model_copy(
+        update={
+            "authorized_sources": (
+                body_source,
+                *context.authorized_sources[1:],
+            )
+        }
+    )
+    candidate = DeckRepairCandidate(
+        source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="body",
+                expected_source_hash=body_hash,
+                content=body,
+            ),
+            SourceUpdate(
+                selector="slide:1",
+                source_role="slide_css",
+                expected_source_hash=SLIDE_CSS_HASH,
+                content=(
+                    "#mechanism.frame{left:96px;top:112px;width:704px;height:336px}"
+                ),
+            ),
+        ),
+        rationale="Use only selectors present in the authenticated body.",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    assert result.candidate == candidate
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_body_only_program_is_rejected_before_provider_admission() -> None:
+    request = _request(program=_program(source_roles=("body",)))
+    author, _loader, invoker = _author(request=request)
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "context_invalid")
+    assert invoker.prepare_calls == []
+    assert invoker.invoke_calls == []
 
 
 @pytest.mark.parametrize(
@@ -833,7 +1035,14 @@ def test_body_candidate_rejects_token_boundary_changes_across_markup(
     source = context.authorized_sources[0].model_copy(
         update={"manifest_source_hash": source_hash, "text": source_text}
     )
-    context = context.model_copy(update={"authorized_sources": (source,)})
+    context = context.model_copy(
+        update={
+            "authorized_sources": (
+                source,
+                *context.authorized_sources[1:],
+            )
+        }
+    )
     candidate = DeckRepairCandidate(
         source_updates=(
             SourceUpdate(
@@ -890,7 +1099,14 @@ def test_body_candidate_rejects_list_marker_semantic_changes(
     source = context.authorized_sources[0].model_copy(
         update={"manifest_source_hash": source_hash, "text": source_text}
     )
-    context = context.model_copy(update={"authorized_sources": (source,)})
+    context = context.model_copy(
+        update={
+            "authorized_sources": (
+                source,
+                *context.authorized_sources[1:],
+            )
+        }
+    )
     candidate = DeckRepairCandidate(
         source_updates=(
             SourceUpdate(
@@ -916,10 +1132,16 @@ def test_body_candidate_rejects_list_marker_semantic_changes(
 
 
 def test_slide_css_candidate_must_fit_existing_compact_v2_byte_limit() -> None:
-    request = _request(program=_program(source_role="slide_css"))
+    request = _request(program=_program())
     context = _context(request=request)
     accepted = DeckRepairCandidate(
         source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="body",
+                expected_source_hash=SOURCE_HASH,
+                content=SOURCE_TEXT,
+            ),
             SourceUpdate(
                 selector="slide:1",
                 source_role="slide_css",
@@ -937,13 +1159,14 @@ def test_slide_css_candidate_must_fit_existing_compact_v2_byte_limit() -> None:
 
     assert _run(author(request)).candidate == accepted
 
-    oversized_content = SLIDE_CSS_TEXT + "/*" + ("é" * 483) + "*/"
+    oversized_content = SLIDE_CSS_TEXT + "/*" + ("é" * 484) + "*/"
     assert len(oversized_content) < 1_024
-    assert len(oversized_content.encode("utf-8")) == 1_026
+    assert len(oversized_content.encode("utf-8")) == 1_025
     oversized = accepted.model_copy(
         update={
             "source_updates": (
-                accepted.source_updates[0].model_copy(
+                accepted.source_updates[0],
+                accepted.source_updates[1].model_copy(
                     update={"content": oversized_content}
                 ),
             )
@@ -963,20 +1186,26 @@ def test_slide_css_candidate_must_fit_existing_compact_v2_byte_limit() -> None:
 
 
 def test_slide_css_allows_non_concealing_content_values_and_ordinary_layout() -> None:
-    request = _request(program=_program(source_role="slide_css"))
+    request = _request(program=_program())
     context = _context(request=request)
     accepted = DeckRepairCandidate(
         source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="body",
+                expected_source_hash=SOURCE_HASH,
+                content=SOURCE_TEXT,
+            ),
             SourceUpdate(
                 selector="slide:1",
                 source_role="slide_css",
                 expected_source_hash=SLIDE_CSS_HASH,
                 content=(
                     SLIDE_CSS_TEXT
-                    + ".frame{overflow:hidden;position:absolute;content:normal;"
-                    "display:flex;visibility:visible;text-transform:none;"
+                    + "section{overflow:hidden;position:absolute;content:normal;"
+                    "display:flex;visibility:visible;"
                     "opacity:1;font-size:12px;"
-                    "color:rgba(0,0,0,.5)}.frame::before{content:none}"
+                    "color:rgba(0,0,0,.5)}"
                 ),
             ),
         ),
@@ -1015,7 +1244,9 @@ def test_slide_css_allows_non_concealing_content_values_and_ordinary_layout() ->
         "color:#0000",
         "color:#00000000",
         "color:var(--ink)",
+        "text-transform:none",
         "text-transform:uppercase",
+        "all:initial",
         "list-style:none",
         "list-style-type:decimal",
         'list-style-image:url("marker.svg")',
@@ -1041,7 +1272,9 @@ def test_slide_css_allows_non_concealing_content_values_and_ordinary_layout() ->
         "short-hex-alpha-zero",
         "long-hex-alpha-zero",
         "color-variable",
+        "text-transform-none",
         "text-transform",
+        "all-shorthand",
         "list-style",
         "list-style-type",
         "list-style-image",
@@ -1050,7 +1283,7 @@ def test_slide_css_allows_non_concealing_content_values_and_ordinary_layout() ->
 def test_slide_css_candidate_rejects_text_hiding_generation_or_transform(
     declaration: str,
 ) -> None:
-    request = _request(program=_program(source_role="slide_css"))
+    request = _request(program=_program())
     context = _context(request=request)
     candidate = DeckRepairCandidate(
         source_updates=(
@@ -1087,7 +1320,7 @@ def test_slide_css_candidate_rejects_text_hiding_generation_or_transform(
 def test_slide_css_candidate_rejects_nested_concealment(
     nested_css: str,
 ) -> None:
-    request = _request(program=_program(source_role="slide_css"))
+    request = _request(program=_program())
     context = _context(request=request)
     candidate = DeckRepairCandidate(
         source_updates=(
@@ -1151,7 +1384,8 @@ def test_safe_trace_network_work_runs_off_the_async_event_loop() -> None:
 
     result, event_loop_thread_id = _run(invoke())
 
-    assert result == invoker.result
+    assert result.metrics is invoker.result.metrics
+    assert result.candidate.source_updates[0].content == SOURCE_TEXT
     assert traces.factory_thread_id is not None
     assert traces.span.finish_thread_id is not None
     assert traces.factory_thread_id != event_loop_thread_id

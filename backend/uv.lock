@@ -917,6 +917,7 @@ version = "0.1.0"
 source = { editable = "packages/harness" }
 dependencies = [
     { name = "agent-sandbox" },
+    { name = "beautifulsoup4" },
     { name = "cachetools" },
     { name = "ddgs" },
     { name = "deepagents" },
@@ -951,6 +952,7 @@ dependencies = [
 [package.metadata]
 requires-dist = [
     { name = "agent-sandbox", specifier = ">=0.0.19" },
+    { name = "beautifulsoup4", specifier = ">=4.14.3" },
     { name = "cachetools", specifier = ">=5.3.0" },
     { name = "ddgs", specifier = ">=9.10.0" },
     { name = "deepagents", specifier = ">=0.6.0,<0.7.0" },
