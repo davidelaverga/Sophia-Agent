@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import re
+import shutil
 import subprocess  # noqa: S404 - fixed vendored scripts with sanitized args.
 import sys
+import tempfile
 import time
 from pathlib import Path
 from typing import Any
@@ -231,26 +233,72 @@ class DeckNativeService:
                 residue=[],
                 errors=_errors(completed),
             )
-        try:
-            payload = json.loads(completed.stdout)
-        except ValueError:
-            payload = {}
-        fixed = payload.get("fixed") if isinstance(payload.get("fixed"), list) else []
-        residue = payload.get("residue") if isinstance(payload.get("residue"), list) else []
-        structured_remaining = payload.get("remaining_issues") if isinstance(payload.get("remaining_issues"), list) else []
-        residue_items = _merge_lint_residue(
-            [item for item in residue if isinstance(item, dict)],
-            _remaining_issue_residue(structured_remaining),
-        )
+        payload = _parse_lint_payload(completed.stdout)
+        if payload is None:
+            return NativeDeckLintFixResult(
+                success=False,
+                lint_issue_count_before=0,
+                fix_applied_count=0,
+                residue_count=0,
+                touched_slide_count=len(touched),
+                residue=[],
+                errors=["hands-on-deck lint-fix returned an invalid JSON report"],
+            )
+        fixed, residue_items = _lint_payload_results(payload)
+        lint_issue_count_before = len(fixed) + len(residue_items)
+        all_fixed = list(fixed)
+        if residue_items and all(
+            item.get("kind") == "repair_still_failing" for item in residue_items
+        ):
+            with tempfile.TemporaryDirectory(
+                prefix=f".{pptx.stem}.lint-retry-",
+                dir=pptx.parent,
+            ) as retry_dir:
+                retry_pptx = Path(retry_dir) / pptx.name
+                shutil.copy2(pptx, retry_pptx)
+                retry_command = list(command)
+                retry_command[2] = str(retry_pptx)
+                retry = self._run(retry_command, writable_files=[retry_pptx])
+                if retry.returncode != 0:
+                    return NativeDeckLintFixResult(
+                        success=False,
+                        lint_issue_count_before=lint_issue_count_before,
+                        fix_applied_count=len(all_fixed),
+                        residue_count=len(residue_items),
+                        touched_slide_count=len(touched),
+                        residue=residue_items,
+                        errors=_errors(retry),
+                        issue_kinds=_kind_counts(all_fixed, "action"),
+                        residue_kinds=_kind_counts(residue_items, "kind"),
+                    )
+                retry_payload = _parse_lint_payload(retry.stdout)
+                if retry_payload is None:
+                    return NativeDeckLintFixResult(
+                        success=False,
+                        lint_issue_count_before=lint_issue_count_before,
+                        fix_applied_count=len(all_fixed),
+                        residue_count=len(residue_items),
+                        touched_slide_count=len(touched),
+                        residue=residue_items,
+                        errors=[
+                            "hands-on-deck lint-fix retry returned an invalid JSON report"
+                        ],
+                        issue_kinds=_kind_counts(all_fixed, "action"),
+                        residue_kinds=_kind_counts(residue_items, "kind"),
+                    )
+                retry_fixed, retry_residue_items = _lint_payload_results(retry_payload)
+                retry_pptx.replace(pptx)
+                all_fixed.extend(retry_fixed)
+                residue_items = retry_residue_items
         return NativeDeckLintFixResult(
             success=True,
-            lint_issue_count_before=len(fixed) + len(residue_items),
-            fix_applied_count=len(fixed),
+            lint_issue_count_before=lint_issue_count_before,
+            fix_applied_count=len(all_fixed),
             residue_count=len(residue_items),
             touched_slide_count=len(touched),
             residue=residue_items,
             errors=[],
-            issue_kinds=_kind_counts(fixed, "action"),
+            issue_kinds=_kind_counts(all_fixed, "action"),
             residue_kinds=_kind_counts(residue_items, "kind"),
         )
 
@@ -576,6 +624,67 @@ def _kind_counts(items: list[Any], key: str) -> dict[str, int]:
         normalized = value.strip().split(":", 1)[0][:80]
         counts[normalized] = counts.get(normalized, 0) + 1
     return counts
+
+
+def _lint_payload_results(
+    payload: object,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    value = payload if isinstance(payload, dict) else {}
+    raw_fixed = value.get("fixed") if isinstance(value.get("fixed"), list) else []
+    raw_residue = value.get("residue") if isinstance(value.get("residue"), list) else []
+    structured_remaining = (
+        value.get("remaining_issues")
+        if isinstance(value.get("remaining_issues"), list)
+        else []
+    )
+    fixed = [item for item in raw_fixed if isinstance(item, dict)]
+    residue = _merge_lint_residue(
+        [item for item in raw_residue if isinstance(item, dict)],
+        _remaining_issue_residue(structured_remaining),
+    )
+    return fixed, residue
+
+
+def _parse_lint_payload(stdout: str) -> dict[str, Any] | None:
+    try:
+        payload = json.loads(stdout)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(payload, dict):
+        return None
+    if any(
+        not isinstance(payload.get(key), list)
+        for key in ("fixed", "residue", "remaining_issues")
+    ):
+        return None
+    if not all(
+        _valid_lint_payload_item(item, kind=kind)
+        for kind in ("fixed", "residue", "remaining_issues")
+        for item in payload[kind]
+    ):
+        return None
+    return payload
+
+
+def _valid_lint_payload_item(item: object, *, kind: str) -> bool:
+    if not isinstance(item, dict):
+        return False
+    slide = item.get("slide")
+    shape = item.get("shape")
+    if (
+        not isinstance(slide, int)
+        or isinstance(slide, bool)
+        or slide < 0
+        or not isinstance(shape, str)
+        or not shape
+    ):
+        return False
+    if kind == "fixed":
+        return isinstance(item.get("action"), str) and bool(item["action"])
+    if kind == "residue":
+        return isinstance(item.get("kind"), str) and bool(item["kind"])
+    issues = item.get("issues")
+    return isinstance(issues, dict) and bool(issues)
 
 
 def _remaining_issue_residue(items: list[Any]) -> list[dict[str, Any]]:

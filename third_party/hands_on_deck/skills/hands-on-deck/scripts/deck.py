@@ -2413,6 +2413,19 @@ def _scale_font(shape, scale, default_pt):
     for para in shape.text_frame.paragraphs:
         if not para.text.strip():
             continue
+        line_spacing = para.line_spacing
+        if hasattr(line_spacing, "pt"):
+            effective_spacing = float(line_spacing.pt)
+            new_spacing = min(
+                effective_spacing,
+                max(
+                    MIN_FONT_PT,
+                    math.floor(effective_spacing * scale * 2) / 2,
+                ),
+            )
+            if new_spacing < effective_spacing:
+                para.line_spacing = Pt(new_spacing)
+                changed.append((effective_spacing, new_spacing))
         paragraph_default = _effective_font_pt(para, default_pt)
         for run in para.runs:
             # Preserve mixed-run hierarchy: each explicit run scales from its

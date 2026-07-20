@@ -4,6 +4,7 @@ import importlib.util
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
@@ -20,6 +21,10 @@ HTML2PATCH_PATH = (
     PROJECT_ROOT
     / "third_party/hands_on_deck/skills/hands-on-deck/scripts/html2patch.py"
 )
+DECK_PATH = (
+    PROJECT_ROOT
+    / "third_party/hands_on_deck/skills/hands-on-deck/scripts/deck.py"
+)
 
 
 def _html2patch_module():
@@ -28,6 +33,19 @@ def _html2patch_module():
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def _deck_module():
+    scripts_dir = str(DECK_PATH.parent)
+    sys.path.insert(0, scripts_dir)
+    try:
+        spec = importlib.util.spec_from_file_location("deck_native_deck", DECK_PATH)
+        assert spec is not None and spec.loader is not None
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+    finally:
+        sys.path.remove(scripts_dir)
 
 
 def _compiler_text_item(
@@ -520,6 +538,338 @@ def test_deck_native_lint_fix_promotes_every_remaining_issue_to_residue(
         (1, "s7"),
         (2, "s11"),
     }
+
+
+def test_deck_native_lint_fix_retries_only_repair_still_failing_residue(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output = tmp_path / "bounded-lint-retry.pptx"
+    Presentation().save(output)
+    first = {
+        "fixed": [
+            {"slide": 0, "shape": "s1", "action": "grow"},
+            {"slide": 0, "shape": "s2", "action": "align-x"},
+        ],
+        "residue": [
+            {
+                "slide": 0,
+                "shape": "s3",
+                "kind": "repair_still_failing",
+                "issue": "shrink-font applied but frame_overflow_bottom remains",
+            }
+        ],
+        "remaining_issues": [
+            {
+                "slide": 0,
+                "shape": "s3",
+                "issues": {"frame_overflow_bottom": 0.07},
+            }
+        ],
+    }
+    second = {
+        "fixed": [{"slide": 0, "shape": "s3", "action": "shrink-font"}],
+        "residue": [],
+        "remaining_issues": [],
+    }
+    responses = iter((first, second))
+    calls: list[list[str]] = []
+    service = DeckNativeService()
+
+    def run(command, **_kwargs):
+        calls.append(list(command))
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(next(responses)),
+            stderr="",
+        )
+
+    monkeypatch.setattr(service, "_run", run)
+
+    result = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert len(calls) == 2
+    assert calls[0][2] == str(output)
+    assert calls[1][2] != str(output)
+    assert calls[0][:2] == calls[1][:2]
+    assert calls[0][3:] == calls[1][3:]
+    assert result.success is True
+    assert result.lint_issue_count_before == 3
+    assert result.fix_applied_count == 3
+    assert result.issue_kinds == {"grow": 1, "align-x": 1, "shrink-font": 1}
+    assert result.residue_count == 0
+    assert result.residue_kinds == {}
+
+
+@pytest.mark.parametrize(
+    "stdout",
+    (
+        "{not-json",
+        "[]",
+        "{}",
+        '{"fixed": {}, "residue": [], "remaining_issues": []}',
+        '{"fixed": [null], "residue": [], "remaining_issues": []}',
+        '{"fixed": [], "residue": [null], "remaining_issues": []}',
+        '{"fixed": [], "residue": [], "remaining_issues": [null]}',
+        '{"fixed": [], "residue": [], "remaining_issues": [{}]}',
+    ),
+)
+def test_deck_native_lint_fix_fails_closed_on_invalid_initial_report(
+    tmp_path: Path,
+    monkeypatch,
+    stdout: str,
+) -> None:
+    output = tmp_path / "invalid-lint-report.pptx"
+    Presentation().save(output)
+    calls = 0
+    service = DeckNativeService()
+
+    def run(command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(command, 0, stdout=stdout, stderr="")
+
+    monkeypatch.setattr(service, "_run", run)
+
+    result = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert calls == 1
+    assert result.success is False
+    assert result.lint_issue_count_before == 0
+    assert result.fix_applied_count == 0
+    assert result.residue_count == 0
+    assert result.errors == ["hands-on-deck lint-fix returned an invalid JSON report"]
+
+
+def test_deck_native_lint_fix_fails_closed_on_invalid_retry_report(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output = tmp_path / "invalid-lint-retry-report.pptx"
+    Presentation().save(output)
+    expected_bytes = output.read_bytes()
+    first = {
+        "fixed": [{"slide": 0, "shape": "s1", "action": "grow"}],
+        "residue": [
+            {
+                "slide": 0,
+                "shape": "s3",
+                "kind": "repair_still_failing",
+                "issue": "shrink-font applied but frame_overflow_bottom remains",
+            }
+        ],
+        "remaining_issues": [],
+    }
+    calls = 0
+    service = DeckNativeService()
+
+    def run(command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(first),
+                stderr="",
+            )
+        Path(command[2]).write_bytes(b"partial retry mutation")
+        return subprocess.CompletedProcess(command, 0, stdout="{truncated", stderr="")
+
+    monkeypatch.setattr(service, "_run", run)
+
+    result = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert calls == 2
+    assert result.success is False
+    assert result.lint_issue_count_before == 2
+    assert result.fix_applied_count == 1
+    assert result.residue_count == 1
+    assert result.residue_kinds == {"repair_still_failing": 1}
+    assert result.errors == ["hands-on-deck lint-fix retry returned an invalid JSON report"]
+    assert output.read_bytes() == expected_bytes
+
+
+def test_deck_native_lint_fix_preserves_first_pass_bytes_when_retry_fails(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output = tmp_path / "failed-lint-retry.pptx"
+    Presentation().save(output)
+    first_pass_bytes = b"first-pass deck bytes"
+    first = {
+        "fixed": [],
+        "residue": [
+            {
+                "slide": 0,
+                "shape": "s3",
+                "kind": "repair_still_failing",
+                "issue": "shrink-font applied but frame_overflow_bottom remains",
+            }
+        ],
+        "remaining_issues": [],
+    }
+    calls = 0
+    service = DeckNativeService()
+
+    def run(command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            Path(command[2]).write_bytes(first_pass_bytes)
+            return subprocess.CompletedProcess(
+                command,
+                0,
+                stdout=json.dumps(first),
+                stderr="",
+            )
+        Path(command[2]).write_bytes(b"partial retry deck bytes")
+        return subprocess.CompletedProcess(
+            command,
+            124,
+            stdout="",
+            stderr="hands-on-deck subprocess timed out",
+        )
+
+    monkeypatch.setattr(service, "_run", run)
+
+    result = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert calls == 2
+    assert result.success is False
+    assert result.lint_issue_count_before == 1
+    assert result.fix_applied_count == 0
+    assert result.residue_count == 1
+    assert result.residue_kinds == {"repair_still_failing": 1}
+    assert result.errors == ["hands-on-deck subprocess timed out"]
+    assert output.read_bytes() == first_pass_bytes
+
+
+def test_deck_native_lint_fix_bounds_repair_still_failing_retry(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    output = tmp_path / "bounded-lint-retry-residue.pptx"
+    Presentation().save(output)
+    payload = {
+        "fixed": [],
+        "residue": [
+            {
+                "slide": 0,
+                "shape": "s3",
+                "kind": "repair_still_failing",
+                "issue": "shrink-font applied but frame_overflow_bottom remains",
+            }
+        ],
+        "remaining_issues": [],
+    }
+    calls = 0
+    service = DeckNativeService()
+
+    def run(command, **_kwargs):
+        nonlocal calls
+        calls += 1
+        return subprocess.CompletedProcess(
+            command,
+            0,
+            stdout=json.dumps(payload),
+            stderr="",
+        )
+
+    monkeypatch.setattr(service, "_run", run)
+
+    result = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert calls == 2
+    assert result.success is True
+    assert result.fix_applied_count == 0
+    assert result.residue_count == 1
+    assert result.residue_kinds == {"repair_still_failing": 1}
+
+
+def test_deck_native_lint_fix_scales_fixed_line_spacing_on_bounded_retry(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "fixed-line-spacing-overflow.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    panel = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.25),
+        Inches(0.98),
+        Inches(10.83),
+        Inches(1.04),
+    )
+    panel.name = "fixed-line-spacing-panel"
+    blocker = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.25),
+        Inches(2.03),
+        Inches(10.83),
+        Inches(0.80),
+    )
+    blocker.name = "fixed-line-spacing-blocker"
+    title = slide.shapes.add_textbox(
+        Inches(1.25),
+        Inches(0.98),
+        Inches(10.83),
+        Inches(1.04),
+    )
+    title.name = "fixed-line-spacing-title"
+    title.text_frame.margin_left = 0
+    title.text_frame.margin_right = 0
+    title.text_frame.margin_top = 0
+    title.text_frame.margin_bottom = 0
+    paragraph = title.text_frame.paragraphs[0]
+    paragraph.text = "A production headline that wraps across multiple lines safely"
+    paragraph.line_spacing = Pt(66)
+    paragraph.runs[0].font.size = Pt(66)
+    presentation.save(output)
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.lint_issue_count_before == 1
+    assert fixed.fix_applied_count == 1
+    assert fixed.issue_kinds == {"shrink-font": 1}
+    assert fixed.residue_count == 0
+    repaired = Presentation(output)
+    repaired_title = next(shape for shape in repaired.slides[0].shapes if shape.name == "fixed-line-spacing-title")
+    repaired_paragraph = repaired_title.text_frame.paragraphs[0]
+    assert repaired_paragraph.line_spacing.pt < 66
+    assert repaired_paragraph.runs[0].font.size.pt < 66
+    assert repaired_paragraph.line_spacing.pt >= 10
+    assert repaired_paragraph.runs[0].font.size.pt >= 10
+
+    clean = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+    assert clean.lint_issue_count_before == 0
+    assert clean.fix_applied_count == 0
+    assert clean.residue_count == 0
+
+
+def test_deck_native_scale_font_never_increases_sub_floor_line_spacing() -> None:
+    presentation = Presentation()
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    shape = slide.shapes.add_textbox(
+        Inches(1),
+        Inches(1),
+        Inches(5),
+        Inches(1),
+    )
+    paragraph = shape.text_frame.paragraphs[0]
+    paragraph.text = "Compact fixed spacing"
+    paragraph.line_spacing = Pt(8)
+    paragraph.runs[0].font.size = Pt(12)
+
+    changes = _deck_module()._scale_font(shape, 0.6, 14)
+
+    assert paragraph.line_spacing.pt == pytest.approx(8)
+    assert paragraph.line_spacing.pt <= 8
+    assert paragraph.runs[0].font.size.pt == pytest.approx(10)
+    assert (8.0, 10.0) not in changes
 
 
 def test_deck_native_lint_fix_repairs_compatible_alignment_geometry(
