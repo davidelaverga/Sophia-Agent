@@ -2689,6 +2689,102 @@ def _single_edge_autoshape_alignment(rec, recs, *, slide_w, slide_h):
     return role, left, top, width, height, delta, mode
 
 
+def _coordinated_center_container_alignment(rec, recs, *, slide_w, slide_h):
+    """Translate a container and only the carried shapes that must follow it.
+
+    A center snap cannot resize only one boundary without changing the
+    container's visual center.  Keep carried content on its established global
+    grid when it remains inside the translated container, and move only
+    boundary-attached carried shapes that would otherwise fall outside.  The
+    saved slide is still subject to the combined alignment transaction's
+    overlap, overflow, containment, and issue-regression checks.
+    """
+    if (
+        len(rec.misaligned) != 1
+        or rec.type != "AUTO_SHAPE"
+        or rec.is_text
+        or rec.is_table
+        or rec.group is not None
+        or float(getattr(rec.shape, "rotation", 0) or 0) % 360
+    ):
+        return None
+    item = rec.misaligned[0]
+    role = str(item.get("edge") or "")
+    if role not in {"hcenter", "vcenter"} or role not in _alignment_edges(rec, slide_w, slide_h):
+        return None
+
+    peers = [str(peer) for peer in item.get("with") or [] if str(peer)]
+    if len(set(peers)) < ALIGN_MIN_CLUSTER:
+        return None
+    peer_coordinates = []
+    for peer_id in peers:
+        peer = recs.get(peer_id)
+        if peer is None or float(getattr(peer.shape, "rotation", 0) or 0) % 360:
+            return None
+        if _alignment_edges(peer, slide_w, slide_h).get(role) is None:
+            return None
+        peer_coordinates.append(_absolute_alignment_coordinate(peer, role))
+    target = sum(peer_coordinates) / len(peer_coordinates)
+    if any(abs(coordinate - target) > ALIGN_EPS for coordinate in peer_coordinates):
+        return None
+
+    current = _absolute_alignment_coordinate(rec, role)
+    if current is None:
+        return None
+    delta = target - current
+    if not (ALIGN_EPS < abs(delta) <= ALIGN_BAND + ALIGN_EPS):
+        return None
+
+    carried = _contained_shape_ids(rec, recs)
+    if not carried or carried.intersection(peers):
+        return None
+    axis = _ALIGNMENT_ROLE[role][0]
+    outer_left, outer_top, outer_width, outer_height = _absolute_rect(rec)
+    if axis == "x":
+        outer_left += delta
+    else:
+        outer_top += delta
+    moved_carried = set()
+    for sid in carried:
+        item_rec = recs.get(sid)
+        if (
+            item_rec is None
+            or float(getattr(item_rec.shape, "rotation", 0) or 0) % 360
+        ):
+            return None
+        left, top, width, height = _absolute_rect(item_rec)
+        remains_contained = (
+            outer_left <= left + ALIGN_EPS
+            and outer_top <= top + ALIGN_EPS
+            and outer_left + outer_width + ALIGN_EPS >= left + width
+            and outer_top + outer_height + ALIGN_EPS >= top + height
+        )
+        if remains_contained:
+            continue
+        moved_carried.add(sid)
+        moved_left = left + delta if axis == "x" else left
+        moved_top = top + delta if axis == "y" else top
+        if (
+            moved_left < 0
+            or moved_top < 0
+            or moved_left + width > slide_w
+            or moved_top + height > slide_h
+            or outer_left > moved_left + ALIGN_EPS
+            or outer_top > moved_top + ALIGN_EPS
+            or outer_left + outer_width + ALIGN_EPS < moved_left + width
+            or outer_top + outer_height + ALIGN_EPS < moved_top + height
+        ):
+            return None
+    if (
+        outer_left < 0
+        or outer_top < 0
+        or outer_left + outer_width > slide_w
+        or outer_top + outer_height > slide_h
+    ):
+        return None
+    return role, delta, tuple(sorted(moved_carried))
+
+
 def _shared_text_seam_plan(rec, recs, *, role, new_left, excluded=()):
     """Coordinate a left snap with its immediate row neighbor when needed."""
     rec_left, rec_top, rec_width, rec_height = _absolute_rect(rec)
@@ -3193,12 +3289,79 @@ def cmd_fix(args):
                             })
                             geometry_touched.update((slide_idx, shape_id) for shape_id in affected)
                     else:
-                        adjustment = _single_edge_autoshape_alignment(
+                        coordinated = _coordinated_center_container_alignment(
                             r,
                             recs,
                             slide_w=slide_w,
                             slide_h=slide_h,
                         )
+                        if coordinated is not None:
+                            role, delta, moved_carried = coordinated
+                            affected = {sid, *moved_carried}
+                            if not any(
+                                (slide_idx, shape_id) in geometry_touched
+                                for shape_id in affected
+                            ):
+                                axis = _ALIGNMENT_ROLE[role][0]
+                                affected_records = []
+                                for shape_id in sorted(affected):
+                                    affected_er = eidx[slide_idx].get(shape_id)
+                                    affected_rec = recs.get(shape_id)
+                                    if affected_er is None or affected_rec is None:
+                                        affected_records = []
+                                        break
+                                    affected_records.append((affected_er, affected_rec))
+                                if affected_records:
+                                    originals = []
+                                    for affected_er, affected_rec in affected_records:
+                                        affected_shape = affected_er.shape
+                                        originals.append((
+                                            affected_shape,
+                                            affected_shape.left,
+                                            affected_shape.top,
+                                            affected_shape.width,
+                                            affected_shape.height,
+                                        ))
+                                        left, top, _, _ = _absolute_rect(affected_rec)
+                                        if axis == "x":
+                                            affected_shape.left = int(
+                                                affected_er.tf.child_x(Inches(left + delta))
+                                            )
+                                        else:
+                                            affected_shape.top = int(
+                                                affected_er.tf.child_y(Inches(top + delta))
+                                            )
+                                    action = "align-%s-container" % axis
+                                    fixed_entry = {
+                                        "slide": slide_idx,
+                                        "shape": sid,
+                                        "action": action,
+                                        "was": abs(delta),
+                                        "detail": (
+                                            "translate container and %d carried shapes %.3f\" "
+                                            "to the same-role peer grid"
+                                        ) % (len(moved_carried), delta),
+                                    }
+                                    fixed.append(fixed_entry)
+                                    alignment_changes.append({
+                                        "slide": slide_idx,
+                                        "targets": {sid},
+                                        "affected": affected,
+                                        "originals": originals,
+                                        "fixed": fixed_entry,
+                                    })
+                                    geometry_touched.update(
+                                        (slide_idx, shape_id) for shape_id in affected
+                                    )
+
+                        adjustment = None
+                        if coordinated is None:
+                            adjustment = _single_edge_autoshape_alignment(
+                                r,
+                                recs,
+                                slide_w=slide_w,
+                                slide_h=slide_h,
+                            )
                         if adjustment is not None:
                             role, new_left, new_top, new_width, new_height, delta, mode = adjustment
                             originals = [(sh, sh.left, sh.top, sh.width, sh.height)]
@@ -3351,6 +3514,8 @@ def cmd_fix(args):
             "align-x-seam",
             "align-x-boundary",
             "align-y-boundary",
+            "align-x-container",
+            "align-y-container",
         ):
             key = "misaligned"
         else:

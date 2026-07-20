@@ -9,7 +9,7 @@ from pathlib import Path
 import pytest
 from PIL import Image, ImageFont
 from pptx import Presentation
-from pptx.enum.shapes import MSO_SHAPE
+from pptx.enum.shapes import MSO_CONNECTOR, MSO_SHAPE
 from pptx.util import Inches, Pt
 
 from deerflow.sophia.deck_native import DeckNativeService, native_mechanical_report
@@ -1046,6 +1046,214 @@ def test_deck_native_lint_fix_coordinates_production_shaped_closing_grid(
     assert clean.lint_issue_count_before == 0
     assert clean.fix_applied_count == 0
     assert clean.residue_count == 0
+
+
+def test_deck_native_lint_fix_center_snaps_container_with_carried_content(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "centered-container-grid.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20.0)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    peer_geometries = (
+        (2.19, 1.92),
+        (4.23, 1.92),
+        (6.27, 1.92),
+        (8.31, 1.96),
+    )
+    for index, (top, height) in enumerate(peer_geometries, start=1):
+        peer = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(1.77),
+            Inches(top),
+            Inches(17.50),
+            Inches(height),
+        )
+        peer.name = f"center-peer-{index}"
+        if index == 4:
+            continue
+        peer_text = slide.shapes.add_textbox(
+            Inches(2.10),
+            Inches(top + 0.30),
+            Inches(17.17),
+            Inches(0.36),
+        )
+        peer_text.name = f"center-peer-text-{index}"
+        peer_text.text = f"Peer {index}"
+        peer_text.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+
+    lower_rule = slide.shapes.add_connector(
+        MSO_CONNECTOR.STRAIGHT,
+        Inches(1.77),
+        Inches(10.23),
+        Inches(19.27),
+        Inches(10.23),
+    )
+    lower_rule.name = "center-container-lower-rule"
+    heading = slide.shapes.add_textbox(
+        Inches(2.10),
+        Inches(8.92),
+        Inches(17.17),
+        Inches(0.36),
+    )
+    heading.name = "center-container-heading"
+    heading.text = "Closing assertion"
+    heading.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+
+    target = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.25),
+        Inches(8.54),
+        Inches(18.33),
+        Inches(2.44),
+    )
+    target.name = "center-container"
+    vertical_rule = slide.shapes.add_connector(
+        MSO_CONNECTOR.STRAIGHT,
+        Inches(1.33),
+        Inches(8.54),
+        Inches(1.33),
+        Inches(10.98),
+    )
+    vertical_rule.name = "center-container-vertical-rule"
+    body = slide.shapes.add_textbox(
+        Inches(1.75),
+        Inches(9.44),
+        Inches(17.52),
+        Inches(0.62),
+    )
+    body.name = "center-container-body"
+    body.text = "Carried content"
+    body.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+    presentation.save(output)
+
+    before = Presentation(output)
+    before_by_name = {shape.name: shape for shape in before.slides[0].shapes}
+    stationary_names = (
+        "center-container-lower-rule",
+        "center-container-heading",
+        "center-container-vertical-rule",
+        "center-container-body",
+    )
+    original_geometries = {
+        name: (
+            before_by_name[name].left,
+            before_by_name[name].top,
+            before_by_name[name].width,
+            before_by_name[name].height,
+        )
+        for name in stationary_names
+    }
+    original_text = {
+        name: before_by_name[name].text
+        for name in ("center-container-heading", "center-container-body")
+    }
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.lint_issue_count_before == 1
+    assert fixed.fix_applied_count == 1, fixed.residue
+    assert fixed.issue_kinds == {"align-x-container": 1}
+    assert fixed.residue_count == 0
+    repaired = Presentation(output)
+    by_name = {shape.name: shape for shape in repaired.slides[0].shapes}
+    expected_left = 10.52 - (18.33 / 2.0)
+    assert by_name["center-container"].left.inches == pytest.approx(
+        expected_left,
+        abs=0.001,
+    )
+    assert {
+        name: (
+            by_name[name].left,
+            by_name[name].top,
+            by_name[name].width,
+            by_name[name].height,
+        )
+        for name in stationary_names
+    } == original_geometries
+    assert {
+        name: by_name[name].text
+        for name in ("center-container-heading", "center-container-body")
+    } == original_text
+
+    clean = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+    assert clean.lint_issue_count_before == 0
+    assert clean.fix_applied_count == 0
+    assert clean.residue_count == 0
+
+
+def test_deck_native_lint_fix_refuses_center_snap_with_rotated_carried_shape(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "rotated-center-container.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20.0)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    for index, top in enumerate((1.0, 2.2, 3.4, 4.6), start=1):
+        peer = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(1.77),
+            Inches(top),
+            Inches(17.50),
+            Inches(0.90),
+        )
+        peer.name = f"rotated-center-peer-{index}"
+
+    target = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.25),
+        Inches(7.00),
+        Inches(18.33),
+        Inches(2.44),
+    )
+    target.name = "rotated-center-container"
+    rotated = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.30),
+        Inches(7.50),
+        Inches(0.40),
+        Inches(0.40),
+    )
+    rotated.name = "rotated-carried-shape"
+    rotated.rotation = 45
+    presentation.save(output)
+
+    before = Presentation(output)
+    before_by_name = {shape.name: shape for shape in before.slides[0].shapes}
+    original = {
+        name: (
+            before_by_name[name].left,
+            before_by_name[name].top,
+            before_by_name[name].width,
+            before_by_name[name].height,
+            before_by_name[name].rotation,
+        )
+        for name in ("rotated-center-container", "rotated-carried-shape")
+    }
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.lint_issue_count_before == 1
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_kinds == {"misaligned": 1}
+    repaired = Presentation(output)
+    by_name = {shape.name: shape for shape in repaired.slides[0].shapes}
+    assert {
+        name: (
+            by_name[name].left,
+            by_name[name].top,
+            by_name[name].width,
+            by_name[name].height,
+            by_name[name].rotation,
+        )
+        for name in ("rotated-center-container", "rotated-carried-shape")
+    } == original
 
 
 def test_deck_native_lint_fix_rolls_back_container_boundary_without_child_snap(
