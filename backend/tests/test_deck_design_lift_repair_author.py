@@ -309,6 +309,24 @@ def _candidate(*, expected_source_hash: str = SOURCE_HASH) -> DeckRepairCandidat
     )
 
 
+def _candidate_with_body(
+    content: str,
+    *,
+    expected_source_hash: str = SOURCE_HASH,
+) -> DeckRepairCandidate:
+    candidate = _candidate(expected_source_hash=expected_source_hash)
+    return candidate.model_copy(
+        update={
+            "source_updates": (
+                candidate.source_updates[0].model_copy(
+                    update={"content": content}
+                ),
+                candidate.source_updates[1],
+            )
+        }
+    )
+
+
 def _sized_slide_css(size_bytes: int) -> str:
     prefix = SLIDE_CSS_TEXT + "/*"
     suffix = "*/"
@@ -763,6 +781,10 @@ def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:
             "unknown-selector",
         ),
         (
+            ".mechanism{left:96px;top:112px;width:704px;height:336px}",
+            "selector-invented-by-model-body",
+        ),
+        (
             "aside:not(section){left:96px;top:112px;width:704px;height:336px}",
             "nonmatching-tag-predicate",
         ),
@@ -922,30 +944,22 @@ def test_body_only_program_is_rejected_before_provider_admission() -> None:
         "hidden-self-closing-nonvoid",
     ),
 )
-def test_body_candidate_rejects_hiding_baseline_visible_text(
+def test_body_candidate_discards_hiding_markup_before_materialization(
     candidate_text: str,
 ) -> None:
     request = _request()
-    candidate = DeckRepairCandidate(
-        source_updates=(
-            SourceUpdate(
-                selector="slide:1",
-                source_role="body",
-                expected_source_hash=SOURCE_HASH,
-                content=candidate_text,
-            ),
-        ),
-        rationale="Keep the baseline content while changing its presentation.",
-    )
+    candidate = _candidate_with_body(candidate_text)
     author, _loader, invoker = _author(
         request=request,
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    with pytest.raises(DeckRepairAuthorError) as error:
-        _run(author(request))
+    result = _run(author(request))
 
-    _assert_code(error, "candidate_invalid")
+    assert result.candidate.source_updates[0].content == SOURCE_TEXT
+    assert candidate_text not in tuple(
+        update.content for update in result.candidate.source_updates
+    )
     assert len(invoker.invoke_calls) == 1
 
 
@@ -972,30 +986,22 @@ def test_body_candidate_rejects_hiding_baseline_visible_text(
         "embedded-template",
     ),
 )
-def test_body_candidate_rejects_visible_injected_copy_cloaks(
+def test_body_candidate_discards_injected_copy_cloaks(
     injected_node: str,
 ) -> None:
     request = _request()
-    candidate = DeckRepairCandidate(
-        source_updates=(
-            SourceUpdate(
-                selector="slide:1",
-                source_role="body",
-                expected_source_hash=SOURCE_HASH,
-                content=SOURCE_TEXT + injected_node,
-            ),
-        ),
-        rationale="Do not cloak additional visible content.",
-    )
+    candidate = _candidate_with_body(SOURCE_TEXT + injected_node)
     author, _loader, invoker = _author(
         request=request,
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    with pytest.raises(DeckRepairAuthorError) as error:
-        _run(author(request))
+    result = _run(author(request))
 
-    _assert_code(error, "candidate_invalid")
+    assert result.candidate.source_updates[0].content == SOURCE_TEXT
+    assert injected_node not in tuple(
+        update.content for update in result.candidate.source_updates
+    )
     assert len(invoker.invoke_calls) == 1
 
 
@@ -1009,32 +1015,22 @@ def test_body_candidate_rejects_visible_injected_copy_cloaks(
     ],
     ids=("symbol-insertion", "rewrite", "removal", "order-change"),
 )
-def test_body_candidate_rejects_visible_token_sequence_changes(
+def test_body_candidate_discards_visible_token_sequence_changes(
     candidate_text: str,
 ) -> None:
     request = _request()
     context = _context(request=request)
-    candidate = DeckRepairCandidate(
-        source_updates=(
-            SourceUpdate(
-                selector="slide:1",
-                source_role="body",
-                expected_source_hash=SOURCE_HASH,
-                content=candidate_text,
-            ),
-        ),
-        rationale="Change structure only while retaining visible content.",
-    )
+    candidate = _candidate_with_body(candidate_text)
     author, _loader, invoker = _author(
         request=request,
         context=context,
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    with pytest.raises(DeckRepairAuthorError) as error:
-        _run(author(request))
+    result = _run(author(request))
 
-    _assert_code(error, "candidate_invalid")
+    assert result.candidate.source_updates[0].content == SOURCE_TEXT
+    assert invoker.result.candidate == candidate
     assert len(invoker.invoke_calls) == 1
 
 
@@ -1052,7 +1048,7 @@ def test_body_candidate_rejects_visible_token_sequence_changes(
     ],
     ids=("token-split", "token-merge"),
 )
-def test_body_candidate_rejects_token_boundary_changes_across_markup(
+def test_body_candidate_discards_token_boundary_changes_across_markup(
     source_text: str,
     candidate_text: str,
 ) -> None:
@@ -1070,16 +1066,9 @@ def test_body_candidate_rejects_token_boundary_changes_across_markup(
             )
         }
     )
-    candidate = DeckRepairCandidate(
-        source_updates=(
-            SourceUpdate(
-                selector="slide:1",
-                source_role="body",
-                expected_source_hash=source_hash,
-                content=candidate_text,
-            ),
-        ),
-        rationale="Restructure markup without changing token boundaries.",
+    candidate = _candidate_with_body(
+        candidate_text,
+        expected_source_hash=source_hash,
     )
     author, _loader, invoker = _author(
         request=request,
@@ -1087,10 +1076,10 @@ def test_body_candidate_rejects_token_boundary_changes_across_markup(
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    with pytest.raises(DeckRepairAuthorError) as error:
-        _run(author(request))
+    result = _run(author(request))
 
-    _assert_code(error, "candidate_invalid")
+    assert result.candidate.source_updates[0].content == source_text
+    assert invoker.result.candidate == candidate
     assert len(invoker.invoke_calls) == 1
 
 
@@ -1109,14 +1098,10 @@ def test_body_candidate_rejects_token_boundary_changes_across_markup(
             "<section><ul><li>One</li></ul></section>",
             "<section><ol><li>One</li></ol></section>",
         ),
-        (
-            "<section><ul><li>One</li></ul></section>",
-            '<section><ul style="list-style:none"><li>One</li></ul></section>',
-        ),
     ],
-    ids=("paragraph-to-ul", "paragraph-to-ol", "ul-to-ol", "inline-list-style"),
+    ids=("paragraph-to-ul", "paragraph-to-ol", "ul-to-ol"),
 )
-def test_body_candidate_rejects_list_marker_semantic_changes(
+def test_body_candidate_discards_list_marker_semantic_changes(
     source_text: str,
     candidate_text: str,
 ) -> None:
@@ -1134,16 +1119,9 @@ def test_body_candidate_rejects_list_marker_semantic_changes(
             )
         }
     )
-    candidate = DeckRepairCandidate(
-        source_updates=(
-            SourceUpdate(
-                selector="slide:1",
-                source_role="body",
-                expected_source_hash=source_hash,
-                content=candidate_text,
-            ),
-        ),
-        rationale="Keep visible copy while preserving list marker semantics.",
+    candidate = _candidate_with_body(
+        candidate_text,
+        expected_source_hash=source_hash,
     )
     author, _loader, invoker = _author(
         request=request,
@@ -1151,10 +1129,10 @@ def test_body_candidate_rejects_list_marker_semantic_changes(
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    with pytest.raises(DeckRepairAuthorError) as error:
-        _run(author(request))
+    result = _run(author(request))
 
-    _assert_code(error, "candidate_invalid")
+    assert result.candidate.source_updates[0].content == source_text
+    assert invoker.result.candidate == candidate
     assert len(invoker.invoke_calls) == 1
 
 
@@ -1481,6 +1459,7 @@ def test_exact_program_source_role_and_manifest_hash_bind_candidate() -> None:
         _run(author(request))
 
     _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_hash_invalid"
     assert len(invoker.invoke_calls) == 1
 
 

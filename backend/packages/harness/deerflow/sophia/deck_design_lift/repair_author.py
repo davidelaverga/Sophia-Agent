@@ -1218,28 +1218,21 @@ def _visible_html_token_sequence(
     return tuple(parser.tokens)
 
 
-def _candidate_preserves_authorized_body_text(
+def _candidate_uses_manifest_body_sources(
     candidate: DeckRepairCandidate,
     authorized_sources: tuple[RepairSourceContext, ...],
 ) -> bool:
-    source_text = {
+    manifest_bodies = {
         (source.selector, source.source_role): source.text
         for source in authorized_sources
+        if source.source_role == "body"
     }
-    try:
-        return all(
-            update.source_role != "body"
-            or _visible_html_token_sequence(
-                update.content,
-                reject_unsafe_markup=True,
-            )
-            == _visible_html_token_sequence(
-                source_text[(update.selector, update.source_role)]
-            )
-            for update in candidate.source_updates
-        )
-    except Exception:
-        return False
+    return all(
+        update.source_role != "body"
+        or update.content
+        == manifest_bodies.get((update.selector, update.source_role))
+        for update in candidate.source_updates
+    )
 
 
 def _candidate_with_manifest_body_sources(
@@ -1328,22 +1321,6 @@ def _validate_invocation_result(
             "candidate_invalid",
             trace_error_code="candidate_targets_invalid",
         )
-    if not _candidate_preserves_authorized_body_text(
-        result.candidate,
-        context.authorized_sources,
-    ):
-        raise DeckRepairAuthorError(
-            "candidate_invalid",
-            trace_error_code="candidate_body_invalid",
-        )
-    if not _candidate_css_targets_manifest_bodies(
-        result.candidate,
-        context.authorized_sources,
-    ):
-        raise DeckRepairAuthorError(
-            "candidate_invalid",
-            trace_error_code="candidate_css_targets_invalid",
-        )
     source_hashes = {(source.selector, source.source_role): source.manifest_source_hash for source in context.authorized_sources}
     if any(update.expected_source_hash != source_hashes.get((update.selector, update.source_role)) for update in result.candidate.source_updates):
         raise DeckRepairAuthorError(
@@ -1360,6 +1337,22 @@ def _validate_invocation_result(
             "candidate_invalid",
             trace_error_code="candidate_canonicalization_invalid",
         ) from None
+    if not _candidate_uses_manifest_body_sources(
+        canonical_candidate,
+        context.authorized_sources,
+    ):
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_canonicalization_invalid",
+        )
+    if not _candidate_css_targets_manifest_bodies(
+        canonical_candidate,
+        context.authorized_sources,
+    ):
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_css_targets_invalid",
+        )
     if (
         LOCKED_DQ1_RUN_CAP_RESERVE_USD
         + sol_cost_usd(
