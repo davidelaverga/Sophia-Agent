@@ -766,10 +766,6 @@ def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:
             "aside:not(section){left:96px;top:112px;width:704px;height:336px}",
             "nonmatching-tag-predicate",
         ),
-        (
-            ".model-only,section{left:96px;top:112px;width:704px;height:336px}",
-            "partially-unmatched-selector-list",
-        ),
         ("section{color:#0B1F3A}", "no-effective-geometry"),
     ],
 )
@@ -845,6 +841,33 @@ def test_css_repair_accepts_existing_manifest_class_and_id_selectors() -> None:
     result = _run(author(request))
 
     assert result.candidate == candidate
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_css_repair_allows_unmatched_auxiliary_rule_when_geometry_binds() -> None:
+    request = _request()
+    model_css = (
+        ".model-only{color:#0B1F3A}"
+        "section,.unused{left:96px;top:112px;width:704px;height:336px}"
+    )
+    candidate = _candidate().model_copy(
+        update={
+            "source_updates": (
+                _candidate().source_updates[0],
+                _candidate().source_updates[1].model_copy(
+                    update={"content": model_css}
+                ),
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    assert result.candidate.source_updates[1].content == model_css
     assert len(invoker.invoke_calls) == 1
 
 

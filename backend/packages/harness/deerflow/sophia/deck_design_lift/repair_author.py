@@ -992,8 +992,8 @@ def _selector_arms(tokens: list[Any] | tuple[Any, ...]) -> tuple[str, ...]:
     return tuple(arms)
 
 
-def _stylesheet_selector_contract(value: str) -> tuple[str, ...] | None:
-    selectors: list[str] = []
+def _stylesheet_selector_contract(value: str) -> tuple[tuple[str, bool], ...] | None:
+    selectors: list[tuple[str, bool]] = []
 
     def collect(rules: list[Any]) -> None:
         for rule in rules:
@@ -1001,7 +1001,23 @@ def _stylesheet_selector_contract(value: str) -> tuple[str, ...] | None:
                 raise ValueError
             content = getattr(rule, "content", None)
             if rule.type == "qualified-rule":
-                selectors.extend(_selector_arms(list(rule.prelude)))
+                declarations = tuple(
+                    item
+                    for item in tinycss2.parse_declaration_list(
+                        content,
+                        skip_comments=True,
+                        skip_whitespace=True,
+                    )
+                    if item.type == "declaration"
+                )
+                has_geometry = any(
+                    declaration.lower_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+                    for declaration in declarations
+                )
+                selectors.extend(
+                    (selector, has_geometry)
+                    for selector in _selector_arms(list(rule.prelude))
+                )
                 if content is not None:
                     nested = [
                         item
@@ -1053,22 +1069,27 @@ def _candidate_css_targets_manifest_bodies(
         if update.source_role != "slide_css":
             continue
         body = body_inventories.get(update.selector)
-        selectors = _stylesheet_selector_contract(update.content)
-        if body is None or not selectors:
+        selector_contract = _stylesheet_selector_contract(update.content)
+        if body is None or not selector_contract:
             return False
         try:
             soup = BeautifulSoup(
                 f"<html><body>{body}</body></html>",
                 "html.parser",
             )
-            if any(not soup.select(selector) for selector in selectors):
-                return False
         except Exception:
             return False
-        if not any(
-            declaration.lower_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
-            for declaration in _stylesheet_declarations(update.content)
-        ):
+        matched_geometry = False
+        for selector, has_geometry in selector_contract:
+            if not has_geometry:
+                continue
+            try:
+                if soup.select(selector):
+                    matched_geometry = True
+                    break
+            except Exception:
+                continue
+        if not matched_geometry:
             return False
     return True
 
