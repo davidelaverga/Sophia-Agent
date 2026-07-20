@@ -6,6 +6,7 @@ import shutil
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 from PIL import Image, ImageFont
@@ -2089,6 +2090,396 @@ def test_deck_native_lint_fix_grows_small_overflow_inside_containing_panel(
     assert clean.lint_issue_count_before == 0
     assert clean.fix_applied_count == 0
     assert clean.residue_count == 0
+
+
+def test_deck_native_lint_fix_clamps_bounded_vector_right_edge_bleed(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "bounded-vector-right-edge-bleed.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    panel = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(11.667),
+        Inches(2.188),
+        Inches(8.375),
+        Inches(7.938),
+    )
+    panel.name = "right-edge-panel"
+    top_rule = slide.shapes.add_connector(
+        MSO_CONNECTOR.STRAIGHT,
+        Inches(11.667),
+        Inches(2.198),
+        Inches(20.042),
+        Inches(2.198),
+    )
+    top_rule.name = "right-edge-top-rule"
+    right_rule = slide.shapes.add_connector(
+        MSO_CONNECTOR.STRAIGHT,
+        Inches(20.031),
+        Inches(2.188),
+        Inches(20.031),
+        Inches(10.125),
+    )
+    right_rule.name = "right-edge-rule"
+    bottom_rule = slide.shapes.add_connector(
+        MSO_CONNECTOR.STRAIGHT,
+        Inches(11.667),
+        Inches(10.115),
+        Inches(20.042),
+        Inches(10.115),
+    )
+    bottom_rule.name = "right-edge-bottom-rule"
+    left_rule = slide.shapes.add_connector(
+        MSO_CONNECTOR.STRAIGHT,
+        Inches(11.740),
+        Inches(2.188),
+        Inches(11.740),
+        Inches(10.125),
+    )
+    left_rule.name = "right-edge-left-rule"
+    body = slide.shapes.add_textbox(
+        Inches(12.375),
+        Inches(3.021),
+        Inches(7.225),
+        Inches(1.25),
+    )
+    body.name = "right-edge-contained-text"
+    body.text = "Contained native text remains unchanged"
+    body.text_frame.paragraphs[0].runs[0].font.size = Pt(18)
+    presentation.save(output)
+
+    before = Presentation(output)
+    before_by_name = {shape.name: shape for shape in before.slides[0].shapes}
+    original_lefts = {
+        name: before_by_name[name].left
+        for name in (
+            "right-edge-panel",
+            "right-edge-top-rule",
+            "right-edge-bottom-rule",
+            "right-edge-left-rule",
+            "right-edge-contained-text",
+        )
+    }
+    original_text_geometry = (
+        before_by_name["right-edge-contained-text"].left,
+        before_by_name["right-edge-contained-text"].top,
+        before_by_name["right-edge-contained-text"].width,
+        before_by_name["right-edge-contained-text"].height,
+    )
+
+    service = DeckNativeService()
+    fixed = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.lint_issue_count_before == 4
+    assert fixed.fix_applied_count == 4, fixed.residue
+    assert fixed.issue_kinds == {"clamp-right-edge": 4}
+    assert fixed.residue_count == 0
+    repaired = Presentation(output)
+    by_name = {shape.name: shape for shape in repaired.slides[0].shapes}
+    for name in (
+        "right-edge-panel",
+        "right-edge-top-rule",
+        "right-edge-bottom-rule",
+    ):
+        assert by_name[name].left == original_lefts[name]
+        assert (by_name[name].left + by_name[name].width) / Inches(1) == pytest.approx(
+            20.0,
+            abs=0.002,
+        )
+    assert by_name["right-edge-rule"].left.inches == pytest.approx(20.0, abs=0.002)
+    assert by_name["right-edge-left-rule"].left == original_lefts["right-edge-left-rule"]
+    assert (
+        by_name["right-edge-contained-text"].left,
+        by_name["right-edge-contained-text"].top,
+        by_name["right-edge-contained-text"].width,
+        by_name["right-edge-contained-text"].height,
+    ) == original_text_geometry
+
+    clean = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+    assert clean.lint_issue_count_before == 0
+    assert clean.fix_applied_count == 0
+    assert clean.residue_count == 0
+
+
+@pytest.mark.parametrize(
+    "shape_kind",
+    ("ellipse", "diagonal-line", "rotated-rectangle"),
+)
+def test_deck_native_lint_fix_does_not_clamp_ambiguous_small_vector_bleed(
+    tmp_path: Path,
+    shape_kind: str,
+) -> None:
+    output = tmp_path / f"ambiguous-small-{shape_kind}-bleed.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    if shape_kind == "ellipse":
+        shape = slide.shapes.add_shape(
+            MSO_SHAPE.OVAL,
+            Inches(18),
+            Inches(2),
+            Inches(2.03),
+            Inches(3),
+        )
+    elif shape_kind == "diagonal-line":
+        shape = slide.shapes.add_connector(
+            MSO_CONNECTOR.STRAIGHT,
+            Inches(18),
+            Inches(2),
+            Inches(20.03),
+            Inches(3),
+        )
+    else:
+        shape = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(18),
+            Inches(2),
+            Inches(2.03),
+            Inches(3),
+        )
+        shape.rotation = 5
+    shape.name = "ambiguous-small-bleed"
+    presentation.save(output)
+    original = Presentation(output).slides[0].shapes[0]
+    original_geometry = (original.left, original.top, original.width, original.height)
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_kinds == {"slide_overflow_non_text": 1}
+    repaired = Presentation(output).slides[0].shapes[0]
+    assert (repaired.left, repaired.top, repaired.width, repaired.height) == original_geometry
+
+
+def test_deck_native_lint_fix_does_not_clamp_grouped_vector_bleed(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "grouped-small-vector-bleed.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    group = slide.shapes.add_group_shape()
+    group.name = "edge-group"
+    child = group.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(18),
+        Inches(2),
+        Inches(2.03),
+        Inches(3),
+    )
+    child.name = "grouped-edge-rectangle"
+    presentation.save(output)
+    before = Presentation(output)
+    before_group = before.slides[0].shapes[0]
+    original_group_geometry = (
+        before_group.left,
+        before_group.top,
+        before_group.width,
+        before_group.height,
+    )
+    original_child_geometry = (
+        before_group.shapes[0].left,
+        before_group.shapes[0].top,
+        before_group.shapes[0].width,
+        before_group.shapes[0].height,
+    )
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_kinds == {"slide_overflow_non_text": 2}
+    repaired_group = Presentation(output).slides[0].shapes[0]
+    assert (
+        repaired_group.left,
+        repaired_group.top,
+        repaired_group.width,
+        repaired_group.height,
+    ) == original_group_geometry
+    assert (
+        repaired_group.shapes[0].left,
+        repaired_group.shapes[0].top,
+        repaired_group.shapes[0].width,
+        repaired_group.shapes[0].height,
+    ) == original_child_geometry
+
+
+def test_deck_native_lint_fix_rolls_back_edge_clamp_that_loses_containment(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "right-edge-clamp-containment-rollback.pptx"
+    image_path = tmp_path / "contained-edge-image.png"
+    Image.new("RGB", (16, 16), "#4A90E2").save(image_path)
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    panel = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(11.667),
+        Inches(2.188),
+        Inches(8.375),
+        Inches(7.938),
+    )
+    panel.name = "rollback-edge-panel"
+    picture = slide.shapes.add_picture(
+        str(image_path),
+        Inches(19.94),
+        Inches(3),
+        Inches(0.10),
+        Inches(0.10),
+    )
+    picture.name = "rollback-contained-picture"
+    presentation.save(output)
+    before = Presentation(output)
+    before_panel = before.slides[0].shapes[0]
+    original_panel_geometry = (
+        before_panel.left,
+        before_panel.top,
+        before_panel.width,
+        before_panel.height,
+    )
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_kinds == {"slide_overflow_non_text": 2}
+    assert any("original containment" in item["issue"] for item in fixed.residue)
+    repaired_panel = Presentation(output).slides[0].shapes[0]
+    assert (
+        repaired_panel.left,
+        repaired_panel.top,
+        repaired_panel.width,
+        repaired_panel.height,
+    ) == original_panel_geometry
+
+
+def test_deck_native_lint_fix_validates_edge_clamp_after_alignment_rollback(
+    tmp_path: Path,
+    monkeypatch,
+    capsys,
+) -> None:
+    output = tmp_path / "edge-clamp-after-alignment-rollback.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    for index, left in enumerate((1.0, 4.5, 8.0, 11.5)):
+        peer = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(left),
+            Inches(3.13),
+            Inches(2.9),
+            Inches(3.88),
+        )
+        peer.name = f"transaction-order-peer-{index}"
+    alignment_target = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(15.0),
+        Inches(3.13),
+        Inches(2.9),
+        Inches(3.8),
+    )
+    alignment_target.name = "transaction-order-alignment-target"
+    edge_panel = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(11.667),
+        Inches(8.0),
+        Inches(8.375),
+        Inches(2.0),
+    )
+    edge_panel.name = "transaction-order-edge-panel"
+    presentation.save(output)
+    alignment_target_sid = f"s{alignment_target.shape_id}"
+    edge_panel_sid = f"s{edge_panel.shape_id}"
+    original_target_height = alignment_target.height
+
+    module = _deck_module()
+    original_transaction_check = module._alignment_transaction_failure
+    transaction_calls: list[set[str]] = []
+
+    def reject_alignment_only(
+        before_recs,
+        after_recs,
+        target_sids,
+        *,
+        affected_sids=None,
+    ):
+        targets = set(target_sids)
+        transaction_calls.append(targets)
+        if alignment_target_sid in targets:
+            return "forced alignment rollback"
+        return original_transaction_check(
+            before_recs,
+            after_recs,
+            targets,
+            affected_sids=affected_sids,
+        )
+
+    monkeypatch.setattr(module, "_alignment_transaction_failure", reject_alignment_only)
+    module.cmd_fix(
+        SimpleNamespace(
+            file=str(output),
+            slides="0",
+            all=False,
+            output=None,
+            in_place=True,
+            json=True,
+        )
+    )
+    report = json.loads(capsys.readouterr().out)
+
+    assert alignment_target_sid in transaction_calls[0]
+    assert edge_panel_sid in transaction_calls[-1]
+    assert len(report["fixed"]) == 1
+    assert report["fixed"][0]["shape"] == edge_panel_sid
+    assert report["fixed"][0]["action"] == "clamp-right-edge"
+    assert report["fixed"][0]["was"] == pytest.approx(0.042, abs=0.001)
+    assert any("forced alignment rollback" in item["issue"] for item in report["residue"])
+    repaired = Presentation(output)
+    repaired_by_name = {shape.name: shape for shape in repaired.slides[0].shapes}
+    assert repaired_by_name["transaction-order-alignment-target"].height == original_target_height
+    assert (
+        repaired_by_name["transaction-order-edge-panel"].left
+        + repaired_by_name["transaction-order-edge-panel"].width
+    ) == presentation.slide_width
+
+
+def test_deck_native_lint_fix_keeps_larger_vector_bleed_as_residue(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "larger-vector-right-edge-bleed.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+    shape = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(18),
+        Inches(2),
+        Inches(2.2),
+        Inches(3),
+    )
+    shape.name = "intentional-or-ambiguous-bleed"
+    presentation.save(output)
+    original = Presentation(output).slides[0].shapes[0]
+    original_geometry = (original.left, original.top, original.width, original.height)
+
+    fixed = DeckNativeService().lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.fix_applied_count == 0
+    assert fixed.residue_kinds == {"slide_overflow_non_text": 1}
+    repaired = Presentation(output).slides[0].shapes[0]
+    assert (repaired.left, repaired.top, repaired.width, repaired.height) == original_geometry
 
 
 def test_deck_native_lint_fix_repairs_canary_headline_and_kpi_overflow(

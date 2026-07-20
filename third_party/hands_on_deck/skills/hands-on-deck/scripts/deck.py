@@ -2391,6 +2391,7 @@ COMPACT_FONT_FLOOR_PT = 15.0
 REQUIRED_FONT_FLOOR_PT = 18.0
 SLIDE_MARGIN_IN = 0.1
 CONTAINER_TEXT_PADDING_IN = 0.1
+VECTOR_EDGE_ROUNDING_TOLERANCE_IN = 0.05
 BG_AREA_FRACTION = 0.6  # shapes covering >60% of the slide don't block growth
 GEOMETRY_EPS_IN = 0.01
 
@@ -2555,6 +2556,51 @@ def _container_text_width_growth(
         if proposed_overlap > original_overlap + 1e-6:
             return None
     return new_left, new_width, container_sid
+
+
+def _bounded_vector_right_edge_clamp(rec, *, slide_w, slide_h, slide_area):
+    """Clamp tiny native-vector rounding bleed without accepting real bleed."""
+    left, top, width, height = _absolute_rect(rec)
+    overflow = left + width - slide_w
+    if (
+        rec.is_text
+        or rec.is_table
+        or rec.type not in {"AUTO_SHAPE", "LINE"}
+        or rec.group is not None
+        or float(getattr(rec.shape, "rotation", 0) or 0) % 360
+        or not (GEOMETRY_EPS_IN < overflow <= VECTOR_EDGE_ROUNDING_TOLERANCE_IN)
+        or left < 0
+        or top < 0
+        or top + height > slide_h
+        or width * height > BG_AREA_FRACTION * slide_area
+    ):
+        return None
+    if rec.type == "AUTO_SHAPE":
+        if (
+            getattr(rec.shape, "auto_shape_type", None) != MSO_SHAPE.RECTANGLE
+            or rec.shape._element.findall(".//" + qn("a:blip"))
+            or width < ALIGN_MIN_DIM
+            or height < ALIGN_MIN_DIM
+            or slide_w - left <= GEOMETRY_EPS_IN
+        ):
+            return None
+        return "trim-width", overflow
+
+    has_unsafe_line_end = any(
+        rec.shape._element.findall(".//" + qn(tag))
+        for tag in ("a:stCxn", "a:endCxn", "a:headEnd", "a:tailEnd")
+    )
+    if has_unsafe_line_end:
+        return None
+    horizontal = height <= GEOMETRY_EPS_IN and width >= ALIGN_MIN_DIM
+    vertical = width <= GEOMETRY_EPS_IN and height >= ALIGN_MIN_DIM
+    if horizontal == vertical:
+        return None
+    if horizontal:
+        if slide_w - left <= GEOMETRY_EPS_IN:
+            return None
+        return "trim-width", overflow
+    return "translate-zero-width-edge", overflow
 
 
 def _alignment_coordinate(rec, role):
@@ -3214,6 +3260,7 @@ def cmd_fix(args):
     fixed, residue = [], []
     alignment_changes = []
     overflow_geometry_changes = []
+    bleed_geometry_changes = []
     geometry_touched = set()
     for slide_idx, recs in midx.items():
         z_order = {shape_id: index for index, shape_id in enumerate(recs)}
@@ -3549,7 +3596,41 @@ def cmd_fix(args):
                 if ovs is None:
                     continue
                 if not r.is_text:
-                    # pictures off one edge MAY be intentional bleed — never auto-move
+                    clamp = None
+                    if axis == "x" and iss.get("slide_overflow_bottom") is None:
+                        clamp = _bounded_vector_right_edge_clamp(
+                            r,
+                            slide_w=slide_w,
+                            slide_h=slide_h,
+                            slide_area=slide_area,
+                        )
+                    if clamp is not None:
+                        clamp_mode, exact_overflow = clamp
+                        originals = [(sh, sh.left, sh.top, sh.width, sh.height)]
+                        if clamp_mode == "trim-width":
+                            sh.width = prs.slide_width - sh.left
+                            clamp_detail = "trimmed width"
+                        else:
+                            sh.left = prs.slide_width
+                            clamp_detail = "translated zero-width edge"
+                        fixed_entry = {
+                            "slide": slide_idx,
+                            "shape": sid,
+                            "action": "clamp-right-edge",
+                            "was": exact_overflow,
+                            "detail": '%s by %.3f"' % (clamp_detail, exact_overflow),
+                        }
+                        fixed.append(fixed_entry)
+                        bleed_geometry_changes.append({
+                            "slide": slide_idx,
+                            "targets": {sid},
+                            "affected": {sid},
+                            "originals": originals,
+                            "fixed": fixed_entry,
+                        })
+                        geometry_touched.add((slide_idx, sid))
+                        continue
+                    # Larger or ambiguous non-text bleed still requires judgment.
                     residue.append({
                         "slide": slide_idx, "shape": sid,
                         "kind": "slide_overflow_non_text",
@@ -3698,13 +3779,71 @@ def cmd_fix(args):
                 shutil.copy2(args.file, out_path)
             remaining = collect_issue_map(out_path, only_slides=only)
 
+    # Tiny native-vector edge clamps are validated after every other geometry
+    # transaction reaches its final state. The sub-0.05in repair removes only
+    # conversion-rounding bleed; any collateral change restores the complete
+    # slide clamp set to the exact original EMUs.
+    if bleed_geometry_changes:
+        post_index = build_index(Presentation(out_path), measure=True, only_slides=only)
+        unsafe_slides = {}
+        for slide_idx in {change["slide"] for change in bleed_geometry_changes}:
+            targets = set().union(*(
+                change["targets"]
+                for change in bleed_geometry_changes
+                if change["slide"] == slide_idx
+            ))
+            affected = set().union(*(
+                change["affected"]
+                for change in bleed_geometry_changes
+                if change["slide"] == slide_idx
+            ))
+            after_recs = post_index.get(slide_idx, {})
+            reason = next(
+                (
+                    "target %s retains right-edge overflow" % sid
+                    for sid in sorted(targets)
+                    if sid not in after_recs
+                    or rec_issues(after_recs[sid]).get("slide_overflow_right") is not None
+                ),
+                None,
+            )
+            if reason is None:
+                reason = _alignment_transaction_failure(
+                    midx.get(slide_idx, {}),
+                    after_recs,
+                    targets,
+                    affected_sids=affected,
+                )
+            if reason:
+                unsafe_slides[slide_idx] = reason
+        if unsafe_slides:
+            for change in bleed_geometry_changes:
+                reason = unsafe_slides.get(change["slide"])
+                if not reason:
+                    continue
+                for shape, left, top, width, height in change["originals"]:
+                    shape.left, shape.top, shape.width, shape.height = left, top, width, height
+                fixed[:] = [item for item in fixed if item is not change["fixed"]]
+                residue.append({
+                    "slide": change["slide"],
+                    "shape": next(iter(change["targets"])),
+                    "kind": "slide_overflow_non_text",
+                    "issue": "right-edge clamp transaction rejected: %s" % reason,
+                    "suggest": "keep the native vector edge within the slide without collateral changes",
+                })
+            if fixed or str(out_path) == str(args.file):
+                prs.save(out_path)
+            else:
+                shutil.copy2(args.file, out_path)
+            remaining = collect_issue_map(out_path, only_slides=only)
+
     # honesty pass: every producer-reported remaining issue is residue, not fixed
     confirmed = []
     for f in fixed:
         rem = remaining.get((f["slide"], f["shape"]), {})
         if f["action"] in ("grow", "shrink-font", "widen-in-container"):
             key = "frame_overflow_bottom"
-        elif f["action"] in ("nudge-left", "fit-width"):
+        elif f["action"] in ("nudge-left", "fit-width", "clamp-right-edge"):
             key = "slide_overflow_right"
         elif f["action"] in (
             "align-x",
