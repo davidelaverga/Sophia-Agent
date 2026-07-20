@@ -47,7 +47,17 @@ SafeIdentifier = Annotated[
     ),
 ]
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
-RepairTraceErrorCode = Literal["repair_unavailable", "candidate_invalid"]
+RepairTraceErrorCode = Literal[
+    "repair_unavailable",
+    "candidate_invalid",
+    "candidate_scope_invalid",
+    "candidate_source_contract_invalid",
+    "candidate_targets_invalid",
+    "candidate_body_invalid",
+    "candidate_css_targets_invalid",
+    "candidate_source_hash_invalid",
+    "candidate_canonicalization_invalid",
+]
 
 _FORBIDDEN_FIELD_NAMES = frozenset(
     {

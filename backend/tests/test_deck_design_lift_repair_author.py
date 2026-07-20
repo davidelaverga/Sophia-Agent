@@ -785,16 +785,20 @@ def test_css_repair_must_target_manifest_dom_with_geometry(
             )
         }
     )
+    traces = FakeTraceFactory()
     author, _loader, invoker = _author(
         request=request,
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
+        trace_factory=traces,
     )
 
     with pytest.raises(DeckRepairAuthorError) as error:
         _run(author(request))
 
     _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
     assert len(invoker.invoke_calls) == 1
+    assert traces.spans[0].outputs[0].error_code == "candidate_css_targets_invalid"
 
 
 def test_css_repair_accepts_existing_manifest_class_and_id_selectors() -> None:

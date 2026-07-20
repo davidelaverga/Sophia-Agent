@@ -49,6 +49,7 @@ from deerflow.sophia.deck_design_lift.invoker import (
 )
 from deerflow.sophia.deck_design_lift.repair_tracing import (
     DeckRepairTraceFactory,
+    RepairTraceErrorCode,
     SafeDeckRepairTraceOutput,
     safe_deck_repair_trace_input,
 )
@@ -153,8 +154,18 @@ DeckRepairAuthorErrorCode = Literal[
 class DeckRepairAuthorError(RuntimeError):
     """Content-free author failure safe for logs and durable status."""
 
-    def __init__(self, code: DeckRepairAuthorErrorCode) -> None:
+    def __init__(
+        self,
+        code: DeckRepairAuthorErrorCode,
+        *,
+        trace_error_code: RepairTraceErrorCode | None = None,
+    ) -> None:
         self.code = code
+        self.trace_error_code: RepairTraceErrorCode = trace_error_code or (
+            "candidate_invalid"
+            if code == "candidate_invalid"
+            else "repair_unavailable"
+        )
         super().__init__(code)
 
 
@@ -1294,9 +1305,15 @@ def _validate_invocation_result(
     try:
         validate_candidate_against_program(result.candidate, request.program)
     except (RepairProgramRejected, ValueError, TypeError):
-        raise DeckRepairAuthorError("candidate_invalid") from None
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_scope_invalid",
+        ) from None
     if not _candidate_fits_compact_v2_source_contract(result.candidate):
-        raise DeckRepairAuthorError("candidate_invalid")
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_source_contract_invalid",
+        )
     expected_targets = {
         (selector, role)
         for selector in request.program.authorized_selectors
@@ -1307,27 +1324,42 @@ def _validate_invocation_result(
         for update in result.candidate.source_updates
     }
     if actual_targets != expected_targets:
-        raise DeckRepairAuthorError("candidate_invalid")
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_targets_invalid",
+        )
     if not _candidate_preserves_authorized_body_text(
         result.candidate,
         context.authorized_sources,
     ):
-        raise DeckRepairAuthorError("candidate_invalid")
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_body_invalid",
+        )
     if not _candidate_css_targets_manifest_bodies(
         result.candidate,
         context.authorized_sources,
     ):
-        raise DeckRepairAuthorError("candidate_invalid")
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_css_targets_invalid",
+        )
     source_hashes = {(source.selector, source.source_role): source.manifest_source_hash for source in context.authorized_sources}
     if any(update.expected_source_hash != source_hashes.get((update.selector, update.source_role)) for update in result.candidate.source_updates):
-        raise DeckRepairAuthorError("candidate_invalid")
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_source_hash_invalid",
+        )
     try:
         canonical_candidate = _candidate_with_manifest_body_sources(
             result.candidate,
             context.authorized_sources,
         )
     except Exception:
-        raise DeckRepairAuthorError("candidate_invalid") from None
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_canonicalization_invalid",
+        ) from None
     if (
         LOCKED_DQ1_RUN_CAP_RESERVE_USD
         + sol_cost_usd(
@@ -1468,7 +1500,7 @@ class ProductionDeckRepairAuthor:
                         status="error",
                         latency_ms=latency_ms,
                         input_tokens=preflight.input_tokens,
-                        error_code=("candidate_invalid" if error.code == "candidate_invalid" else "repair_unavailable"),
+                        error_code=error.trace_error_code,
                     ),
                 )
             except Exception:

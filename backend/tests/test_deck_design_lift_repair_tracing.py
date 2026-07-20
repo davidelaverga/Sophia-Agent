@@ -336,6 +336,23 @@ def test_failure_trace_uses_only_controlled_code_and_partial_safe_metrics() -> N
     assert "private" not in _serialized_trace_surfaces(client)
 
 
+def test_failure_trace_accepts_content_free_candidate_stage_code() -> None:
+    client = CapturingClient()
+    trace = _trace(client)
+    output = SafeDeckRepairTraceOutput(
+        status="error",
+        latency_ms=3_000,
+        input_tokens=1_200,
+        error_code="candidate_css_targets_invalid",
+    )
+
+    trace.finish(output)
+
+    update = client.update_attempts[0]
+    assert update["outputs"] == output.model_dump(mode="json", exclude_none=True)
+    assert update["error"] == "dq2_repair_failure:candidate_css_targets_invalid"
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
