@@ -48,11 +48,12 @@ from deerflow.sophia.deck_design_lift.schemas import (
     SelectorRepair,
     SkillRef,
 )
-from deerflow.sophia.deck_quality.canonical import canonical_sha256
+from deerflow.sophia.deck_quality.canonical import canonical_json_bytes, canonical_sha256
 from deerflow.sophia.deck_quality.idempotency import derive_quality_run_id
 from deerflow.sophia.deck_quality.instrument import DeckQualityRuntimeInstrument
 from deerflow.sophia.deck_quality.publisher import (
     DeckQualityProducerBundleReceipt,
+    DeckQualitySourcePack,
     PreparedDeckQualityPublication,
     capture_deck_quality_source_pack,
     deck_quality_immutable_artifact_snapshot_path,
@@ -559,6 +560,33 @@ class _MemoryPublicationStore:
         if value is not None and len(value) > max_bytes:
             raise RuntimeError("oversized")
         return value
+
+
+class _ScriptedSnapshotStore(_MemoryPublicationStore):
+    def __init__(self, *snapshot_events: str) -> None:
+        super().__init__()
+        self.snapshot_events = list(snapshot_events)
+        self.snapshot_create_count = 0
+
+    def create_if_absent(self, object_path, content, *, content_type):
+        if content_type.endswith("presentationml.presentation"):
+            self.snapshot_create_count += 1
+            if self.snapshot_events:
+                event = self.snapshot_events.pop(0)
+                self.creates.append(object_path)
+                if event == "raise_after_commit":
+                    self.objects[object_path] = content
+                    raise RuntimeError("synthetic create response loss")
+                if event == "raise_before_commit":
+                    raise RuntimeError("synthetic pre-commit failure")
+                if event == "invalid_outcome":
+                    return "invalid"
+                raise AssertionError(f"unknown snapshot event: {event}")
+        return super().create_if_absent(
+            object_path,
+            content,
+            content_type=content_type,
+        )
 
 
 class _FakeDeckService:
@@ -1091,6 +1119,234 @@ def test_reuse_only_image_runner_copies_exact_frozen_asset_bytes(tmp_path: Path)
     assert summary["source"] == "immutable_baseline_reuse"
     assert (outputs / "assets" / "slide-01.png").read_bytes() == content
     assert summary["items"][0]["reused_asset_hash"] == _sha(content)
+
+
+def test_candidate_snapshot_reconciles_lost_create_response() -> None:
+    store = _ScriptedSnapshotStore("raise_after_commit")
+    content = b"exact candidate"
+    path = "artifacts/test/candidate.pptx"
+
+    DurableCandidateDq1Publisher._persist_snapshot(
+        store=store,
+        object_path=path,
+        pptx_bytes=content,
+    )
+
+    assert store.snapshot_create_count == 1
+    assert store.objects[path] == content
+
+
+def test_candidate_snapshot_retries_once_after_precommit_failure() -> None:
+    store = _ScriptedSnapshotStore("raise_before_commit")
+    content = b"exact candidate"
+    path = "artifacts/test/candidate.pptx"
+
+    DurableCandidateDq1Publisher._persist_snapshot(
+        store=store,
+        object_path=path,
+        pptx_bytes=content,
+    )
+
+    assert store.snapshot_create_count == 2
+    assert store.objects[path] == content
+
+
+def test_candidate_snapshot_reconciles_lost_retry_response() -> None:
+    store = _ScriptedSnapshotStore(
+        "raise_before_commit",
+        "raise_after_commit",
+    )
+    content = b"exact candidate"
+    path = "artifacts/test/candidate.pptx"
+
+    DurableCandidateDq1Publisher._persist_snapshot(
+        store=store,
+        object_path=path,
+        pptx_bytes=content,
+    )
+
+    assert store.snapshot_create_count == 2
+    assert store.objects[path] == content
+
+
+def test_candidate_snapshot_rejects_conflicting_existing_bytes() -> None:
+    store = _ScriptedSnapshotStore()
+    path = "artifacts/test/candidate.pptx"
+    store.objects[path] = b"other candidate"
+
+    with pytest.raises(DeckCandidateCompilationError, match="publication_failed"):
+        DurableCandidateDq1Publisher._persist_snapshot(
+            store=store,
+            object_path=path,
+            pptx_bytes=b"exact candidate",
+        )
+
+    assert store.snapshot_create_count == 1
+    assert store.objects[path] == b"other candidate"
+
+
+def test_candidate_snapshot_does_not_retry_ambiguous_conflict() -> None:
+    path = "artifacts/test/candidate.pptx"
+
+    class _AmbiguousConflictStore(_ScriptedSnapshotStore):
+        def create_if_absent(self, object_path, content, *, content_type):
+            self.snapshot_create_count += 1
+            self.objects[object_path] = b"other candidate"
+            raise RuntimeError("synthetic response loss")
+
+    store = _AmbiguousConflictStore()
+    with pytest.raises(DeckCandidateCompilationError, match="publication_failed"):
+        DurableCandidateDq1Publisher._persist_snapshot(
+            store=store,
+            object_path=path,
+            pptx_bytes=b"exact candidate",
+        )
+
+    assert store.snapshot_create_count == 1
+    assert store.objects[path] == b"other candidate"
+
+
+def test_candidate_snapshot_fails_closed_after_one_exhausted_retry() -> None:
+    store = _ScriptedSnapshotStore(
+        "raise_before_commit",
+        "raise_before_commit",
+    )
+    path = "artifacts/test/candidate.pptx"
+
+    with pytest.raises(DeckCandidateCompilationError, match="publication_failed"):
+        DurableCandidateDq1Publisher._persist_snapshot(
+            store=store,
+            object_path=path,
+            pptx_bytes=b"exact candidate",
+        )
+
+    assert store.snapshot_create_count == 2
+    assert path not in store.objects
+
+
+def test_candidate_snapshot_logs_no_storage_exception_details(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    private_sentinel = "private-storage-error-sentinel"
+    private_path = "artifacts/private-user/private-thread/candidate.pptx"
+
+    class _PrivateFailureStore(_MemoryPublicationStore):
+        def create_if_absent(self, object_path, content, *, content_type):
+            raise RuntimeError(private_sentinel)
+
+    with caplog.at_level("INFO", logger=candidate_module.__name__):
+        with pytest.raises(DeckCandidateCompilationError, match="publication_failed"):
+            DurableCandidateDq1Publisher._persist_snapshot(
+                store=_PrivateFailureStore(),
+                object_path=private_path,
+                pptx_bytes=b"exact candidate",
+            )
+
+    messages = "\n".join(record.getMessage() for record in caplog.records)
+    assert messages == (
+        "DQ2 candidate publication failed "
+        "stage=immutable_snapshot code=retry_create_failed"
+    )
+    assert private_sentinel not in messages
+    assert private_path not in messages
+    assert all(record.exc_info is None for record in caplog.records)
+
+
+def test_candidate_snapshot_does_not_retry_invalid_store_outcome() -> None:
+    store = _ScriptedSnapshotStore("invalid_outcome")
+    path = "artifacts/test/candidate.pptx"
+
+    with pytest.raises(DeckCandidateCompilationError, match="publication_failed"):
+        DurableCandidateDq1Publisher._persist_snapshot(
+            store=store,
+            object_path=path,
+            pptx_bytes=b"exact candidate",
+        )
+
+    assert store.snapshot_create_count == 1
+    assert path not in store.objects
+
+
+@pytest.mark.parametrize("inject_store", [False, True])
+def test_candidate_publisher_selects_producer_protocol(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    inject_store: bool,
+) -> None:
+    store = _MemoryPublicationStore()
+    monkeypatch.setattr(
+        candidate_module,
+        "SupabaseImmutableObjectStore",
+        lambda: store,
+    )
+    captured: dict[str, Any] = {}
+    quality_run_id = "quality_" + "9" * 64
+    receipt = DeckQualityProducerBundleReceipt(
+        quality_run_id=quality_run_id,
+        bundle_object_path=deck_quality_producer_bundle_path(quality_run_id),
+        bundle_hash="8" * 64,
+        bundle_size_bytes=100,
+    )
+
+    def persist(**kwargs: Any) -> DeckQualityProducerBundleReceipt:
+        captured.update(kwargs)
+        return receipt
+
+    monkeypatch.setattr(
+        candidate_module,
+        "persist_deck_quality_producer_bundle",
+        persist,
+    )
+    pptx_bytes = b"candidate bytes"
+    artifact_hash = _sha(pptx_bytes)
+    virtual_path = "/mnt/user-data/outputs/candidate.pptx"
+    snapshot_path = deck_quality_immutable_artifact_snapshot_path(
+        user_id=USER_ID,
+        thread_id=THREAD_ID,
+        build_id=BUILD_ID,
+        logical_artifact_id="logical_deck_01",
+        artifact_version_id=CANDIDATE_ARTIFACT_ID,
+        artifact_sha256=artifact_hash,
+        artifact_virtual_path=virtual_path,
+    )
+    prepared = PreparedDeckQualityPublication.model_construct(
+        outputs_root=tmp_path,
+        artifact_virtual_path=virtual_path,
+        artifact_storage_object_path=snapshot_path,
+        artifact_sha256=artifact_hash,
+        logical_artifact_id="logical_deck_01",
+        artifact_version_id=CANDIDATE_ARTIFACT_ID,
+        manifest_revision=2,
+        build_id=BUILD_ID,
+        user_id=USER_ID,
+        thread_id=THREAD_ID,
+    )
+    source_pack = DeckQualitySourcePack.model_construct(
+        artifact_sha256=artifact_hash,
+        artifact_version_id=CANDIDATE_ARTIFACT_ID,
+        manifest_revision=2,
+    )
+    source_pack_bytes = canonical_json_bytes(source_pack)
+    publisher = (
+        DurableCandidateDq1Publisher(store_factory=lambda: store)
+        if inject_store
+        else DurableCandidateDq1Publisher()
+    )
+
+    result = publisher._publish_sync(
+        prepared=prepared,
+        instrument=_instrument(),
+        pptx_bytes=pptx_bytes,
+        source_pack=source_pack,
+        source_pack_bytes=source_pack_bytes,
+    )
+
+    assert result == receipt
+    assert store.objects[snapshot_path] == pptx_bytes
+    if inject_store:
+        assert captured["object_store"] is store
+    else:
+        assert "object_store" not in captured
 
 
 def test_durable_candidate_publisher_uploads_snapshot_and_replays_bundle(

@@ -20,6 +20,7 @@ import hashlib
 import inspect
 import io
 import json
+import logging
 import math
 import re
 import tempfile
@@ -67,6 +68,7 @@ from deerflow.sophia.deck_quality.publisher import (
     deck_quality_producer_archive_path,
     deck_quality_producer_bundle_path,
     persist_deck_quality_producer_bundle,
+    safe_deck_quality_publication_error_code,
 )
 from deerflow.sophia.deck_quality.schemas import (
     MechanicalCheck,
@@ -90,6 +92,8 @@ RENDER_COMPARE_WIDTH = 480
 RENDER_COMPARE_HEIGHT = 270
 MAX_UNCHANGED_RENDER_MEAN_DELTA = 8.0
 MAX_NATIVE_EDITABILITY_DROP = 0.01
+
+logger = logging.getLogger(__name__)
 
 _CANONICAL_ZIP_DATETIME = (1980, 1, 1, 0, 0, 0)
 _VOLATILE_BUILD_RECORD_KEYS = frozenset(
@@ -342,9 +346,133 @@ class DurableCandidateDq1Publisher:
     def __init__(
         self,
         *,
-        store_factory: Callable[[], _CandidatePublicationStore] = SupabaseImmutableObjectStore,
+        store_factory: Callable[[], _CandidatePublicationStore] | None = None,
     ) -> None:
-        self._store_factory = store_factory
+        self._store_factory = (
+            store_factory
+            if store_factory is not None
+            else SupabaseImmutableObjectStore
+        )
+        # Injected synchronous stores are useful for deterministic tests.  The
+        # live producer bundle must use its native async, deadline-bounded
+        # protocol instead of inheriting the snapshot store's per-request
+        # synchronous timeouts.
+        self._reuse_snapshot_store_for_bundle = store_factory is not None
+
+    @staticmethod
+    def _persist_snapshot(
+        *,
+        store: _CandidatePublicationStore,
+        object_path: str,
+        pptx_bytes: bytes,
+    ) -> None:
+        """Create one immutable snapshot with exact ambiguity reconciliation."""
+
+        create_failed = False
+        try:
+            outcome = store.create_if_absent(
+                object_path,
+                pptx_bytes,
+                content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+        except Exception:
+            # A create-only POST may commit before its response is lost.  The
+            # exact bounded GET below is the ambiguity fence.
+            create_failed = True
+            outcome = None
+        if not create_failed and outcome not in {"created", "exists"}:
+            logger.warning(
+                "DQ2 candidate publication failed "
+                "stage=immutable_snapshot code=create_outcome_invalid"
+            )
+            raise DeckCandidateCompilationError("publication_failed")
+
+        first_read_failed = False
+        try:
+            stored = store.read_bounded(
+                object_path,
+                max_bytes=MAX_CANDIDATE_PPTX_BYTES,
+            )
+        except Exception:
+            first_read_failed = True
+            stored = None
+        if stored is not None:
+            if stored != pptx_bytes:
+                logger.warning(
+                    "DQ2 candidate publication failed "
+                    "stage=immutable_snapshot code=content_conflict"
+                )
+                raise DeckCandidateCompilationError("publication_failed")
+            if create_failed:
+                logger.info(
+                    "DQ2 candidate publication reconciled "
+                    "stage=immutable_snapshot attempt=1"
+                )
+            return
+
+        if not create_failed:
+            code = "readback_failed" if first_read_failed else "missing_after_create"
+            logger.warning(
+                "DQ2 candidate publication failed "
+                "stage=immutable_snapshot code=%s",
+                code,
+            )
+            raise DeckCandidateCompilationError("publication_failed")
+
+        # The first create response is ambiguous and no exact object can be
+        # confirmed.  One create-only retry is safe even if the first POST
+        # committed: it can only return a conflict for the same key.
+        retry_create_failed = False
+        try:
+            retry_outcome = store.create_if_absent(
+                object_path,
+                pptx_bytes,
+                content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+            )
+        except Exception:
+            retry_create_failed = True
+            retry_outcome = None
+        if not retry_create_failed and retry_outcome not in {"created", "exists"}:
+            logger.warning(
+                "DQ2 candidate publication failed "
+                "stage=immutable_snapshot code=retry_outcome_invalid"
+            )
+            raise DeckCandidateCompilationError("publication_failed")
+
+        retry_read_failed = False
+        try:
+            stored = store.read_bounded(
+                object_path,
+                max_bytes=MAX_CANDIDATE_PPTX_BYTES,
+            )
+        except Exception:
+            retry_read_failed = True
+            stored = None
+        if stored is not None:
+            if stored != pptx_bytes:
+                logger.warning(
+                    "DQ2 candidate publication failed "
+                    "stage=immutable_snapshot code=content_conflict"
+                )
+                raise DeckCandidateCompilationError("publication_failed")
+            logger.info(
+                "DQ2 candidate publication reconciled "
+                "stage=immutable_snapshot attempt=2"
+            )
+            return
+
+        if retry_read_failed:
+            code = "retry_readback_failed"
+        elif retry_create_failed:
+            code = "retry_create_failed"
+        else:
+            code = "missing_after_retry"
+        logger.warning(
+            "DQ2 candidate publication failed "
+            "stage=immutable_snapshot code=%s",
+            code,
+        )
+        raise DeckCandidateCompilationError("publication_failed")
 
     async def publish(
         self,
@@ -401,26 +529,38 @@ class DurableCandidateDq1Publisher:
             raise DeckCandidateCompilationError("identity_mismatch")
         try:
             store = self._store_factory()
-            outcome = store.create_if_absent(
-                expected_path,
-                pptx_bytes,
-                content_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        except Exception:
+            logger.warning(
+                "DQ2 candidate publication failed "
+                "stage=immutable_snapshot code=store_unavailable"
             )
-            if outcome not in {"created", "exists"}:
-                raise DeckCandidateCompilationError("publication_failed")
-            stored = store.read_bounded(expected_path, max_bytes=MAX_CANDIDATE_PPTX_BYTES)
-            if stored != pptx_bytes:
-                raise DeckCandidateCompilationError("publication_failed")
+            raise DeckCandidateCompilationError("publication_failed") from None
+
+        self._persist_snapshot(
+            store=store,
+            object_path=expected_path,
+            pptx_bytes=pptx_bytes,
+        )
+        try:
+            publication_kwargs: dict[str, Any] = {
+                "prepared": prepared,
+                "instrument": instrument,
+                "source_pack": source_pack,
+                "source_pack_bytes": source_pack_bytes,
+            }
+            if self._reuse_snapshot_store_for_bundle:
+                publication_kwargs["object_store"] = store
             return persist_deck_quality_producer_bundle(
-                prepared=prepared,
-                instrument=instrument,
-                object_store=store,
-                source_pack=source_pack,
-                source_pack_bytes=source_pack_bytes,
+                **publication_kwargs,
             )
         except DeckCandidateCompilationError:
             raise
-        except Exception:
+        except Exception as error:
+            logger.warning(
+                "DQ2 candidate publication failed "
+                "stage=producer_bundle code=%s",
+                safe_deck_quality_publication_error_code(error),
+            )
             raise DeckCandidateCompilationError("publication_failed") from None
 
 
