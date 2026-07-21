@@ -7,7 +7,7 @@ from deerflow.sophia.deck_design_lift.schemas import (
     LocalityProof,
 )
 
-_PSI_FAILURE_FAMILY_BY_CODE = {
+PSI_FAILURE_FAMILY_BY_CODE = {
     "weak_subject_specificity": "weak_subject_specificity",
     "weak_signature_realization": "weak_signature_realization",
     "default_look_gravity": "default_look_gravity",
@@ -99,9 +99,9 @@ def compare_deck_versions(inputs: DeckVersionComparisonInput) -> DeckVersionComp
         initial.failure_codes
     )
     resolved_psi_families = {
-        _PSI_FAILURE_FAMILY_BY_CODE[code]
+        PSI_FAILURE_FAMILY_BY_CODE[code]
         for code in resolved_failures
-        if code in _PSI_FAILURE_FAMILY_BY_CODE
+        if code in PSI_FAILURE_FAMILY_BY_CODE
     }
     psi_floor_passed = (
         len(resolved_psi_families) >= PSI_REQUIRED_RESOLVED_FAMILY_COUNT

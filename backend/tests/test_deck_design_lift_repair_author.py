@@ -120,6 +120,11 @@ def _program(
     *,
     render_hash: str = RENDER_HASH,
     source_roles: tuple[str, ...] | None = None,
+    failure_codes: tuple[str, ...] = (
+        "weak_subject_specificity",
+        "weak_signature_realization",
+        "weak_mechanism_visualization",
+    ),
 ) -> DeckRepairProgram:
     authorized_roles = source_roles or ("body", "slide_css")
     render = RepairRenderEvidence(
@@ -145,7 +150,7 @@ def _program(
         "selector_repairs": (
             SelectorRepair(
                 selector="slide:1",
-                failure_codes=("weak_subject_specificity",),
+                failure_codes=failure_codes,
                 render_evidence=(render,),
                 instruction="Make the PSI mechanism visible and subject-specific.",
                 retained_content=("Preserve the PSI control-loop claim.",),
@@ -155,7 +160,7 @@ def _program(
         "must_preserve": ("Preserve factual content and slide count.",),
         "must_not": ("Do not edit another selector.",),
         "skill_refs": (skill,),
-        "expected_improvements": ("weak_subject_specificity",),
+        "expected_improvements": failure_codes,
         "forbidden_regressions": ("content_regression",),
         "rubric_version": "deck-quality-rubric-v1",
         "instrument_hash": OTHER_HASH,
@@ -590,6 +595,15 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "use only the safe literal forms" in system_prompt
     assert "do not use var(), calc(), inheritance, or ambiguous values" in system_prompt
     assert "Ordinary overflow and layout declarations are allowed" in system_prompt
+    assert "campaign's only repair" in system_prompt
+    assert "decisive, presentation-scale design lift" in system_prompt
+    assert "Treat every expected improvement as a required visible outcome" in system_prompt
+    assert "map each listed priority PSI family" in system_prompt
+    assert "when at least three distinct families are available" in system_prompt
+    assert "geometry, grouping, scale, fill, border, and whitespace" in system_prompt
+    assert "palette-only restyling or moving generic boxes does not count" in system_prompt
+    assert "recheck every expected improvement against the whole-deck contact sheet" in system_prompt
+    assert "fresh independent rendered judgment can mark satisfied" in system_prompt
 
     payload_text = messages[1].content[0]["text"]
     payload = json.loads(payload_text.removeprefix("Allowed repair context JSON:\n"))
@@ -599,6 +613,27 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
             "classes": [],
             "ids": [],
         }
+    }
+    assert payload["repair_constraints"]["campaign_acceptance"] == {
+        "comparison_target": "approved_improvement",
+        "preferred_candidate_verdict": "satisfied",
+        "campaign_required_resolved_family_count": 3,
+        "available_family_count": 3,
+        "author_target_resolved_family_count": 3,
+        "campaign_floor_feasible": True,
+        "priority_failure_codes": [
+            "weak_subject_specificity",
+            "weak_signature_realization",
+            "weak_mechanism_visualization",
+        ],
+        "psi_failure_family_by_code": {
+            "weak_subject_specificity": "weak_subject_specificity",
+            "weak_signature_realization": "weak_signature_realization",
+            "weak_mechanism_visualization": "weak_mechanism_visualization",
+        },
+        "expected_improvements_are_required_visible_outcomes": True,
+        "cosmetic_rearrangement_is_insufficient": True,
+        "forbidden_regressions_remain_binding": True,
     }
     assert payload["repair_constraints"]["compiler_contract"] == {
         "authoring_contract": "compact_model_html_v2",
@@ -702,6 +737,65 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
             "ordinary_overflow_and_layout_allowed": True,
         },
     }
+
+
+def test_campaign_acceptance_prioritizes_only_available_psi_floor_families() -> None:
+    program = _program(
+        failure_codes=(
+            "weak_subject_specificity",
+            "weak_memorability",
+            "weak_signature_realization",
+            "low_sequence_rhythm",
+        )
+    )
+    request = _request(program=program)
+
+    messages = build_repair_author_messages(
+        context=_context(request=request),
+        program=program,
+    )
+
+    payload_text = messages[1].content[0]["text"]
+    payload = json.loads(payload_text.removeprefix("Allowed repair context JSON:\n"))
+    acceptance = payload["repair_constraints"]["campaign_acceptance"]
+    assert acceptance["campaign_floor_feasible"] is True
+    assert acceptance["available_family_count"] == 3
+    assert acceptance["author_target_resolved_family_count"] == 3
+    assert acceptance["priority_failure_codes"] == [
+        "weak_subject_specificity",
+        "weak_signature_realization",
+        "low_sequence_rhythm",
+    ]
+    assert "weak_memorability" not in acceptance["psi_failure_family_by_code"]
+
+
+@pytest.mark.parametrize(
+    "failure_codes",
+    [
+        ("weak_subject_specificity",),
+        (
+            "weak_subject_specificity",
+            "low_sequence_rhythm",
+            "weak_narrative_pacing",
+        ),
+    ],
+)
+def test_infeasible_campaign_is_rejected_before_context_or_provider_work(
+    failure_codes: tuple[str, ...],
+) -> None:
+    request = _request(program=_program(failure_codes=failure_codes))
+    traces = FakeTraceFactory()
+    author, loader, invoker = _author(request=request, trace_factory=traces)
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "repair_unavailable")
+    assert loader.calls == []
+    assert invoker.prepare_calls == []
+    assert invoker.count_calls == []
+    assert invoker.invoke_calls == []
+    assert traces.inputs == []
 
 
 def test_body_selector_inventory_is_exact_and_content_free() -> None:

@@ -28,18 +28,18 @@ class RepairProgramRejected(ValueError):
 _FAILURE_INSTRUCTIONS = {
     "rendered_readability_failure": "Restore legibility at presentation scale without dropping required content.",
     "weak_narrative_arc": "Strengthen the sequence so each page turn advances one clear argument.",
-    "weak_closing_synthesis": "Make the close synthesize the control loop and operational consequence.",
-    "weak_subject_specificity": "Use PSI-specific mechanism language and visual structure that could not fit an unrelated subject.",
+    "weak_closing_synthesis": "Visually consolidate the existing thesis, consequence, and action into one dominant close without depending on new copy.",
+    "weak_subject_specificity": "Make existing PSI-specific subject and mechanism labels the spatial anchors of a structure that could not fit an unrelated subject.",
     "weak_visual_hierarchy": "Create a decisive reading order with clearer scale, grouping, and emphasis.",
     "low_sequence_rhythm": "Vary composition and density to create intentional sequence rhythm.",
     "weak_narrative_pacing": "Vary composition and density to create intentional sequence rhythm.",
     "repetitive_structure": "Replace repeated scaffolds with compositions shaped by each content beat.",
-    "weak_signature_realization": "Realize the promised deck signature as a functional, recurring visual idea.",
+    "weak_signature_realization": "Realize the promised deck signature as a functional recurring structural motif; palette-only restyling is insufficient.",
     "weak_typography": "Repair typography hierarchy, wraps, density, and presentation-scale legibility.",
     "inconsistent_typography": "Restore a coherent typographic system while preserving semantic text.",
     "weak_composition": "Rebalance space and relationships around the slide's primary claim.",
     "weak_spatial_tension": "Use scale, placement, and negative space to create purposeful spatial tension.",
-    "weak_mechanism_visualization": "Express the mechanism with a native, inspectable visual rather than generic prose containers.",
+    "weak_mechanism_visualization": "Arrange existing labeled elements into a directional, native, inspectable mechanism; generic prose boxes do not count.",
     "mismatched_visual_medium": "Choose a visual medium that directly explains the content and integrate it into the composition.",
     "weak_asset_integration": "Integrate the asset as part of the argument rather than as decoration.",
     "weak_audience_fit": "Tune the visual and narrative emphasis for product and engineering leaders.",
@@ -54,7 +54,7 @@ _FAILURE_INSTRUCTIONS = {
     "composition_plan_not_realized": "Bring the rendered composition into alignment with the frozen plan commitment.",
     "weak_fingerprint_realization": "Realize the planned structural fingerprint visibly and coherently.",
     "plan_realization_failure": "Repair the failed plan commitment on the authorized slide only.",
-    "default_look_gravity": "Replace default template gravity with a coherent, subject-specific visual system.",
+    "default_look_gravity": "Replace default template gravity with a content-shaped composition and functional structural motif; palette-only styling is insufficient.",
 }
 
 _DECK_WIDE_STYLE_FAILURES = frozenset(

@@ -119,6 +119,32 @@ def test_compiler_freezes_selector_roles_and_canonical_hash() -> None:
         DeckRepairProgram.model_validate(tampered)
 
 
+def test_compiler_psi_instructions_match_the_css_only_repair_channel() -> None:
+    program = compile_repair_program(
+        _compiler_input(
+            findings=(
+                _finding("slide:1", "weak_subject_specificity"),
+                _finding("slide:3", "weak_signature_realization"),
+                _finding("slide:5", "default_look_gravity"),
+            )
+        )
+    )
+    instructions = {
+        code: repair.instruction
+        for repair in program.selector_repairs
+        for code in repair.failure_codes
+    }
+
+    assert "existing PSI-specific subject and mechanism labels" in instructions[
+        "weak_subject_specificity"
+    ]
+    assert "functional recurring structural motif" in instructions[
+        "weak_signature_realization"
+    ]
+    assert "content-shaped composition" in instructions["default_look_gravity"]
+    assert all("new copy" not in instruction for instruction in instructions.values())
+
+
 def test_compiler_enforces_one_repair_and_source_authorization() -> None:
     with pytest.raises(RepairProgramRejected, match="automatic_repair_limit_reached"):
         compile_repair_program(_compiler_input(prior_repair_count=1))
