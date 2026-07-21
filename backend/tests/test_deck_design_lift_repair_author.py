@@ -60,7 +60,15 @@ OTHER_HASH = "b" * 64
 MANIFEST_HASH = "c" * 64
 SKILL_SOURCE_HASH = "d" * 64
 SOURCE_TEXT = "<section><h1>Current PSI control loop</h1></section>"
-SLIDE_CSS_TEXT = "section{left:80px;top:120px;width:640px;height:320px}"
+BASELINE_SLIDE_CSS_TEXT = ""
+SLIDE_CSS_TEXT = (
+    "section{font-size:32px;line-height:1.2;"
+    "border:1px solid #0B1F3A;box-sizing:border-box}"
+)
+RETAINED_SLIDE_CSS_TEXT = (
+    "section{font-size:32px;line-height:1.2;"
+    "border:1px solid #0B1F3A;box-sizing:border-box;}"
+)
 DECK_CSS_TEXT = ":root{}"
 SKILL_EXCERPT = "Use one subject-specific mechanism visual and preserve factual text."
 
@@ -80,7 +88,7 @@ RENDER_BYTES = _png_bytes(color="navy")
 CONTACT_HASH = hashlib.sha256(CONTACT_BYTES).hexdigest()
 RENDER_HASH = hashlib.sha256(RENDER_BYTES).hexdigest()
 SOURCE_HASH = hashlib.sha256(SOURCE_TEXT.encode()).hexdigest()
-SLIDE_CSS_HASH = hashlib.sha256(SLIDE_CSS_TEXT.encode()).hexdigest()
+SLIDE_CSS_HASH = hashlib.sha256(BASELINE_SLIDE_CSS_TEXT.encode()).hexdigest()
 DECK_CSS_HASH = hashlib.sha256(DECK_CSS_TEXT.encode()).hexdigest()
 SKILL_EXCERPT_HASH = hashlib.sha256(SKILL_EXCERPT.encode()).hexdigest()
 
@@ -173,6 +181,20 @@ def _program(
     return DeckRepairProgram.model_validate(payload)
 
 
+def _deck_style_root_program() -> DeckRepairProgram:
+    payload = _program().model_dump(mode="python", exclude={"program_hash"})
+    selector_repair = dict(payload["selector_repairs"][0])
+    selector_repair["selector"] = "deck-style:root"
+    selector_repair["allowed_asset_changes"] = ()
+    payload["authorized_selectors"] = ("deck-style:root",)
+    payload["authorized_source_roles"] = {
+        "deck-style:root": ("deck_css",),
+    }
+    payload["selector_repairs"] = (selector_repair,)
+    payload["program_hash"] = canonical_sha256(payload)
+    return DeckRepairProgram.model_validate(payload)
+
+
 def _request(*, program: DeckRepairProgram | None = None) -> RepairInvocationRequest:
     return RepairInvocationRequest(
         campaign_run_id="campaign-dq2-001",
@@ -210,7 +232,11 @@ def _context(*, request: RepairInvocationRequest | None = None) -> RepairAuthorC
             manifest_source_hash=(
                 SLIDE_CSS_HASH if source_role == "slide_css" else SOURCE_HASH
             ),
-            text=(SLIDE_CSS_TEXT if source_role == "slide_css" else SOURCE_TEXT),
+            text=(
+                BASELINE_SLIDE_CSS_TEXT
+                if source_role == "slide_css"
+                else SOURCE_TEXT
+            ),
         )
         for source_role in request.program.authorized_source_roles["slide:1"]
     )
@@ -581,11 +607,16 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
 
     system_prompt = messages[0].content
     assert "compact_model_html_v2 limit of 1024 UTF-8 bytes" in system_prompt
-    assert "literal px values for left, top, width, and height" in system_prompt
-    assert "native peer edges or centerlines" in system_prompt
-    assert "transforms, calc(), or percentage values" in system_prompt
+    assert "retains only font-size, line-height, box-sizing:border-box" in system_prompt
+    assert "strips every fill, background, text color, geometry" in system_prompt
+    assert "Literal border color is part of the retained border declaration" in system_prompt
+    assert "Do not use variables, calc(), inheritance keywords, or !important" in system_prompt
+    assert "Do not attempt to move or resize native shapes" in system_prompt
+    assert "preserve the authenticated geometry and shared fill/text palette" in system_prompt
     assert "copy its current manifest source byte-for-byte" in system_prompt
     assert "pins body content to the authenticated manifest bytes" in system_prompt
+    assert "baseline slide_css source is semantically empty" in system_prompt
+    assert "nonempty baseline is rejected before provider admission" in system_prompt
     assert "express every visible repair in the authorized slide_css" in system_prompt
     assert "target only tags, classes, and IDs listed" in system_prompt
     assert "body_selector_inventory" in system_prompt
@@ -611,29 +642,17 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "Do not use rejected or lossy native CSS properties" in system_prompt
     assert "Do not change generated list-marker semantics" in system_prompt
     assert "list-style, list-style-type, or list-style-image" in system_prompt
-    assert "use only the safe literal forms" in system_prompt
-    assert "do not use var(), calc(), inheritance, or ambiguous values" in system_prompt
-    assert "co-declare one opaque literal color in that same rule" in system_prompt
-    assert "WCAG contrast of at least 4.5:1" in system_prompt
-    assert "inherited from another rule is not sufficient" in system_prompt
-    assert "effective authored or authenticated inline foreground" in system_prompt
-    assert "importance, specificity, source order, and inheritance" in system_prompt
-    assert "nearest effective authored background" in system_prompt
-    assert "sealed repair contract permits only opaque literal colors" in system_prompt
-    assert "forbids background-image" in system_prompt
-    assert "decorative-only elements without text are exempt" in system_prompt
-    assert "rendered native contrast gate remains authoritative" in system_prompt
     assert "Do not use at-rules or nested CSS rules" in system_prompt
     assert "Use read_only_sources only to account for" in system_prompt
     assert "never return an update for a read-only source" in system_prompt
     assert "Do not set display, overflow, overflow-x, or overflow-y" in system_prompt
-    assert "no larger than 64px" in system_prompt
+    assert "from 12px through 64px" in system_prompt
     assert "campaign's only repair" in system_prompt
     assert "decisive, presentation-scale design lift" in system_prompt
     assert "Treat every expected improvement as a required visible outcome" in system_prompt
     assert "map each listed priority PSI family" in system_prompt
     assert "when at least three distinct families are available" in system_prompt
-    assert "geometry, grouping, scale, fill, border, and whitespace" in system_prompt
+    assert "decisive type scale, line spacing, and border framing" in system_prompt
     assert "palette-only restyling or moving generic boxes does not count" in system_prompt
     assert "recheck every expected improvement against the whole-deck contact sheet" in system_prompt
     assert "fresh independent rendered judgment can mark satisfied" in system_prompt
@@ -710,10 +729,61 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
         "slide_css": {
             "source_role": "slide_css",
             "max_utf8_bytes": 1_024,
-            "geometry_properties": ["left", "top", "width", "height"],
-            "geometry_value_format": "literal_px",
-            "alignment_rule": "exact_native_peer_edges_or_centers",
-            "forbidden_geometry_forms": ["transform", "calc()", "percentage"],
+            "retained_properties": [
+                "border",
+                "border-bottom",
+                "border-bottom-color",
+                "border-bottom-left-radius",
+                "border-bottom-right-radius",
+                "border-bottom-style",
+                "border-bottom-width",
+                "border-color",
+                "border-left",
+                "border-left-color",
+                "border-left-style",
+                "border-left-width",
+                "border-radius",
+                "border-right",
+                "border-right-color",
+                "border-right-style",
+                "border-right-width",
+                "border-style",
+                "border-top",
+                "border-top-color",
+                "border-top-left-radius",
+                "border-top-right-radius",
+                "border-top-style",
+                "border-top-width",
+                "border-width",
+                "box-sizing",
+                "font-size",
+                "line-height",
+            ],
+            "author_boundary_property_filter": "strip_all_unlisted_declarations",
+            "authenticated_baseline_policy": "require_semantically_empty_slide_css",
+            "fill_background_text_paint_updates_retained": False,
+            "geometry_updates_retained": False,
+            "retained_value_contract": {
+                "font_size": {
+                    "unit": "px",
+                    "minimum_inclusive": 12,
+                    "maximum_inclusive": 64,
+                },
+                "line_height": {
+                    "unitless_range_inclusive": [0.8, 3.0],
+                    "px_range_inclusive": [8.0, 96.0],
+                },
+                "box_sizing": "border-box",
+                "border_width_px_range_inclusive": [0.5, 16.0],
+                "border_styles": ["dashed", "dotted", "double", "solid"],
+                "border_color": "literal_nontransparent_css_color",
+                "border_radius": {
+                    "px_range_inclusive": [0, 1080.0],
+                    "percentage_range_inclusive": [0, 50],
+                },
+                "important_allowed": False,
+                "variables_or_calculations_allowed": False,
+            },
             "forbidden_native_properties": [
                 "animation",
                 "animation-name",
@@ -754,7 +824,7 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                 "font_size": {
                     "allowed_single_token_type": "dimension",
                     "required_unit": "px",
-                    "minimum_exclusive": 0,
+                    "minimum_inclusive": 12,
                     "maximum_inclusive": 64,
                 },
                 "color": {
@@ -921,7 +991,12 @@ def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:
     request = _request(
         program=_program(source_roles=("body", "slide_css")),
     )
-    model_css = "section{left:96px;top:112px;width:704px;height:336px}"
+    model_css = (
+        "section{left:96px;top:112px;width:704px;height:336px;"
+        "font-size:36px;border:2px solid #0B1F3A;padding:12px;"
+        "background:#FFFFFF;color:#0B1F3A}"
+    )
+    retained_css = "section{font-size:36px;border:2px solid #0B1F3A;}"
     authored = DeckRepairCandidate(
         source_updates=(
             SourceUpdate(
@@ -958,7 +1033,7 @@ def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:
         for update in result.candidate.source_updates
     ) == (
         ("body", SOURCE_HASH, SOURCE_TEXT),
-        ("slide_css", SLIDE_CSS_HASH, model_css),
+        ("slide_css", SLIDE_CSS_HASH, retained_css),
     )
     assert invoker.result.candidate == authored
 
@@ -967,21 +1042,31 @@ def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:
     ("model_css", "case"),
     [
         (
-            ".model-only{left:96px;top:112px;width:704px;height:336px}",
+            ".model-only{font-size:36px}",
             "unknown-selector",
         ),
         (
-            ".mechanism{left:96px;top:112px;width:704px;height:336px}",
+            ".mechanism{font-size:36px}",
             "selector-invented-by-model-body",
         ),
         (
-            "aside:not(section){left:96px;top:112px;width:704px;height:336px}",
+            "aside:not(section){font-size:36px}",
             "nonmatching-tag-predicate",
         ),
-        ("section{color:#0B1F3A}", "no-effective-geometry"),
+        ("body{font-size:36px}", "synthetic-body-wrapper"),
+        (":root{font-size:36px}", "synthetic-root"),
+        ("*{font-size:36px}", "universal-selector"),
+        (
+            "section:not(.invented){font-size:36px}",
+            "invented-negated-class",
+        ),
+        ("section *{font-size:36px}", "descendant-universal"),
+        ("section,:root{font-size:36px}", "grouped-synthetic-root"),
+        ("section,*{font-size:36px}", "grouped-universal"),
+        ("section,.invented{font-size:36px}", "grouped-invented-class"),
     ],
 )
-def test_css_repair_must_target_manifest_dom_with_geometry(
+def test_css_repair_must_target_manifest_dom_with_retained_declaration(
     model_css: str,
     case: str,
 ) -> None:
@@ -1013,6 +1098,36 @@ def test_css_repair_must_target_manifest_dom_with_geometry(
     assert traces.spans[0].outputs[0].error_code == "candidate_css_targets_invalid"
 
 
+def test_css_repair_requires_at_least_one_retained_declaration() -> None:
+    request = _request()
+    candidate = _candidate().model_copy(
+        update={
+            "source_updates": (
+                _candidate().source_updates[0],
+                _candidate().source_updates[1].model_copy(
+                    update={"content": "section{color:#0B1F3A;left:96px}"}
+                ),
+            )
+        }
+    )
+    traces = FakeTraceFactory()
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+        trace_factory=traces,
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_canonicalization_invalid"
+    assert len(invoker.invoke_calls) == 1
+    assert traces.spans[0].outputs[0].error_code == (
+        "candidate_canonicalization_invalid"
+    )
+
+
 def test_css_repair_accepts_existing_manifest_class_and_id_selectors() -> None:
     request = _request()
     body = '<section id="mechanism" class="frame panel"><h1>Current PSI control loop</h1></section>'
@@ -1042,7 +1157,7 @@ def test_css_repair_accepts_existing_manifest_class_and_id_selectors() -> None:
                 source_role="slide_css",
                 expected_source_hash=SLIDE_CSS_HASH,
                 content=(
-                    "#mechanism.frame{left:96px;top:112px;width:704px;height:336px}"
+                    "#mechanism.frame{font-size:36px;border:2px solid #0B1F3A}"
                 ),
             ),
         ),
@@ -1056,15 +1171,17 @@ def test_css_repair_accepts_existing_manifest_class_and_id_selectors() -> None:
 
     result = _run(author(request))
 
-    assert result.candidate == candidate
+    assert result.candidate.source_updates[1].content == (
+        "#mechanism.frame{font-size:36px;border:2px solid #0B1F3A;}"
+    )
     assert len(invoker.invoke_calls) == 1
 
 
-def test_css_repair_allows_unmatched_auxiliary_rule_when_geometry_binds() -> None:
+def test_css_repair_rejects_unmatched_grouped_selector_arm() -> None:
     request = _request()
     model_css = (
         ".model-only{color:#0B1F3A}"
-        "section,.unused{left:96px;top:112px;width:704px;height:336px}"
+        "section,.unused{font-size:36px;padding:12px}"
     )
     candidate = _candidate().model_copy(
         update={
@@ -1081,15 +1198,108 @@ def test_css_repair_allows_unmatched_auxiliary_rule_when_geometry_binds() -> Non
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    result = _run(author(request))
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
 
-    assert result.candidate.source_updates[1].content == model_css
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_css_repair_rejects_standalone_unmatched_retained_rule() -> None:
+    request = _request()
+    candidate = _candidate().model_copy(
+        update={
+            "source_updates": (
+                _candidate().source_updates[0],
+                _candidate().source_updates[1].model_copy(
+                    update={
+                        "content": (
+                            "section{font-size:36px}"
+                            ".unused{border:2px solid #0B1F3A}"
+                        )
+                    }
+                ),
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
     assert len(invoker.invoke_calls) == 1
 
 
 def test_body_only_program_is_rejected_before_provider_admission() -> None:
     request = _request(program=_program(source_roles=("body",)))
     author, _loader, invoker = _author(request=request)
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "context_invalid")
+    assert invoker.prepare_calls == []
+    assert invoker.invoke_calls == []
+
+
+def test_nonempty_authenticated_slide_css_is_rejected_before_provider() -> None:
+    request = _request()
+    context = _context(request=request)
+    baseline_css = (
+        "section{left:80px;top:120px;background:#FFFFFF;color:#15171C}"
+    )
+    context = context.model_copy(
+        update={
+            "authorized_sources": tuple(
+                source.model_copy(
+                    update={
+                        "text": baseline_css,
+                        "manifest_source_hash": hashlib.sha256(
+                            baseline_css.encode()
+                        ).hexdigest(),
+                    }
+                )
+                if source.source_role == "slide_css"
+                else source
+                for source in context.authorized_sources
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "context_invalid")
+    assert invoker.prepare_calls == []
+    assert invoker.invoke_calls == []
+
+
+def test_deck_style_root_program_is_rejected_before_provider_admission() -> None:
+    request = _request(program=_deck_style_root_program())
+    context = _context()
+    context = context.model_copy(
+        update={
+            "identity": context.identity.model_copy(
+                update={
+                    "repair_program_hash": request.program.program_hash,
+                }
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+    )
 
     with pytest.raises(DeckRepairAuthorError) as error:
         _run(author(request))
@@ -1352,9 +1562,17 @@ def test_slide_css_candidate_must_fit_existing_compact_v2_byte_limit() -> None:
         invoker=FakeTwoPhaseInvoker(candidate=accepted),
     )
 
-    assert _run(author(request)).candidate == accepted
+    result = _run(author(request))
+    assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
 
-    oversized_content = SLIDE_CSS_TEXT + "/*" + ("é" * 484) + "*/"
+    prefix = SLIDE_CSS_TEXT + "/*"
+    suffix = "*/"
+    oversized_content = (
+        prefix
+        + ("é" * ((1_025 - len(prefix.encode()) - len(suffix.encode())) // 2))
+        + "x"
+        + suffix
+    )
     assert len(oversized_content) < 1_024
     assert len(oversized_content.encode("utf-8")) == 1_025
     oversized = accepted.model_copy(
@@ -1412,7 +1630,105 @@ def test_slide_css_allows_safe_content_visibility_color_and_font_size_boundary()
         invoker=FakeTwoPhaseInvoker(candidate=accepted),
     )
 
-    assert _run(author(request)).candidate == accepted
+    result = _run(author(request))
+    assert result.candidate.source_updates[1].content == (
+        RETAINED_SLIDE_CSS_TEXT + "section{font-size:64px;}"
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("declaration", "canonical"),
+    [
+        ("font-size:12px", "font-size:12px;"),
+        ("font-size:64px", "font-size:64px;"),
+        ("line-height:0.8", "line-height:0.8;"),
+        ("line-height:3", "line-height:3;"),
+        ("line-height:8px", "line-height:8px;"),
+        ("line-height:96px", "line-height:96px;"),
+        ("box-sizing:border-box", "box-sizing:border-box;"),
+        (
+            "border:0.5px solid #0B1F3A",
+            "border:0.5px solid #0B1F3A;",
+        ),
+        (
+            "border:16px double rgba(11,31,58,.5)",
+            "border:16px double rgba(11,31,58,.5);",
+        ),
+        ("border-width:0.5px", "border-width:0.5px;"),
+        ("border-width:16px", "border-width:16px;"),
+        ("border-style:dashed", "border-style:dashed;"),
+        ("border-color:#0B1F3A", "border-color:#0B1F3A;"),
+        ("border-radius:0px", "border-radius:0px;"),
+        ("border-radius:1080px", "border-radius:1080px;"),
+        ("border-radius:50%", "border-radius:50%;"),
+    ],
+)
+def test_slide_css_retained_value_boundaries_are_canonicalized(
+    declaration: str,
+    canonical: str,
+) -> None:
+    request = _request()
+    candidate = _candidate().model_copy(
+        update={
+            "source_updates": (
+                _candidate().source_updates[0],
+                _candidate().source_updates[1].model_copy(
+                    update={"content": f"section{{{declaration}}}"}
+                ),
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    assert result.candidate.source_updates[1].content == f"section{{{canonical}}}"
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "line-height:0",
+        "line-height:-999px",
+        "line-height:var(--x)",
+        "border:9999px solid #0B1F3A",
+        "border-width:calc(100% + 1px)",
+        "box-sizing:inherit",
+        "font-size:32px!important",
+        "border:1px solid transparent",
+        "border-radius:51%",
+        "border-radius:-1px",
+    ],
+)
+def test_slide_css_rejects_candidate_without_safe_retained_value(
+    declaration: str,
+) -> None:
+    request = _request()
+    candidate = _candidate().model_copy(
+        update={
+            "source_updates": (
+                _candidate().source_updates[0],
+                _candidate().source_updates[1].model_copy(
+                    update={"content": f"section{{{declaration}}}"}
+                ),
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_canonicalization_invalid"
     assert len(invoker.invoke_calls) == 1
 
 
@@ -1518,7 +1834,7 @@ def test_slide_css_allows_same_rule_opaque_text_background_contrast(
 
     result = _run(author(request))
 
-    assert result.candidate.source_updates[1].content == candidate_css
+    assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
     assert len(invoker.invoke_calls) == 1
 
 
@@ -1560,7 +1876,8 @@ def test_slide_css_allows_safe_background_pair_cascade(css: str) -> None:
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    assert _run(author(request)).candidate == candidate
+    result = _run(author(request))
+    assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
     assert len(invoker.invoke_calls) == 1
 
 
@@ -1580,7 +1897,8 @@ def test_slide_css_allows_nested_opaque_surfaces() -> None:
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    assert _run(author(request)).candidate == candidate
+    result = _run(author(request))
+    assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
     assert len(invoker.invoke_calls) == 1
 
 
@@ -1601,7 +1919,8 @@ def test_slide_css_allows_outer_foreground_shielded_by_nested_surface() -> None:
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    assert _run(author(request)).candidate == candidate
+    result = _run(author(request))
+    assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
     assert len(invoker.invoke_calls) == 1
 
 
@@ -1796,7 +2115,8 @@ def test_slide_css_skips_provably_transparent_shared_surface() -> None:
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    assert _run(author(request)).candidate == candidate
+    result = _run(author(request))
+    assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
     assert len(invoker.invoke_calls) == 1
 
 
@@ -1815,7 +2135,8 @@ def test_slide_css_allows_unmatched_auxiliary_foreground_with_safe_surface() -> 
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    assert _run(author(request)).candidate == candidate
+    result = _run(author(request))
+    assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
     assert len(invoker.invoke_calls) == 1
 
 
@@ -1948,7 +2269,7 @@ def test_slide_css_allows_solid_background_on_decorative_only_element() -> None:
 
     result = _run(author(request))
 
-    assert result.candidate == candidate
+    assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
     assert len(invoker.invoke_calls) == 1
 
 
@@ -2028,6 +2349,7 @@ def test_slide_css_candidate_rejects_native_lossy_or_font_overrides(
         "opacity:var(--alpha)",
         "opacity:calc(1 - 1)",
         "font-size:0rem",
+        "font-size:1px",
         "font-size:-1px",
         "font-size:65px",
         "font-size:70px",
@@ -2072,6 +2394,7 @@ def test_slide_css_candidate_rejects_native_lossy_or_font_overrides(
         "opacity-variable",
         "opacity-calculation",
         "font-size-zero",
+        "font-size-below-minimum",
         "font-size-negative",
         "font-size-over-boundary",
         "font-size-observed-70",

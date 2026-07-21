@@ -193,6 +193,7 @@ class DeckBuildService:
         style_profile: dict[str, Any] | None = None,
         design_plan: dict[str, Any] | None = None,
         creative_plan: dict[str, Any] | None = None,
+        native_lint_slide_indices: tuple[int, ...] | None = None,
     ) -> DeckBuildResult:
         service_started = time.perf_counter()
         # Fresh production builds receive this at dispatch so identity survives
@@ -291,7 +292,11 @@ class DeckBuildService:
             try:
                 # Compile even when source quality has gaps so the single repair
                 # receives both static and native/mechanical targets together.
-                self._compile_pptx(deck, runtime)
+                self._compile_pptx(
+                    deck,
+                    runtime,
+                    native_lint_slide_indices=native_lint_slide_indices,
+                )
             except DeckBuildFailure as exc:
                 if exc.code == "deck_mechanical_gate_failed" and not source_evaluation.passed:
                     raise DeckBuildFailure(
@@ -1006,7 +1011,13 @@ class DeckBuildService:
                 },
             )
 
-    def _compile_pptx(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
+    def _compile_pptx(
+        self,
+        deck: DeckBuild,
+        runtime: ToolRuntime,
+        *,
+        native_lint_slide_indices: tuple[int, ...] | None = None,
+    ) -> None:
         preflight = self._trace_native_requirement(deck, runtime)
         if not preflight.success:
             deck.deck_compile_mode = NATIVE_UNAVAILABLE_DECK_COMPILE_MODE
@@ -1016,7 +1027,11 @@ class DeckBuildService:
                 retryable=False,
             )
         try:
-            self._compile_native_pptx(deck, runtime)
+            self._compile_native_pptx(
+                deck,
+                runtime,
+                native_lint_slide_indices=native_lint_slide_indices,
+            )
         except DeckNativePathError as exc:
             deck.deck_compile_mode = NATIVE_UNAVAILABLE_DECK_COMPILE_MODE
             raise DeckBuildFailure(
@@ -1098,7 +1113,13 @@ class DeckBuildService:
             deck.compile_overflow_slides = [entry for entry in (result.get("overflow_slides") or []) if isinstance(entry, dict)]
             deck.status = "compiled"
 
-    def _compile_native_pptx(self, deck: DeckBuild, runtime: ToolRuntime) -> None:
+    def _compile_native_pptx(
+        self,
+        deck: DeckBuild,
+        runtime: ToolRuntime,
+        *,
+        native_lint_slide_indices: tuple[int, ...] | None = None,
+    ) -> None:
         deck.deck_compile_mode = NATIVE_DECK_COMPILE_MODE
         base_host = _host_path(_NATIVE_BASE, runtime)
         patch_host = _host_path(_NATIVE_PATCH, runtime)
@@ -1183,7 +1204,27 @@ class DeckBuildService:
                 f"Native editability score {deck.native_editability_score:.2f} is below the 0.60 D1 gate.",
                 retryable=False,
             )
-        touched_slides = [slide.index - 1 for slide in deck.slides]
+        all_slide_indices = [slide.index - 1 for slide in deck.slides]
+        if native_lint_slide_indices is None:
+            lint_slide_indices = all_slide_indices
+        else:
+            lint_slide_indices = list(native_lint_slide_indices)
+            if (
+                not lint_slide_indices
+                or len(set(lint_slide_indices)) != len(lint_slide_indices)
+                or any(
+                    isinstance(index, bool)
+                    or not isinstance(index, int)
+                    or index not in all_slide_indices
+                    for index in lint_slide_indices
+                )
+            ):
+                raise DeckBuildFailure(
+                    "invalid_deck_ir",
+                    "Native lint slide scope is invalid.",
+                    retryable=False,
+                )
+            lint_slide_indices.sort()
         _assert_deck_deadline(runtime, stage="native_lint_fix")
         with deck_span(
             "deck.native.lint_fix",
@@ -1194,9 +1235,12 @@ class DeckBuildService:
             slide_count=len(deck.slides),
             run_type="tool",
             deck_compile_mode=deck.deck_compile_mode,
-            inputs={"touched_slide_count": len(touched_slides)},
+            inputs={"touched_slide_count": len(lint_slide_indices)},
         ) as run:
-            lint_fix = self._native_service.lint_fix(pptx_path=str(output_host), touched_slides=touched_slides)
+            lint_fix = self._native_service.lint_fix(
+                pptx_path=str(output_host),
+                touched_slides=lint_slide_indices,
+            )
             finish_span(run, _native_lint_fix_span_outputs(lint_fix))
         if not lint_fix.success:
             if _native_deadline_error(lint_fix.errors):
@@ -1250,9 +1294,16 @@ class DeckBuildService:
             slide_count=len(deck.slides),
             run_type="tool",
             deck_compile_mode=deck.deck_compile_mode,
-            inputs={"pptx_file": basename(deck.output_path), "slide_count": len(touched_slides)},
+            inputs={
+                "pptx_file": basename(deck.output_path),
+                "slide_count": len(all_slide_indices),
+            },
         ) as run:
-            rendered = self._native_service.render(pptx_path=str(output_host), output_dir=str(render_host), slides=touched_slides)
+            rendered = self._native_service.render(
+                pptx_path=str(output_host),
+                output_dir=str(render_host),
+                slides=all_slide_indices,
+            )
             finish_span(run, _native_render_span_outputs(rendered))
         if not rendered.success:
             if _native_deadline_error(rendered.errors):

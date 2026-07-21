@@ -646,9 +646,11 @@ class _FakeDeckService:
         self.tracing_enabled = None
         self.raw_pptx_bytes: bytes | None = None
         self.thread_ids: list[int] = []
+        self.native_lint_slide_indices: tuple[int, ...] | None = None
 
     def prepare_and_build(self, **kwargs) -> DeckBuildResult:
         self.thread_ids.append(threading.get_ident())
+        self.native_lint_slide_indices = kwargs.get("native_lint_slide_indices")
         runtime = kwargs["runtime"]
         slides = kwargs["slides"]
         output_path = kwargs["output_path"]
@@ -1003,6 +1005,7 @@ def test_candidate_compiler_rebuilds_sources_proves_locality_and_publishes_dq1(
     assert service.foundation_config.enabled is False
     assert service.foundation_config.manifest_mode == "off"
     assert service.tracing_enabled is False
+    assert service.native_lint_slide_indices == (0,)
     assert service.thread_ids and service.thread_ids[0] != threading.get_ident()
     assert len(blocking_threads) == 2
     assert all(thread_id != threading.get_ident() for thread_id in blocking_threads)

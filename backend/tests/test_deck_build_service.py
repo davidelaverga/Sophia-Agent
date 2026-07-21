@@ -518,6 +518,105 @@ def test_deck_build_service_required_deck_writes_manifest_html_pptx_and_build_js
     assert loaded.slides[0].selector == "slide:1"
 
 
+def test_deck_build_service_scopes_native_lint_but_renders_every_slide(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    lint_calls: list[list[int]] = []
+    render_calls: list[list[int]] = []
+
+    class RecordingNativeService(_FakeNativeService):
+        def lint_fix(
+            self,
+            *,
+            pptx_path: str,
+            touched_slides: list[int] | None = None,
+        ) -> NativeDeckLintFixResult:
+            lint_calls.append(list(touched_slides or []))
+            return super().lint_fix(
+                pptx_path=pptx_path,
+                touched_slides=touched_slides,
+            )
+
+        def render(
+            self,
+            *,
+            pptx_path: str,
+            output_dir: str,
+            slides: list[int] | None = None,
+        ) -> NativeDeckRenderResult:
+            render_calls.append(list(slides or []))
+            return super().render(
+                pptx_path=pptx_path,
+                output_dir=output_dir,
+                slides=slides,
+            )
+
+    result = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        native_service=RecordingNativeService([]),
+    ).prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
+        native_lint_slide_indices=(0, 2),
+    )
+
+    assert result.success is True
+    assert lint_calls == [[0, 2]]
+    assert render_calls == [[0, 1, 2]]
+
+
+@pytest.mark.parametrize(
+    "scope",
+    [
+        (),
+        (0, 0),
+        (False,),
+        (-1,),
+        (3,),
+        ("0",),
+    ],
+)
+def test_deck_build_service_rejects_invalid_native_lint_scope(
+    tmp_path: Path,
+    scope: tuple[object, ...],
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    lint_calls: list[list[int]] = []
+
+    class RecordingNativeService(_FakeNativeService):
+        def lint_fix(
+            self,
+            *,
+            pptx_path: str,
+            touched_slides: list[int] | None = None,
+        ) -> NativeDeckLintFixResult:
+            lint_calls.append(list(touched_slides or []))
+            return super().lint_fix(
+                pptx_path=pptx_path,
+                touched_slides=touched_slides,
+            )
+
+    result = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        native_service=RecordingNativeService([]),
+    ).prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=_creative_plan(),
+        native_lint_slide_indices=scope,  # type: ignore[arg-type]
+    )
+
+    assert result.success is False
+    assert result.failure_code == "invalid_deck_ir"
+    assert lint_calls == []
+
+
 def test_deck_build_service_resolves_manifest_owner_from_runtime_config(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     runtime.state.pop("thread_id")

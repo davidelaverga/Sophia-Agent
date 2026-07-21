@@ -107,12 +107,98 @@ _FORBIDDEN_CANDIDATE_BODY_ATTRIBUTES = frozenset(
     {"aria-hidden", "hidden", "style"}
 )
 _VISIBLE_HTML_TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]")
+_MIN_AUTHORED_FONT_SIZE_PX = 12.0
 _MAX_AUTHORED_FONT_SIZE_PX = 64.0
+_MIN_RETAINED_LINE_HEIGHT = 0.8
+_MAX_RETAINED_LINE_HEIGHT = 3.0
+_MIN_RETAINED_LINE_HEIGHT_PX = 8.0
+_MAX_RETAINED_LINE_HEIGHT_PX = 96.0
+_MIN_RETAINED_BORDER_WIDTH_PX = 0.5
+_MAX_RETAINED_BORDER_WIDTH_PX = 16.0
+_MAX_RETAINED_BORDER_RADIUS_PX = 1080.0
 _MIN_AUTHORED_TEXT_BACKGROUND_CONTRAST = 4.5
 _SLIDE_CSS_BACKGROUND_PROPERTIES = frozenset(
     {"background", "background-color"}
 )
 _SLIDE_CSS_FORBIDDEN_BACKGROUND_PROPERTIES = frozenset({"background-image"})
+_RETAINED_SLIDE_CSS_PROPERTIES = frozenset(
+    {
+        "border",
+        "border-bottom",
+        "border-bottom-color",
+        "border-bottom-left-radius",
+        "border-bottom-right-radius",
+        "border-bottom-style",
+        "border-bottom-width",
+        "border-color",
+        "border-left",
+        "border-left-color",
+        "border-left-style",
+        "border-left-width",
+        "border-radius",
+        "border-right",
+        "border-right-color",
+        "border-right-style",
+        "border-right-width",
+        "border-style",
+        "border-top",
+        "border-top-color",
+        "border-top-left-radius",
+        "border-top-right-radius",
+        "border-top-style",
+        "border-top-width",
+        "border-width",
+        "box-sizing",
+        "font-size",
+        "line-height",
+    }
+)
+_RETAINED_BORDER_SHORTHAND_PROPERTIES = frozenset(
+    {"border", "border-bottom", "border-left", "border-right", "border-top"}
+)
+_RETAINED_BORDER_COLOR_PROPERTIES = frozenset(
+    {
+        "border-color",
+        "border-bottom-color",
+        "border-left-color",
+        "border-right-color",
+        "border-top-color",
+    }
+)
+_RETAINED_BORDER_STYLE_PROPERTIES = frozenset(
+    {
+        "border-style",
+        "border-bottom-style",
+        "border-left-style",
+        "border-right-style",
+        "border-top-style",
+    }
+)
+_RETAINED_BORDER_WIDTH_PROPERTIES = frozenset(
+    {
+        "border-width",
+        "border-bottom-width",
+        "border-left-width",
+        "border-right-width",
+        "border-top-width",
+    }
+)
+_RETAINED_BORDER_RADIUS_PROPERTIES = frozenset(
+    {
+        "border-radius",
+        "border-bottom-left-radius",
+        "border-bottom-right-radius",
+        "border-top-left-radius",
+        "border-top-right-radius",
+    }
+)
+_RETAINED_BORDER_STYLES = frozenset({"dashed", "dotted", "double", "solid"})
+_ALLOWED_RETAINED_SELECTOR_PSEUDO_CLASSES = frozenset(
+    {"first-child", "first-of-type", "last-child", "last-of-type", "only-child"}
+)
+_ALLOWED_RETAINED_SELECTOR_FUNCTIONS = frozenset(
+    {"is", "not", "nth-child", "nth-of-type", "where"}
+)
 _ALL_CSS_BACKGROUND_PAINT_PROPERTIES = (
     _SLIDE_CSS_BACKGROUND_PROPERTIES
     | _SLIDE_CSS_FORBIDDEN_BACKGROUND_PROPERTIES
@@ -520,8 +606,20 @@ def _validated_context(
         raise DeckRepairAuthorError("context_invalid")
 
     expected_sources = {(selector, role) for selector in request.program.authorized_selectors for role in request.program.authorized_source_roles[selector]}
+    if any(
+        selector == DECK_STYLE_ROOT_SELECTOR
+        or len(roles) != 2
+        or set(roles) != {"body", "slide_css"}
+        for selector, roles in request.program.authorized_source_roles.items()
+    ):
+        raise DeckRepairAuthorError("context_invalid")
     actual_sources = {(source.selector, source.source_role) for source in context.authorized_sources}
     if actual_sources != expected_sources or any(source.build_id != request.build_id or source.manifest_revision != identity.manifest_revision or source.manifest_hash != identity.manifest_hash for source in context.authorized_sources):
+        raise DeckRepairAuthorError("context_invalid")
+    if any(
+        source.source_role == "slide_css" and source.text.strip()
+        for source in context.authorized_sources
+    ):
         raise DeckRepairAuthorError("context_invalid")
     expected_read_only_sources = (
         set()
@@ -556,12 +654,6 @@ def _validated_context(
         for source in context.authorized_sources
     ):
         raise DeckRepairAuthorError("context_invalid")
-    if any(
-        ("body" in roles) != ("slide_css" in roles)
-        for roles in request.program.authorized_source_roles.values()
-    ):
-        raise DeckRepairAuthorError("context_invalid")
-
     expected_assets = {(repair.selector, asset_id) for repair in request.program.selector_repairs for asset_id in repair.allowed_asset_changes}
     actual_assets = {(asset.selector, asset.asset_id) for asset in context.owned_assets}
     if actual_assets != expected_assets or any(asset.build_id != request.build_id or asset.manifest_revision != identity.manifest_revision or asset.manifest_hash != identity.manifest_hash for asset in context.owned_assets):
@@ -627,13 +719,15 @@ This is the campaign's only repair: use the whole-deck contact sheet and every a
 Treat every expected improvement as a required visible outcome.
 First, privately map each listed priority PSI family to its frozen selector, visible observation, and one judge-visible CSS intervention.
 Spend the compact CSS budget on the mapped priority families before generic polish; when at least three distinct families are available, materially resolve at least three.
-Use existing semantic elements with geometry, grouping, scale, fill, border, and whitespace; palette-only restyling or moving generic boxes does not count.
+Use existing semantic elements with decisive type scale, line spacing, and border framing; palette-only restyling or moving generic boxes does not count.
 Before returning, recheck every expected improvement against the whole-deck contact sheet while preserving every locked constraint.
 Aim for a candidate that a fresh independent rendered judgment can mark satisfied.
 Deterministic comparison must also approve it without a critical, mechanical, content, or collateral regression.
 Every authorized body update is an addressing echo: copy its current manifest source byte-for-byte.
 Use read_only_sources only to account for the authenticated shared CSS cascade; never return an update for a read-only source.
 The author boundary pins body content to the authenticated manifest bytes before compilation, so express every visible repair in the authorized slide_css and target only tags, classes, and IDs listed in the supplied body_selector_inventory.
+This sealed lane is admitted only when every authenticated baseline slide_css source is semantically empty.
+A nonempty baseline is rejected before provider admission so authenticated geometry and paint can never be deleted by canonicalization.
 Do not restructure body markup or attributes. Do not add, remove, or rewrite visible glyphs, symbols, labels, or words, and do not change their order.
 Body output must still preserve the exact normalized visible HTML token sequence: do not split or merge a token or change token order; script, style, and template content is excluded.
 Body updates must use classes plus the authorized slide_css: do not use inline style, hidden, or aria-hidden attributes, and do not add script, style, or template elements.
@@ -643,19 +737,18 @@ Do not set font or font-family in slide_css; preserve the shared Office-safe fon
 Do not use rejected or lossy native CSS properties, including filter, backdrop-filter, blend modes, animation, transition, box-shadow, text-shadow, letter-spacing, or opacity.
 Do not change generated list-marker semantics or set list-style, list-style-type, or list-style-image.
 Do not set display, overflow, overflow-x, or overflow-y in slide_css; preserve the authenticated layout and native text-extraction semantics.
-For visibility and color, use only the safe literal forms in the structured compiler contract; do not use var(), calc(), inheritance, or ambiguous values.
-Although the general compiler supports gradients, this sealed repair contract permits only opaque literal colors in background and background-color and forbids background-image.
-Every rule that sets a background on an existing selector whose matched element contains semantic text must co-declare one opaque literal color in that same rule with WCAG contrast of at least 4.5:1.
-A foreground inherited from another rule is not sufficient.
-The effective authored or authenticated inline foreground after CSS importance, specificity, source order, and inheritance must also meet the same contrast floor on the nearest effective authored background.
-Background rules proven to match decorative-only elements without text are exempt; the rendered native contrast gate remains authoritative for spatial overlap.
+The sealed candidate override lane retains only font-size, line-height, box-sizing:border-box, and simple border declarations.
+The author boundary strips every fill, background, text color, geometry, margin, padding, and other declaration before durable materialization.
+Literal border color is part of the retained border declaration. Spend the entire CSS budget on the retained hierarchy-and-framing lane.
+Use only finite literal values in that lane: unitless or px line-height, literal px border widths, and solid/dashed/dotted/double border styles.
+Use literal border colors and literal px or percentage border radii. Do not use variables, calc(), inheritance keywords, or !important.
 Do not use at-rules or nested CSS rules in slide_css; this is one fixed 1920x1080 canvas with no responsive or conditional repair variants.
-Use font-size only as one finite literal px value greater than 0 and no larger than 64px.
+Use font-size only as one finite literal px value from 12px through 64px.
 Every slide_css update must fit the compact_model_html_v2 limit of 1024 UTF-8 bytes.
-Use literal px values for left, top, width, and height, aligned exactly to native peer edges or centerlines; do not position or size with transforms, calc(), or percentage values.
+Do not attempt to move or resize native shapes; preserve the authenticated geometry and shared fill/text palette.
 Do not create full-slide raster replacements or semantic text inside generated images.
 {compiler_capability_prompt_excerpt()}
-The sealed repair contract overrides general gradient and conditional CSS capabilities: use only opaque literal colors for background and background-color, never use background-image, and never use at-rules or nested rules.
+The sealed repair contract overrides broader compiler capabilities: only font-size, line-height, box-sizing, and border declarations survive the author boundary; never use at-rules or nested rules.
 The provider-enforced strict output schema is the sole response format."""
 
 
@@ -729,14 +822,41 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
             "slide_css": {
                 "source_role": "slide_css",
                 "max_utf8_bytes": _COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES,
-                "geometry_properties": list(_SLIDE_CSS_GEOMETRY_PROPERTIES),
-                "geometry_value_format": "literal_px",
-                "alignment_rule": "exact_native_peer_edges_or_centers",
-                "forbidden_geometry_forms": [
-                    "transform",
-                    "calc()",
-                    "percentage",
-                ],
+                "retained_properties": sorted(_RETAINED_SLIDE_CSS_PROPERTIES),
+                "author_boundary_property_filter": "strip_all_unlisted_declarations",
+                "authenticated_baseline_policy": "require_semantically_empty_slide_css",
+                "fill_background_text_paint_updates_retained": False,
+                "geometry_updates_retained": False,
+                "retained_value_contract": {
+                    "font_size": {
+                        "unit": "px",
+                        "minimum_inclusive": int(_MIN_AUTHORED_FONT_SIZE_PX),
+                        "maximum_inclusive": int(_MAX_AUTHORED_FONT_SIZE_PX),
+                    },
+                    "line_height": {
+                        "unitless_range_inclusive": [
+                            _MIN_RETAINED_LINE_HEIGHT,
+                            _MAX_RETAINED_LINE_HEIGHT,
+                        ],
+                        "px_range_inclusive": [
+                            _MIN_RETAINED_LINE_HEIGHT_PX,
+                            _MAX_RETAINED_LINE_HEIGHT_PX,
+                        ],
+                    },
+                    "box_sizing": "border-box",
+                    "border_width_px_range_inclusive": [
+                        _MIN_RETAINED_BORDER_WIDTH_PX,
+                        _MAX_RETAINED_BORDER_WIDTH_PX,
+                    ],
+                    "border_styles": ["dashed", "dotted", "double", "solid"],
+                    "border_color": "literal_nontransparent_css_color",
+                    "border_radius": {
+                        "px_range_inclusive": [0, _MAX_RETAINED_BORDER_RADIUS_PX],
+                        "percentage_range_inclusive": [0, 50],
+                    },
+                    "important_allowed": False,
+                    "variables_or_calculations_allowed": False,
+                },
                 "forbidden_native_properties": sorted(
                     REJECTED_CSS_PROPERTIES
                     | LOSSY_CSS_PROPERTIES
@@ -768,7 +888,7 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                     "font_size": {
                         "allowed_single_token_type": "dimension",
                         "required_unit": "px",
-                        "minimum_exclusive": 0,
+                        "minimum_inclusive": int(_MIN_AUTHORED_FONT_SIZE_PX),
                         "maximum_inclusive": int(_MAX_AUTHORED_FONT_SIZE_PX),
                     },
                     "color": {
@@ -1606,9 +1726,121 @@ def _css_font_size_violates_candidate_contract(declaration: Any) -> bool:
         or not isinstance(value, (int, float))
         or isinstance(value, bool)
         or not math.isfinite(value)
-        or value <= 0
+        or value < _MIN_AUTHORED_FONT_SIZE_PX
         or value > _MAX_AUTHORED_FONT_SIZE_PX
     )
+
+
+def _finite_css_token_value(token: Any) -> float | None:
+    value = getattr(token, "value", None)
+    if (
+        isinstance(value, bool)
+        or not isinstance(value, (int, float))
+        or not math.isfinite(value)
+    ):
+        return None
+    return float(value)
+
+
+def _retained_line_height_token_is_safe(token: Any) -> bool:
+    value = _finite_css_token_value(token)
+    if value is None:
+        return False
+    if token.type == "number":
+        return _MIN_RETAINED_LINE_HEIGHT <= value <= _MAX_RETAINED_LINE_HEIGHT
+    if token.type != "dimension":
+        return False
+    return (
+        str(getattr(token, "unit", "")).casefold() == "px"
+        and _MIN_RETAINED_LINE_HEIGHT_PX
+        <= value
+        <= _MAX_RETAINED_LINE_HEIGHT_PX
+    )
+
+
+def _retained_border_width_token_is_safe(token: Any) -> bool:
+    value = _finite_css_token_value(token)
+    return (
+        token.type == "dimension"
+        and str(getattr(token, "unit", "")).casefold() == "px"
+        and value is not None
+        and _MIN_RETAINED_BORDER_WIDTH_PX
+        <= value
+        <= _MAX_RETAINED_BORDER_WIDTH_PX
+    )
+
+
+def _retained_border_radius_token_is_safe(token: Any) -> bool:
+    value = _finite_css_token_value(token)
+    if value is None:
+        return False
+    if token.type == "dimension":
+        return (
+            str(getattr(token, "unit", "")).casefold() == "px"
+            and 0 <= value <= _MAX_RETAINED_BORDER_RADIUS_PX
+        )
+    return token.type == "percentage" and 0 <= value <= 50
+
+
+def _retained_border_color_token_is_safe(token: Any) -> bool:
+    try:
+        color = parse_color(token)
+    except Exception:
+        return False
+    alpha = getattr(color, "alpha", None)
+    return (
+        not isinstance(alpha, bool)
+        and isinstance(alpha, (int, float))
+        and math.isfinite(alpha)
+        and alpha > 0
+    )
+
+
+def _retained_border_shorthand_is_safe(tokens: tuple[Any, ...]) -> bool:
+    kinds: set[str] = set()
+    for token in tokens:
+        if _retained_border_width_token_is_safe(token):
+            kind = "width"
+        elif token.type == "ident" and str(token.value).casefold() in _RETAINED_BORDER_STYLES:
+            kind = "style"
+        elif _retained_border_color_token_is_safe(token):
+            kind = "color"
+        else:
+            return False
+        if kind in kinds:
+            return False
+        kinds.add(kind)
+    return kinds == {"width", "style", "color"}
+
+
+def _retained_css_declaration_is_safe(declaration: Any) -> bool:
+    if declaration.type != "declaration" or bool(declaration.important):
+        return False
+    name = declaration.lower_name
+    if name not in _RETAINED_SLIDE_CSS_PROPERTIES:
+        return False
+    tokens = _significant_css_value_tokens(declaration)
+    if name == "font-size":
+        return not _css_font_size_violates_candidate_contract(declaration)
+    if name == "line-height":
+        return len(tokens) == 1 and _retained_line_height_token_is_safe(tokens[0])
+    if name == "box-sizing":
+        return _single_css_identifier(declaration) == "border-box"
+    if name in _RETAINED_BORDER_SHORTHAND_PROPERTIES:
+        return _retained_border_shorthand_is_safe(tokens)
+    if name in _RETAINED_BORDER_COLOR_PROPERTIES:
+        return len(tokens) == 1 and _retained_border_color_token_is_safe(tokens[0])
+    if name in _RETAINED_BORDER_STYLE_PROPERTIES:
+        return (
+            len(tokens) == 1
+            and tokens[0].type == "ident"
+            and str(tokens[0].value).casefold() in _RETAINED_BORDER_STYLES
+        )
+    if name in _RETAINED_BORDER_WIDTH_PROPERTIES:
+        return len(tokens) == 1 and _retained_border_width_token_is_safe(tokens[0])
+    if name in _RETAINED_BORDER_RADIUS_PROPERTIES:
+        return len(tokens) == 1 and _retained_border_radius_token_is_safe(tokens[0])
+    return False
 
 
 def _css_declaration_hides_text(declaration: Any) -> bool:
@@ -1825,8 +2057,96 @@ def _selector_arms(tokens: list[Any] | tuple[Any, ...]) -> tuple[str, ...]:
     return tuple(arms)
 
 
-def _stylesheet_selector_contract(value: str) -> tuple[tuple[str, bool], ...] | None:
-    selectors: list[tuple[str, bool]] = []
+def _selector_uses_only_manifest_atoms(
+    selector: str,
+    inventory: dict[str, list[str]],
+) -> bool:
+    tags = set(inventory["tags"])
+    casefold_tags = {tag.casefold() for tag in tags}
+    classes = set(inventory["classes"])
+    ids = set(inventory["ids"])
+    saw_manifest_atom = False
+
+    def validate(tokens: list[Any] | tuple[Any, ...]) -> bool:
+        nonlocal saw_manifest_atom
+        previous: Any | None = None
+        for token in tokens:
+            if token.type in {"comment", "whitespace"}:
+                continue
+            if token.type == "literal":
+                if token.value == "*" or (
+                    token.value == ":"
+                    and previous is not None
+                    and previous.type == "literal"
+                    and previous.value == ":"
+                ):
+                    return False
+                previous = token
+                continue
+            if token.type == "ident":
+                value = str(token.value)
+                if (
+                    previous is not None
+                    and previous.type == "literal"
+                    and previous.value == "."
+                ):
+                    if value not in classes:
+                        return False
+                    saw_manifest_atom = True
+                elif (
+                    previous is not None
+                    and previous.type == "literal"
+                    and previous.value == ":"
+                ):
+                    if value.casefold() not in _ALLOWED_RETAINED_SELECTOR_PSEUDO_CLASSES:
+                        return False
+                else:
+                    if value.casefold() not in casefold_tags:
+                        return False
+                    saw_manifest_atom = True
+                previous = token
+                continue
+            if token.type == "hash" and bool(getattr(token, "is_identifier", False)):
+                if str(token.value) not in ids:
+                    return False
+                saw_manifest_atom = True
+                previous = token
+                continue
+            if token.type == "function":
+                if not (
+                    previous is not None
+                    and previous.type == "literal"
+                    and previous.value == ":"
+                ):
+                    return False
+                name = str(token.lower_name).casefold()
+                if name not in _ALLOWED_RETAINED_SELECTOR_FUNCTIONS:
+                    return False
+                if name in {"is", "not", "where"}:
+                    if not validate(tuple(token.arguments)):
+                        return False
+                else:
+                    expression = tinycss2.serialize(token.arguments).strip().casefold()
+                    if re.fullmatch(r"(?:odd|even|[1-9][0-9]*)", expression) is None:
+                        return False
+                previous = token
+                continue
+            # Attribute selectors and every other block/token form are outside
+            # the authenticated tag/class/id selector inventory contract.
+            return False
+        return True
+
+    try:
+        tokens = tinycss2.parse_component_value_list(selector)
+    except Exception:
+        return False
+    return validate(tuple(tokens)) and saw_manifest_atom
+
+
+def _stylesheet_selector_contract(
+    value: str,
+) -> tuple[tuple[tuple[str, ...], bool], ...] | None:
+    selectors: list[tuple[tuple[str, ...], bool]] = []
 
     def collect(rules: list[Any]) -> None:
         for rule in rules:
@@ -1847,9 +2167,8 @@ def _stylesheet_selector_contract(value: str) -> tuple[tuple[str, bool], ...] | 
                     declaration.lower_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
                     for declaration in declarations
                 )
-                selectors.extend(
-                    (selector, has_geometry)
-                    for selector in _selector_arms(list(rule.prelude))
+                selectors.append(
+                    (_selector_arms(list(rule.prelude)), has_geometry)
                 )
                 if content is not None:
                     nested = [
@@ -1892,6 +2211,8 @@ def _stylesheet_selector_contract(value: str) -> tuple[tuple[str, bool], ...] | 
 def _candidate_css_targets_manifest_bodies(
     candidate: DeckRepairCandidate,
     authorized_sources: tuple[RepairSourceContext, ...],
+    *,
+    require_geometry: bool = True,
 ) -> bool:
     body_inventories = {
         source.selector: source.text
@@ -1905,24 +2226,31 @@ def _candidate_css_targets_manifest_bodies(
         selector_contract = _stylesheet_selector_contract(update.content)
         if body is None or not selector_contract:
             return False
+        selector_inventory = _body_selector_inventory(body)
         try:
-            soup = BeautifulSoup(
-                f"<html><body>{body}</body></html>",
-                "html.parser",
-            )
+            soup = BeautifulSoup(body, "html.parser")
         except Exception:
             return False
-        matched_geometry = False
-        for selector, has_geometry in selector_contract:
-            if not has_geometry:
+        matched_rule = False
+        for selector_arms, has_geometry in selector_contract:
+            if require_geometry and not has_geometry:
                 continue
-            try:
-                if soup.select(selector):
-                    matched_geometry = True
-                    break
-            except Exception:
-                continue
-        if not matched_geometry:
+            matched_rule = True
+            arm_matches = False
+            for selector in selector_arms:
+                if not _selector_uses_only_manifest_atoms(
+                    selector,
+                    selector_inventory,
+                ):
+                    return False
+                try:
+                    if soup.select(selector):
+                        arm_matches = True
+                except Exception:
+                    return False
+            if not arm_matches:
+                return False
+        if not matched_rule:
             return False
     return True
 
@@ -2090,6 +2418,53 @@ def _candidate_with_manifest_body_sources(
     return DeckRepairCandidate.model_validate(payload)
 
 
+def _retained_slide_css(value: str) -> str:
+    rules = _stylesheet_qualified_rules(value)
+    if rules is None:
+        raise ValueError("candidate slide CSS is invalid")
+    retained_rules: list[str] = []
+    for rule in rules:
+        declarations = tuple(
+            item
+            for item in tinycss2.parse_declaration_list(
+                rule.content,
+                skip_comments=True,
+                skip_whitespace=True,
+            )
+            if _retained_css_declaration_is_safe(item)
+        )
+        if not declarations:
+            continue
+        selector = tinycss2.serialize(rule.prelude).strip()
+        if not selector:
+            raise ValueError("candidate slide CSS selector is invalid")
+        retained_rules.append(
+            f"{selector}{{{tinycss2.serialize(declarations).strip()}}}"
+        )
+    retained = "".join(retained_rules)
+    if not retained:
+        raise ValueError("candidate slide CSS has no retained declarations")
+    return retained
+
+
+def _candidate_with_retained_slide_css(
+    candidate: DeckRepairCandidate,
+) -> DeckRepairCandidate:
+    updates = [
+        update.model_copy(
+            update={"content": _retained_slide_css(update.content)}
+        )
+        if update.source_role == "slide_css"
+        else update
+        for update in candidate.source_updates
+    ]
+    payload = candidate.model_dump(mode="python")
+    payload["source_updates"] = [
+        update.model_dump(mode="python") for update in updates
+    ]
+    return DeckRepairCandidate.model_validate(payload)
+
+
 def _validate_invocation_result(
     *,
     result: object,
@@ -2158,6 +2533,9 @@ def _validate_invocation_result(
             result.candidate,
             context.authorized_sources,
         )
+        canonical_candidate = _candidate_with_retained_slide_css(
+            canonical_candidate,
+        )
     except Exception:
         raise DeckRepairAuthorError(
             "candidate_invalid",
@@ -2174,10 +2552,20 @@ def _validate_invocation_result(
     if not _candidate_css_targets_manifest_bodies(
         canonical_candidate,
         context.authorized_sources,
+        require_geometry=False,
     ):
         raise DeckRepairAuthorError(
             "candidate_invalid",
             trace_error_code="candidate_css_targets_invalid",
+        )
+    if not _candidate_fits_compact_v2_source_contract(
+        canonical_candidate,
+        context.authorized_sources,
+        context.read_only_sources,
+    ):
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_source_contract_invalid",
         )
     if (
         LOCKED_DQ1_RUN_CAP_RESERVE_USD

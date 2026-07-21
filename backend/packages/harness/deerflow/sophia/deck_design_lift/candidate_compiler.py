@@ -1463,6 +1463,11 @@ def _run_candidate_build(
             style_profile=(inputs.baseline.build_record.get("style_profile") if isinstance(inputs.baseline.build_record.get("style_profile"), dict) else {}),
             design_plan=inputs.baseline.design_plan_record,
             creative_plan=inputs.baseline.creative_plan_record,
+            native_lint_slide_indices=tuple(
+                int(_SLIDE_SELECTOR_RE.fullmatch(selector).group(1)) - 1
+                for selector in inputs.changed_selectors
+                if selector != DECK_STYLE_ROOT_SELECTOR
+            ),
         )
     return runtime, result
 
