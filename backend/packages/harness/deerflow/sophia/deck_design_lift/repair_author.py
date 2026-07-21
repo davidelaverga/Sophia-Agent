@@ -14,6 +14,7 @@ import base64
 import hashlib
 import io
 import json
+import math
 import re
 import time
 import unicodedata
@@ -102,6 +103,10 @@ _FORBIDDEN_CANDIDATE_BODY_ATTRIBUTES = frozenset(
     {"aria-hidden", "hidden", "style"}
 )
 _VISIBLE_HTML_TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]")
+_MAX_AUTHORED_FONT_SIZE_PX = 64.0
+_FORBIDDEN_LAYOUT_EXTRACTION_PROPERTIES = frozenset(
+    {"display", "overflow", "overflow-x", "overflow-y"}
+)
 _SAFE_DISPLAY_IDENTIFIERS = frozenset(
     {
         "block",
@@ -583,8 +588,9 @@ Do not use CSS text-transform or the all shorthand; either can change inherited 
 Do not set font or font-family in slide_css; preserve the shared Office-safe font contract.
 Do not use rejected or lossy native CSS properties, including filter, backdrop-filter, blend modes, animation, transition, box-shadow, text-shadow, letter-spacing, or opacity.
 Do not change generated list-marker semantics or set list-style, list-style-type, or list-style-image.
-For display, visibility, font-size, and color, use only the safe literal forms in the structured compiler contract; do not use var(), calc(), inheritance, or ambiguous values.
-Ordinary overflow and layout declarations are allowed only when they do not conceal semantic content.
+Do not set display, overflow, overflow-x, or overflow-y in slide_css; preserve the authenticated layout and native text-extraction semantics.
+For visibility and color, use only the safe literal forms in the structured compiler contract; do not use var(), calc(), inheritance, or ambiguous values.
+Use font-size only as one finite literal px value greater than 0 and no larger than 64px.
 Every slide_css update must fit the compact_model_html_v2 limit of 1024 UTF-8 bytes.
 Use literal px values for left, top, width, and height, aligned exactly to native peer edges or centerlines; do not position or size with transforms, calc(), or percentage values.
 Do not create full-slide raster replacements or semantic text inside generated images.
@@ -680,9 +686,15 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                         "allowed_single_identifiers": ["none", "normal"],
                     },
                     "display": {
-                        "allowed_single_identifiers": sorted(
-                            _SAFE_DISPLAY_IDENTIFIERS
-                        ),
+                        "allowed": False,
+                    },
+                    "overflow": {
+                        "allowed": False,
+                        "property_names": [
+                            "overflow",
+                            "overflow-x",
+                            "overflow-y",
+                        ],
                     },
                     "visibility": {
                         "allowed_single_identifiers": sorted(
@@ -693,8 +705,10 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                         "allowed": False,
                     },
                     "font_size": {
-                        "allowed_single_token_types": ["dimension", "percentage"],
+                        "allowed_single_token_type": "dimension",
+                        "required_unit": "px",
                         "minimum_exclusive": 0,
+                        "maximum_inclusive": int(_MAX_AUTHORED_FONT_SIZE_PX),
                     },
                     "color": {
                         "parser": "css_color_3",
@@ -715,7 +729,7 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                     "off_canvas",
                     "css_generated_content",
                 ],
-                "ordinary_overflow_and_layout_allowed": True,
+                "display_and_overflow_allowed": False,
             },
         },
         "deck_instruction": program.deck_instruction,
@@ -909,6 +923,22 @@ def _css_color_is_transparent_or_ambiguous(declaration: Any) -> bool:
     return not isinstance(alpha, (int, float)) or alpha <= 0
 
 
+def _css_font_size_violates_candidate_contract(declaration: Any) -> bool:
+    tokens = _significant_css_value_tokens(declaration)
+    if len(tokens) != 1 or tokens[0].type != "dimension":
+        return True
+    unit = str(getattr(tokens[0], "unit", "")).casefold()
+    value = getattr(tokens[0], "value", None)
+    return (
+        unit != "px"
+        or not isinstance(value, (int, float))
+        or isinstance(value, bool)
+        or not math.isfinite(value)
+        or value <= 0
+        or value > _MAX_AUTHORED_FONT_SIZE_PX
+    )
+
+
 def _css_declaration_hides_text(declaration: Any) -> bool:
     if declaration.type != "declaration":
         return False
@@ -948,6 +978,18 @@ def _css_declaration_generates_or_transforms_text(declaration: Any) -> bool:
     }:
         return True
     return False
+
+
+def _css_declaration_violates_candidate_contract(declaration: Any) -> bool:
+    if declaration.type != "declaration":
+        return False
+    if declaration.lower_name in _FORBIDDEN_LAYOUT_EXTRACTION_PROPERTIES:
+        return True
+    if declaration.lower_name == "font-size":
+        return _css_font_size_violates_candidate_contract(declaration)
+    return _css_declaration_hides_text(
+        declaration
+    ) or _css_declaration_generates_or_transforms_text(declaration)
 
 
 def _stylesheet_declarations(value: str) -> tuple[Any, ...]:
@@ -1013,8 +1055,7 @@ def _stylesheet_declarations(value: str) -> tuple[Any, ...]:
 
 def _slide_css_has_forbidden_text_declaration(value: str) -> bool:
     return any(
-        _css_declaration_hides_text(declaration)
-        or _css_declaration_generates_or_transforms_text(declaration)
+        _css_declaration_violates_candidate_contract(declaration)
         for declaration in _stylesheet_declarations(value)
     )
 

@@ -418,6 +418,46 @@ def _baseline(instrument: DeckQualityRuntimeInstrument) -> DeckCandidateBaseline
     )
 
 
+def _visible_text_slide(selector: str, text: str) -> VisibleTextSlide:
+    return VisibleTextSlide(
+        selector=selector,
+        text=text,
+        source_hash=canonical_sha256({"selector": selector, "text": text}),
+    )
+
+
+def _baseline_with_first_slide_text(
+    instrument: DeckQualityRuntimeInstrument,
+    text: str,
+) -> DeckCandidateBaseline:
+    baseline = _baseline(instrument)
+    return baseline.model_copy(
+        update={
+            "visible_text": (
+                _visible_text_slide("slide:1", text),
+                baseline.visible_text[1],
+            )
+        }
+    )
+
+
+def _stub_candidate_visible_text(
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    baseline: DeckCandidateBaseline,
+    first_slide_text: str,
+) -> None:
+    candidate = (
+        _visible_text_slide("slide:1", first_slide_text),
+        baseline.visible_text[1],
+    )
+    monkeypatch.setattr(
+        candidate_module,
+        "_candidate_visible_text",
+        lambda _content: candidate,
+    )
+
+
 def _request(
     instrument: DeckQualityRuntimeInstrument,
 ) -> DeckCandidateCompileRequest:
@@ -705,6 +745,111 @@ class _FakeDeckService:
                 "lint_fix_success": True,
                 "lint_residue_count": 0,
             },
+        )
+
+
+def test_content_proof_accepts_visible_token_boundary_regrouping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instrument = _instrument()
+    baseline = _baseline_with_first_slide_text(
+        instrument,
+        "PSI \ufb01delity:\ncontrol loop.",
+    )
+    _stub_candidate_visible_text(
+        monkeypatch,
+        baseline=baseline,
+        first_slide_text="PSI fidelity: control\nloop.",
+    )
+
+    proof = candidate_module._content_proof(
+        baseline=baseline,
+        candidate_pptx=b"candidate",
+        selectors=("slide:1", "slide:2"),
+        candidate_editability_score=0.9,
+    )
+
+    assert proof.required_content_preserved is True
+
+
+def test_content_proof_rejects_visible_token_reordering(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    instrument = _instrument()
+    baseline = _baseline_with_first_slide_text(
+        instrument,
+        "PSI control loop.",
+    )
+    _stub_candidate_visible_text(
+        monkeypatch,
+        baseline=baseline,
+        first_slide_text="PSI loop control.",
+    )
+
+    with pytest.raises(DeckCandidateCompilationError, match="content_changed"):
+        candidate_module._content_proof(
+            baseline=baseline,
+            candidate_pptx=b"candidate",
+            selectors=("slide:1", "slide:2"),
+            candidate_editability_score=0.9,
+        )
+
+
+@pytest.mark.parametrize(
+    "candidate_text",
+    ("PSI control loop now.", "PSI control."),
+    ids=("addition", "removal"),
+)
+def test_content_proof_rejects_visible_token_addition_or_removal(
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_text: str,
+) -> None:
+    instrument = _instrument()
+    baseline = _baseline_with_first_slide_text(
+        instrument,
+        "PSI control loop.",
+    )
+    _stub_candidate_visible_text(
+        monkeypatch,
+        baseline=baseline,
+        first_slide_text=candidate_text,
+    )
+
+    with pytest.raises(DeckCandidateCompilationError, match="content_changed"):
+        candidate_module._content_proof(
+            baseline=baseline,
+            candidate_pptx=b"candidate",
+            selectors=("slide:1", "slide:2"),
+            candidate_editability_score=0.9,
+        )
+
+
+@pytest.mark.parametrize(
+    "candidate_text",
+    ("psi control loop.", "PSI control loop!"),
+    ids=("case", "punctuation"),
+)
+def test_content_proof_rejects_visible_token_case_or_punctuation_changes(
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_text: str,
+) -> None:
+    instrument = _instrument()
+    baseline = _baseline_with_first_slide_text(
+        instrument,
+        "PSI control loop.",
+    )
+    _stub_candidate_visible_text(
+        monkeypatch,
+        baseline=baseline,
+        first_slide_text=candidate_text,
+    )
+
+    with pytest.raises(DeckCandidateCompilationError, match="content_changed"):
+        candidate_module._content_proof(
+            baseline=baseline,
+            candidate_pptx=b"candidate",
+            selectors=("slide:1", "slide:2"),
+            candidate_editability_score=0.9,
         )
 
 

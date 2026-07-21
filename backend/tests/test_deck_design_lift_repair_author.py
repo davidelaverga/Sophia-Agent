@@ -594,7 +594,8 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "list-style, list-style-type, or list-style-image" in system_prompt
     assert "use only the safe literal forms" in system_prompt
     assert "do not use var(), calc(), inheritance, or ambiguous values" in system_prompt
-    assert "Ordinary overflow and layout declarations are allowed" in system_prompt
+    assert "Do not set display, overflow, overflow-x, or overflow-y" in system_prompt
+    assert "no larger than 64px" in system_prompt
     assert "campaign's only repair" in system_prompt
     assert "decisive, presentation-scale design lift" in system_prompt
     assert "Treat every expected improvement as a required visible outcome" in system_prompt
@@ -692,17 +693,14 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                     "allowed_single_identifiers": ["none", "normal"],
                 },
                 "display": {
-                    "allowed_single_identifiers": [
-                        "block",
-                        "contents",
-                        "flex",
-                        "flow-root",
-                        "grid",
-                        "initial",
-                        "inline",
-                        "inline-block",
-                        "list-item",
-                        "table",
+                    "allowed": False,
+                },
+                "overflow": {
+                    "allowed": False,
+                    "property_names": [
+                        "overflow",
+                        "overflow-x",
+                        "overflow-y",
                     ],
                 },
                 "visibility": {
@@ -712,8 +710,10 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                     "allowed": False,
                 },
                 "font_size": {
-                    "allowed_single_token_types": ["dimension", "percentage"],
+                    "allowed_single_token_type": "dimension",
+                    "required_unit": "px",
                     "minimum_exclusive": 0,
+                    "maximum_inclusive": 64,
                 },
                 "color": {
                     "parser": "css_color_3",
@@ -734,7 +734,7 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                 "off_canvas",
                 "css_generated_content",
             ],
-            "ordinary_overflow_and_layout_allowed": True,
+            "display_and_overflow_allowed": False,
         },
     }
 
@@ -840,9 +840,7 @@ def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:
     request = _request(
         program=_program(source_roles=("body", "slide_css")),
     )
-    model_css = (
-        "section{left:96px;top:112px;width:704px;height:336px;display:grid}"
-    )
+    model_css = "section{left:96px;top:112px;width:704px;height:336px}"
     authored = DeckRepairCandidate(
         source_updates=(
             SourceUpdate(
@@ -1301,7 +1299,7 @@ def test_slide_css_candidate_must_fit_existing_compact_v2_byte_limit() -> None:
     assert len(invoker.invoke_calls) == 1
 
 
-def test_slide_css_allows_non_concealing_content_values_and_ordinary_layout() -> None:
+def test_slide_css_allows_safe_content_visibility_color_and_font_size_boundary() -> None:
     request = _request(program=_program())
     context = _context(request=request)
     accepted = DeckRepairCandidate(
@@ -1318,9 +1316,9 @@ def test_slide_css_allows_non_concealing_content_values_and_ordinary_layout() ->
                 expected_source_hash=SLIDE_CSS_HASH,
                 content=(
                     SLIDE_CSS_TEXT
-                    + "section{overflow:hidden;position:absolute;content:normal;"
-                    "display:flex;visibility:visible;"
-                    "font-size:12px;"
+                    + "section{position:absolute;content:normal;"
+                    "visibility:visible;"
+                    "font-size:64px;"
                     "color:rgba(0,0,0,.5)}"
                 ),
             ),
@@ -1393,7 +1391,17 @@ def test_slide_css_candidate_rejects_native_lossy_or_font_overrides(
     [
         'content:"+"',
         "display:none",
+        "display:block",
+        "display:inline-block",
+        "display:flex",
         "display:var(--display)",
+        "overflow:hidden",
+        "overflow:clip",
+        "overflow:auto",
+        "overflow:scroll",
+        "overflow:visible",
+        "overflow-x:hidden",
+        "overflow-y:auto",
         "visibility:hidden",
         "visibility:collapse",
         "visibility:var(--visibility)",
@@ -1404,6 +1412,12 @@ def test_slide_css_candidate_rejects_native_lossy_or_font_overrides(
         "opacity:calc(1 - 1)",
         "font-size:0rem",
         "font-size:-1px",
+        "font-size:65px",
+        "font-size:70px",
+        "font-size:84px",
+        "font-size:12pt",
+        "font-size:2rem",
+        "font-size:100%",
         "font-size:var(--size)",
         "font-size:calc(12px - 12px)",
         "color:transparent",
@@ -1421,7 +1435,17 @@ def test_slide_css_candidate_rejects_native_lossy_or_font_overrides(
     ids=(
         "generated-content",
         "display-none",
+        "display-block",
+        "display-inline-block",
+        "display-flex",
         "display-variable",
+        "overflow-hidden",
+        "overflow-clip",
+        "overflow-auto",
+        "overflow-scroll",
+        "overflow-visible",
+        "overflow-x-hidden",
+        "overflow-y-auto",
         "visibility-hidden",
         "visibility-collapse",
         "visibility-variable",
@@ -1432,6 +1456,12 @@ def test_slide_css_candidate_rejects_native_lossy_or_font_overrides(
         "opacity-calculation",
         "font-size-zero",
         "font-size-negative",
+        "font-size-over-boundary",
+        "font-size-observed-70",
+        "font-size-observed-84",
+        "font-size-points",
+        "font-size-relative",
+        "font-size-percentage",
         "font-size-variable",
         "font-size-calculation",
         "transparent-color",

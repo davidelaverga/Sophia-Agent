@@ -26,7 +26,6 @@ import re
 import tempfile
 import unicodedata
 import zipfile
-from collections import Counter
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from functools import partial
@@ -88,6 +87,7 @@ MAX_CANDIDATE_PACKAGE_MEMBER_BYTES = 64 * 1024 * 1024
 MAX_CANDIDATE_PACKAGE_UNCOMPRESSED_BYTES = 128 * 1024 * 1024
 MAX_NATIVE_RECORD_BYTES = 2 * 1024 * 1024
 MAX_JSON_INPUT_BYTES = 4 * 1024 * 1024
+_VISIBLE_TEXT_TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]")
 RENDER_COMPARE_WIDTH = 480
 RENDER_COMPARE_HEIGHT = 270
 MAX_UNCHANGED_RENDER_MEAN_DELTA = 8.0
@@ -1189,9 +1189,11 @@ def _candidate_visible_text(content: bytes) -> tuple[VisibleTextSlide, ...]:
         raise DeckCandidateCompilationError("candidate_artifact_invalid") from None
 
 
-def _normalized_text_counter(value: str) -> Counter[str]:
-    lines = (" ".join(unicodedata.normalize("NFKC", line).split()) for line in value.splitlines())
-    return Counter(line for line in lines if line)
+def _normalized_text_token_sequence(value: str) -> tuple[str, ...]:
+    """Return ordered visible-text tokens while ignoring layout whitespace."""
+
+    normalized = unicodedata.normalize("NFKC", value)
+    return tuple(_VISIBLE_TEXT_TOKEN_PATTERN.findall(normalized))
 
 
 def _content_proof(
@@ -1204,7 +1206,11 @@ def _content_proof(
     candidate = _candidate_visible_text(candidate_pptx)
     baseline_by_selector = {item.selector: item for item in baseline.visible_text}
     candidate_by_selector = {item.selector: item for item in candidate}
-    text_preserved = tuple(candidate_by_selector) == selectors and all(_normalized_text_counter(candidate_by_selector[selector].text) == _normalized_text_counter(baseline_by_selector[selector].text) for selector in selectors)
+    text_preserved = tuple(candidate_by_selector) == selectors and all(
+        _normalized_text_token_sequence(candidate_by_selector[selector].text)
+        == _normalized_text_token_sequence(baseline_by_selector[selector].text)
+        for selector in selectors
+    )
     raw_baseline_score = baseline.build_record.get("native_editability_score")
     baseline_score = float(raw_baseline_score) if isinstance(raw_baseline_score, (int, float)) and not isinstance(raw_baseline_score, bool) else 0.0
     native_preserved = candidate_editability_score + MAX_NATIVE_EDITABILITY_DROP >= baseline_score
