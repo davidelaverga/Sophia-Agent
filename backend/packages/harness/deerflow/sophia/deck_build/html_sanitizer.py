@@ -10,6 +10,7 @@ import tinycss2
 from tinycss2.color3 import parse_color
 
 from deerflow.sophia.deck_build.compiler_capabilities import (
+    LOSSY_CSS_PROPERTIES,
     lossy_css_in_html,
     meta_attributes_are_inert,
     unsupported_css_in_html,
@@ -679,7 +680,28 @@ def validate_and_sanitize_slide_html(
         validation.errors.append(f"unsupported_native_deck_tag: {tag}")
     for prop in validation.unsupported_css:
         validation.errors.append(f"unsupported_native_deck_css: {prop}")
-    for prop in lossy_css_in_html(source):
+    authored_lossy_css = set(lossy_css_in_html(source)) | set(
+        _lossy_css_in_scanner(scanner)
+    )
+    sanitized = _sanitize_css(source)
+    sanitized_scanner = _HtmlScanner()
+    try:
+        sanitized_scanner.feed(sanitized)
+    except Exception:  # noqa: BLE001 - existing parser errors already fail closed.
+        sanitized_scanner = _HtmlScanner()
+    remaining_lossy_css = set(lossy_css_in_html(sanitized)) | set(
+        _lossy_css_in_scanner(sanitized_scanner)
+    )
+    for prop in sorted(authored_lossy_css):
+        if prop == "letter-spacing" and prop not in remaining_lossy_css:
+            # PowerPoint's native text model cannot reproduce authored CSS
+            # tracking faithfully.  Unlike opacity or shadows, however,
+            # dropping tracking is mechanically safe and does not remove
+            # semantic content.  Normalize it at the trust boundary so a
+            # cosmetic declaration cannot spend the model's one bounded
+            # service-quality repair before the deck reaches native lint.
+            validation.warnings.append("stripped_lossy_native_deck_css: letter-spacing")
+            continue
         validation.errors.append(f"lossy_native_deck_css: {prop}")
     _validate_source_elements(scanner.source_elements, validation)
     _validate_canvas(source, scanner, validation)
@@ -687,7 +709,6 @@ def validate_and_sanitize_slide_html(
     _validate_position_offsets(scanner.inline_style_elements, scanner.style_blocks, validation)
     _validate_css(scanner.styles, validation)
     _validate_image_refs(validation.image_refs, allowed_asset_refs, validation)
-    sanitized = _sanitize_css(source)
     validation.sanitized = bool(inferred_role_count or removed_required_count) or sanitized != source
     validation.valid = not validation.errors
     return sanitized, validation
@@ -1329,8 +1350,236 @@ def _canonical_planned_asset_ref(ref: str) -> str | None:
 def _sanitize_css(source: str) -> str:
     sanitized = re.sub(r"\bbox-shadow\s*:\s*[^;{}]+;?", "", source, flags=re.I)
     sanitized = re.sub(r"\btext-shadow\s*:\s*[^;{}]+;?", "", sanitized, flags=re.I)
-    sanitized = re.sub(r"\bletter-spacing\s*:\s*-\d+(?:\.\d+)?(?:px|em|rem);?", "letter-spacing: 0;", sanitized, flags=re.I)
+    return _strip_scoped_letter_spacing(sanitized)
+
+
+def _strip_scoped_letter_spacing(source: str) -> str:
+    """Remove only parsed CSS declarations, never matching visible HTML text."""
+
+    normalizer = _ScopedLetterSpacingNormalizer(source)
+    try:
+        normalizer.feed(source)
+        normalizer.close()
+    except Exception:  # noqa: BLE001 - remaining lossy CSS fails validation.
+        return source
+    sanitized = source
+    for start, end, replacement in reversed(normalizer.replacements):
+        sanitized = f"{sanitized[:start]}{replacement}{sanitized[end:]}"
     return sanitized
+
+
+class _ScopedLetterSpacingNormalizer(HTMLParser):
+    """Locate authored CSS spans while preserving all non-CSS source bytes."""
+
+    def __init__(self, source: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self.source = source
+        self.replacements: list[tuple[int, int, str]] = []
+        self.style_content_starts: list[int] = []
+        self.line_offsets: list[int] = []
+        offset = 0
+        for line in source.splitlines(keepends=True):
+            self.line_offsets.append(offset)
+            offset += len(line)
+        if not self.line_offsets:
+            self.line_offsets.append(0)
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        self._sanitize_start_tag(tag, push_style=True)
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        del attrs
+        self._sanitize_start_tag(tag, push_style=False)
+
+    def _sanitize_start_tag(self, tag: str, *, push_style: bool) -> None:
+        raw_tag = self.get_starttag_text() or ""
+        start = self._current_offset()
+        if start < 0 or self.source[start : start + len(raw_tag)] != raw_tag:
+            return
+        normalized_tag = _strip_letter_spacing_from_style_attributes(raw_tag)
+        if normalized_tag != raw_tag:
+            self.replacements.append((start, start + len(raw_tag), normalized_tag))
+        if push_style and tag.lower() == "style":
+            self.style_content_starts.append(start + len(raw_tag))
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "style" or not self.style_content_starts:
+            return
+        start = self.style_content_starts.pop()
+        end = self._current_offset()
+        if end < start:
+            return
+        css = self.source[start:end]
+        sanitized, removed = _strip_letter_spacing_from_stylesheet(css)
+        if removed:
+            self.replacements.append((start, end, sanitized))
+
+    def _current_offset(self) -> int:
+        line, column = self.getpos()
+        if line <= 0 or line > len(self.line_offsets):
+            return -1
+        return self.line_offsets[line - 1] + column
+
+
+def _strip_letter_spacing_from_style_attributes(raw_tag: str) -> str:
+    replacements: list[tuple[int, int, str]] = []
+    for name, _value, start, end in _start_tag_attributes(raw_tag):
+        if name != "style":
+            continue
+        raw_attribute = raw_tag[start:end]
+        equals = raw_attribute.find("=")
+        if equals < 0:
+            continue
+        value_start = equals + 1
+        while value_start < len(raw_attribute) and raw_attribute[value_start].isspace():
+            value_start += 1
+        if value_start >= len(raw_attribute):
+            continue
+        quote = raw_attribute[value_start] if raw_attribute[value_start] in "\"'" else ""
+        if quote:
+            value_start += 1
+            value_end = raw_attribute.find(quote, value_start)
+            if value_end < 0:
+                continue
+        else:
+            value_end = value_start
+            while value_end < len(raw_attribute) and not raw_attribute[value_end].isspace():
+                value_end += 1
+        css = raw_attribute[value_start:value_end]
+        sanitized, removed = _strip_letter_spacing_from_declarations(css)
+        if not removed:
+            continue
+        normalized_attribute = (
+            f"{raw_attribute[:value_start]}{sanitized}{raw_attribute[value_end:]}"
+        )
+        replacements.append((start, end, normalized_attribute))
+    normalized_tag = raw_tag
+    for start, end, replacement in reversed(replacements):
+        normalized_tag = f"{normalized_tag[:start]}{replacement}{normalized_tag[end:]}"
+    return normalized_tag
+
+
+def _strip_letter_spacing_from_stylesheet(css: str) -> tuple[str, int]:
+    rules = tinycss2.parse_stylesheet(css, skip_comments=False, skip_whitespace=False)
+    removed = _strip_letter_spacing_from_rule_nodes(rules)
+    return (tinycss2.serialize(rules), removed) if removed else (css, 0)
+
+
+def _strip_letter_spacing_from_rule_nodes(rules: list[object]) -> int:
+    removed = 0
+    for rule in rules:
+        content = getattr(rule, "content", None)
+        if content is None:
+            continue
+        rule_type = getattr(rule, "type", None)
+        if rule_type == "qualified-rule":
+            sanitized, count = _strip_letter_spacing_from_declarations(
+                tinycss2.serialize(content)
+            )
+            if count:
+                rule.content = tinycss2.parse_component_value_list(
+                    sanitized,
+                    skip_comments=False,
+                )
+                removed += count
+            continue
+        if rule_type != "at-rule":
+            continue
+        nested_rules = tinycss2.parse_rule_list(
+            content,
+            skip_comments=False,
+            skip_whitespace=False,
+        )
+        if any(getattr(item, "type", None) in {"qualified-rule", "at-rule"} for item in nested_rules):
+            count = _strip_letter_spacing_from_rule_nodes(nested_rules)
+            if count:
+                rule.content = tinycss2.parse_component_value_list(
+                    tinycss2.serialize(nested_rules),
+                    skip_comments=False,
+                )
+                removed += count
+            continue
+        sanitized, count = _strip_letter_spacing_from_declarations(
+            tinycss2.serialize(content)
+        )
+        if count:
+            rule.content = tinycss2.parse_component_value_list(
+                sanitized,
+                skip_comments=False,
+            )
+            removed += count
+    return removed
+
+
+def _strip_letter_spacing_from_declarations(css: str) -> tuple[str, int]:
+    declarations = tinycss2.parse_declaration_list(
+        css,
+        skip_comments=False,
+        skip_whitespace=False,
+    )
+    retained = [
+        item
+        for item in declarations
+        if not (
+            getattr(item, "type", None) == "declaration"
+            and getattr(item, "lower_name", None) == "letter-spacing"
+        )
+    ]
+    removed = len(declarations) - len(retained)
+    return (tinycss2.serialize(retained), removed) if removed else (css, 0)
+
+
+def _lossy_css_in_scanner(scanner: _HtmlScanner) -> list[str]:
+    properties: set[str] = set()
+    for block in scanner.style_blocks:
+        rules = tinycss2.parse_stylesheet(
+            str(block.get("css") or ""),
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        properties.update(_declaration_names_from_rule_nodes(rules))
+    for element in scanner.inline_style_elements:
+        css = str(element.get("attrs", {}).get("style") or "")
+        declarations = tinycss2.parse_declaration_list(
+            css,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        properties.update(
+            str(item.lower_name)
+            for item in declarations
+            if getattr(item, "type", None) == "declaration"
+        )
+    return sorted(properties & LOSSY_CSS_PROPERTIES)
+
+
+def _declaration_names_from_rule_nodes(rules: list[object]) -> set[str]:
+    properties: set[str] = set()
+    for rule in rules:
+        content = getattr(rule, "content", None)
+        if content is None:
+            continue
+        rule_type = getattr(rule, "type", None)
+        declarations = tinycss2.parse_declaration_list(
+            content,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        properties.update(
+            str(item.lower_name)
+            for item in declarations
+            if getattr(item, "type", None) == "declaration"
+        )
+        if rule_type != "at-rule":
+            continue
+        nested_rules = tinycss2.parse_rule_list(
+            content,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        properties.update(_declaration_names_from_rule_nodes(nested_rules))
+    return properties
 
 
 def _first_px(source: str, prop: str) -> int | None:

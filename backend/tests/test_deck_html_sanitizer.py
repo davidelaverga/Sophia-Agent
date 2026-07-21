@@ -34,6 +34,45 @@ html, body { width: 1920px; height: 1080px; background: #0A0E14; }
     assert "box-shadow" not in sanitized
 
 
+def test_letter_spacing_is_stripped_without_spending_service_quality_repair() -> None:
+    html = """<!doctype html><html><head><style>
+html, body { width: 1920px; height: 1080px; background: #0A0E14; }
+.canvas { width: 1920px; height: 1080px; background: #0A0E14; }
+h1 { font-size: 72px; letter-spacing: -0.03em; --letter-spacing: 2px; content: "letter-spacing: 3px"; }
+</style></head><body><main class="canvas"><h1 style="letter-spacing: 1px; font-size: 72px">Title</h1><p>Use letter-spacing: 4px; when documenting CSS.</p></main></body></html>"""
+
+    sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+    assert result.sanitized is True
+    assert result.errors == []
+    assert result.warnings.count("stripped_lossy_native_deck_css: letter-spacing") == 1
+    assert "letter-spacing: -0.03em" not in sanitized
+    assert 'style="letter-spacing: 1px' not in sanitized
+    assert "font-size: 72px" in sanitized
+    assert "--letter-spacing: 2px" in sanitized
+    assert 'content: "letter-spacing: 3px"' in sanitized
+    assert "Use letter-spacing: 4px; when documenting CSS." in sanitized
+
+
+def test_encoded_letter_spacing_declaration_fails_closed() -> None:
+    for encoded_declaration in (
+        "letter-spacing&#58; 1px",
+        "letter&#45;spacing: 1px",
+    ):
+        html = f"""<!doctype html><html><head><style>
+html, body {{ width: 1920px; height: 1080px; background: #0A0E14; }}
+.canvas {{ width: 1920px; height: 1080px; background: #0A0E14; }}
+</style></head><body><main class="canvas"><h1 style="{encoded_declaration}; font-size: 72px">Title</h1></main></body></html>"""
+
+        sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+        assert result.valid is False
+        assert result.sanitized is False
+        assert "lossy_native_deck_css: letter-spacing" in result.errors
+        assert encoded_declaration in sanitized
+
+
 def test_rejects_active_and_external_html() -> None:
     html = """<!doctype html><html><head><style>
 html, body { width: 1920px; height: 1080px; background: #fff; }
