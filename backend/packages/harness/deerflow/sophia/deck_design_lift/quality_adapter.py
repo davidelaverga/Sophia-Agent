@@ -182,8 +182,8 @@ _SKILL_EXCERPT_SPECS = (
     _SkillExcerptSpec(
         route_key="sophia_deck_craft",
         path="skills/public/sophia/deck_craft.md",
-        source_hash="b1259666b40d5f281ffe0daf4f13c3d307901452118e5127c319fa9875a1719c",
-        excerpt_hash="d421096f0ff3b0d0fc3224474d223aa76bfbfc5e02e46e1eac9541695607b495",
+        source_hash="5cd80c328b922283c2f2e1319deac8ea458c90293c808b5623754f454dd6ece4",
+        excerpt_hash="8127322a793d3daaf483e5e3e5c69df4f6084fda7841f8800b65584e61047052",
         first_line=79,
         last_line=109,
     ),

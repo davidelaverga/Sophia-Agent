@@ -68,8 +68,16 @@ def test_compact_v2_body_limit_is_consistent_across_authoritative_prompt_surface
         encoding="utf-8"
     )
 
-    assert "each `html_body` under 4 KiB" in ppt_skill
-    assert "each `html_body` <= 4 KiB" in deck_craft
+    assert "target each `html_body` under 4 KiB" in ppt_skill
+    assert "combined `html_body` bytes must stay within 4 KiB times the slide count" in ppt_skill
+    assert "slides may borrow unused body budget" in ppt_skill
+    assert "each slide capped at the hard 6 KiB ceiling" in ppt_skill
+    assert "target each `html_body` <= 4 KiB" in deck_craft
+    assert "combined `html_body` bytes <= 4 KiB times slide count" in deck_craft
+    assert "slides may borrow unused body budget" in deck_craft
+    assert "each slide capped at 6 KiB" in deck_craft
+    assert "one slide may borrow" not in ppt_skill
+    assert "one slide may borrow" not in deck_craft
     assert "3 KiB" not in ppt_skill
     assert "3 KiB" not in deck_craft
 

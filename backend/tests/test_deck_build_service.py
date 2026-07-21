@@ -80,6 +80,29 @@ def test_deck_service_reserves_terminal_cleanup_from_shared_deadline(monkeypatch
     assert deck_service._remaining_deadline_seconds(runtime) == 270
 
 
+def test_deck_service_v2_body_pool_matches_typed_contract() -> None:
+    deck = SimpleNamespace(
+        deck_stylesheet="main{font-family:Calibri,Arial,sans-serif}",
+        deck_authoring_contract="compact_model_html_v2",
+    )
+
+    deck_service._validate_v2_authoring_sizes(
+        deck,
+        [{"html_body": "x" * 6144}, {"html_body": "x" * 2048}],
+    )
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="aggregate budget is 8192 bytes"):
+        deck_service._validate_v2_authoring_sizes(
+            deck,
+            [{"html_body": "x" * 6144}, {"html_body": "x" * 2049}],
+        )
+    with pytest.raises(deck_service.DeckBuildFailure, match="hard 6144-byte limit"):
+        deck_service._validate_v2_authoring_sizes(
+            deck,
+            [{"html_body": "x" * 6145}, *[{"html_body": "x"} for _ in range(4)]],
+        )
+
+
 def _slide_html(index: int, title: str, narrative: str, *, include_asset: bool = False) -> str:
     asset = f'<figure class="asset"><img src="../assets/slide-{index:02d}.png" alt="" /></figure>' if include_asset else ""
     return f"""<!doctype html>
@@ -1564,7 +1587,11 @@ def test_presentation_authoring_prompt_forbids_recurring_page_chrome() -> None:
 def test_presentation_authoring_prompt_matches_compact_v2_body_limit() -> None:
     prompt = builder_artifact_module._PRESENTATION_AUTHORING_SYSTEM_PROMPT
 
-    assert "each html_body under 4 KiB" in prompt
+    assert "target each html_body under 4 KiB" in prompt
+    assert "combined html_body bytes within 4 KiB times the slide count" in prompt
+    assert "slides may borrow unused body budget" in prompt
+    assert "each slide capped at the hard 6 KiB ceiling" in prompt
+    assert "one slide may borrow" not in prompt
     assert "each html_body under 3 KiB" not in prompt
 
 
@@ -1921,7 +1948,7 @@ def test_prepare_schema_retry_recovers_all_size_targets_without_tool_metadata(
         "prepare_emitted_call_count": 1,
         "prepare_call_count": 1,
     }
-    body_sizes = [1173, 4244, 2896, 4466, 2625]
+    body_sizes = [1173, 6244, 2896, 6466, 2625]
     template = _compact_slides()[0]
     slides = [
         {
@@ -1956,8 +1983,8 @@ def test_prepare_schema_retry_recovers_all_size_targets_without_tool_metadata(
     assert isinstance(command, Command)
     assert not command.goto
     assert command.update["builder_deck_prepare_phase"] == "retry_pending"
-    slide_two = "slides[1].html_body is 4244 bytes; compact-v2 limit is 4096 bytes"
-    slide_four = "slides[3].html_body is 4466 bytes; compact-v2 limit is 4096 bytes"
+    slide_two = "slides[1].html_body is 6244 bytes; compact-v2 hard limit is 6144 bytes"
+    slide_four = "slides[3].html_body is 6466 bytes; compact-v2 hard limit is 6144 bytes"
     repair_message = command.update["builder_deck_prepare_repair_message"]
     diagnostics = command.update["builder_pptx_diagnostics"]
     for target in (slide_two, slide_four):

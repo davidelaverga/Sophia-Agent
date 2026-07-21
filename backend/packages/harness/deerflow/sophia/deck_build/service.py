@@ -51,7 +51,10 @@ from deerflow.sophia.deck_build.source_retention import (
     retention_summary,
 )
 from deerflow.sophia.deck_build.storage import save_deck_build
-from deerflow.sophia.deck_build.tool_contract import COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES
+from deerflow.sophia.deck_build.tool_contract import (
+    COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES,
+    COMPACT_V2_TARGET_SLIDE_HTML_BODY_BYTES,
+)
 from deerflow.sophia.deck_build.tracing import (
     DEFAULT_ARTIFACT_TARGET_EXT,
     DEFAULT_DECK_COMPILE_MODE,
@@ -2808,16 +2811,27 @@ def _validate_v2_authoring_sizes(deck: DeckBuild, slides: list[dict[str, Any]]) 
     stylesheet = deck.deck_stylesheet or ""
     if len(stylesheet.encode("utf-8")) > 8 * 1024:
         raise _authoring_failure("deck_stylesheet exceeds the compact-v2 8192-byte limit.")
+    body_sizes: list[int] = []
     for index, raw in enumerate(slides):
         body = str(raw.get("html_body") or "").strip()
         slide_css = str(raw.get("slide_css") or "").strip()
-        if len(body.encode("utf-8")) > COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES:
+        body_size = len(body.encode("utf-8"))
+        body_sizes.append(body_size)
+        if body_size > COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES:
             raise _authoring_failure(
-                f"slides[{index}].html_body exceeds the compact-v2 "
+                f"slides[{index}].html_body exceeds the compact-v2 hard "
                 f"{COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES}-byte limit."
             )
         if len(slide_css.encode("utf-8")) > 1024:
             raise _authoring_failure(f"slides[{index}].slide_css exceeds the compact-v2 1024-byte limit.")
+    body_total = sum(body_sizes)
+    body_budget = len(body_sizes) * COMPACT_V2_TARGET_SLIDE_HTML_BODY_BYTES
+    if body_total > body_budget:
+        raise _authoring_failure(
+            f"slides.html_body_total is {body_total} bytes; compact-v2 aggregate budget is "
+            f"{body_budget} bytes ({len(body_sizes)} slides x "
+            f"{COMPACT_V2_TARGET_SLIDE_HTML_BODY_BYTES} bytes)."
+        )
 
 
 def _slide_authoring_sources(raw: dict[str, Any]) -> dict[str, str | None]:

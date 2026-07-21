@@ -177,7 +177,8 @@ _MAX_SLIDE_HTML_BODY_BYTES = 16 * 1024
 _MAX_SLIDE_CSS_BYTES = 8 * 1024
 _MAX_AUTHORING_PAYLOAD_BYTES = 128 * 1024
 _V2_MAX_DECK_STYLESHEET_BYTES = 8 * 1024
-COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES = 4 * 1024
+COMPACT_V2_TARGET_SLIDE_HTML_BODY_BYTES = 4 * 1024
+COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES = 6 * 1024
 _V2_MAX_SLIDE_CSS_BYTES = 1 * 1024
 _V2_MAX_CREATIVE_PLAN_BYTES = 12 * 1024
 _V2_MAX_AUTHORING_PAYLOAD_BYTES = 48 * 1024
@@ -213,7 +214,10 @@ def _compact_slide_json_schema(schema: dict[str, Any]) -> None:
         body_schema.pop("default", None)
         body_schema["description"] = (
             f"{str(body_schema.get('description') or '').rstrip()} "
-            f"Maximum payload is {COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES} UTF-8 bytes."
+            f"Target at most {COMPACT_V2_TARGET_SLIDE_HTML_BODY_BYTES} UTF-8 bytes per slide. "
+            f"Combined slide bodies must remain within {COMPACT_V2_TARGET_SLIDE_HTML_BODY_BYTES} "
+            f"bytes times the slide count. Slides may borrow unused body budget, with each slide "
+            f"capped at {COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES} UTF-8 bytes."
         ).strip()
         _set_string_max_length(body_schema, COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES)
     slide_css_schema = schema.get("properties", {}).get("slide_css")
@@ -383,14 +387,25 @@ class PrepareDeckBuildInput(BaseModel):
     def _validate_v2_authoring_profile(self, stylesheet: str) -> None:
         if _utf8_size(stylesheet) > _V2_MAX_DECK_STYLESHEET_BYTES:
             raise ValueError("deck_stylesheet exceeds the compact-v2 8192-byte limit")
+        body_sizes: list[int] = []
         for index, slide in enumerate(self.slides):
-            if _utf8_size(slide.html_body) > COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES:
+            body_size = _utf8_size((slide.html_body or "").strip())
+            body_sizes.append(body_size)
+            if body_size > COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES:
                 raise ValueError(
-                    f"slides[{index}].html_body exceeds the compact-v2 "
+                    f"slides[{index}].html_body exceeds the compact-v2 hard "
                     f"{COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES}-byte limit"
                 )
-            if _utf8_size(slide.slide_css) > _V2_MAX_SLIDE_CSS_BYTES:
+            if _utf8_size((slide.slide_css or "").strip()) > _V2_MAX_SLIDE_CSS_BYTES:
                 raise ValueError(f"slides[{index}].slide_css exceeds the compact-v2 1024-byte limit")
+        body_total = sum(body_sizes)
+        body_budget = len(body_sizes) * COMPACT_V2_TARGET_SLIDE_HTML_BODY_BYTES
+        if body_total > body_budget:
+            raise ValueError(
+                f"slides.html_body_total is {body_total} bytes; compact-v2 aggregate budget is "
+                f"{body_budget} bytes ({len(body_sizes)} slides x "
+                f"{COMPACT_V2_TARGET_SLIDE_HTML_BODY_BYTES} bytes)"
+            )
         plan_json = json.dumps(self.creative_plan.model_dump(mode="json"), separators=(",", ":"), ensure_ascii=False)
         if _utf8_size(plan_json) > _V2_MAX_CREATIVE_PLAN_BYTES:
             raise ValueError("creative_plan exceeds the compact-v2 12288-byte limit")
@@ -421,27 +436,32 @@ def _compact_v2_size_violations(value: Any) -> list[tuple[str, str]]:
         except (TypeError, ValueError):
             pass
     if isinstance(slides, list):
+        body_sizes: list[int] = []
+        valid_body_count = 0
+        hard_reduction_bytes = 0
         for index, slide in enumerate(slides):
-            if not isinstance(slide, dict):
-                continue
-            html_body = slide.get("html_body")
-            if isinstance(html_body, str):
-                size = _utf8_size(html_body)
-                if size > COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES:
-                    field = f"slides[{index}].html_body"
-                    target = _compact_slide_repair_target(index=index)
-                    violations.append(
-                        (
-                            field,
-                            f"{field} is {size} bytes; compact-v2 limit is "
-                            f"{COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES} bytes; "
-                            f"exact target: {target}; reduce by at least "
-                            f"{size - COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES} bytes",
-                        )
+            html_body = slide.get("html_body") if isinstance(slide, dict) else None
+            body_size = _utf8_size(html_body.strip()) if isinstance(html_body, str) else 0
+            body_sizes.append(body_size)
+            if body_size > 0:
+                valid_body_count += 1
+            if body_size > COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES:
+                field = f"slides[{index}].html_body"
+                target = _compact_slide_repair_target(index=index)
+                hard_excess = body_size - COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES
+                hard_reduction_bytes += hard_excess
+                violations.append(
+                    (
+                        field,
+                        f"{field} is {body_size} bytes; compact-v2 hard limit is "
+                        f"{COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES} bytes; "
+                        f"exact target: {target}; reduce by at least "
+                        f"{hard_excess} bytes",
                     )
-            slide_css = slide.get("slide_css")
+                )
+            slide_css = slide.get("slide_css") if isinstance(slide, dict) else None
             if isinstance(slide_css, str):
-                size = _utf8_size(slide_css)
+                size = _utf8_size(slide_css.strip())
                 if size > _V2_MAX_SLIDE_CSS_BYTES:
                     field = f"slides[{index}].slide_css"
                     target = _compact_slide_repair_target(index=index)
@@ -453,6 +473,35 @@ def _compact_v2_size_violations(value: Any) -> list[tuple[str, str]]:
                             f"{size - _V2_MAX_SLIDE_CSS_BYTES} bytes",
                         )
                     )
+        body_total = sum(body_sizes)
+        body_budget = valid_body_count * COMPACT_V2_TARGET_SLIDE_HTML_BODY_BYTES
+        remaining_aggregate_reduction = max(
+            0,
+            body_total - hard_reduction_bytes - body_budget,
+        )
+        if remaining_aggregate_reduction > 0:
+            field = "slides.html_body_total"
+            budget_label = (
+                f"{valid_body_count} slides"
+                if valid_body_count == len(slides)
+                else f"{valid_body_count} valid slide bod{'y' if valid_body_count == 1 else 'ies'}"
+            )
+            reduction_label = (
+                f"reduce by at least {remaining_aggregate_reduction} bytes"
+                if hard_reduction_bytes == 0
+                else (
+                    "after the mandatory hard-limit repairs, reduce by at least "
+                    f"{remaining_aggregate_reduction} additional bytes"
+                )
+            )
+            violations.append(
+                (
+                    field,
+                    f"{field} is {body_total} bytes; compact-v2 aggregate budget is {body_budget} bytes "
+                    f"({budget_label} x {COMPACT_V2_TARGET_SLIDE_HTML_BODY_BYTES} bytes); "
+                    f"{reduction_label}",
+                )
+            )
 
     creative_plan = value.get("creative_plan")
     if isinstance(creative_plan, dict):

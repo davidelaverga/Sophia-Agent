@@ -104,7 +104,7 @@ def test_real_prepare_deck_build_executes_through_tool_node_with_runtime() -> No
 
 
 def test_real_prepare_deck_build_normalizes_production_shaped_wrapped_slides_through_tool_node() -> None:
-    production_body_sizes = [1334, 3802, 2243, 3089, 2912]
+    production_body_sizes = [1622, 4596, 3151, 4226, 2745]
     slides = []
     for index, body_size in enumerate(production_body_sizes, start=1):
         slide = dict(_slides()[0])
