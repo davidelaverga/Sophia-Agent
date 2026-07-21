@@ -736,7 +736,8 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "Do not use variables, calc(), inheritance keywords, or !important" in system_prompt
     assert "Move or resize only existing elements on the assigned priority selectors" in system_prompt
     assert "Preserve every title, all semantic content, and every unauthorized shape" in system_prompt
-    assert "copy its current manifest source byte-for-byte" in system_prompt
+    assert "do not return body updates" in system_prompt
+    assert "inserts every authorized body as an addressing echo" in system_prompt
     assert "pins body content to the authenticated manifest bytes" in system_prompt
     assert "Every slide_css output is an overlay only" in system_prompt
     assert "nonempty authenticated baseline is opaque" in system_prompt
@@ -752,7 +753,7 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
         in system_prompt
     )
     assert (
-        "Body output must still preserve the exact normalized visible HTML token sequence"
+        "The inserted authenticated body echoes preserve the exact normalized visible HTML token sequence"
         in system_prompt
     )
     assert "do not split or merge a token or change token order" in system_prompt
@@ -1223,6 +1224,52 @@ def test_body_candidate_with_preserved_tokens_is_pinned_to_manifest_source() -> 
     assert result.candidate.source_updates[0].content == SOURCE_TEXT
     assert invoker.result.candidate == accepted
     assert len(invoker.invoke_calls) == 1
+
+
+def test_missing_body_echo_is_inserted_from_authenticated_manifest() -> None:
+    request = _request()
+    authored = DeckRepairCandidate(
+        source_updates=(_candidate().source_updates[1],),
+        rationale="Strengthen the frozen PSI mechanism through the authorized overlay.",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=authored),
+    )
+
+    result = _run(author(request))
+
+    assert invoker.result.candidate == authored
+    assert tuple(
+        (update.source_role, update.expected_source_hash, update.content)
+        for update in result.candidate.source_updates
+    ) == (
+        ("slide_css", SLIDE_CSS_HASH, RETAINED_SLIDE_CSS_TEXT),
+        ("body", SOURCE_HASH, SOURCE_TEXT),
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_missing_slide_css_target_is_not_synthesized() -> None:
+    request = _request()
+    authored = DeckRepairCandidate(
+        source_updates=(_candidate().source_updates[0],),
+        rationale="Preserve the authenticated body without inventing a CSS repair.",
+    )
+    traces = FakeTraceFactory()
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=authored),
+        trace_factory=traces,
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+    assert traces.spans[0].outputs[0].error_code == "candidate_targets_invalid"
 
 
 def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:

@@ -74,6 +74,7 @@ from deerflow.sophia.deck_design_lift.schemas import (
     DeckRepairCandidate,
     DeckRepairProgram,
     DeckSelector,
+    SourceUpdate,
     StableSlideSelector,
     WritableSourceRole,
 )
@@ -744,7 +745,8 @@ Do not add a separate rule for a deferred failure, and do not leave a priority f
 Before returning, recheck the three priority outcomes and every locked constraint against the whole-deck contact sheet.
 Aim for a candidate that a fresh independent rendered judgment can mark satisfied.
 Deterministic comparison must also approve it without a critical, mechanical, content, or collateral regression.
-Every authorized body update is an addressing echo: copy its current manifest source byte-for-byte.
+Return exactly one slide_css update for every authorized selector and do not return body updates.
+The author boundary deterministically inserts every authorized body as an addressing echo from the authenticated manifest source, byte-for-byte, after validating your slide_css targets.
 Use read_only_sources only to account for the authenticated shared CSS cascade; never return an update for a read-only source.
 The author boundary pins body content to the authenticated manifest bytes before compilation, so express every visible repair in the authorized slide_css overlay.
 Target only tags, classes, and IDs listed in the supplied body_selector_inventory.
@@ -752,8 +754,8 @@ Every slide_css output is an overlay only. Never copy, summarize, replace, or re
 A nonempty authenticated baseline is opaque to you and omitted from source text. The author boundary preserves its exact bytes as the compiled prefix, inserts one deterministic separator, and appends only the filtered overlay.
 Copy the authenticated baseline manifest_source_hash unchanged into expected_source_hash; it identifies the source being overlaid, not the overlay content.
 Do not restructure body markup or attributes. Do not add, remove, or rewrite visible glyphs, symbols, labels, or words, and do not change their order.
-Body output must still preserve the exact normalized visible HTML token sequence: do not split or merge a token or change token order; script, style, and template content is excluded.
-Body updates must use classes plus the authorized slide_css: do not use inline style, hidden, or aria-hidden attributes, and do not add script, style, or template elements.
+The inserted authenticated body echoes preserve the exact normalized visible HTML token sequence; they do not split or merge a token or change token order, and script, style, and template content is excluded.
+No model-authored body markup or semantic text is accepted: do not use inline style, hidden, or aria-hidden attributes, and do not add script, style, or template elements.
 Do not hide semantic content with HTML attributes or CSS, clip it, move it off-canvas, or create semantic content with CSS-generated content.
 Do not use CSS text-transform or the all shorthand; either can change inherited visible text semantics.
 Do not set font or font-family in slide_css; preserve the shared Office-safe font contract.
@@ -2783,19 +2785,33 @@ def _candidate_with_manifest_body_sources(
     """
 
     body_sources = {
-        (source.selector, source.source_role): source.text
+        (source.selector, source.source_role): source
         for source in authorized_sources
         if source.source_role == "body"
     }
     updates: list[Any] = []
+    existing_body_targets: set[tuple[str, str]] = set()
     for update in candidate.source_updates:
         if update.source_role != "body":
             updates.append(update)
             continue
-        body = body_sources.get((update.selector, update.source_role))
-        if body is None:
+        target = (str(update.selector), update.source_role)
+        source = body_sources.get(target)
+        if source is None:
             raise ValueError("candidate body source is not authorized")
-        updates.append(update.model_copy(update={"content": body}))
+        existing_body_targets.add(target)
+        updates.append(update.model_copy(update={"content": source.text}))
+    for target, source in body_sources.items():
+        if target in existing_body_targets:
+            continue
+        updates.append(
+            SourceUpdate(
+                selector=source.selector,
+                source_role="body",
+                expected_source_hash=source.manifest_source_hash,
+                content=source.text,
+            )
+        )
     payload = candidate.model_dump(mode="python")
     payload["source_updates"] = [
         update.model_dump(mode="python") for update in updates
@@ -2974,7 +2990,10 @@ def _validate_invocation_result(
         (update.selector, update.source_role)
         for update in result.candidate.source_updates
     }
-    if actual_targets != expected_targets:
+    missing_targets = expected_targets - actual_targets
+    if actual_targets - expected_targets or any(
+        role != "body" for _selector, role in missing_targets
+    ):
         raise DeckRepairAuthorError(
             "candidate_invalid",
             trace_error_code="candidate_targets_invalid",
@@ -2985,19 +3004,22 @@ def _validate_invocation_result(
             "candidate_invalid",
             trace_error_code="candidate_source_hash_invalid",
         )
-    if not _candidate_slide_css_preserves_authenticated_baselines(
-        result.candidate,
-        context.authorized_sources,
-    ):
-        raise DeckRepairAuthorError(
-            "candidate_invalid",
-            trace_error_code="candidate_canonicalization_invalid",
-        )
     try:
         canonical_candidate = _candidate_with_manifest_body_sources(
             result.candidate,
             context.authorized_sources,
         )
+        canonical_targets = {
+            (update.selector, update.source_role)
+            for update in canonical_candidate.source_updates
+        }
+        if canonical_targets != expected_targets:
+            raise ValueError
+        if not _candidate_slide_css_preserves_authenticated_baselines(
+            canonical_candidate,
+            context.authorized_sources,
+        ):
+            raise ValueError
         canonical_candidate = _candidate_with_retained_slide_css(
             canonical_candidate,
         )
