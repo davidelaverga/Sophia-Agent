@@ -779,6 +779,8 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "deferred failure as context and a no-regression constraint" in system_prompt
     assert "Follow campaign_acceptance.priority_selector_by_failure_code exactly" in system_prompt
     assert "Materially resolve exactly those three distinct priority families" in system_prompt
+    assert "at least two distinct existing semantic elements" in system_prompt
+    assert "minimum distinct geometry targets" in system_prompt
     assert "CSS budget is a hard ceiling, never a target" in system_prompt
     assert "fewest selector-specific rules and retained declarations" in system_prompt
     assert "at most one thin, purposeful full enclosing frame per authorized slide" in system_prompt
@@ -843,6 +845,7 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
         },
         "distinct_priority_selector_count": 1,
         "priority_geometry_required": False,
+        "minimum_distinct_geometry_targets_per_priority_selector": 0,
         "psi_failure_family_by_code": {
             "weak_subject_specificity": "weak_subject_specificity",
             "weak_signature_realization": "weak_signature_realization",
@@ -1157,6 +1160,75 @@ def test_campaign_acceptance_maximizes_distinct_priority_selectors() -> None:
     }
     assert acceptance["distinct_priority_selector_count"] == 3
     assert acceptance["priority_geometry_required"] is True
+    assert (
+        acceptance["minimum_distinct_geometry_targets_per_priority_selector"]
+        == 2
+    )
+
+
+def test_priority_geometry_infeasible_context_is_rejected_before_provider() -> None:
+    program = _overlapping_three_selector_program()
+    request = _request(program=program)
+    body = (
+        '<section class="subject">'
+        '<div class="mechanism">Current PSI control loop</div>'
+        "</section>"
+    )
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    base = _context(request=request)
+    sources = tuple(
+        RepairSourceContext(
+            build_id=request.build_id,
+            manifest_revision=program.initial_manifest_revision,
+            manifest_hash=MANIFEST_HASH,
+            selector=selector,
+            source_role=role,
+            component_version_id=f"{selector}-{role}-version-001",
+            manifest_source_path=f"versions/{selector}/{role}.txt",
+            manifest_source_hash=(
+                SLIDE_CSS_HASH if role == "slide_css" else body_hash
+            ),
+            text=BASELINE_SLIDE_CSS_TEXT if role == "slide_css" else body,
+        )
+        for selector in program.authorized_selectors
+        for role in program.authorized_source_roles[selector]
+    )
+    renders = tuple(
+        RepairContextImage(
+            artifact_version_id=request.initial_artifact_version_id,
+            selector=evidence.selector,
+            path=evidence.path,
+            sha256=evidence.sha256,
+            width=64,
+            height=36,
+            png_bytes=RENDER_BYTES,
+        )
+        for repair in program.selector_repairs
+        for evidence in repair.render_evidence
+    )
+    context = base.model_copy(
+        update={
+            "authorized_sources": sources,
+            "failing_renders": renders,
+            "owned_assets": (),
+        }
+    )
+    traces = FakeTraceFactory()
+    author, loader, invoker = _author(
+        request=request,
+        context=context,
+        trace_factory=traces,
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "repair_unavailable")
+    assert loader.calls == [request]
+    assert invoker.prepare_calls == []
+    assert invoker.count_calls == []
+    assert invoker.invoke_calls == []
+    assert traces.inputs == []
 
 
 @pytest.mark.parametrize(
@@ -2315,6 +2387,11 @@ def test_slide_css_geometry_must_target_exactly_one_manifest_element() -> None:
 
 def test_three_priority_selectors_each_require_retained_geometry() -> None:
     program = _overlapping_three_selector_program()
+    body = (
+        '<section class="subject">Current PSI</section>'
+        '<section class="mechanism">Control loop</section>'
+    )
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
     sources = tuple(
         RepairSourceContext(
             build_id="build-psi-001",
@@ -2324,8 +2401,8 @@ def test_three_priority_selectors_each_require_retained_geometry() -> None:
             source_role="body",
             component_version_id=f"{selector}-version-001",
             manifest_source_path=f"versions/{selector}/body.html",
-            manifest_source_hash=SOURCE_HASH,
-            text=SOURCE_TEXT,
+            manifest_source_hash=body_hash,
+            text=body,
         )
         for selector in program.authorized_selectors
     )
@@ -2346,17 +2423,32 @@ def test_three_priority_selectors_each_require_retained_geometry() -> None:
 
     complete = candidate_with(
         {
-            "slide:1": "section{left:80px;top:80px;width:640px;height:360px}",
-            "slide:2": "section{left:720px;top:80px;width:640px;height:360px}",
-            "slide:3": "section{left:1280px;top:80px;width:640px;height:360px}",
+            "slide:1": (
+                ".subject{left:80px;top:80px;width:640px;height:360px}"
+                ".mechanism{left:800px;top:80px;width:640px;height:360px}"
+            ),
+            "slide:2": (
+                ".subject{left:80px;top:120px;width:640px;height:360px}"
+                ".mechanism{left:800px;top:120px;width:640px;height:360px}"
+            ),
+            "slide:3": (
+                ".subject{left:80px;top:160px;width:640px;height:360px}"
+                ".mechanism{left:800px;top:160px;width:640px;height:360px}"
+            ),
         }
     )
-    border_only = candidate_with(
+    one_geometry_target = candidate_with(
         {
-            "slide:1": "section{left:80px;top:80px;width:640px;height:360px}",
-            "slide:2": "section{left:720px;top:80px;width:640px;height:360px}",
+            "slide:1": (
+                ".subject{left:80px;top:80px;width:640px;height:360px}"
+                ".mechanism{left:800px;top:80px;width:640px;height:360px}"
+            ),
+            "slide:2": (
+                ".subject{left:80px;top:120px;width:640px;height:360px}"
+                ".mechanism{left:800px;top:120px;width:640px;height:360px}"
+            ),
             "slide:3": (
-                "section{border:2px solid #0B1F3A;box-sizing:border-box}"
+                ".subject{left:80px;top:160px;width:640px;height:360px}"
             ),
         }
     )
@@ -2367,9 +2459,27 @@ def test_three_priority_selectors_each_require_retained_geometry() -> None:
         sources,
     )
     assert not _candidate_materializes_priority_contract(
-        border_only,
+        one_geometry_target,
         program,
         sources,
+    )
+
+    nested_body = (
+        '<section class="subject">'
+        '<div class="mechanism">Current PSI control loop</div>'
+        "</section>"
+    )
+    nested_hash = hashlib.sha256(nested_body.encode()).hexdigest()
+    nested_sources = tuple(
+        source.model_copy(
+            update={"manifest_source_hash": nested_hash, "text": nested_body}
+        )
+        for source in sources
+    )
+    assert not _candidate_materializes_priority_contract(
+        complete,
+        program,
+        nested_sources,
     )
 
 

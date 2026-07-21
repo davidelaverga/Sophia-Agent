@@ -131,6 +131,7 @@ _FIXED_SLIDE_CANVAS_WIDTH_PX = 1920.0
 _FIXED_SLIDE_CANVAS_HEIGHT_PX = 1080.0
 _MIN_RETAINED_GEOMETRY_WIDTH_PX = 48.0
 _MIN_RETAINED_GEOMETRY_HEIGHT_PX = 24.0
+_MIN_PRIORITY_GEOMETRY_TARGETS_PER_SELECTOR = 2
 _MIN_AUTHORED_TEXT_BACKGROUND_CONTRAST = 4.5
 _SLIDE_CSS_BACKGROUND_PROPERTIES = frozenset(
     {"background", "background-color"}
@@ -728,11 +729,12 @@ Only campaign_acceptance.priority_failure_codes are required visible outcomes. T
 Follow campaign_acceptance.priority_selector_by_failure_code exactly: make each priority family's primary judge-visible intervention on its assigned frozen selector.
 Materially resolve exactly those three distinct priority families before considering incidental polish, using family-specific structure rather than repeating one generic decoration.
 When campaign_acceptance.priority_geometry_required is true, every assigned priority \
-selector must contain at least one complete retained left/top/width/height rule for one \
-existing semantic container. Use that bounded geometry to transform the argument: make \
+selector must contain complete retained left/top/width/height rules for at least two \
+distinct existing semantic elements that are not ancestors or descendants of one another. Use those \
+independent bounded geometry moves to transform the argument: make \
 the subject-specific anchor dominant, make the mechanism visibly directional or closed, \
 and compress the final thesis into a decisive synthesis.
-The compact CSS budget is a hard ceiling, never a target. Use the fewest selector-specific rules and retained declarations that make those three priority outcomes visible.
+The compact CSS budget is a hard ceiling, never a target. Use the fewest selector-specific rules and retained declarations that still satisfy the minimum distinct geometry targets and make those three priority outcomes visible.
 A border-only repair is invalid. Paint and frames may support a structural intervention, but repeating a rail, band, divider, card, or frame is not a signature and cannot be the primary repair.
 Use at most one thin, purposeful full enclosing frame per authorized slide, with a \
 literal width from 0.5px through 2px, and only around one high-level semantic container \
@@ -790,7 +792,10 @@ Do not use at-rules or nested CSS rules in slide_css; this is one fixed 1920x108
 Use font-size only as one finite literal px value from 12px through 64px.
 The compiled baseline-plus-separator-plus-overlay must fit the compact_model_html_v2 limit of 1024 UTF-8 bytes.
 For a nonempty baseline, obey that source's repair_overlay_max_utf8_bytes; an empty baseline keeps the full 1024-byte overlay limit.
-Move or resize only existing elements on the assigned priority selectors through one or more complete bounded geometry rules. Preserve every title, all semantic content, and every unauthorized shape.
+Move or resize only existing elements on the assigned priority selectors through complete bounded geometry rules. \
+When priority geometry is required, move or resize at least two independent existing semantic elements on every \
+assigned priority selector; a container and its descendant count as one layout relationship. Preserve every title, \
+all semantic content, and every unauthorized shape.
 Do not create full-slide raster replacements or semantic text inside generated images.
 {compiler_capability_prompt_excerpt()}
 The sealed repair contract overrides broader compiler capabilities: only complete \
@@ -868,6 +873,10 @@ def _campaign_acceptance_contract(
     distinct_priority_selector_count = len(
         set(priority_selector_by_code.values())
     )
+    priority_geometry_required = (
+        distinct_priority_selector_count
+        == PSI_REQUIRED_RESOLVED_FAMILY_COUNT
+    )
     priority_family_by_code = {
         code: family_by_code[code] for code in priority_codes
     }
@@ -885,9 +894,11 @@ def _campaign_acceptance_contract(
         "priority_psi_failure_family_by_code": priority_family_by_code,
         "priority_selector_by_failure_code": priority_selector_by_code,
         "distinct_priority_selector_count": distinct_priority_selector_count,
-        "priority_geometry_required": (
-            distinct_priority_selector_count
-            == PSI_REQUIRED_RESOLVED_FAMILY_COUNT
+        "priority_geometry_required": priority_geometry_required,
+        "minimum_distinct_geometry_targets_per_priority_selector": (
+            _MIN_PRIORITY_GEOMETRY_TARGETS_PER_SELECTOR
+            if priority_geometry_required
+            else 0
         ),
         "psi_failure_family_by_code": family_by_code,
         "deferred_failure_codes": deferred_failure_codes,
@@ -1581,6 +1592,86 @@ def _element_is_within(
     return element is container or any(
         parent is container for parent in element.parents
     )
+
+
+def _contains_independent_element_antichain(
+    elements: tuple[Tag, ...],
+    *,
+    minimum: int,
+) -> bool:
+    """Require independent layout targets, not two names for one hierarchy."""
+
+    if type(minimum) is not int or minimum < 1:
+        return False
+    distinct = tuple({id(element): element for element in elements}.values())
+    if len(distinct) < minimum:
+        return False
+    if minimum == 1:
+        return True
+    if minimum != _MIN_PRIORITY_GEOMETRY_TARGETS_PER_SELECTOR:
+        return False
+    deepest = max(
+        distinct,
+        key=lambda element: sum(
+            isinstance(parent, Tag) for parent in element.parents
+        ),
+    )
+    return any(
+        element is not deepest
+        and not _element_is_within(element, deepest)
+        and not _element_is_within(deepest, element)
+        for element in distinct
+    )
+
+
+def _priority_geometry_sources_are_feasible(
+    program: DeckRepairProgram,
+    authorized_sources: tuple[RepairSourceContext, ...],
+) -> bool:
+    """Fail before provider admission when two independent targets cannot exist."""
+
+    acceptance = _campaign_acceptance_contract(program)
+    if acceptance["priority_geometry_required"] is not True:
+        return True
+    minimum = acceptance[
+        "minimum_distinct_geometry_targets_per_priority_selector"
+    ]
+    if type(minimum) is not int or minimum < 1:
+        return False
+    selector_map = acceptance["priority_selector_by_failure_code"]
+    if not isinstance(selector_map, dict):
+        return False
+    body_by_selector = {
+        source.selector: source.text
+        for source in authorized_sources
+        if source.source_role == "body"
+    }
+    for selector in {str(value) for value in selector_map.values()}:
+        body = body_by_selector.get(selector)
+        if body is None:
+            return False
+        try:
+            soup = BeautifulSoup(body, "html.parser")
+        except Exception:
+            return False
+        eligible = tuple(
+            element
+            for element in soup.find_all(True)
+            if isinstance(element, Tag)
+            and str(element.name).casefold()
+            not in {
+                "body",
+                "head",
+                "html",
+                *_NON_VISIBLE_HTML_CONTENT_ELEMENTS,
+            }
+        )
+        if not _contains_independent_element_antichain(
+            eligible,
+            minimum=minimum,
+        ):
+            return False
+    return True
 
 
 def _semantic_text_owners(soup: BeautifulSoup) -> tuple[Tag, ...]:
@@ -2540,7 +2631,13 @@ def _candidate_css_targets_manifest_bodies(
     *,
     require_geometry: bool = True,
     required_selectors: frozenset[str] | None = None,
+    minimum_distinct_geometry_targets_per_selector: int = 1,
 ) -> bool:
+    if (
+        type(minimum_distinct_geometry_targets_per_selector) is not int
+        or minimum_distinct_geometry_targets_per_selector < 1
+    ):
+        return False
     body_inventories = {
         source.selector: source.text
         for source in authorized_sources
@@ -2565,12 +2662,13 @@ def _candidate_css_targets_manifest_bodies(
         except Exception:
             return False
         matched_rule = False
+        selector_geometry_nodes: dict[int, Tag] = {}
         for selector_arms, has_geometry in selector_contract:
             if require_geometry and not has_geometry:
                 continue
             matched_rule = True
             arm_matches = False
-            matched_geometry_node_ids: set[int] = set()
+            matched_geometry_nodes: dict[int, Tag] = {}
             for selector in selector_arms:
                 if not _selector_uses_only_manifest_atoms(
                     selector,
@@ -2582,16 +2680,26 @@ def _candidate_css_targets_manifest_bodies(
                     if matches:
                         arm_matches = True
                         if has_geometry:
-                            matched_geometry_node_ids.update(
-                                id(match) for match in matches
+                            matched_geometry_nodes.update(
+                                {
+                                    id(match): match
+                                    for match in matches
+                                    if isinstance(match, Tag)
+                                }
                             )
                 except Exception:
                     return False
             if not arm_matches:
                 return False
-            if has_geometry and len(matched_geometry_node_ids) != 1:
+            if has_geometry and len(matched_geometry_nodes) != 1:
                 return False
+            selector_geometry_nodes.update(matched_geometry_nodes)
         if not matched_rule:
+            return False
+        if require_geometry and not _contains_independent_element_antichain(
+            tuple(selector_geometry_nodes.values()),
+            minimum=minimum_distinct_geometry_targets_per_selector,
+        ):
             return False
         validated_selectors.add(update.selector)
     return (
@@ -2631,11 +2739,17 @@ def _candidate_materializes_priority_contract(
             if not property_names & _PRIORITY_MATERIAL_SLIDE_CSS_PROPERTIES:
                 return False
         if acceptance["priority_geometry_required"] is True:
+            minimum_targets = acceptance[
+                "minimum_distinct_geometry_targets_per_priority_selector"
+            ]
+            if type(minimum_targets) is not int or minimum_targets < 1:
+                return False
             return _candidate_css_targets_manifest_bodies(
                 candidate,
                 authorized_sources,
                 require_geometry=True,
                 required_selectors=priority_selectors,
+                minimum_distinct_geometry_targets_per_selector=minimum_targets,
             )
         return True
     except Exception:
@@ -3127,6 +3241,11 @@ class ProductionDeckRepairAuthor:
         except Exception:
             raise DeckRepairAuthorError("context_unavailable") from None
         context = _validated_context(request, raw_context)
+        if not _priority_geometry_sources_are_feasible(
+            request.program,
+            context.authorized_sources,
+        ):
+            raise DeckRepairAuthorError("repair_unavailable")
         messages = build_repair_author_messages(
             context=context,
             program=request.program,
