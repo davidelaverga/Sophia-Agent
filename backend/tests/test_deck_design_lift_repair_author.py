@@ -733,7 +733,15 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "put border, border-radius, and box-sizing:border-box in the same qualified CSS rule" in system_prompt
     assert "dependent frame declarations in split rules are stripped" in system_prompt
     assert "full border without box-sizing:border-box" in system_prompt
-    assert "Do not use variables, calc(), inheritance keywords, or !important" in system_prompt
+    assert "Do not use variables, calc(), or inheritance keywords" in system_prompt
+    assert (
+        "Use !important only on all four left/top/width/height declarations"
+        in system_prompt
+    )
+    assert "all four must omit it otherwise" in system_prompt
+    assert "Never use !important for paint, typography, borders" in system_prompt
+    assert "inline geometry that is itself !important" in system_prompt
+    assert "geometry-affecting aliases are intentionally fail-closed" in system_prompt
     assert "Move or resize only existing elements on the assigned priority selectors" in system_prompt
     assert "Preserve every title, all semantic content, and every unauthorized shape" in system_prompt
     assert "do not return body updates" in system_prompt
@@ -927,6 +935,33 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                     "properties": ["left", "top", "width", "height"],
                     "unit": "px",
                     "all_four_properties_same_rule": True,
+                    "all_four_properties_same_importance": True,
+                    "important_required_for_authenticated_inline_geometry": True,
+                    "important_forbidden_without_authenticated_inline_geometry": True,
+                    "authenticated_inline_important_geometry_target_allowed": False,
+                    "ambiguous_authenticated_inline_geometry_target_allowed": False,
+                    "ambiguous_authenticated_inline_geometry_properties": [
+                        "all",
+                        "block-size",
+                        "bottom",
+                        "inline-size",
+                        "inset",
+                        "inset-block",
+                        "inset-block-end",
+                        "inset-block-start",
+                        "inset-inline",
+                        "inset-inline-end",
+                        "inset-inline-start",
+                        "max-block-size",
+                        "max-height",
+                        "max-inline-size",
+                        "max-width",
+                        "min-block-size",
+                        "min-height",
+                        "min-inline-size",
+                        "min-width",
+                        "right",
+                    ],
                     "canvas_width_px": 1920,
                     "canvas_height_px": 1080,
                     "must_remain_fully_on_canvas": True,
@@ -966,7 +1001,7 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                     "px_range_inclusive": [0, 1080.0],
                     "percentage_range_inclusive": [0, 50],
                 },
-                "important_allowed": False,
+                "important_allowed_for_non_geometry": False,
                 "variables_or_calculations_allowed": False,
             },
             "forbidden_native_properties": [
@@ -2304,6 +2339,39 @@ def test_slide_css_retains_only_complete_on_canvas_geometry() -> None:
     ) == "section{left:0px;top:0px;width:1920px;height:1080px;}"
 
 
+def test_slide_css_retains_complete_uniform_important_geometry() -> None:
+    assert _retained_slide_css(
+        "section{left:80px!important;top:80px!important;"
+        "width:640px!important;height:360px!important}"
+    ) == (
+        "section{left:80px!important;top:80px!important;"
+        "width:640px!important;height:360px!important;}"
+    )
+
+
+@pytest.mark.parametrize("ordinary_property", ["left", "top", "width", "height"])
+def test_slide_css_strips_mixed_importance_geometry(
+    ordinary_property: str,
+) -> None:
+    geometry = {
+        "left": "80px!important",
+        "top": "80px!important",
+        "width": "640px!important",
+        "height": "360px!important",
+    }
+    geometry[ordinary_property] = geometry[ordinary_property].replace(
+        "!important",
+        "",
+    )
+    declarations = ";".join(
+        f"{name}:{value}" for name, value in geometry.items()
+    )
+
+    assert _retained_slide_css(
+        f"section{{font-size:32px;{declarations}}}"
+    ) == "section{font-size:32px;}"
+
+
 @pytest.mark.parametrize(
     "geometry",
     [
@@ -2369,6 +2437,142 @@ def test_slide_css_geometry_must_target_exactly_one_manifest_element() -> None:
     request, context, candidate = _contrast_candidate(
         body=body,
         css=".node{left:80px;top:80px;width:320px;height:120px}",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_requires_important_for_authenticated_inline_geometry() -> None:
+    body = '<section style="left:0px">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css="section{left:80px;top:80px;width:640px;height:360px}",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_allows_important_for_authenticated_inline_geometry() -> None:
+    body = '<section style="left:0px">Current PSI control loop</section>'
+    geometry = (
+        "section{left:80px!important;top:80px!important;"
+        "width:640px!important;height:360px!important}"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=geometry,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    assert result.candidate.source_updates[1].content == (
+        RETAINED_SLIDE_CSS_TEXT
+        + "section{left:80px!important;top:80px!important;"
+        "width:640px!important;height:360px!important;}"
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_unnecessary_important_geometry() -> None:
+    body = "<section>Current PSI control loop</section>"
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            "section{left:80px!important;top:80px!important;"
+            "width:640px!important;height:360px!important}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_inline_important_geometry_target() -> None:
+    body = (
+        '<section style="left:0px!important">'
+        "Current PSI control loop</section>"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            "section{left:80px!important;top:80px!important;"
+            "width:640px!important;height:360px!important}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "inline_style",
+    [
+        "inset:0",
+        "inset:0!important",
+        "inset-inline-start:0",
+        "all:initial",
+        "all:initial!important",
+        "inline-size:640px",
+        "max-width:640px",
+        "right:0",
+    ],
+)
+def test_slide_css_rejects_ambiguous_inline_geometry_target(
+    inline_style: str,
+) -> None:
+    body = (
+        f'<section style="{inline_style}">'
+        "Current PSI control loop</section>"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            "section{left:80px!important;top:80px!important;"
+            "width:640px!important;height:360px!important}"
+        ),
     )
     author, _loader, invoker = _author(
         request=request,
@@ -2461,6 +2665,53 @@ def test_three_priority_selectors_each_require_retained_geometry() -> None:
         one_geometry_target,
         program,
         sources,
+    )
+
+    important_complete = candidate_with(
+        {
+            selector: css.replace("px", "px!important")
+            for selector, css in {
+                "slide:1": (
+                    ".subject{left:80px;top:80px;width:640px;height:360px}"
+                    ".mechanism{left:800px;top:80px;width:640px;height:360px}"
+                ),
+                "slide:2": (
+                    ".subject{left:80px;top:120px;width:640px;height:360px}"
+                    ".mechanism{left:800px;top:120px;width:640px;height:360px}"
+                ),
+                "slide:3": (
+                    ".subject{left:80px;top:160px;width:640px;height:360px}"
+                    ".mechanism{left:800px;top:160px;width:640px;height:360px}"
+                ),
+            }.items()
+        }
+    )
+    assert not _candidate_materializes_priority_contract(
+        important_complete,
+        program,
+        sources,
+    )
+
+    inline_body = (
+        '<section class="subject" style="left:0px">Current PSI</section>'
+        '<section class="mechanism" style="top:0px">Control loop</section>'
+    )
+    inline_hash = hashlib.sha256(inline_body.encode()).hexdigest()
+    inline_sources = tuple(
+        source.model_copy(
+            update={"manifest_source_hash": inline_hash, "text": inline_body}
+        )
+        for source in sources
+    )
+    assert not _candidate_materializes_priority_contract(
+        complete,
+        program,
+        inline_sources,
+    )
+    assert _candidate_materializes_priority_contract(
+        important_complete,
+        program,
+        inline_sources,
     )
 
     nested_body = (

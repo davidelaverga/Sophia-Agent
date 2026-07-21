@@ -112,6 +112,30 @@ _COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES = (
     COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES
 )
 _SLIDE_CSS_GEOMETRY_PROPERTIES = ("left", "top", "width", "height")
+_AMBIGUOUS_INLINE_GEOMETRY_PROPERTIES = frozenset(
+    {
+        "all",
+        "block-size",
+        "bottom",
+        "inline-size",
+        "inset",
+        "inset-block",
+        "inset-block-end",
+        "inset-block-start",
+        "inset-inline",
+        "inset-inline-end",
+        "inset-inline-start",
+        "max-block-size",
+        "max-height",
+        "max-inline-size",
+        "max-width",
+        "min-block-size",
+        "min-height",
+        "min-inline-size",
+        "min-width",
+        "right",
+    }
+)
 _SLIDE_CSS_FORBIDDEN_FONT_PROPERTIES = frozenset({"font", "font-family"})
 _NON_VISIBLE_HTML_CONTENT_ELEMENTS = frozenset({"script", "style", "template"})
 _FORBIDDEN_CANDIDATE_BODY_ATTRIBUTES = frozenset(
@@ -787,7 +811,13 @@ stripped and cannot satisfy a priority.
 Choose only a top-level semantic container whose authenticated layout already uses \
 absolute slide-canvas coordinates. Never apply geometry to a static element or a nested \
 child whose left/top values are local to another positioned container.
-Use fully opaque literal full-border colors, border widths from 0.5px through 2px, and literal px or percentage border radii. Do not use variables, calc(), inheritance keywords, or !important.
+Use fully opaque literal full-border colors, border widths from 0.5px through 2px, and literal px or percentage border radii. Do not use variables, calc(), or inheritance keywords.
+Use !important only on all four left/top/width/height declarations in a geometry \
+rule when the exact authenticated target already declares any of those geometry \
+properties inline; all four geometry declarations must use it there, and all four \
+must omit it otherwise.
+Never use !important for paint, typography, borders, or any other declaration, and never target authenticated inline geometry that is itself !important.
+Do not target an element whose inline style uses all, inset shorthands, logical size properties, right/bottom positioning, or min/max size constraints; those geometry-affecting aliases are intentionally fail-closed.
 Do not use at-rules or nested CSS rules in slide_css; this is one fixed 1920x1080 canvas with no responsive or conditional repair variants.
 Use font-size only as one finite literal px value from 12px through 64px.
 The compiled baseline-plus-separator-plus-overlay must fit the compact_model_html_v2 limit of 1024 UTF-8 bytes.
@@ -967,6 +997,14 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                         "properties": list(_SLIDE_CSS_GEOMETRY_PROPERTIES),
                         "unit": "px",
                         "all_four_properties_same_rule": True,
+                        "all_four_properties_same_importance": True,
+                        "important_required_for_authenticated_inline_geometry": True,
+                        "important_forbidden_without_authenticated_inline_geometry": True,
+                        "authenticated_inline_important_geometry_target_allowed": False,
+                        "ambiguous_authenticated_inline_geometry_target_allowed": False,
+                        "ambiguous_authenticated_inline_geometry_properties": sorted(
+                            _AMBIGUOUS_INLINE_GEOMETRY_PROPERTIES
+                        ),
                         "canvas_width_px": int(_FIXED_SLIDE_CANVAS_WIDTH_PX),
                         "canvas_height_px": int(_FIXED_SLIDE_CANVAS_HEIGHT_PX),
                         "must_remain_fully_on_canvas": True,
@@ -1020,7 +1058,7 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                         "px_range_inclusive": [0, _MAX_RETAINED_BORDER_RADIUS_PX],
                         "percentage_range_inclusive": [0, 50],
                     },
-                    "important_allowed": False,
+                    "important_allowed_for_non_geometry": False,
                     "variables_or_calculations_allowed": False,
                 },
                 "forbidden_native_properties": sorted(
@@ -1734,6 +1772,45 @@ def _inline_background(element: Tag) -> Any | None:
     )
 
 
+def _inline_geometry_requires_important(element: Tag) -> bool | None:
+    """Return whether an external geometry overlay must use ``!important``.
+
+    ``None`` is fail-closed: malformed inline CSS or inline-important geometry
+    cannot be safely and deterministically overridden from an author rule.
+    """
+
+    style = element.attrs.get("style")
+    if not isinstance(style, str) or not style.strip():
+        return False
+    parsed = tuple(
+        tinycss2.parse_declaration_list(
+            style,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+    )
+    if any(item.type == "error" for item in parsed):
+        return None
+    declarations = tuple(
+        item
+        for item in parsed
+        if item.type == "declaration"
+    )
+    if any(
+        item.lower_name in _AMBIGUOUS_INLINE_GEOMETRY_PROPERTIES
+        for item in declarations
+    ):
+        return None
+    geometry = tuple(
+        item
+        for item in declarations
+        if item.lower_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+    )
+    if any(bool(item.important) for item in geometry):
+        return None
+    return bool(geometry)
+
+
 def _parent_tag(element: Tag) -> Tag | None:
     parent = element.parent
     return parent if isinstance(parent, Tag) else None
@@ -2086,6 +2163,8 @@ def _retained_geometry_box_is_on_canvas(
         _SLIDE_CSS_GEOMETRY_PROPERTIES
     ):
         return False
+    if len({bool(item.important) for item in geometry}) != 1:
+        return False
     values: dict[str, float] = {}
     for declaration in geometry:
         tokens = _significant_css_value_tokens(declaration)
@@ -2165,10 +2244,12 @@ def _retained_full_border_shorthand_is_safe(tokens: tuple[Any, ...]) -> bool:
 
 
 def _retained_css_declaration_is_safe(declaration: Any) -> bool:
-    if declaration.type != "declaration" or bool(declaration.important):
+    if declaration.type != "declaration":
         return False
     name = declaration.lower_name
     if name not in _RETAINED_SLIDE_CSS_PROPERTIES:
+        return False
+    if bool(declaration.important) and name not in _SLIDE_CSS_GEOMETRY_PROPERTIES:
         return False
     tokens = _significant_css_value_tokens(declaration)
     if name in _SLIDE_CSS_GEOMETRY_PROPERTIES:
@@ -2574,8 +2655,8 @@ def _selector_uses_only_manifest_atoms(
 
 def _stylesheet_selector_contract(
     value: str,
-) -> tuple[tuple[tuple[str, ...], bool], ...] | None:
-    selectors: list[tuple[tuple[str, ...], bool]] = []
+) -> tuple[tuple[tuple[str, ...], bool, bool | None], ...] | None:
+    selectors: list[tuple[tuple[str, ...], bool, bool | None]] = []
 
     def collect(rules: list[Any]) -> None:
         for rule in rules:
@@ -2592,12 +2673,24 @@ def _stylesheet_selector_contract(
                     )
                     if item.type == "declaration"
                 )
-                has_geometry = any(
-                    declaration.lower_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+                geometry = tuple(
+                    declaration
                     for declaration in declarations
+                    if declaration.lower_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+                )
+                has_geometry = bool(geometry)
+                geometry_importance = (
+                    bool(geometry[0].important)
+                    if geometry
+                    and len({bool(item.important) for item in geometry}) == 1
+                    else None
                 )
                 selectors.append(
-                    (_selector_arms(list(rule.prelude)), has_geometry)
+                    (
+                        _selector_arms(list(rule.prelude)),
+                        has_geometry,
+                        geometry_importance,
+                    )
                 )
                 if content is not None:
                     nested = [
@@ -2675,7 +2768,7 @@ def _candidate_css_targets_manifest_bodies(
             return False
         matched_rule = False
         selector_geometry_nodes: dict[int, Tag] = {}
-        for selector_arms, has_geometry in selector_contract:
+        for selector_arms, has_geometry, geometry_importance in selector_contract:
             if require_geometry and not has_geometry:
                 continue
             matched_rule = True
@@ -2705,6 +2798,17 @@ def _candidate_css_targets_manifest_bodies(
                 return False
             if has_geometry and len(matched_geometry_nodes) != 1:
                 return False
+            if has_geometry:
+                if geometry_importance is None:
+                    return False
+                inline_requirement = _inline_geometry_requires_important(
+                    next(iter(matched_geometry_nodes.values()))
+                )
+                if (
+                    inline_requirement is None
+                    or geometry_importance is not inline_requirement
+                ):
+                    return False
             selector_geometry_nodes.update(matched_geometry_nodes)
         if not matched_rule:
             return False
