@@ -900,9 +900,19 @@ def _campaign_acceptance_contract(
         assignment.pop(code, None)
 
     consider_selector_assignments(0, {})
-    distinct_priority_selector_count = len(
-        set(priority_selector_by_code.values())
-    )
+    priority_selectors = set(priority_selector_by_code.values())
+    authorized_slide_css_selectors = {
+        selector
+        for selector, source_roles in program.authorized_source_roles.items()
+        if "slide_css" in source_roles
+    }
+    if authorized_slide_css_selectors != priority_selectors:
+        # Every authored slide-CSS target must be the primary visible target of
+        # one of the three campaign priority families.  Otherwise the strict
+        # all-target output contract would force an unrelated intervention on
+        # a deferred-only selector and create avoidable collateral risk.
+        raise DeckRepairAuthorError("repair_unavailable")
+    distinct_priority_selector_count = len(priority_selectors)
     priority_geometry_required = (
         distinct_priority_selector_count
         == PSI_REQUIRED_RESOLVED_FAMILY_COUNT

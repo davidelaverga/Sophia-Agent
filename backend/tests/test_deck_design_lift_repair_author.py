@@ -251,6 +251,45 @@ def _overlapping_three_selector_program() -> DeckRepairProgram:
     return DeckRepairProgram.model_validate(payload)
 
 
+def _deferred_only_authorized_selector_program() -> DeckRepairProgram:
+    priority_codes = (
+        "weak_subject_specificity",
+        "weak_signature_realization",
+        "weak_closing_synthesis",
+    )
+    deferred_code = "weak_mechanism_visualization"
+    payload = _program().model_dump(mode="python", exclude={"program_hash"})
+    payload["authorized_selectors"] = ("slide:1", "slide:2", "slide:3")
+    payload["authorized_source_roles"] = {
+        selector: ("body", "slide_css")
+        for selector in payload["authorized_selectors"]
+    }
+    payload["selector_repairs"] = tuple(
+        SelectorRepair(
+            selector=selector,
+            failure_codes=failure_codes,
+            render_evidence=(
+                RepairRenderEvidence(
+                    selector=selector,
+                    path=f"renders/{selector.replace(':', '-')}.png",
+                    sha256=RENDER_HASH,
+                ),
+            ),
+            instruction="Make only the mapped failure visibly stronger.",
+            retained_content=("Preserve the PSI control-loop claim.",),
+            allowed_asset_changes=(),
+        )
+        for selector, failure_codes in (
+            ("slide:1", priority_codes[:2]),
+            ("slide:2", priority_codes[2:]),
+            ("slide:3", (deferred_code,)),
+        )
+    )
+    payload["expected_improvements"] = (*priority_codes, deferred_code)
+    payload["program_hash"] = canonical_sha256(payload)
+    return DeckRepairProgram.model_validate(payload)
+
+
 def _deck_style_root_program() -> DeckRepairProgram:
     payload = _program().model_dump(mode="python", exclude={"program_hash"})
     selector_repair = dict(payload["selector_repairs"][0])
@@ -1199,6 +1238,25 @@ def test_campaign_acceptance_maximizes_distinct_priority_selectors() -> None:
         acceptance["minimum_distinct_geometry_targets_per_priority_selector"]
         == 2
     )
+
+
+def test_deferred_only_authorized_selector_is_rejected_before_provider() -> None:
+    request = _request(program=_deferred_only_authorized_selector_program())
+    traces = FakeTraceFactory()
+    author, loader, invoker = _author(
+        request=request,
+        trace_factory=traces,
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "repair_unavailable")
+    assert loader.calls == []
+    assert invoker.prepare_calls == []
+    assert invoker.count_calls == []
+    assert invoker.invoke_calls == []
+    assert traces.inputs == []
 
 
 @pytest.mark.parametrize(
