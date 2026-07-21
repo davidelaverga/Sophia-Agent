@@ -51,7 +51,7 @@ def _built_deck(tmp_path, *, repeated: bool = False, old_marker: bool = False):
             if slide.composition_plan is not None:
                 slide.composition_plan.layout_name = "same_layout"
     if old_marker:
-        loaded.slides[0].html_source = (loaded.slides[0].html_source or "") + "<div class='system-diagram'></div>"
+        loaded.slides[0].html_source = (loaded.slides[0].html_source or "") + "<!-- deck_build_templates_v1 -->"
     return loaded
 
 
@@ -105,6 +105,43 @@ def test_mechanical_gates_fail_repeated_skeleton_and_old_renderer_marker(tmp_pat
 
     assert result.passed is False
     assert {issue.code for issue in result.issues} >= {"repeated_slide_skeleton", "old_renderer_artifact"}
+
+
+def test_single_legacy_class_name_is_not_misclassified_as_old_renderer(tmp_path) -> None:
+    for marker in ("section-label", "system-diagram", "closing-synthesis"):
+        deck = _built_deck(tmp_path / marker)
+        deck.slides[0].html_source = f"<div class='{marker}'>Subject-specific content</div>"
+
+        result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path / marker))
+
+        assert not any(issue.code == "old_renderer_artifact" for issue in result.issues)
+
+
+def test_compound_legacy_class_signature_is_rejected(tmp_path) -> None:
+    deck = _built_deck(tmp_path)
+    deck.slides[0].html_source = """
+    <div class='section-label'></div>
+    <div class='system-diagram'></div>
+    <div class='closing-synthesis'></div>
+    """
+
+    result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path))
+
+    assert any(issue.code == "old_renderer_artifact" for issue in result.issues)
+
+
+def test_legacy_class_markers_split_across_slides_are_not_rejected(tmp_path) -> None:
+    deck = _built_deck(tmp_path)
+    for slide, marker in zip(
+        deck.slides,
+        ("section-label", "system-diagram", "closing-synthesis"),
+        strict=False,
+    ):
+        slide.html_source = f"<div class='{marker}'>Subject-specific content</div>"
+
+    result = evaluate_mechanical_gates(deck, rendered_dir=_render_dir(tmp_path))
+
+    assert not any(issue.code == "old_renderer_artifact" for issue in result.issues)
 
 
 def test_mechanical_gates_fail_dark_request_rendered_light(tmp_path) -> None:

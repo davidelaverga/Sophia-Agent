@@ -55,6 +55,15 @@ def test_chrome_check_flags_icon_strip_class():
     assert gaps and "icon-strip" in gaps[0].detail
 
 
+def test_chrome_check_flags_visible_section_label_but_not_css_only_token():
+    visible = "<body><p class='section-label'>Overview</p><h1>T</h1></body>"
+    gaps = chrome_check(SlideSignals(slide_sources=[("visible.html", visible)]))
+    assert gaps and "section-label" in gaps[0].detail
+
+    css_only = "<style>.section-label { color: red; }</style><body><h1>T</h1></body>"
+    assert chrome_check(SlideSignals(slide_sources=[("css.html", css_only)])) == []
+
+
 def test_chrome_check_passes_clean_slide():
     assert chrome_check(SlideSignals(slide_sources=[("01.html", _CLEAN_SLIDE)])) == []
 

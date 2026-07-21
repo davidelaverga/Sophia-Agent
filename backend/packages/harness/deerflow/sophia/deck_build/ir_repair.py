@@ -37,6 +37,12 @@ class DeckIRRepairInstruction:
 _SLIDE_FIELD_RE = re.compile(r"\bSlide\s+(?P<slide>\d+)\s+(?P<field>[A-Za-z_][\w-]*)\b")
 _HEX_COLOR_RE = re.compile(r"^#?(?P<hex>[0-9A-Fa-f]{6})$")
 _OVERLAP_PAIR_RE = re.compile(r"\boverlaps\s+(?P<other>[^\s,;:]+)", re.I)
+_OVERLAP_MOVE_DELTA_RE = re.compile(
+    r"\bmove\s+(?P<shape>[^\s,;:]+)\s+by\s+\[\s*"
+    r"(?P<dx>-?(?:\d+(?:\.\d+)?|\.\d+))\s*,\s*"
+    r"(?P<dy>-?(?:\d+(?:\.\d+)?|\.\d+))\s*\]",
+    re.I,
+)
 _NATIVE_SHAPE_ID_RE = re.compile(r"\bs\d+(?:-\d+)?\b", re.I)
 _ALIGNMENT_ROLE_RE = re.compile(
     r"\b(?P<role>left|right|top|bottom|hcenter|vcenter)\b",
@@ -62,15 +68,20 @@ _MAX_TYPOGRAPHY_REPAIR_LINE_BYTES = 1024
 _MAX_TYPOGRAPHY_SOURCE_IDS = 3
 _MAX_TYPOGRAPHY_SOURCE_ID_BYTES = 72
 _MATERIAL_OVERLAP_MIN_AREA = 0.08
+_CSS_PX_PER_NATIVE_INCH = 96.0
 _MECHANICAL_REPAIR_PREAMBLE = (
-    "Repair every listed source-quality and mechanical issue in the complete prior input; preserve "
-    "copy, structure, and unnamed slides. Edit the exact named HTML/CSS, shared CSS, or creative_plan "
-    "image prompt/asset record. TYPE includes nested visible descendants. ALIGN native gridline C_in "
-    "to CSS px with Cpx=96*C_in; for source width Wpx/height Hpx: left-edge left=Cpx; "
+    "Repair every listed source-quality and mechanical issue in the complete prior input; preserve copy, "
+    "structure, and unnamed slides. Edit exact named HTML/CSS, shared CSS, or creative_plan image prompt/asset "
+    "record. TYPE includes visible descendants. ALIGN native "
+    "gridline C_in to CSS px with Cpx=96*C_in; for source Wpx/Hpx: left-edge left=Cpx; "
     "right-edge left=Cpx-Wpx; hcenter left=Cpx-Wpx/2; top-edge top=Cpx; "
     "bottom-edge top=Cpx-Hpx; vcenter top=Cpx-Hpx/2. "
-    "Use supplied contrast colors and move overlap source geometry. Then call prepare_deck_build "
-    "once with the complete prior input."
+    "Use supplied contrast colors. Then call prepare_deck_build once with the complete prior input."
+)
+_OVERLAP_REPAIR_GUIDANCE = (
+    "OVERLAP boxes/hints use native inches; CSS delta px=96*native delta in, including nested sources "
+    "(never parent-subtract a delta). For a sized target with padding/border, set box-sizing:border-box "
+    "on that exact source element only; never add a global or universal box-sizing reset."
 )
 
 
@@ -340,10 +351,13 @@ def _overlap_repair_targets(
                 selector=selector,
                 native_shape_inventory=native_shape_inventory,
                 source_element_map=source_element_map,
+                direct_source=True,
             )
             if detail is not None:
                 pair_shapes.append(detail)
         source_ids = sorted({source_id for detail in pair_shapes for source_id in detail["source_ids"]})
+        suggestion = _compact_excerpt(item.get("suggest"), limit=160)
+        suggested_move = _overlap_suggested_move(suggestion)
         targets.append(
             {
                 "target_type": "overlap",
@@ -352,7 +366,8 @@ def _overlap_repair_targets(
                 "pair": pair,
                 "pair_shapes": pair_shapes,
                 "area": area,
-                "suggest": _compact_excerpt(item.get("suggest"), limit=160),
+                "suggest": suggestion,
+                "suggested_move": suggested_move,
                 "issue": issue,
                 "source_ids": source_ids,
             }
@@ -590,6 +605,7 @@ def _overlap_shape_target(
     selector: str,
     native_shape_inventory: dict[str, Any] | None,
     source_element_map: dict[str, Any] | None,
+    direct_source: bool = False,
 ) -> dict[str, Any] | None:
     record = _native_shape_record(
         native_shape_inventory=native_shape_inventory,
@@ -602,10 +618,18 @@ def _overlap_shape_target(
     return {
         "id": shape_id,
         "name": shape_name,
-        "source_ids": _source_ids_for_shape(
-            source_element_map=source_element_map,
-            selector=selector,
-            shape_name=shape_name,
+        "source_ids": (
+            _direct_first_source_ids_for_shape(
+                source_element_map=source_element_map,
+                selector=selector,
+                shape_name=shape_name,
+            )
+            if direct_source
+            else _source_ids_for_shape(
+                source_element_map=source_element_map,
+                selector=selector,
+                shape_name=shape_name,
+            )
         ),
         "text_excerpt": _compact_excerpt(record.get("text_preview"), limit=120),
         "pos": _compact_geometry(record.get("pos")),
@@ -640,6 +664,18 @@ def _compact_geometry(value: Any) -> list[float]:
         if number is not None:
             result.append(round(number, 3))
     return result
+
+
+def _overlap_suggested_move(value: str) -> dict[str, Any] | None:
+    match = _OVERLAP_MOVE_DELTA_RE.search(value)
+    if match is None:
+        return None
+    native_delta = [float(match.group("dx")), float(match.group("dy"))]
+    return {
+        "shape": _compact_excerpt(match.group("shape"), limit=80).rstrip(".)]"),
+        "native_delta_in": [round(value, 3) for value in native_delta],
+        "css_delta_px": [round(value * _CSS_PX_PER_NATIVE_INCH, 2) for value in native_delta],
+    }
 
 
 def _generic_mechanical_repair_targets(
@@ -890,6 +926,8 @@ def _mechanical_repair_message(
     total_target_count: int,
 ) -> str:
     lines = [_MECHANICAL_REPAIR_PREAMBLE]
+    if any(str(target.get("target_type") or "") == "overlap" for target in targets):
+        lines.append(_OVERLAP_REPAIR_GUIDANCE)
     lines.extend(_mechanical_repair_line(index, target) for index, target in enumerate(targets, start=1))
     omitted_count = max(0, total_target_count - len(targets))
     if omitted_count:
@@ -972,11 +1010,19 @@ def _overlap_repair_line(index: int, target: dict[str, Any]) -> str:
         if isinstance(detail, dict)
     )
     pair_detail = details or pair
+    suggested_move = target.get("suggested_move")
+    converted_move = ""
+    if isinstance(suggested_move, dict):
+        native_delta = _format_geometry(suggested_move.get("native_delta_in"))
+        css_delta = _format_geometry(suggested_move.get("css_delta_px"), suffix="px")
+        converted_move = (
+            f" Move {suggested_move.get('shape') or 'the hinted source'} by native delta "
+            f"{native_delta}in = CSS delta {css_delta}."
+        )
     return (
         f"{index}. OVERLAP {target.get('selector') or 'deck'} area {target.get('area')}: {pair_detail}; "
-        f"hint {suggestion}. Separate in source CSS without deleting content. If moving or resizing an "
-        "explicitly sized target with padding or a border, set box-sizing:border-box on that exact source "
-        "element only; never add a global or universal box-sizing reset, and leave unrelated geometry unchanged."
+        f"native-inch hint {suggestion}.{converted_move} Separate the exact source CSS without deleting "
+        "content, and leave unrelated geometry unchanged."
     )
 
 
@@ -993,8 +1039,13 @@ def _overlap_shape_detail(detail: dict[str, Any]) -> str:
     pos = detail.get("pos") or []
     size = detail.get("size") or []
     if pos or size:
-        geometry = f" box={pos or '?'}+{size or '?'}"
+        geometry = f" native_box_in={pos or '?'}+{size or '?'}"
     return f"{shape_id}{source} {text}{geometry}"
+
+
+def _format_geometry(value: Any, *, suffix: str = "") -> str:
+    values = value if isinstance(value, (list, tuple)) else []
+    return "[" + ", ".join(f"{float(item):g}{suffix}" for item in values[:2]) + "]"
 
 
 def _overflow_repair_line(index: int, target: dict[str, Any]) -> str:
@@ -1145,6 +1196,27 @@ def _source_ids_for_shape(
         for source_id, record in elements.items()
         if isinstance(record, dict) and shape_name in {str(name) for name in record.get("shape_names") or []}
     )
+
+
+def _direct_first_source_ids_for_shape(
+    *,
+    source_element_map: dict[str, Any] | None,
+    selector: str,
+    shape_name: str,
+) -> list[str]:
+    matches = _source_ids_for_shape(
+        source_element_map=source_element_map,
+        selector=selector,
+        shape_name=shape_name,
+    )
+    direct = [
+        source_id
+        for source_id in matches
+        if _is_direct_compiler_shape_name(shape_name=shape_name, source_id=source_id)
+    ]
+    if direct:
+        return [max(direct, key=len)]
+    return matches if len(matches) == 1 else []
 
 
 def _direct_source_role_for_shape(

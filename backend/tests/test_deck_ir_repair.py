@@ -233,6 +233,11 @@ def test_mechanical_repair_instruction_combines_contrast_overlap_and_generic_tar
     assert overlap["pair"] == ["s5", "s8"]
     assert overlap["area"] == 0.2
     assert overlap["suggest"] == "move s8 by [0, 2.22]"
+    assert overlap["suggested_move"] == {
+        "shape": "s8",
+        "native_delta_in": [0.0, 2.22],
+        "css_delta_px": [0.0, 213.12],
+    }
     assert overlap["source_ids"] == ["problem-chart", "problem-narrative"]
     assert overlap["pair_shapes"][0] == {
         "id": "s5",
@@ -250,8 +255,63 @@ def test_mechanical_repair_instruction_combines_contrast_overlap_and_generic_tar
     assert "move s8 by [0, 2.22]" in message
     assert 's5/data-deck-id="problem-narrative"' in message
     assert "Three isolated habitat patches" in message
-    assert "box=[1.25, 2.396]+[8.233, 2.625]" in message
+    assert "native_box_in=[1.25, 2.396]+[8.233, 2.625]" in message
+    assert "native delta [0, 2.22]in = CSS delta [0px, 213.12px]" in message
     assert "sparse_rendered_slide" in message
+
+
+def test_overlap_repair_uses_direct_leaf_source_id_for_nested_shape_mapping() -> None:
+    instruction = deck_mechanical_repair_instruction_from_reports(
+        native_contrast_report={},
+        native_mechanical_report={
+            "lint_residue": [
+                {
+                    "slide": 0,
+                    "shape": "s1",
+                    "kind": "overlap",
+                    "overlap_area": 0.2,
+                    "issue": "overlaps s2 by 0.2 sq in",
+                    "suggest": "move s2 by [0.25, -0.5]",
+                }
+            ]
+        },
+        mechanical_gate_results={
+            "issues": [
+                {
+                    "code": "native_lint_severe_overlap",
+                    "selector": "slide:1",
+                    "summary": "Native lint/fix left a material shape overlap.",
+                    "repair_hint": "Separate the semantic elements.",
+                }
+            ]
+        },
+        native_shape_inventory={
+            "slide:1": {
+                "shapes": [
+                    {"id": "s1", "name": "h2p-1-leaf-a-box", "pos": [1, 1], "size": [2, 2]},
+                    {"id": "s2", "name": "h2p-1-leaf-b-text", "pos": [2, 2], "size": [2, 1]},
+                ]
+            }
+        },
+        source_element_map={
+            "slides": {
+                "slide:1": {
+                    "elements": {
+                        "ancestor": {"shape_names": ["h2p-1-leaf-a-box", "h2p-1-leaf-b-text"]},
+                        "leaf-a": {"shape_names": ["h2p-1-leaf-a-box"]},
+                        "leaf-b": {"shape_names": ["h2p-1-leaf-b-text"]},
+                    }
+                }
+            }
+        },
+    )
+
+    assert instruction is not None
+    target = instruction["repair_targets"][0]
+    assert target["pair_shapes"][0]["source_ids"] == ["leaf-a"]
+    assert target["pair_shapes"][1]["source_ids"] == ["leaf-b"]
+    assert target["source_ids"] == ["leaf-a", "leaf-b"]
+    assert target["suggested_move"]["css_delta_px"] == [24.0, -48.0]
 
 
 def test_mechanical_repair_instruction_is_bounded_without_hiding_target_categories() -> None:

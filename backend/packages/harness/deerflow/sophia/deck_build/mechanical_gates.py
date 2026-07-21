@@ -19,12 +19,12 @@ except Exception:  # noqa: BLE001
     Image = None  # type: ignore[assignment]
     ImageStat = None  # type: ignore[assignment]
 
-_OLD_RENDERER_MARKERS = (
+_OLD_RENDERER_CLASS_MARKERS = (
     "section-label",
     "system-diagram",
     "closing-synthesis",
-    "deck_build_templates_v1",
 )
+_OLD_RENDERER_STRONG_MARKER = "deck_build_templates_v1"
 _HARD_RESIDUE_KINDS = {
     "frame_overflow",
     "misaligned",
@@ -250,19 +250,22 @@ def _normalize_visible_text(value: Any) -> str:
 
 
 def _old_renderer_issues(deck: DeckBuild) -> list[MechanicalGateIssue]:
-    issues: list[MechanicalGateIssue] = []
-    for slide in deck.slides:
-        source = slide.html_source or ""
-        if any(marker in source for marker in _OLD_RENDERER_MARKERS):
-            issues.append(
-                MechanicalGateIssue(
-                    code="old_renderer_artifact",
-                    selector=slide.selector,
-                    summary="Slide HTML appears to contain the retired deterministic renderer skeleton.",
-                    repair_hint="Author subject-specific slide HTML from the creative plan instead of using the old template structure.",
-                )
-            )
-    return issues
+    sources = [slide.html_source or "" for slide in deck.slides]
+    explicit_fingerprint = any(_OLD_RENDERER_STRONG_MARKER in source for source in sources)
+    compound_fingerprint = any(
+        all(marker in source for marker in _OLD_RENDERER_CLASS_MARKERS)
+        for source in sources
+    )
+    if not explicit_fingerprint and not compound_fingerprint:
+        return []
+    return [
+        MechanicalGateIssue(
+            code="old_renderer_artifact",
+            selector="deck",
+            summary="Slide HTML appears to contain the retired deterministic renderer skeleton.",
+            repair_hint="Author subject-specific slide HTML from the creative plan instead of using the old template structure.",
+        )
+    ]
 
 
 def _repeated_structure_issues(deck: DeckBuild) -> list[MechanicalGateIssue]:

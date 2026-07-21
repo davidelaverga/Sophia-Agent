@@ -41,6 +41,7 @@ _MAX_SLIDE_COLUMNS = 3
 # slide). Matched against class="..."/id="..." tokens + semantic tags.
 _CHROME_CLASS_TOKENS = (
     "eyebrow",
+    "section-label",
     "navbar",
     "nav-row",
     "nav-bar",
