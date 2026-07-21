@@ -113,14 +113,18 @@ _MIN_RETAINED_LINE_HEIGHT = 0.8
 _MAX_RETAINED_LINE_HEIGHT = 3.0
 _MIN_RETAINED_LINE_HEIGHT_PX = 8.0
 _MAX_RETAINED_LINE_HEIGHT_PX = 96.0
+_MIN_RETAINED_BORDER_WIDTH_PX = 0.5
+_MAX_RETAINED_BORDER_WIDTH_PX = 16.0
+_MAX_RETAINED_BORDER_RADIUS_PX = 1080.0
 _MIN_AUTHORED_TEXT_BACKGROUND_CONTRAST = 4.5
 _SLIDE_CSS_BACKGROUND_PROPERTIES = frozenset(
     {"background", "background-color"}
 )
 _SLIDE_CSS_FORBIDDEN_BACKGROUND_PROPERTIES = frozenset({"background-image"})
 _RETAINED_SLIDE_CSS_PROPERTIES = frozenset(
-    {"font-size", "line-height"}
+    {"border", "border-radius", "box-sizing", "font-size", "line-height"}
 )
+_RETAINED_BORDER_STYLES = frozenset({"solid"})
 _ALLOWED_RETAINED_SELECTOR_PSEUDO_CLASSES = frozenset(
     {"first-child", "first-of-type", "last-child", "last-of-type", "only-child"}
 )
@@ -647,7 +651,9 @@ This is the campaign's only repair: use the whole-deck contact sheet and every a
 Treat every expected improvement as a required visible outcome.
 First, privately map each listed priority PSI family to its frozen selector, visible observation, and one judge-visible CSS intervention.
 Spend the compact CSS budget on the mapped priority families before generic polish; when at least three distinct families are available, materially resolve at least three.
-Use existing semantic elements with decisive type-scale contrast and line spacing; palette-only restyling or moving generic boxes does not count.
+Use existing semantic elements with decisive type-scale contrast, line spacing, and full enclosing frames; palette-only restyling or moving generic boxes does not count.
+When mechanism, signature, or closing-synthesis families are listed, use purposeful full enclosing frames to make the existing mechanism state, recurring motif, or consolidated close visibly distinct.
+Do not frame every box or use generic card chrome, and do not leave a priority family addressed only in rationale: each mapped family needs a retained judge-visible declaration.
 Before returning, recheck every expected improvement against the whole-deck contact sheet while preserving every locked constraint.
 Aim for a candidate that a fresh independent rendered judgment can mark satisfied.
 Deterministic comparison must also approve it without a critical, mechanical, content, or collateral regression.
@@ -665,17 +671,22 @@ Do not set font or font-family in slide_css; preserve the shared Office-safe fon
 Do not use rejected or lossy native CSS properties, including filter, backdrop-filter, blend modes, animation, transition, box-shadow, text-shadow, letter-spacing, or opacity.
 Do not change generated list-marker semantics or set list-style, list-style-type, or list-style-image.
 Do not set display, overflow, overflow-x, or overflow-y in slide_css; preserve the authenticated layout and native text-extraction semantics.
-The sealed candidate override lane retains only font-size and line-height declarations.
+The sealed candidate override lane retains only font-size, line-height, box-sizing:border-box, full border shorthand, and border-radius declarations.
 The author boundary strips every fill, background, text color, geometry, margin, padding, and other declaration before durable materialization.
-Spend the entire CSS budget on decisive, selector-specific typographic hierarchy.
-Use only finite literal values in that lane: px font-size and unitless or px line-height. Do not use variables, calc(), inheritance keywords, or !important.
+Directional or independently authored border sides and border longhands are stripped because they materialize as mechanically unstable native line fragments.
+Use only full enclosing border shorthand when framing is judge-visible and purposeful.
+For each framed selector, put border, border-radius, and box-sizing:border-box in the same qualified CSS rule; dependent frame declarations in split rules are stripped.
+Spend the entire CSS budget on decisive, selector-specific typographic hierarchy and full-frame structure.
+Use only finite literal values in that lane: px font-size, unitless or px line-height, literal px border widths, and solid full-border style.
+Use fully opaque literal full-border colors and literal px or percentage border radii. Do not use variables, calc(), inheritance keywords, or !important.
 Do not use at-rules or nested CSS rules in slide_css; this is one fixed 1920x1080 canvas with no responsive or conditional repair variants.
 Use font-size only as one finite literal px value from 12px through 64px.
 Every slide_css update must fit the compact_model_html_v2 limit of 1024 UTF-8 bytes.
 Do not attempt to move or resize native shapes; preserve the authenticated geometry and shared fill/text palette.
 Do not create full-slide raster replacements or semantic text inside generated images.
 {compiler_capability_prompt_excerpt()}
-The sealed repair contract overrides broader compiler capabilities: only font-size and line-height declarations survive the author boundary; never use at-rules or nested rules.
+The sealed repair contract overrides broader compiler capabilities: only font-size, line-height, box-sizing:border-box, full border shorthand, and border-radius survive the author boundary.
+Never use directional border sides, border longhands, at-rules, or nested rules.
 The provider-enforced strict output schema is the sole response format."""
 
 
@@ -769,6 +780,21 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                             _MIN_RETAINED_LINE_HEIGHT_PX,
                             _MAX_RETAINED_LINE_HEIGHT_PX,
                         ],
+                    },
+                    "box_sizing": "border-box",
+                    "full_border_shorthand_only": True,
+                    "frame_declarations_same_qualified_rule": True,
+                    "directional_border_sides_allowed": False,
+                    "border_longhands_allowed": False,
+                    "border_width_px_range_inclusive": [
+                        _MIN_RETAINED_BORDER_WIDTH_PX,
+                        _MAX_RETAINED_BORDER_WIDTH_PX,
+                    ],
+                    "border_styles": ["solid"],
+                    "border_color": "literal_fully_opaque_css_color",
+                    "border_radius": {
+                        "px_range_inclusive": [0, _MAX_RETAINED_BORDER_RADIUS_PX],
+                        "percentage_range_inclusive": [0, 50],
                     },
                     "important_allowed": False,
                     "variables_or_calculations_allowed": False,
@@ -1674,6 +1700,61 @@ def _retained_line_height_token_is_safe(token: Any) -> bool:
     )
 
 
+def _retained_border_width_token_is_safe(token: Any) -> bool:
+    value = _finite_css_token_value(token)
+    return (
+        token.type == "dimension"
+        and str(getattr(token, "unit", "")).casefold() == "px"
+        and value is not None
+        and _MIN_RETAINED_BORDER_WIDTH_PX
+        <= value
+        <= _MAX_RETAINED_BORDER_WIDTH_PX
+    )
+
+
+def _retained_border_radius_token_is_safe(token: Any) -> bool:
+    value = _finite_css_token_value(token)
+    if value is None:
+        return False
+    if token.type == "dimension":
+        return (
+            str(getattr(token, "unit", "")).casefold() == "px"
+            and 0 <= value <= _MAX_RETAINED_BORDER_RADIUS_PX
+        )
+    return token.type == "percentage" and 0 <= value <= 50
+
+
+def _retained_border_color_token_is_safe(token: Any) -> bool:
+    try:
+        color = parse_color(token)
+    except Exception:
+        return False
+    alpha = getattr(color, "alpha", None)
+    return (
+        not isinstance(alpha, bool)
+        and isinstance(alpha, (int, float))
+        and math.isfinite(alpha)
+        and alpha == 1
+    )
+
+
+def _retained_full_border_shorthand_is_safe(tokens: tuple[Any, ...]) -> bool:
+    kinds: set[str] = set()
+    for token in tokens:
+        if _retained_border_width_token_is_safe(token):
+            kind = "width"
+        elif token.type == "ident" and str(token.value).casefold() in _RETAINED_BORDER_STYLES:
+            kind = "style"
+        elif _retained_border_color_token_is_safe(token):
+            kind = "color"
+        else:
+            return False
+        if kind in kinds:
+            return False
+        kinds.add(kind)
+    return kinds == {"width", "style", "color"}
+
+
 def _retained_css_declaration_is_safe(declaration: Any) -> bool:
     if declaration.type != "declaration" or bool(declaration.important):
         return False
@@ -1685,6 +1766,12 @@ def _retained_css_declaration_is_safe(declaration: Any) -> bool:
         return not _css_font_size_violates_candidate_contract(declaration)
     if name == "line-height":
         return len(tokens) == 1 and _retained_line_height_token_is_safe(tokens[0])
+    if name == "box-sizing":
+        return _single_css_identifier(declaration) == "border-box"
+    if name == "border":
+        return _retained_full_border_shorthand_is_safe(tokens)
+    if name == "border-radius":
+        return len(tokens) == 1 and _retained_border_radius_token_is_safe(tokens[0])
     return False
 
 
@@ -2278,6 +2365,12 @@ def _retained_slide_css(value: str) -> str:
             )
             if _retained_css_declaration_is_safe(item)
         )
+        if not any(item.lower_name == "border" for item in declarations):
+            declarations = tuple(
+                item
+                for item in declarations
+                if item.lower_name not in {"border-radius", "box-sizing"}
+            )
         if not declarations:
             continue
         selector = tinycss2.serialize(rule.prelude).strip()

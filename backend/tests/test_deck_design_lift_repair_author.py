@@ -65,7 +65,10 @@ SLIDE_CSS_TEXT = (
     "section{font-size:32px;line-height:1.2;"
     "border:1px solid #0B1F3A;box-sizing:border-box}"
 )
-RETAINED_SLIDE_CSS_TEXT = "section{font-size:32px;line-height:1.2;}"
+RETAINED_SLIDE_CSS_TEXT = (
+    "section{font-size:32px;line-height:1.2;"
+    "border:1px solid #0B1F3A;box-sizing:border-box;}"
+)
 DECK_CSS_TEXT = ":root{}"
 SKILL_EXCERPT = "Use one subject-specific mechanism visual and preserve factual text."
 
@@ -604,9 +607,13 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
 
     system_prompt = messages[0].content
     assert "compact_model_html_v2 limit of 1024 UTF-8 bytes" in system_prompt
-    assert "retains only font-size and line-height" in system_prompt
+    assert "retains only font-size, line-height, box-sizing:border-box" in system_prompt
     assert "strips every fill, background, text color, geometry" in system_prompt
-    assert "selector-specific typographic hierarchy" in system_prompt
+    assert "full enclosing border shorthand" in system_prompt
+    assert "Directional or independently authored border sides" in system_prompt
+    assert "mechanically unstable native line fragments" in system_prompt
+    assert "put border, border-radius, and box-sizing:border-box in the same qualified CSS rule" in system_prompt
+    assert "dependent frame declarations in split rules are stripped" in system_prompt
     assert "Do not use variables, calc(), inheritance keywords, or !important" in system_prompt
     assert "Do not attempt to move or resize native shapes" in system_prompt
     assert "preserve the authenticated geometry and shared fill/text palette" in system_prompt
@@ -649,7 +656,10 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "Treat every expected improvement as a required visible outcome" in system_prompt
     assert "map each listed priority PSI family" in system_prompt
     assert "when at least three distinct families are available" in system_prompt
-    assert "decisive type-scale contrast and line spacing" in system_prompt
+    assert "decisive type-scale contrast, line spacing, and full enclosing frames" in system_prompt
+    assert "mechanism, signature, or closing-synthesis families" in system_prompt
+    assert "Do not frame every box or use generic card chrome" in system_prompt
+    assert "each mapped family needs a retained judge-visible declaration" in system_prompt
     assert "palette-only restyling or moving generic boxes does not count" in system_prompt
     assert "recheck every expected improvement against the whole-deck contact sheet" in system_prompt
     assert "fresh independent rendered judgment can mark satisfied" in system_prompt
@@ -726,7 +736,13 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
         "slide_css": {
             "source_role": "slide_css",
             "max_utf8_bytes": 1_024,
-            "retained_properties": ["font-size", "line-height"],
+            "retained_properties": [
+                "border",
+                "border-radius",
+                "box-sizing",
+                "font-size",
+                "line-height",
+            ],
             "author_boundary_property_filter": "strip_all_unlisted_declarations",
             "authenticated_baseline_policy": "require_semantically_empty_slide_css",
             "fill_background_text_paint_updates_retained": False,
@@ -740,6 +756,18 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                 "line_height": {
                     "unitless_range_inclusive": [0.8, 3.0],
                     "px_range_inclusive": [8.0, 96.0],
+                },
+                "box_sizing": "border-box",
+                "full_border_shorthand_only": True,
+                "frame_declarations_same_qualified_rule": True,
+                "directional_border_sides_allowed": False,
+                "border_longhands_allowed": False,
+                "border_width_px_range_inclusive": [0.5, 16.0],
+                "border_styles": ["solid"],
+                "border_color": "literal_fully_opaque_css_color",
+                "border_radius": {
+                    "px_range_inclusive": [0, 1080.0],
+                    "percentage_range_inclusive": [0, 50],
                 },
                 "important_allowed": False,
                 "variables_or_calculations_allowed": False,
@@ -956,7 +984,9 @@ def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:
         "font-size:36px;border:2px solid #0B1F3A;padding:12px;"
         "background:#FFFFFF;color:#0B1F3A}"
     )
-    retained_css = "section{font-size:36px;}"
+    retained_css = (
+        "section{font-size:36px;border:2px solid #0B1F3A;}"
+    )
     authored = DeckRepairCandidate(
         source_updates=(
             SourceUpdate(
@@ -1132,7 +1162,7 @@ def test_css_repair_accepts_existing_manifest_class_and_id_selectors() -> None:
     result = _run(author(request))
 
     assert result.candidate.source_updates[1].content == (
-        "#mechanism.frame{font-size:36px;}"
+        "#mechanism.frame{font-size:36px;border:2px solid #0B1F3A;}"
     )
     assert len(invoker.invoke_calls) == 1
 
@@ -1606,6 +1636,24 @@ def test_slide_css_allows_safe_content_visibility_color_and_font_size_boundary()
         ("line-height:3", "line-height:3;"),
         ("line-height:8px", "line-height:8px;"),
         ("line-height:96px", "line-height:96px;"),
+        (
+            "border:1px solid #0B1F3A;box-sizing:border-box",
+            "border:1px solid #0B1F3A;box-sizing:border-box;",
+        ),
+        ("border:0.5px solid #0B1F3A", "border:0.5px solid #0B1F3A;"),
+        ("border:16px solid rgb(11,31,58)", "border:16px solid rgb(11,31,58);"),
+        (
+            "border:1px solid #0B1F3A;border-radius:0px",
+            "border:1px solid #0B1F3A;border-radius:0px;",
+        ),
+        (
+            "border:1px solid #0B1F3A;border-radius:1080px",
+            "border:1px solid #0B1F3A;border-radius:1080px;",
+        ),
+        (
+            "border:1px solid #0B1F3A;border-radius:50%",
+            "border:1px solid #0B1F3A;border-radius:50%;",
+        ),
     ],
 )
 def test_slide_css_retained_value_boundaries_are_canonicalized(
@@ -1634,6 +1682,126 @@ def test_slide_css_retained_value_boundaries_are_canonicalized(
     assert len(invoker.invoke_calls) == 1
 
 
+def test_slide_css_keeps_full_frame_and_strips_directional_border_fragments() -> None:
+    request = _request()
+    candidate = _candidate().model_copy(
+        update={
+            "source_updates": (
+                _candidate().source_updates[0],
+                _candidate().source_updates[1].model_copy(
+                    update={
+                        "content": (
+                            "section{font-size:32px;box-sizing:border-box;"
+                            "border:2px solid #0B1F3A;border-radius:12px;"
+                            "border-left:4px solid #EA7C32;"
+                            "border-top-width:3px;border-color:#FFFFFF}"
+                        )
+                    }
+                ),
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    assert result.candidate.source_updates[1].content == (
+        "section{font-size:32px;box-sizing:border-box;"
+        "border:2px solid #0B1F3A;border-radius:12px;}"
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_strips_frame_dependents_split_from_full_border_rule() -> None:
+    request = _request()
+    candidate = _candidate().model_copy(
+        update={
+            "source_updates": (
+                _candidate().source_updates[0],
+                _candidate().source_updates[1].model_copy(
+                    update={
+                        "content": (
+                            "section{border:2px solid #0B1F3A}"
+                            "section{border-radius:12px;box-sizing:border-box;"
+                            "font-size:32px}"
+                        )
+                    }
+                ),
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    assert result.candidate.source_updates[1].content == (
+        "section{border:2px solid #0B1F3A;}section{font-size:32px;}"
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        "border-left-width:2px",
+        "border-left-style:solid",
+        "border-left-color:#0B1F3A",
+        "border-right-width:2px",
+        "border-right-style:solid",
+        "border-right-color:#0B1F3A",
+        "border-top-width:2px",
+        "border-top-style:solid",
+        "border-top-color:#0B1F3A",
+        "border-bottom-width:2px",
+        "border-bottom-style:solid",
+        "border-bottom-color:#0B1F3A",
+        "border-top-left-radius:12px",
+        "border-top-right-radius:12px",
+        "border-bottom-left-radius:12px",
+        "border-bottom-right-radius:12px",
+        "border-inline:2px solid #0B1F3A",
+        "border-inline-start:2px solid #0B1F3A",
+        "border-inline-end:2px solid #0B1F3A",
+        "border-block:2px solid #0B1F3A",
+        "border-block-start:2px solid #0B1F3A",
+        "border-block-end:2px solid #0B1F3A",
+        "border-start-start-radius:12px",
+        "border-start-end-radius:12px",
+        "border-end-start-radius:12px",
+        "border-end-end-radius:12px",
+    ],
+)
+def test_slide_css_strips_every_directional_border_longhand(
+    declaration: str,
+) -> None:
+    request = _request()
+    candidate = _candidate().model_copy(
+        update={
+            "source_updates": (
+                _candidate().source_updates[0],
+                _candidate().source_updates[1].model_copy(
+                    update={"content": f"section{{font-size:32px;{declaration}}}"}
+                ),
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    assert result.candidate.source_updates[1].content == "section{font-size:32px;}"
+    assert len(invoker.invoke_calls) == 1
+
+
 @pytest.mark.parametrize(
     "declaration",
     [
@@ -1641,8 +1809,19 @@ def test_slide_css_retained_value_boundaries_are_canonicalized(
         "line-height:-999px",
         "line-height:var(--x)",
         "box-sizing:border-box",
-        "border:1px solid #0B1F3A",
+        "border-radius:12px",
         "border:9999px solid #0B1F3A",
+        "border-left:1px solid #0B1F3A",
+        "border-top:1px solid #0B1F3A",
+        "border-bottom:1px solid #0B1F3A",
+        "border-right:1px solid #0B1F3A",
+        "border-width:1px",
+        "border-style:solid",
+        "border-color:#0B1F3A",
+        "border:1px dashed #0B1F3A",
+        "border:1px dotted #0B1F3A",
+        "border:1px double #0B1F3A",
+        "border:1px solid rgba(11,31,58,.5)",
         "border-width:calc(100% + 1px)",
         "box-sizing:inherit",
         "font-size:32px!important",
