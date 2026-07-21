@@ -1703,6 +1703,7 @@ def _priority_geometry_sources_are_feasible(
                 "html",
                 *_NON_VISIBLE_HTML_CONTENT_ELEMENTS,
             }
+            and _inline_geometry_requires_important(element) is not None
         )
         if not _contains_independent_element_antichain(
             eligible,

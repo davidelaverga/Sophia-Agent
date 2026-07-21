@@ -1201,14 +1201,27 @@ def test_campaign_acceptance_maximizes_distinct_priority_selectors() -> None:
     )
 
 
-def test_priority_geometry_infeasible_context_is_rejected_before_provider() -> None:
+@pytest.mark.parametrize(
+    "body",
+    [
+        (
+            '<section class="subject">'
+            '<div class="mechanism">Current PSI control loop</div>'
+            "</section>"
+        ),
+        (
+            '<section class="subject" style="inset:0">Current PSI</section>'
+            '<section class="mechanism" style="left:0!important">'
+            "Control loop</section>"
+        ),
+    ],
+    ids=("nested-targets", "ineligible-inline-geometry"),
+)
+def test_priority_geometry_infeasible_context_is_rejected_before_provider(
+    body: str,
+) -> None:
     program = _overlapping_three_selector_program()
     request = _request(program=program)
-    body = (
-        '<section class="subject">'
-        '<div class="mechanism">Current PSI control loop</div>'
-        "</section>"
-    )
     body_hash = hashlib.sha256(body.encode()).hexdigest()
     base = _context(request=request)
     sources = tuple(
