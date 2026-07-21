@@ -710,15 +710,21 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "from 12px through 64px" in system_prompt
     assert "campaign's only repair" in system_prompt
     assert "decisive, presentation-scale design lift" in system_prompt
-    assert "Treat every expected improvement as a required visible outcome" in system_prompt
+    assert "Only campaign_acceptance.priority_failure_codes are required visible outcomes" in system_prompt
+    assert "deferred failure as context and a no-regression constraint" in system_prompt
     assert "map each listed priority PSI family" in system_prompt
-    assert "when at least three distinct families are available" in system_prompt
-    assert "decisive type-scale contrast, line spacing, and full enclosing frames" in system_prompt
-    assert "mechanism, signature, or closing-synthesis families" in system_prompt
-    assert "Do not frame every box or use generic card chrome" in system_prompt
-    assert "each mapped family needs a retained judge-visible declaration" in system_prompt
-    assert "palette-only restyling or moving generic boxes does not count" in system_prompt
-    assert "recheck every expected improvement against the whole-deck contact sheet" in system_prompt
+    assert "Materially resolve exactly those three distinct priority families" in system_prompt
+    assert "CSS budget is a hard ceiling, never a target" in system_prompt
+    assert "fewest selector-specific rules and retained declarations" in system_prompt
+    assert "at most one thin, purposeful full enclosing frame per authorized slide" in system_prompt
+    assert "one high-level semantic container" in system_prompt
+    assert "Never frame a title or other text leaf, repeated list or loop nodes" in system_prompt
+    assert "without clipping or a new wrap" in system_prompt
+    assert "Preserve every existing deck and slide title fully visible" in system_prompt
+    assert "Do not add a separate rule for a deferred failure" in system_prompt
+    assert "each priority family needs a retained judge-visible declaration" in system_prompt
+    assert "Treat every expected improvement as a required visible outcome" not in system_prompt
+    assert "Spend the entire CSS budget" not in system_prompt
     assert "fresh independent rendered judgment can mark satisfied" in system_prompt
 
     payload_text = messages[1].content[0]["text"]
@@ -752,12 +758,20 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
             "weak_signature_realization",
             "weak_mechanism_visualization",
         ],
+        "priority_psi_failure_family_by_code": {
+            "weak_subject_specificity": "weak_subject_specificity",
+            "weak_signature_realization": "weak_signature_realization",
+            "weak_mechanism_visualization": "weak_mechanism_visualization",
+        },
         "psi_failure_family_by_code": {
             "weak_subject_specificity": "weak_subject_specificity",
             "weak_signature_realization": "weak_signature_realization",
             "weak_mechanism_visualization": "weak_mechanism_visualization",
         },
-        "expected_improvements_are_required_visible_outcomes": True,
+        "deferred_failure_codes": [],
+        "priority_failure_codes_are_required_visible_outcomes": True,
+        "expected_improvements_are_required_visible_outcomes": False,
+        "priority_slide_css_feasible": True,
         "cosmetic_rearrangement_is_insufficient": True,
         "forbidden_regressions_remain_binding": True,
     }
@@ -968,6 +982,49 @@ def test_campaign_acceptance_prioritizes_only_available_psi_floor_families() -> 
         "low_sequence_rhythm",
     ]
     assert "weak_memorability" not in acceptance["psi_failure_family_by_code"]
+
+
+def test_campaign_acceptance_prioritizes_exactly_three_critical_psi_families() -> None:
+    program = _program(
+        failure_codes=(
+            "default_look_gravity",
+            "weak_closing_synthesis",
+            "weak_fingerprint_realization",
+            "weak_mechanism_visualization",
+            "weak_memorability",
+            "weak_signature_realization",
+            "weak_spatial_tension",
+            "weak_subject_specificity",
+        )
+    )
+    request = _request(program=program)
+
+    messages = build_repair_author_messages(
+        context=_context(request=request),
+        program=program,
+    )
+
+    payload_text = messages[1].content[0]["text"]
+    payload = json.loads(payload_text.removeprefix("Allowed repair context JSON:\n"))
+    acceptance = payload["repair_constraints"]["campaign_acceptance"]
+    assert acceptance["available_family_count"] == 5
+    assert acceptance["priority_failure_codes"] == [
+        "weak_closing_synthesis",
+        "weak_signature_realization",
+        "weak_subject_specificity",
+    ]
+    assert acceptance["priority_psi_failure_family_by_code"] == {
+        "weak_closing_synthesis": "weak_closing_synthesis",
+        "weak_signature_realization": "weak_signature_realization",
+        "weak_subject_specificity": "weak_subject_specificity",
+    }
+    assert acceptance["deferred_failure_codes"] == [
+        "default_look_gravity",
+        "weak_fingerprint_realization",
+        "weak_mechanism_visualization",
+        "weak_memorability",
+        "weak_spatial_tension",
+    ]
 
 
 @pytest.mark.parametrize(
@@ -1294,12 +1351,13 @@ def test_css_repair_rejects_standalone_unmatched_retained_rule() -> None:
 
 def test_body_only_program_is_rejected_before_provider_admission() -> None:
     request = _request(program=_program(source_roles=("body",)))
-    author, _loader, invoker = _author(request=request)
+    author, loader, invoker = _author(request=request)
 
     with pytest.raises(DeckRepairAuthorError) as error:
         _run(author(request))
 
-    _assert_code(error, "context_invalid")
+    _assert_code(error, "repair_unavailable")
+    assert loader.calls == []
     assert invoker.prepare_calls == []
     assert invoker.invoke_calls == []
 
@@ -1531,7 +1589,7 @@ def test_deck_style_root_program_is_rejected_before_provider_admission() -> None
     with pytest.raises(DeckRepairAuthorError) as error:
         _run(author(request))
 
-    _assert_code(error, "context_invalid")
+    _assert_code(error, "repair_unavailable")
     assert invoker.prepare_calls == []
     assert invoker.invoke_calls == []
 

@@ -1230,7 +1230,9 @@ class DurableDeckQualityEvidenceAdapter:
                 raise DeckQualityEvidenceAdapterError("manifest_source_role_invalid")
             available.add("body")
         if failure_code in _NARRATIVE_FAILURES:
-            return ("body",) if "body" in available else ()
+            return tuple(
+                role for role in ("body", "slide_css") if role in available
+            )
         return tuple(role for role in ("body", "slide_css") if role in available)
 
 

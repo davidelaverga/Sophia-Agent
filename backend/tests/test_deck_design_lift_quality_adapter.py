@@ -812,6 +812,33 @@ def _adapter(
     )
 
 
+@pytest.mark.parametrize(
+    "failure_code",
+    (
+        "weak_audience_fit",
+        "weak_closing_synthesis",
+        "weak_forward_momentum",
+        "weak_narrative_arc",
+        "weak_narrative_pacing",
+        "weak_subject_specificity",
+    ),
+)
+def test_narrative_findings_authorize_the_slide_css_repair_channel(
+    failure_code: str,
+) -> None:
+    roles = DurableDeckQualityEvidenceAdapter._requested_roles(  # noqa: SLF001
+        component_source_path="components/slide-1/body.html",
+        component_source_roles={
+            "body": "components/slide-1/body.html",
+            "slide_css": "components/slide-1/slide.css",
+            "notes": "components/slide-1/notes.txt",
+        },
+        failure_code=failure_code,
+    )
+
+    assert roles == ("body", "slide_css")
+
+
 @pytest.mark.anyio
 async def test_initial_projects_completed_dq1_and_compiles_three_local_findings() -> None:
     fixture = _fixture()
