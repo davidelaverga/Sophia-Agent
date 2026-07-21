@@ -65,10 +65,7 @@ SLIDE_CSS_TEXT = (
     "section{font-size:32px;line-height:1.2;"
     "border:1px solid #0B1F3A;box-sizing:border-box}"
 )
-RETAINED_SLIDE_CSS_TEXT = (
-    "section{font-size:32px;line-height:1.2;"
-    "border:1px solid #0B1F3A;box-sizing:border-box;}"
-)
+RETAINED_SLIDE_CSS_TEXT = "section{font-size:32px;line-height:1.2;}"
 DECK_CSS_TEXT = ":root{}"
 SKILL_EXCERPT = "Use one subject-specific mechanism visual and preserve factual text."
 
@@ -607,9 +604,9 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
 
     system_prompt = messages[0].content
     assert "compact_model_html_v2 limit of 1024 UTF-8 bytes" in system_prompt
-    assert "retains only font-size, line-height, box-sizing:border-box" in system_prompt
+    assert "retains only font-size and line-height" in system_prompt
     assert "strips every fill, background, text color, geometry" in system_prompt
-    assert "Literal border color is part of the retained border declaration" in system_prompt
+    assert "selector-specific typographic hierarchy" in system_prompt
     assert "Do not use variables, calc(), inheritance keywords, or !important" in system_prompt
     assert "Do not attempt to move or resize native shapes" in system_prompt
     assert "preserve the authenticated geometry and shared fill/text palette" in system_prompt
@@ -652,7 +649,7 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "Treat every expected improvement as a required visible outcome" in system_prompt
     assert "map each listed priority PSI family" in system_prompt
     assert "when at least three distinct families are available" in system_prompt
-    assert "decisive type scale, line spacing, and border framing" in system_prompt
+    assert "decisive type-scale contrast and line spacing" in system_prompt
     assert "palette-only restyling or moving generic boxes does not count" in system_prompt
     assert "recheck every expected improvement against the whole-deck contact sheet" in system_prompt
     assert "fresh independent rendered judgment can mark satisfied" in system_prompt
@@ -729,36 +726,7 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
         "slide_css": {
             "source_role": "slide_css",
             "max_utf8_bytes": 1_024,
-            "retained_properties": [
-                "border",
-                "border-bottom",
-                "border-bottom-color",
-                "border-bottom-left-radius",
-                "border-bottom-right-radius",
-                "border-bottom-style",
-                "border-bottom-width",
-                "border-color",
-                "border-left",
-                "border-left-color",
-                "border-left-style",
-                "border-left-width",
-                "border-radius",
-                "border-right",
-                "border-right-color",
-                "border-right-style",
-                "border-right-width",
-                "border-style",
-                "border-top",
-                "border-top-color",
-                "border-top-left-radius",
-                "border-top-right-radius",
-                "border-top-style",
-                "border-top-width",
-                "border-width",
-                "box-sizing",
-                "font-size",
-                "line-height",
-            ],
+            "retained_properties": ["font-size", "line-height"],
             "author_boundary_property_filter": "strip_all_unlisted_declarations",
             "authenticated_baseline_policy": "require_semantically_empty_slide_css",
             "fill_background_text_paint_updates_retained": False,
@@ -772,14 +740,6 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                 "line_height": {
                     "unitless_range_inclusive": [0.8, 3.0],
                     "px_range_inclusive": [8.0, 96.0],
-                },
-                "box_sizing": "border-box",
-                "border_width_px_range_inclusive": [0.5, 16.0],
-                "border_styles": ["dashed", "dotted", "double", "solid"],
-                "border_color": "literal_nontransparent_css_color",
-                "border_radius": {
-                    "px_range_inclusive": [0, 1080.0],
-                    "percentage_range_inclusive": [0, 50],
                 },
                 "important_allowed": False,
                 "variables_or_calculations_allowed": False,
@@ -996,7 +956,7 @@ def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:
         "font-size:36px;border:2px solid #0B1F3A;padding:12px;"
         "background:#FFFFFF;color:#0B1F3A}"
     )
-    retained_css = "section{font-size:36px;border:2px solid #0B1F3A;}"
+    retained_css = "section{font-size:36px;}"
     authored = DeckRepairCandidate(
         source_updates=(
             SourceUpdate(
@@ -1172,7 +1132,7 @@ def test_css_repair_accepts_existing_manifest_class_and_id_selectors() -> None:
     result = _run(author(request))
 
     assert result.candidate.source_updates[1].content == (
-        "#mechanism.frame{font-size:36px;border:2px solid #0B1F3A;}"
+        "#mechanism.frame{font-size:36px;}"
     )
     assert len(invoker.invoke_calls) == 1
 
@@ -1216,7 +1176,7 @@ def test_css_repair_rejects_standalone_unmatched_retained_rule() -> None:
                     update={
                         "content": (
                             "section{font-size:36px}"
-                            ".unused{border:2px solid #0B1F3A}"
+                            ".unused{line-height:1.2}"
                         )
                     }
                 ),
@@ -1646,22 +1606,6 @@ def test_slide_css_allows_safe_content_visibility_color_and_font_size_boundary()
         ("line-height:3", "line-height:3;"),
         ("line-height:8px", "line-height:8px;"),
         ("line-height:96px", "line-height:96px;"),
-        ("box-sizing:border-box", "box-sizing:border-box;"),
-        (
-            "border:0.5px solid #0B1F3A",
-            "border:0.5px solid #0B1F3A;",
-        ),
-        (
-            "border:16px double rgba(11,31,58,.5)",
-            "border:16px double rgba(11,31,58,.5);",
-        ),
-        ("border-width:0.5px", "border-width:0.5px;"),
-        ("border-width:16px", "border-width:16px;"),
-        ("border-style:dashed", "border-style:dashed;"),
-        ("border-color:#0B1F3A", "border-color:#0B1F3A;"),
-        ("border-radius:0px", "border-radius:0px;"),
-        ("border-radius:1080px", "border-radius:1080px;"),
-        ("border-radius:50%", "border-radius:50%;"),
     ],
 )
 def test_slide_css_retained_value_boundaries_are_canonicalized(
@@ -1696,6 +1640,8 @@ def test_slide_css_retained_value_boundaries_are_canonicalized(
         "line-height:0",
         "line-height:-999px",
         "line-height:var(--x)",
+        "box-sizing:border-box",
+        "border:1px solid #0B1F3A",
         "border:9999px solid #0B1F3A",
         "border-width:calc(100% + 1px)",
         "box-sizing:inherit",
