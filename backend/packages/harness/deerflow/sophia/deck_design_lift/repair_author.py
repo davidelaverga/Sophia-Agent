@@ -128,6 +128,8 @@ _MAX_RETAINED_BORDER_WIDTH_PX = 2.0
 _MAX_RETAINED_BORDER_RADIUS_PX = 1080.0
 _FIXED_SLIDE_CANVAS_WIDTH_PX = 1920.0
 _FIXED_SLIDE_CANVAS_HEIGHT_PX = 1080.0
+_MIN_RETAINED_GEOMETRY_WIDTH_PX = 48.0
+_MIN_RETAINED_GEOMETRY_HEIGHT_PX = 24.0
 _MIN_AUTHORED_TEXT_BACKGROUND_CONTRAST = 4.5
 _SLIDE_CSS_BACKGROUND_PROPERTIES = frozenset(
     {"background", "background-color"}
@@ -774,9 +776,13 @@ literal color in the same rule and must pair with a fully opaque literal foregro
 color that keeps the effective cascade at 4.5:1 contrast for every descendant. \
 Unpaired, translucent, gradient, image, or low-contrast paint is rejected.
 Every geometry intervention must put left, top, width, and height together in the same \
-qualified rule as finite literal px values, remain wholly inside the fixed 1920x1080 \
-canvas, and keep width and height positive. Partial or off-canvas geometry is stripped \
-and cannot satisfy a priority.
+qualified rule as finite literal px values, resolve to exactly one existing manifest \
+element, remain wholly inside the fixed 1920x1080 canvas, and keep width at least 48px \
+and height at least 24px. Partial, ambiguous, collapsed, or off-canvas geometry is \
+stripped and cannot satisfy a priority.
+Choose only a top-level semantic container whose authenticated layout already uses \
+absolute slide-canvas coordinates. Never apply geometry to a static element or a nested \
+child whose left/top values are local to another positioned container.
 Use fully opaque literal full-border colors, border widths from 0.5px through 2px, and literal px or percentage border radii. Do not use variables, calc(), inheritance keywords, or !important.
 Do not use at-rules or nested CSS rules in slide_css; this is one fixed 1920x1080 canvas with no responsive or conditional repair variants.
 Use font-size only as one finite literal px value from 12px through 64px.
@@ -951,7 +957,13 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                         "canvas_width_px": int(_FIXED_SLIDE_CANVAS_WIDTH_PX),
                         "canvas_height_px": int(_FIXED_SLIDE_CANVAS_HEIGHT_PX),
                         "must_remain_fully_on_canvas": True,
-                        "width_and_height_must_be_positive": True,
+                        "selector_must_match_exactly_one_manifest_element": True,
+                        "minimum_width_px": int(
+                            _MIN_RETAINED_GEOMETRY_WIDTH_PX
+                        ),
+                        "minimum_height_px": int(
+                            _MIN_RETAINED_GEOMETRY_HEIGHT_PX
+                        ),
                     },
                     "paint": {
                         "background_properties": sorted(
@@ -1946,7 +1958,12 @@ def _retained_geometry_token_is_safe(
             if property_name == "width"
             else _FIXED_SLIDE_CANVAS_HEIGHT_PX
         )
-        return 0 < value <= limit
+        minimum = (
+            _MIN_RETAINED_GEOMETRY_WIDTH_PX
+            if property_name == "width"
+            else _MIN_RETAINED_GEOMETRY_HEIGHT_PX
+        )
+        return minimum <= value <= limit
     return False
 
 
@@ -2551,6 +2568,7 @@ def _candidate_css_targets_manifest_bodies(
                 continue
             matched_rule = True
             arm_matches = False
+            matched_geometry_node_ids: set[int] = set()
             for selector in selector_arms:
                 if not _selector_uses_only_manifest_atoms(
                     selector,
@@ -2558,11 +2576,18 @@ def _candidate_css_targets_manifest_bodies(
                 ):
                     return False
                 try:
-                    if soup.select(selector):
+                    matches = soup.select(selector)
+                    if matches:
                         arm_matches = True
+                        if has_geometry:
+                            matched_geometry_node_ids.update(
+                                id(match) for match in matches
+                            )
                 except Exception:
                     return False
             if not arm_matches:
+                return False
+            if has_geometry and len(matched_geometry_node_ids) != 1:
                 return False
         if not matched_rule:
             return False

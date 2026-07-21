@@ -784,6 +784,11 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "A border-only repair is invalid" in system_prompt
     assert "from 0.5px through 2px" in system_prompt
     assert "Every geometry intervention must put left, top, width, and height together" in system_prompt
+    assert "resolve to exactly one existing manifest element" in system_prompt
+    assert "width at least 48px" in system_prompt
+    assert "height at least 24px" in system_prompt
+    assert "authenticated layout already uses absolute slide-canvas coordinates" in system_prompt
+    assert "Never apply geometry to a static element or a nested child" in system_prompt
     assert "one high-level semantic container" in system_prompt
     assert "Never frame a title or other text leaf, repeated list or loop nodes" in system_prompt
     assert "without clipping or a new wrap" in system_prompt
@@ -921,7 +926,9 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                     "canvas_width_px": 1920,
                     "canvas_height_px": 1080,
                     "must_remain_fully_on_canvas": True,
-                    "width_and_height_must_be_positive": True,
+                    "selector_must_match_exactly_one_manifest_element": True,
+                    "minimum_width_px": 48,
+                    "minimum_height_px": 24,
                 },
                 "paint": {
                     "background_properties": [
@@ -2189,6 +2196,8 @@ def test_slide_css_retains_only_complete_on_canvas_geometry() -> None:
         "left:1281px;top:0px;width:640px;height:360px",
         "left:0px;top:721px;width:640px;height:360px",
         "left:0px;top:0px;width:0px;height:360px",
+        "left:0px;top:0px;width:47.99px;height:360px",
+        "left:0px;top:0px;width:640px;height:23.99px",
     ],
 )
 def test_slide_css_strips_partial_or_off_canvas_geometry(geometry: str) -> None:
@@ -2231,6 +2240,29 @@ def test_slide_css_rejects_border_only_priority_repair() -> None:
 
     _assert_code(error, "candidate_invalid")
     assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_geometry_must_target_exactly_one_manifest_element() -> None:
+    body = (
+        '<section><div class="node">First</div>'
+        '<div class="node">Second</div></section>'
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=".node{left:80px;top:80px;width:320px;height:120px}",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
     assert len(invoker.invoke_calls) == 1
 
 
