@@ -21,6 +21,7 @@ import unicodedata
 from collections.abc import Awaitable
 from decimal import Decimal
 from html.parser import HTMLParser
+from itertools import combinations, product
 from typing import Annotated, Any, Literal, Protocol
 
 import anyio
@@ -229,6 +230,37 @@ _CRITICAL_PSI_FAILURE_CODES = frozenset(
         "weak_subject_specificity",
     }
 )
+# Stable campaign tie-break after selector specificity and criticality.  This
+# order is deliberately independent of compiler serialization order: the same
+# frozen findings must yield the same three-family assignment even when
+# selector repairs or expected improvements are presented in another order.
+_PSI_PRIORITY_CODE_ORDER = (
+    "weak_subject_specificity",
+    "weak_signature_realization",
+    "weak_closing_synthesis",
+    "weak_mechanism_visualization",
+    "low_sequence_rhythm",
+    "weak_narrative_pacing",
+    "default_look_gravity",
+)
+_PSI_PRIORITY_CODE_RANK = {
+    code: index for index, code in enumerate(_PSI_PRIORITY_CODE_ORDER)
+}
+
+
+def _psi_priority_code_sort_key(code: str) -> tuple[int, str]:
+    return (
+        _PSI_PRIORITY_CODE_RANK.get(code, len(_PSI_PRIORITY_CODE_RANK)),
+        code,
+    )
+
+
+def _priority_selector_sort_key(selector: str) -> tuple[int, int]:
+    if selector == DECK_STYLE_ROOT_SELECTOR:
+        return (0, 0)
+    return (1, int(selector.split(":", 1)[1]))
+
+
 _LIST_ITEM_STRUCTURAL_TOKENS = {
     "ol": "<struct:list-item:ordered>",
     "ul": "<struct:list-item:unordered>",
@@ -851,67 +883,83 @@ def _campaign_acceptance_contract(
         # the repair.  Reject before any provider work can consume the single
         # campaign repair attempt.
         raise DeckRepairAuthorError("repair_unavailable")
-    priority_codes: list[str] = []
-    priority_families: set[str] = set()
-    for critical_only in (True, False):
-        for code, family in family_by_code.items():
-            if (code in _CRITICAL_PSI_FAILURE_CODES) != critical_only:
-                continue
-            if family in priority_families:
-                continue
-            priority_codes.append(code)
-            priority_families.add(family)
-            if len(priority_codes) == PSI_REQUIRED_RESOLVED_FAMILY_COUNT:
-                break
-        if len(priority_codes) == PSI_REQUIRED_RESOLVED_FAMILY_COUNT:
-            break
-    if len(priority_codes) != PSI_REQUIRED_RESOLVED_FAMILY_COUNT:
-        raise DeckRepairAuthorError("repair_unavailable")
-    selectors_by_priority_code: dict[str, tuple[str, ...]] = {}
-    for code in priority_codes:
-        selectors = tuple(
-            repair.selector
-            for repair in program.selector_repairs
-            if code in repair.failure_codes
-            and "slide_css"
-            in program.authorized_source_roles.get(repair.selector, ())
-        )
-        if not selectors:
-            raise DeckRepairAuthorError("repair_unavailable")
-        selectors_by_priority_code[code] = selectors
-    priority_selector_by_code: dict[str, str] = {}
-    maximum_distinct_selector_count = -1
-
-    def consider_selector_assignments(
-        index: int,
-        assignment: dict[str, str],
-    ) -> None:
-        nonlocal priority_selector_by_code, maximum_distinct_selector_count
-        if index == len(priority_codes):
-            distinct_selector_count = len(set(assignment.values()))
-            if distinct_selector_count > maximum_distinct_selector_count:
-                priority_selector_by_code = dict(assignment)
-                maximum_distinct_selector_count = distinct_selector_count
-            return
-        code = priority_codes[index]
-        for selector in selectors_by_priority_code[code]:
-            assignment[code] = selector
-            consider_selector_assignments(index + 1, assignment)
-        assignment.pop(code, None)
-
-    consider_selector_assignments(0, {})
-    priority_selectors = set(priority_selector_by_code.values())
     authorized_slide_css_selectors = {
         selector
         for selector, source_roles in program.authorized_source_roles.items()
         if "slide_css" in source_roles
     }
-    if authorized_slide_css_selectors != priority_selectors:
+    selectors_by_code = {
+        code: tuple(
+            sorted(
+                {
+                    repair.selector
+                    for repair in program.selector_repairs
+                    if code in repair.failure_codes
+                    and "slide_css"
+                    in program.authorized_source_roles.get(
+                        repair.selector,
+                        (),
+                    )
+                },
+                key=_priority_selector_sort_key,
+            )
+        )
+        for code in family_by_code
+    }
+    repairable_codes = tuple(
+        sorted(
+            (code for code, selectors in selectors_by_code.items() if selectors),
+            key=_psi_priority_code_sort_key,
+        )
+    )
+    best_key: tuple[Any, ...] | None = None
+    priority_codes: tuple[str, ...] = ()
+    priority_selector_by_code: dict[str, str] = {}
+    for code_group in combinations(
+        repairable_codes,
+        PSI_REQUIRED_RESOLVED_FAMILY_COUNT,
+    ):
+        if len({family_by_code[code] for code in code_group}) != len(
+            code_group
+        ):
+            continue
+        selector_specificity = tuple(
+            sorted(len(selectors_by_code[code]) for code in code_group)
+        )
+        critical_count = sum(
+            code in _CRITICAL_PSI_FAILURE_CODES for code in code_group
+        )
+        for selector_group in product(
+            *(selectors_by_code[code] for code in code_group)
+        ):
+            if set(selector_group) != authorized_slide_css_selectors:
+                continue
+            candidate_key = (
+                sum(selector_specificity),
+                selector_specificity,
+                -critical_count,
+                tuple(
+                    _psi_priority_code_sort_key(code)
+                    for code in code_group
+                ),
+                tuple(
+                    _priority_selector_sort_key(selector)
+                    for selector in selector_group
+                ),
+            )
+            if best_key is None or candidate_key < best_key:
+                best_key = candidate_key
+                priority_codes = code_group
+                priority_selector_by_code = dict(
+                    zip(code_group, selector_group, strict=True)
+                )
+    if best_key is None:
         # Every authored slide-CSS target must be the primary visible target of
         # one of the three campaign priority families.  Otherwise the strict
         # all-target output contract would force an unrelated intervention on
         # a deferred-only selector and create avoidable collateral risk.
         raise DeckRepairAuthorError("repair_unavailable")
+    priority_selectors = set(priority_selector_by_code.values())
     distinct_priority_selector_count = len(priority_selectors)
     priority_geometry_required = (
         distinct_priority_selector_count
@@ -930,7 +978,7 @@ def _campaign_acceptance_contract(
         "available_family_count": available_family_count,
         "author_target_resolved_family_count": PSI_REQUIRED_RESOLVED_FAMILY_COUNT,
         "campaign_floor_feasible": True,
-        "priority_failure_codes": priority_codes,
+        "priority_failure_codes": list(priority_codes),
         "priority_psi_failure_family_by_code": priority_family_by_code,
         "priority_selector_by_failure_code": priority_selector_by_code,
         "distinct_priority_selector_count": distinct_priority_selector_count,

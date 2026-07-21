@@ -251,13 +251,70 @@ def _overlapping_three_selector_program() -> DeckRepairProgram:
     return DeckRepairProgram.model_validate(payload)
 
 
+def _specificity_first_three_selector_program(
+    *,
+    reverse_input_order: bool = False,
+) -> DeckRepairProgram:
+    global_codes = (
+        "default_look_gravity",
+        "low_sequence_rhythm",
+        "weak_signature_realization",
+        "weak_subject_specificity",
+    )
+    local_codes = (
+        "weak_mechanism_visualization",
+        "weak_closing_synthesis",
+    )
+    selector_codes = (
+        ("slide:1", global_codes),
+        ("slide:2", (*global_codes, local_codes[0])),
+        ("slide:5", (*global_codes, local_codes[1])),
+    )
+    expected_improvements = (*global_codes, *local_codes)
+    if reverse_input_order:
+        selector_codes = tuple(reversed(selector_codes))
+        expected_improvements = tuple(reversed(expected_improvements))
+    payload = _program().model_dump(mode="python", exclude={"program_hash"})
+    payload["authorized_selectors"] = tuple(
+        selector for selector, _codes in selector_codes
+    )
+    payload["authorized_source_roles"] = {
+        selector: ("body", "slide_css")
+        for selector in payload["authorized_selectors"]
+    }
+    payload["selector_repairs"] = tuple(
+        SelectorRepair(
+            selector=selector,
+            failure_codes=(
+                tuple(reversed(failure_codes))
+                if reverse_input_order
+                else failure_codes
+            ),
+            render_evidence=(
+                RepairRenderEvidence(
+                    selector=selector,
+                    path=f"renders/{selector.replace(':', '-')}.png",
+                    sha256=RENDER_HASH,
+                ),
+            ),
+            instruction="Resolve the authenticated failures on this selector.",
+            retained_content=("Preserve the PSI control-loop claim.",),
+            allowed_asset_changes=(),
+        )
+        for selector, failure_codes in selector_codes
+    )
+    payload["expected_improvements"] = expected_improvements
+    payload["program_hash"] = canonical_sha256(payload)
+    return DeckRepairProgram.model_validate(payload)
+
+
 def _deferred_only_authorized_selector_program() -> DeckRepairProgram:
     priority_codes = (
         "weak_subject_specificity",
         "weak_signature_realization",
         "weak_closing_synthesis",
     )
-    deferred_code = "weak_mechanism_visualization"
+    deferred_code = "weak_memorability"
     payload = _program().model_dump(mode="python", exclude={"program_hash"})
     payload["authorized_selectors"] = ("slide:1", "slide:2", "slide:3")
     payload["authorized_source_roles"] = {
@@ -1204,9 +1261,9 @@ def test_campaign_acceptance_prioritizes_exactly_three_critical_psi_families() -
     acceptance = payload["repair_constraints"]["campaign_acceptance"]
     assert acceptance["available_family_count"] == 5
     assert acceptance["priority_failure_codes"] == [
-        "weak_closing_synthesis",
-        "weak_signature_realization",
         "weak_subject_specificity",
+        "weak_signature_realization",
+        "weak_closing_synthesis",
     ]
     assert acceptance["priority_psi_failure_family_by_code"] == {
         "weak_closing_synthesis": "weak_closing_synthesis",
@@ -1220,6 +1277,44 @@ def test_campaign_acceptance_prioritizes_exactly_three_critical_psi_families() -
         "weak_memorability",
         "weak_spatial_tension",
     ]
+
+
+def test_campaign_acceptance_prefers_localized_mechanism_and_closing() -> None:
+    acceptance = _campaign_acceptance_contract(
+        _specificity_first_three_selector_program()
+    )
+
+    assert acceptance["priority_failure_codes"] == [
+        "weak_subject_specificity",
+        "weak_closing_synthesis",
+        "weak_mechanism_visualization",
+    ]
+    assert acceptance["priority_selector_by_failure_code"] == {
+        "weak_subject_specificity": "slide:1",
+        "weak_closing_synthesis": "slide:5",
+        "weak_mechanism_visualization": "slide:2",
+    }
+    assert acceptance["distinct_priority_selector_count"] == 3
+    assert acceptance["priority_geometry_required"] is True
+
+
+def test_campaign_acceptance_assignment_is_insertion_order_invariant() -> None:
+    forward = _campaign_acceptance_contract(
+        _specificity_first_three_selector_program()
+    )
+    reversed_input = _campaign_acceptance_contract(
+        _specificity_first_three_selector_program(reverse_input_order=True)
+    )
+
+    for field in (
+        "priority_failure_codes",
+        "priority_psi_failure_family_by_code",
+        "priority_selector_by_failure_code",
+        "distinct_priority_selector_count",
+        "priority_geometry_required",
+        "minimum_distinct_geometry_targets_per_priority_selector",
+    ):
+        assert reversed_input[field] == forward[field]
 
 
 def test_campaign_acceptance_maximizes_distinct_priority_selectors() -> None:
