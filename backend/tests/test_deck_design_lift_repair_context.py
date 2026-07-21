@@ -258,6 +258,7 @@ class Fixture:
     objects: FakeObjectStore
     quality: FakeQualityAdapter
     source_path: str
+    deck_css_path: str
     render_path: str
 
 
@@ -596,6 +597,7 @@ def _fixture() -> Fixture:
         objects=objects,
         quality=quality,
         source_path=durable_sources["slide:1"],
+        deck_css_path=durable_sources[DECK_STYLE_ROOT_SELECTOR],
         render_path=render_paths["slide:1"],
     )
 
@@ -620,11 +622,24 @@ def test_loads_exact_durable_manifest_snapshot_sources_and_skill_context() -> No
     assert tuple(item.path for item in context.failing_renders) == (fixture.render_path,)
     assert tuple((source.selector, source.source_role, source.manifest_source_path) for source in context.authorized_sources) == (("slide:1", "body", fixture.source_path),)
     assert context.authorized_sources[0].text == SOURCE_BYTES.decode()
+    assert tuple(
+        (
+            source.selector,
+            source.source_role,
+            source.manifest_source_path,
+        )
+        for source in context.read_only_sources
+    ) == ((DECK_STYLE_ROOT_SELECTOR, "deck_css", fixture.deck_css_path),)
+    assert context.read_only_sources[0].text == ":root{}"
     assert context.owned_assets == ()
     assert context.skill_excerpts[0].excerpt == SKILL_TEXT
     assert len(fixture.quality.calls) == 1
     assert fixture.quality.calls[0].artifact.version_id == ARTIFACT_ID
     assert (fixture.source_path, MAX_REPAIR_CONTEXT_SOURCE_BYTES) in fixture.objects.calls
+    assert (
+        fixture.deck_css_path,
+        MAX_REPAIR_CONTEXT_SOURCE_BYTES,
+    ) in fixture.objects.calls
     assert (fixture.render_path, MAX_REPAIR_CONTEXT_IMAGE_BYTES) in fixture.objects.calls
     assert fixture.mutations.thread_ids
     assert all(thread_id != threading.get_ident() for thread_id in fixture.mutations.thread_ids)

@@ -59,6 +59,7 @@ MANIFEST_HASH = "c" * 64
 SKILL_SOURCE_HASH = "d" * 64
 SOURCE_TEXT = "<section><h1>Current PSI control loop</h1></section>"
 SLIDE_CSS_TEXT = "section{left:80px;top:120px;width:640px;height:320px}"
+DECK_CSS_TEXT = ":root{}"
 SKILL_EXCERPT = "Use one subject-specific mechanism visual and preserve factual text."
 
 
@@ -78,6 +79,7 @@ CONTACT_HASH = hashlib.sha256(CONTACT_BYTES).hexdigest()
 RENDER_HASH = hashlib.sha256(RENDER_BYTES).hexdigest()
 SOURCE_HASH = hashlib.sha256(SOURCE_TEXT.encode()).hexdigest()
 SLIDE_CSS_HASH = hashlib.sha256(SLIDE_CSS_TEXT.encode()).hexdigest()
+DECK_CSS_HASH = hashlib.sha256(DECK_CSS_TEXT.encode()).hexdigest()
 SKILL_EXCERPT_HASH = hashlib.sha256(SKILL_EXCERPT.encode()).hexdigest()
 
 
@@ -264,6 +266,21 @@ def _context(*, request: RepairInvocationRequest | None = None) -> RepairAuthorC
             ),
         ),
         authorized_sources=sources,
+        read_only_sources=(
+            RepairSourceContext(
+                build_id=request.build_id,
+                manifest_revision=request.program.initial_manifest_revision,
+                manifest_hash=MANIFEST_HASH,
+                selector="deck-style:root",
+                source_role="deck_css",
+                component_version_id="deck-style-version-001",
+                manifest_source_path=(
+                    "versions/deck-style/deck.css"
+                ),
+                manifest_source_hash=DECK_CSS_HASH,
+                text=DECK_CSS_TEXT,
+            ),
+        ),
         owned_assets=(
             RepairOwnedAssetContext(
                 build_id=request.build_id,
@@ -594,6 +611,19 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "list-style, list-style-type, or list-style-image" in system_prompt
     assert "use only the safe literal forms" in system_prompt
     assert "do not use var(), calc(), inheritance, or ambiguous values" in system_prompt
+    assert "co-declare one opaque literal color in that same rule" in system_prompt
+    assert "WCAG contrast of at least 4.5:1" in system_prompt
+    assert "inherited from another rule is not sufficient" in system_prompt
+    assert "effective authored or authenticated inline foreground" in system_prompt
+    assert "importance, specificity, source order, and inheritance" in system_prompt
+    assert "nearest effective authored background" in system_prompt
+    assert "sealed repair contract permits only opaque literal colors" in system_prompt
+    assert "forbids background-image" in system_prompt
+    assert "decorative-only elements without text are exempt" in system_prompt
+    assert "rendered native contrast gate remains authoritative" in system_prompt
+    assert "Do not use at-rules or nested CSS rules" in system_prompt
+    assert "Use read_only_sources only to account for" in system_prompt
+    assert "never return an update for a read-only source" in system_prompt
     assert "Do not set display, overflow, overflow-x, or overflow-y" in system_prompt
     assert "no larger than 64px" in system_prompt
     assert "campaign's only repair" in system_prompt
@@ -615,6 +645,16 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
             "ids": [],
         }
     }
+    assert payload["read_only_sources"] == [
+        {
+            "selector": "deck-style:root",
+            "source_role": "deck_css",
+            "component_version_id": "deck-style-version-001",
+            "manifest_source_path": "versions/deck-style/deck.css",
+            "manifest_source_hash": DECK_CSS_HASH,
+            "text": DECK_CSS_TEXT,
+        }
+    ]
     assert payload["repair_constraints"]["campaign_acceptance"] == {
         "comparison_target": "approved_improvement",
         "preferred_candidate_verdict": "satisfied",
@@ -719,6 +759,45 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                     "parser": "css_color_3",
                     "minimum_alpha_exclusive": 0,
                     "variables_or_unparsed_values_allowed": False,
+                },
+                "text_background_contrast": {
+                    "minimum_ratio": 4.5,
+                    "background_properties": [
+                        "background",
+                        "background-color",
+                    ],
+                    "background_value_format": "opaque_literal_color",
+                    "forbidden_background_properties": [
+                        "background-image",
+                    ],
+                    "gradients_allowed": False,
+                    "foreground_property": "color",
+                    "foreground_must_be_same_rule": True,
+                    "foreground_must_be_opaque_literal": True,
+                    "inherited_or_separate_rule_foreground_allowed": False,
+                    "effective_cascade_foreground_must_pass": True,
+                    "cascade_resolution": [
+                        "importance",
+                        "inline_origin",
+                        "specificity",
+                        "source_order",
+                        "inheritance",
+                    ],
+                    "authenticated_inline_foregrounds_must_also_pass": True,
+                    "nearest_effective_opaque_background_wins": True,
+                    "at_rules_allowed": False,
+                    "nested_rules_allowed": False,
+                    "decorative_only_rule_exempt": True,
+                    "rendered_native_contrast_gate_authoritative": True,
+                    "selector_match_basis": "authenticated_manifest_body",
+                    "read_only_cascade_sources": [
+                        "authenticated_deck_css",
+                        "authenticated_inline_style",
+                    ],
+                    "read_only_background_paint_policy": (
+                        "opaque_literal_or_provably_transparent_no_image"
+                    ),
+                    "unsupported_read_only_paint_rejected_before_provider": True,
                 },
                 "text_transform": {
                     "allowed": False,
@@ -1335,6 +1414,542 @@ def test_slide_css_allows_safe_content_visibility_color_and_font_size_boundary()
     assert len(invoker.invoke_calls) == 1
 
 
+def _contrast_candidate(
+    *,
+    body: str,
+    css: str,
+) -> tuple[
+    RepairInvocationRequest,
+    RepairAuthorContext,
+    DeckRepairCandidate,
+]:
+    request = _request(program=_program())
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    base_context = _context(request=request)
+    context = base_context.model_copy(
+        update={
+            "authorized_sources": tuple(
+                source.model_copy(
+                    update={
+                        "text": body,
+                        "manifest_source_hash": body_hash,
+                    }
+                )
+                if source.source_role == "body"
+                else source
+                for source in base_context.authorized_sources
+            )
+        }
+    )
+    candidate = _candidate_with_body(
+        body,
+        expected_source_hash=body_hash,
+    )
+    candidate = candidate.model_copy(
+        update={
+            "source_updates": (
+                candidate.source_updates[0],
+                candidate.source_updates[1].model_copy(
+                    update={"content": SLIDE_CSS_TEXT + css}
+                ),
+            )
+        }
+    )
+    return request, context, candidate
+
+
+def _with_deck_css(
+    context: RepairAuthorContext,
+    deck_css: str,
+) -> RepairAuthorContext:
+    deck_css_hash = hashlib.sha256(deck_css.encode()).hexdigest()
+    return context.model_copy(
+        update={
+            "read_only_sources": tuple(
+                source.model_copy(
+                    update={
+                        "text": deck_css,
+                        "manifest_source_hash": deck_css_hash,
+                    }
+                )
+                for source in context.read_only_sources
+            )
+        }
+    )
+
+
+@pytest.mark.parametrize(
+    ("paired_color", "safe_cascade"),
+    [
+        ("#FFFFFF", ""),
+        ("rgb(255,255,255)", ""),
+        ("#FFFFFF", "h1{color:#EDEEF2}"),
+    ],
+    ids=("hex", "rgb", "safe-child-foreground"),
+)
+def test_slide_css_allows_same_rule_opaque_text_background_contrast(
+    paired_color: str,
+    safe_cascade: str,
+) -> None:
+    request = _request(program=_program())
+    context = _context(request=request)
+    candidate = _candidate_with_body(SOURCE_TEXT)
+    candidate_css = (
+        SLIDE_CSS_TEXT
+        + f"section{{background:#1D2027;color:{paired_color}}}{safe_cascade}"
+    )
+    candidate = candidate.model_copy(
+        update={
+            "source_updates": (
+                candidate.source_updates[0],
+                candidate.source_updates[1].model_copy(
+                    update={"content": candidate_css}
+                ),
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    assert result.candidate.source_updates[1].content == candidate_css
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "css",
+    [
+        (
+            "section{background:#F4F5F7;color:#15171C}"
+            "section{background:#1D2027;color:#FFFFFF}"
+        ),
+        (
+            "section{background:#F4F5F7;color:#15171C}"
+            "html body section{background:#1D2027;color:#FFFFFF}"
+        ),
+        (
+            "section{background:#F4F5F7!important;color:#15171C!important}"
+            "section{background:#1D2027;color:#FFFFFF}"
+        ),
+        (
+            "section{background:#F4F5F7;color:#15171C}"
+            "section{background:#1D2027!important;color:#FFFFFF!important}"
+        ),
+    ],
+    ids=(
+        "later-equal-specificity",
+        "later-higher-specificity",
+        "earlier-important",
+        "later-important",
+    ),
+)
+def test_slide_css_allows_safe_background_pair_cascade(css: str) -> None:
+    request, context, candidate = _contrast_candidate(
+        body=SOURCE_TEXT,
+        css=css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    assert _run(author(request)).candidate == candidate
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_allows_nested_opaque_surfaces() -> None:
+    body = (
+        '<section class="outer"><div class="inner">'
+        "<p>Nested text</p></div></section>"
+    )
+    css = (
+        ".outer{background:#1D2027;color:#FFFFFF}"
+        ".inner{background:#F4F5F7;color:#15171C}"
+    )
+    request, context, candidate = _contrast_candidate(body=body, css=css)
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    assert _run(author(request)).candidate == candidate
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_allows_outer_foreground_shielded_by_nested_surface() -> None:
+    body = (
+        '<section class="outer"><div class="inner">'
+        "<p>Nested text</p></div></section>"
+    )
+    css = (
+        ".outer{background:#1D2027;color:#FFFFFF}"
+        ".outer{color:#15171C}"
+        ".inner{background:#F4F5F7;color:#15171C}"
+    )
+    request, context, candidate = _contrast_candidate(body=body, css=css)
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    assert _run(author(request)).candidate == candidate
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_unsafe_outer_foreground_for_exposed_text() -> None:
+    body = (
+        '<section class="outer">Exposed text<div class="inner">'
+        "<p>Nested text</p></div></section>"
+    )
+    css = (
+        ".outer{background:#1D2027;color:#FFFFFF}"
+        ".outer{color:#15171C}"
+        ".inner{background:#F4F5F7;color:#15171C}"
+    )
+    request, context, candidate = _contrast_candidate(body=body, css=css)
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_does_not_collapse_structurally_equal_nodes() -> None:
+    body = (
+        '<section class="dark"><p>Same</p></section>'
+        '<section class="light"><p>Same</p></section>'
+    )
+    css = (
+        ".dark{background:#1D2027;color:#FFFFFF}"
+        ".light{background:#F4F5F7;color:#15171C}"
+        "p{color:#FFFFFF}"
+    )
+    request, context, candidate = _contrast_candidate(body=body, css=css)
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_authenticated_inline_low_contrast() -> None:
+    body = (
+        "<section>"
+        '<h1 style="color:#15171C">Current PSI control loop</h1>'
+        "</section>"
+    )
+    css = "section{background:#1D2027;color:#FFFFFF}"
+    request, context, candidate = _contrast_candidate(body=body, css=css)
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_resolves_authenticated_inline_background_cascade() -> None:
+    body = (
+        '<section style="background:#FFFFFF;color:#15171C">'
+        "<h1>Current PSI control loop</h1></section>"
+    )
+    css = "section{background:#1D2027;color:#FFFFFF!important}"
+    request, context, candidate = _contrast_candidate(body=body, css=css)
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_resolves_authenticated_shared_deck_css_cascade() -> None:
+    css = "section{background:#1D2027;color:#FFFFFF}"
+    request, context, candidate = _contrast_candidate(
+        body=SOURCE_TEXT,
+        css=css,
+    )
+    deck_css = "h1{color:#15171C}"
+    context = _with_deck_css(context, deck_css)
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "canvas_selector",
+    [
+        "main",
+        ".slide-root",
+        '[data-slide-canvas="true"]',
+    ],
+    ids=("main", "class", "data-attribute"),
+)
+def test_slide_css_resolves_authenticated_compiler_canvas_shell(
+    canvas_selector: str,
+) -> None:
+    css = "h1{color:#FFFFFF}"
+    request, context, candidate = _contrast_candidate(
+        body=SOURCE_TEXT,
+        css=css,
+    )
+    deck_css = (
+        f"{canvas_selector}{{background:#FFFFFF;color:#15171C}}"
+    )
+    context = _with_deck_css(context, deck_css)
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_resolves_shared_canvas_descendant_foreground() -> None:
+    css = "section{background:#1D2027;color:#FFFFFF}"
+    request, context, candidate = _contrast_candidate(
+        body=SOURCE_TEXT,
+        css=css,
+    )
+    context = _with_deck_css(
+        context,
+        ".slide-root h1{color:#15171C}",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_skips_provably_transparent_shared_surface() -> None:
+    body = '<section class="inner"><h1>Nested text</h1></section>'
+    css = "h1{color:#FFFFFF}"
+    request, context, candidate = _contrast_candidate(body=body, css=css)
+    context = _with_deck_css(
+        context,
+        (
+            ".slide-root{background:#1D2027;color:#FFFFFF}"
+            ".inner{background:transparent;color:#FFFFFF}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    assert _run(author(request)).candidate == candidate
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_allows_unmatched_auxiliary_foreground_with_safe_surface() -> None:
+    css = (
+        "section{background:#1D2027;color:#FFFFFF}"
+        ".missing{color:#15171C}"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=SOURCE_TEXT,
+        css=css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    assert _run(author(request)).candidate == candidate
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "unsafe_css",
+    [
+        "section{background:#1D2027}",
+        "section{background:#1D2027;color:#15171C}",
+        "section{color:#FFFFFF}section{background:#1D2027}",
+        "section{background:#1D2027;color:#FFFFFF;color:#15171C}",
+        "section{background:#1D2027;color:#FFFFFF}section{color:#15171C}",
+        "section{background:#1D2027;color:#FFFFFF}section{color:#15171C!important}",
+        "section{background:#1D2027;color:#FFFFFF}html body section{color:#15171C}",
+        "section{background:#1D2027;color:#FFFFFF}h1{color:#15171C}",
+        (
+            "@media (min-width:1px){section{background:#1D2027;color:#FFFFFF}"
+            "h1{color:#15171C}}"
+        ),
+        (
+            "section{background-image:linear-gradient(#1D2027,#1D2027);"
+            "color:#15171C}"
+        ),
+        (
+            "section{background:linear-gradient(#1D2027,#1D2027);"
+            "color:#FFFFFF}"
+        ),
+        "section{background:rgba(29,32,39,.8);color:#FFFFFF}",
+        ".missing{background:#1D2027;color:#FFFFFF}",
+        "@media (min-width:1px){section{background:#1D2027}}",
+        (
+            "@media (min-width:1px){"
+            "section{background:#1D2027;color:#FFFFFF}}"
+        ),
+    ],
+    ids=(
+        "missing-same-rule-foreground",
+        "low-contrast-pair",
+        "separate-rule-inheritance",
+        "final-duplicate-is-low-contrast",
+        "later-rule-override",
+        "later-important-override",
+        "higher-specificity-override",
+        "child-override",
+        "nested-at-rule-override",
+        "background-image-gradient",
+        "background-shorthand-gradient",
+        "translucent-background",
+        "unmatched-selector",
+        "nested-at-rule",
+        "safe-pair-at-rule-forbidden",
+    ),
+)
+def test_slide_css_rejects_unsafe_text_background_contrast(
+    unsafe_css: str,
+) -> None:
+    request = _request(program=_program())
+    context = _context(request=request)
+    candidate = _candidate_with_body(SOURCE_TEXT)
+    candidate = candidate.model_copy(
+        update={
+            "source_updates": (
+                candidate.source_updates[0],
+                candidate.source_updates[1].model_copy(
+                    update={"content": SLIDE_CSS_TEXT + unsafe_css}
+                ),
+            )
+        }
+    )
+    traces = FakeTraceFactory()
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+        trace_factory=traces,
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+    assert traces.spans[0].outputs[0].error_code == (
+        "candidate_source_contract_invalid"
+    )
+
+
+def test_slide_css_allows_solid_background_on_decorative_only_element() -> None:
+    body = (
+        '<section><h1>Current PSI control loop</h1>'
+        '<div class="ornament"></div></section>'
+    )
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    request = _request(program=_program())
+    context = _context(request=request)
+    context = context.model_copy(
+        update={
+            "authorized_sources": tuple(
+                source.model_copy(
+                    update={"text": body, "manifest_source_hash": body_hash}
+                )
+                if source.source_role == "body"
+                else source
+                for source in context.authorized_sources
+            )
+        }
+    )
+    candidate = DeckRepairCandidate(
+        source_updates=(
+            SourceUpdate(
+                selector="slide:1",
+                source_role="body",
+                expected_source_hash=body_hash,
+                content=body,
+            ),
+            SourceUpdate(
+                selector="slide:1",
+                source_role="slide_css",
+                expected_source_hash=SLIDE_CSS_HASH,
+                content=SLIDE_CSS_TEXT + ".ornament{background:#1D2027}",
+            ),
+        ),
+        rationale="Use a decorative background without changing semantic text.",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    assert result.candidate == candidate
+    assert len(invoker.invoke_calls) == 1
+
+
 @pytest.mark.parametrize(
     "declaration",
     [
@@ -1640,6 +2255,168 @@ def test_render_hash_or_program_identity_mismatch_is_rejected_before_provider() 
 
     _assert_code(error, "context_invalid")
     assert invoker.prepare_calls == []
+
+
+def test_unsupported_read_only_deck_css_is_rejected_before_provider() -> None:
+    request = _request()
+    context = _context(request=request)
+    deck_css = "@media (min-width:1px){h1{color:#15171C}}"
+    deck_css_hash = hashlib.sha256(deck_css.encode()).hexdigest()
+    context = context.model_copy(
+        update={
+            "read_only_sources": tuple(
+                source.model_copy(
+                    update={
+                        "text": deck_css,
+                        "manifest_source_hash": deck_css_hash,
+                    }
+                )
+                for source in context.read_only_sources
+            )
+        }
+    )
+    author, _loader, invoker = _author(request=request, context=context)
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "context_invalid")
+    assert invoker.prepare_calls == []
+    assert invoker.invoke_calls == []
+
+
+@pytest.mark.parametrize("source", ["deck_css", "inline_body"])
+def test_read_only_background_image_is_rejected_before_provider(
+    source: str,
+) -> None:
+    request = _request()
+    context = _context(request=request)
+    if source == "deck_css":
+        context = _with_deck_css(
+            context,
+            (
+                ".special{background-color:#FFFFFF;"
+                "background-image:linear-gradient(#000000,#000000);"
+                "color:#FFFFFF}"
+            ),
+        )
+    else:
+        body = (
+            '<section style="background:linear-gradient(#000000,#000000);'
+            'color:#FFFFFF"><h1>Current PSI control loop</h1></section>'
+        )
+        body_hash = hashlib.sha256(body.encode()).hexdigest()
+        context = context.model_copy(
+            update={
+                "authorized_sources": tuple(
+                    source_context.model_copy(
+                        update={
+                            "text": body,
+                            "manifest_source_hash": body_hash,
+                        }
+                    )
+                    if source_context.source_role == "body"
+                    else source_context
+                    for source_context in context.authorized_sources
+                )
+            }
+        )
+    author, _loader, invoker = _author(request=request, context=context)
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "context_invalid")
+    assert invoker.prepare_calls == []
+    assert invoker.invoke_calls == []
+
+
+@pytest.mark.parametrize("source", ["deck_css", "inline_body"])
+def test_invalid_background_color_none_is_rejected_before_provider(
+    source: str,
+) -> None:
+    request = _request()
+    context = _context(request=request)
+    if source == "deck_css":
+        context = _with_deck_css(
+            context,
+            (
+                ".slide-root{background:#FFFFFF;color:#15171C}"
+                "section{background-color:#000000;color:#FFFFFF}"
+                "section{background-color:none}"
+            ),
+        )
+    else:
+        body = (
+            '<section style="background-color:#000000;color:#FFFFFF;'
+            'background-color:none"><h1>Current PSI control loop</h1></section>'
+        )
+        body_hash = hashlib.sha256(body.encode()).hexdigest()
+        context = context.model_copy(
+            update={
+                "authorized_sources": tuple(
+                    source_context.model_copy(
+                        update={
+                            "text": body,
+                            "manifest_source_hash": body_hash,
+                        }
+                    )
+                    if source_context.source_role == "body"
+                    else source_context
+                    for source_context in context.authorized_sources
+                )
+            }
+        )
+    author, _loader, invoker = _author(request=request, context=context)
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "context_invalid")
+    assert invoker.prepare_calls == []
+    assert invoker.invoke_calls == []
+
+
+@pytest.mark.parametrize("source", ["deck_css", "inline_body"])
+def test_invalid_literal_background_image_is_rejected_before_provider(
+    source: str,
+) -> None:
+    request = _request()
+    context = _context(request=request)
+    if source == "deck_css":
+        context = _with_deck_css(
+            context,
+            ".special{background-image:#000000;color:#FFFFFF}",
+        )
+    else:
+        body = (
+            '<section style="background-image:#000000;color:#FFFFFF">'
+            "<h1>Current PSI control loop</h1></section>"
+        )
+        body_hash = hashlib.sha256(body.encode()).hexdigest()
+        context = context.model_copy(
+            update={
+                "authorized_sources": tuple(
+                    source_context.model_copy(
+                        update={
+                            "text": body,
+                            "manifest_source_hash": body_hash,
+                        }
+                    )
+                    if source_context.source_role == "body"
+                    else source_context
+                    for source_context in context.authorized_sources
+                )
+            }
+        )
+    author, _loader, invoker = _author(request=request, context=context)
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "context_invalid")
+    assert invoker.prepare_calls == []
+    assert invoker.invoke_calls == []
 
 
 def test_exact_program_source_role_and_manifest_hash_bind_candidate() -> None:

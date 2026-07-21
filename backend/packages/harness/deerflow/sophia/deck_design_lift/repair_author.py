@@ -25,7 +25,8 @@ from typing import Annotated, Any, Literal, Protocol
 
 import anyio
 import tinycss2
-from bs4 import BeautifulSoup
+from bs4 import BeautifulSoup, Tag
+from cssselect2.parser import parse as parse_css_selectors
 from langchain_core.messages import HumanMessage, SystemMessage
 from PIL import Image
 from pydantic import (
@@ -39,6 +40,7 @@ from pydantic import (
 from tinycss2.color3 import parse_color
 
 from deerflow.config.model_route_config import ResolvedModelPlan
+from deerflow.sophia.build_manifest import DECK_STYLE_ROOT_SELECTOR
 from deerflow.sophia.deck_build.compiler_capabilities import (
     LOSSY_CSS_PROPERTIES,
     REJECTED_CSS_PROPERTIES,
@@ -46,6 +48,7 @@ from deerflow.sophia.deck_build.compiler_capabilities import (
     lossy_css_in_html,
     unsupported_css_in_html,
 )
+from deerflow.sophia.deck_build.html_sanitizer import assemble_compact_slide_html
 from deerflow.sophia.deck_design_lift.comparator import (
     PSI_FAILURE_FAMILY_BY_CODE,
     PSI_REQUIRED_RESOLVED_FAMILY_COUNT,
@@ -104,6 +107,15 @@ _FORBIDDEN_CANDIDATE_BODY_ATTRIBUTES = frozenset(
 )
 _VISIBLE_HTML_TOKEN_PATTERN = re.compile(r"\w+|[^\w\s]")
 _MAX_AUTHORED_FONT_SIZE_PX = 64.0
+_MIN_AUTHORED_TEXT_BACKGROUND_CONTRAST = 4.5
+_SLIDE_CSS_BACKGROUND_PROPERTIES = frozenset(
+    {"background", "background-color"}
+)
+_SLIDE_CSS_FORBIDDEN_BACKGROUND_PROPERTIES = frozenset({"background-image"})
+_ALL_CSS_BACKGROUND_PAINT_PROPERTIES = (
+    _SLIDE_CSS_BACKGROUND_PROPERTIES
+    | _SLIDE_CSS_FORBIDDEN_BACKGROUND_PROPERTIES
+)
 _FORBIDDEN_LAYOUT_EXTRACTION_PROPERTIES = frozenset(
     {"display", "overflow", "overflow-x", "overflow-y"}
 )
@@ -368,6 +380,7 @@ class RepairAuthorContext(_StrictFrozenModel):
     contact_sheet: RepairContextImage
     failing_renders: tuple[RepairContextImage, ...]
     authorized_sources: tuple[RepairSourceContext, ...]
+    read_only_sources: tuple[RepairSourceContext, ...]
     owned_assets: tuple[RepairOwnedAssetContext, ...] = ()
     skill_excerpts: tuple[RepairSkillExcerptContext, ...]
 
@@ -394,10 +407,16 @@ class RepairAuthorContext(_StrictFrozenModel):
         if len(self.contact_sheet.png_bytes) + sum(len(image.png_bytes) for image in self.failing_renders) > MAX_REPAIR_CONTEXT_TOTAL_IMAGE_BYTES:
             raise ValueError("repair context images exceed their aggregate budget")
 
-        source_keys = tuple((source.selector, source.source_role) for source in self.authorized_sources)
+        source_keys = tuple(
+            (source.selector, source.source_role)
+            for source in (*self.authorized_sources, *self.read_only_sources)
+        )
         if len(source_keys) != len(set(source_keys)):
             raise ValueError("repair source inventory is duplicated")
-        if sum(len(source.text.encode("utf-8")) for source in self.authorized_sources) > MAX_REPAIR_CONTEXT_TOTAL_SOURCE_BYTES:
+        if sum(
+            len(source.text.encode("utf-8"))
+            for source in (*self.authorized_sources, *self.read_only_sources)
+        ) > MAX_REPAIR_CONTEXT_TOTAL_SOURCE_BYTES:
             raise ValueError("repair sources exceed their aggregate budget")
 
         asset_keys = tuple((asset.selector, asset.asset_id) for asset in self.owned_assets)
@@ -503,6 +522,39 @@ def _validated_context(
     actual_sources = {(source.selector, source.source_role) for source in context.authorized_sources}
     if actual_sources != expected_sources or any(source.build_id != request.build_id or source.manifest_revision != identity.manifest_revision or source.manifest_hash != identity.manifest_hash for source in context.authorized_sources):
         raise DeckRepairAuthorError("context_invalid")
+    expected_read_only_sources = (
+        set()
+        if (DECK_STYLE_ROOT_SELECTOR, "deck_css") in expected_sources
+        else {(DECK_STYLE_ROOT_SELECTOR, "deck_css")}
+    )
+    actual_read_only_sources = {
+        (source.selector, source.source_role)
+        for source in context.read_only_sources
+    }
+    if actual_read_only_sources != expected_read_only_sources or any(
+        source.build_id != request.build_id
+        or source.manifest_revision != identity.manifest_revision
+        or source.manifest_hash != identity.manifest_hash
+        for source in (*context.authorized_sources, *context.read_only_sources)
+    ):
+        raise DeckRepairAuthorError("context_invalid")
+    if any(
+        source.source_role == "deck_css"
+        and (
+            _stylesheet_qualified_rules(source.text) is None
+            or _stylesheet_has_unsupported_read_only_background_paint(
+                source.text
+            )
+        )
+        for source in context.read_only_sources
+    ):
+        raise DeckRepairAuthorError("context_invalid")
+    if any(
+        source.source_role == "body"
+        and _html_has_unsupported_inline_background_paint(source.text)
+        for source in context.authorized_sources
+    ):
+        raise DeckRepairAuthorError("context_invalid")
     if any(
         ("body" in roles) != ("slide_css" in roles)
         for roles in request.program.authorized_source_roles.values()
@@ -579,6 +631,7 @@ Before returning, recheck every expected improvement against the whole-deck cont
 Aim for a candidate that a fresh independent rendered judgment can mark satisfied.
 Deterministic comparison must also approve it without a critical, mechanical, content, or collateral regression.
 Every authorized body update is an addressing echo: copy its current manifest source byte-for-byte.
+Use read_only_sources only to account for the authenticated shared CSS cascade; never return an update for a read-only source.
 The author boundary pins body content to the authenticated manifest bytes before compilation, so express every visible repair in the authorized slide_css and target only tags, classes, and IDs listed in the supplied body_selector_inventory.
 Do not restructure body markup or attributes. Do not add, remove, or rewrite visible glyphs, symbols, labels, or words, and do not change their order.
 Body output must still preserve the exact normalized visible HTML token sequence: do not split or merge a token or change token order; script, style, and template content is excluded.
@@ -590,11 +643,18 @@ Do not use rejected or lossy native CSS properties, including filter, backdrop-f
 Do not change generated list-marker semantics or set list-style, list-style-type, or list-style-image.
 Do not set display, overflow, overflow-x, or overflow-y in slide_css; preserve the authenticated layout and native text-extraction semantics.
 For visibility and color, use only the safe literal forms in the structured compiler contract; do not use var(), calc(), inheritance, or ambiguous values.
+Although the general compiler supports gradients, this sealed repair contract permits only opaque literal colors in background and background-color and forbids background-image.
+Every rule that sets a background on an existing selector whose matched element contains semantic text must co-declare one opaque literal color in that same rule with WCAG contrast of at least 4.5:1.
+A foreground inherited from another rule is not sufficient.
+The effective authored or authenticated inline foreground after CSS importance, specificity, source order, and inheritance must also meet the same contrast floor on the nearest effective authored background.
+Background rules proven to match decorative-only elements without text are exempt; the rendered native contrast gate remains authoritative for spatial overlap.
+Do not use at-rules or nested CSS rules in slide_css; this is one fixed 1920x1080 canvas with no responsive or conditional repair variants.
 Use font-size only as one finite literal px value greater than 0 and no larger than 64px.
 Every slide_css update must fit the compact_model_html_v2 limit of 1024 UTF-8 bytes.
 Use literal px values for left, top, width, and height, aligned exactly to native peer edges or centerlines; do not position or size with transforms, calc(), or percentage values.
 Do not create full-slide raster replacements or semantic text inside generated images.
 {compiler_capability_prompt_excerpt()}
+The sealed repair contract overrides general gradient and conditional CSS capabilities: use only opaque literal colors for background and background-color, never use background-image, and never use at-rules or nested rules.
 The provider-enforced strict output schema is the sole response format."""
 
 
@@ -715,6 +775,44 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                         "minimum_alpha_exclusive": 0,
                         "variables_or_unparsed_values_allowed": False,
                     },
+                    "text_background_contrast": {
+                        "minimum_ratio": _MIN_AUTHORED_TEXT_BACKGROUND_CONTRAST,
+                        "background_properties": sorted(
+                            _SLIDE_CSS_BACKGROUND_PROPERTIES
+                        ),
+                        "background_value_format": "opaque_literal_color",
+                        "forbidden_background_properties": sorted(
+                            _SLIDE_CSS_FORBIDDEN_BACKGROUND_PROPERTIES
+                        ),
+                        "gradients_allowed": False,
+                        "foreground_property": "color",
+                        "foreground_must_be_same_rule": True,
+                        "foreground_must_be_opaque_literal": True,
+                        "inherited_or_separate_rule_foreground_allowed": False,
+                        "effective_cascade_foreground_must_pass": True,
+                        "cascade_resolution": [
+                            "importance",
+                            "inline_origin",
+                            "specificity",
+                            "source_order",
+                            "inheritance",
+                        ],
+                        "authenticated_inline_foregrounds_must_also_pass": True,
+                        "nearest_effective_opaque_background_wins": True,
+                        "at_rules_allowed": False,
+                        "nested_rules_allowed": False,
+                        "decorative_only_rule_exempt": True,
+                        "rendered_native_contrast_gate_authoritative": True,
+                        "selector_match_basis": "authenticated_manifest_body",
+                        "read_only_cascade_sources": [
+                            "authenticated_deck_css",
+                            "authenticated_inline_style",
+                        ],
+                        "read_only_background_paint_policy": (
+                            "opaque_literal_or_provably_transparent_no_image"
+                        ),
+                        "unsupported_read_only_paint_rejected_before_provider": True,
+                    },
                     "text_transform": {
                         "allowed": False,
                     },
@@ -762,6 +860,10 @@ def build_repair_author_messages(
         context.authorized_sources,
         key=lambda item: (item.selector, item.source_role),
     )
+    read_only_sources = sorted(
+        context.read_only_sources,
+        key=lambda item: (item.selector, item.source_role),
+    )
     assets = sorted(
         context.owned_assets,
         key=lambda item: (item.selector, item.asset_id),
@@ -799,6 +901,17 @@ def build_repair_author_messages(
                 "text": source.text,
             }
             for source in sources
+        ],
+        "read_only_sources": [
+            {
+                "selector": source.selector,
+                "source_role": source.source_role,
+                "component_version_id": source.component_version_id,
+                "manifest_source_path": source.manifest_source_path,
+                "manifest_source_hash": source.manifest_source_hash,
+                "text": source.text,
+            }
+            for source in read_only_sources
         ],
         "body_selector_inventory": {
             str(source.selector): _body_selector_inventory(source.text)
@@ -923,6 +1036,564 @@ def _css_color_is_transparent_or_ambiguous(declaration: Any) -> bool:
     return not isinstance(alpha, (int, float)) or alpha <= 0
 
 
+def _css_opaque_rgb(declaration: Any) -> tuple[float, float, float] | None:
+    tokens = _significant_css_value_tokens(declaration)
+    if len(tokens) != 1:
+        return None
+    try:
+        color = parse_color(tokens[0])
+    except Exception:
+        return None
+    alpha = getattr(color, "alpha", None)
+    channels = (
+        getattr(color, "red", None),
+        getattr(color, "green", None),
+        getattr(color, "blue", None),
+    )
+    if (
+        not isinstance(alpha, (int, float))
+        or isinstance(alpha, bool)
+        or not math.isfinite(alpha)
+        or alpha < 1.0
+        or alpha > 1.0
+        or any(
+            not isinstance(channel, (int, float))
+            or isinstance(channel, bool)
+            or not math.isfinite(channel)
+            or channel < 0
+            or channel > 1
+            for channel in channels
+        )
+    ):
+        return None
+    return tuple(float(channel) for channel in channels)
+
+
+def _css_background_is_provably_transparent_or_none(
+    declaration: Any,
+) -> bool:
+    identifier = _single_css_identifier(declaration)
+    if declaration.lower_name == "background-image":
+        return identifier in {"initial", "none", "unset"}
+    if declaration.lower_name not in _SLIDE_CSS_BACKGROUND_PROPERTIES:
+        return False
+    transparent_identifiers = {"initial", "transparent", "unset"}
+    if declaration.lower_name == "background":
+        transparent_identifiers.add("none")
+    if identifier in transparent_identifiers:
+        return True
+    tokens = _significant_css_value_tokens(declaration)
+    if len(tokens) != 1:
+        return False
+    try:
+        color = parse_color(tokens[0])
+    except Exception:
+        return False
+    alpha = getattr(color, "alpha", None)
+    return (
+        isinstance(alpha, (int, float))
+        and not isinstance(alpha, bool)
+        and math.isfinite(alpha)
+        and alpha == 0
+    )
+
+
+def _read_only_background_declaration_is_supported(
+    declaration: Any,
+) -> bool:
+    if declaration.lower_name not in _ALL_CSS_BACKGROUND_PAINT_PROPERTIES:
+        return True
+    if declaration.lower_name == "background-image":
+        return _css_background_is_provably_transparent_or_none(declaration)
+    return (
+        _css_opaque_rgb(declaration) is not None
+        or _css_background_is_provably_transparent_or_none(declaration)
+    )
+
+
+def _stylesheet_has_unsupported_read_only_background_paint(
+    value: str,
+) -> bool:
+    return any(
+        not _read_only_background_declaration_is_supported(declaration)
+        for declaration in _stylesheet_declarations(value)
+        if declaration.lower_name in _ALL_CSS_BACKGROUND_PAINT_PROPERTIES
+    )
+
+
+def _html_has_unsupported_inline_background_paint(value: str) -> bool:
+    try:
+        soup = BeautifulSoup(value, "html.parser")
+        for element in soup.find_all(True):
+            if not isinstance(element, Tag):
+                continue
+            style = element.attrs.get("style")
+            if not isinstance(style, str) or not style.strip():
+                continue
+            declarations = tuple(
+                item
+                for item in tinycss2.parse_declaration_list(
+                    style,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+                if item.type == "declaration"
+            )
+            if any(
+                declaration.lower_name
+                in _ALL_CSS_BACKGROUND_PAINT_PROPERTIES
+                and not _read_only_background_declaration_is_supported(
+                    declaration
+                )
+                for declaration in declarations
+            ):
+                return True
+        return False
+    except Exception:
+        return True
+
+
+def _css_relative_luminance(rgb: tuple[float, float, float]) -> float:
+    linear = tuple(
+        channel / 12.92
+        if channel <= 0.04045
+        else ((channel + 0.055) / 1.055) ** 2.4
+        for channel in rgb
+    )
+    return 0.2126 * linear[0] + 0.7152 * linear[1] + 0.0722 * linear[2]
+
+
+def _css_contrast_ratio(
+    foreground: tuple[float, float, float],
+    background: tuple[float, float, float],
+) -> float:
+    foreground_luminance = _css_relative_luminance(foreground)
+    background_luminance = _css_relative_luminance(background)
+    high = max(foreground_luminance, background_luminance)
+    low = min(foreground_luminance, background_luminance)
+    return (high + 0.05) / (low + 0.05)
+
+
+def _final_css_declaration(
+    declarations: tuple[Any, ...],
+    names: frozenset[str],
+) -> Any | None:
+    matching = tuple(
+        declaration
+        for declaration in declarations
+        if declaration.type == "declaration"
+        and declaration.lower_name in names
+    )
+    important = tuple(
+        declaration
+        for declaration in matching
+        if bool(getattr(declaration, "important", False))
+    )
+    candidates = important or matching
+    return candidates[-1] if candidates else None
+
+
+def _selector_specificity(value: str) -> tuple[int, int, int] | None:
+    try:
+        selectors = tuple(parse_css_selectors(value))
+    except Exception:
+        return None
+    if len(selectors) != 1 or selectors[0].pseudo_element is not None:
+        return None
+    specificity = selectors[0].specificity
+    if (
+        not isinstance(specificity, tuple)
+        or len(specificity) != 3
+        or any(type(component) is not int for component in specificity)
+    ):
+        return None
+    return specificity
+
+
+def _unique_tags_by_identity(elements: list[Tag]) -> tuple[Tag, ...]:
+    unique: list[Tag] = []
+    seen: set[int] = set()
+    for element in elements:
+        marker = id(element)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        unique.append(element)
+    return tuple(unique)
+
+
+def _qualified_rule_selector_matches(
+    rule: Any,
+    soup: BeautifulSoup,
+) -> tuple[tuple[tuple[int, int, int], tuple[Tag, ...]], ...] | None:
+    try:
+        selector_arms = _selector_arms(list(rule.prelude))
+    except Exception:
+        return None
+    matched: list[tuple[tuple[int, int, int], tuple[Tag, ...]]] = []
+    for selector in selector_arms:
+        specificity = _selector_specificity(selector)
+        if specificity is None:
+            return None
+        try:
+            elements = soup.select(selector)
+        except Exception:
+            return None
+        matched.append(
+            (
+                specificity,
+                _unique_tags_by_identity(
+                    [element for element in elements if isinstance(element, Tag)]
+                ),
+            )
+        )
+    return tuple(matched)
+
+
+def _stylesheet_qualified_rules(
+    value: str,
+) -> tuple[Any, ...] | None:
+    try:
+        rules = tuple(
+            tinycss2.parse_stylesheet(
+                value,
+                skip_comments=True,
+                skip_whitespace=True,
+            )
+        )
+    except Exception:
+        return None
+    qualified: list[Any] = []
+    for rule in rules:
+        if rule.type != "qualified-rule" or rule.content is None:
+            return None
+        nested = tuple(
+            item
+            for item in tinycss2.parse_rule_list(
+                rule.content,
+                skip_comments=True,
+                skip_whitespace=True,
+            )
+            if getattr(item, "type", "") in {"at-rule", "qualified-rule"}
+        )
+        if nested:
+            return None
+        qualified.append(rule)
+    return tuple(qualified)
+
+
+def _element_is_within(
+    element: Tag,
+    container: Tag,
+) -> bool:
+    return element is container or any(
+        parent is container for parent in element.parents
+    )
+
+
+def _semantic_text_owners(soup: BeautifulSoup) -> tuple[Tag, ...]:
+    owners: list[Tag] = []
+    seen: set[int] = set()
+    for text_node in soup.find_all(string=True):
+        if not str(text_node).strip():
+            continue
+        parent = text_node.parent
+        if not isinstance(parent, Tag):
+            continue
+        ancestry = (parent, *parent.parents)
+        if any(
+            isinstance(ancestor, Tag)
+            and str(ancestor.name).casefold()
+            in _NON_VISIBLE_HTML_CONTENT_ELEMENTS
+            for ancestor in ancestry
+        ):
+            continue
+        marker = id(parent)
+        if marker in seen:
+            continue
+        seen.add(marker)
+        owners.append(parent)
+    return tuple(owners)
+
+
+def _inline_foreground(element: Tag) -> Any | None:
+    style = element.attrs.get("style")
+    if not isinstance(style, str) or not style.strip():
+        return None
+    parsed = tuple(
+        item
+        for item in tinycss2.parse_declaration_list(
+            style,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        if item.type == "declaration"
+    )
+    return _final_css_declaration(parsed, frozenset({"color"}))
+
+
+def _inline_background(element: Tag) -> Any | None:
+    style = element.attrs.get("style")
+    if not isinstance(style, str) or not style.strip():
+        return None
+    parsed = tuple(
+        item
+        for item in tinycss2.parse_declaration_list(
+            style,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        if item.type == "declaration"
+    )
+    return _final_css_declaration(
+        parsed,
+        _SLIDE_CSS_BACKGROUND_PROPERTIES,
+    )
+
+
+def _parent_tag(element: Tag) -> Tag | None:
+    parent = element.parent
+    return parent if isinstance(parent, Tag) else None
+
+
+def _css_cascade_priority(
+    declaration: Any,
+    specificity: tuple[int, int, int],
+    order: int,
+    *,
+    inline: bool = False,
+) -> tuple[int, int, int, int, int, int]:
+    return (
+        int(bool(getattr(declaration, "important", False))),
+        int(inline),
+        *specificity,
+        order,
+    )
+
+
+def _record_css_winner(
+    winners: dict[
+        int,
+        tuple[tuple[int, int, int, int, int, int], Any],
+    ],
+    *,
+    element: Tag,
+    declaration: Any,
+    specificity: tuple[int, int, int],
+    order: int,
+    inline: bool = False,
+) -> None:
+    candidate = (
+        _css_cascade_priority(
+            declaration,
+            specificity,
+            order,
+            inline=inline,
+        ),
+        declaration,
+    )
+    current = winners.get(id(element))
+    if current is None or candidate[0] >= current[0]:
+        winners[id(element)] = candidate
+
+
+def _inherited_css_winner(
+    element: Tag,
+    winners: dict[
+        int,
+        tuple[tuple[int, int, int, int, int, int], Any],
+    ],
+) -> Any | None:
+    current: Tag | None = element
+    while current is not None:
+        winner = winners.get(id(current))
+        if winner is not None:
+            return winner[1]
+        current = _parent_tag(current)
+    return None
+
+
+def _slide_css_has_unsafe_text_background(
+    value: str,
+    body: str,
+    *,
+    deck_css: str,
+) -> bool:
+    try:
+        soup = BeautifulSoup(
+            assemble_compact_slide_html(
+                deck_stylesheet="",
+                html_body=body,
+                slide_css="",
+            ),
+            "html.parser",
+        )
+    except Exception:
+        return True
+
+    try:
+        deck_rules = _stylesheet_qualified_rules(deck_css)
+        slide_rules = _stylesheet_qualified_rules(value)
+        if deck_rules is None or slide_rules is None:
+            return True
+        rule_sources = (
+            *((False, rule) for rule in deck_rules),
+            *((True, rule) for rule in slide_rules),
+        )
+        text_owners = _semantic_text_owners(soup)
+        background_winners: dict[
+            int,
+            tuple[tuple[int, int, int, int, int, int], Any],
+        ] = {}
+        foreground_winners: dict[
+            int,
+            tuple[tuple[int, int, int, int, int, int], Any],
+        ] = {}
+        for order, (candidate_authored, rule) in enumerate(rule_sources):
+            declarations = tuple(
+                item
+                for item in tinycss2.parse_declaration_list(
+                    rule.content,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+                if item.type == "declaration"
+            )
+            background = _final_css_declaration(
+                declarations,
+                _SLIDE_CSS_BACKGROUND_PROPERTIES,
+            )
+            foreground = _final_css_declaration(
+                declarations,
+                frozenset({"color"}),
+            )
+            if background is None and foreground is None:
+                continue
+            selector_matches = _qualified_rule_selector_matches(rule, soup)
+            if selector_matches is None:
+                return True
+            all_matches = _unique_tags_by_identity(
+                [
+                    element
+                    for _specificity, matches in selector_matches
+                    for element in matches
+                ]
+            )
+            if not all_matches:
+                if candidate_authored and background is not None:
+                    return True
+                continue
+            text_containers = (
+                tuple(
+                    element
+                    for element in all_matches
+                    if any(
+                        _element_is_within(owner, element)
+                        for owner in text_owners
+                    )
+                )
+                if background is not None
+                else ()
+            )
+            if candidate_authored and text_containers:
+                background_rgb = _css_opaque_rgb(background)
+                foreground_rgb = (
+                    _css_opaque_rgb(foreground)
+                    if foreground is not None
+                    else None
+                )
+                if (
+                    background_rgb is None
+                    or foreground_rgb is None
+                    or _css_contrast_ratio(foreground_rgb, background_rgb)
+                    < _MIN_AUTHORED_TEXT_BACKGROUND_CONTRAST
+                ):
+                    return True
+            for specificity, matches in selector_matches:
+                for element in matches:
+                    if background is not None:
+                        _record_css_winner(
+                            background_winners,
+                            element=element,
+                            declaration=background,
+                            specificity=specificity,
+                            order=order,
+                        )
+                    if foreground is not None:
+                        _record_css_winner(
+                            foreground_winners,
+                            element=element,
+                            declaration=foreground,
+                            specificity=specificity,
+                            order=order,
+                        )
+
+        inline_order = len(rule_sources)
+        for element in soup.find_all(True):
+            if not isinstance(element, Tag):
+                continue
+            inline_background = _inline_background(element)
+            if inline_background is not None:
+                _record_css_winner(
+                    background_winners,
+                    element=element,
+                    declaration=inline_background,
+                    specificity=(0, 0, 0),
+                    order=inline_order,
+                    inline=True,
+                )
+            inline_foreground = _inline_foreground(element)
+            if inline_foreground is None:
+                continue
+            _record_css_winner(
+                foreground_winners,
+                element=element,
+                declaration=inline_foreground,
+                specificity=(0, 0, 0),
+                order=inline_order,
+                inline=True,
+            )
+
+        for owner in text_owners:
+            current: Tag | None = owner
+            while current is not None:
+                background_winner = background_winners.get(id(current))
+                if background_winner is not None:
+                    background_rgb = _css_opaque_rgb(background_winner[1])
+                    if (
+                        background_rgb is None
+                        and _css_background_is_provably_transparent_or_none(
+                            background_winner[1]
+                        )
+                    ):
+                        current = _parent_tag(current)
+                        continue
+                    foreground = _inherited_css_winner(
+                        owner,
+                        foreground_winners,
+                    )
+                    foreground_rgb = (
+                        _css_opaque_rgb(foreground)
+                        if foreground is not None
+                        else None
+                    )
+                    if (
+                        background_rgb is None
+                        or foreground_rgb is None
+                        or _css_contrast_ratio(
+                            foreground_rgb,
+                            background_rgb,
+                        )
+                        < _MIN_AUTHORED_TEXT_BACKGROUND_CONTRAST
+                    ):
+                        return True
+                    break
+                current = _parent_tag(current)
+        return False
+    except Exception:
+        return True
+
+
 def _css_font_size_violates_candidate_contract(declaration: Any) -> bool:
     tokens = _significant_css_value_tokens(declaration)
     if len(tokens) != 1 or tokens[0].type != "dimension":
@@ -984,6 +1655,13 @@ def _css_declaration_violates_candidate_contract(declaration: Any) -> bool:
     if declaration.type != "declaration":
         return False
     if declaration.lower_name in _FORBIDDEN_LAYOUT_EXTRACTION_PROPERTIES:
+        return True
+    if declaration.lower_name in _SLIDE_CSS_FORBIDDEN_BACKGROUND_PROPERTIES:
+        return True
+    if (
+        declaration.lower_name in _SLIDE_CSS_BACKGROUND_PROPERTIES
+        and _css_opaque_rgb(declaration) is None
+    ):
         return True
     if declaration.lower_name == "font-size":
         return _css_font_size_violates_candidate_contract(declaration)
@@ -1077,9 +1755,25 @@ def _slide_css_has_forbidden_native_feature(value: str) -> bool:
 
 def _candidate_fits_compact_v2_source_contract(
     candidate: DeckRepairCandidate,
+    authorized_sources: tuple[RepairSourceContext, ...],
+    read_only_sources: tuple[RepairSourceContext, ...],
 ) -> bool:
     """Check source limits and text safety before downstream compilation."""
 
+    bodies = {
+        source.selector: source.text
+        for source in authorized_sources
+        if source.source_role == "body"
+    }
+    deck_stylesheets = tuple(
+        source.text
+        for source in (*authorized_sources, *read_only_sources)
+        if source.selector == DECK_STYLE_ROOT_SELECTOR
+        and source.source_role == "deck_css"
+    )
+    if len(deck_stylesheets) != 1:
+        return False
+    deck_css = deck_stylesheets[0]
     for update in candidate.source_updates:
         if update.source_role != "slide_css":
             continue
@@ -1091,12 +1785,21 @@ def _candidate_fits_compact_v2_source_contract(
             has_forbidden_native_feature = (
                 _slide_css_has_forbidden_native_feature(update.content)
             )
+            has_unsafe_text_background = (
+                update.selector not in bodies
+                or _slide_css_has_unsafe_text_background(
+                    update.content,
+                    bodies[update.selector],
+                    deck_css=deck_css,
+                )
+            )
         except Exception:
             return False
         if (
             size_bytes > _COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES
             or has_forbidden_text_declaration
             or has_forbidden_native_feature
+            or has_unsafe_text_background
         ):
             return False
     return True
@@ -1420,7 +2123,11 @@ def _validate_invocation_result(
             "candidate_invalid",
             trace_error_code="candidate_scope_invalid",
         ) from None
-    if not _candidate_fits_compact_v2_source_contract(result.candidate):
+    if not _candidate_fits_compact_v2_source_contract(
+        result.candidate,
+        context.authorized_sources,
+        context.read_only_sources,
+    ):
         raise DeckRepairAuthorError(
             "candidate_invalid",
             trace_error_code="candidate_source_contract_invalid",

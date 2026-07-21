@@ -19,6 +19,7 @@ import anyio
 from pydantic import ValidationError
 
 from deerflow.sophia.build_manifest import (
+    DECK_STYLE_ROOT_SELECTOR,
     BuildManifest,
     manifest_components_by_selector,
 )
@@ -444,7 +445,10 @@ async def _load_sources(
     manifest: BuildManifest,
     manifest_hash: str,
     object_store: SupabaseImmutableObjectStore,
-) -> tuple[RepairSourceContext, ...]:
+) -> tuple[
+    tuple[RepairSourceContext, ...],
+    tuple[RepairSourceContext, ...],
+]:
     components, object_root = await _run_sync(
         _context_source_inventory,
         manifest,
@@ -452,47 +456,58 @@ async def _load_sources(
         thread_id=request.thread_id,
         build_id=request.build_id,
     )
-    contexts: list[RepairSourceContext] = []
-    for selector in request.program.authorized_selectors:
+    async def load_source(
+        selector: str,
+        role: str,
+    ) -> RepairSourceContext:
         component = components.get(selector)
         if component is None:
             _invalid()
+        source_path = component.source_roles.get(role)
+        source_hash = component.source_hashes.get(role)
+        if not isinstance(source_path, str) or not isinstance(source_hash, str):
+            _invalid()
+        try:
+            durable_path = await _run_sync(
+                canonical_manifest_source_path,
+                source_path,
+                object_root=object_root,
+                build_id=request.build_id,
+                thread_id=request.thread_id,
+            )
+        except DeckDesignLiftProductionStorageError:
+            _invalid()
+        raw = await _read_object(
+            object_store,
+            durable_path,
+            max_bytes=MAX_REPAIR_CONTEXT_SOURCE_BYTES,
+            allow_empty=True,
+        )
+        return await _run_sync(
+            _verified_source_context,
+            raw=raw,
+            expected_hash=source_hash,
+            build_id=request.build_id,
+            manifest_revision=manifest.manifest_revision,
+            manifest_hash=manifest_hash,
+            selector=selector,
+            source_role=role,
+            component_version_id=component.current_version_id,
+            durable_path=durable_path,
+        )
+
+    authorized: list[RepairSourceContext] = []
+    authorized_keys: set[tuple[str, str]] = set()
+    for selector in request.program.authorized_selectors:
         for role in request.program.authorized_source_roles[selector]:
-            source_path = component.source_roles.get(role)
-            source_hash = component.source_hashes.get(role)
-            if not isinstance(source_path, str) or not isinstance(source_hash, str):
-                _invalid()
-            try:
-                durable_path = await _run_sync(
-                    canonical_manifest_source_path,
-                    source_path,
-                    object_root=object_root,
-                    build_id=request.build_id,
-                    thread_id=request.thread_id,
-                )
-            except DeckDesignLiftProductionStorageError:
-                _invalid()
-            raw = await _read_object(
-                object_store,
-                durable_path,
-                max_bytes=MAX_REPAIR_CONTEXT_SOURCE_BYTES,
-                allow_empty=True,
-            )
-            contexts.append(
-                await _run_sync(
-                    _verified_source_context,
-                    raw=raw,
-                    expected_hash=source_hash,
-                    build_id=request.build_id,
-                    manifest_revision=manifest.manifest_revision,
-                    manifest_hash=manifest_hash,
-                    selector=selector,
-                    source_role=role,
-                    component_version_id=component.current_version_id,
-                    durable_path=durable_path,
-                )
-            )
-    return tuple(contexts)
+            authorized.append(await load_source(selector, role))
+            authorized_keys.add((selector, role))
+
+    read_only: list[RepairSourceContext] = []
+    deck_css_key = (DECK_STYLE_ROOT_SELECTOR, "deck_css")
+    if deck_css_key not in authorized_keys:
+        read_only.append(await load_source(*deck_css_key))
+    return tuple(authorized), tuple(read_only)
 
 
 def _context_source_inventory(
@@ -759,6 +774,7 @@ def _repair_author_context(
     contact_sheet: RepairContextImage,
     failing_renders: tuple[RepairContextImage, ...],
     authorized_sources: tuple[RepairSourceContext, ...],
+    read_only_sources: tuple[RepairSourceContext, ...],
     owned_assets: tuple[RepairOwnedAssetContext, ...],
     skill_excerpts: tuple[RepairSkillExcerptContext, ...],
 ) -> RepairAuthorContext:
@@ -799,6 +815,7 @@ def _repair_author_context(
             contact_sheet=contact_sheet,
             failing_renders=failing_renders,
             authorized_sources=authorized_sources,
+            read_only_sources=read_only_sources,
             owned_assets=owned_assets,
             skill_excerpts=skill_excerpts,
         )
@@ -897,7 +914,7 @@ class ProductionRepairAuthorContextLoader:
             request=request,
             object_store=self._objects,
         )
-        authorized_sources = await _load_sources(
+        authorized_sources, read_only_sources = await _load_sources(
             request=request,
             manifest=manifest,
             manifest_hash=manifest_hash,
@@ -931,6 +948,7 @@ class ProductionRepairAuthorContextLoader:
             contact_sheet=contact_sheet,
             failing_renders=failing_renders,
             authorized_sources=authorized_sources,
+            read_only_sources=read_only_sources,
             owned_assets=owned_assets,
             skill_excerpts=skill_excerpts,
         )
