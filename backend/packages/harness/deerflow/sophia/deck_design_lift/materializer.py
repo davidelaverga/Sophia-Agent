@@ -36,6 +36,10 @@ from deerflow.sophia.deck_design_lift.schemas import (
     DeckRepairProgram,
     LocalityProof,
 )
+from deerflow.sophia.deck_design_lift.slide_css_overlay import (
+    COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES,
+    compose_authenticated_slide_css,
+)
 from deerflow.sophia.deck_quality.canonical import canonical_json_bytes, canonical_sha256
 from deerflow.sophia.deck_quality.schemas import MechanicalProjection
 from deerflow.sophia.storage.supabase_artifact_store import (
@@ -884,7 +888,28 @@ class DurableDeckCandidateMaterializer:
             changed = component.selector in component_version_ids
             for role in sorted(component.source_roles):
                 source = baseline.sources[(component.selector, role)]
-                content = updates.get((component.selector, role), source.content.decode("utf-8")).encode("utf-8")
+                baseline_text = source.content.decode("utf-8")
+                candidate_text = updates.get((component.selector, role))
+                if candidate_text is not None and role == "slide_css":
+                    try:
+                        candidate_text = compose_authenticated_slide_css(
+                            baseline=baseline_text,
+                            overlay=candidate_text,
+                        )
+                    except ValueError:
+                        raise DeckCandidateMaterializationError(
+                            "candidate_writes_invalid"
+                        ) from None
+                    if (
+                        len(candidate_text.encode("utf-8"))
+                        > COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES
+                    ):
+                        raise DeckCandidateMaterializationError(
+                            "candidate_writes_invalid"
+                        )
+                content = (
+                    baseline_text if candidate_text is None else candidate_text
+                ).encode("utf-8")
                 object_path = source.object_path
                 if changed:
                     object_path = self._candidate_source_path(

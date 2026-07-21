@@ -34,6 +34,11 @@ from deerflow.sophia.deck_design_lift.schemas import (
     SkillRef,
     SourceUpdate,
 )
+from deerflow.sophia.deck_design_lift.slide_css_overlay import (
+    COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES,
+    SLIDE_CSS_REPAIR_OVERLAY_SEPARATOR,
+    compose_authenticated_slide_css,
+)
 from deerflow.sophia.deck_quality.canonical import canonical_sha256
 from deerflow.sophia.deck_quality.schemas import MechanicalCheck, MechanicalProjection
 
@@ -487,6 +492,178 @@ def test_stage_materializes_native_candidate_and_retains_sibling_versions() -> N
     assert all(path.startswith(f"{OBJECT_ROOT}/") for path in staged.staged_object_paths)
     assert staged.manifest_object_path == f"{OBJECT_ROOT}/manifest/manifest-r2.json"
     assert _run(fixture.materializer().load_staged(transaction=fixture.transaction)) == staged
+
+
+def test_compile_request_preserves_baseline_css_and_appends_overlay_exactly() -> None:
+    fixture = _fixture()
+    slide_css_update = next(
+        update
+        for update in fixture.candidate.source_updates
+        if update.source_role == "slide_css"
+    )
+    baseline_css = _source_contents("slide:1")["slide_css"].decode()
+    baseline_hash = _sha(baseline_css.encode())
+    assert slide_css_update.expected_source_hash == baseline_hash
+
+    _run(
+        fixture.materializer().stage(
+            transaction=fixture.transaction,
+            program=fixture.program,
+            candidate=fixture.candidate,
+        )
+    )
+
+    request = fixture.compiler.calls[0]
+    compiled_source = next(
+        source
+        for source in request.sources
+        if (source.selector, source.source_role) == ("slide:1", "slide_css")
+    )
+    expected_content = (
+        baseline_css
+        + SLIDE_CSS_REPAIR_OVERLAY_SEPARATOR
+        + slide_css_update.content
+    ).encode()
+    assert compiled_source.content == expected_content
+    assert compiled_source.source_hash == _sha(expected_content)
+    assert fixture.candidate.source_updates[-1] == slide_css_update
+    assert slide_css_update.expected_source_hash == baseline_hash
+
+
+def test_empty_baseline_css_keeps_overlay_only_materialization() -> None:
+    fixture = _fixture()
+    components = list(fixture.manifest.components)
+    slide = components[1]
+    source_hashes = dict(slide.source_hashes)
+    source_hashes["slide_css"] = _sha(b"")
+    components[1] = slide.model_copy(update={"source_hashes": source_hashes})
+    fixture.store.objects[
+        _object_source_path(
+            "component_slide_1",
+            "component_version_slide_1_01",
+            "slide.css",
+        )
+    ] = b""
+    _replace_manifest(
+        fixture,
+        fixture.manifest.model_copy(update={"components": components}, deep=True),
+    )
+    fixture.candidate = fixture.candidate.model_copy(
+        update={
+            "source_updates": tuple(
+                update.model_copy(
+                    update={"expected_source_hash": _sha(b"")}
+                )
+                if update.source_role == "slide_css"
+                else update
+                for update in fixture.candidate.source_updates
+            )
+        }
+    )
+
+    _run(
+        fixture.materializer().stage(
+            transaction=fixture.transaction,
+            program=fixture.program,
+            candidate=fixture.candidate,
+        )
+    )
+
+    slide_css_update = fixture.candidate.source_updates[-1]
+    compiled_source = next(
+        source
+        for source in fixture.compiler.calls[0].sources
+        if (source.selector, source.source_role) == ("slide:1", "slide_css")
+    )
+    assert compiled_source.content == slide_css_update.content.encode()
+    assert compose_authenticated_slide_css(
+        baseline="",
+        overlay=slide_css_update.content,
+    ) == slide_css_update.content
+    whitespace_baseline = " \n\t"
+    assert compose_authenticated_slide_css(
+        baseline=whitespace_baseline,
+        overlay=slide_css_update.content,
+    ) == (
+        whitespace_baseline
+        + SLIDE_CSS_REPAIR_OVERLAY_SEPARATOR
+        + slide_css_update.content
+    )
+
+
+def test_combined_baseline_and_overlay_must_fit_compact_v2_limit() -> None:
+    fixture = _fixture()
+    baseline_css = _source_contents("slide:1")["slide_css"].decode()
+    prefix_size = len(
+        (baseline_css + SLIDE_CSS_REPAIR_OVERLAY_SEPARATOR).encode()
+    )
+    oversized_overlay = "x" * (
+        COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES - prefix_size + 1
+    )
+    fixture.candidate = fixture.candidate.model_copy(
+        update={
+            "source_updates": tuple(
+                update.model_copy(update={"content": oversized_overlay})
+                if update.source_role == "slide_css"
+                else update
+                for update in fixture.candidate.source_updates
+            )
+        }
+    )
+
+    with pytest.raises(
+        DeckCandidateMaterializationError,
+        match="^candidate_writes_invalid$",
+    ):
+        _run(
+            fixture.materializer().stage(
+                transaction=fixture.transaction,
+                program=fixture.program,
+                candidate=fixture.candidate,
+            )
+        )
+
+    assert fixture.compiler.calls == []
+    assert fixture.store.create_calls == []
+
+
+def test_materializer_rejects_already_composed_slide_css() -> None:
+    fixture = _fixture()
+    baseline_css = _source_contents("slide:1")["slide_css"].decode()
+    overlay = next(
+        update.content
+        for update in fixture.candidate.source_updates
+        if update.source_role == "slide_css"
+    )
+    already_composed = compose_authenticated_slide_css(
+        baseline=baseline_css,
+        overlay=overlay,
+    )
+    fixture.candidate = fixture.candidate.model_copy(
+        update={
+            "source_updates": tuple(
+                update.model_copy(update={"content": already_composed})
+                if update.source_role == "slide_css"
+                else update
+                for update in fixture.candidate.source_updates
+            )
+        }
+    )
+
+    with pytest.raises(
+        DeckCandidateMaterializationError,
+        match="^candidate_writes_invalid$",
+    ):
+        _run(
+            fixture.materializer().stage(
+                transaction=fixture.transaction,
+                program=fixture.program,
+                candidate=fixture.candidate,
+            )
+        )
+
+    assert fixture.compiler.calls == []
+    assert fixture.store.create_calls == []
 
 
 def test_restart_after_ambiguous_create_replays_exact_bytes() -> None:

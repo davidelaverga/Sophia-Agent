@@ -77,6 +77,14 @@ from deerflow.sophia.deck_design_lift.schemas import (
     StableSlideSelector,
     WritableSourceRole,
 )
+from deerflow.sophia.deck_design_lift.slide_css_overlay import (
+    COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES,
+    SLIDE_CSS_REPAIR_OVERLAY_PROBE,
+    SLIDE_CSS_REPAIR_OVERLAY_SEPARATOR,
+    compose_authenticated_slide_css,
+    recover_authenticated_slide_css_overlay,
+    repair_overlay_utf8_budget,
+)
 from deerflow.sophia.deck_quality.canonical import (
     canonical_json_bytes,
     canonical_sha256,
@@ -99,7 +107,9 @@ MAX_REPAIR_CONTEXT_SKILL_EXCERPT_BYTES = 32 * 1024
 MAX_REPAIR_CONTEXT_TOTAL_SKILL_BYTES = 128 * 1024
 MAX_REPAIR_CONTEXT_METADATA_BYTES = 32 * 1024
 MAX_REPAIR_MESSAGE_TEXT_BYTES = 3 * 1024 * 1024
-_COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES = 1_024
+_COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES = (
+    COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES
+)
 _SLIDE_CSS_GEOMETRY_PROPERTIES = ("left", "top", "width", "height")
 _SLIDE_CSS_FORBIDDEN_FONT_PROPERTIES = frozenset({"font", "font-family"})
 _NON_VISIBLE_HTML_CONTENT_ELEMENTS = frozenset({"script", "style", "template"})
@@ -549,7 +559,8 @@ def _validated_context(
     if actual_sources != expected_sources or any(source.build_id != request.build_id or source.manifest_revision != identity.manifest_revision or source.manifest_hash != identity.manifest_hash for source in context.authorized_sources):
         raise DeckRepairAuthorError("context_invalid")
     if any(
-        source.source_role == "slide_css" and source.text.strip()
+        source.source_role == "slide_css"
+        and not _authenticated_slide_css_baseline_is_safe(source.text)
         for source in context.authorized_sources
     ):
         raise DeckRepairAuthorError("context_invalid")
@@ -583,6 +594,30 @@ def _validated_context(
     if any(
         source.source_role == "body"
         and _html_has_unsupported_inline_background_paint(source.text)
+        for source in context.authorized_sources
+    ):
+        raise DeckRepairAuthorError("context_invalid")
+    deck_css = next(
+        source.text
+        for source in context.read_only_sources
+        if source.source_role == "deck_css"
+    )
+    bodies = {
+        source.selector: source.text
+        for source in context.authorized_sources
+        if source.source_role == "body"
+    }
+    if any(
+        source.source_role == "slide_css"
+        and (
+            source.selector not in bodies
+            or _slide_css_has_unsafe_text_background(
+                "",
+                bodies[source.selector],
+                deck_css=deck_css,
+                baseline_slide_css=source.text,
+            )
+        )
         for source in context.authorized_sources
     ):
         raise DeckRepairAuthorError("context_invalid")
@@ -659,9 +694,11 @@ Aim for a candidate that a fresh independent rendered judgment can mark satisfie
 Deterministic comparison must also approve it without a critical, mechanical, content, or collateral regression.
 Every authorized body update is an addressing echo: copy its current manifest source byte-for-byte.
 Use read_only_sources only to account for the authenticated shared CSS cascade; never return an update for a read-only source.
-The author boundary pins body content to the authenticated manifest bytes before compilation, so express every visible repair in the authorized slide_css and target only tags, classes, and IDs listed in the supplied body_selector_inventory.
-This sealed lane is admitted only when every authenticated baseline slide_css source is semantically empty.
-A nonempty baseline is rejected before provider admission so authenticated geometry and paint can never be deleted by canonicalization.
+The author boundary pins body content to the authenticated manifest bytes before compilation, so express every visible repair in the authorized slide_css overlay.
+Target only tags, classes, and IDs listed in the supplied body_selector_inventory.
+Every slide_css output is an overlay only. Never copy, summarize, replace, or reconstruct authenticated baseline slide_css.
+A nonempty authenticated baseline is opaque to you and omitted from source text. The author boundary preserves its exact bytes as the compiled prefix, inserts one deterministic separator, and appends only the filtered overlay.
+Copy the authenticated baseline manifest_source_hash unchanged into expected_source_hash; it identifies the source being overlaid, not the overlay content.
 Do not restructure body markup or attributes. Do not add, remove, or rewrite visible glyphs, symbols, labels, or words, and do not change their order.
 Body output must still preserve the exact normalized visible HTML token sequence: do not split or merge a token or change token order; script, style, and template content is excluded.
 Body updates must use classes plus the authorized slide_css: do not use inline style, hidden, or aria-hidden attributes, and do not add script, style, or template elements.
@@ -676,12 +713,14 @@ The author boundary strips every fill, background, text color, geometry, margin,
 Directional or independently authored border sides and border longhands are stripped because they materialize as mechanically unstable native line fragments.
 Use only full enclosing border shorthand when framing is judge-visible and purposeful.
 For each framed selector, put border, border-radius, and box-sizing:border-box in the same qualified CSS rule; dependent frame declarations in split rules are stripped.
+A full border without box-sizing:border-box in that same rule is also stripped.
 Spend the entire CSS budget on decisive, selector-specific typographic hierarchy and full-frame structure.
 Use only finite literal values in that lane: px font-size, unitless or px line-height, literal px border widths, and solid full-border style.
 Use fully opaque literal full-border colors and literal px or percentage border radii. Do not use variables, calc(), inheritance keywords, or !important.
 Do not use at-rules or nested CSS rules in slide_css; this is one fixed 1920x1080 canvas with no responsive or conditional repair variants.
 Use font-size only as one finite literal px value from 12px through 64px.
-Every slide_css update must fit the compact_model_html_v2 limit of 1024 UTF-8 bytes.
+The compiled baseline-plus-separator-plus-overlay must fit the compact_model_html_v2 limit of 1024 UTF-8 bytes.
+For a nonempty baseline, obey that source's repair_overlay_max_utf8_bytes; an empty baseline keeps the full 1024-byte overlay limit.
 Do not attempt to move or resize native shapes; preserve the authenticated geometry and shared fill/text palette.
 Do not create full-slide raster replacements or semantic text inside generated images.
 {compiler_capability_prompt_excerpt()}
@@ -760,9 +799,13 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
             "slide_css": {
                 "source_role": "slide_css",
                 "max_utf8_bytes": _COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES,
+                "model_output_policy": "repair_overlay_only",
                 "retained_properties": sorted(_RETAINED_SLIDE_CSS_PROPERTIES),
                 "author_boundary_property_filter": "strip_all_unlisted_declarations",
-                "authenticated_baseline_policy": "require_semantically_empty_slide_css",
+                "authenticated_baseline_policy": "opaque_exact_byte_prefix_when_nonempty",
+                "compiled_source_policy": "authenticated_baseline_plus_deterministic_separator_plus_filtered_overlay",
+                "empty_baseline_policy": "filtered_overlay_only_without_separator",
+                "combined_size_policy": "baseline_separator_and_filtered_overlay_must_fit_max_utf8_bytes",
                 "fill_background_text_paint_updates_retained": False,
                 "geometry_updates_retained": False,
                 "retained_value_contract": {
@@ -784,6 +827,7 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                     "box_sizing": "border-box",
                     "full_border_shorthand_only": True,
                     "frame_declarations_same_qualified_rule": True,
+                    "full_border_requires_box_sizing_same_rule": True,
                     "directional_border_sides_allowed": False,
                     "border_longhands_allowed": False,
                     "border_width_px_range_inclusive": [
@@ -913,6 +957,30 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
     }
 
 
+def _serialized_authorized_source(
+    source: RepairSourceContext,
+) -> dict[str, JsonValue]:
+    serialized: dict[str, JsonValue] = {
+        "selector": source.selector,
+        "source_role": source.source_role,
+        "component_version_id": source.component_version_id,
+        "manifest_source_path": source.manifest_source_path,
+        "manifest_source_hash": source.manifest_source_hash,
+    }
+    if source.source_role != "slide_css" or not source.text:
+        serialized["text"] = source.text
+        return serialized
+    serialized["authenticated_baseline"] = {
+        "content_exposed": False,
+        "preservation": "exact_bytes_as_compiled_prefix",
+        "utf8_bytes": len(source.text.encode("utf-8")),
+        "repair_overlay_max_utf8_bytes": repair_overlay_utf8_budget(
+            baseline=source.text
+        ),
+    }
+    return serialized
+
+
 def build_repair_author_messages(
     *,
     context: RepairAuthorContext,
@@ -955,15 +1023,7 @@ def build_repair_author_messages(
         "design_plan_hash": plans["design_plan"].content_hash,
         "repair_constraints": _repair_constraints(program),
         "authorized_sources": [
-            {
-                "selector": source.selector,
-                "source_role": source.source_role,
-                "component_version_id": source.component_version_id,
-                "manifest_source_path": source.manifest_source_path,
-                "manifest_source_hash": source.manifest_source_hash,
-                "text": source.text,
-            }
-            for source in sources
+            _serialized_authorized_source(source) for source in sources
         ],
         "read_only_sources": [
             {
@@ -1481,6 +1541,7 @@ def _slide_css_has_unsafe_text_background(
     body: str,
     *,
     deck_css: str,
+    baseline_slide_css: str = "",
 ) -> bool:
     try:
         soup = BeautifulSoup(
@@ -1496,11 +1557,17 @@ def _slide_css_has_unsafe_text_background(
 
     try:
         deck_rules = _stylesheet_qualified_rules(deck_css)
+        baseline_rules = _stylesheet_qualified_rules(baseline_slide_css)
         slide_rules = _stylesheet_qualified_rules(value)
-        if deck_rules is None or slide_rules is None:
+        if (
+            deck_rules is None
+            or baseline_rules is None
+            or slide_rules is None
+        ):
             return True
         rule_sources = (
             *((False, rule) for rule in deck_rules),
+            *((False, rule) for rule in baseline_rules),
             *((True, rule) for rule in slide_rules),
         )
         text_owners = _semantic_text_owners(soup)
@@ -1918,12 +1985,78 @@ def _slide_css_has_forbidden_native_feature(value: str) -> bool:
         return True
 
 
+def _authenticated_slide_css_baseline_is_safe(value: str) -> bool:
+    """Admit an immutable compact-v2 baseline without applying overlay policy."""
+
+    if not value:
+        return True
+    try:
+        encoded = value.encode("utf-8")
+        if (
+            b"\x00" in encoded
+            or "</style" in value.casefold()
+            or repair_overlay_utf8_budget(baseline=value) <= 0
+        ):
+            return False
+        rules = _stylesheet_qualified_rules(value)
+        if rules is None:
+            return False
+        declarations: list[Any] = []
+        for rule in rules:
+            selector_arms = _selector_arms(list(rule.prelude))
+            if any(
+                _selector_specificity(selector) is None
+                for selector in selector_arms
+            ):
+                return False
+            rule_declarations = tuple(
+                tinycss2.parse_declaration_list(
+                    rule.content,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+            )
+            if any(
+                item.type != "declaration" for item in rule_declarations
+            ):
+                return False
+            declarations.extend(rule_declarations)
+        append_probe = (
+            value
+            + SLIDE_CSS_REPAIR_OVERLAY_SEPARATOR
+            + SLIDE_CSS_REPAIR_OVERLAY_PROBE
+        )
+        probed_rules = _stylesheet_qualified_rules(append_probe)
+        if not probed_rules:
+            return False
+        final_rule = probed_rules[-1]
+        if (
+            tinycss2.serialize(final_rule.prelude).strip()
+            != ".__sophia_dq2_overlay_probe__"
+            or tinycss2.serialize(final_rule.content).strip()
+            != "width:1px"
+        ):
+            return False
+        wrapped = f"<style>{value}</style>"
+        if unsupported_css_in_html(wrapped) or lossy_css_in_html(wrapped):
+            return False
+        return not any(
+            _css_declaration_hides_text(declaration)
+            or _css_declaration_generates_or_transforms_text(declaration)
+            for declaration in declarations
+        )
+    except Exception:
+        return False
+
+
 def _candidate_fits_compact_v2_source_contract(
     candidate: DeckRepairCandidate,
     authorized_sources: tuple[RepairSourceContext, ...],
     read_only_sources: tuple[RepairSourceContext, ...],
+    *,
+    validate_compiled_source_size: bool = False,
 ) -> bool:
-    """Check source limits and text safety before downstream compilation."""
+    """Validate model overlays without reinterpreting authenticated baselines."""
 
     bodies = {
         source.selector: source.text
@@ -1939,11 +2072,25 @@ def _candidate_fits_compact_v2_source_contract(
     if len(deck_stylesheets) != 1:
         return False
     deck_css = deck_stylesheets[0]
+    baseline_stylesheets = {
+        source.selector: source.text
+        for source in authorized_sources
+        if source.source_role == "slide_css"
+    }
     for update in candidate.source_updates:
         if update.source_role != "slide_css":
             continue
         try:
-            size_bytes = len(update.content.encode("utf-8"))
+            baseline = baseline_stylesheets[update.selector]
+            size_value = (
+                compose_authenticated_slide_css(
+                    baseline=baseline,
+                    overlay=update.content,
+                )
+                if validate_compiled_source_size
+                else update.content
+            )
+            size_bytes = len(size_value.encode("utf-8"))
             has_forbidden_text_declaration = (
                 _slide_css_has_forbidden_text_declaration(update.content)
             )
@@ -1956,6 +2103,7 @@ def _candidate_fits_compact_v2_source_contract(
                     update.content,
                     bodies[update.selector],
                     deck_css=deck_css,
+                    baseline_slide_css=baseline,
                 )
             )
         except Exception:
@@ -2365,11 +2513,18 @@ def _retained_slide_css(value: str) -> str:
             )
             if _retained_css_declaration_is_safe(item)
         )
-        if not any(item.lower_name == "border" for item in declarations):
+        has_full_border = any(
+            item.lower_name == "border" for item in declarations
+        )
+        has_border_box = any(
+            item.lower_name == "box-sizing" for item in declarations
+        )
+        if not (has_full_border and has_border_box):
             declarations = tuple(
                 item
                 for item in declarations
-                if item.lower_name not in {"border-radius", "box-sizing"}
+                if item.lower_name
+                not in {"border", "border-radius", "box-sizing"}
             )
         if not declarations:
             continue
@@ -2401,6 +2556,39 @@ def _candidate_with_retained_slide_css(
         update.model_dump(mode="python") for update in updates
     ]
     return DeckRepairCandidate.model_validate(payload)
+
+
+def _candidate_slide_css_preserves_authenticated_baselines(
+    candidate: DeckRepairCandidate,
+    authorized_sources: tuple[RepairSourceContext, ...],
+) -> bool:
+    baselines = {
+        source.selector: source.text
+        for source in authorized_sources
+        if source.source_role == "slide_css"
+    }
+    for update in candidate.source_updates:
+        if update.source_role != "slide_css":
+            continue
+        baseline = baselines.get(update.selector)
+        if baseline is None:
+            return False
+        try:
+            composed = compose_authenticated_slide_css(
+                baseline=baseline,
+                overlay=update.content,
+            )
+            recovered = recover_authenticated_slide_css_overlay(
+                baseline=baseline,
+                composed=composed,
+            )
+        except Exception:
+            return False
+        if recovered != update.content:
+            return False
+        if baseline and composed[: len(baseline)] != baseline:
+            return False
+    return True
 
 
 def _validate_invocation_result(
@@ -2466,6 +2654,14 @@ def _validate_invocation_result(
             "candidate_invalid",
             trace_error_code="candidate_source_hash_invalid",
         )
+    if not _candidate_slide_css_preserves_authenticated_baselines(
+        result.candidate,
+        context.authorized_sources,
+    ):
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_canonicalization_invalid",
+        )
     try:
         canonical_candidate = _candidate_with_manifest_body_sources(
             result.candidate,
@@ -2487,6 +2683,14 @@ def _validate_invocation_result(
             "candidate_invalid",
             trace_error_code="candidate_canonicalization_invalid",
         )
+    if not _candidate_slide_css_preserves_authenticated_baselines(
+        canonical_candidate,
+        context.authorized_sources,
+    ):
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_canonicalization_invalid",
+        )
     if not _candidate_css_targets_manifest_bodies(
         canonical_candidate,
         context.authorized_sources,
@@ -2500,6 +2704,7 @@ def _validate_invocation_result(
         canonical_candidate,
         context.authorized_sources,
         context.read_only_sources,
+        validate_compiled_source_size=True,
     ):
         raise DeckRepairAuthorError(
             "candidate_invalid",
