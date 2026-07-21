@@ -1738,6 +1738,86 @@ def test_deck_native_lint_fix_center_snaps_container_with_carried_content(
     assert clean.residue_count == 0
 
 
+def test_deck_native_lint_fix_center_snaps_container_to_contained_peer_grid(
+    tmp_path: Path,
+) -> None:
+    output = tmp_path / "contained-center-peer-grid.pptx"
+    presentation = Presentation()
+    presentation.slide_width = Inches(20.0)
+    presentation.slide_height = Inches(11.25)
+    slide = presentation.slides.add_slide(presentation.slide_layouts[6])
+
+    target = slide.shapes.add_shape(
+        MSO_SHAPE.RECTANGLE,
+        Inches(1.0),
+        Inches(0.75),
+        Inches(18.0),
+        Inches(9.75),
+    )
+    target.name = "contained-peer-container"
+    peer_names = []
+    for index, (left, width) in enumerate(
+        ((1.25, 3.0), (4.75, 3.0), (8.25, 3.0), (11.75, 3.0), (15.25, 3.0)),
+        start=1,
+    ):
+        peer = slide.shapes.add_shape(
+            MSO_SHAPE.RECTANGLE,
+            Inches(left),
+            Inches(4.175),
+            Inches(width),
+            Inches(3.0),
+        )
+        peer.name = f"contained-center-peer-{index}"
+        peer_names.append(peer.name)
+    presentation.save(output)
+
+    before = Presentation(output)
+    before_by_name = {shape.name: shape for shape in before.slides[0].shapes}
+    original_peer_geometries = {
+        name: (
+            before_by_name[name].left,
+            before_by_name[name].top,
+            before_by_name[name].width,
+            before_by_name[name].height,
+        )
+        for name in peer_names
+    }
+
+    service = DeckNativeService()
+    fixed = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+
+    assert fixed.success is True
+    assert fixed.lint_issue_count_before == 1
+    assert fixed.fix_applied_count == 1, fixed.residue
+    assert fixed.issue_kinds == {"align-y-container": 1}
+    assert fixed.residue_count == 0
+    repaired = Presentation(output)
+    by_name = {shape.name: shape for shape in repaired.slides[0].shapes}
+    repaired_container = by_name["contained-peer-container"]
+    assert repaired_container.left.inches == pytest.approx(1.0, abs=0.001)
+    assert repaired_container.top.inches == pytest.approx(0.80, abs=0.001)
+    assert {
+        name: (
+            by_name[name].left,
+            by_name[name].top,
+            by_name[name].width,
+            by_name[name].height,
+        )
+        for name in peer_names
+    } == original_peer_geometries
+    for name in peer_names:
+        peer = by_name[name]
+        assert repaired_container.left <= peer.left
+        assert repaired_container.top <= peer.top
+        assert repaired_container.left + repaired_container.width >= peer.left + peer.width
+        assert repaired_container.top + repaired_container.height >= peer.top + peer.height
+
+    clean = service.lint_fix(pptx_path=str(output), touched_slides=[0])
+    assert clean.lint_issue_count_before == 0
+    assert clean.fix_applied_count == 0
+    assert clean.residue_count == 0
+
+
 def test_deck_native_lint_fix_refuses_center_snap_with_rotated_carried_shape(
     tmp_path: Path,
 ) -> None:

@@ -2901,7 +2901,7 @@ def _coordinated_center_container_alignment(rec, recs, *, slide_w, slide_h):
         return None
 
     carried = _contained_shape_ids(rec, recs)
-    if not carried or carried.intersection(peers):
+    if not carried:
         return None
     axis = _ALIGNMENT_ROLE[role][0]
     outer_left, outer_top, outer_width, outer_height = _absolute_rect(rec)
