@@ -45,8 +45,8 @@ def _plan(**overrides: object) -> ResolvedModelPlan:
             "output_version": "responses/v1",
             "use_responses_api": True,
             "store": False,
-            "max_completion_tokens": 12_000,
-            "timeout": 240,
+            "max_completion_tokens": 24_000,
+            "timeout": 360,
             "max_retries": 0,
         },
         "plan_hash": "a" * 64,
@@ -184,7 +184,7 @@ class _FakeModel:
                 "context": "current_turn",
             },
             "store": False,
-            "max_output_tokens": 12_000,
+            "max_output_tokens": 24_000,
             "input": [{"role": "user", "content": messages[0]}],
             "text": {"format": {"type": "json_schema", **schema}},
         }
@@ -288,11 +288,11 @@ def test_exact_canary_invocation_is_one_stateless_untraced_provider_call(
 
     assert len(responses.count_calls) == 1
     count_call = responses.count_calls[0]
-    assert count_call.pop("timeout") == 240
+    assert count_call.pop("timeout") == 360
     assert set(count_call) == {"model", "reasoning", "input", "text"}
     assert len(responses.create_calls) == 1
     call = responses.create_calls[0]
-    assert call.pop("timeout") == 240
+    assert call.pop("timeout") == 360
     assert set(call) == {
         "model",
         "stream",
@@ -305,7 +305,7 @@ def test_exact_canary_invocation_is_one_stateless_untraced_provider_call(
     }
     assert call["store"] is False
     assert call["stream"] is False
-    assert call["max_output_tokens"] == 12_000
+    assert call["max_output_tokens"] == 24_000
     assert call["reasoning"] == {
         "effort": "high",
         "mode": "standard",
@@ -319,7 +319,7 @@ def test_exact_canary_invocation_is_one_stateless_untraced_provider_call(
     assert captured["kwargs"]["attach_tracing"] is False
     assert captured["kwargs"]["api_key"].get_secret_value() == ("synthetic-dq-only-key")
     assert captured["kwargs"]["max_retries"] == 0
-    assert captured["kwargs"]["timeout"] == 240
+    assert captured["kwargs"]["timeout"] == 360
     assert not {"callbacks", "tags", "metadata", "verbose"} & captured["kwargs"].keys()
     model = captured["model"]
     assert (model.callbacks, model.tags, model.metadata, model.verbose) == (
@@ -430,7 +430,7 @@ def test_real_pinned_chatopenai_builds_the_locked_repair_payload(
     }
     assert payload["model"] == "gpt-5.6-sol"
     assert payload["store"] is False
-    assert payload["max_output_tokens"] == 12_000
+    assert payload["max_output_tokens"] == 24_000
     assert payload["text"]["format"]["name"] == "DeckRepairCandidate"
     assert payload["text"]["format"]["strict"] is True
     schema = payload["text"]["format"]["schema"]
@@ -563,7 +563,7 @@ def test_missing_dq_credential_never_falls_back_to_process_openai_key(
         lambda payload: payload.__setitem__("temperature", 0),
         lambda payload: payload.__setitem__("store", True),
         lambda payload: payload.__setitem__("stream", True),
-        lambda payload: payload.__setitem__("max_output_tokens", 12_001),
+        lambda payload: payload.__setitem__("max_output_tokens", 24_001),
         lambda payload: payload.__setitem__("reasoning", {"effort": "medium"}),
         lambda payload: payload["extra_body"].__setitem__("unsafe", True),
         lambda payload: payload.pop("text"),
@@ -601,9 +601,9 @@ def test_payload_lock_drift_fails_before_provider_invocation(
     [
         {"max_retries": 1},
         {"max_retries": False},
-        {"timeout": 241},
-        {"timeout": 240.0},
-        {"max_completion_tokens": 11_999},
+        {"timeout": 361},
+        {"timeout": 360.0},
+        {"max_completion_tokens": 23_999},
         {"store": True},
         {"use_responses_api": False},
         {"output_version": "v0"},
@@ -648,7 +648,7 @@ def test_profile_or_client_override_drift_fails_closed(
         _complete_response(input_tokens=None),
         _complete_response(output_tokens=True),
         _complete_response(output_tokens=-1, total_tokens=199),
-        _complete_response(output_tokens=12_001, total_tokens=12_201),
+        _complete_response(output_tokens=24_001, total_tokens=24_201),
         _complete_response(total_tokens=251),
         SimpleNamespace(
             status="incomplete",
@@ -716,6 +716,109 @@ def test_provider_error_retains_only_allowlisted_diagnostics(
     assert error.__cause__ is None
     assert "SECRET_REQUEST_AND_RESPONSE" not in str(error)
     assert len(responses.create_calls) == 1
+
+
+def test_incomplete_response_retains_only_allowlisted_terminal_metadata(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    response = SimpleNamespace(
+        status="incomplete",
+        incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+        error=None,
+        output_text="SECRET_PARTIAL_PROVIDER_OUTPUT",
+        usage=SimpleNamespace(
+            input_tokens=200,
+            output_tokens=24_000,
+            total_tokens=24_200,
+        ),
+    )
+    responses = _FakeResponses(response=response)
+    monkeypatch.setattr(
+        invoker_module,
+        "create_internal_route_chat_model",
+        lambda **_kwargs: _FakeModel(responses),
+    )
+
+    with pytest.raises(DeckRepairInvocationError) as captured:
+        asyncio.run(
+            _invoke_two_phase(
+                invoker=DeckRepairModelInvoker(),
+                plan=_plan(),
+                messages=["PRIVATE_REPAIR_INPUT"],
+                canary_user_id="synthetic-canary-user",
+            )
+        )
+
+    error = captured.value
+    assert error.code == "structured_output_invalid"
+    assert error.provider_error_type is None
+    assert error.provider_status_code is None
+    assert error.provider_response_status == "incomplete"
+    assert error.provider_incomplete_reason == "max_output_tokens"
+    assert error.__cause__ is None
+    assert "SECRET_PARTIAL_PROVIDER_OUTPUT" not in str(error)
+    assert len(responses.create_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        SimpleNamespace(
+            status=[],
+            incomplete_details=SimpleNamespace(reason="max_output_tokens"),
+            error=None,
+            output_text="SECRET_RAW_PROVIDER_OUTPUT",
+        ),
+        SimpleNamespace(
+            status="incomplete",
+            incomplete_details=SimpleNamespace(reason=[]),
+            error=None,
+            output_text="SECRET_RAW_PROVIDER_OUTPUT",
+        ),
+    ],
+)
+def test_unhashable_terminal_metadata_is_sanitized(
+    monkeypatch: pytest.MonkeyPatch,
+    response: Any,
+) -> None:
+    responses = _FakeResponses(response=response)
+    monkeypatch.setattr(
+        invoker_module,
+        "create_internal_route_chat_model",
+        lambda **_kwargs: _FakeModel(responses),
+    )
+
+    with pytest.raises(DeckRepairInvocationError) as captured:
+        asyncio.run(
+            _invoke_two_phase(
+                invoker=DeckRepairModelInvoker(),
+                plan=_plan(),
+                messages=["PRIVATE_REPAIR_INPUT"],
+                canary_user_id="synthetic-canary-user",
+            )
+        )
+
+    error = captured.value
+    assert error.code == "structured_output_invalid"
+    assert error.provider_response_status is None or error.provider_response_status == "incomplete"
+    assert error.provider_incomplete_reason is None
+    assert error.__cause__ is None
+    assert "SECRET_RAW_PROVIDER_OUTPUT" not in str(error)
+
+
+def test_invocation_error_rejects_unallowlisted_diagnostics() -> None:
+    error = DeckRepairInvocationError(
+        "repair_unavailable",
+        provider_error_type=[],  # type: ignore[arg-type]
+        provider_status_code=True,
+        provider_response_status=[],  # type: ignore[arg-type]
+        provider_incomplete_reason=[],  # type: ignore[arg-type]
+    )
+
+    assert error.provider_error_type is None
+    assert error.provider_status_code is None
+    assert error.provider_response_status is None
+    assert error.provider_incomplete_reason is None
 
 
 def test_callback_overrides_are_removed_from_route_only_construction(

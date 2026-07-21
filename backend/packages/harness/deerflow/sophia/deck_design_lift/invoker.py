@@ -6,7 +6,7 @@ import os
 import re
 import time
 from dataclasses import dataclass, field
-from typing import Any, Literal
+from typing import Any, Literal, get_args
 
 import anyio
 from pydantic import SecretStr
@@ -65,28 +65,45 @@ _LOCKED_REASONING = {
     "mode": "standard",
     "context": "current_turn",
 }
-_LOCKED_MAX_OUTPUT_TOKENS = 12_000
-_LOCKED_TIMEOUT_SECONDS = 240
+_LOCKED_MAX_OUTPUT_TOKENS = 24_000
+_LOCKED_TIMEOUT_SECONDS = 360
 _DQ_OPENAI_API_KEY_ENV = "SOPHIA_DECK_QUALITY_OPENAI_API_KEY"
-_SAFE_PROVIDER_ERROR_TYPES = frozenset(
-    {
-        "APIConnectionError",
-        "APIStatusError",
-        "APITimeoutError",
-        "AuthenticationError",
-        "BadRequestError",
-        "ConflictError",
-        "ContentFilterFinishReasonError",
-        "InternalServerError",
-        "LengthFinishReasonError",
-        "NotFoundError",
-        "OutputParserException",
-        "PermissionDeniedError",
-        "RateLimitError",
-        "TimeoutError",
-        "UnprocessableEntityError",
-        "ValidationError",
-    }
+SafeProviderErrorType = Literal[
+    "APIConnectionError",
+    "APIStatusError",
+    "APITimeoutError",
+    "AuthenticationError",
+    "BadRequestError",
+    "ConflictError",
+    "ContentFilterFinishReasonError",
+    "InternalServerError",
+    "LengthFinishReasonError",
+    "NotFoundError",
+    "OutputParserException",
+    "PermissionDeniedError",
+    "RateLimitError",
+    "TimeoutError",
+    "UnprocessableEntityError",
+    "ValidationError",
+]
+SafeProviderResponseStatus = Literal[
+    "cancelled",
+    "completed",
+    "failed",
+    "in_progress",
+    "incomplete",
+    "queued",
+]
+SafeProviderIncompleteReason = Literal[
+    "content_filter",
+    "max_output_tokens",
+]
+_SAFE_PROVIDER_ERROR_TYPES = frozenset(get_args(SafeProviderErrorType))
+_SAFE_PROVIDER_RESPONSE_STATUSES = frozenset(
+    get_args(SafeProviderResponseStatus)
+)
+_SAFE_PROVIDER_INCOMPLETE_REASONS = frozenset(
+    get_args(SafeProviderIncompleteReason)
 )
 _SAFE_VALIDATION_TOKEN = re.compile(r"^[A-Za-z0-9_.:\[\]-]{1,160}$")
 
@@ -122,11 +139,26 @@ class DeckRepairInvocationError(RuntimeError):
         *,
         provider_error_type: str | None = None,
         provider_status_code: int | None = None,
+        provider_response_status: str | None = None,
+        provider_incomplete_reason: str | None = None,
         validation_issues: tuple[str, ...] = (),
     ) -> None:
         self.code = code
-        self.provider_error_type = provider_error_type if provider_error_type in _SAFE_PROVIDER_ERROR_TYPES else None
+        self.provider_error_type = provider_error_type if isinstance(provider_error_type, str) and provider_error_type in _SAFE_PROVIDER_ERROR_TYPES else None
         self.provider_status_code = provider_status_code if isinstance(provider_status_code, int) and not isinstance(provider_status_code, bool) and 100 <= provider_status_code <= 599 else None
+        self.provider_response_status = (
+            provider_response_status
+            if isinstance(provider_response_status, str)
+            and provider_response_status in _SAFE_PROVIDER_RESPONSE_STATUSES
+            else None
+        )
+        self.provider_incomplete_reason = (
+            provider_incomplete_reason
+            if isinstance(provider_incomplete_reason, str)
+            and provider_incomplete_reason in _SAFE_PROVIDER_INCOMPLETE_REASONS
+            and self.provider_response_status == "incomplete"
+            else None
+        )
         self.validation_issues = tuple(issue for issue in validation_issues[:20] if isinstance(issue, str) and _SAFE_VALIDATION_TOKEN.fullmatch(issue))
         diagnostic = ",".join(
             value
@@ -214,6 +246,21 @@ def _response_usage(response: Any) -> tuple[int, int, int]:
     if total_tokens != input_tokens + output_tokens or output_tokens > _LOCKED_MAX_OUTPUT_TOKENS:
         raise TypeError
     return input_tokens, output_tokens, total_tokens
+
+
+def _safe_provider_response_status(response: Any) -> str | None:
+    status = getattr(response, "status", None)
+    return status if isinstance(status, str) and status in _SAFE_PROVIDER_RESPONSE_STATUSES else None
+
+
+def _safe_provider_incomplete_reason(response: Any) -> str | None:
+    details = getattr(response, "incomplete_details", None)
+    reason = (
+        details.get("reason")
+        if isinstance(details, dict)
+        else getattr(details, "reason", None)
+    )
+    return reason if isinstance(reason, str) and reason in _SAFE_PROVIDER_INCOMPLETE_REASONS else None
 
 
 class DeckRepairModelInvoker:
@@ -490,11 +537,20 @@ class DeckRepairModelInvoker:
             ) from None
 
         latency_ms = round((time.monotonic() - started) * 1000)
-        if getattr(response, "status", None) != "completed" or getattr(response, "error", None) is not None:
-            raise DeckRepairInvocationError("structured_output_invalid") from None
+        response_status = _safe_provider_response_status(response)
+        incomplete_reason = _safe_provider_incomplete_reason(response)
+        if response_status != "completed" or getattr(response, "error", None) is not None:
+            raise DeckRepairInvocationError(
+                "structured_output_invalid",
+                provider_response_status=response_status,
+                provider_incomplete_reason=incomplete_reason,
+            ) from None
         output_text = getattr(response, "output_text", None)
         if not isinstance(output_text, str) or not output_text:
-            raise DeckRepairInvocationError("structured_output_invalid") from None
+            raise DeckRepairInvocationError(
+                "structured_output_invalid",
+                provider_response_status=response_status,
+            ) from None
         try:
             candidate = DeckRepairCandidate.model_validate_json(output_text)
             input_tokens, output_tokens, total_tokens = _response_usage(response)
@@ -504,6 +560,7 @@ class DeckRepairModelInvoker:
             raise DeckRepairInvocationError(
                 "structured_output_invalid",
                 provider_error_type=type(error).__name__,
+                provider_response_status=response_status,
                 validation_issues=_safe_validation_issues(error),
             ) from None
         return DeckRepairInvocationResult(

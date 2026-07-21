@@ -77,6 +77,8 @@ def test_production_dq2_authority_is_exact_canary_with_locked_mutation_foundatio
     assert repair_route["max_failovers"] == 0
     assert repair_route["profile"] == "deck-repair-executor-v1"
     assert production["harness_profiles"]["deck-repair-executor-v1"]["max_retries"] == 0
+    assert production["harness_profiles"]["deck-repair-executor-v1"]["timeout_seconds"] == 360
+    assert production["harness_profiles"]["deck-repair-executor-v1"]["model_overrides"]["max_completion_tokens"] == 24_000
 
 
 def test_langgraph_exposes_dq2_only_through_the_private_http_app() -> None:

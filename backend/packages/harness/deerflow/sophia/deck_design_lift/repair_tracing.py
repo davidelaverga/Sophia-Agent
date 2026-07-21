@@ -24,6 +24,11 @@ from langsmith import Client as LangSmithClient
 from langsmith.utils import LangSmithNotFoundError
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
+from deerflow.sophia.deck_design_lift.invoker import (
+    SafeProviderErrorType,
+    SafeProviderIncompleteReason,
+    SafeProviderResponseStatus,
+)
 from deerflow.sophia.deck_design_lift.runtime import RepairInvocationRequest
 
 _EU_LANGSMITH_ENDPOINT = "https://eu.api.smith.langchain.com"
@@ -31,7 +36,7 @@ _TRACE_NAME = "deck.repair.author"
 _TRACE_TAGS = ("sophia_deck_design_lift", "dq2_safe_repair_trace")
 _TRACE_ID_NAMESPACE = UUID("8071714f-74eb-54f8-b2d8-d64926548197")
 _MAX_INPUT_TOKENS = 2_000_000
-_MAX_OUTPUT_TOKENS = 12_000
+_MAX_OUTPUT_TOKENS = 24_000
 _MAX_LATENCY_MS = 15 * 60 * 1_000
 _DEFAULT_FLUSH_TIMEOUT_SECONDS = 15.0
 _MAX_FLUSH_TIMEOUT_SECONDS = 30.0
@@ -49,6 +54,7 @@ SafeIdentifier = Annotated[
 Sha256 = Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
 RepairTraceErrorCode = Literal[
     "repair_unavailable",
+    "structured_output_invalid",
     "candidate_invalid",
     "candidate_scope_invalid",
     "candidate_source_contract_invalid",
@@ -166,7 +172,10 @@ def _reject_unsafe_trace_value(
     lowered = value.lower()
     if any(marker in lowered for marker in _FORBIDDEN_VALUE_MARKERS):
         raise ValueError("unsafe value is forbidden in DQ-2 repair traces")
-    if _CREDENTIAL_TOKEN.search(value) or (field_name != "error_code" and _EXCEPTION_TEXT.search(value)):
+    if _CREDENTIAL_TOKEN.search(value) or (
+        field_name not in {"error_code", "provider_error_type"}
+        and _EXCEPTION_TEXT.search(value)
+    ):
         raise ValueError("credential or exception content is forbidden in DQ-2 repair traces")
     if field_name != "schema_version" and (_PATH_PREFIX.search(value) or "\\" in value):
         raise ValueError("filesystem paths are forbidden in DQ-2 repair traces")
@@ -233,14 +242,50 @@ class SafeDeckRepairTraceOutput(_SafeTraceModel):
         le=_MAX_INPUT_TOKENS + _MAX_OUTPUT_TOKENS,
     )
     error_code: RepairTraceErrorCode | None = None
+    provider_error_type: SafeProviderErrorType | None = None
+    provider_status_code: int | None = Field(default=None, ge=100, le=599)
+    provider_response_status: SafeProviderResponseStatus | None = None
+    provider_incomplete_reason: SafeProviderIncompleteReason | None = None
 
     @model_validator(mode="after")
     def align_terminal_metrics(self) -> SafeDeckRepairTraceOutput:
         if self.status == "completed":
-            if self.output_tokens is None or self.total_tokens is None or self.total_tokens != self.input_tokens + self.output_tokens or self.error_code is not None:
+            if (
+                self.output_tokens is None
+                or self.total_tokens is None
+                or self.total_tokens != self.input_tokens + self.output_tokens
+                or self.error_code is not None
+                or self.provider_error_type is not None
+                or self.provider_status_code is not None
+                or self.provider_response_status is not None
+                or self.provider_incomplete_reason is not None
+            ):
                 raise ValueError("completed repair traces require exact token metrics")
         elif self.output_tokens is not None or self.total_tokens is not None or self.error_code is None:
             raise ValueError("failed repair traces require only a controlled error code")
+        elif (
+            any(
+                value is not None
+                for value in (
+                    self.provider_error_type,
+                    self.provider_status_code,
+                    self.provider_response_status,
+                    self.provider_incomplete_reason,
+                )
+            )
+            and self.error_code
+            not in {"repair_unavailable", "structured_output_invalid"}
+        ):
+            raise ValueError(
+                "provider diagnostics require an invocation-stage error code"
+            )
+        elif (
+            self.provider_incomplete_reason is not None
+            and self.provider_response_status != "incomplete"
+        ):
+            raise ValueError(
+                "provider incomplete reasons require an incomplete response"
+            )
         return self
 
 

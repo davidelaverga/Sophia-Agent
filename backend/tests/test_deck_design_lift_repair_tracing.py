@@ -324,14 +324,19 @@ def test_failure_trace_uses_only_controlled_code_and_partial_safe_metrics() -> N
         status="error",
         latency_ms=3_000,
         input_tokens=1_200,
-        error_code="repair_unavailable",
+        error_code="structured_output_invalid",
+        provider_response_status="incomplete",
+        provider_incomplete_reason="max_output_tokens",
     )
 
     trace.finish(output)
 
     update = client.update_attempts[0]
     assert update["outputs"] == output.model_dump(mode="json", exclude_none=True)
-    assert update["error"] == "dq2_repair_failure:repair_unavailable"
+    assert update["outputs"]["schema_version"] == "deck-repair-safe-trace-output/v1"
+    assert update["outputs"]["provider_response_status"] == "incomplete"
+    assert update["outputs"]["provider_incomplete_reason"] == "max_output_tokens"
+    assert update["error"] == "dq2_repair_failure:structured_output_invalid"
     assert "exception" not in _serialized_trace_surfaces(client)
     assert "private" not in _serialized_trace_surfaces(client)
 
@@ -353,6 +358,70 @@ def test_failure_trace_accepts_content_free_candidate_stage_code() -> None:
     assert update["error"] == "dq2_repair_failure:candidate_css_targets_invalid"
 
 
+def test_failure_trace_accepts_allowlisted_provider_exception_metadata() -> None:
+    client = CapturingClient()
+    trace = _trace(client)
+    output = SafeDeckRepairTraceOutput(
+        status="error",
+        latency_ms=3_000,
+        input_tokens=1_200,
+        error_code="repair_unavailable",
+        provider_error_type="BadRequestError",
+        provider_status_code=400,
+    )
+
+    trace.finish(output)
+
+    update = client.update_attempts[0]
+    assert update["outputs"] == output.model_dump(mode="json", exclude_none=True)
+    assert update["error"] == "dq2_repair_failure:repair_unavailable"
+    assert "badrequesterror" in _serialized_trace_surfaces(client)
+    assert "exception" not in _serialized_trace_surfaces(client)
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"provider_error_type": "RuntimeError"},
+        {"provider_status_code": 99},
+        {"provider_status_code": 600},
+        {"provider_status_code": True},
+        {"provider_response_status": "private-status"},
+        {
+            "provider_response_status": "completed",
+            "provider_incomplete_reason": "max_output_tokens",
+        },
+    ],
+)
+def test_failure_trace_rejects_unallowlisted_provider_diagnostics(
+    overrides: dict[str, Any],
+) -> None:
+    values: dict[str, Any] = {
+        "status": "error",
+        "latency_ms": 3_000,
+        "input_tokens": 1_200,
+        "error_code": "structured_output_invalid",
+        **overrides,
+    }
+
+    with pytest.raises(ValidationError):
+        SafeDeckRepairTraceOutput.model_validate(values)
+
+
+def test_success_and_candidate_stage_traces_reject_provider_diagnostics() -> None:
+    with pytest.raises(ValidationError):
+        _success_output(provider_response_status="completed")
+
+    with pytest.raises(ValidationError):
+        SafeDeckRepairTraceOutput(
+            status="error",
+            latency_ms=3_000,
+            input_tokens=1_200,
+            error_code="candidate_css_targets_invalid",
+            provider_error_type="ValidationError",
+        )
+
+
 @pytest.mark.parametrize(
     ("field", "value"),
     [
@@ -364,6 +433,7 @@ def test_failure_trace_accepts_content_free_candidate_stage_code() -> None:
         ("provider_payload", {"input": "raw"}),
         ("secret", "lsv2_sk_private"),
         ("exception_text", "Traceback: private body"),
+        ("validation_issues", ("PRIVATECUSTOMFIELD:extra_forbidden",)),
     ],
 )
 def test_trace_models_reject_every_non_whitelisted_content_surface(

@@ -75,7 +75,7 @@ harness_profiles:
 
   deck-repair-executor-v1:
     version: v1
-    timeout_seconds: 240
+    timeout_seconds: 360
     max_retries: 0
     model_overrides:
       reasoning:
@@ -85,7 +85,7 @@ harness_profiles:
       output_version: responses/v1
       use_responses_api: true
       store: false
-      max_completion_tokens: 12000
+      max_completion_tokens: 24000
 
 # DQ-2 may mutate only through the enforced manifest/CAS foundation and its
 # durable transaction RPCs. These values are validated again during LangGraph

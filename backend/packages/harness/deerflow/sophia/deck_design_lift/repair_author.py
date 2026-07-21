@@ -59,6 +59,7 @@ from deerflow.sophia.deck_design_lift.compiler import (
 )
 from deerflow.sophia.deck_design_lift.invoker import (
     DeckRepairInputTokenCount,
+    DeckRepairInvocationError,
     DeckRepairInvocationResult,
     PreparedDeckRepairRequest,
 )
@@ -85,7 +86,7 @@ from deerflow.sophia.deck_quality.schemas import BlindBrief
 
 LOCKED_DQ1_RUN_CAP_RESERVE_USD = Decimal("1.20")
 LOCKED_DQ2_CAMPAIGN_COST_CAP_USD = Decimal("3.00")
-LOCKED_REPAIR_MAX_OUTPUT_TOKENS = 12_000
+LOCKED_REPAIR_MAX_OUTPUT_TOKENS = 24_000
 LOCKED_SOL_PRICING_VERSION = "gpt-5.6-sol-pricing-2026-07-16"
 
 MAX_REPAIR_CONTEXT_IMAGE_BYTES = 1024 * 1024
@@ -2281,6 +2282,28 @@ class ProductionDeckRepairAuthor:
                 plan=self._plan,
                 preflight=preflight,
             )
+        except DeckRepairInvocationError as error:
+            latency_ms = min(
+                round((time.monotonic() - invoke_started) * 1000),
+                15 * 60 * 1_000,
+            )
+            try:
+                await anyio.to_thread.run_sync(
+                    trace.finish,
+                    SafeDeckRepairTraceOutput(
+                        status="error",
+                        latency_ms=latency_ms,
+                        input_tokens=preflight.input_tokens,
+                        error_code=error.code,
+                        provider_error_type=error.provider_error_type,
+                        provider_status_code=error.provider_status_code,
+                        provider_response_status=error.provider_response_status,
+                        provider_incomplete_reason=error.provider_incomplete_reason,
+                    ),
+                )
+            except Exception:
+                pass
+            raise DeckRepairAuthorError("repair_unavailable") from None
         except Exception:
             latency_ms = min(
                 round((time.monotonic() - invoke_started) * 1000),

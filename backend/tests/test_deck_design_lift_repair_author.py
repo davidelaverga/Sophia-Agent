@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import threading
+from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
 
@@ -14,6 +15,7 @@ from PIL import Image
 from deerflow.config.model_route_config import ResolvedModelPlan
 from deerflow.sophia.deck_design_lift.invoker import (
     DeckRepairInputTokenCount,
+    DeckRepairInvocationError,
     DeckRepairInvocationMetrics,
     DeckRepairInvocationResult,
     PreparedDeckRepairRequest,
@@ -109,8 +111,8 @@ def _plan() -> ResolvedModelPlan:
                 "output_version": "responses/v1",
                 "use_responses_api": True,
                 "store": False,
-                "max_completion_tokens": 12_000,
-                "timeout": 240,
+                "max_completion_tokens": 24_000,
+                "timeout": 360,
                 "max_retries": 0,
             },
             "plan_hash": HASH,
@@ -2207,6 +2209,10 @@ def test_safe_trace_network_work_runs_off_the_async_event_loop() -> None:
 def test_cost_projection_reserves_both_dq1_runs_and_rejects_without_create() -> None:
     assert projected_repair_campaign_cost_usd(input_tokens=200) > 1
     assert repair_preflight_admitted(input_tokens=200)
+    assert projected_repair_campaign_cost_usd(input_tokens=216_000) == Decimal("3.00")
+    assert repair_preflight_admitted(input_tokens=216_000)
+    assert projected_repair_campaign_cost_usd(input_tokens=216_001) == Decimal("3.000005")
+    assert not repair_preflight_admitted(input_tokens=216_001)
     assert not repair_preflight_admitted(input_tokens=300_000)
     request = _request()
     invoker = FakeTwoPhaseInvoker(input_tokens=300_000)
@@ -2515,4 +2521,69 @@ def test_provider_failure_emits_only_controlled_trace_failure() -> None:
     assert output.output_tokens is None
     assert output.total_tokens is None
     assert output.error_code == "repair_unavailable"
+    assert output.provider_error_type is None
+    assert output.provider_status_code is None
+    assert output.provider_response_status is None
+    assert output.provider_incomplete_reason is None
     assert "SECRET_CONTEXT" not in repr(output)
+
+
+def test_provider_exception_diagnostics_survive_to_safe_trace() -> None:
+    request = _request()
+    traces = FakeTraceFactory()
+    invoker = FakeTwoPhaseInvoker()
+    provider_error = DeckRepairInvocationError(
+        "repair_unavailable",
+        provider_error_type="BadRequestError",
+        provider_status_code=400,
+    )
+    provider_error.__cause__ = RuntimeError("SECRET_RAW_PROVIDER_BODY")
+    invoker.invoke_error = provider_error
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=invoker,
+        trace_factory=traces,
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as captured:
+        _run(author(request))
+
+    _assert_code(captured, "repair_unavailable")
+    assert len(invoker.invoke_calls) == 1
+    output = traces.spans[0].outputs[0]
+    assert output.status == "error"
+    assert output.error_code == "repair_unavailable"
+    assert output.provider_error_type == "BadRequestError"
+    assert output.provider_status_code == 400
+    assert output.provider_response_status is None
+    assert output.provider_incomplete_reason is None
+    assert "SECRET_RAW_PROVIDER_BODY" not in repr(output)
+
+
+def test_incomplete_response_diagnostics_survive_to_safe_trace() -> None:
+    request = _request()
+    traces = FakeTraceFactory()
+    invoker = FakeTwoPhaseInvoker()
+    invoker.invoke_error = DeckRepairInvocationError(
+        "structured_output_invalid",
+        provider_response_status="incomplete",
+        provider_incomplete_reason="max_output_tokens",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=invoker,
+        trace_factory=traces,
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as captured:
+        _run(author(request))
+
+    _assert_code(captured, "repair_unavailable")
+    assert len(invoker.invoke_calls) == 1
+    output = traces.spans[0].outputs[0]
+    assert output.status == "error"
+    assert output.error_code == "structured_output_invalid"
+    assert output.provider_error_type is None
+    assert output.provider_status_code is None
+    assert output.provider_response_status == "incomplete"
+    assert output.provider_incomplete_reason == "max_output_tokens"
