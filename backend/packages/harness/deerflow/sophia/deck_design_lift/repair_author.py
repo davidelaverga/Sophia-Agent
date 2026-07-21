@@ -112,6 +112,7 @@ MAX_REPAIR_MESSAGE_TEXT_BYTES = 3 * 1024 * 1024
 _COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES = (
     COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES
 )
+_MAX_SLIDE_CSS_FILTER_INPUT_UTF8_BYTES = 16 * 1024
 _SLIDE_CSS_GEOMETRY_PROPERTIES = ("left", "top", "width", "height")
 _AMBIGUOUS_INLINE_GEOMETRY_PROPERTIES = frozenset(
     {
@@ -2538,6 +2539,57 @@ def _authenticated_slide_css_baseline_is_safe(value: str) -> bool:
         return False
 
 
+def _slide_css_is_safe_filter_input(value: str) -> bool:
+    """Admit bounded flat CSS for deterministic retained-overlay filtering."""
+
+    try:
+        encoded = value.encode("utf-8")
+        if (
+            len(encoded) > _MAX_SLIDE_CSS_FILTER_INPUT_UTF8_BYTES
+            or b"\x00" in encoded
+            or "</style" in value.casefold()
+        ):
+            return False
+        rules = _stylesheet_qualified_rules(value)
+        if rules is None:
+            return False
+        declarations: list[Any] = []
+        for rule in rules:
+            rule_declarations = tuple(
+                tinycss2.parse_declaration_list(
+                    rule.content,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+            )
+            if any(
+                declaration.type != "declaration"
+                for declaration in rule_declarations
+            ):
+                return False
+            declarations.extend(rule_declarations)
+        external_constructs = set(
+            unsupported_css_in_html(f"<style>{value}</style>")
+        ) & {"url", "image-set", "@import", "@font-face"}
+        return not external_constructs and not any(
+            _css_declaration_hides_text(declaration)
+            or _css_declaration_generates_or_transforms_text(declaration)
+            for declaration in declarations
+        )
+    except Exception:
+        return False
+
+
+def _candidate_slide_css_is_safe_filter_input(
+    candidate: DeckRepairCandidate,
+) -> bool:
+    return all(
+        update.source_role != "slide_css"
+        or _slide_css_is_safe_filter_input(update.content)
+        for update in candidate.source_updates
+    )
+
+
 def _candidate_fits_compact_v2_source_contract(
     candidate: DeckRepairCandidate,
     authorized_sources: tuple[RepairSourceContext, ...],
@@ -2545,7 +2597,7 @@ def _candidate_fits_compact_v2_source_contract(
     *,
     validate_compiled_source_size: bool = False,
 ) -> bool:
-    """Validate model overlays without reinterpreting authenticated baselines."""
+    """Validate retained overlays without reinterpreting authenticated baselines."""
 
     bodies = {
         source.selector: source.text
@@ -3261,15 +3313,6 @@ def _validate_invocation_result(
             "candidate_invalid",
             trace_error_code="candidate_scope_invalid",
         ) from None
-    if not _candidate_fits_compact_v2_source_contract(
-        result.candidate,
-        context.authorized_sources,
-        context.read_only_sources,
-    ):
-        raise DeckRepairAuthorError(
-            "candidate_invalid",
-            trace_error_code="candidate_source_contract_invalid",
-        )
     expected_targets = {
         (selector, role)
         for selector in request.program.authorized_selectors
@@ -3292,6 +3335,11 @@ def _validate_invocation_result(
         raise DeckRepairAuthorError(
             "candidate_invalid",
             trace_error_code="candidate_source_hash_invalid",
+        )
+    if not _candidate_slide_css_is_safe_filter_input(result.candidate):
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_canonicalization_invalid",
         )
     try:
         canonical_candidate = _candidate_with_manifest_body_sources(
@@ -3325,15 +3373,6 @@ def _validate_invocation_result(
             "candidate_invalid",
             trace_error_code="candidate_canonicalization_invalid",
         )
-    if not _candidate_materializes_priority_contract(
-        canonical_candidate,
-        request.program,
-        context.authorized_sources,
-    ):
-        raise DeckRepairAuthorError(
-            "candidate_invalid",
-            trace_error_code="candidate_source_contract_invalid",
-        )
     if not _candidate_slide_css_preserves_authenticated_baselines(
         canonical_candidate,
         context.authorized_sources,
@@ -3341,15 +3380,6 @@ def _validate_invocation_result(
         raise DeckRepairAuthorError(
             "candidate_invalid",
             trace_error_code="candidate_canonicalization_invalid",
-        )
-    if not _candidate_css_targets_manifest_bodies(
-        canonical_candidate,
-        context.authorized_sources,
-        require_geometry=False,
-    ):
-        raise DeckRepairAuthorError(
-            "candidate_invalid",
-            trace_error_code="candidate_css_targets_invalid",
         )
     if not _candidate_fits_compact_v2_source_contract(
         canonical_candidate,
@@ -3360,6 +3390,24 @@ def _validate_invocation_result(
         raise DeckRepairAuthorError(
             "candidate_invalid",
             trace_error_code="candidate_source_contract_invalid",
+        )
+    if not _candidate_materializes_priority_contract(
+        canonical_candidate,
+        request.program,
+        context.authorized_sources,
+    ):
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_source_contract_invalid",
+        )
+    if not _candidate_css_targets_manifest_bodies(
+        canonical_candidate,
+        context.authorized_sources,
+        require_geometry=False,
+    ):
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_css_targets_invalid",
         )
     if (
         LOCKED_DQ1_RUN_CAP_RESERVE_USD
