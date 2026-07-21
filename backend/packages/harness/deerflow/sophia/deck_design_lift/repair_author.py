@@ -124,15 +124,42 @@ _MAX_RETAINED_LINE_HEIGHT = 3.0
 _MIN_RETAINED_LINE_HEIGHT_PX = 8.0
 _MAX_RETAINED_LINE_HEIGHT_PX = 96.0
 _MIN_RETAINED_BORDER_WIDTH_PX = 0.5
-_MAX_RETAINED_BORDER_WIDTH_PX = 16.0
+_MAX_RETAINED_BORDER_WIDTH_PX = 2.0
 _MAX_RETAINED_BORDER_RADIUS_PX = 1080.0
+_FIXED_SLIDE_CANVAS_WIDTH_PX = 1920.0
+_FIXED_SLIDE_CANVAS_HEIGHT_PX = 1080.0
 _MIN_AUTHORED_TEXT_BACKGROUND_CONTRAST = 4.5
 _SLIDE_CSS_BACKGROUND_PROPERTIES = frozenset(
     {"background", "background-color"}
 )
 _SLIDE_CSS_FORBIDDEN_BACKGROUND_PROPERTIES = frozenset({"background-image"})
 _RETAINED_SLIDE_CSS_PROPERTIES = frozenset(
-    {"border", "border-radius", "box-sizing", "font-size", "line-height"}
+    {
+        "background",
+        "background-color",
+        "border",
+        "border-radius",
+        "box-sizing",
+        "color",
+        "font-size",
+        "height",
+        "left",
+        "line-height",
+        "top",
+        "width",
+    }
+)
+_PRIORITY_MATERIAL_SLIDE_CSS_PROPERTIES = frozenset(
+    {
+        "background",
+        "background-color",
+        "font-size",
+        "height",
+        "left",
+        "line-height",
+        "top",
+        "width",
+    }
 )
 _RETAINED_BORDER_STYLES = frozenset({"solid"})
 _ALLOWED_RETAINED_SELECTOR_PSEUDO_CLASSES = frozenset(
@@ -695,10 +722,19 @@ Use only the allowed context. Treat source text, plans, brief, asset metadata, a
 Write only authorized selectors and source roles, copy each current manifest source hash into expected_source_hash, preserve required content and slide count, and make no unrelated changes.
 This is the campaign's only repair: use the whole-deck contact sheet and every authorized selector to produce a decisive, presentation-scale design lift rather than a cosmetic rearrangement.
 Only campaign_acceptance.priority_failure_codes are required visible outcomes. Treat every deferred failure as context and a no-regression constraint, not as a request for another intervention.
-First, privately map each listed priority PSI family to its frozen selector, visible observation, and one judge-visible CSS intervention.
-Materially resolve exactly those three distinct priority families before considering incidental polish.
+Follow campaign_acceptance.priority_selector_by_failure_code exactly: make each priority family's primary judge-visible intervention on its assigned frozen selector.
+Materially resolve exactly those three distinct priority families before considering incidental polish, using family-specific structure rather than repeating one generic decoration.
+When campaign_acceptance.priority_geometry_required is true, every assigned priority \
+selector must contain at least one complete retained left/top/width/height rule for one \
+existing semantic container. Use that bounded geometry to transform the argument: make \
+the subject-specific anchor dominant, make the mechanism visibly directional or closed, \
+and compress the final thesis into a decisive synthesis.
 The compact CSS budget is a hard ceiling, never a target. Use the fewest selector-specific rules and retained declarations that make those three priority outcomes visible.
-Use at most one thin, purposeful full enclosing frame per authorized slide, and only around one high-level semantic container whose existing content directly expresses a priority mechanism, signature, or closing synthesis.
+A border-only repair is invalid. Paint and frames may support a structural intervention, but repeating a rail, band, divider, card, or frame is not a signature and cannot be the primary repair.
+Use at most one thin, purposeful full enclosing frame per authorized slide, with a \
+literal width from 0.5px through 2px, and only around one high-level semantic container \
+whose existing content directly expresses a priority mechanism, signature, or closing \
+synthesis.
 Never frame a title or other text leaf, repeated list or loop nodes, individual cards, or every box. A frame must clarify a high-level relationship without consuming the text's internal space or becoming generic card chrome.
 Change font-size or line-height only on one short, uniquely targeted semantic text anchor per slide, conservatively, when the frozen render and body prove the text will retain its current line count without clipping or a new wrap.
 Never apply type changes to a container, repeated nodes, body copy, lists, or quotes. Preserve every existing deck and slide title fully visible.
@@ -722,23 +758,37 @@ Do not set font or font-family in slide_css; preserve the shared Office-safe fon
 Do not use rejected or lossy native CSS properties, including filter, backdrop-filter, blend modes, animation, transition, box-shadow, text-shadow, letter-spacing, or opacity.
 Do not change generated list-marker semantics or set list-style, list-style-type, or list-style-image.
 Do not set display, overflow, overflow-x, or overflow-y in slide_css; preserve the authenticated layout and native text-extraction semantics.
-The sealed candidate override lane retains only font-size, line-height, box-sizing:border-box, full border shorthand, and border-radius declarations.
-The author boundary strips every fill, background, text color, geometry, margin, padding, and other declaration before durable materialization.
+The sealed candidate override lane retains only complete on-canvas \
+left/top/width/height geometry, paired opaque background or background-color plus color, \
+font-size, line-height, box-sizing:border-box, full border shorthand, and border-radius \
+declarations.
+The author boundary strips margin, padding, partial or off-canvas geometry, unpaired paint, and every other declaration before durable materialization.
 Directional or independently authored border sides and border longhands are stripped because they materialize as mechanically unstable native line fragments.
 Use only full enclosing border shorthand when framing is judge-visible and purposeful.
 For each framed selector, put border, border-radius, and box-sizing:border-box in the same qualified CSS rule; dependent frame declarations in split rules are stripped.
 A full border without box-sizing:border-box in that same rule is also stripped.
 Keep the overlay materially below its CSS byte ceiling whenever the three priority repairs need fewer declarations.
-Use only finite literal values in that lane: px font-size, unitless or px line-height, literal px border widths, and solid full-border style.
-Use fully opaque literal full-border colors and literal px or percentage border radii. Do not use variables, calc(), inheritance keywords, or !important.
+Use only finite literal values in that lane: px geometry and font-size, unitless or px line-height, opaque literal paint, literal px border widths, and solid full-border style.
+Every authored background that paints behind semantic text must have a fully opaque \
+literal color in the same rule and must pair with a fully opaque literal foreground \
+color that keeps the effective cascade at 4.5:1 contrast for every descendant. \
+Unpaired, translucent, gradient, image, or low-contrast paint is rejected.
+Every geometry intervention must put left, top, width, and height together in the same \
+qualified rule as finite literal px values, remain wholly inside the fixed 1920x1080 \
+canvas, and keep width and height positive. Partial or off-canvas geometry is stripped \
+and cannot satisfy a priority.
+Use fully opaque literal full-border colors, border widths from 0.5px through 2px, and literal px or percentage border radii. Do not use variables, calc(), inheritance keywords, or !important.
 Do not use at-rules or nested CSS rules in slide_css; this is one fixed 1920x1080 canvas with no responsive or conditional repair variants.
 Use font-size only as one finite literal px value from 12px through 64px.
 The compiled baseline-plus-separator-plus-overlay must fit the compact_model_html_v2 limit of 1024 UTF-8 bytes.
 For a nonempty baseline, obey that source's repair_overlay_max_utf8_bytes; an empty baseline keeps the full 1024-byte overlay limit.
-Do not attempt to move or resize native shapes; preserve the authenticated geometry and shared fill/text palette.
+Move or resize only existing elements on the assigned priority selectors through one or more complete bounded geometry rules. Preserve every title, all semantic content, and every unauthorized shape.
 Do not create full-slide raster replacements or semantic text inside generated images.
 {compiler_capability_prompt_excerpt()}
-The sealed repair contract overrides broader compiler capabilities: only font-size, line-height, box-sizing:border-box, full border shorthand, and border-radius survive the author boundary.
+The sealed repair contract overrides broader compiler capabilities: only complete \
+on-canvas left/top/width/height geometry, paired opaque background or background-color \
+plus color, font-size, line-height, box-sizing:border-box, full border shorthand, and \
+border-radius survive the author boundary.
 Never use directional border sides, border longhands, at-rules, or nested rules.
 The provider-enforced strict output schema is the sole response format."""
 
@@ -774,16 +824,42 @@ def _campaign_acceptance_contract(
             break
     if len(priority_codes) != PSI_REQUIRED_RESOLVED_FAMILY_COUNT:
         raise DeckRepairAuthorError("repair_unavailable")
-    if any(
-        not any(
-            code in repair.failure_codes
+    selectors_by_priority_code: dict[str, tuple[str, ...]] = {}
+    for code in priority_codes:
+        selectors = tuple(
+            repair.selector
+            for repair in program.selector_repairs
+            if code in repair.failure_codes
             and "slide_css"
             in program.authorized_source_roles.get(repair.selector, ())
-            for repair in program.selector_repairs
         )
-        for code in priority_codes
-    ):
-        raise DeckRepairAuthorError("repair_unavailable")
+        if not selectors:
+            raise DeckRepairAuthorError("repair_unavailable")
+        selectors_by_priority_code[code] = selectors
+    priority_selector_by_code: dict[str, str] = {}
+    maximum_distinct_selector_count = -1
+
+    def consider_selector_assignments(
+        index: int,
+        assignment: dict[str, str],
+    ) -> None:
+        nonlocal priority_selector_by_code, maximum_distinct_selector_count
+        if index == len(priority_codes):
+            distinct_selector_count = len(set(assignment.values()))
+            if distinct_selector_count > maximum_distinct_selector_count:
+                priority_selector_by_code = dict(assignment)
+                maximum_distinct_selector_count = distinct_selector_count
+            return
+        code = priority_codes[index]
+        for selector in selectors_by_priority_code[code]:
+            assignment[code] = selector
+            consider_selector_assignments(index + 1, assignment)
+        assignment.pop(code, None)
+
+    consider_selector_assignments(0, {})
+    distinct_priority_selector_count = len(
+        set(priority_selector_by_code.values())
+    )
     priority_family_by_code = {
         code: family_by_code[code] for code in priority_codes
     }
@@ -799,9 +875,18 @@ def _campaign_acceptance_contract(
         "campaign_floor_feasible": True,
         "priority_failure_codes": priority_codes,
         "priority_psi_failure_family_by_code": priority_family_by_code,
+        "priority_selector_by_failure_code": priority_selector_by_code,
+        "distinct_priority_selector_count": distinct_priority_selector_count,
+        "priority_geometry_required": (
+            distinct_priority_selector_count
+            == PSI_REQUIRED_RESOLVED_FAMILY_COUNT
+        ),
         "psi_failure_family_by_code": family_by_code,
         "deferred_failure_codes": deferred_failure_codes,
         "priority_failure_codes_are_required_visible_outcomes": True,
+        "priority_primary_retained_properties": sorted(
+            _PRIORITY_MATERIAL_SLIDE_CSS_PROPERTIES
+        ),
         "expected_improvements_are_required_visible_outcomes": False,
         "priority_slide_css_feasible": True,
         "cosmetic_rearrangement_is_insufficient": True,
@@ -856,9 +941,29 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                 "compiled_source_policy": "authenticated_baseline_plus_deterministic_separator_plus_filtered_overlay",
                 "empty_baseline_policy": "filtered_overlay_only_without_separator",
                 "combined_size_policy": "baseline_separator_and_filtered_overlay_must_fit_max_utf8_bytes",
-                "fill_background_text_paint_updates_retained": False,
-                "geometry_updates_retained": False,
+                "fill_background_text_paint_updates_retained": True,
+                "geometry_updates_retained": True,
                 "retained_value_contract": {
+                    "geometry": {
+                        "properties": list(_SLIDE_CSS_GEOMETRY_PROPERTIES),
+                        "unit": "px",
+                        "all_four_properties_same_rule": True,
+                        "canvas_width_px": int(_FIXED_SLIDE_CANVAS_WIDTH_PX),
+                        "canvas_height_px": int(_FIXED_SLIDE_CANVAS_HEIGHT_PX),
+                        "must_remain_fully_on_canvas": True,
+                        "width_and_height_must_be_positive": True,
+                    },
+                    "paint": {
+                        "background_properties": sorted(
+                            _SLIDE_CSS_BACKGROUND_PROPERTIES
+                        ),
+                        "foreground_property": "color",
+                        "paired_same_rule_for_semantic_text": True,
+                        "fully_opaque_literal_colors_only": True,
+                        "minimum_contrast_ratio": (
+                            _MIN_AUTHORED_TEXT_BACKGROUND_CONTRAST
+                        ),
+                    },
                     "font_size": {
                         "unit": "px",
                         "minimum_inclusive": int(_MIN_AUTHORED_FONT_SIZE_PX),
@@ -1817,6 +1922,71 @@ def _retained_line_height_token_is_safe(token: Any) -> bool:
     )
 
 
+def _retained_geometry_token_is_safe(
+    property_name: str,
+    token: Any,
+) -> bool:
+    value = _finite_css_token_value(token)
+    if (
+        token.type != "dimension"
+        or str(getattr(token, "unit", "")).casefold() != "px"
+        or value is None
+    ):
+        return False
+    if property_name in {"left", "top"}:
+        limit = (
+            _FIXED_SLIDE_CANVAS_WIDTH_PX
+            if property_name == "left"
+            else _FIXED_SLIDE_CANVAS_HEIGHT_PX
+        )
+        return 0 <= value < limit
+    if property_name in {"width", "height"}:
+        limit = (
+            _FIXED_SLIDE_CANVAS_WIDTH_PX
+            if property_name == "width"
+            else _FIXED_SLIDE_CANVAS_HEIGHT_PX
+        )
+        return 0 < value <= limit
+    return False
+
+
+def _retained_geometry_box_is_on_canvas(
+    declarations: tuple[Any, ...],
+) -> bool:
+    geometry = tuple(
+        declaration
+        for declaration in declarations
+        if declaration.lower_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+    )
+    if len(geometry) != len(_SLIDE_CSS_GEOMETRY_PROPERTIES):
+        return False
+    if {item.lower_name for item in geometry} != set(
+        _SLIDE_CSS_GEOMETRY_PROPERTIES
+    ):
+        return False
+    values: dict[str, float] = {}
+    for declaration in geometry:
+        tokens = _significant_css_value_tokens(declaration)
+        if (
+            len(tokens) != 1
+            or not _retained_geometry_token_is_safe(
+                declaration.lower_name,
+                tokens[0],
+            )
+        ):
+            return False
+        value = _finite_css_token_value(tokens[0])
+        if value is None:
+            return False
+        values[declaration.lower_name] = value
+    return (
+        values["left"] + values["width"]
+        <= _FIXED_SLIDE_CANVAS_WIDTH_PX
+        and values["top"] + values["height"]
+        <= _FIXED_SLIDE_CANVAS_HEIGHT_PX
+    )
+
+
 def _retained_border_width_token_is_safe(token: Any) -> bool:
     value = _finite_css_token_value(token)
     return (
@@ -1879,6 +2049,13 @@ def _retained_css_declaration_is_safe(declaration: Any) -> bool:
     if name not in _RETAINED_SLIDE_CSS_PROPERTIES:
         return False
     tokens = _significant_css_value_tokens(declaration)
+    if name in _SLIDE_CSS_GEOMETRY_PROPERTIES:
+        return (
+            len(tokens) == 1
+            and _retained_geometry_token_is_safe(name, tokens[0])
+        )
+    if name in _SLIDE_CSS_BACKGROUND_PROPERTIES or name == "color":
+        return _css_opaque_rgb(declaration) is not None
     if name == "font-size":
         return not _css_font_size_violates_candidate_contract(declaration)
     if name == "line-height":
@@ -2343,14 +2520,21 @@ def _candidate_css_targets_manifest_bodies(
     authorized_sources: tuple[RepairSourceContext, ...],
     *,
     require_geometry: bool = True,
+    required_selectors: frozenset[str] | None = None,
 ) -> bool:
     body_inventories = {
         source.selector: source.text
         for source in authorized_sources
         if source.source_role == "body"
     }
+    validated_selectors: set[str] = set()
     for update in candidate.source_updates:
         if update.source_role != "slide_css":
+            continue
+        if (
+            required_selectors is not None
+            and update.selector not in required_selectors
+        ):
             continue
         body = body_inventories.get(update.selector)
         selector_contract = _stylesheet_selector_contract(update.content)
@@ -2382,7 +2566,53 @@ def _candidate_css_targets_manifest_bodies(
                 return False
         if not matched_rule:
             return False
-    return True
+        validated_selectors.add(update.selector)
+    return (
+        required_selectors is None
+        or validated_selectors == set(required_selectors)
+    )
+
+
+def _candidate_materializes_priority_contract(
+    candidate: DeckRepairCandidate,
+    program: DeckRepairProgram,
+    authorized_sources: tuple[RepairSourceContext, ...],
+) -> bool:
+    try:
+        acceptance = _campaign_acceptance_contract(program)
+        selector_map = acceptance["priority_selector_by_failure_code"]
+        if not isinstance(selector_map, dict):
+            return False
+        priority_selectors = frozenset(
+            str(selector) for selector in selector_map.values()
+        )
+        css_by_selector = {
+            str(update.selector): update.content
+            for update in candidate.source_updates
+            if update.source_role == "slide_css"
+        }
+        if any(selector not in css_by_selector for selector in priority_selectors):
+            return False
+        for selector in priority_selectors:
+            property_names = {
+                declaration.lower_name
+                for declaration in _stylesheet_declarations(
+                    css_by_selector[selector]
+                )
+                if declaration.type == "declaration"
+            }
+            if not property_names & _PRIORITY_MATERIAL_SLIDE_CSS_PROPERTIES:
+                return False
+        if acceptance["priority_geometry_required"] is True:
+            return _candidate_css_targets_manifest_bodies(
+                candidate,
+                authorized_sources,
+                require_geometry=True,
+                required_selectors=priority_selectors,
+            )
+        return True
+    except Exception:
+        return False
 
 
 def _inline_style_hides_text(value: str) -> bool:
@@ -2563,6 +2793,32 @@ def _retained_slide_css(value: str) -> str:
             )
             if _retained_css_declaration_is_safe(item)
         )
+        has_any_geometry = any(
+            item.lower_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+            for item in declarations
+        )
+        if has_any_geometry and not _retained_geometry_box_is_on_canvas(
+            declarations
+        ):
+            declarations = tuple(
+                item
+                for item in declarations
+                if item.lower_name not in _SLIDE_CSS_GEOMETRY_PROPERTIES
+            )
+        has_background = any(
+            item.lower_name in _SLIDE_CSS_BACKGROUND_PROPERTIES
+            for item in declarations
+        )
+        has_foreground = any(
+            item.lower_name == "color" for item in declarations
+        )
+        if has_background != has_foreground:
+            declarations = tuple(
+                item
+                for item in declarations
+                if item.lower_name
+                not in (*_SLIDE_CSS_BACKGROUND_PROPERTIES, "color")
+            )
         has_full_border = any(
             item.lower_name == "border" for item in declarations
         )
@@ -2732,6 +2988,15 @@ def _validate_invocation_result(
         raise DeckRepairAuthorError(
             "candidate_invalid",
             trace_error_code="candidate_canonicalization_invalid",
+        )
+    if not _candidate_materializes_priority_contract(
+        canonical_candidate,
+        request.program,
+        context.authorized_sources,
+    ):
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_source_contract_invalid",
         )
     if not _candidate_slide_css_preserves_authenticated_baselines(
         canonical_candidate,

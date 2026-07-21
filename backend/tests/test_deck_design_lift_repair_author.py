@@ -32,6 +32,9 @@ from deerflow.sophia.deck_design_lift.repair_author import (
     RepairPlanContext,
     RepairSkillExcerptContext,
     RepairSourceContext,
+    _campaign_acceptance_contract,
+    _candidate_materializes_priority_contract,
+    _retained_slide_css,
     build_repair_author_messages,
     projected_repair_campaign_cost_usd,
     repair_preflight_admitted,
@@ -183,6 +186,67 @@ def _program(
         "rubric_version": "deck-quality-rubric-v1",
         "instrument_hash": OTHER_HASH,
     }
+    payload["program_hash"] = canonical_sha256(payload)
+    return DeckRepairProgram.model_validate(payload)
+
+
+def _overlapping_three_selector_program() -> DeckRepairProgram:
+    codes = (
+        "weak_subject_specificity",
+        "weak_signature_realization",
+        "weak_mechanism_visualization",
+    )
+    payload = _program().model_dump(mode="python", exclude={"program_hash"})
+    payload["authorized_selectors"] = ("slide:1", "slide:2", "slide:3")
+    payload["authorized_source_roles"] = {
+        selector: ("body", "slide_css")
+        for selector in payload["authorized_selectors"]
+    }
+    payload["selector_repairs"] = (
+        SelectorRepair(
+            selector="slide:1",
+            failure_codes=(codes[0], codes[1]),
+            render_evidence=(
+                RepairRenderEvidence(
+                    selector="slide:1",
+                    path="renders/slide-1.png",
+                    sha256=RENDER_HASH,
+                ),
+            ),
+            instruction="Make the subject anchor unmistakable.",
+            retained_content=("Preserve the PSI control-loop claim.",),
+            allowed_asset_changes=(),
+        ),
+        SelectorRepair(
+            selector="slide:2",
+            failure_codes=(codes[0],),
+            render_evidence=(
+                RepairRenderEvidence(
+                    selector="slide:2",
+                    path="renders/slide-2.png",
+                    sha256=RENDER_HASH,
+                ),
+            ),
+            instruction="Make the subject-specific mechanism dominant.",
+            retained_content=("Preserve the mechanism.",),
+            allowed_asset_changes=(),
+        ),
+        SelectorRepair(
+            selector="slide:3",
+            failure_codes=(codes[2],),
+            render_evidence=(
+                RepairRenderEvidence(
+                    selector="slide:3",
+                    path="renders/slide-3.png",
+                    sha256=RENDER_HASH,
+                ),
+            ),
+            instruction="Make the mechanism visibly directional.",
+            retained_content=("Preserve the feedback loop.",),
+            allowed_asset_changes=(),
+        ),
+    )
+    payload["expected_improvements"] = codes
     payload["program_hash"] = canonical_sha256(payload)
     return DeckRepairProgram.model_validate(payload)
 
@@ -661,8 +725,8 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
 
     system_prompt = messages[0].content
     assert "compact_model_html_v2 limit of 1024 UTF-8 bytes" in system_prompt
-    assert "retains only font-size, line-height, box-sizing:border-box" in system_prompt
-    assert "strips every fill, background, text color, geometry" in system_prompt
+    assert "retains only complete on-canvas left/top/width/height geometry" in system_prompt
+    assert "paired opaque background or background-color plus color" in system_prompt
     assert "full enclosing border shorthand" in system_prompt
     assert "Directional or independently authored border sides" in system_prompt
     assert "mechanically unstable native line fragments" in system_prompt
@@ -670,8 +734,8 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "dependent frame declarations in split rules are stripped" in system_prompt
     assert "full border without box-sizing:border-box" in system_prompt
     assert "Do not use variables, calc(), inheritance keywords, or !important" in system_prompt
-    assert "Do not attempt to move or resize native shapes" in system_prompt
-    assert "preserve the authenticated geometry and shared fill/text palette" in system_prompt
+    assert "Move or resize only existing elements on the assigned priority selectors" in system_prompt
+    assert "Preserve every title, all semantic content, and every unauthorized shape" in system_prompt
     assert "copy its current manifest source byte-for-byte" in system_prompt
     assert "pins body content to the authenticated manifest bytes" in system_prompt
     assert "Every slide_css output is an overlay only" in system_prompt
@@ -712,11 +776,14 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "decisive, presentation-scale design lift" in system_prompt
     assert "Only campaign_acceptance.priority_failure_codes are required visible outcomes" in system_prompt
     assert "deferred failure as context and a no-regression constraint" in system_prompt
-    assert "map each listed priority PSI family" in system_prompt
+    assert "Follow campaign_acceptance.priority_selector_by_failure_code exactly" in system_prompt
     assert "Materially resolve exactly those three distinct priority families" in system_prompt
     assert "CSS budget is a hard ceiling, never a target" in system_prompt
     assert "fewest selector-specific rules and retained declarations" in system_prompt
     assert "at most one thin, purposeful full enclosing frame per authorized slide" in system_prompt
+    assert "A border-only repair is invalid" in system_prompt
+    assert "from 0.5px through 2px" in system_prompt
+    assert "Every geometry intervention must put left, top, width, and height together" in system_prompt
     assert "one high-level semantic container" in system_prompt
     assert "Never frame a title or other text leaf, repeated list or loop nodes" in system_prompt
     assert "without clipping or a new wrap" in system_prompt
@@ -763,6 +830,13 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
             "weak_signature_realization": "weak_signature_realization",
             "weak_mechanism_visualization": "weak_mechanism_visualization",
         },
+        "priority_selector_by_failure_code": {
+            "weak_subject_specificity": "slide:1",
+            "weak_signature_realization": "slide:1",
+            "weak_mechanism_visualization": "slide:1",
+        },
+        "distinct_priority_selector_count": 1,
+        "priority_geometry_required": False,
         "psi_failure_family_by_code": {
             "weak_subject_specificity": "weak_subject_specificity",
             "weak_signature_realization": "weak_signature_realization",
@@ -770,6 +844,16 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
         },
         "deferred_failure_codes": [],
         "priority_failure_codes_are_required_visible_outcomes": True,
+        "priority_primary_retained_properties": [
+            "background",
+            "background-color",
+            "font-size",
+            "height",
+            "left",
+            "line-height",
+            "top",
+            "width",
+        ],
         "expected_improvements_are_required_visible_outcomes": False,
         "priority_slide_css_feasible": True,
         "cosmetic_rearrangement_is_insufficient": True,
@@ -809,20 +893,46 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
             "max_utf8_bytes": 1_024,
             "model_output_policy": "repair_overlay_only",
             "retained_properties": [
+                "background",
+                "background-color",
                 "border",
                 "border-radius",
                 "box-sizing",
+                "color",
                 "font-size",
+                "height",
+                "left",
                 "line-height",
+                "top",
+                "width",
             ],
             "author_boundary_property_filter": "strip_all_unlisted_declarations",
             "authenticated_baseline_policy": "opaque_exact_byte_prefix_when_nonempty",
             "compiled_source_policy": "authenticated_baseline_plus_deterministic_separator_plus_filtered_overlay",
             "empty_baseline_policy": "filtered_overlay_only_without_separator",
             "combined_size_policy": "baseline_separator_and_filtered_overlay_must_fit_max_utf8_bytes",
-            "fill_background_text_paint_updates_retained": False,
-            "geometry_updates_retained": False,
+            "fill_background_text_paint_updates_retained": True,
+            "geometry_updates_retained": True,
             "retained_value_contract": {
+                "geometry": {
+                    "properties": ["left", "top", "width", "height"],
+                    "unit": "px",
+                    "all_four_properties_same_rule": True,
+                    "canvas_width_px": 1920,
+                    "canvas_height_px": 1080,
+                    "must_remain_fully_on_canvas": True,
+                    "width_and_height_must_be_positive": True,
+                },
+                "paint": {
+                    "background_properties": [
+                        "background",
+                        "background-color",
+                    ],
+                    "foreground_property": "color",
+                    "paired_same_rule_for_semantic_text": True,
+                    "fully_opaque_literal_colors_only": True,
+                    "minimum_contrast_ratio": 4.5,
+                },
                 "font_size": {
                     "unit": "px",
                     "minimum_inclusive": 12,
@@ -838,7 +948,7 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                 "full_border_requires_box_sizing_same_rule": True,
                 "directional_border_sides_allowed": False,
                 "border_longhands_allowed": False,
-                "border_width_px_range_inclusive": [0.5, 16.0],
+                "border_width_px_range_inclusive": [0.5, 2.0],
                 "border_styles": ["solid"],
                 "border_color": "literal_fully_opaque_css_color",
                 "border_radius": {
@@ -1027,6 +1137,20 @@ def test_campaign_acceptance_prioritizes_exactly_three_critical_psi_families() -
     ]
 
 
+def test_campaign_acceptance_maximizes_distinct_priority_selectors() -> None:
+    acceptance = _campaign_acceptance_contract(
+        _overlapping_three_selector_program()
+    )
+
+    assert acceptance["priority_selector_by_failure_code"] == {
+        "weak_subject_specificity": "slide:2",
+        "weak_signature_realization": "slide:1",
+        "weak_mechanism_visualization": "slide:3",
+    }
+    assert acceptance["distinct_priority_selector_count"] == 3
+    assert acceptance["priority_geometry_required"] is True
+
+
 @pytest.mark.parametrize(
     "failure_codes",
     [
@@ -1105,8 +1229,9 @@ def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:
         "background:#FFFFFF;color:#0B1F3A}"
     )
     retained_css = (
-        "section{font-size:36px;border:2px solid #0B1F3A;"
-        "box-sizing:border-box;}"
+        "section{left:96px;top:112px;width:704px;height:336px;"
+        "font-size:36px;border:2px solid #0B1F3A;"
+        "box-sizing:border-box;background:#FFFFFF;color:#0B1F3A;}"
     )
     authored = DeckRepairCandidate(
         source_updates=(
@@ -1997,28 +2122,28 @@ def test_slide_css_allows_safe_content_visibility_color_and_font_size_boundary()
         ("line-height:8px", "line-height:8px;"),
         ("line-height:96px", "line-height:96px;"),
         (
-            "border:1px solid #0B1F3A;box-sizing:border-box",
-            "border:1px solid #0B1F3A;box-sizing:border-box;",
+            "font-size:32px;border:1px solid #0B1F3A;box-sizing:border-box",
+            "font-size:32px;border:1px solid #0B1F3A;box-sizing:border-box;",
         ),
         (
-            "border:0.5px solid #0B1F3A;box-sizing:border-box",
-            "border:0.5px solid #0B1F3A;box-sizing:border-box;",
+            "font-size:32px;border:0.5px solid #0B1F3A;box-sizing:border-box",
+            "font-size:32px;border:0.5px solid #0B1F3A;box-sizing:border-box;",
         ),
         (
-            "border:16px solid rgb(11,31,58);box-sizing:border-box",
-            "border:16px solid rgb(11,31,58);box-sizing:border-box;",
+            "font-size:32px;border:2px solid rgb(11,31,58);box-sizing:border-box",
+            "font-size:32px;border:2px solid rgb(11,31,58);box-sizing:border-box;",
         ),
         (
-            "border:1px solid #0B1F3A;border-radius:0px;box-sizing:border-box",
-            "border:1px solid #0B1F3A;border-radius:0px;box-sizing:border-box;",
+            "font-size:32px;border:1px solid #0B1F3A;border-radius:0px;box-sizing:border-box",
+            "font-size:32px;border:1px solid #0B1F3A;border-radius:0px;box-sizing:border-box;",
         ),
         (
-            "border:1px solid #0B1F3A;border-radius:1080px;box-sizing:border-box",
-            "border:1px solid #0B1F3A;border-radius:1080px;box-sizing:border-box;",
+            "font-size:32px;border:1px solid #0B1F3A;border-radius:1080px;box-sizing:border-box",
+            "font-size:32px;border:1px solid #0B1F3A;border-radius:1080px;box-sizing:border-box;",
         ),
         (
-            "border:1px solid #0B1F3A;border-radius:50%;box-sizing:border-box",
-            "border:1px solid #0B1F3A;border-radius:50%;box-sizing:border-box;",
+            "font-size:32px;border:1px solid #0B1F3A;border-radius:50%;box-sizing:border-box",
+            "font-size:32px;border:1px solid #0B1F3A;border-radius:50%;box-sizing:border-box;",
         ),
     ],
 )
@@ -2046,6 +2171,127 @@ def test_slide_css_retained_value_boundaries_are_canonicalized(
 
     assert result.candidate.source_updates[1].content == f"section{{{canonical}}}"
     assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_retains_only_complete_on_canvas_geometry() -> None:
+    assert _retained_slide_css(
+        "section{left:0px;top:0px;width:1920px;height:1080px}"
+    ) == "section{left:0px;top:0px;width:1920px;height:1080px;}"
+
+
+@pytest.mark.parametrize(
+    "geometry",
+    [
+        "left:0px;top:0px;width:1920px",
+        "left:0%;top:0px;width:640px;height:360px",
+        "left:calc(1px);top:0px;width:640px;height:360px",
+        "left:-1px;top:0px;width:640px;height:360px",
+        "left:1281px;top:0px;width:640px;height:360px",
+        "left:0px;top:721px;width:640px;height:360px",
+        "left:0px;top:0px;width:0px;height:360px",
+    ],
+)
+def test_slide_css_strips_partial_or_off_canvas_geometry(geometry: str) -> None:
+    assert _retained_slide_css(
+        f"section{{font-size:32px;{geometry}}}"
+    ) == "section{font-size:32px;}"
+
+
+def test_slide_css_strips_border_above_two_pixels() -> None:
+    assert _retained_slide_css(
+        "section{font-size:32px;border:2.01px solid #0B1F3A;"
+        "box-sizing:border-box}"
+    ) == "section{font-size:32px;}"
+
+
+def test_slide_css_rejects_border_only_priority_repair() -> None:
+    request = _request()
+    candidate = _candidate().model_copy(
+        update={
+            "source_updates": (
+                _candidate().source_updates[0],
+                _candidate().source_updates[1].model_copy(
+                    update={
+                        "content": (
+                            "section{border:2px solid #0B1F3A;"
+                            "box-sizing:border-box}"
+                        )
+                    }
+                ),
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_three_priority_selectors_each_require_retained_geometry() -> None:
+    program = _overlapping_three_selector_program()
+    sources = tuple(
+        RepairSourceContext(
+            build_id="build-psi-001",
+            manifest_revision=1,
+            manifest_hash=MANIFEST_HASH,
+            selector=selector,
+            source_role="body",
+            component_version_id=f"{selector}-version-001",
+            manifest_source_path=f"versions/{selector}/body.html",
+            manifest_source_hash=SOURCE_HASH,
+            text=SOURCE_TEXT,
+        )
+        for selector in program.authorized_selectors
+    )
+
+    def candidate_with(css_by_selector: dict[str, str]) -> DeckRepairCandidate:
+        return DeckRepairCandidate(
+            source_updates=tuple(
+                SourceUpdate(
+                    selector=selector,
+                    source_role="slide_css",
+                    expected_source_hash=SLIDE_CSS_HASH,
+                    content=_retained_slide_css(css),
+                )
+                for selector, css in css_by_selector.items()
+            ),
+            rationale="Use distinct structural interventions for every priority.",
+        )
+
+    complete = candidate_with(
+        {
+            "slide:1": "section{left:80px;top:80px;width:640px;height:360px}",
+            "slide:2": "section{left:720px;top:80px;width:640px;height:360px}",
+            "slide:3": "section{left:1280px;top:80px;width:640px;height:360px}",
+        }
+    )
+    border_only = candidate_with(
+        {
+            "slide:1": "section{left:80px;top:80px;width:640px;height:360px}",
+            "slide:2": "section{left:720px;top:80px;width:640px;height:360px}",
+            "slide:3": (
+                "section{border:2px solid #0B1F3A;box-sizing:border-box}"
+            ),
+        }
+    )
+
+    assert _candidate_materializes_priority_contract(
+        complete,
+        program,
+        sources,
+    )
+    assert not _candidate_materializes_priority_contract(
+        border_only,
+        program,
+        sources,
+    )
 
 
 def test_slide_css_keeps_full_frame_and_strips_directional_border_fragments() -> None:
@@ -2326,7 +2572,10 @@ def test_slide_css_allows_same_rule_opaque_text_background_contrast(
 
     result = _run(author(request))
 
-    assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
+    assert result.candidate.source_updates[1].content == (
+        RETAINED_SLIDE_CSS_TEXT
+        + f"section{{background:#1D2027;color:{paired_color};}}"
+    )
     assert len(invoker.invoke_calls) == 1
 
 
@@ -2339,7 +2588,7 @@ def test_slide_css_allows_same_rule_opaque_text_background_contrast(
         ),
         (
             "section{background:#F4F5F7;color:#15171C}"
-            "html body section{background:#1D2027;color:#FFFFFF}"
+            "section h1{background:#1D2027;color:#FFFFFF}"
         ),
         (
             "section{background:#F4F5F7!important;color:#15171C!important}"
@@ -2369,7 +2618,33 @@ def test_slide_css_allows_safe_background_pair_cascade(css: str) -> None:
     )
 
     result = _run(author(request))
-    assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
+    expected_overlay = {
+        (
+            "section{background:#F4F5F7;color:#15171C}"
+            "section{background:#1D2027;color:#FFFFFF}"
+        ): (
+            "section{background:#F4F5F7;color:#15171C;}"
+            "section{background:#1D2027;color:#FFFFFF;}"
+        ),
+        (
+            "section{background:#F4F5F7;color:#15171C}"
+            "section h1{background:#1D2027;color:#FFFFFF}"
+        ): (
+            "section{background:#F4F5F7;color:#15171C;}"
+            "section h1{background:#1D2027;color:#FFFFFF;}"
+        ),
+        (
+            "section{background:#F4F5F7!important;color:#15171C!important}"
+            "section{background:#1D2027;color:#FFFFFF}"
+        ): "section{background:#1D2027;color:#FFFFFF;}",
+        (
+            "section{background:#F4F5F7;color:#15171C}"
+            "section{background:#1D2027!important;color:#FFFFFF!important}"
+        ): "section{background:#F4F5F7;color:#15171C;}",
+    }[css]
+    assert result.candidate.source_updates[1].content == (
+        RETAINED_SLIDE_CSS_TEXT + expected_overlay
+    )
     assert len(invoker.invoke_calls) == 1
 
 
@@ -2390,7 +2665,11 @@ def test_slide_css_allows_nested_opaque_surfaces() -> None:
     )
 
     result = _run(author(request))
-    assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
+    assert result.candidate.source_updates[1].content == (
+        RETAINED_SLIDE_CSS_TEXT
+        + ".outer{background:#1D2027;color:#FFFFFF;}"
+        + ".inner{background:#F4F5F7;color:#15171C;}"
+    )
     assert len(invoker.invoke_calls) == 1
 
 
@@ -2412,7 +2691,11 @@ def test_slide_css_allows_outer_foreground_shielded_by_nested_surface() -> None:
     )
 
     result = _run(author(request))
-    assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
+    assert result.candidate.source_updates[1].content == (
+        RETAINED_SLIDE_CSS_TEXT
+        + ".outer{background:#1D2027;color:#FFFFFF;}"
+        + ".inner{background:#F4F5F7;color:#15171C;}"
+    )
     assert len(invoker.invoke_calls) == 1
 
 
@@ -2628,7 +2911,10 @@ def test_slide_css_allows_unmatched_auxiliary_foreground_with_safe_surface() -> 
     )
 
     result = _run(author(request))
-    assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
+    assert result.candidate.source_updates[1].content == (
+        RETAINED_SLIDE_CSS_TEXT
+        + "section{background:#1D2027;color:#FFFFFF;}"
+    )
     assert len(invoker.invoke_calls) == 1
 
 
