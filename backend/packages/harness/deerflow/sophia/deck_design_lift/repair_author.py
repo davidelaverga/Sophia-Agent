@@ -1757,13 +1757,14 @@ def _css_cascade_priority(
 def _record_css_winner(
     winners: dict[
         int,
-        tuple[tuple[int, int, int, int, int, int], Any],
+        tuple[tuple[int, int, int, int, int, int], Any, bool],
     ],
     *,
     element: Tag,
     declaration: Any,
     specificity: tuple[int, int, int],
     order: int,
+    candidate_authored: bool,
     inline: bool = False,
 ) -> None:
     candidate = (
@@ -1774,6 +1775,7 @@ def _record_css_winner(
             inline=inline,
         ),
         declaration,
+        candidate_authored,
     )
     current = winners.get(id(element))
     if current is None or candidate[0] >= current[0]:
@@ -1784,14 +1786,14 @@ def _inherited_css_winner(
     element: Tag,
     winners: dict[
         int,
-        tuple[tuple[int, int, int, int, int, int], Any],
+        tuple[tuple[int, int, int, int, int, int], Any, bool],
     ],
-) -> Any | None:
+) -> tuple[Any, bool] | None:
     current: Tag | None = element
     while current is not None:
         winner = winners.get(id(current))
         if winner is not None:
-            return winner[1]
+            return winner[1], winner[2]
         current = _parent_tag(current)
     return None
 
@@ -1833,11 +1835,11 @@ def _slide_css_has_unsafe_text_background(
         text_owners = _semantic_text_owners(soup)
         background_winners: dict[
             int,
-            tuple[tuple[int, int, int, int, int, int], Any],
+            tuple[tuple[int, int, int, int, int, int], Any, bool],
         ] = {}
         foreground_winners: dict[
             int,
-            tuple[tuple[int, int, int, int, int, int], Any],
+            tuple[tuple[int, int, int, int, int, int], Any, bool],
         ] = {}
         for order, (candidate_authored, rule) in enumerate(rule_sources):
             declarations = tuple(
@@ -1908,6 +1910,7 @@ def _slide_css_has_unsafe_text_background(
                             declaration=background,
                             specificity=specificity,
                             order=order,
+                            candidate_authored=candidate_authored,
                         )
                     if foreground is not None:
                         _record_css_winner(
@@ -1916,6 +1919,7 @@ def _slide_css_has_unsafe_text_background(
                             declaration=foreground,
                             specificity=specificity,
                             order=order,
+                            candidate_authored=candidate_authored,
                         )
 
         inline_order = len(rule_sources)
@@ -1930,6 +1934,7 @@ def _slide_css_has_unsafe_text_background(
                     declaration=inline_background,
                     specificity=(0, 0, 0),
                     order=inline_order,
+                    candidate_authored=False,
                     inline=True,
                 )
             inline_foreground = _inline_foreground(element)
@@ -1941,6 +1946,7 @@ def _slide_css_has_unsafe_text_background(
                 declaration=inline_foreground,
                 specificity=(0, 0, 0),
                 order=inline_order,
+                candidate_authored=False,
                 inline=True,
             )
 
@@ -1963,10 +1969,16 @@ def _slide_css_has_unsafe_text_background(
                         foreground_winners,
                     )
                     foreground_rgb = (
-                        _css_opaque_rgb(foreground)
+                        _css_opaque_rgb(foreground[0])
                         if foreground is not None
                         else None
                     )
+                    candidate_changed_contrast = (
+                        background_winner[2]
+                        or (foreground is not None and foreground[1])
+                    )
+                    if not candidate_changed_contrast:
+                        break
                     if (
                         background_rgb is None
                         or foreground_rgb is None

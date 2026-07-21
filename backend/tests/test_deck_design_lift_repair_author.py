@@ -1796,7 +1796,6 @@ def test_already_composed_provider_css_is_rejected_before_canonicalization() -> 
         'section{content:"unterminated}',
         "section{position:fixed;width:100px}",
         "section{opacity:.5;width:100px}",
-        "section{background:#FFFFFF;color:#FFFFFF}",
         "section::before{content:'untrusted'}",
         "section{background-image:url(https://invalid.example/a.png)}",
         "section{width:100px}\x00",
@@ -3081,6 +3080,51 @@ def test_slide_css_skips_provably_transparent_shared_surface() -> None:
 
     result = _run(author(request))
     assert result.candidate.source_updates[1].content == RETAINED_SLIDE_CSS_TEXT
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_authenticated_shared_contrast_does_not_block_nonpaint_overlay() -> None:
+    request = _request()
+    context = _with_deck_css(
+        _context(request=request),
+        "section{background:#1D2027;color:#15171C}",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=_candidate()),
+    )
+
+    result = _run(author(request))
+
+    assert result.candidate.source_updates[1].content == (
+        RETAINED_SLIDE_CSS_TEXT
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_authenticated_slide_contrast_does_not_block_nonpaint_overlay() -> None:
+    request = _request()
+    baseline_css = "section{background:#FFFFFF;color:#FFFFFF}"
+    context = _context_with_slide_css_baseline(
+        _context(request=request),
+        baseline_css,
+    )
+    candidate = _candidate_with_slide_css_baseline_hash(
+        _candidate(),
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    assert result.candidate.source_updates[1].content == (
+        RETAINED_SLIDE_CSS_TEXT
+    )
     assert len(invoker.invoke_calls) == 1
 
 
