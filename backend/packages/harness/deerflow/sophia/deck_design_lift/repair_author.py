@@ -790,7 +790,11 @@ selector must contain complete retained left/top/width/height rules for at least
 distinct existing semantic elements that are not ancestors or descendants of one another. Use those \
 independent bounded geometry moves to transform the argument: make \
 the subject-specific anchor dominant, make the mechanism visibly directional or closed, \
-and compress the final thesis into a decisive synthesis.
+and stage the existing final thesis as a decisive full-canvas synthesis.
+Treat every text-bearing geometry target, including a container with text descendants, \
+as translation-or-expansion only: never reduce its authenticated width or height, create \
+a new wrap, cluster moved anchors into one canvas band, or open a newly empty center \
+or quadrant. Synthesis means hierarchy and relationship, not spatial compression.
 The compact CSS budget is a hard ceiling, never a target. Use the fewest selector-specific rules and retained declarations that still satisfy the minimum distinct geometry targets and make those three priority outcomes visible.
 A border-only repair is invalid. Paint and frames may support a structural intervention, but repeating a rail, band, divider, card, or frame is not a signature and cannot be the primary repair.
 Use at most one thin, purposeful full enclosing frame per authorized slide, with a \
@@ -2766,8 +2770,23 @@ def _selector_uses_only_manifest_atoms(
 
 def _stylesheet_selector_contract(
     value: str,
-) -> tuple[tuple[tuple[str, ...], bool, bool | None], ...] | None:
-    selectors: list[tuple[tuple[str, ...], bool, bool | None]] = []
+) -> tuple[
+    tuple[
+        tuple[str, ...],
+        bool,
+        bool | None,
+        dict[str, float] | None,
+    ],
+    ...,
+] | None:
+    selectors: list[
+        tuple[
+            tuple[str, ...],
+            bool,
+            bool | None,
+            dict[str, float] | None,
+        ]
+    ] = []
 
     def collect(rules: list[Any]) -> None:
         for rule in rules:
@@ -2796,11 +2815,27 @@ def _stylesheet_selector_contract(
                     and len({bool(item.important) for item in geometry}) == 1
                     else None
                 )
+                geometry_box: dict[str, float] | None = None
+                if has_geometry:
+                    values: dict[str, float] = {}
+                    for declaration in geometry:
+                        tokens = _significant_css_value_tokens(declaration)
+                        if len(tokens) != 1:
+                            values = {}
+                            break
+                        numeric_value = _finite_css_token_value(tokens[0])
+                        if numeric_value is None:
+                            values = {}
+                            break
+                        values[declaration.lower_name] = numeric_value
+                    if set(values) == set(_SLIDE_CSS_GEOMETRY_PROPERTIES):
+                        geometry_box = values
                 selectors.append(
                     (
                         _selector_arms(list(rule.prelude)),
                         has_geometry,
                         geometry_importance,
+                        geometry_box,
                     )
                 )
                 if content is not None:
@@ -2841,10 +2876,155 @@ def _stylesheet_selector_contract(
     return tuple(selectors)
 
 
+def _authenticated_geometry_size_px(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> dict[str, float] | None:
+    """Resolve authenticated literal-pixel width/height winners for one element.
+
+    An empty mapping means neither dimension is authenticated. ``None`` is
+    fail-closed: the authenticated cascade affects size but cannot be reduced
+    to an unambiguous literal-pixel winner.
+    """
+
+    deck_rules = _stylesheet_qualified_rules(deck_css)
+    baseline_rules = _stylesheet_qualified_rules(baseline_slide_css)
+    if deck_rules is None or baseline_rules is None:
+        return None
+    winners: dict[
+        str,
+        dict[
+            int,
+            tuple[
+                tuple[int, int, int, int, int, int],
+                Any,
+                bool,
+            ],
+        ],
+    ] = {"width": {}, "height": {}}
+    for order, rule in enumerate((*deck_rules, *baseline_rules)):
+        try:
+            parsed = tuple(
+                tinycss2.parse_declaration_list(
+                    rule.content,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+            )
+        except Exception:
+            return None
+        if any(item.type == "error" for item in parsed):
+            return None
+        declarations = tuple(
+            item for item in parsed if item.type == "declaration"
+        )
+        relevant = {
+            property_name: _final_css_declaration(
+                declarations,
+                frozenset({property_name}),
+            )
+            for property_name in ("width", "height")
+        }
+        ambiguous = any(
+            item.lower_name in _AMBIGUOUS_INLINE_GEOMETRY_PROPERTIES
+            for item in declarations
+        )
+        if not ambiguous and all(
+            declaration is None for declaration in relevant.values()
+        ):
+            continue
+        selector_matches = _qualified_rule_selector_matches(rule, soup)
+        if selector_matches is None:
+            return None
+        matched_specificities = tuple(
+            specificity
+            for specificity, matches in selector_matches
+            if any(match is element for match in matches)
+        )
+        if not matched_specificities:
+            continue
+        if ambiguous:
+            return None
+        for specificity in matched_specificities:
+            for property_name, declaration in relevant.items():
+                if declaration is None:
+                    continue
+                _record_css_winner(
+                    winners[property_name],
+                    element=element,
+                    declaration=declaration,
+                    specificity=specificity,
+                    order=order,
+                    candidate_authored=False,
+                )
+
+    style = element.attrs.get("style")
+    if isinstance(style, str) and style.strip():
+        try:
+            parsed = tuple(
+                tinycss2.parse_declaration_list(
+                    style,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+            )
+        except Exception:
+            return None
+        if any(item.type == "error" for item in parsed):
+            return None
+        declarations = tuple(
+            item for item in parsed if item.type == "declaration"
+        )
+        if any(
+            item.lower_name in _AMBIGUOUS_INLINE_GEOMETRY_PROPERTIES
+            for item in declarations
+        ):
+            return None
+        inline_order = len(deck_rules) + len(baseline_rules)
+        for property_name in ("width", "height"):
+            declaration = _final_css_declaration(
+                declarations,
+                frozenset({property_name}),
+            )
+            if declaration is None:
+                continue
+            _record_css_winner(
+                winners[property_name],
+                element=element,
+                declaration=declaration,
+                specificity=(0, 0, 0),
+                order=inline_order,
+                candidate_authored=False,
+                inline=True,
+            )
+
+    values: dict[str, float] = {}
+    for property_name, property_winners in winners.items():
+        winner = property_winners.get(id(element))
+        if winner is None:
+            continue
+        tokens = _significant_css_value_tokens(winner[1])
+        if (
+            len(tokens) != 1
+            or tokens[0].type != "dimension"
+            or str(getattr(tokens[0], "unit", "")).casefold() != "px"
+        ):
+            return None
+        numeric_value = _finite_css_token_value(tokens[0])
+        if numeric_value is None:
+            return None
+        values[property_name] = numeric_value
+    return values
+
+
 def _candidate_css_targets_manifest_bodies(
     candidate: DeckRepairCandidate,
     authorized_sources: tuple[RepairSourceContext, ...],
     *,
+    read_only_sources: tuple[RepairSourceContext, ...] = (),
     require_geometry: bool = True,
     required_selectors: frozenset[str] | None = None,
     minimum_distinct_geometry_targets_per_selector: int = 1,
@@ -2859,6 +3039,19 @@ def _candidate_css_targets_manifest_bodies(
         for source in authorized_sources
         if source.source_role == "body"
     }
+    baseline_slide_css_by_selector = {
+        source.selector: source.text
+        for source in authorized_sources
+        if source.source_role == "slide_css"
+    }
+    deck_css_sources = tuple(
+        source.text
+        for source in (*authorized_sources, *read_only_sources)
+        if source.source_role == "deck_css"
+    )
+    if len(deck_css_sources) > 1:
+        return False
+    deck_css = deck_css_sources[0] if deck_css_sources else ""
     validated_selectors: set[str] = set()
     for update in candidate.source_updates:
         if update.source_role != "slide_css":
@@ -2877,11 +3070,19 @@ def _candidate_css_targets_manifest_bodies(
             soup = BeautifulSoup(body, "html.parser")
         except Exception:
             return False
+        semantic_text_owners = _semantic_text_owners(soup)
         matched_rule = False
         selector_geometry_nodes: dict[int, Tag] = {}
-        for selector_arms, has_geometry, geometry_importance in selector_contract:
+        for (
+            selector_arms,
+            has_geometry,
+            geometry_importance,
+            geometry_box,
+        ) in selector_contract:
             if require_geometry and not has_geometry:
                 continue
+            if has_geometry and geometry_box is None:
+                return False
             matched_rule = True
             arm_matches = False
             matched_geometry_nodes: dict[int, Tag] = {}
@@ -2912,14 +3113,37 @@ def _candidate_css_targets_manifest_bodies(
             if has_geometry:
                 if geometry_importance is None:
                     return False
+                matched_geometry_node = next(
+                    iter(matched_geometry_nodes.values())
+                )
                 inline_requirement = _inline_geometry_requires_important(
-                    next(iter(matched_geometry_nodes.values()))
+                    matched_geometry_node
                 )
                 if (
                     inline_requirement is None
                     or geometry_importance is not inline_requirement
                 ):
                     return False
+                if any(
+                    _element_is_within(owner, matched_geometry_node)
+                    for owner in semantic_text_owners
+                ):
+                    baseline_size = _authenticated_geometry_size_px(
+                        matched_geometry_node,
+                        soup,
+                        deck_css=deck_css,
+                        baseline_slide_css=(
+                            baseline_slide_css_by_selector.get(
+                                update.selector,
+                                "",
+                            )
+                        ),
+                    )
+                    if baseline_size is None or any(
+                        geometry_box[property_name] < baseline_value
+                        for property_name, baseline_value in baseline_size.items()
+                    ):
+                        return False
             selector_geometry_nodes.update(matched_geometry_nodes)
         if not matched_rule:
             return False
@@ -2939,6 +3163,7 @@ def _candidate_materializes_priority_contract(
     candidate: DeckRepairCandidate,
     program: DeckRepairProgram,
     authorized_sources: tuple[RepairSourceContext, ...],
+    read_only_sources: tuple[RepairSourceContext, ...] = (),
 ) -> bool:
     try:
         acceptance = _campaign_acceptance_contract(program)
@@ -2974,6 +3199,7 @@ def _candidate_materializes_priority_contract(
             return _candidate_css_targets_manifest_bodies(
                 candidate,
                 authorized_sources,
+                read_only_sources=read_only_sources,
                 require_geometry=True,
                 required_selectors=priority_selectors,
                 minimum_distinct_geometry_targets_per_selector=minimum_targets,
@@ -3395,6 +3621,7 @@ def _validate_invocation_result(
         canonical_candidate,
         request.program,
         context.authorized_sources,
+        context.read_only_sources,
     ):
         raise DeckRepairAuthorError(
             "candidate_invalid",
@@ -3403,6 +3630,7 @@ def _validate_invocation_result(
     if not _candidate_css_targets_manifest_bodies(
         canonical_candidate,
         context.authorized_sources,
+        read_only_sources=context.read_only_sources,
         require_geometry=False,
     ):
         raise DeckRepairAuthorError(
