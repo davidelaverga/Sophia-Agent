@@ -1926,6 +1926,7 @@ def _strict_geometry_source_witness(
     baseline_slide_css: str,
     deck_css: str,
     minimum: int,
+    target_element_ids: frozenset[str] | None = None,
 ) -> str | None:
     soup = BeautifulSoup(
         assemble_compact_slide_html(
@@ -1944,6 +1945,10 @@ def _strict_geometry_source_witness(
             for owner in semantic_text_owners
         ):
             continue
+        if target_element_ids is not None:
+            element_id = element.attrs.get("id")
+            if not isinstance(element_id, str) or element_id not in target_element_ids:
+                continue
         winners = _geometry_cascade_winners(
             element,
             soup,

@@ -118,8 +118,9 @@ _PRESENTATION_AUTHORING_SYSTEM_PROMPT = (
     "budget, with each slide capped at the hard 6 KiB ceiling. Keep the creative plan "
     "under 12 KiB, and total arguments under 48 KiB. Use an opaque "
     "model-authored canvas background, meaningful data-deck-id values, varied "
-    "spatial compositions, and no repeated document/style tags. Every slide must expose at least two "
-    "independent repair-addressable layout anchors as non-nested section or div direct children of the "
+    "spatial compositions, and no repeated document/style tags. On every slide set repair_anchor_ids to exactly "
+    "two short HTML ids, then expose both named repair-addressable layout anchors as non-nested section "
+    "or div direct children of the "
     "service-owned main canvas. Each anchor must contain visible semantic text and have an HTML id unique within "
     "its slide; the same two short anchor IDs may be reused in separate slide fragments so shared #id rules scale. "
     "Each anchor id must match [a-z][a-z0-9_-]{0,31}: a lowercase ASCII letter followed by at most 31 lowercase "
@@ -133,7 +134,11 @@ _PRESENTATION_AUTHORING_SYSTEM_PROMPT = (
     "anchor descendants with separate descendant selectors. Keep this anchor "
     "geometry out of slide_css and inline styles. Do not use !important, right, bottom, inset, min/max sizing, "
     "transform, or opacity on an anchor, and do not put at-rules or nested rules in authored CSS. Flex and grid "
-    "remain available inside either anchor. Do not use deterministic templates, "
+    "remain available inside either anchor. Canonical pattern: repair_anchor_ids=[\"hero\",\"proof\"], "
+    "html_body starts with <section id=\"hero\" data-deck-id=\"hero\" data-deck-role=\"title\" "
+    "data-deck-required=\"true\">...</section><div id=\"proof\" data-deck-id=\"proof\" "
+    "data-deck-role=\"narrative\" data-deck-required=\"true\">...</div>, and deck_stylesheet contains separate "
+    "#hero and #proof geometry rules. Do not use deterministic templates, "
     "screenshot slides, lower-level deck tools, or incomplete fallback output. Pass creative_plan as "
     "a JSON object, never as a JSON-encoded string. Required body text must reach 4.5:1 contrast and "
     "qualifying large text 3.0:1 against an opaque solid underlay; do not use accent colors for text "
@@ -6250,7 +6255,8 @@ def _pptx_compile_latch_message(state: dict[str, Any]) -> str:
             "This is a fresh PPTX deck build. Stop authoring lower-level deck files or compiler "
             "commands. Use the injected deck-craft contract, then call `prepare_deck_build` "
             "with authoring_contract='compact_model_html_v2', one concise creative_plan, one shared "
-            "deck_stylesheet, and the complete slide html_body list. Reuse shared classes, keep each "
+            "deck_stylesheet, and the complete slide html_body list with exactly two repair_anchor_ids on every "
+            "slide. Reuse shared classes, keep each "
             "html_body compact, omit slide_css or keep it empty for every slide so the later authenticated "
             "repair overlay retains its full budget, and emit no prose outside the tool call "
             f"and output_path='{target}'. DeckBuildService owns HTML sanitization, planned generated assets, "
@@ -6324,7 +6330,8 @@ def _visual_design_skill_message() -> str:
         "`read_file(description='read visual design skill', "
         "path='/mnt/skills/public/visual-design/SKILL.md')`.\n"
         "For PPTX decks, read the deck craft guidance and call `prepare_deck_build` with "
-        "creative_plan, deck_stylesheet, and slide html_body; do not write slide files or call `build_deck_from_slides`. "
+        "creative_plan, deck_stylesheet, and slide html_body plus exactly two repair_anchor_ids per slide; do not "
+        "write slide files or call `build_deck_from_slides`. "
         "DeckBuildService owns sanitization, planned assets, native PowerPoint "
         "compilation, inspection, and mechanical gates. If native deck generation fails, emit artifact_path=null with "
         "the returned failure code and summary. For PDF reports, draw both charts AND structural diagrams "
@@ -8453,7 +8460,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 "Error: emit_builder_artifact rejected — the PPTX deck failed Sophia "
                 "structural validation:\n"
                 f"{listing}\n\n"
-                "For fresh decks, call `prepare_deck_build` with corrected creative_plan, deck_stylesheet, and slide html_body and "
+                "For fresh decks, call `prepare_deck_build` with corrected creative_plan, deck_stylesheet, slide "
+                "html_body, and exactly two repair_anchor_ids per slide, then "
                 "emit only its returned PPTX or its clean null-artifact failure. Do not repair "
                 "through lower-level deck files or compiler commands."
             )
@@ -8485,7 +8493,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 subject = "cover"
             else:
                 if _deck_build_service_route_active(state):
-                    wiring = "call prepare_deck_build with a complete creative_plan, deck_stylesheet, and slide html_body; declare generated assets only in creative_plan.image_assets"
+                    wiring = (
+                        "call prepare_deck_build with a complete creative_plan, deck_stylesheet, slide html_body, "
+                        "and exactly two repair_anchor_ids per slide; declare generated assets only in "
+                        "creative_plan.image_assets"
+                    )
                 else:
                     wiring = "save it as /mnt/user-data/outputs/assets/slide-01.png, embed it in your first slide's HTML by the relative path ../assets/slide-01.png, then call build_deck_from_slides"
                 subject = "hero"
@@ -10021,7 +10033,7 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             message = (
                 "Repair the exact prepare_deck_build validation failure and call prepare_deck_build exactly once more "
                 "with authoring_contract=compact_model_html_v2, the complete concise creative_plan, one shared "
-                "deck_stylesheet, and compact html_body values."
+                "deck_stylesheet, compact html_body values, and exactly two repair_anchor_ids per slide."
             )
         return {
             "messages": [HumanMessage(content=f"[Sophia/PPTX D2.1 repair]\n{message}")],
@@ -12013,7 +12025,11 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             if isinstance(repair_payload, dict):
                 message = str(repair_payload.get("repair_message") or repair_payload.get("message") or "")
             if not message:
-                message = "Repair the D2.1 creative deck input and call prepare_deck_build exactly once more. Provide creative_plan, shared deck_stylesheet, and html_body for every slide; keep generated images as planned assets only."
+                message = (
+                    "Repair the D2.1 creative deck input and call prepare_deck_build exactly once more. Provide "
+                    "creative_plan, shared deck_stylesheet, html_body, and exactly two repair_anchor_ids for every "
+                    "slide; keep generated images as planned assets only."
+                )
             counter_key = "builder_deck_creative_repair_attempt_count"
             last_failure_key = "builder_last_deck_creative_failure"
             component = "deck_creative_repair"
@@ -12147,7 +12163,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             repair_message = (
                 "Repair the prepare_deck_build arguments using compact_model_html_v2 and the canonical typed schema. "
                 "Pass creative_plan as a JSON object, not a JSON-encoded string; include every required creative_plan "
-                "field, deck_stylesheet, and slide html_body, then call prepare_deck_build exactly once more. "
+                "field, deck_stylesheet, slide html_body, and exactly two repair_anchor_ids per slide, then call "
+                "prepare_deck_build exactly once more. "
                 "Slide array references below are zero-based indexes: modify the exact index and matching visible "
                 "slide named in each target; changing a different ordinal slide does not satisfy the error."
             )
@@ -13435,7 +13452,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             return (
                 "[Sophia/deck-build] Fresh PPTX deck visuals are generated internally by "
                 "`prepare_deck_build`. Do not call image-generation scripts directly. Submit "
-                "the complete creative_plan, deck_stylesheet, and slide html_body list through prepare_deck_build; the harness owns "
+                "the complete creative_plan, deck_stylesheet, slide html_body list, and exactly two "
+                "repair_anchor_ids per slide through prepare_deck_build; the harness owns "
                 "asset preparation, native PowerPoint compilation, inspection, and mechanical gates."
             )
         billable = [segment for segment in _command_segments_for_marker(command, _IMAGE_GENERATION_PATH_MARKERS) if "--preflight" not in _command_parts(segment)]
@@ -13541,7 +13559,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                             "[Sophia/deck-build] Fresh PPTX decks are built through "
                             "`prepare_deck_build`. Do not call image-generation scripts, "
                             "prepare_pptx_image_manifest, build_deck_from_slides, python-pptx, "
-                            "or pptxgenjs directly. Submit creative_plan, deck_stylesheet, and slide html_body through prepare_deck_build; "
+                            "or pptxgenjs directly. Submit creative_plan, deck_stylesheet, slide html_body, and "
+                            "exactly two repair_anchor_ids per slide through prepare_deck_build; "
                             "DeckBuildService owns sanitization, planned assets, native PowerPoint "
                             "compilation, inspection, mechanical gates, and terminal failure. Screenshot-backed PPTX is not an "
                             "acceptable fallback."
@@ -13626,7 +13645,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             content = (
                 "[Sophia/deck-build] Fresh PPTX decks are built through `prepare_deck_build`. "
                 "Do not write custom deck compiler code or invoke deck compilers directly. "
-                "Submit creative_plan, deck_stylesheet, and slide html_body through prepare_deck_build; DeckBuildService owns assembly, sanitization, "
+                "Submit creative_plan, deck_stylesheet, slide html_body, and exactly two repair_anchor_ids per "
+                "slide through prepare_deck_build; DeckBuildService owns assembly, sanitization, "
                 "planned assets, native PowerPoint compilation, inspection, mechanical gates, and terminal failure. "
                 "Screenshot-backed PPTX is not an acceptable fallback."
             )

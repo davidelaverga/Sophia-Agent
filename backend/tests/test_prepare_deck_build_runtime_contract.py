@@ -40,6 +40,7 @@ def test_prepare_deck_build_runtime_is_injected_and_hidden_from_model_schema() -
     assert schema["properties"]["authoring_contract"]["const"] == "compact_model_html_v2"
     slide_schema = schema["$defs"]["DeckSlideInput"]
     assert "html_body" in slide_schema["required"]
+    assert "repair_anchor_ids" in slide_schema["required"]
     assert "html_source" not in slide_schema["properties"]
     assert "register" in prepare_deck_build.args
     assert "deck_register" not in prepare_deck_build.args
@@ -111,6 +112,7 @@ def test_real_prepare_deck_build_normalizes_production_shaped_wrapped_slides_thr
         slide.pop("html_source")
         slide["title"] = f"Production slide {index}"
         slide["html_body"] = "x" * body_size
+        slide["repair_anchor_ids"] = ["hero", "proof"]
         slides.append(slide)
     tool_call = {
         "id": "prepare-runtime-wrapped",

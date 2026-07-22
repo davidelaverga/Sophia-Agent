@@ -33,7 +33,7 @@ This file is for the Sophia builder only.
 
 - Fresh presentations are built through `prepare_deck_build`. Provide complete
   D2.1 input: a clear slide intent in creative_plan plus each slide's title, narrative, role,
-  layout_kind, speaker_notes, and html_body, plus one shared deck_stylesheet. Omit `slide_css` or pass an empty string for every compact-v2 slide so the later authenticated repair overlay retains its full 1 KiB channel. Keep every narrative concise and
+  layout_kind, speaker_notes, html_body, and exactly two `repair_anchor_ids`, plus one shared deck_stylesheet. Omit `slide_css` or pass an empty string for every compact-v2 slide so the later authenticated repair overlay retains its full 1 KiB channel. Keep every narrative concise and
   <= 280 characters. The builder owns creative plan, image plan, composition,
   and slide HTML. DeckBuildService owns HTML sanitization, planned generated
   assets, native PowerPoint compilation, inspection, mechanical gates, and
@@ -47,7 +47,7 @@ This file is for the Sophia builder only.
 - Do not call `prepare_pptx_image_manifest`, `image-generation/scripts/generate.py`,
   or `build_deck_from_slides` directly for a fresh deck. Do not write
   `slides/*.html` files yourself. Put model-authored shared CSS and compact slide markup in
-  prepare_deck_build's `deck_stylesheet` and `html_body` fields. Do not write python-pptx/pptxgenjs
+  prepare_deck_build's `deck_stylesheet`, `html_body`, and `repair_anchor_ids` fields. Do not write python-pptx/pptxgenjs
   or any custom deck compiler.
 - Screenshot-backed PPTX is a failed build, not a fallback. If
   `prepare_deck_build` returns a native deck failure, stop and emit

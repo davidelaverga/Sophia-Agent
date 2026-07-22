@@ -105,7 +105,9 @@ def test_authoritative_prompt_surfaces_require_repair_addressable_anchors() -> N
     )
 
     for text in (ppt_skill, deck_craft):
-        assert "at least two independent repair-addressable layout anchors" in text
+        assert "`repair_anchor_ids`" in text
+        assert "exactly two distinct short HTML ids" in text
+        assert "both independent repair-addressable layout anchors" in text or "both named independent repair-addressable layout anchors" in text
         assert "direct children of the service-owned `main`" in text
         assert "HTML `id` unique within its slide" in text
         assert "same two short anchor IDs may be reused in separate slide fragments" in text
@@ -125,6 +127,7 @@ def test_authoritative_prompt_surfaces_require_repair_addressable_anchors() -> N
         assert "logical or vendor margin property" in text
         assert "reset margins on anchor descendants with separate descendant selectors" in text
         assert "Flex and grid" in text
+        assert '`repair_anchor_ids=["hero","proof"]`' in text
         assert "omit `slide_css` or pass an empty string" in text.lower()
         assert "full 1 kib channel" in text.lower()
 
@@ -157,6 +160,18 @@ def test_fresh_compact_v2_prompt_surfaces_reserve_slide_css_for_repair() -> None
         assert "authenticated repair overlay retains its full" in text
         assert "optional slide_css" not in text
         assert "use slide_css only for a small" not in text
+
+
+def test_outer_fresh_deck_surfaces_require_repair_anchor_ids() -> None:
+    paths = (
+        PROJECT_ROOT / "skills" / "public" / "sophia" / "builder_obligations.md",
+        PROJECT_ROOT / "skills" / "public" / "sophia" / "coordination_core.md",
+        PROJECT_ROOT / "skills" / "public" / "sophia" / "visual_composition.md",
+        PROJECT_ROOT / "skills" / "public" / "visual-design" / "SKILL.md",
+    )
+
+    for path in paths:
+        assert "repair_anchor_ids" in path.read_text(encoding="utf-8")
 
 
 def test_outer_deck_prompt_surfaces_require_slide_local_anchor_semantics() -> None:

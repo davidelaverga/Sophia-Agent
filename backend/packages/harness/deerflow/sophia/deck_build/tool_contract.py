@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import re
 from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, BeforeValidator, ConfigDict, Field, ValidationInfo, field_validator, model_validator
@@ -185,6 +186,7 @@ _V2_MAX_AUTHORING_PAYLOAD_BYTES = 48 * 1024
 _MAX_PREPARE_VALIDATION_ERRORS = 8
 _MAX_PREPARE_VALIDATION_SUMMARY_CHARS = 1200
 _DOCUMENT_FRAGMENT_TAGS = ("<html", "</html", "<head", "</head", "<body", "</body", "<style", "</style")
+_REPAIR_ANCHOR_ID_RE = re.compile(r"[a-z][a-z0-9_-]{0,31}")
 
 
 def _utf8_size(value: str | None) -> int:
@@ -207,8 +209,9 @@ def _compact_slide_repair_target(*, index: int) -> str:
 
 def _compact_slide_json_schema(schema: dict[str, Any]) -> None:
     required = schema.setdefault("required", [])
-    if "html_body" not in required:
-        required.append("html_body")
+    for field_name in ("html_body", "repair_anchor_ids"):
+        if field_name not in required:
+            required.append(field_name)
     body_schema = schema.get("properties", {}).get("html_body")
     if isinstance(body_schema, dict):
         body_schema.pop("default", None)
@@ -223,6 +226,15 @@ def _compact_slide_json_schema(schema: dict[str, Any]) -> None:
     slide_css_schema = schema.get("properties", {}).get("slide_css")
     if isinstance(slide_css_schema, dict):
         _set_string_max_length(slide_css_schema, _V2_MAX_SLIDE_CSS_BYTES)
+    repair_anchor_schema = schema.get("properties", {}).get("repair_anchor_ids")
+    if isinstance(repair_anchor_schema, dict):
+        repair_anchor_schema.pop("default", None)
+        repair_anchor_schema["minItems"] = 2
+        repair_anchor_schema["maxItems"] = 2
+        repair_anchor_schema["uniqueItems"] = True
+        items_schema = repair_anchor_schema.get("items")
+        if isinstance(items_schema, dict):
+            items_schema["pattern"] = r"^[a-z][a-z0-9_-]{0,31}$"
 
 
 def _compact_prepare_json_schema(schema: dict[str, Any]) -> None:
@@ -274,6 +286,15 @@ class DeckSlideInput(BaseModel):
             "31 lowercase ASCII letters, digits, underscore, or hyphen, for a maximum of 32 characters. Each "
             "anchor's data-deck-id must be unique within its slide, its data-deck-role must be nonempty, and "
             "data-deck-required must equal true."
+        ),
+    )
+    repair_anchor_ids: list[str] = Field(
+        default_factory=list,
+        description=(
+            "Exactly two short HTML ids naming this slide's repair-addressable direct-child anchors. Each value "
+            "must match [a-z][a-z0-9_-]{0,31}, be unique within this list, and exactly match one eligible section "
+            "or div id in html_body. These two ids define the strict repair witness pair; other layout elements "
+            "remain allowed. Example: [\"hero\",\"proof\"]."
         ),
     )
     slide_css: str | None = Field(
@@ -412,6 +433,19 @@ class PrepareDeckBuildInput(BaseModel):
             raise ValueError("deck_stylesheet exceeds the compact-v2 8192-byte limit")
         body_sizes: list[int] = []
         for index, slide in enumerate(self.slides):
+            anchor_ids = slide.repair_anchor_ids
+            if len(anchor_ids) != 2:
+                raise ValueError(
+                    f"slides[{index}].repair_anchor_ids must contain exactly two short HTML ids"
+                )
+            if len(set(anchor_ids)) != 2:
+                raise ValueError(
+                    f"slides[{index}].repair_anchor_ids must contain two distinct HTML ids"
+                )
+            if any(_REPAIR_ANCHOR_ID_RE.fullmatch(identifier) is None for identifier in anchor_ids):
+                raise ValueError(
+                    f"slides[{index}].repair_anchor_ids values must match [a-z][a-z0-9_-]{{0,31}}"
+                )
             body_size = _utf8_size((slide.html_body or "").strip())
             body_sizes.append(body_size)
             if body_size > COMPACT_V2_MAX_SLIDE_HTML_BODY_BYTES:

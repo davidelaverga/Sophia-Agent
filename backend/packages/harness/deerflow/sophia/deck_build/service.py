@@ -2700,6 +2700,22 @@ def _validate_compact_source_addressability(
                 f"slides[{index}].slide_css must be empty for compact-v2 source addressability; "
                 "put shared anchor geometry in deck_stylesheet."
             )
+        declared_anchor_ids = raw.get("repair_anchor_ids")
+        if (
+            not isinstance(declared_anchor_ids, list)
+            or len(declared_anchor_ids) != 2
+            or any(
+                not isinstance(identifier, str)
+                or _COMPACT_SOURCE_ID_RE.fullmatch(identifier) is None
+                for identifier in declared_anchor_ids
+            )
+            or len(set(declared_anchor_ids)) != 2
+        ):
+            raise _authoring_failure(
+                f"slides[{index}].repair_anchor_ids must declare exactly two distinct short HTML ids matching "
+                "[a-z][a-z0-9_-]{0,31}."
+            )
+        declared_anchor_id_set = set(declared_anchor_ids)
         try:
             soup = BeautifulSoup(body, "html.parser")
         except Exception as exc:
@@ -2724,11 +2740,13 @@ def _validate_compact_source_addressability(
             if isinstance(element, Tag)
             and _compact_source_anchor_is_eligible(element, shared_geometry)
         )
-        if len(anchors) < 2:
+        eligible_anchor_ids = {str(anchor.attrs["id"]) for anchor in anchors}
+        if not declared_anchor_id_set <= eligible_anchor_ids:
             raise _authoring_failure(
-                f"slides[{index}].html_body must contain at least two independent visible text-bearing section/div "
-                "direct children of main with short unique HTML IDs, nonempty data-deck-id/data-deck-role, "
-                "data-deck-required='true', and complete safe absolute px geometry in deck_stylesheet."
+                f"slides[{index}].html_body must contain both repair anchors declared by "
+                "repair_anchor_ids as independent visible text-bearing section/div direct children of main with "
+                "short unique HTML IDs, nonempty data-deck-id/data-deck-role, data-deck-required='true', and "
+                "complete safe absolute px geometry in deck_stylesheet."
             )
         # Import locally to avoid making ordinary deck-service module loading
         # depend on the campaign repair author. The witness itself remains
@@ -2747,10 +2765,12 @@ def _validate_compact_source_addressability(
                 baseline_slide_css=slide_css,
             )
         )
-        if len(anchors) < 2:
+        visible_anchor_ids = {str(anchor.attrs["id"]) for anchor in anchors}
+        if not declared_anchor_id_set <= visible_anchor_ids:
             raise _authoring_failure(
-                f"slides[{index}].html_body must contain at least two visible text-bearing compact-v2 anchors; "
-                "hidden, inert, aria-hidden, display:none, visibility:hidden, and opacity below 1 do not qualify."
+                f"slides[{index}].html_body must keep both declared compact-v2 repair anchors visible and "
+                "text-bearing; hidden, inert, aria-hidden, display:none, visibility:hidden, and opacity below 1 "
+                "do not qualify."
             )
         semantic_ids = [str(anchor.attrs["data-deck-id"]).strip() for anchor in anchors]
         if len(set(semantic_ids)) != len(semantic_ids):
@@ -2766,8 +2786,8 @@ def _validate_compact_source_addressability(
             baseline_slide_css="",
             deck_css=stylesheet,
             minimum=2,
+            target_element_ids=frozenset(declared_anchor_id_set),
         )
-        eligible_anchor_ids = {str(anchor.attrs["id"]) for anchor in anchors}
         effective_witness = shared_witness
         if slide_css.strip():
             effective_witness = _strict_geometry_source_witness(
@@ -2775,14 +2795,15 @@ def _validate_compact_source_addressability(
                 baseline_slide_css=slide_css,
                 deck_css=stylesheet,
                 minimum=2,
+                target_element_ids=frozenset(declared_anchor_id_set),
             )
         shared_witness_ids = _compact_witness_anchor_ids(shared_witness)
         effective_witness_ids = _compact_witness_anchor_ids(effective_witness)
         if (
             shared_witness_ids is None
             or effective_witness_ids is None
-            or not shared_witness_ids <= eligible_anchor_ids
-            or not effective_witness_ids <= eligible_anchor_ids
+            or shared_witness_ids != declared_anchor_id_set
+            or effective_witness_ids != declared_anchor_id_set
         ):
             raise _authoring_failure(
                 f"slides[{index}] cannot prove two compact-v2 source geometry anchors; "

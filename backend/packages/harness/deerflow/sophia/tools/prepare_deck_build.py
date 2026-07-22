@@ -44,7 +44,8 @@ def _prepare_deck_build_impl(
     Args:
         deck_title: Human-readable deck title.
         slides: Ordered slide dictionaries with title, narrative, role,
-            layout_kind, speaker_notes, and html_body. For compact_model_html_v2,
+            layout_kind, speaker_notes, html_body, and exactly two
+            repair_anchor_ids. For compact_model_html_v2,
             omit slide_css or pass an empty string so the later authenticated
             repair overlay retains its full 1024-byte channel.
         deck_stylesheet: Shared model-authored CSS for all slide bodies.
@@ -64,7 +65,7 @@ def _prepare_deck_build_impl(
 
     Fresh PPTX rules:
         Call this tool once with the complete creative_plan, deck_stylesheet,
-        and all slide html_body values. Do not call deck.py, html2patch.py,
+        and all slide html_body plus repair_anchor_ids values. Do not call deck.py, html2patch.py,
         build_deck_from_slides, prepare_pptx_image_manifest, image generation
         scripts, python-pptx, or pptxgenjs directly. Generated images must be
         declared in creative_plan.image_assets and used only as assets, not as
@@ -124,11 +125,15 @@ def _prepare_deck_build_impl(
             payload["repair_instruction"] = {
                 "should_retry": True,
                 "max_retry_count": 1,
-                "message": ("Repair the creative_plan, deck_stylesheet, and slide html_body values, then call prepare_deck_build exactly once more."),
+                "message": (
+                    "Repair the creative_plan, deck_stylesheet, slide html_body, and repair_anchor_ids values, then "
+                    "call prepare_deck_build exactly once more."
+                ),
                 "repair_message": (
                     "Repair the D2.1 deck input and call prepare_deck_build exactly once more. Include "
                     "authoring_contract=compact_model_html_v2, one concise creative_plan, one shared deck_stylesheet, "
-                    "and html_body for every slide; omit slide_css or pass an empty string so the later authenticated "
+                    "html_body, and exactly two repair_anchor_ids for every slide; "
+                    "omit slide_css or pass an empty string so the later authenticated "
                     "repair overlay retains its full 1024-byte channel."
                 ),
             }

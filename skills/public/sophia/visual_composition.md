@@ -13,7 +13,7 @@ medium. Do not mix workflows just because another tool is available.
 - Presentations (`.pptx`) are native DeckBuildService decks. The builder owns
   the creative plan, image plan, composition, and compiler-supported slide HTML.
   It reads `/mnt/skills/public/sophia/deck_craft.md` and submits creative_plan plus
-  shared deck_stylesheet and slide html_body through `prepare_deck_build`; DeckBuildService owns safe shell assembly,
+  shared deck_stylesheet, slide html_body, and exactly two repair_anchor_ids per slide through `prepare_deck_build`; DeckBuildService owns safe shell assembly,
   execution, sanitization, planned generated assets, native PowerPoint compilation,
   inspection, mechanical gates, and terminal failure.
   Screenshot-backed PPTX decks are not acceptable

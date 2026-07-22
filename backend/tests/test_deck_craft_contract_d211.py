@@ -124,6 +124,7 @@ def _compact_slide() -> dict:
     slide = deepcopy(_slides()[0])
     slide.pop("html_source")
     slide["html_body"] = '<h1 data-deck-id="title" data-deck-role="title">Compact</h1>'
+    slide["repair_anchor_ids"] = ["hero", "proof"]
     return slide
 
 
@@ -225,7 +226,16 @@ def test_compact_v2_profile_is_required_in_model_schema_and_bounded() -> None:
     schema = PrepareDeckBuildInput.model_json_schema()
     assert "authoring_contract" in schema["required"]
     assert schema["properties"]["authoring_contract"]["const"] == "compact_model_html_v2"
-    body = schema["$defs"]["DeckSlideInput"]["properties"]["html_body"]
+    slide_schema = schema["$defs"]["DeckSlideInput"]
+    assert "repair_anchor_ids" in slide_schema["required"]
+    repair_anchor_ids = slide_schema["properties"]["repair_anchor_ids"]
+    assert repair_anchor_ids["minItems"] == 2
+    assert repair_anchor_ids["maxItems"] == 2
+    assert repair_anchor_ids["uniqueItems"] is True
+    assert repair_anchor_ids["items"]["pattern"] == r"^[a-z][a-z0-9_-]{0,31}$"
+    assert "Exactly two short HTML ids" in repair_anchor_ids["description"]
+    assert '["hero","proof"]' in repair_anchor_ids["description"]
+    body = slide_schema["properties"]["html_body"]
     string_variant = next(item for item in body["anyOf"] if item.get("type") == "string")
     assert string_variant["maxLength"] == 6 * 1024
     assert "Target at most 4096 UTF-8 bytes per slide" in body["description"]
@@ -269,10 +279,12 @@ def test_compact_v2_profile_is_required_in_model_schema_and_bounded() -> None:
         )
 
     # Queued/internal compact-v1 payloads retain the previous 16 KiB body limit.
+    legacy_slide = dict(slide)
+    legacy_slide.pop("repair_anchor_ids")
     model = PrepareDeckBuildInput.model_validate(
         {
             "deck_title": "Technical Deck",
-            "slides": [slide],
+            "slides": [legacy_slide],
             "output_path": "/mnt/user-data/outputs/deck.pptx",
             "creative_plan": _creative_plan(),
             "authoring_contract": "compact_model_html_v1",
@@ -280,6 +292,40 @@ def test_compact_v2_profile_is_required_in_model_schema_and_bounded() -> None:
         }
     )
     assert model.authoring_contract == "compact_model_html_v1"
+    assert model.slides[0].repair_anchor_ids == []
+
+
+@pytest.mark.parametrize(
+    ("repair_anchor_ids", "message"),
+    [
+        (None, "must contain exactly two short HTML ids"),
+        (["hero"], "must contain exactly two short HTML ids"),
+        (["hero", "proof", "detail"], "must contain exactly two short HTML ids"),
+        (["hero", "hero"], "must contain two distinct HTML ids"),
+        (["Hero", "proof"], "values must match"),
+    ],
+)
+def test_compact_v2_repair_anchor_ids_are_exact_and_typed(
+    repair_anchor_ids: list[str] | None,
+    message: str,
+) -> None:
+    slide = _compact_slide()
+    if repair_anchor_ids is None:
+        slide.pop("repair_anchor_ids")
+    else:
+        slide["repair_anchor_ids"] = repair_anchor_ids
+
+    with pytest.raises(ValidationError, match=message):
+        PrepareDeckBuildInput.model_validate(
+            {
+                "deck_title": "Technical Deck",
+                "slides": [slide],
+                "output_path": "/mnt/user-data/outputs/deck.pptx",
+                "creative_plan": _creative_plan(),
+                "authoring_contract": "compact_model_html_v2",
+                "deck_stylesheet": "main { background: #101828; }",
+            }
+        )
 
 
 @pytest.mark.parametrize("body_size", [4052, 4 * 1024])

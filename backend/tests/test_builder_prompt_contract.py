@@ -253,6 +253,13 @@ def test_deck_corrections_use_deck_build_service_not_image_forward() -> None:
             assert token not in low, f"image-forward token {token!r} in {name} correction"
 
 
+def test_fresh_deck_corrections_require_typed_repair_anchor_ids() -> None:
+    rendered = _render_deck_corrections()
+
+    for name in ("compile_latch_ready", "compile_latch_drifting", "visual_design"):
+        assert "repair_anchor_ids" in rendered[name], f"missing typed repair anchors in {name}"
+
+
 def test_retired_deck_correction_functions_are_deleted() -> None:
     from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
 

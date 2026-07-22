@@ -162,6 +162,7 @@ def _compact_prepare_args(*, creative_plan: Any) -> dict[str, Any]:
                     f'<main class="slide-root" data-deck-id="slide-{index}">'
                     f'<h1 data-deck-id="headline-{index}">Control {index}</h1></main>'
                 ),
+                "repair_anchor_ids": ["hero", "proof"],
             }
             for index in range(1, 4)
         ],

@@ -977,7 +977,8 @@ def _pptx_visual_guidance(*, deck_service_enabled: bool, image_generation_enable
             "Decks are built by prepare_deck_build using the injected compact deck-craft contract. "
             "Submit authoring_contract='compact_model_html_v2', a concise complete creative_plan, one shared "
             "deck_stylesheet, and slide entries with title, narrative, "
-            "role, layout_kind, speaker_notes, and html_body; omit slide_css or pass an empty string for every "
+            "role, layout_kind, speaker_notes, html_body, and exactly two repair_anchor_ids; "
+            "omit slide_css or pass an empty string for every "
             "slide so the later authenticated repair overlay retains its full 1 KiB channel. Every narrative "
             "must be <= 280 characters. Reuse shared classes, keep each html_body compact, put all fresh-deck CSS "
             "in deck_stylesheet, and emit no prose outside the prepare call. Each repair anchor's data-deck-id must "
@@ -1378,7 +1379,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             sections.append("<builder_target_workflows>\n" + "\n\n".join(workflow_sections) + "\n</builder_target_workflows>")
 
         pptx_library_guidance = (
-            "For PPTX, submit creative_plan, deck_stylesheet, and slide html_body through prepare_deck_build; NEVER write custom python-pptx/pptxgenjs scripts or lower-level compiler files yourself."
+            "For PPTX, submit creative_plan, deck_stylesheet, slide html_body, and exactly two repair_anchor_ids per "
+            "slide through prepare_deck_build; NEVER write custom python-pptx/pptxgenjs scripts or lower-level "
+            "compiler files yourself."
             if deck_service_enabled
             else "For PPTX, this is an explicit non-production legacy/debug route; use the exposed ppt-generation workflow tools prepare_pptx_image_manifest and build_deck_from_slides; NEVER write custom python-pptx/pptxgenjs scripts."
         )
@@ -1425,7 +1428,9 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
             image_generation_enabled=image_generation_enabled,
         )
         pptx_delivery_line = (
-            "For fresh decks, call prepare_deck_build once with authoring_contract='compact_model_html_v2', the concise complete creative_plan, shared deck_stylesheet, and slide html_body list "
+            "For fresh decks, call prepare_deck_build once with authoring_contract='compact_model_html_v2', the "
+            "concise complete creative_plan, shared deck_stylesheet, slide html_body list, and exactly two "
+            "repair_anchor_ids per slide "
             "(or one repair retry when retryable=true); "
             "emit the returned native PPTX or a clean null-artifact failure if native generation "
             "fails. Screenshot-backed PPTX is not an acceptable fallback. Never write lower-level "

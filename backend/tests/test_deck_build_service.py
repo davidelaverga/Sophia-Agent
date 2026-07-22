@@ -159,6 +159,7 @@ def _compact_slides(*, visible_eyebrow_on_slide: int | None = None) -> list[dict
             f'<div id="n{index}" class="narrative" data-deck-id="narrative-{index}" data-deck-role="narrative" '
             f'data-deck-required="true"><p>{slide["narrative"]}</p></div>'
         )
+        slide["repair_anchor_ids"] = [f"t{index}", f"n{index}"]
     return slides
 
 
@@ -1156,10 +1157,10 @@ def test_compact_v2_source_addressability_rejects_unprovable_pairs(
     body: str,
     stylesheet: str,
 ) -> None:
-    with pytest.raises(deck_service.DeckBuildFailure, match="two independent visible text-bearing section/div") as exc:
+    with pytest.raises(deck_service.DeckBuildFailure, match="both repair anchors declared") as exc:
         deck_service._validate_compact_source_addressability(
             stylesheet,
-            [{"html_body": body, "slide_css": ""}],
+            [{"html_body": body, "slide_css": "", "repair_anchor_ids": ["hero", "proof"]}],
         )
 
     assert exc.value.code == "invalid_deck_ir"
@@ -1182,7 +1183,7 @@ def test_compact_v2_source_addressability_requires_deck_semantics(
     with pytest.raises(deck_service.DeckBuildFailure, match="data-deck-id/data-deck-role"):
         deck_service._validate_compact_source_addressability(
             _source_pair_stylesheet(),
-            [{"html_body": body, "slide_css": ""}],
+            [{"html_body": body, "slide_css": "", "repair_anchor_ids": ["hero", "proof"]}],
         )
 
 
@@ -1192,7 +1193,7 @@ def test_compact_v2_source_addressability_rejects_duplicate_anchor_data_deck_ids
     with pytest.raises(deck_service.DeckBuildFailure, match="distinct data-deck-id values") as exc:
         deck_service._validate_compact_source_addressability(
             _source_pair_stylesheet(),
-            [{"html_body": body, "slide_css": ""}],
+            [{"html_body": body, "slide_css": "", "repair_anchor_ids": ["hero", "proof"]}],
         )
 
     assert exc.value.code == "invalid_deck_ir"
@@ -1204,7 +1205,7 @@ def test_compact_v2_source_addressability_rejects_duplicate_ids_within_slide() -
     with pytest.raises(deck_service.DeckBuildFailure, match="unique within one slide"):
         deck_service._validate_compact_source_addressability(
             _source_pair_stylesheet(),
-            [{"html_body": body, "slide_css": ""}],
+            [{"html_body": body, "slide_css": "", "repair_anchor_ids": ["hero", "proof"]}],
         )
 
 
@@ -1214,7 +1215,7 @@ def test_compact_v2_source_addressability_accepts_strict_dq2_pair_with_interior_
 
     deck_service._validate_compact_source_addressability(
         stylesheet,
-        [{"html_body": body, "slide_css": ""}],
+        [{"html_body": body, "slide_css": "", "repair_anchor_ids": ["hero", "proof"]}],
     )
 
     from deerflow.sophia.deck_design_lift.repair_author import _strict_geometry_source_witness
@@ -1227,11 +1228,69 @@ def test_compact_v2_source_addressability_accepts_strict_dq2_pair_with_interior_
     ) is not None
 
 
+def test_compact_v2_source_addressability_accepts_reversed_declared_pair() -> None:
+    deck_service._validate_compact_source_addressability(
+        _source_pair_stylesheet(),
+        [
+            {
+                "html_body": _source_pair_body(),
+                "slide_css": "",
+                "repair_anchor_ids": ["proof", "hero"],
+            }
+        ],
+    )
+
+
+def test_compact_v2_source_addressability_allows_intervening_eligible_layout_anchor() -> None:
+    extra = (
+        '<section id="detail" data-deck-id="detail" data-deck-role="evidence" '
+        'data-deck-required="true">Additional evidence</section>'
+    )
+    body = _source_pair_body().replace(
+        '</section><div id="proof"',
+        f'</section>{extra}<div id="proof"',
+        1,
+    )
+    stylesheet = _source_pair_stylesheet() + (
+        "#detail{position:absolute;left:720px;top:440px;width:480px;height:80px;"
+        "box-sizing:border-box;margin:0}"
+    )
+
+    deck_service._validate_compact_source_addressability(
+        stylesheet,
+        [{"html_body": body, "slide_css": "", "repair_anchor_ids": ["hero", "proof"]}],
+    )
+
+
+@pytest.mark.parametrize(
+    "repair_anchor_ids",
+    (None, [], ["hero"], ["hero", "proof", "detail"], ["hero", "hero"], ["Hero", "proof"]),
+)
+def test_compact_v2_source_addressability_rejects_invalid_declared_pair(
+    repair_anchor_ids: object,
+) -> None:
+    slide = {"html_body": _source_pair_body(), "slide_css": ""}
+    if repair_anchor_ids is not None:
+        slide["repair_anchor_ids"] = repair_anchor_ids
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="repair_anchor_ids must declare exactly two"):
+        deck_service._validate_compact_source_addressability(
+            _source_pair_stylesheet(),
+            [slide],
+        )
+
+
 def test_compact_v2_source_addressability_rejects_nonempty_slide_css() -> None:
     with pytest.raises(deck_service.DeckBuildFailure, match="slide_css must be empty"):
         deck_service._validate_compact_source_addressability(
             _source_pair_stylesheet(),
-            [{"html_body": _source_pair_body(), "slide_css": ".unrelated{color:#94A3B8}"}],
+            [
+                {
+                    "html_body": _source_pair_body(),
+                    "slide_css": ".unrelated{color:#94A3B8}",
+                    "repair_anchor_ids": ["hero", "proof"],
+                }
+            ],
         )
 
 
@@ -1251,6 +1310,15 @@ def test_compact_v2_source_addressability_is_fresh_only_for_trusted_candidate_co
         allow_repair_overlay=True,
     )
 
+    missing_declaration = [{"html_body": _source_pair_body(), "slide_css": ""}]
+    with pytest.raises(deck_service.DeckBuildFailure, match="repair_anchor_ids must declare exactly two"):
+        deck_service._validate_authoring_inputs(deck, missing_declaration)
+    deck_service._validate_authoring_inputs(
+        deck,
+        missing_declaration,
+        allow_repair_overlay=True,
+    )
+
 
 def test_compact_v2_source_addressability_preserves_full_body_cascade() -> None:
     body = '<div class="lead">Lead</div>' + _source_pair_body()
@@ -1267,7 +1335,7 @@ def test_compact_v2_source_addressability_preserves_full_body_cascade() -> None:
     with pytest.raises(deck_service.DeckBuildFailure, match="cannot prove"):
         deck_service._validate_compact_source_addressability(
             stylesheet,
-            [{"html_body": body, "slide_css": ""}],
+            [{"html_body": body, "slide_css": "", "repair_anchor_ids": ["hero", "proof"]}],
         )
 
 
@@ -1285,7 +1353,13 @@ def test_compact_v2_source_addressability_rejects_matching_nonzero_margin_rule()
     with pytest.raises(deck_service.DeckBuildFailure, match="matching nonzero, logical, or vendor margin"):
         deck_service._validate_compact_source_addressability(
             stylesheet,
-            [{"html_body": _source_pair_body(), "slide_css": ""}],
+            [
+                {
+                    "html_body": _source_pair_body(),
+                    "slide_css": "",
+                    "repair_anchor_ids": ["hero", "proof"],
+                }
+            ],
         )
 
 
@@ -1312,7 +1386,7 @@ def test_compact_v2_source_addressability_rejects_non_anchor_witness_pair() -> N
     with pytest.raises(deck_service.DeckBuildFailure, match="cannot prove"):
         deck_service._validate_compact_source_addressability(
             stylesheet,
-            [{"html_body": body, "slide_css": ""}],
+            [{"html_body": body, "slide_css": "", "repair_anchor_ids": ["hero", "proof"]}],
         )
 
 
@@ -1320,10 +1394,10 @@ def test_compact_v2_source_addressability_rejects_hidden_descendant_text() -> No
     body = _source_pair_body().replace("<div><strong>", '<div class="hide"><strong>', 1)
     stylesheet = _source_pair_stylesheet().replace("#hero>div{display:flex;gap:24px}", "") + ".hide{display:none}"
 
-    with pytest.raises(deck_service.DeckBuildFailure, match="visible text-bearing compact-v2 anchors"):
+    with pytest.raises(deck_service.DeckBuildFailure, match="both declared compact-v2 repair anchors visible"):
         deck_service._validate_compact_source_addressability(
             stylesheet,
-            [{"html_body": body, "slide_css": ""}],
+            [{"html_body": body, "slide_css": "", "repair_anchor_ids": ["hero", "proof"]}],
         )
 
 
@@ -1830,7 +1904,8 @@ def test_presentation_authoring_prompt_matches_compact_v2_body_limit() -> None:
 def test_presentation_authoring_prompt_requires_repair_addressable_anchors() -> None:
     prompt = builder_artifact_module._PRESENTATION_AUTHORING_SYSTEM_PROMPT
 
-    assert "at least two independent repair-addressable layout anchors" in prompt
+    assert "repair_anchor_ids to exactly two short HTML ids" in prompt
+    assert "both named repair-addressable layout anchors" in prompt
     assert "non-nested section or div direct children of the service-owned main canvas" in prompt
     assert "HTML id unique within its slide" in prompt
     assert "same two short anchor IDs may be reused in separate slide fragments" in prompt
@@ -1850,6 +1925,8 @@ def test_presentation_authoring_prompt_requires_repair_addressable_anchors() -> 
     assert "Do not use !important, right, bottom, inset, min/max sizing" in prompt
     assert "do not put at-rules or nested rules in authored CSS" in prompt
     assert "Flex and grid remain available inside either anchor" in prompt
+    assert 'repair_anchor_ids=["hero","proof"]' in prompt
+    assert '<section id="hero" data-deck-id="hero"' in prompt
     assert "slide_css omitted or empty for every slide" in prompt
     assert "authenticated repair overlay retains its full budget" in prompt
     assert "only small slide_css overrides" not in prompt
@@ -2198,6 +2275,7 @@ def test_prepare_deck_build_schema_failure_gets_one_bounded_retry(tmp_path: Path
     assert "prepare_service_call_count" not in diagnostics
     assert diagnostics["deck_root_failure_code"] == "deck_prepare_argument_invalid"
     assert "builder_deck_prepare_repair_attempt_count" not in command.update
+    assert "exactly two repair_anchor_ids per slide" in command.update["builder_deck_prepare_repair_message"]
 
 
 def test_prepare_schema_retry_recovers_all_size_targets_without_tool_metadata(

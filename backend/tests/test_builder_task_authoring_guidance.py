@@ -33,7 +33,10 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-from deerflow.agents.sophia_agent.middlewares.builder_task import BuilderTaskMiddleware
+from deerflow.agents.sophia_agent.middlewares.builder_task import (
+    BuilderTaskMiddleware,
+    _pptx_visual_guidance,
+)
 
 
 def _make_runtime() -> MagicMock:
@@ -178,6 +181,16 @@ class TestBuilderResearchGuidance:
 
         assert "Web research is available for every builder task type" not in briefing
         assert "`builder_web_search` or `builder_web_fetch` at least once" not in briefing
+
+
+def test_fresh_pptx_guidance_requires_typed_repair_anchor_ids() -> None:
+    guidance = _pptx_visual_guidance(
+        deck_service_enabled=True,
+        image_generation_enabled=True,
+    )
+
+    assert "exactly two repair_anchor_ids" in guidance
+    assert "omit slide_css or pass an empty string" in guidance
 
 
 class TestBuilderWorkflowCards:
