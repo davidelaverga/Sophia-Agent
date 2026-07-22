@@ -264,11 +264,25 @@ class DeckSlideInput(BaseModel):
     layout_kind: str = Field(default="single_visual_focus")
     html_body: str | None = Field(
         default=None,
-        description=("Compiler-supported markup inside the slide canvas. Do not include html, head, body, or style tags."),
+        description=(
+            "Compiler-supported markup inside the slide canvas. Do not include html, head, body, or style tags. "
+            "Include at least two independent non-nested section or div direct children of the service-owned main "
+            "canvas as repair-addressable layout anchors. Each anchor must contain visible semantic text and use "
+            "an HTML id unique within its slide; the same two short anchor IDs may be reused in separate slide "
+            "fragments so shared #id rules scale. Each anchor id must match [a-z][a-z0-9_-]{0,31}: a lowercase "
+            "ASCII letter followed by at most "
+            "31 lowercase ASCII letters, digits, underscore, or hyphen, for a maximum of 32 characters. Each "
+            "anchor's data-deck-id must be unique within its slide, its data-deck-role must be nonempty, and "
+            "data-deck-required must equal true."
+        ),
     )
     slide_css: str | None = Field(
         default=None,
-        description="Optional CSS used only by this slide; shared rules belong in deck_stylesheet.",
+        description=(
+            "For compact_model_html_v2, omit slide_css or pass an empty string so the authenticated repair overlay "
+            "retains its full 1024-byte budget. Put all fresh-deck CSS, including repair-anchor geometry, in "
+            "deck_stylesheet."
+        ),
     )
     # Transitional service compatibility. Keeping this out of JSON schema prevents
     # new model calls from rediscovering the oversized six-document contract.
@@ -325,7 +339,16 @@ class PrepareDeckBuildInput(BaseModel):
     creative_plan: NormalizedDeckCreativePlan
     deck_stylesheet: str | None = Field(
         default=None,
-        description=("Shared compiler-supported CSS for every slide. It must style the main 1920x1080 canvas with an opaque background."),
+        description=(
+            "Shared compiler-supported CSS for every slide. It must style the main 1920x1080 canvas with an opaque "
+            "background. For each slide's two repair-addressable anchors, use the anchor's short HTML #id in a flat "
+            "rule that declares position:absolute, box-sizing:border-box, margin:0, and finite pixel left, top, width, "
+            "and height. Keep each anchor at least 48x24px and wholly on canvas; do not use !important, right, bottom, "
+            "inset, min/max sizing, transform, or opacity for an anchor. Do not use at-rules or nested CSS anywhere "
+            "in deck_stylesheet. No other CSS "
+            "selector matching an anchor may declare a nonzero margin or any logical or vendor margin property; "
+            "reset margins on anchor descendants with separate descendant selectors."
+        ),
     )
     deck_register: str = Field(
         default="professional_technical",

@@ -96,6 +96,92 @@ def test_authoritative_prompt_surfaces_use_parent_local_nested_coordinates() -> 
         assert "Keep non-bleed geometry inside" in text
 
 
+def test_authoritative_prompt_surfaces_require_repair_addressable_anchors() -> None:
+    ppt_skill = (PROJECT_ROOT / "skills" / "public" / "ppt-generation" / "SKILL.md").read_text(
+        encoding="utf-8"
+    )
+    deck_craft = (PROJECT_ROOT / "skills" / "public" / "sophia" / "deck_craft.md").read_text(
+        encoding="utf-8"
+    )
+
+    for text in (ppt_skill, deck_craft):
+        assert "at least two independent repair-addressable layout anchors" in text
+        assert "direct children of the service-owned `main`" in text
+        assert "HTML `id` unique within its slide" in text
+        assert "same two short anchor IDs may be reused in separate slide fragments" in text
+        assert "shared `#id` rules scale" in text
+        assert "`[a-z][a-z0-9_-]{0,31}`" in text
+        assert "lowercase ASCII letter followed by at most 31 lowercase ASCII letters" in text
+        assert "maximum of 32 characters" in text
+        assert "`data-deck-id` must be unique within its slide" in text
+        assert "`data-deck-role` must be nonempty" in text
+        assert "`data-deck-required=\"true\"`" in text
+        assert "`position:absolute`" in text
+        assert "`box-sizing:border-box`" in text
+        assert "`margin:0`" in text
+        assert "48x24px" in text
+        assert "anchor geometry out of `slide_css` and inline styles" in text
+        assert "No other CSS selector matching an anchor may declare a nonzero margin" in text
+        assert "logical or vendor margin property" in text
+        assert "reset margins on anchor descendants with separate descendant selectors" in text
+        assert "Flex and grid" in text
+        assert "omit `slide_css` or pass an empty string" in text.lower()
+        assert "full 1 kib channel" in text.lower()
+
+
+def test_fresh_compact_v2_prompt_surfaces_reserve_slide_css_for_repair() -> None:
+    paths = (
+        PROJECT_ROOT
+        / "backend"
+        / "packages"
+        / "harness"
+        / "deerflow"
+        / "agents"
+        / "sophia_agent"
+        / "middlewares"
+        / "builder_task.py",
+        PROJECT_ROOT / "skills" / "public" / "sophia" / "builder_obligations.md",
+        PROJECT_ROOT
+        / "backend"
+        / "packages"
+        / "harness"
+        / "deerflow"
+        / "sophia"
+        / "tools"
+        / "prepare_deck_build.py",
+    )
+
+    for path in paths:
+        text = " ".join(path.read_text(encoding="utf-8").lower().split())
+        assert "omit slide_css or pass an empty string" in text or "omit `slide_css` or pass an empty string" in text
+        assert "authenticated repair overlay retains its full" in text
+        assert "optional slide_css" not in text
+        assert "use slide_css only for a small" not in text
+
+
+def test_outer_deck_prompt_surfaces_require_slide_local_anchor_semantics() -> None:
+    paths = (
+        PROJECT_ROOT
+        / "backend"
+        / "packages"
+        / "harness"
+        / "deerflow"
+        / "agents"
+        / "sophia_agent"
+        / "middlewares"
+        / "builder_task.py",
+        PROJECT_ROOT / "skills" / "public" / "sophia" / "builder_obligations.md",
+    )
+
+    for path in paths:
+        text = " ".join(path.read_text(encoding="utf-8").lower().split())
+        assert "data-deck-id" in text
+        assert "unique within its slide" in text
+        assert "data-deck-role must be nonempty" in text or "`data-deck-role` must be nonempty" in text
+        assert "data-deck-required" in text
+        assert "true" in text
+
+
 def test_injected_deck_contract_uses_renderer_safe_pptx_fonts() -> None:
     text = (PROJECT_ROOT / "skills" / "public" / "sophia" / "deck_craft.md").read_text(encoding="utf-8")
 

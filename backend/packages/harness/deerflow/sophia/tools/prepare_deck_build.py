@@ -44,7 +44,9 @@ def _prepare_deck_build_impl(
     Args:
         deck_title: Human-readable deck title.
         slides: Ordered slide dictionaries with title, narrative, role,
-            layout_kind, speaker_notes, html_body, and optional slide_css.
+            layout_kind, speaker_notes, and html_body. For compact_model_html_v2,
+            omit slide_css or pass an empty string so the later authenticated
+            repair overlay retains its full 1024-byte channel.
         deck_stylesheet: Shared model-authored CSS for all slide bodies.
         output_path: Absolute /mnt/user-data/outputs/*.pptx output path.
         deck_register: Internal name for the public ``register`` deck style.
@@ -126,7 +128,8 @@ def _prepare_deck_build_impl(
                 "repair_message": (
                     "Repair the D2.1 deck input and call prepare_deck_build exactly once more. Include "
                     "authoring_contract=compact_model_html_v2, one concise creative_plan, one shared deck_stylesheet, "
-                    "and html_body for every slide; use slide_css only for a small per-slide override."
+                    "and html_body for every slide; omit slide_css or pass an empty string so the later authenticated "
+                    "repair overlay retains its full 1024-byte channel."
                 ),
             }
     return json.dumps(payload)

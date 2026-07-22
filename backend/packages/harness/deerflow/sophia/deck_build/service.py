@@ -15,6 +15,7 @@ from pathlib import Path
 from typing import Any
 
 import tinycss2
+from bs4 import BeautifulSoup, Tag
 from langchain.tools import ToolRuntime
 
 from deerflow.sandbox.tools import get_thread_data, replace_virtual_path
@@ -117,6 +118,8 @@ _FONT_SIZE_KEYWORDS = {
     "xxx-large",
 }
 _BASE_FONT_SELECTORS = {"*", ".slide-root", "body", "html", "main", "main.slide-root"}
+_COMPACT_SOURCE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
+_COMPACT_SOURCE_GEOMETRY_PROPERTIES = ("left", "top", "width", "height")
 _BANNED_STYLE_RE = re.compile(r"\b(chalkboard|blackboard|whiteboard|handwritten|sketch|cyberpunk|neon)\b", re.I)
 _BANNED_TEXT_RE = re.compile(r"THE TEXT READS|title reads|large readable text|paragraph text|axis labels?|formula", re.I)
 _NEGATED_BANNED_TERM_RE = re.compile(r"(?:\bno\b|\bnot\b|\bwithout\b|\bavoid\b|\bnever\b|\bdo\s+not\b)\W*$", re.I)
@@ -375,7 +378,11 @@ class DeckBuildService:
                 "visual_policy='text_only' requires an explicit plain/text-only/no-visual request.",
                 retryable=True,
             )
-        _validate_authoring_inputs(deck, slides)
+        _validate_authoring_inputs(
+            deck,
+            slides,
+            allow_repair_overlay=_state_value(runtime, "deck_candidate_compile") is True,
+        )
 
     def _build_slide_specs(
         self,
@@ -2286,8 +2293,8 @@ def _repair_instruction_for_failure(
         "repair_message": (
             "Repair the D2.1 deck input and call prepare_deck_build exactly once more. "
             "Include authoring_contract=compact_model_html_v2, creative_plan with design_plan, image_assets, "
-            "slide_compositions, one concise shared deck_stylesheet, and one html_body per slide. Use slide_css "
-            "only for a small per-slide override. Keep the slide canvas 1920x1080, use an opaque background, no scripts/external URLs, "
+            "slide_compositions, one concise shared deck_stylesheet, and one html_body per slide. Put all authored CSS "
+            "in deck_stylesheet and keep slide_css empty. Keep the slide canvas 1920x1080, use an opaque background, no scripts/external URLs, "
             "and reference only planned assets as ../assets/slide-XX.png. "
             f"Previous failure: {exc.code}: {safe_excerpt(exc.summary, limit=400)}"
         ),
@@ -2617,7 +2624,12 @@ def _authoring_failure(summary: str) -> DeckBuildFailure:
     return DeckBuildFailure("invalid_deck_ir", summary, retryable=True)
 
 
-def _validate_authoring_inputs(deck: DeckBuild, slides: list[dict[str, Any]]) -> None:
+def _validate_authoring_inputs(
+    deck: DeckBuild,
+    slides: list[dict[str, Any]],
+    *,
+    allow_repair_overlay: bool = False,
+) -> None:
     compact_mode = bool(deck.deck_stylesheet)
     stylesheet = deck.deck_stylesheet or ""
     if len(stylesheet.encode("utf-8")) > 24 * 1024:
@@ -2626,6 +2638,8 @@ def _validate_authoring_inputs(deck: DeckBuild, slides: list[dict[str, Any]]) ->
         raise _authoring_failure("deck_stylesheet contains a forbidden closing style tag.")
     if deck.deck_authoring_contract == "compact_model_html_v2":
         _validate_compact_pptx_font_contract(stylesheet, slides)
+        if not allow_repair_overlay:
+            _validate_compact_source_addressability(stylesheet, slides)
     total_bytes = len(stylesheet.encode("utf-8"))
     for index, raw in enumerate(slides):
         total_bytes += _validate_slide_authoring_input(
@@ -2662,6 +2676,307 @@ def _validate_compact_pptx_font_contract(stylesheet: str, slides: list[dict[str,
                 label=f"slides[{index}].html_body inline style",
                 base_selector=False,
             )
+
+
+def _validate_compact_source_addressability(
+    stylesheet: str,
+    slides: list[dict[str, Any]],
+) -> None:
+    """Require a source pair that the sealed DQ2 geometry witness can address.
+
+    This intentionally accepts only a small, mechanically provable subset of
+    compact-v2: two direct section/div semantic text owners with short
+    slide-unique IDs and complete bounded geometry in standalone shared-
+    stylesheet ID rules.
+    The existing strict DQ2 witness remains the final proof of cascade safety.
+    """
+
+    shared_geometry = _compact_shared_id_geometry(stylesheet)
+    for index, raw in enumerate(slides):
+        body = str(raw.get("html_body") or "")
+        slide_css = str(raw.get("slide_css") or "")
+        if slide_css.strip():
+            raise _authoring_failure(
+                f"slides[{index}].slide_css must be empty for compact-v2 source addressability; "
+                "put shared anchor geometry in deck_stylesheet."
+            )
+        try:
+            soup = BeautifulSoup(body, "html.parser")
+        except Exception as exc:
+            raise _authoring_failure(
+                f"slides[{index}].html_body cannot prove compact-v2 source addressability."
+            ) from exc
+
+        body_ids: list[str] = []
+        for element in soup.find_all(True):
+            element_id = element.attrs.get("id")
+            if not isinstance(element_id, str) or not element_id:
+                continue
+            if element_id in body_ids:
+                raise _authoring_failure(
+                    f"slides[{index}].html_body contains duplicate HTML id '{safe_excerpt(element_id, limit=40)}'; "
+                    "HTML IDs must be unique within one slide."
+                )
+            body_ids.append(element_id)
+        anchors = tuple(
+            element
+            for element in soup.contents
+            if isinstance(element, Tag)
+            and _compact_source_anchor_is_eligible(element, shared_geometry)
+        )
+        if len(anchors) < 2:
+            raise _authoring_failure(
+                f"slides[{index}].html_body must contain at least two independent visible text-bearing section/div "
+                "direct children of main with short unique HTML IDs, nonempty data-deck-id/data-deck-role, "
+                "data-deck-required='true', and complete safe absolute px geometry in deck_stylesheet."
+            )
+        # Import locally to avoid making ordinary deck-service module loading
+        # depend on the campaign repair author. The witness itself remains
+        # unchanged and authoritative.
+        from deerflow.sophia.deck_design_lift.repair_author import (  # noqa: PLC0415
+            _strict_geometry_source_witness,
+        )
+
+        anchors = tuple(
+            anchor
+            for anchor in anchors
+            if _compact_anchor_has_visible_text(
+                anchor,
+                soup,
+                deck_css=stylesheet,
+                baseline_slide_css=slide_css,
+            )
+        )
+        if len(anchors) < 2:
+            raise _authoring_failure(
+                f"slides[{index}].html_body must contain at least two visible text-bearing compact-v2 anchors; "
+                "hidden, inert, aria-hidden, display:none, visibility:hidden, and opacity below 1 do not qualify."
+            )
+        semantic_ids = [str(anchor.attrs["data-deck-id"]).strip() for anchor in anchors]
+        if len(set(semantic_ids)) != len(semantic_ids):
+            duplicate = next(value for value in semantic_ids if semantic_ids.count(value) > 1)
+            raise _authoring_failure(
+                f"slides[{index}].html_body reuses anchor data-deck-id "
+                f"'{safe_excerpt(duplicate, limit=40)}'; eligible compact-v2 anchors must use distinct "
+                "data-deck-id values within the slide."
+            )
+
+        shared_witness = _strict_geometry_source_witness(
+            body=body,
+            baseline_slide_css="",
+            deck_css=stylesheet,
+            minimum=2,
+        )
+        eligible_anchor_ids = {str(anchor.attrs["id"]) for anchor in anchors}
+        effective_witness = shared_witness
+        if slide_css.strip():
+            effective_witness = _strict_geometry_source_witness(
+                body=body,
+                baseline_slide_css=slide_css,
+                deck_css=stylesheet,
+                minimum=2,
+            )
+        shared_witness_ids = _compact_witness_anchor_ids(shared_witness)
+        effective_witness_ids = _compact_witness_anchor_ids(effective_witness)
+        if (
+            shared_witness_ids is None
+            or effective_witness_ids is None
+            or not shared_witness_ids <= eligible_anchor_ids
+            or not effective_witness_ids <= eligible_anchor_ids
+        ):
+            raise _authoring_failure(
+                f"slides[{index}] cannot prove two compact-v2 source geometry anchors; "
+                "keep their complete baseline geometry in deck_stylesheet and any authenticated repair overlay safe. "
+                "Avoid any other matching nonzero, logical, or vendor margin rule."
+            )
+
+
+def _compact_witness_anchor_ids(witness: str | None) -> set[str] | None:
+    if witness is None:
+        return None
+    rules = tinycss2.parse_stylesheet(witness, skip_comments=True, skip_whitespace=True)
+    selectors: set[str] = set()
+    for rule in rules:
+        if getattr(rule, "type", "") != "qualified-rule":
+            return None
+        selector = tinycss2.serialize(rule.prelude).strip()
+        match = re.fullmatch(r"#([a-z][a-z0-9_-]{0,31})", selector)
+        if match is None:
+            return None
+        selectors.add(match.group(1))
+    return selectors if len(rules) == 2 and len(selectors) == 2 else None
+
+
+def _compact_anchor_has_visible_text(
+    anchor: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> bool:
+    from deerflow.sophia.deck_design_lift.repair_author import (  # noqa: PLC0415
+        _authenticated_display_generates_box,
+        _authenticated_element_is_fully_opaque,
+        _authenticated_target_is_visible,
+    )
+
+    for text_node in anchor.find_all(string=True):
+        if not str(text_node).strip() or not isinstance(text_node.parent, Tag):
+            continue
+        current: Tag | None = text_node.parent
+        ancestry: list[Tag] = []
+        while current is not None:
+            ancestry.append(current)
+            if current is anchor:
+                break
+            current = current.parent if isinstance(current.parent, Tag) else None
+        if not ancestry or ancestry[-1] is not anchor:
+            continue
+        if any(
+            "hidden" in element.attrs
+            or "inert" in element.attrs
+            or str(element.attrs.get("aria-hidden") or "").strip().casefold() == "true"
+            or not _authenticated_display_generates_box(
+                element,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+            )
+            or not _authenticated_target_is_visible(
+                element,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+            )
+            or not _authenticated_element_is_fully_opaque(
+                element,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+            )
+            for element in ancestry
+        ):
+            continue
+        return True
+    return False
+
+
+def _compact_source_anchor_is_eligible(
+    element: Tag,
+    shared_geometry: dict[str, tuple[float, float, float, float]],
+) -> bool:
+    element_id = element.attrs.get("id")
+    if not isinstance(element_id, str) or not _COMPACT_SOURCE_ID_RE.fullmatch(element_id):
+        return False
+    if element_id not in shared_geometry:
+        return False
+    if str(element.name).casefold() not in {"div", "section"}:
+        return False
+    if not str(element.attrs.get("data-deck-id") or "").strip():
+        return False
+    if not str(element.attrs.get("data-deck-role") or "").strip():
+        return False
+    if str(element.attrs.get("data-deck-required") or "").strip().casefold() != "true":
+        return False
+    if not element.get_text(" ", strip=True):
+        return False
+    inline_style = element.attrs.get("style")
+    if isinstance(inline_style, str) and inline_style.strip():
+        declarations = tinycss2.parse_declaration_list(
+            inline_style,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        if any(
+            getattr(item, "type", "") != "declaration"
+            or item.lower_name in {"position", "box-sizing", "margin", *_COMPACT_SOURCE_GEOMETRY_PROPERTIES}
+            for item in declarations
+        ):
+            return False
+    return True
+
+
+def _compact_shared_id_geometry(stylesheet: str) -> dict[str, tuple[float, float, float, float]]:
+    geometry: dict[str, tuple[float, float, float, float]] = {}
+    rules = tinycss2.parse_stylesheet(stylesheet, skip_comments=True, skip_whitespace=True)
+    for rule in rules:
+        if getattr(rule, "type", "") != "qualified-rule":
+            continue
+        selector = tinycss2.serialize(rule.prelude).strip()
+        match = re.fullmatch(r"#([a-z][a-z0-9_-]{0,31})", selector)
+        if match is None:
+            continue
+        declarations = tinycss2.parse_declaration_list(
+            rule.content,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        if any(getattr(item, "type", "") != "declaration" for item in declarations):
+            continue
+        if any(bool(getattr(item, "important", False)) for item in declarations):
+            continue
+        final = {item.lower_name: item for item in declarations}
+        if _css_single_identifier(final.get("position")) != "absolute":
+            continue
+        if _css_single_identifier(final.get("box-sizing")) != "border-box":
+            continue
+        if _css_zero_value(final.get("margin")) is not True:
+            continue
+        values = tuple(
+            _css_absolute_px_value(final.get(property_name))
+            for property_name in _COMPACT_SOURCE_GEOMETRY_PROPERTIES
+        )
+        if any(value is None for value in values):
+            continue
+        left, top, width, height = (float(value) for value in values if value is not None)
+        if (
+            left < 0
+            or top < 0
+            or width < 48
+            or height < 24
+            or left + width > 1920
+            or top + height > 1080
+        ):
+            continue
+        geometry[match.group(1)] = (left, top, width, height)
+    return geometry
+
+
+def _css_single_identifier(declaration: Any | None) -> str | None:
+    if declaration is None:
+        return None
+    tokens = [
+        token
+        for token in declaration.value
+        if getattr(token, "type", "") not in {"comment", "whitespace"}
+    ]
+    if len(tokens) != 1 or getattr(tokens[0], "type", "") != "ident":
+        return None
+    return str(tokens[0].value).casefold()
+
+
+def _css_absolute_px_value(declaration: Any | None) -> float | None:
+    if declaration is None:
+        return None
+    tokens = [
+        token
+        for token in declaration.value
+        if getattr(token, "type", "") not in {"comment", "whitespace"}
+    ]
+    if len(tokens) != 1:
+        return None
+    token = tokens[0]
+    if getattr(token, "type", "") == "number" and float(token.value) == 0:
+        return 0.0
+    if getattr(token, "type", "") != "dimension" or str(getattr(token, "unit", "")).casefold() != "px":
+        return None
+    value = float(token.value)
+    return value if value == value and abs(value) != float("inf") else None
+
+
+def _css_zero_value(declaration: Any | None) -> bool | None:
+    value = _css_absolute_px_value(declaration)
+    return value == 0 if value is not None else None
 
 
 def _validate_css_font_declarations(css: str, *, label: str, require_base: bool) -> bool:

@@ -822,6 +822,7 @@ def _runtime(
             "run_id": request.operation_id,
             "builder_pptx_requested_slide_count": slide_count,
             "builder_artifact_target_path": output_path,
+            "deck_candidate_compile": True,
             "delegation_context": {"request": baseline.task_brief},
             "thread_data": {
                 "outputs_path": str(outputs),

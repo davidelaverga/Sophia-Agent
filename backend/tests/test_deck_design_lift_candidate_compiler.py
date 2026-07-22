@@ -643,6 +643,7 @@ class _FakeDeckService:
         self.build_timestamp = build_timestamp
         self.retained_build_value = retained_build_value
         self.foundation_config = None
+        self.deck_candidate_compile = None
         self.tracing_enabled = None
         self.raw_pptx_bytes: bytes | None = None
         self.thread_ids: list[int] = []
@@ -655,6 +656,7 @@ class _FakeDeckService:
         slides = kwargs["slides"]
         output_path = kwargs["output_path"]
         self.foundation_config = runtime.context["build_foundation_config"]
+        self.deck_candidate_compile = runtime.state.get("deck_candidate_compile")
         self.tracing_enabled = get_tracing_context()["enabled"]
         output_host = Path(replace_virtual_path(output_path, runtime.state["thread_data"]))
         output_host.parent.mkdir(parents=True, exist_ok=True)
@@ -1004,6 +1006,7 @@ def test_candidate_compiler_rebuilds_sources_proves_locality_and_publishes_dq1(
     assert len(publisher.calls) == 1
     assert service.foundation_config.enabled is False
     assert service.foundation_config.manifest_mode == "off"
+    assert service.deck_candidate_compile is True
     assert service.tracing_enabled is False
     assert service.native_lint_slide_indices == (0,)
     assert service.thread_ids and service.thread_ids[0] != threading.get_ident()

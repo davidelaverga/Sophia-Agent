@@ -153,13 +153,30 @@ def _compact_slides(*, visible_eyebrow_on_slide: int | None = None) -> list[dict
         slide.pop("html_source")
         slide["visual_prompt"] = ""
         slide["html_body"] = (
-            f'{eyebrow}<h1 data-deck-id="title-{index}" data-deck-role="title" '
-            f'data-deck-required="true">{slide["title"]}</h1>'
+            f'{eyebrow}<section id="t{index}" data-deck-id="title-{index}" data-deck-role="title" '
+            f'data-deck-required="true"><h1>{slide["title"]}</h1></section>'
             f'<section class="diagram" data-deck-id="diagram-{index}" data-deck-role="diagram"></section>'
-            f'<p class="narrative" data-deck-id="narrative-{index}" data-deck-role="narrative" '
-            f'data-deck-required="true">{slide["narrative"]}</p>'
+            f'<div id="n{index}" class="narrative" data-deck-id="narrative-{index}" data-deck-role="narrative" '
+            f'data-deck-required="true"><p>{slide["narrative"]}</p></div>'
         )
     return slides
+
+
+def _compact_stylesheet(*extra: str, font_family: str = "Calibri,Arial,sans-serif") -> str:
+    geometry = "".join(
+        (
+            f"#t{index}{{position:absolute;left:120px;top:80px;width:1200px;height:120px;"
+            "box-sizing:border-box;margin:0}"
+            f"#n{index}{{position:absolute;left:120px;top:820px;width:1320px;height:120px;"
+            "box-sizing:border-box;margin:0}"
+        )
+        for index in range(1, 4)
+    )
+    return (
+        f"main{{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:{font_family}}}"
+        + geometry
+        + "".join(extra)
+    )
 
 
 def _creative_plan(*, include_asset: bool = True) -> dict:
@@ -816,8 +833,7 @@ def test_deck_build_service_ignores_hidden_unused_eyebrow_selector(tmp_path: Pat
         deck_title="Technical Deck",
         slides=_compact_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
-        deck_stylesheet=(
-            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Calibri,Arial,sans-serif}"
+        deck_stylesheet=_compact_stylesheet(
             ".eyebrow-none{display:none}"
             "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
         ),
@@ -843,8 +859,7 @@ def test_deck_build_service_allows_emitted_20px_label_and_ignores_unused_tiny_ru
         deck_title="Technical Deck",
         slides=_compact_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
-        deck_stylesheet=(
-            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Calibri,Arial,sans-serif}"
+        deck_stylesheet=_compact_stylesheet(
             ".unused-utility{font-size:12px}.status-label{font-size:20px}"
             "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
         ),
@@ -873,8 +888,7 @@ def test_deck_build_service_routes_compiled_required_tiny_text_to_mechanical_rep
         deck_title="Technical Deck",
         slides=_compact_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
-        deck_stylesheet=(
-            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Calibri,Arial,sans-serif}"
+        deck_stylesheet=_compact_stylesheet(
             "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:23px}"
         ),
         authoring_contract="compact_model_html_v2",
@@ -909,8 +923,7 @@ def test_deck_build_service_still_rejects_visible_eyebrow_chrome(tmp_path: Path)
         deck_title="Technical Deck",
         slides=_compact_slides(visible_eyebrow_on_slide=2),
         output_path=f"{_OUTPUTS}deck.pptx",
-        deck_stylesheet=(
-            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Calibri,Arial,sans-serif}"
+        deck_stylesheet=_compact_stylesheet(
             "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
         ),
         authoring_contract="compact_model_html_v2",
@@ -969,8 +982,7 @@ def test_deck_build_service_combines_source_and_mechanical_targets_for_one_repai
         deck_title="Technical Deck",
         slides=slides,
         output_path=f"{_OUTPUTS}deck.pptx",
-        deck_stylesheet=(
-            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Calibri,Arial,sans-serif}"
+        deck_stylesheet=_compact_stylesheet(
             "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
         ),
         authoring_contract="compact_model_html_v2",
@@ -999,8 +1011,7 @@ def test_deck_build_service_combines_source_and_mechanical_targets_for_one_repai
         deck_title="Technical Deck",
         slides=_compact_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
-        deck_stylesheet=(
-            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Calibri,Arial,sans-serif}"
+        deck_stylesheet=_compact_stylesheet(
             "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
         ),
         authoring_contract="compact_model_html_v2",
@@ -1024,9 +1035,9 @@ def test_deck_build_service_rejects_renderer_unsafe_compact_fonts(tmp_path: Path
         deck_title="Technical Deck",
         slides=_compact_slides(),
         output_path=f"{_OUTPUTS}deck.pptx",
-        deck_stylesheet=(
-            "main{width:1920px;height:1080px;background:#F7F1E1;color:#2B2926;font-family:Georgia,serif}"
-            "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
+        deck_stylesheet=_compact_stylesheet(
+            "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}",
+            font_family="Georgia,serif",
         ),
         authoring_contract="compact_model_html_v2",
         creative_plan=_creative_plan(include_asset=False),
@@ -1093,6 +1104,227 @@ def test_compact_font_contract_accepts_safe_font_shorthand() -> None:
         ),
         _compact_slides(),
     )
+
+
+def _source_pair_stylesheet(*, second_position: str = "absolute") -> str:
+    return (
+        "main{background:#101828;color:#F8FAFC;font-family:Calibri,Arial,sans-serif}"
+        "#hero{position:absolute;left:80px;top:80px;width:720px;height:320px;"
+        "box-sizing:border-box;margin:0}"
+        f"#proof{{position:{second_position};left:920px;top:560px;width:720px;height:320px;"
+        "box-sizing:border-box;margin:0}"
+        "#hero>div{display:flex;gap:24px}#proof>div{display:grid;grid-template-columns:1fr 1fr}"
+    )
+
+
+def _source_pair_body() -> str:
+    return (
+        '<section id="hero" data-deck-id="hero" data-deck-role="subject" data-deck-required="true">'
+        "<div><strong>Current</strong><span>PSI</span></div></section>"
+        '<div id="proof" data-deck-id="proof" data-deck-role="mechanism" data-deck-required="true">'
+        "<div><span>Control</span><span>loop</span></div></div>"
+    )
+
+
+@pytest.mark.parametrize(
+    ("body", "stylesheet"),
+    [
+        (
+            '<section data-deck-id="hero" data-deck-role="subject" data-deck-required="true">Current PSI</section>'
+            '<div data-deck-id="proof" data-deck-role="mechanism" data-deck-required="true">Control loop</div>',
+            _source_pair_stylesheet(),
+        ),
+        (
+            '<section id="hero" data-deck-id="hero" data-deck-role="subject" data-deck-required="true">Current PSI</section>'
+            '<div id="other" data-deck-id="other" data-deck-role="detail" data-deck-required="true">Detail</div>',
+            _source_pair_stylesheet(),
+        ),
+        (
+            '<section><div id="hero" data-deck-id="hero" data-deck-role="subject" data-deck-required="true">'
+            'Current PSI</div><div id="proof" data-deck-id="proof" data-deck-role="mechanism" '
+            'data-deck-required="true">Control loop</div></section>',
+            _source_pair_stylesheet(),
+        ),
+        (
+            _source_pair_body(),
+            _source_pair_stylesheet(second_position="static"),
+        ),
+    ],
+    ids=("missing", "one", "nested", "static"),
+)
+def test_compact_v2_source_addressability_rejects_unprovable_pairs(
+    body: str,
+    stylesheet: str,
+) -> None:
+    with pytest.raises(deck_service.DeckBuildFailure, match="two independent visible text-bearing section/div") as exc:
+        deck_service._validate_compact_source_addressability(
+            stylesheet,
+            [{"html_body": body, "slide_css": ""}],
+        )
+
+    assert exc.value.code == "invalid_deck_ir"
+
+
+@pytest.mark.parametrize(
+    "missing_attribute",
+    ("data-deck-id", "data-deck-role", "data-deck-required"),
+)
+def test_compact_v2_source_addressability_requires_deck_semantics(
+    missing_attribute: str,
+) -> None:
+    authored_attribute = {
+        "data-deck-id": ' data-deck-id="proof"',
+        "data-deck-role": ' data-deck-role="mechanism"',
+        "data-deck-required": ' data-deck-required="true"',
+    }[missing_attribute]
+    body = _source_pair_body().replace(authored_attribute, "", 1)
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="data-deck-id/data-deck-role"):
+        deck_service._validate_compact_source_addressability(
+            _source_pair_stylesheet(),
+            [{"html_body": body, "slide_css": ""}],
+        )
+
+
+def test_compact_v2_source_addressability_rejects_duplicate_anchor_data_deck_ids() -> None:
+    body = _source_pair_body().replace('data-deck-id="proof"', 'data-deck-id="hero"', 1)
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="distinct data-deck-id values") as exc:
+        deck_service._validate_compact_source_addressability(
+            _source_pair_stylesheet(),
+            [{"html_body": body, "slide_css": ""}],
+        )
+
+    assert exc.value.code == "invalid_deck_ir"
+
+
+def test_compact_v2_source_addressability_rejects_duplicate_ids_within_slide() -> None:
+    body = _source_pair_body() + '<span id="hero">Duplicate</span>'
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="unique within one slide"):
+        deck_service._validate_compact_source_addressability(
+            _source_pair_stylesheet(),
+            [{"html_body": body, "slide_css": ""}],
+        )
+
+
+def test_compact_v2_source_addressability_accepts_strict_dq2_pair_with_interior_layout() -> None:
+    body = _source_pair_body()
+    stylesheet = _source_pair_stylesheet()
+
+    deck_service._validate_compact_source_addressability(
+        stylesheet,
+        [{"html_body": body, "slide_css": ""}],
+    )
+
+    from deerflow.sophia.deck_design_lift.repair_author import _strict_geometry_source_witness
+
+    assert _strict_geometry_source_witness(
+        body=body,
+        baseline_slide_css="",
+        deck_css=stylesheet,
+        minimum=2,
+    ) is not None
+
+
+def test_compact_v2_source_addressability_rejects_nonempty_slide_css() -> None:
+    with pytest.raises(deck_service.DeckBuildFailure, match="slide_css must be empty"):
+        deck_service._validate_compact_source_addressability(
+            _source_pair_stylesheet(),
+            [{"html_body": _source_pair_body(), "slide_css": ".unrelated{color:#94A3B8}"}],
+        )
+
+
+def test_compact_v2_source_addressability_is_fresh_only_for_trusted_candidate_compile() -> None:
+    deck = SimpleNamespace(
+        deck_stylesheet=_source_pair_stylesheet(),
+        deck_authoring_contract="compact_model_html_v2",
+    )
+    slides = [{"html_body": _source_pair_body(), "slide_css": "#hero{left:120px}"}]
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="slide_css must be empty"):
+        deck_service._validate_authoring_inputs(deck, slides)
+
+    deck_service._validate_authoring_inputs(
+        deck,
+        slides,
+        allow_repair_overlay=True,
+    )
+
+
+def test_compact_v2_source_addressability_preserves_full_body_cascade() -> None:
+    body = '<div class="lead">Lead</div>' + _source_pair_body()
+    stylesheet = _source_pair_stylesheet() + "section:nth-child(2){transform:translateX(1px)}"
+
+    from deerflow.sophia.deck_design_lift.repair_author import _strict_geometry_source_witness
+
+    assert _strict_geometry_source_witness(
+        body=body,
+        baseline_slide_css="",
+        deck_css=stylesheet,
+        minimum=2,
+    ) is None
+    with pytest.raises(deck_service.DeckBuildFailure, match="cannot prove"):
+        deck_service._validate_compact_source_addressability(
+            stylesheet,
+            [{"html_body": body, "slide_css": ""}],
+        )
+
+
+def test_compact_v2_source_addressability_rejects_matching_nonzero_margin_rule() -> None:
+    stylesheet = _source_pair_stylesheet() + "section{margin:8px}"
+
+    from deerflow.sophia.deck_design_lift.repair_author import _strict_geometry_source_witness
+
+    assert _strict_geometry_source_witness(
+        body=_source_pair_body(),
+        baseline_slide_css="",
+        deck_css=stylesheet,
+        minimum=2,
+    ) is None
+    with pytest.raises(deck_service.DeckBuildFailure, match="matching nonzero, logical, or vendor margin"):
+        deck_service._validate_compact_source_addressability(
+            stylesheet,
+            [{"html_body": _source_pair_body(), "slide_css": ""}],
+        )
+
+
+def test_compact_v2_source_addressability_rejects_non_anchor_witness_pair() -> None:
+    body = _source_pair_body() + '<h1 id="x">Fallback title</h1><p id="y">Fallback body</p>'
+    stylesheet = _source_pair_stylesheet() + (
+        "#hero{transform:translateX(1px)}"
+        "#x{position:absolute;left:120px;top:440px;width:600px;height:80px;"
+        "box-sizing:border-box;margin:0}"
+        "#y{position:absolute;left:920px;top:440px;width:600px;height:80px;"
+        "box-sizing:border-box;margin:0}"
+    )
+
+    from deerflow.sophia.deck_design_lift.repair_author import _strict_geometry_source_witness
+
+    witness = _strict_geometry_source_witness(
+        body=body,
+        baseline_slide_css="",
+        deck_css=stylesheet,
+        minimum=2,
+    )
+    assert witness is not None
+    assert deck_service._compact_witness_anchor_ids(witness) not in ({"hero", "proof"}, None)
+    with pytest.raises(deck_service.DeckBuildFailure, match="cannot prove"):
+        deck_service._validate_compact_source_addressability(
+            stylesheet,
+            [{"html_body": body, "slide_css": ""}],
+        )
+
+
+def test_compact_v2_source_addressability_rejects_hidden_descendant_text() -> None:
+    body = _source_pair_body().replace("<div><strong>", '<div class="hide"><strong>', 1)
+    stylesheet = _source_pair_stylesheet().replace("#hero>div{display:flex;gap:24px}", "") + ".hide{display:none}"
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="visible text-bearing compact-v2 anchors"):
+        deck_service._validate_compact_source_addressability(
+            stylesheet,
+            [{"html_body": body, "slide_css": ""}],
+        )
 
 
 def test_deck_build_service_allows_explicitly_requested_visual_style(tmp_path: Path) -> None:
@@ -1593,6 +1825,34 @@ def test_presentation_authoring_prompt_matches_compact_v2_body_limit() -> None:
     assert "each slide capped at the hard 6 KiB ceiling" in prompt
     assert "one slide may borrow" not in prompt
     assert "each html_body under 3 KiB" not in prompt
+
+
+def test_presentation_authoring_prompt_requires_repair_addressable_anchors() -> None:
+    prompt = builder_artifact_module._PRESENTATION_AUTHORING_SYSTEM_PROMPT
+
+    assert "at least two independent repair-addressable layout anchors" in prompt
+    assert "non-nested section or div direct children of the service-owned main canvas" in prompt
+    assert "HTML id unique within its slide" in prompt
+    assert "same two short anchor IDs may be reused in separate slide fragments" in prompt
+    assert "shared #id rules scale" in prompt
+    assert "[a-z][a-z0-9_-]{0,31}" in prompt
+    assert "lowercase ASCII letter followed by at most 31 lowercase ASCII letters" in prompt
+    assert "maximum of 32 characters" in prompt
+    assert "data-deck-id must be unique within its slide" in prompt
+    assert "data-deck-role must be nonempty" in prompt
+    assert "data-deck-required must equal true" in prompt
+    assert "position:absolute, box-sizing:border-box, margin:0" in prompt
+    assert "at least 48x24px and wholly inside the canvas" in prompt
+    assert "geometry out of slide_css and inline styles" in prompt
+    assert "No other CSS selector matching an anchor may declare a nonzero margin" in prompt
+    assert "logical or vendor margin property" in prompt
+    assert "reset margins on anchor descendants with separate descendant selectors" in prompt
+    assert "Do not use !important, right, bottom, inset, min/max sizing" in prompt
+    assert "do not put at-rules or nested rules in authored CSS" in prompt
+    assert "Flex and grid remain available inside either anchor" in prompt
+    assert "slide_css omitted or empty for every slide" in prompt
+    assert "authenticated repair overlay retains its full budget" in prompt
+    assert "only small slide_css overrides" not in prompt
 
 
 def test_presentation_authoring_prompt_sets_role_aware_font_floors() -> None:
