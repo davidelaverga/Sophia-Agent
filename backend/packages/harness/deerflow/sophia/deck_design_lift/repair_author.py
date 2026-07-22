@@ -1780,55 +1780,454 @@ def _contains_independent_element_antichain(
     )
 
 
+def _strict_geometry_selector_segment(element: Tag) -> str:
+    element_id = element.attrs.get("id")
+    if (
+        isinstance(element_id, str)
+        and element_id
+        and all(
+            character.isalnum() or character in "_-"
+            for character in element_id
+        )
+    ):
+        return f"#{element_id}"
+    tag = str(element.name).casefold()
+    classes = element.attrs.get("class")
+    class_suffix = ""
+    if isinstance(classes, list):
+        class_suffix = "".join(
+            f".{value}"
+            for item in classes
+            for value in (str(item),)
+            if value
+            and all(
+                character.isalnum() or character in "_-"
+                for character in value
+            )
+        )
+    parent = _parent_tag(element)
+    if parent is None:
+        return f"{tag}{class_suffix}"
+    siblings = tuple(
+        child for child in parent.children if isinstance(child, Tag)
+    )
+    index = next(
+        (
+            position
+            for position, child in enumerate(siblings, start=1)
+            if child is element
+        ),
+        1,
+    )
+    return f"{tag}{class_suffix}:nth-child({index})"
+
+
+def _strict_unique_manifest_selector(
+    element: Tag,
+    soup: BeautifulSoup,
+    inventory: dict[str, list[str]],
+) -> str | None:
+    chain: list[Tag] = []
+    current: Tag | None = element
+    while current is not None and not (
+        str(current.name).casefold() == "main"
+        and "slide-root" in (current.attrs.get("class") or [])
+    ):
+        chain.append(current)
+        current = _parent_tag(current)
+    if current is None:
+        return None
+    selector = ">".join(
+        _strict_geometry_selector_segment(item)
+        for item in reversed(chain)
+    )
+    try:
+        matches = soup.select(selector)
+    except Exception:
+        return None
+    if (
+        len(matches) != 1
+        or matches[0] is not element
+        or not _selector_uses_only_manifest_atoms(selector, inventory)
+    ):
+        return None
+    return selector
+
+
+def _strict_geometry_pixel_value(winner: object) -> float | None:
+    if winner is None:
+        return None
+    tokens = _significant_css_value_tokens(winner[1])
+    if len(tokens) != 1:
+        return None
+    token = tokens[0]
+    value = _finite_css_token_value(token)
+    if value is None:
+        return None
+    if (
+        token.type == "dimension"
+        and str(getattr(token, "unit", "")).casefold() == "px"
+    ):
+        return value
+    if token.type == "number" and value == 0:
+        return 0.0
+    return None
+
+
+def _strict_geometry_candidate_rule(
+    selector: str,
+    box: dict[str, float],
+    *,
+    important: bool,
+) -> str | None:
+    left, top, width, height = (
+        box["left"],
+        box["top"],
+        box["width"],
+        box["height"],
+    )
+    if (
+        width < _MIN_RETAINED_GEOMETRY_WIDTH_PX
+        or height < _MIN_RETAINED_GEOMETRY_HEIGHT_PX
+    ):
+        return None
+    translated: tuple[float, float] | None = None
+    for delta_x, delta_y in (
+        (8.0, 0.0),
+        (-8.0, 0.0),
+        (0.0, 8.0),
+        (0.0, -8.0),
+    ):
+        candidate_left = left + delta_x
+        candidate_top = top + delta_y
+        if (
+            candidate_left >= 0
+            and candidate_top >= 0
+            and candidate_left + width <= _FIXED_SLIDE_CANVAS_WIDTH_PX
+            and candidate_top + height <= _FIXED_SLIDE_CANVAS_HEIGHT_PX
+        ):
+            translated = (candidate_left, candidate_top)
+            break
+    if translated is None:
+        return None
+    suffix = "!important" if important else ""
+    return (
+        f"{selector}{{"
+        f"left:{_css_px_literal(translated[0])}{suffix};"
+        f"top:{_css_px_literal(translated[1])}{suffix};"
+        f"width:{_css_px_literal(width)}{suffix};"
+        f"height:{_css_px_literal(height)}{suffix}}}"
+    )
+
+
+def _strict_geometry_source_witness(
+    *,
+    body: str,
+    baseline_slide_css: str,
+    deck_css: str,
+    minimum: int,
+) -> str | None:
+    soup = BeautifulSoup(
+        assemble_compact_slide_html(
+            deck_stylesheet="",
+            html_body=body,
+            slide_css="",
+        ),
+        "html.parser",
+    )
+    inventory = _body_selector_inventory(body)
+    semantic_text_owners = _semantic_text_owners(soup)
+    eligible: list[tuple[Tag, str]] = []
+    for element in soup.find_all(True):
+        if not isinstance(element, Tag) or not any(
+            _element_is_within(owner, element)
+            for owner in semantic_text_owners
+        ):
+            continue
+        winners = _geometry_cascade_winners(
+            element,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+            candidate_slide_css="",
+        )
+        if winners is None:
+            continue
+        box = {
+            property_name: _strict_geometry_pixel_value(
+                winners[property_name]
+            )
+            for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+        }
+        if any(
+            value is None or not math.isfinite(value)
+            for value in box.values()
+        ):
+            continue
+        authenticated_size = _authenticated_geometry_size_px(
+            element,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+        )
+        if authenticated_size is None or set(authenticated_size) != {
+            "width",
+            "height",
+        }:
+            continue
+        if (
+            _authenticated_position_value(
+                element,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+            )
+            != "absolute"
+        ):
+            continue
+        manifest_selector = _strict_unique_manifest_selector(
+            element,
+            soup,
+            inventory,
+        )
+        if manifest_selector is None:
+            continue
+        important = _inline_geometry_requires_important(element)
+        if important is None:
+            continue
+        candidate_rule = _strict_geometry_candidate_rule(
+            manifest_selector,
+            {
+                property_name: float(value)
+                for property_name, value in box.items()
+                if value is not None
+            },
+            important=important,
+        )
+        if candidate_rule is None or not (
+            _authenticated_absolute_slide_canvas_target(
+                element,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+                candidate_slide_css=candidate_rule,
+            )
+            and _candidate_geometry_wins_authenticated_cascade(
+                element,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+                candidate_slide_css=candidate_rule,
+            )
+        ):
+            continue
+        eligible.append((element, candidate_rule))
+
+    overlay_budget = repair_overlay_utf8_budget(
+        baseline=baseline_slide_css,
+    )
+    for first, second in combinations(eligible, 2):
+        elements = (first[0], second[0])
+        if not _contains_independent_element_antichain(
+            elements,
+            minimum=minimum,
+        ):
+            continue
+        if (
+            len(first[1].encode("utf-8"))
+            + len(second[1].encode("utf-8"))
+            > overlay_budget
+        ):
+            continue
+        combined = first[1] + second[1]
+        if not all(
+            _candidate_geometry_wins_authenticated_cascade(
+                element,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+                candidate_slide_css=combined,
+            )
+            for element in elements
+        ):
+            continue
+        try:
+            retained = _retained_slide_css(combined)
+            retained = _retained_slide_css_with_preserved_text_geometry(
+                retained,
+                body,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+            )
+            if len(retained.encode("utf-8")) > overlay_budget:
+                continue
+            composed = compose_authenticated_slide_css(
+                baseline=baseline_slide_css,
+                overlay=retained,
+            )
+            if (
+                len(composed.encode("utf-8"))
+                > _COMPACT_V2_SLIDE_CSS_MAX_UTF8_BYTES
+            ):
+                continue
+        except Exception:
+            continue
+        if all(
+            _candidate_geometry_wins_authenticated_cascade(
+                element,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+                candidate_slide_css=retained,
+            )
+            for element in elements
+        ):
+            return retained
+    return None
+
+
 def _priority_geometry_sources_are_feasible(
     program: DeckRepairProgram,
     authorized_sources: tuple[RepairSourceContext, ...],
+    read_only_sources: tuple[RepairSourceContext, ...],
 ) -> bool:
-    """Fail before provider admission when two independent targets cannot exist."""
+    """Prove each priority slide can materialize two safe geometry moves."""
 
-    acceptance = _campaign_acceptance_contract(program)
-    if acceptance["priority_geometry_required"] is not True:
-        return True
-    minimum = acceptance[
-        "minimum_distinct_geometry_targets_per_priority_selector"
-    ]
-    if type(minimum) is not int or minimum < 1:
-        return False
-    selector_map = acceptance["priority_selector_by_failure_code"]
-    if not isinstance(selector_map, dict):
-        return False
-    body_by_selector = {
-        source.selector: source.text
-        for source in authorized_sources
-        if source.source_role == "body"
-    }
-    for selector in {str(value) for value in selector_map.values()}:
-        body = body_by_selector.get(selector)
-        if body is None:
+    try:
+        acceptance = _campaign_acceptance_contract(program)
+        if acceptance["priority_geometry_required"] is not True:
+            return True
+        minimum = acceptance[
+            "minimum_distinct_geometry_targets_per_priority_selector"
+        ]
+        if type(minimum) is not int or minimum < 1:
             return False
-        try:
-            soup = BeautifulSoup(body, "html.parser")
-        except Exception:
+        selector_map = acceptance["priority_selector_by_failure_code"]
+        if not isinstance(selector_map, dict):
             return False
-        eligible = tuple(
-            element
-            for element in soup.find_all(True)
-            if isinstance(element, Tag)
-            and str(element.name).casefold()
-            not in {
-                "body",
-                "head",
-                "html",
-                *_NON_VISIBLE_HTML_CONTENT_ELEMENTS,
-            }
-            and _inline_geometry_requires_important(element) is not None
+        body_sources = tuple(
+            source
+            for source in authorized_sources
+            if source.source_role == "body"
         )
-        if not _contains_independent_element_antichain(
-            eligible,
-            minimum=minimum,
+        baseline_sources = tuple(
+            source
+            for source in authorized_sources
+            if source.source_role == "slide_css"
+        )
+        deck_css_sources = tuple(
+            source.text
+            for source in read_only_sources
+            if source.source_role == "deck_css"
+        )
+        body_by_selector = {
+            str(source.selector): source.text for source in body_sources
+        }
+        baseline_by_selector = {
+            str(source.selector): source.text for source in baseline_sources
+        }
+        if (
+            len(deck_css_sources) != 1
+            or len(body_by_selector) != len(body_sources)
+            or len(baseline_by_selector) != len(baseline_sources)
         ):
             return False
-    return True
+        deck_css = deck_css_sources[0]
+        body_source_by_selector = {
+            str(source.selector): source for source in body_sources
+        }
+        baseline_source_by_selector = {
+            str(source.selector): source for source in baseline_sources
+        }
+        source_updates: list[SourceUpdate] = []
+        for selector in sorted(
+            {str(value) for value in selector_map.values()},
+            key=_priority_selector_sort_key,
+        ):
+            body_source = body_source_by_selector.get(selector)
+            baseline_source = baseline_source_by_selector.get(selector)
+            if body_source is None or baseline_source is None:
+                return False
+            witness = _strict_geometry_source_witness(
+                body=body_source.text,
+                baseline_slide_css=baseline_source.text,
+                deck_css=deck_css,
+                minimum=minimum,
+            )
+            if witness is None:
+                return False
+            source_updates.extend(
+                (
+                    SourceUpdate(
+                        selector=selector,
+                        source_role="body",
+                        expected_source_hash=body_source.manifest_source_hash,
+                        content=body_source.text,
+                    ),
+                    SourceUpdate(
+                        selector=selector,
+                        source_role="slide_css",
+                        expected_source_hash=(
+                            baseline_source.manifest_source_hash
+                        ),
+                        content=witness,
+                    ),
+                )
+            )
+        candidate = DeckRepairCandidate(
+            source_updates=tuple(source_updates),
+            rationale="Authenticated source-feasibility witness.",
+        )
+        validate_candidate_against_program(candidate, program)
+        if not _candidate_slide_css_is_safe_filter_input(candidate):
+            return False
+        canonical_candidate = _candidate_with_manifest_body_sources(
+            candidate,
+            authorized_sources,
+        )
+        if not _candidate_slide_css_preserves_authenticated_baselines(
+            canonical_candidate,
+            authorized_sources,
+        ):
+            return False
+        canonical_candidate = _candidate_with_retained_slide_css(
+            canonical_candidate,
+        )
+        canonical_candidate = _candidate_with_preserved_text_geometry(
+            canonical_candidate,
+            authorized_sources,
+            read_only_sources,
+        )
+        return (
+            _candidate_uses_manifest_body_sources(
+                canonical_candidate,
+                authorized_sources,
+            )
+            and _candidate_slide_css_preserves_authenticated_baselines(
+                canonical_candidate,
+                authorized_sources,
+            )
+            and _candidate_fits_compact_v2_source_contract(
+                canonical_candidate,
+                authorized_sources,
+                read_only_sources,
+                validate_compiled_source_size=True,
+            )
+            and _candidate_materializes_priority_contract(
+                canonical_candidate,
+                program,
+                authorized_sources,
+                read_only_sources,
+            )
+            and _candidate_css_targets_manifest_bodies(
+                canonical_candidate,
+                authorized_sources,
+                read_only_sources=read_only_sources,
+                require_geometry=False,
+            )
+        )
+    except Exception:
+        return False
 
 
 def _semantic_text_owners(soup: BeautifulSoup) -> tuple[Tag, ...]:
@@ -5381,6 +5780,7 @@ class ProductionDeckRepairAuthor:
         if not _priority_geometry_sources_are_feasible(
             request.program,
             context.authorized_sources,
+            context.read_only_sources,
         ):
             raise DeckRepairAuthorError("repair_unavailable")
         messages = build_repair_author_messages(

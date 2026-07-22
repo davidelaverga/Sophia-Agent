@@ -34,7 +34,9 @@ from deerflow.sophia.deck_design_lift.repair_author import (
     RepairSourceContext,
     _campaign_acceptance_contract,
     _candidate_materializes_priority_contract,
+    _priority_geometry_sources_are_feasible,
     _retained_slide_css,
+    _strict_geometry_candidate_rule,
     build_repair_author_messages,
     projected_repair_campaign_cost_usd,
     repair_preflight_admitted,
@@ -1443,6 +1445,200 @@ def test_priority_geometry_infeasible_context_is_rejected_before_provider(
     assert invoker.count_calls == []
     assert invoker.invoke_calls == []
     assert traces.inputs == []
+
+
+def _v32_priority_geometry_context(
+    *,
+    body: str,
+    deck_css: str = DECK_CSS_TEXT,
+) -> tuple[RepairInvocationRequest, RepairAuthorContext]:
+    program = _specificity_first_three_selector_program()
+    request = _request(program=program)
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    base = _context(request=request)
+    sources = tuple(
+        RepairSourceContext(
+            build_id=request.build_id,
+            manifest_revision=program.initial_manifest_revision,
+            manifest_hash=MANIFEST_HASH,
+            selector=selector,
+            source_role=source_role,
+            component_version_id=f"{selector}-{source_role}-version-001",
+            manifest_source_path=(
+                f"versions/{selector.replace(':', '-')}/{source_role}.txt"
+            ),
+            manifest_source_hash=(
+                SLIDE_CSS_HASH
+                if source_role == "slide_css"
+                else body_hash
+            ),
+            text=(
+                BASELINE_SLIDE_CSS_TEXT
+                if source_role == "slide_css"
+                else body
+            ),
+        )
+        for selector in program.authorized_selectors
+        for source_role in program.authorized_source_roles[selector]
+    )
+    renders = tuple(
+        RepairContextImage(
+            artifact_version_id=request.initial_artifact_version_id,
+            selector=evidence.selector,
+            path=evidence.path,
+            sha256=evidence.sha256,
+            width=64,
+            height=36,
+            png_bytes=RENDER_BYTES,
+        )
+        for repair in program.selector_repairs
+        for evidence in repair.render_evidence
+    )
+    return request, base.model_copy(
+        update={
+            "authorized_sources": sources,
+            "read_only_sources": tuple(
+                source.model_copy(
+                    update={
+                        "text": deck_css,
+                        "manifest_source_hash": hashlib.sha256(
+                            deck_css.encode()
+                        ).hexdigest(),
+                    }
+                )
+                for source in base.read_only_sources
+            ),
+            "failing_renders": renders,
+            "owned_assets": (),
+        }
+    )
+
+
+def test_v32_static_group_layout_is_rejected_before_provider_admission() -> None:
+    request, context = _v32_priority_geometry_context(
+        body=(
+            '<div class="group">'
+            '<section class="subject">Current PSI</section>'
+            '<section class="mechanism">Control loop</section>'
+            "</div>"
+        )
+    )
+    traces = FakeTraceFactory()
+    author, loader, invoker = _author(
+        request=request,
+        context=context,
+        trace_factory=traces,
+    )
+
+    assert not _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "repair_unavailable")
+    assert loader.calls == [request]
+    assert invoker.prepare_calls == []
+    assert invoker.count_calls == []
+    assert invoker.invoke_calls == []
+    assert traces.inputs == []
+
+
+def test_v32_combined_absolute_pair_passes_strict_source_feasibility() -> None:
+    request, context = _v32_priority_geometry_context(
+        body=(
+            '<section class="subject" style="position:absolute;'
+            'box-sizing:border-box;left:80px;top:80px;'
+            'width:640px;height:360px">Current PSI</section>'
+            '<section class="mechanism" style="position:absolute;'
+            'box-sizing:border-box;left:800px;top:520px;'
+            'width:640px;height:360px">Control loop</section>'
+        )
+    )
+
+    assert _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_combined_geometry_witness_rejects_aggregate_oversize() -> None:
+    class_names = tuple(
+        f"geometry-anchor-{index}-{'x' * 44}"
+        for index in range(8)
+    )
+    long_classes = " ".join(class_names)
+    selector_stem = "section" + "".join(
+        f".{class_name}" for class_name in class_names
+    )
+    first_rule = _strict_geometry_candidate_rule(
+        f"{selector_stem}:nth-child(1)",
+        {"left": 80.0, "top": 80.0, "width": 640.0, "height": 360.0},
+        important=True,
+    )
+    second_rule = _strict_geometry_candidate_rule(
+        f"{selector_stem}:nth-child(2)",
+        {
+            "left": 800.0,
+            "top": 520.0,
+            "width": 640.0,
+            "height": 360.0,
+        },
+        important=True,
+    )
+    assert first_rule is not None and second_rule is not None
+    assert len(first_rule.encode()) <= repair_overlay_utf8_budget(baseline="")
+    assert len(second_rule.encode()) <= repair_overlay_utf8_budget(baseline="")
+    assert len((first_rule + second_rule).encode()) > repair_overlay_utf8_budget(
+        baseline="",
+    )
+    request, context = _v32_priority_geometry_context(
+        body=(
+            f'<section class="{long_classes}" '
+            'style="position:absolute;box-sizing:border-box;'
+            'left:80px;top:80px;width:640px;height:360px">'
+            "Current PSI</section>"
+            f'<section class="{long_classes}" '
+            'style="position:absolute;box-sizing:border-box;'
+            'left:800px;top:520px;width:640px;height:360px">'
+            "Control loop</section>"
+        )
+    )
+
+    assert not _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_geometry_witness_rejects_candidate_only_box_sizing() -> None:
+    retained = _retained_slide_css(
+        ".subject{left:88px!important;top:80px!important;"
+        "width:640px!important;height:360px!important;"
+        "box-sizing:border-box}"
+    )
+    assert "box-sizing" not in retained
+    request, context = _v32_priority_geometry_context(
+        body=(
+            '<section class="subject" style="position:absolute;'
+            'left:80px;top:80px;width:640px;height:360px">'
+            "Current PSI</section>"
+            '<section class="mechanism" style="position:absolute;'
+            'left:800px;top:520px;width:640px;height:360px">'
+            "Control loop</section>"
+        ),
+        deck_css=":root{}",
+    )
+
+    assert not _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
 
 
 @pytest.mark.parametrize(
