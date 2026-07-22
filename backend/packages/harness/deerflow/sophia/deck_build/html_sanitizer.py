@@ -148,6 +148,28 @@ _SIMPLE_POSITION_SELECTOR_RE = re.compile(
     r"^(?P<tag>\*|[-_a-zA-Z][-_a-zA-Z0-9]*)?"
     r"(?P<qualifiers>(?:[.#][-_a-zA-Z][-_a-zA-Z0-9]*)*)$"
 )
+_TRUSTED_SLIDE_SHELL_INLINE_STYLE = (
+    "display: block !important; position: static !important; "
+    "margin: 0 !important; padding: 0 !important; "
+    "width: 1920px !important; min-width: 1920px !important; "
+    "max-width: 1920px !important; "
+    "height: 1080px !important; min-height: 1080px !important; "
+    "max-height: 1080px !important; "
+    "box-sizing: border-box !important; border: 0 !important; "
+    "overflow: hidden !important;"
+)
+_TRUSTED_SLIDE_CANVAS_INLINE_STYLE = (
+    "display: block !important; position: relative !important; "
+    "left: 0 !important; top: 0 !important; "
+    "right: auto !important; bottom: auto !important; "
+    "margin: 0 !important; padding: 0 !important; float: none !important; "
+    "width: 1920px !important; min-width: 1920px !important; "
+    "max-width: 1920px !important; "
+    "height: 1080px !important; min-height: 1080px !important; "
+    "max-height: 1080px !important; "
+    "box-sizing: border-box !important; border: 0 !important; "
+    "overflow: hidden !important;"
+)
 
 
 def assemble_compact_slide_html(
@@ -159,7 +181,7 @@ def assemble_compact_slide_html(
     """Wrap model-owned CSS and markup in a content-free compiler shell."""
 
     return f"""<!doctype html>
-<html lang="en">
+<html lang="en" style="{_TRUSTED_SLIDE_SHELL_INLINE_STYLE}">
 <head>
 <meta charset="utf-8">
 <style data-deck-harness="true">
@@ -171,8 +193,8 @@ main {{ width: 1920px; height: 1080px; box-sizing: border-box; overflow: hidden;
 {slide_css or ""}
 </style>
 </head>
-<body>
-<main class="slide-root" data-slide-canvas="true" style="width: 1920px; height: 1080px;">
+<body style="{_TRUSTED_SLIDE_SHELL_INLINE_STYLE}">
+<main class="slide-root" data-slide-canvas="true" style="{_TRUSTED_SLIDE_CANVAS_INLINE_STYLE}">
 {html_body}
 </main>
 </body>

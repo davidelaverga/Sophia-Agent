@@ -138,6 +138,61 @@ _AMBIGUOUS_INLINE_GEOMETRY_PROPERTIES = frozenset(
         "right",
     }
 )
+_MARGIN_PROPERTIES = frozenset(
+    {
+        "margin",
+        "margin-block",
+        "margin-block-end",
+        "margin-block-start",
+        "margin-bottom",
+        "margin-inline",
+        "margin-inline-end",
+        "margin-inline-start",
+        "margin-left",
+        "margin-right",
+        "margin-top",
+    }
+)
+_VENDOR_MARGIN_PROPERTIES = frozenset(
+    {
+        "-moz-margin-end",
+        "-moz-margin-left-value",
+        "-moz-margin-right-value",
+        "-moz-margin-start",
+        "-webkit-margin-after",
+        "-webkit-margin-before",
+        "-webkit-margin-bottom-collapse",
+        "-webkit-margin-collapse",
+        "-webkit-margin-end",
+        "-webkit-margin-start",
+        "-webkit-margin-top-collapse",
+    }
+)
+_VENDOR_BOX_SIZING_PROPERTIES = frozenset(
+    {"-moz-box-sizing", "-webkit-box-sizing"}
+)
+_UA_DEFAULT_MARGIN_TAGS = frozenset(
+    {
+        "blockquote",
+        "dd",
+        "dir",
+        "dl",
+        "fieldset",
+        "figure",
+        "h1",
+        "h2",
+        "h3",
+        "h4",
+        "h5",
+        "h6",
+        "hr",
+        "menu",
+        "ol",
+        "p",
+        "pre",
+        "ul",
+    }
+)
 _SLIDE_CSS_FORBIDDEN_FONT_PROPERTIES = frozenset({"font", "font-family"})
 _NON_VISIBLE_HTML_CONTENT_ELEMENTS = frozenset({"script", "style", "template"})
 _FORBIDDEN_CANDIDATE_BODY_ATTRIBUTES = frozenset(
@@ -3020,6 +3075,1553 @@ def _authenticated_geometry_size_px(
     return values
 
 
+def _geometry_cascade_winners(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+    candidate_slide_css: str,
+) -> dict[
+    str,
+    tuple[tuple[int, int, int, int, int, int], Any, bool] | None,
+] | None:
+    """Resolve effective geometry winners without materializing the slide.
+
+    The candidate stylesheet is ordered after both authenticated stylesheets,
+    while inline declarations retain their native cascade precedence. A
+    matching authenticated geometry alias is fail-closed because its computed
+    interaction with the sealed four-property lane is intentionally excluded.
+    """
+
+    sources = (
+        (False, deck_css),
+        (False, baseline_slide_css),
+        (True, candidate_slide_css),
+    )
+    parsed_sources: list[tuple[bool, tuple[Any, ...]]] = []
+    for candidate_authored, source in sources:
+        rules = _stylesheet_qualified_rules(source)
+        if rules is None:
+            return None
+        parsed_sources.append((candidate_authored, tuple(rules)))
+
+    winners: dict[
+        str,
+        dict[
+            int,
+            tuple[tuple[int, int, int, int, int, int], Any, bool],
+        ],
+    ] = {
+        property_name: {}
+        for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+    }
+    order = 0
+    for candidate_authored, rules in parsed_sources:
+        for rule in rules:
+            try:
+                parsed = tuple(
+                    tinycss2.parse_declaration_list(
+                        rule.content,
+                        skip_comments=True,
+                        skip_whitespace=True,
+                    )
+                )
+            except Exception:
+                return None
+            if any(item.type != "declaration" for item in parsed):
+                return None
+            selector_matches = _qualified_rule_selector_matches(rule, soup)
+            if selector_matches is None:
+                return None
+            matched_specificities = tuple(
+                specificity
+                for specificity, matches in selector_matches
+                if any(match is element for match in matches)
+            )
+            if not matched_specificities:
+                order += 1
+                continue
+            if any(
+                item.lower_name in _AMBIGUOUS_INLINE_GEOMETRY_PROPERTIES
+                for item in parsed
+            ):
+                return None
+            relevant = {
+                property_name: _final_css_declaration(
+                    parsed,
+                    frozenset({property_name}),
+                )
+                for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+            }
+            for specificity in matched_specificities:
+                for property_name, declaration in relevant.items():
+                    if declaration is None:
+                        continue
+                    _record_css_winner(
+                        winners[property_name],
+                        element=element,
+                        declaration=declaration,
+                        specificity=specificity,
+                        order=order,
+                        candidate_authored=candidate_authored,
+                    )
+            order += 1
+
+    style = element.attrs.get("style")
+    if isinstance(style, str) and style.strip():
+        try:
+            parsed_inline = tuple(
+                tinycss2.parse_declaration_list(
+                    style,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+            )
+        except Exception:
+            return None
+        if any(item.type != "declaration" for item in parsed_inline) or any(
+            item.lower_name in _AMBIGUOUS_INLINE_GEOMETRY_PROPERTIES
+            for item in parsed_inline
+        ):
+            return None
+        for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES:
+            declaration = _final_css_declaration(
+                parsed_inline,
+                frozenset({property_name}),
+            )
+            if declaration is None:
+                continue
+            _record_css_winner(
+                winners[property_name],
+                element=element,
+                declaration=declaration,
+                specificity=(0, 0, 0),
+                order=order,
+                candidate_authored=False,
+                inline=True,
+            )
+
+    return {
+        property_name: property_winners.get(id(element))
+        for property_name, property_winners in winners.items()
+    }
+
+
+def _authenticated_position_value(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> str | None:
+    """Resolve one authenticated ``position`` value, defaulting to static.
+
+    Candidate CSS cannot author ``position``. Matching ``all`` declarations
+    and non-literal position values are fail-closed because their computed
+    effect cannot be proven inside the sealed repair lane.
+    """
+
+    sources = (deck_css, baseline_slide_css)
+    parsed_sources: list[tuple[Any, ...]] = []
+    for source in sources:
+        rules = _stylesheet_qualified_rules(source)
+        if rules is None:
+            return None
+        parsed_sources.append(tuple(rules))
+
+    winners: dict[
+        int,
+        tuple[tuple[int, int, int, int, int, int], Any, bool],
+    ] = {}
+    order = 0
+    for rules in parsed_sources:
+        for rule in rules:
+            try:
+                parsed = tuple(
+                    tinycss2.parse_declaration_list(
+                        rule.content,
+                        skip_comments=True,
+                        skip_whitespace=True,
+                    )
+                )
+            except Exception:
+                return None
+            if any(item.type != "declaration" for item in parsed):
+                return None
+            selector_matches = _qualified_rule_selector_matches(rule, soup)
+            if selector_matches is None:
+                return None
+            matched_specificities = tuple(
+                specificity
+                for specificity, matches in selector_matches
+                if any(match is element for match in matches)
+            )
+            if not matched_specificities:
+                order += 1
+                continue
+            if any(item.lower_name == "all" for item in parsed):
+                return None
+            declaration = _final_css_declaration(
+                parsed,
+                frozenset({"position"}),
+            )
+            if declaration is not None:
+                for specificity in matched_specificities:
+                    _record_css_winner(
+                        winners,
+                        element=element,
+                        declaration=declaration,
+                        specificity=specificity,
+                        order=order,
+                        candidate_authored=False,
+                    )
+            order += 1
+
+    style = element.attrs.get("style")
+    if isinstance(style, str) and style.strip():
+        try:
+            parsed_inline = tuple(
+                tinycss2.parse_declaration_list(
+                    style,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+            )
+        except Exception:
+            return None
+        if any(item.type != "declaration" for item in parsed_inline) or any(
+            item.lower_name == "all" for item in parsed_inline
+        ):
+            return None
+        declaration = _final_css_declaration(
+            parsed_inline,
+            frozenset({"position"}),
+        )
+        if declaration is not None:
+            _record_css_winner(
+                winners,
+                element=element,
+                declaration=declaration,
+                specificity=(0, 0, 0),
+                order=order,
+                candidate_authored=False,
+                inline=True,
+            )
+
+    winner = winners.get(id(element))
+    if winner is None:
+        return "static"
+    value = _single_css_identifier(winner[1])
+    if value not in {"absolute", "fixed", "relative", "static", "sticky"}:
+        return None
+    return value
+
+
+def _authenticated_display_generates_box(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> bool:
+    """Prove an authenticated element still generates a principal box."""
+
+    sources = (deck_css, baseline_slide_css)
+    parsed_sources: list[tuple[Any, ...]] = []
+    for source in sources:
+        rules = _stylesheet_qualified_rules(source)
+        if rules is None:
+            return False
+        parsed_sources.append(tuple(rules))
+
+    winners: dict[
+        int,
+        tuple[tuple[int, int, int, int, int, int], Any, bool],
+    ] = {}
+    order = 0
+    for rules in parsed_sources:
+        for rule in rules:
+            try:
+                parsed = tuple(
+                    tinycss2.parse_declaration_list(
+                        rule.content,
+                        skip_comments=True,
+                        skip_whitespace=True,
+                    )
+                )
+            except Exception:
+                return False
+            if any(item.type != "declaration" for item in parsed):
+                return False
+            selector_matches = _qualified_rule_selector_matches(rule, soup)
+            if selector_matches is None:
+                return False
+            matched_specificities = tuple(
+                specificity
+                for specificity, matches in selector_matches
+                if any(match is element for match in matches)
+            )
+            if not matched_specificities:
+                order += 1
+                continue
+            if any(
+                item.lower_name == "all"
+                or item.lower_name in _VENDOR_BOX_SIZING_PROPERTIES
+                for item in parsed
+            ):
+                return False
+            declaration = _final_css_declaration(
+                parsed,
+                frozenset({"display"}),
+            )
+            if declaration is not None:
+                for specificity in matched_specificities:
+                    _record_css_winner(
+                        winners,
+                        element=element,
+                        declaration=declaration,
+                        specificity=specificity,
+                        order=order,
+                        candidate_authored=False,
+                    )
+            order += 1
+
+    style = element.attrs.get("style")
+    if isinstance(style, str) and style.strip():
+        try:
+            parsed_inline = tuple(
+                tinycss2.parse_declaration_list(
+                    style,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+            )
+        except Exception:
+            return False
+        if any(item.type != "declaration" for item in parsed_inline) or any(
+            item.lower_name == "all"
+            or item.lower_name in _VENDOR_BOX_SIZING_PROPERTIES
+            for item in parsed_inline
+        ):
+            return False
+        declaration = _final_css_declaration(
+            parsed_inline,
+            frozenset({"display"}),
+        )
+        if declaration is not None:
+            _record_css_winner(
+                winners,
+                element=element,
+                declaration=declaration,
+                specificity=(0, 0, 0),
+                order=order,
+                candidate_authored=False,
+                inline=True,
+            )
+
+    winner = winners.get(id(element))
+    if winner is None:
+        return True
+    tokens = _significant_css_value_tokens(winner[1])
+    if not tokens or any(token.type != "ident" for token in tokens):
+        return False
+    value = tuple(str(token.value).casefold() for token in tokens)
+    return value in {
+        ("block",),
+        ("flex",),
+        ("flow-root",),
+        ("grid",),
+        ("inline-block",),
+        ("inline-flex",),
+        ("inline-grid",),
+        ("inline-table",),
+        ("list-item",),
+        ("table",),
+        ("block", "flex"),
+        ("block", "flow"),
+        ("block", "flow-root"),
+        ("block", "grid"),
+        ("inline", "flex"),
+        ("inline", "flow"),
+        ("inline", "flow-root"),
+        ("inline", "grid"),
+    }
+
+
+def _authenticated_explicit_visibility_value(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> tuple[bool, str | None]:
+    """Resolve an explicit visibility winner; absence remains inherited."""
+
+    winners: dict[
+        int,
+        tuple[tuple[int, int, int, int, int, int], Any, bool],
+    ] = {}
+    order = 0
+    for source in (deck_css, baseline_slide_css):
+        rules = _stylesheet_qualified_rules(source)
+        if rules is None:
+            return (False, None)
+        for rule in rules:
+            try:
+                parsed = tuple(
+                    tinycss2.parse_declaration_list(
+                        rule.content,
+                        skip_comments=True,
+                        skip_whitespace=True,
+                    )
+                )
+            except Exception:
+                return (False, None)
+            if any(item.type != "declaration" for item in parsed):
+                return (False, None)
+            selector_matches = _qualified_rule_selector_matches(rule, soup)
+            if selector_matches is None:
+                return (False, None)
+            matched_specificities = tuple(
+                specificity
+                for specificity, matches in selector_matches
+                if any(match is element for match in matches)
+            )
+            if not matched_specificities:
+                order += 1
+                continue
+            if any(item.lower_name == "all" for item in parsed):
+                return (False, None)
+            declaration = _final_css_declaration(
+                parsed,
+                frozenset({"visibility"}),
+            )
+            if declaration is not None:
+                for specificity in matched_specificities:
+                    _record_css_winner(
+                        winners,
+                        element=element,
+                        declaration=declaration,
+                        specificity=specificity,
+                        order=order,
+                        candidate_authored=False,
+                    )
+            order += 1
+
+    style = element.attrs.get("style")
+    if isinstance(style, str) and style.strip():
+        try:
+            parsed_inline = tuple(
+                tinycss2.parse_declaration_list(
+                    style,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+            )
+        except Exception:
+            return (False, None)
+        if any(item.type != "declaration" for item in parsed_inline) or any(
+            item.lower_name == "all" for item in parsed_inline
+        ):
+            return (False, None)
+        declaration = _final_css_declaration(
+            parsed_inline,
+            frozenset({"visibility"}),
+        )
+        if declaration is not None:
+            _record_css_winner(
+                winners,
+                element=element,
+                declaration=declaration,
+                specificity=(0, 0, 0),
+                order=order,
+                candidate_authored=False,
+                inline=True,
+            )
+
+    winner = winners.get(id(element))
+    if winner is None:
+        return (True, None)
+    value = _single_css_identifier(winner[1])
+    if value not in {"collapse", "hidden", "visible"}:
+        return (False, None)
+    return (True, value)
+
+
+def _authenticated_target_is_visible(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> bool:
+    current: Tag | None = element
+    while current is not None:
+        known, value = _authenticated_explicit_visibility_value(
+            current,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+        )
+        if not known:
+            return False
+        if value is not None:
+            return value == "visible"
+        current = _parent_tag(current)
+    return True
+
+
+def _authenticated_element_is_fully_opaque(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> bool:
+    """Require an effective opacity of exactly one for material geometry."""
+
+    winners: dict[
+        int,
+        tuple[tuple[int, int, int, int, int, int], Any, bool],
+    ] = {}
+    order = 0
+    for source in (deck_css, baseline_slide_css):
+        rules = _stylesheet_qualified_rules(source)
+        if rules is None:
+            return False
+        for rule in rules:
+            try:
+                parsed = tuple(
+                    tinycss2.parse_declaration_list(
+                        rule.content,
+                        skip_comments=True,
+                        skip_whitespace=True,
+                    )
+                )
+            except Exception:
+                return False
+            if any(item.type != "declaration" for item in parsed):
+                return False
+            selector_matches = _qualified_rule_selector_matches(rule, soup)
+            if selector_matches is None:
+                return False
+            matched_specificities = tuple(
+                specificity
+                for specificity, matches in selector_matches
+                if any(match is element for match in matches)
+            )
+            if not matched_specificities:
+                order += 1
+                continue
+            if any(item.lower_name == "all" for item in parsed):
+                return False
+            declaration = _final_css_declaration(
+                parsed,
+                frozenset({"opacity"}),
+            )
+            if declaration is not None:
+                for specificity in matched_specificities:
+                    _record_css_winner(
+                        winners,
+                        element=element,
+                        declaration=declaration,
+                        specificity=specificity,
+                        order=order,
+                        candidate_authored=False,
+                    )
+            order += 1
+
+    style = element.attrs.get("style")
+    if isinstance(style, str) and style.strip():
+        try:
+            parsed_inline = tuple(
+                tinycss2.parse_declaration_list(
+                    style,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+            )
+        except Exception:
+            return False
+        if any(item.type != "declaration" for item in parsed_inline) or any(
+            item.lower_name == "all" for item in parsed_inline
+        ):
+            return False
+        declaration = _final_css_declaration(
+            parsed_inline,
+            frozenset({"opacity"}),
+        )
+        if declaration is not None:
+            _record_css_winner(
+                winners,
+                element=element,
+                declaration=declaration,
+                specificity=(0, 0, 0),
+                order=order,
+                candidate_authored=False,
+                inline=True,
+            )
+
+    winner = winners.get(id(element))
+    if winner is None:
+        return True
+    tokens = _significant_css_value_tokens(winner[1])
+    if len(tokens) != 1:
+        return False
+    value = _finite_css_token_value(tokens[0])
+    return bool(
+        value is not None
+        and (
+            (tokens[0].type == "number" and value == 1)
+            or (tokens[0].type == "percentage" and value == 100)
+        )
+    )
+
+
+def _authenticated_element_preserves_safe_paint_order(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> bool:
+    """Reject authenticated stacking effects that can bury material geometry."""
+
+    properties = frozenset({"isolation", "mix-blend-mode", "z-index"})
+    winners: dict[
+        str,
+        dict[
+            int,
+            tuple[tuple[int, int, int, int, int, int], Any, bool],
+        ],
+    ] = {property_name: {} for property_name in properties}
+    order = 0
+    for source in (deck_css, baseline_slide_css):
+        rules = _stylesheet_qualified_rules(source)
+        if rules is None:
+            return False
+        for rule in rules:
+            try:
+                parsed = tuple(
+                    tinycss2.parse_declaration_list(
+                        rule.content,
+                        skip_comments=True,
+                        skip_whitespace=True,
+                    )
+                )
+            except Exception:
+                return False
+            if any(item.type != "declaration" for item in parsed):
+                return False
+            selector_matches = _qualified_rule_selector_matches(rule, soup)
+            if selector_matches is None:
+                return False
+            matched_specificities = tuple(
+                specificity
+                for specificity, matches in selector_matches
+                if any(match is element for match in matches)
+            )
+            if not matched_specificities:
+                order += 1
+                continue
+            if any(item.lower_name == "all" for item in parsed):
+                return False
+            relevant = {
+                property_name: _final_css_declaration(
+                    parsed,
+                    frozenset({property_name}),
+                )
+                for property_name in properties
+            }
+            for specificity in matched_specificities:
+                for property_name, declaration in relevant.items():
+                    if declaration is None:
+                        continue
+                    _record_css_winner(
+                        winners[property_name],
+                        element=element,
+                        declaration=declaration,
+                        specificity=specificity,
+                        order=order,
+                        candidate_authored=False,
+                    )
+            order += 1
+
+    style = element.attrs.get("style")
+    if isinstance(style, str) and style.strip():
+        try:
+            parsed_inline = tuple(
+                tinycss2.parse_declaration_list(
+                    style,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+            )
+        except Exception:
+            return False
+        if any(item.type != "declaration" for item in parsed_inline) or any(
+            item.lower_name == "all" for item in parsed_inline
+        ):
+            return False
+        for property_name in properties:
+            declaration = _final_css_declaration(
+                parsed_inline,
+                frozenset({property_name}),
+            )
+            if declaration is None:
+                continue
+            _record_css_winner(
+                winners[property_name],
+                element=element,
+                declaration=declaration,
+                specificity=(0, 0, 0),
+                order=order,
+                candidate_authored=False,
+                inline=True,
+            )
+
+    isolation = winners["isolation"].get(id(element))
+    if isolation is not None and _single_css_identifier(isolation[1]) not in {
+        "auto",
+        "initial",
+        "unset",
+    }:
+        return False
+    blend_mode = winners["mix-blend-mode"].get(id(element))
+    if blend_mode is not None and _single_css_identifier(blend_mode[1]) not in {
+        "initial",
+        "normal",
+        "unset",
+    }:
+        return False
+    z_index = winners["z-index"].get(id(element))
+    if z_index is None:
+        return True
+    z_index_identifier = _single_css_identifier(z_index[1])
+    if z_index_identifier in {"auto", "initial", "unset"}:
+        return True
+    tokens = _significant_css_value_tokens(z_index[1])
+    if len(tokens) != 1 or tokens[0].type != "number":
+        return False
+    value = _finite_css_token_value(tokens[0])
+    return bool(value is not None and value.is_integer() and value >= 0)
+
+
+def _authenticated_target_margins_are_zero(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> bool:
+    """Admit only provably zero authenticated target margins."""
+
+    def declaration_is_zero(declaration: Any) -> bool:
+        tokens = _significant_css_value_tokens(declaration)
+        if not 1 <= len(tokens) <= 4:
+            return False
+        return all(
+            token.type in {"dimension", "number", "percentage"}
+            and _finite_css_token_value(token) == 0
+            for token in tokens
+        )
+
+    saw_margin_declaration = False
+    for source in (deck_css, baseline_slide_css):
+        rules = _stylesheet_qualified_rules(source)
+        if rules is None:
+            return False
+        for rule in rules:
+            try:
+                parsed = tuple(
+                    tinycss2.parse_declaration_list(
+                        rule.content,
+                        skip_comments=True,
+                        skip_whitespace=True,
+                    )
+                )
+            except Exception:
+                return False
+            if any(item.type != "declaration" for item in parsed):
+                return False
+            selector_matches = _qualified_rule_selector_matches(rule, soup)
+            if selector_matches is None:
+                return False
+            if not any(
+                any(match is element for match in matches)
+                for _specificity, matches in selector_matches
+            ):
+                continue
+            for declaration in parsed:
+                name = declaration.lower_name
+                if name in _MARGIN_PROPERTIES:
+                    saw_margin_declaration = True
+                    if not declaration_is_zero(declaration):
+                        return False
+                if name in _VENDOR_MARGIN_PROPERTIES:
+                    return False
+
+    style = element.attrs.get("style")
+    if not isinstance(style, str) or not style.strip():
+        return bool(
+            saw_margin_declaration
+            or str(element.name).casefold() not in _UA_DEFAULT_MARGIN_TAGS
+        )
+    try:
+        parsed_inline = tuple(
+            tinycss2.parse_declaration_list(
+                style,
+                skip_comments=True,
+                skip_whitespace=True,
+            )
+        )
+    except Exception:
+        return False
+    if any(item.type != "declaration" for item in parsed_inline):
+        return False
+    for declaration in parsed_inline:
+        name = declaration.lower_name
+        if name in _MARGIN_PROPERTIES:
+            saw_margin_declaration = True
+            if not declaration_is_zero(declaration):
+                return False
+        if name in _VENDOR_MARGIN_PROPERTIES:
+            return False
+    return bool(
+        saw_margin_declaration
+        or str(element.name).casefold() not in _UA_DEFAULT_MARGIN_TAGS
+    )
+
+
+def _effective_target_box_sizing_value(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+    candidate_slide_css: str,
+) -> str | None:
+    """Resolve final target box sizing across authenticated and repair CSS."""
+
+    sources = (deck_css, baseline_slide_css, candidate_slide_css)
+    parsed_sources: list[tuple[Any, ...]] = []
+    for source in sources:
+        rules = _stylesheet_qualified_rules(source)
+        if rules is None:
+            return None
+        parsed_sources.append(tuple(rules))
+
+    winners: dict[
+        int,
+        tuple[tuple[int, int, int, int, int, int], Any, bool],
+    ] = {}
+    order = 0
+    for source_index, rules in enumerate(parsed_sources):
+        for rule in rules:
+            try:
+                parsed = tuple(
+                    tinycss2.parse_declaration_list(
+                        rule.content,
+                        skip_comments=True,
+                        skip_whitespace=True,
+                    )
+                )
+            except Exception:
+                return None
+            if any(item.type != "declaration" for item in parsed):
+                return None
+            selector_matches = _qualified_rule_selector_matches(rule, soup)
+            if selector_matches is None:
+                return None
+            matched_specificities = tuple(
+                specificity
+                for specificity, matches in selector_matches
+                if any(match is element for match in matches)
+            )
+            if not matched_specificities:
+                order += 1
+                continue
+            if any(item.lower_name == "all" for item in parsed):
+                return None
+            declaration = _final_css_declaration(
+                parsed,
+                frozenset({"box-sizing"}),
+            )
+            if declaration is not None:
+                for specificity in matched_specificities:
+                    _record_css_winner(
+                        winners,
+                        element=element,
+                        declaration=declaration,
+                        specificity=specificity,
+                        order=order,
+                        candidate_authored=source_index == 2,
+                    )
+            order += 1
+
+    style = element.attrs.get("style")
+    if isinstance(style, str) and style.strip():
+        try:
+            parsed_inline = tuple(
+                tinycss2.parse_declaration_list(
+                    style,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+            )
+        except Exception:
+            return None
+        if any(item.type != "declaration" for item in parsed_inline) or any(
+            item.lower_name == "all" for item in parsed_inline
+        ):
+            return None
+        declaration = _final_css_declaration(
+            parsed_inline,
+            frozenset({"box-sizing"}),
+        )
+        if declaration is not None:
+            _record_css_winner(
+                winners,
+                element=element,
+                declaration=declaration,
+                specificity=(0, 0, 0),
+                order=order,
+                candidate_authored=False,
+                inline=True,
+            )
+
+    winner = winners.get(id(element))
+    if winner is None:
+        return "content-box"
+    return _single_css_identifier(winner[1])
+
+
+def _authenticated_ancestor_preserves_canvas_containing_block(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> bool:
+    """Reject authenticated ancestor effects that create a containing block."""
+
+    properties = frozenset(
+        {
+            "backdrop-filter",
+            "clip",
+            "clip-path",
+            "contain",
+            "container-type",
+            "content-visibility",
+            "filter",
+            "mask",
+            "mask-border-source",
+            "mask-image",
+            "motion",
+            "motion-path",
+            "offset",
+            "offset-path",
+            "perspective",
+            "rotate",
+            "scale",
+            "transform",
+            "translate",
+            "will-change",
+            "zoom",
+        }
+    )
+    safe_identifiers = {
+        "backdrop-filter": "none",
+        "clip": "auto",
+        "clip-path": "none",
+        "contain": "none",
+        "container-type": "normal",
+        "content-visibility": "visible",
+        "filter": "none",
+        "mask": "none",
+        "mask-border-source": "none",
+        "mask-image": "none",
+        "motion": "none",
+        "motion-path": "none",
+        "offset": "none",
+        "offset-path": "none",
+        "perspective": "none",
+        "rotate": "none",
+        "scale": "none",
+        "transform": "none",
+        "translate": "none",
+        "will-change": "auto",
+        "zoom": "normal",
+    }
+    vendor_aliases = frozenset(
+        f"-{vendor}-{property_name}"
+        for vendor in ("webkit", "moz", "ms", "o")
+        for property_name in properties
+    )
+    sources = (deck_css, baseline_slide_css)
+    parsed_sources: list[tuple[Any, ...]] = []
+    for source in sources:
+        rules = _stylesheet_qualified_rules(source)
+        if rules is None:
+            return False
+        parsed_sources.append(tuple(rules))
+
+    winners: dict[
+        str,
+        dict[
+            int,
+            tuple[tuple[int, int, int, int, int, int], Any, bool],
+        ],
+    ] = {property_name: {} for property_name in properties}
+    order = 0
+    for rules in parsed_sources:
+        for rule in rules:
+            try:
+                parsed = tuple(
+                    tinycss2.parse_declaration_list(
+                        rule.content,
+                        skip_comments=True,
+                        skip_whitespace=True,
+                    )
+                )
+            except Exception:
+                return False
+            if any(item.type != "declaration" for item in parsed):
+                return False
+            selector_matches = _qualified_rule_selector_matches(rule, soup)
+            if selector_matches is None:
+                return False
+            matched_specificities = tuple(
+                specificity
+                for specificity, matches in selector_matches
+                if any(match is element for match in matches)
+            )
+            if not matched_specificities:
+                order += 1
+                continue
+            if any(
+                item.lower_name == "all"
+                or item.lower_name in vendor_aliases
+                for item in parsed
+            ):
+                return False
+            relevant = {
+                property_name: _final_css_declaration(
+                    parsed,
+                    frozenset({property_name}),
+                )
+                for property_name in properties
+            }
+            for specificity in matched_specificities:
+                for property_name, declaration in relevant.items():
+                    if declaration is None:
+                        continue
+                    _record_css_winner(
+                        winners[property_name],
+                        element=element,
+                        declaration=declaration,
+                        specificity=specificity,
+                        order=order,
+                        candidate_authored=False,
+                    )
+            order += 1
+
+    style = element.attrs.get("style")
+    if isinstance(style, str) and style.strip():
+        try:
+            parsed_inline = tuple(
+                tinycss2.parse_declaration_list(
+                    style,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+            )
+        except Exception:
+            return False
+        if any(item.type != "declaration" for item in parsed_inline) or any(
+            item.lower_name == "all"
+            or item.lower_name in vendor_aliases
+            for item in parsed_inline
+        ):
+            return False
+        for property_name in properties:
+            declaration = _final_css_declaration(
+                parsed_inline,
+                frozenset({property_name}),
+            )
+            if declaration is None:
+                continue
+            _record_css_winner(
+                winners[property_name],
+                element=element,
+                declaration=declaration,
+                specificity=(0, 0, 0),
+                order=order,
+                candidate_authored=False,
+                inline=True,
+            )
+
+    return all(
+        winner is None
+        or _single_css_identifier(winner[1])
+        == safe_identifiers[property_name]
+        for property_name, property_winners in winners.items()
+        for winner in (property_winners.get(id(element)),)
+    )
+
+
+def _authenticated_absolute_slide_canvas_target(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+    candidate_slide_css: str,
+) -> bool:
+    """Prove geometry is absolute and relative to the slide canvas.
+
+    Static ancestors do not establish a containing block, so nested markup is
+    permitted only while every ancestor below the synthetic slide canvas
+    remains statically positioned. The canvas itself is the trusted boundary.
+    """
+
+    try:
+        canvases = soup.select(
+            'main.slide-root[data-slide-canvas="true"]'
+        )
+    except Exception:
+        return False
+    if len(canvases) != 1 or not isinstance(canvases[0], Tag):
+        return False
+    canvas = canvases[0]
+    if element is canvas or not _element_is_within(element, canvas):
+        return False
+    html_ancestor: Tag | None = element
+    while html_ancestor is not None:
+        name = str(html_ancestor.name).casefold()
+        attrs = html_ancestor.attrs
+        if (
+            "hidden" in attrs
+            or "popover" in attrs
+            or (name == "input" and str(attrs.get("type", "")).casefold() == "hidden")
+            or (name == "dialog" and "open" not in attrs)
+            or (name == "details" and "open" not in attrs)
+            or name in {"head", "link", "meta", "noscript", "script", "style", "template"}
+        ):
+            return False
+        if html_ancestor is canvas:
+            break
+        html_ancestor = _parent_tag(html_ancestor)
+    if html_ancestor is not canvas:
+        return False
+    if (
+        _authenticated_position_value(
+            canvas,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+        )
+        != "relative"
+    ):
+        return False
+    if not _authenticated_display_generates_box(
+        canvas,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+    ):
+        return False
+    if not _authenticated_element_is_fully_opaque(
+        canvas,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+    ):
+        return False
+    if not _authenticated_element_preserves_safe_paint_order(
+        canvas,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+    ):
+        return False
+    if not _authenticated_ancestor_preserves_canvas_containing_block(
+        canvas,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+    ):
+        return False
+    if (
+        _authenticated_position_value(
+            element,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+        )
+        != "absolute"
+    ):
+        return False
+    if not _authenticated_display_generates_box(
+        element,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+    ):
+        return False
+    if not _authenticated_element_is_fully_opaque(
+        element,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+    ):
+        return False
+    if not _authenticated_element_preserves_safe_paint_order(
+        element,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+    ):
+        return False
+    if not _authenticated_target_is_visible(
+        element,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+    ):
+        return False
+    if not _authenticated_ancestor_preserves_canvas_containing_block(
+        element,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+    ):
+        return False
+    if not _authenticated_target_margins_are_zero(
+        element,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+    ):
+        return False
+    if (
+        _effective_target_box_sizing_value(
+            element,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+            candidate_slide_css=candidate_slide_css,
+        )
+        != "border-box"
+    ):
+        return False
+    ancestor = _parent_tag(element)
+    while ancestor is not None and ancestor is not canvas:
+        if (
+            _authenticated_position_value(
+                ancestor,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+            )
+            != "static"
+            or not _authenticated_display_generates_box(
+                ancestor,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+            )
+            or not _authenticated_element_is_fully_opaque(
+                ancestor,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+            )
+            or not _authenticated_element_preserves_safe_paint_order(
+                ancestor,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+            )
+            or not _authenticated_ancestor_preserves_canvas_containing_block(
+                ancestor,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+            )
+        ):
+            return False
+        ancestor = _parent_tag(ancestor)
+    if ancestor is not canvas:
+        return False
+    shell_ancestor = _parent_tag(canvas)
+    while shell_ancestor is not None:
+        if not _authenticated_display_generates_box(
+            shell_ancestor,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+        ):
+            return False
+        if not _authenticated_element_is_fully_opaque(
+            shell_ancestor,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+        ):
+            return False
+        if not _authenticated_element_preserves_safe_paint_order(
+            shell_ancestor,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+        ):
+            return False
+        if not _authenticated_ancestor_preserves_canvas_containing_block(
+            shell_ancestor,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+        ):
+            return False
+        shell_ancestor = _parent_tag(shell_ancestor)
+    return True
+
+
+def _candidate_geometry_wins_authenticated_cascade(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+    candidate_slide_css: str,
+) -> bool:
+    if not _authenticated_absolute_slide_canvas_target(
+        element,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+        candidate_slide_css=candidate_slide_css,
+    ):
+        return False
+    final_winners = _geometry_cascade_winners(
+        element,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+        candidate_slide_css=candidate_slide_css,
+    )
+    if final_winners is None or any(
+        winner is None or winner[2] is not True
+        for winner in final_winners.values()
+    ):
+        return False
+    baseline_winners = _geometry_cascade_winners(
+        element,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+        candidate_slide_css="",
+    )
+    if baseline_winners is None:
+        return False
+
+    def effective_value(
+        winner: tuple[
+            tuple[int, int, int, int, int, int],
+            Any,
+            bool,
+        ]
+        | None,
+    ) -> tuple[bool, tuple[str, float] | None]:
+        if winner is None:
+            return (False, None)
+        tokens = _significant_css_value_tokens(winner[1])
+        if (
+            len(tokens) == 1
+            and tokens[0].type == "dimension"
+            and str(getattr(tokens[0], "unit", "")).casefold() == "px"
+        ):
+            numeric = _finite_css_token_value(tokens[0])
+            if numeric is not None:
+                return (True, ("px", numeric))
+        if len(tokens) == 1 and tokens[0].type == "number":
+            numeric = _finite_css_token_value(tokens[0])
+            if numeric == 0:
+                return (True, ("px", 0.0))
+        return (False, None)
+
+    final_values = {
+        property_name: effective_value(final_winners[property_name])
+        for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+    }
+    baseline_values = {
+        property_name: effective_value(baseline_winners[property_name])
+        for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+    }
+    if any(
+        not known
+        for known, _value in (*final_values.values(), *baseline_values.values())
+    ):
+        return False
+    return any(
+        final_values[property_name][1]
+        != baseline_values[property_name][1]
+        for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+    )
+
+
+def _css_px_literal(value: float) -> str:
+    if not math.isfinite(value):
+        raise ValueError("CSS pixel value must be finite")
+    if value.is_integer():
+        return f"{int(value)}px"
+    return f"{value!r}px"
+
+
+def _retained_slide_css_with_preserved_text_geometry(
+    value: str,
+    body: str,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> str:
+    """Preserve authenticated text-bearing dimensions in retained CSS.
+
+    Only a complete, already-retained geometry rule with one authenticated DOM
+    target is eligible. Candidate left/top and importance remain untouched;
+    authenticated literal-pixel width/height replace only smaller authored
+    values. If the preserved box would leave the fixed canvas, normalization
+    fails closed instead of inventing a different translation.
+    """
+
+    rules = _stylesheet_qualified_rules(value)
+    if rules is None:
+        raise ValueError("retained slide CSS is invalid")
+    try:
+        soup = BeautifulSoup(
+            assemble_compact_slide_html(
+                deck_stylesheet="",
+                html_body=body,
+                slide_css="",
+            ),
+            "html.parser",
+        )
+    except Exception:
+        raise ValueError("manifest body is invalid") from None
+    selector_inventory = _body_selector_inventory(body)
+    semantic_text_owners = _semantic_text_owners(soup)
+    normalized_rules: list[str] = []
+    for rule in rules:
+        declarations = tuple(
+            tinycss2.parse_declaration_list(
+                rule.content,
+                skip_comments=True,
+                skip_whitespace=True,
+            )
+        )
+        if any(item.type != "declaration" for item in declarations):
+            raise ValueError("retained slide CSS declarations are invalid")
+        geometry = tuple(
+            declaration
+            for declaration in declarations
+            if declaration.lower_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+        )
+        if geometry and not _retained_geometry_box_is_on_canvas(declarations):
+            raise ValueError("retained geometry is invalid")
+
+        matched_geometry_nodes: dict[int, Tag] = {}
+        if geometry:
+            try:
+                selector_arms = _selector_arms(list(rule.prelude))
+            except Exception:
+                selector_arms = ()
+            selectors_are_manifest_bound = bool(selector_arms)
+            for selector in selector_arms:
+                if not _selector_uses_only_manifest_atoms(
+                    selector,
+                    selector_inventory,
+                ):
+                    selectors_are_manifest_bound = False
+                    break
+                try:
+                    matches = soup.select(selector)
+                except Exception:
+                    selectors_are_manifest_bound = False
+                    break
+                matched_geometry_nodes.update(
+                    {
+                        id(match): match
+                        for match in matches
+                        if isinstance(match, Tag)
+                    }
+                )
+            if not selectors_are_manifest_bound:
+                matched_geometry_nodes = {}
+
+        if len(matched_geometry_nodes) == 1:
+            matched_geometry_node = next(
+                iter(matched_geometry_nodes.values())
+            )
+            if any(
+                _element_is_within(owner, matched_geometry_node)
+                for owner in semantic_text_owners
+            ):
+                authenticated_size = _authenticated_geometry_size_px(
+                    matched_geometry_node,
+                    soup,
+                    deck_css=deck_css,
+                    baseline_slide_css=baseline_slide_css,
+                )
+                if authenticated_size is None or set(authenticated_size) != {
+                    "width",
+                    "height",
+                }:
+                    raise ValueError(
+                        "text geometry lacks authenticated literal dimensions"
+                    )
+                authored_size = {
+                    declaration.lower_name: _finite_css_token_value(
+                        _significant_css_value_tokens(declaration)[0]
+                    )
+                    for declaration in geometry
+                    if declaration.lower_name in {"width", "height"}
+                }
+                replacements = {
+                    property_name: baseline_value
+                    for property_name, baseline_value in authenticated_size.items()
+                    if (
+                        authored_size.get(property_name) is not None
+                        and authored_size[property_name] < baseline_value
+                    )
+                }
+                for declaration in geometry:
+                    replacement = replacements.get(declaration.lower_name)
+                    if replacement is None:
+                        continue
+                    declaration.value = tinycss2.parse_component_value_list(
+                        _css_px_literal(replacement)
+                    )
+                if replacements and not _retained_geometry_box_is_on_canvas(
+                    declarations
+                ):
+                    raise ValueError(
+                        "preserved text geometry would leave the canvas"
+                    )
+
+        selector = tinycss2.serialize(rule.prelude).strip()
+        if not selector:
+            raise ValueError("retained slide CSS selector is invalid")
+        normalized_rules.append(
+            f"{selector}{{{tinycss2.serialize(declarations).strip()}}}"
+        )
+    normalized = "".join(normalized_rules)
+    if not normalized:
+        raise ValueError("retained slide CSS has no declarations")
+    return normalized
+
+
 def _candidate_css_targets_manifest_bodies(
     candidate: DeckRepairCandidate,
     authorized_sources: tuple[RepairSourceContext, ...],
@@ -3067,7 +4669,14 @@ def _candidate_css_targets_manifest_bodies(
             return False
         selector_inventory = _body_selector_inventory(body)
         try:
-            soup = BeautifulSoup(body, "html.parser")
+            soup = BeautifulSoup(
+                assemble_compact_slide_html(
+                    deck_stylesheet="",
+                    html_body=body,
+                    slide_css="",
+                ),
+                "html.parser",
+            )
         except Exception:
             return False
         semantic_text_owners = _semantic_text_owners(soup)
@@ -3124,10 +4733,26 @@ def _candidate_css_targets_manifest_bodies(
                     or geometry_importance is not inline_requirement
                 ):
                     return False
-                if any(
+                if not _candidate_geometry_wins_authenticated_cascade(
+                    matched_geometry_node,
+                    soup,
+                    deck_css=deck_css,
+                    baseline_slide_css=(
+                        baseline_slide_css_by_selector.get(
+                            update.selector,
+                            "",
+                        )
+                    ),
+                    candidate_slide_css=update.content,
+                ):
+                    return False
+                has_semantic_text = any(
                     _element_is_within(owner, matched_geometry_node)
                     for owner in semantic_text_owners
-                ):
+                )
+                if not has_semantic_text:
+                    return False
+                if has_semantic_text:
                     baseline_size = _authenticated_geometry_size_px(
                         matched_geometry_node,
                         soup,
@@ -3139,9 +4764,13 @@ def _candidate_css_targets_manifest_bodies(
                             )
                         ),
                     )
-                    if baseline_size is None or any(
-                        geometry_box[property_name] < baseline_value
-                        for property_name, baseline_value in baseline_size.items()
+                    if (
+                        baseline_size is None
+                        or set(baseline_size) != {"width", "height"}
+                        or any(
+                            geometry_box[property_name] < baseline_value
+                            for property_name, baseline_value in baseline_size.items()
+                        )
                     ):
                         return False
             selector_geometry_nodes.update(matched_geometry_nodes)
@@ -3472,6 +5101,52 @@ def _candidate_with_retained_slide_css(
     return DeckRepairCandidate.model_validate(payload)
 
 
+def _candidate_with_preserved_text_geometry(
+    candidate: DeckRepairCandidate,
+    authorized_sources: tuple[RepairSourceContext, ...],
+    read_only_sources: tuple[RepairSourceContext, ...],
+) -> DeckRepairCandidate:
+    bodies = {
+        source.selector: source.text
+        for source in authorized_sources
+        if source.source_role == "body"
+    }
+    baseline_slide_css = {
+        source.selector: source.text
+        for source in authorized_sources
+        if source.source_role == "slide_css"
+    }
+    deck_stylesheets = tuple(
+        source.text
+        for source in (*authorized_sources, *read_only_sources)
+        if source.selector == DECK_STYLE_ROOT_SELECTOR
+        and source.source_role == "deck_css"
+    )
+    if len(deck_stylesheets) != 1:
+        raise ValueError("exactly one authenticated deck stylesheet is required")
+    deck_css = deck_stylesheets[0]
+    updates = [
+        update.model_copy(
+            update={
+                "content": _retained_slide_css_with_preserved_text_geometry(
+                    update.content,
+                    bodies[update.selector],
+                    deck_css=deck_css,
+                    baseline_slide_css=baseline_slide_css[update.selector],
+                )
+            }
+        )
+        if update.source_role == "slide_css"
+        else update
+        for update in candidate.source_updates
+    ]
+    payload = candidate.model_dump(mode="python")
+    payload["source_updates"] = [
+        update.model_dump(mode="python") for update in updates
+    ]
+    return DeckRepairCandidate.model_validate(payload)
+
+
 def _candidate_slide_css_preserves_authenticated_baselines(
     candidate: DeckRepairCandidate,
     authorized_sources: tuple[RepairSourceContext, ...],
@@ -3590,6 +5265,17 @@ def _validate_invocation_result(
         raise DeckRepairAuthorError(
             "candidate_invalid",
             trace_error_code="candidate_canonicalization_invalid",
+        ) from None
+    try:
+        canonical_candidate = _candidate_with_preserved_text_geometry(
+            canonical_candidate,
+            context.authorized_sources,
+            context.read_only_sources,
+        )
+    except Exception:
+        raise DeckRepairAuthorError(
+            "candidate_invalid",
+            trace_error_code="candidate_source_contract_invalid",
         ) from None
     if not _candidate_uses_manifest_body_sources(
         canonical_candidate,

@@ -207,6 +207,35 @@ def test_rejects_duplicate_semantic_source_ids() -> None:
     assert "duplicate data-deck-id: title" in result.errors
 
 
+def test_compact_slide_shell_positions_the_trusted_canvas() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; }",
+        html_body="<section>Current PSI control loop</section>",
+    )
+
+    assert '<main class="slide-root" data-slide-canvas="true"' in html
+    assert (
+        'style="display: block !important; position: relative !important; '
+        'left: 0 !important; top: 0 !important; '
+        'right: auto !important; bottom: auto !important; '
+        'margin: 0 !important; padding: 0 !important; float: none !important; '
+        'width: 1920px !important; min-width: 1920px !important; '
+        'max-width: 1920px !important; height: 1080px !important; '
+        'min-height: 1080px !important; max-height: 1080px !important; '
+        'box-sizing: border-box !important; border: 0 !important; '
+        'overflow: hidden !important;"'
+    ) in html
+    assert html.count(
+        'style="display: block !important; position: static !important; '
+        'margin: 0 !important; padding: 0 !important; '
+        'width: 1920px !important; min-width: 1920px !important; '
+        'max-width: 1920px !important; height: 1080px !important; '
+        'min-height: 1080px !important; max-height: 1080px !important; '
+        'box-sizing: border-box !important; border: 0 !important; '
+        'overflow: hidden !important;"'
+    ) == 2
+
+
 def test_normalizes_incomplete_required_descendants_under_valid_required_ancestor() -> None:
     html = assemble_compact_slide_html(
         deck_stylesheet=".slide-root { background: #101828; }",

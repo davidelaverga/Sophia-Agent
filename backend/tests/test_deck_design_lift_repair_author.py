@@ -78,7 +78,7 @@ RETAINED_SLIDE_CSS_TEXT = (
     "section{font-size:32px;line-height:1.2;"
     "border:1px solid #0B1F3A;box-sizing:border-box;}"
 )
-DECK_CSS_TEXT = ":root{}"
+DECK_CSS_TEXT = ":root{}*{box-sizing:border-box}"
 SKILL_EXCERPT = "Use one subject-specific mechanism visual and preserve factual text."
 
 
@@ -1594,8 +1594,21 @@ def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:
         ),
         rationale="Strengthen hierarchy through existing native layout styling.",
     )
+    baseline_css = (
+        "section{position:absolute;left:0px;top:0px;"
+        "width:700px;height:300px}"
+    )
+    context = _context_with_slide_css_baseline(
+        _context(request=request),
+        baseline_css,
+    )
+    authored = _candidate_with_slide_css_baseline_hash(
+        authored,
+        baseline_css,
+    )
     author, _loader, invoker = _author(
         request=request,
+        context=context,
         invoker=FakeTwoPhaseInvoker(candidate=authored),
     )
 
@@ -1607,10 +1620,14 @@ def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:
     assert tuple(
         (update.source_role, update.expected_source_hash, update.content)
         for update in result.candidate.source_updates
-    ) == (
-        ("body", SOURCE_HASH, SOURCE_TEXT),
-        ("slide_css", SLIDE_CSS_HASH, retained_css),
-    )
+        ) == (
+            ("body", SOURCE_HASH, SOURCE_TEXT),
+            (
+                "slide_css",
+                hashlib.sha256(baseline_css.encode()).hexdigest(),
+                retained_css,
+            ),
+        )
     assert invoker.result.candidate == authored
 
 
@@ -2659,7 +2676,10 @@ def test_slide_css_geometry_must_target_exactly_one_manifest_element() -> None:
 
 
 def test_slide_css_requires_important_for_authenticated_inline_geometry() -> None:
-    body = '<section style="left:0px">Current PSI control loop</section>'
+    body = (
+        '<section style="left:0px;width:640px;height:360px">'
+        "Current PSI control loop</section>"
+    )
     request, context, candidate = _contrast_candidate(
         body=body,
         css="section{left:80px;top:80px;width:640px;height:360px}",
@@ -2679,7 +2699,11 @@ def test_slide_css_requires_important_for_authenticated_inline_geometry() -> Non
 
 
 def test_slide_css_allows_important_for_authenticated_inline_geometry() -> None:
-    body = '<section style="left:0px">Current PSI control loop</section>'
+    body = (
+        '<section style="position:absolute;left:0px;top:0px;'
+        'width:640px;height:360px">'
+        "Current PSI control loop</section>"
+    )
     geometry = (
         "section{left:80px!important;top:80px!important;"
         "width:640px!important;height:360px!important}"
@@ -2726,21 +2750,14 @@ def test_slide_css_allows_important_for_authenticated_inline_geometry() -> None:
             "left:120px!important;top:120px!important;"
             "width:320px!important;height:360px!important",
         ),
-        (
-            '<section style="position:absolute;width:640px;height:360px">'
-            "Current PSI control loop</section>",
-            "left:120px!important;top:120px!important;"
-            "width:320px!important;height:180px!important",
-        ),
     ],
     ids=(
         "width",
         "height",
         "text-bearing-container",
-        "partial-inline-size",
     ),
 )
-def test_slide_css_rejects_shrinking_authenticated_semantic_geometry(
+def test_slide_css_normalizes_shrinking_authenticated_semantic_geometry(
     body: str,
     geometry: str,
 ) -> None:
@@ -2754,11 +2771,15 @@ def test_slide_css_rejects_shrinking_authenticated_semantic_geometry(
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    with pytest.raises(DeckRepairAuthorError) as error:
-        _run(author(request))
+    result = _run(author(request))
 
-    _assert_code(error, "candidate_invalid")
-    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    slide_css = next(
+        update.content
+        for update in result.candidate.source_updates
+        if update.source_role == "slide_css"
+    )
+    assert "left:120px!important;top:120px!important" in slide_css
+    assert "width:640px!important;height:360px!important" in slide_css
     assert len(invoker.invoke_calls) == 1
 
 
@@ -2809,7 +2830,7 @@ def test_slide_css_allows_translation_or_expansion_of_semantic_geometry(
 
 
 @pytest.mark.parametrize("source_role", ["slide_css", "deck_css"])
-def test_slide_css_rejects_shrinking_authenticated_stylesheet_geometry(
+def test_slide_css_normalizes_shrinking_authenticated_stylesheet_geometry(
     source_role: str,
 ) -> None:
     body = '<section class="target">Current PSI control loop</section>'
@@ -2820,7 +2841,8 @@ def test_slide_css_rejects_shrinking_authenticated_stylesheet_geometry(
         ),
     )
     baseline_css = (
-        ".target{left:80px;top:80px;width:640px;height:360px}"
+        ".target{position:absolute;left:80px;top:80px;"
+        "width:640px;height:360px}"
     )
     if source_role == "slide_css":
         context = _context_with_slide_css_baseline(
@@ -2839,29 +2861,133 @@ def test_slide_css_rejects_shrinking_authenticated_stylesheet_geometry(
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    with pytest.raises(DeckRepairAuthorError) as error:
-        _run(author(request))
+    result = _run(author(request))
 
-    _assert_code(error, "candidate_invalid")
+    slide_css = next(
+        update.content
+        for update in result.candidate.source_updates
+        if update.source_role == "slide_css"
+    )
+    assert slide_css == (
+        RETAINED_SLIDE_CSS_TEXT
+        + ".target{left:120px;top:120px;width:640px;height:360px;}"
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("baseline_css", "expected_size"),
+    [
+        (
+            "section{position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px}"
+            ".target{width:720px}",
+            "width:720px;height:360px",
+        ),
+        (
+            ".target{position:absolute;left:80px;top:80px;"
+            "width:640.25px;height:360.5px}",
+            "width:640.25px;height:360.5px",
+        ),
+    ],
+    ids=("specificity", "fractional-pixels"),
+)
+def test_slide_css_normalizes_authenticated_size_cascade_regression(
+    baseline_css: str,
+    expected_size: str,
+) -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:320px;height:180px}"
+        ),
+    )
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    slide_css = next(
+        update.content
+        for update in result.candidate.source_updates
+        if update.source_role == "slide_css"
+    )
+    assert expected_size in slide_css
     assert len(invoker.invoke_calls) == 1
 
 
 @pytest.mark.parametrize(
     "baseline_css",
     [
-        "section{width:640px;height:360px}.target{width:720px}",
-        (
-            ".target{width:640px!important;height:360px!important}"
-            ".target{width:200px;height:100px}"
-        ),
-        ".target{width:50%;height:360px}",
+        "",
+        ".target{width:640px}",
+        ".target{width:auto;height:360px}",
     ],
-    ids=("specificity", "important", "ambiguous-unit"),
+    ids=("absent", "partial", "auto"),
 )
-def test_slide_css_rejects_authenticated_size_cascade_regression(
+def test_slide_css_rejects_text_geometry_without_literal_baseline_dimensions(
     baseline_css: str,
 ) -> None:
     body = '<section class="target">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:48px;height:24px}"
+        ),
+    )
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    ("body", "baseline_css"),
+    [
+        (
+            '<section class="target">Current PSI control loop</section>',
+            (
+                ".target{left:80px!important;top:80px!important;"
+                "width:640px!important;height:360px!important}"
+            ),
+        ),
+        (
+            '<section class="frame"><div class="target">Current PSI control '
+            "loop</div></section>",
+            (
+                ".frame .target{left:80px;top:80px;"
+                "width:640px;height:360px}"
+            ),
+        ),
+    ],
+    ids=("important", "higher-specificity"),
+)
+def test_slide_css_rejects_cascade_dead_geometry(
+    body: str,
+    baseline_css: str,
+) -> None:
     request, context, candidate = _contrast_candidate(
         body=body,
         css=(
@@ -2883,6 +3009,773 @@ def test_slide_css_rejects_authenticated_size_cascade_regression(
         _run(author(request))
 
     _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_canvas_wrapper_cascade_dead_geometry() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:320px;height:180px}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            ".slide-root .target{left:80px;top:80px;"
+            "width:640px;height:360px}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_appended_same_specificity_geometry_wins_cascade() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    baseline_css = (
+        ".target{position:absolute;left:80px;top:80px;"
+        "width:640px;height:360px}"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:320px;height:180px}"
+        ),
+    )
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    slide_css = next(
+        update.content
+        for update in result.candidate.source_updates
+        if update.source_role == "slide_css"
+    )
+    assert slide_css.endswith(
+        ".target{left:120px;top:120px;width:640px;height:360px;}"
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_pins_trusted_canvas_origin_against_authenticated_margin() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:320px;height:180px}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            ".slide-root{margin-left:1000px}"
+            ".target{position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    slide_css = next(
+        update.content
+        for update in result.candidate.source_updates
+        if update.source_role == "slide_css"
+    )
+    assert slide_css.endswith(
+        ".target{left:120px;top:120px;width:640px;height:360px;}"
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "canvas_override",
+    [
+        "position:static!important",
+        "width:100px!important;height:100px!important",
+    ],
+    ids=("position", "dimensions"),
+)
+def test_slide_css_trusted_canvas_resists_authenticated_override(
+    canvas_override: str,
+) -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:320px;height:180px}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            f".slide-root{{{canvas_override}}}"
+            ".target{position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    slide_css = next(
+        update.content
+        for update in result.candidate.source_updates
+        if update.source_role == "slide_css"
+    )
+    assert slide_css.endswith(
+        ".target{left:120px;top:120px;width:640px;height:360px;}"
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_trusted_canvas_resists_authenticated_display_override() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:320px;height:180px}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            ".slide-root{display:contents!important}"
+            ".target{position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    slide_css = next(
+        update.content
+        for update in result.candidate.source_updates
+        if update.source_role == "slide_css"
+    )
+    assert slide_css.endswith(
+        ".target{left:120px;top:120px;width:640px;height:360px;}"
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_target_without_principal_box() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    baseline_css = (
+        ".target{display:contents;position:absolute;left:80px;top:80px;"
+        "width:640px;height:360px}"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:320px;height:180px}"
+        ),
+    )
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        '<section hidden class="target">Current PSI control loop</section>',
+        (
+            '<div hidden><section class="target">'
+            "Current PSI control loop</section></div>"
+        ),
+    ],
+    ids=("target", "ancestor"),
+)
+def test_slide_css_rejects_hidden_html_geometry_target(body: str) -> None:
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:80px;width:640px;height:360px}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            ".target{position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "hidden_ancestor_css",
+    [
+        "display:none",
+        "visibility:hidden",
+        "opacity:0",
+        "clip-path:inset(100%)",
+    ],
+)
+def test_slide_css_rejects_hidden_geometry_target_ancestor(
+    hidden_ancestor_css: str,
+) -> None:
+    body = (
+        '<div class="frame"><section class="target">'
+        "Current PSI control loop</section></div>"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:80px;width:640px;height:360px}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            f".frame{{{hidden_ancestor_css}}}"
+            ".target{position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "hidden_shell_css",
+    [
+        "visibility:hidden",
+        "opacity:0",
+        "clip-path:inset(100%)",
+    ],
+)
+def test_slide_css_rejects_hidden_shell_ancestor(
+    hidden_shell_css: str,
+) -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:80px;width:640px;height:360px}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            f"body{{{hidden_shell_css}}}"
+            ".target{position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_trusted_shell_resists_authenticated_display_override() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:80px;width:640px;height:360px}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            "body{display:none!important}"
+            ".target{position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    slide_css = next(
+        update.content
+        for update in result.candidate.source_updates
+        if update.source_role == "slide_css"
+    )
+    assert slide_css.endswith(
+        ".target{left:120px;top:80px;width:640px;height:360px;}"
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "coordinate_effect",
+    [
+        "transform:rotate(0deg)",
+        'offset:path("M 0 0 L 1000 0") 100%',
+        'motion-path:path("M 0 0 L 1000 0")',
+    ],
+)
+def test_slide_css_rejects_transformed_geometry_target(
+    coordinate_effect: str,
+) -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    baseline_css = (
+        f".target{{position:absolute;{coordinate_effect};"
+        "left:80px;top:80px;width:640px;height:360px}"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:320px;height:180px}"
+        ),
+    )
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_nonzero_authenticated_target_margin() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    baseline_css = (
+        ".target{position:absolute;left:80px;top:80px;"
+        "width:640px;height:360px;margin-left:100px}"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:1280px;top:80px;width:640px;height:360px}"
+        ),
+    )
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_unreset_user_agent_target_margin() -> None:
+    body = '<h1 class="target">Current PSI control loop</h1>'
+    baseline_css = (
+        ".target{position:absolute;left:80px;top:80px;"
+        "width:640px;height:360px}"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:640px;height:360px}"
+        ),
+    )
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_content_box_geometry_target() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    baseline_css = (
+        ".target{position:absolute;box-sizing:content-box;"
+        "left:80px;top:80px;width:640px;height:360px}"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:640px;height:360px}"
+        ),
+    )
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_static_target_geometry_noop() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    baseline_css = (
+        ".target{left:80px;top:80px;width:640px;height:360px}"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:320px;height:180px}"
+        ),
+    )
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_nested_positioned_containing_block() -> None:
+    body = (
+        '<section class="frame"><div class="target">'
+        "Current PSI control loop</div></section>"
+    )
+    baseline_css = (
+        ".frame{position:relative}"
+        ".target{position:absolute;left:80px;top:80px;"
+        "width:640px;height:360px}"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:320px;height:180px}"
+        ),
+    )
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+@pytest.mark.parametrize(
+    "containing_block_css",
+    [
+        "transform:rotate(0deg)",
+        "-webkit-transform:rotate(0deg)",
+        "perspective:1000px",
+        "contain:layout",
+        "container-type:inline-size",
+        "content-visibility:auto",
+        "will-change:transform",
+        "translate:0px",
+        "zoom:2",
+    ],
+)
+def test_slide_css_rejects_nonpositioned_containing_block_ancestor(
+    containing_block_css: str,
+) -> None:
+    body = (
+        '<section class="frame"><div class="target">'
+        "Current PSI control loop</div></section>"
+    )
+    baseline_css = (
+        f".frame{{{containing_block_css}}}"
+        ".target{position:absolute;left:80px;top:80px;"
+        "width:640px;height:360px}"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:320px;height:180px}"
+        ),
+    )
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_unit_spelling_only_geometry_change() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    baseline_css = (
+        ".target{position:absolute;left:0;top:0;"
+        "width:640px;height:360px}"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:0px;top:0px;width:640px;height:360px}"
+        ),
+    )
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_ambiguous_authenticated_size_cascade() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;width:320px;height:180px}"
+        ),
+    )
+    baseline_css = ".target{width:50%;height:360px}"
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_preserved_text_geometry_must_remain_on_canvas() -> None:
+    body = (
+        '<section class="target" style="position:absolute;left:80px;'
+        'top:80px;width:640px;height:360px">Current PSI control loop'
+        "</section>"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:1500px!important;top:120px!important;"
+            "width:320px!important;height:180px!important}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_preserved_text_geometry_must_fit_compiled_budget() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    raw_css = ".target{left:0px;top:0px;width:48px;height:24px}"
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=raw_css,
+    )
+    retained_raw_css = _retained_slide_css(raw_css)
+    normalized_css = (
+        ".target{left:0px;top:0px;width:1920px;height:24px;}"
+    )
+    baseline_prefix = ".target{width:1920px;height:24px}/*"
+    baseline_suffix = "*/"
+    baseline_size = (
+        1_024
+        - len(SLIDE_CSS_REPAIR_OVERLAY_SEPARATOR.encode())
+        - len(retained_raw_css.encode())
+    )
+    baseline_css = (
+        baseline_prefix
+        + (
+            "x"
+            * (
+                baseline_size
+                - len(baseline_prefix.encode())
+                - len(baseline_suffix.encode())
+            )
+        )
+        + baseline_suffix
+    )
+    assert len(
+        compose_authenticated_slide_css(
+            baseline=baseline_css,
+            overlay=retained_raw_css,
+        ).encode()
+    ) == 1_024
+    assert len(
+        compose_authenticated_slide_css(
+            baseline=baseline_css,
+            overlay=normalized_css,
+        ).encode()
+    ) > 1_024
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
     assert len(invoker.invoke_calls) == 1
 
 
@@ -2920,7 +3813,7 @@ def test_slide_css_inline_size_wins_over_authenticated_stylesheet() -> None:
     assert len(invoker.invoke_calls) == 1
 
 
-def test_slide_css_allows_shrinking_text_free_geometry() -> None:
+def test_slide_css_rejects_shrinking_text_free_geometry() -> None:
     body = (
         '<section><div class="ornament" style="position:absolute;'
         'left:20px;top:20px;width:200px;height:120px"></div></section>'
@@ -2938,23 +3831,23 @@ def test_slide_css_allows_shrinking_text_free_geometry() -> None:
         invoker=FakeTwoPhaseInvoker(candidate=candidate),
     )
 
-    result = _run(author(request))
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
 
-    slide_css = next(
-        update.content
-        for update in result.candidate.source_updates
-        if update.source_role == "slide_css"
-    )
-    assert "width:100px!important;height:60px!important" in slide_css
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
     assert len(invoker.invoke_calls) == 1
 
 
-def test_slide_css_rejects_unnecessary_important_geometry() -> None:
-    body = "<section>Current PSI control loop</section>"
+def test_slide_css_rejects_geometry_without_authenticated_baseline_insets() -> None:
+    body = (
+        '<section class="target" style="position:absolute;width:640px;'
+        'height:360px">Current PSI control loop</section>'
+    )
     request, context, candidate = _contrast_candidate(
         body=body,
         css=(
-            "section{left:80px!important;top:80px!important;"
+            ".target{left:10px!important;top:10px!important;"
             "width:640px!important;height:360px!important}"
         ),
     )
@@ -2972,9 +3865,114 @@ def test_slide_css_rejects_unnecessary_important_geometry() -> None:
     assert len(invoker.invoke_calls) == 1
 
 
+@pytest.mark.parametrize(
+    ("body", "authenticated_css"),
+    [
+        (
+            '<section class="target">Current PSI control loop</section>',
+            ".target{z-index:-1;position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px}",
+        ),
+        (
+            '<div class="frame"><section class="target">'
+            "Current PSI control loop</section></div>",
+            ".frame{z-index:-1}.target{position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px}",
+        ),
+    ],
+    ids=("target", "ancestor"),
+)
+def test_slide_css_rejects_negative_authenticated_stacking_order(
+    body: str,
+    authenticated_css: str,
+) -> None:
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:80px;width:640px;height:360px}"
+        ),
+    )
+    context = _with_deck_css(context, authenticated_css)
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_allows_nonnegative_authenticated_stacking_order() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:80px;width:640px;height:360px}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            ".target{z-index:1;position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    slide_css = next(
+        update.content
+        for update in result.candidate.source_updates
+        if update.source_role == "slide_css"
+    )
+    assert slide_css.endswith(
+        ".target{left:120px;top:80px;width:640px;height:360px;}"
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_rejects_unnecessary_important_geometry() -> None:
+    body = "<section>Current PSI control loop</section>"
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            "section{left:80px!important;top:80px!important;"
+            "width:640px!important;height:360px!important}"
+        ),
+    )
+    baseline_css = "section{width:640px;height:360px}"
+    context = _context_with_slide_css_baseline(context, baseline_css)
+    candidate = _candidate_with_slide_css_baseline_hash(
+        candidate,
+        baseline_css,
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
 def test_slide_css_rejects_inline_important_geometry_target() -> None:
     body = (
-        '<section style="left:0px!important">'
+        '<section style="left:0px!important;width:640px;height:360px">'
         "Current PSI control loop</section>"
     )
     request, context, candidate = _contrast_candidate(
@@ -3035,15 +4033,17 @@ def test_slide_css_rejects_ambiguous_inline_geometry_target(
         _run(author(request))
 
     _assert_code(error, "candidate_invalid")
-    assert error.value.trace_error_code == "candidate_css_targets_invalid"
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
     assert len(invoker.invoke_calls) == 1
 
 
 def test_three_priority_selectors_each_require_retained_geometry() -> None:
     program = _overlapping_three_selector_program()
     body = (
-        '<section class="subject">Current PSI</section>'
-        '<section class="mechanism">Control loop</section>'
+        '<section class="subject" style="position:absolute;box-sizing:border-box;left:80px;top:80px;'
+        'width:640px;height:360px">Current PSI</section>'
+        '<section class="mechanism" style="position:absolute;box-sizing:border-box;left:800px;top:80px;'
+        'width:640px;height:360px">Control loop</section>'
     )
     body_hash = hashlib.sha256(body.encode()).hexdigest()
     sources = tuple(
@@ -3078,31 +4078,42 @@ def test_three_priority_selectors_each_require_retained_geometry() -> None:
     complete = candidate_with(
         {
             "slide:1": (
-                ".subject{left:80px;top:80px;width:640px;height:360px}"
-                ".mechanism{left:800px;top:80px;width:640px;height:360px}"
+                ".subject{left:120px!important;top:100px!important;"
+                "width:640px!important;height:360px!important}"
+                ".mechanism{left:840px!important;top:100px!important;"
+                "width:640px!important;height:360px!important}"
             ),
             "slide:2": (
-                ".subject{left:80px;top:120px;width:640px;height:360px}"
-                ".mechanism{left:800px;top:120px;width:640px;height:360px}"
+                ".subject{left:130px!important;top:140px!important;"
+                "width:640px!important;height:360px!important}"
+                ".mechanism{left:830px!important;top:140px!important;"
+                "width:640px!important;height:360px!important}"
             ),
             "slide:3": (
-                ".subject{left:80px;top:160px;width:640px;height:360px}"
-                ".mechanism{left:800px;top:160px;width:640px;height:360px}"
+                ".subject{left:140px!important;top:180px!important;"
+                "width:640px!important;height:360px!important}"
+                ".mechanism{left:820px!important;top:180px!important;"
+                "width:640px!important;height:360px!important}"
             ),
         }
     )
     one_geometry_target = candidate_with(
         {
             "slide:1": (
-                ".subject{left:80px;top:80px;width:640px;height:360px}"
-                ".mechanism{left:800px;top:80px;width:640px;height:360px}"
+                ".subject{left:120px!important;top:100px!important;"
+                "width:640px!important;height:360px!important}"
+                ".mechanism{left:840px!important;top:100px!important;"
+                "width:640px!important;height:360px!important}"
             ),
             "slide:2": (
-                ".subject{left:80px;top:120px;width:640px;height:360px}"
-                ".mechanism{left:800px;top:120px;width:640px;height:360px}"
+                ".subject{left:130px!important;top:140px!important;"
+                "width:640px!important;height:360px!important}"
+                ".mechanism{left:830px!important;top:140px!important;"
+                "width:640px!important;height:360px!important}"
             ),
             "slide:3": (
-                ".subject{left:80px;top:160px;width:640px;height:360px}"
+                ".subject{left:140px!important;top:180px!important;"
+                "width:640px!important;height:360px!important}"
             ),
         }
     )
@@ -3118,56 +4129,29 @@ def test_three_priority_selectors_each_require_retained_geometry() -> None:
         sources,
     )
 
-    important_complete = candidate_with(
-        {
-            selector: css.replace("px", "px!important")
-            for selector, css in {
-                "slide:1": (
-                    ".subject{left:80px;top:80px;width:640px;height:360px}"
-                    ".mechanism{left:800px;top:80px;width:640px;height:360px}"
-                ),
-                "slide:2": (
-                    ".subject{left:80px;top:120px;width:640px;height:360px}"
-                    ".mechanism{left:800px;top:120px;width:640px;height:360px}"
-                ),
-                "slide:3": (
-                    ".subject{left:80px;top:160px;width:640px;height:360px}"
-                    ".mechanism{left:800px;top:160px;width:640px;height:360px}"
-                ),
-            }.items()
+    nonimportant_complete = complete.model_copy(
+        update={
+            "source_updates": tuple(
+                update.model_copy(
+                    update={
+                        "content": update.content.replace("!important", "")
+                    }
+                )
+                for update in complete.source_updates
+            )
         }
     )
     assert not _candidate_materializes_priority_contract(
-        important_complete,
+        nonimportant_complete,
         program,
         sources,
     )
 
-    inline_body = (
-        '<section class="subject" style="left:0px">Current PSI</section>'
-        '<section class="mechanism" style="top:0px">Control loop</section>'
-    )
-    inline_hash = hashlib.sha256(inline_body.encode()).hexdigest()
-    inline_sources = tuple(
-        source.model_copy(
-            update={"manifest_source_hash": inline_hash, "text": inline_body}
-        )
-        for source in sources
-    )
-    assert not _candidate_materializes_priority_contract(
-        complete,
-        program,
-        inline_sources,
-    )
-    assert _candidate_materializes_priority_contract(
-        important_complete,
-        program,
-        inline_sources,
-    )
-
     nested_body = (
-        '<section class="subject">'
-        '<div class="mechanism">Current PSI control loop</div>'
+        '<section class="subject" style="left:80px;top:80px;'
+        'width:640px;height:360px">'
+        '<div class="mechanism" style="left:800px;top:80px;'
+        'width:640px;height:360px">Current PSI control loop</div>'
         "</section>"
     )
     nested_hash = hashlib.sha256(nested_body.encode()).hexdigest()
@@ -3187,6 +4171,8 @@ def test_three_priority_selectors_each_require_retained_geometry() -> None:
 def _three_priority_author_pipeline_case(
     *,
     incomplete_geometry_selector: str | None = None,
+    authenticated_geometry: bool = True,
+    shrink_geometry: bool = False,
 ) -> tuple[
     RepairInvocationRequest,
     RepairAuthorContext,
@@ -3196,8 +4182,17 @@ def _three_priority_author_pipeline_case(
     program = _overlapping_three_selector_program()
     request = _request(program=program)
     body = (
-        '<section class="subject">Current PSI</section>'
-        '<section class="mechanism">Control loop</section>'
+        (
+            '<section class="subject" style="position:absolute;box-sizing:border-box;left:80px;'
+            'top:80px;width:640px;height:360px">Current PSI</section>'
+            '<section class="mechanism" style="position:absolute;box-sizing:border-box;left:800px;'
+            'top:80px;width:640px;height:360px">Control loop</section>'
+        )
+        if authenticated_geometry
+        else (
+            '<section class="subject">Current PSI</section>'
+            '<section class="mechanism">Control loop</section>'
+        )
     )
     body_hash = hashlib.sha256(body.encode()).hexdigest()
     base = _context(request=request)
@@ -3242,14 +4237,24 @@ def _three_priority_author_pipeline_case(
     )
     css_by_selector: dict[str, str] = {}
     for index, selector in enumerate(program.authorized_selectors):
-        top = 80 + index * 40
+        top = 100 + index * 40
+        subject_left = 120 + index * 10
+        mechanism_left = 840 - index * 10
+        importance = "!important" if authenticated_geometry else ""
+        width = 320 if shrink_geometry else 640
+        height = 180 if shrink_geometry else 360
         mechanism_geometry = (
-            f"left:800px;top:{top}px;width:640px"
+            f"left:{mechanism_left}px{importance};top:{top}px{importance};"
+            f"width:{width}px{importance}"
             if selector == incomplete_geometry_selector
-            else f"left:800px;top:{top}px;width:640px;height:360px"
+            else (
+                f"left:{mechanism_left}px{importance};top:{top}px{importance};"
+                f"width:{width}px{importance};height:{height}px{importance}"
+            )
         )
         css_by_selector[selector] = (
-            f".subject{{left:80px;top:{top}px;width:640px;height:360px;"
+            f".subject{{left:{subject_left}px{importance};top:{top}px{importance};"
+            f"width:{width}px{importance};height:{height}px{importance};"
             "display:flex}"
             f".mechanism{{{mechanism_geometry};display:flex}}"
         )
@@ -3305,6 +4310,49 @@ def test_production_author_retains_three_priority_geometry_repairs_after_filteri
         result.candidate,
         request.program,
         context.authorized_sources,
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_production_author_normalizes_three_priority_text_geometry_shrink(
+) -> None:
+    request, context, candidate, raw_css_by_selector = (
+        _three_priority_author_pipeline_case(
+            authenticated_geometry=True,
+            shrink_geometry=True,
+        )
+    )
+    assert all(
+        "width:320px!important;height:180px!important" in css
+        for css in raw_css_by_selector.values()
+    )
+    invoker = FakeTwoPhaseInvoker(candidate=candidate)
+    author, _loader, _invoker = _author(
+        request=request,
+        context=context,
+        invoker=invoker,
+    )
+
+    result = _run(author(request))
+
+    result_css = tuple(
+        update.content
+        for update in result.candidate.source_updates
+        if update.source_role == "slide_css"
+    )
+    assert len(result_css) == 3
+    assert all(
+        css.count("width:640px!important;height:360px!important") == 2
+        and "width:320px" not in css
+        and "height:180px" not in css
+        and "display" not in css
+        for css in result_css
+    )
+    assert _candidate_materializes_priority_contract(
+        result.candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
     )
     assert len(invoker.invoke_calls) == 1
 
@@ -3563,6 +4611,7 @@ def _with_deck_css(
     context: RepairAuthorContext,
     deck_css: str,
 ) -> RepairAuthorContext:
+    deck_css = "*{box-sizing:border-box}" + deck_css
     deck_css_hash = hashlib.sha256(deck_css.encode()).hexdigest()
     return context.model_copy(
         update={
