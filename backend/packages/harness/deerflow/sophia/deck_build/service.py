@@ -2637,6 +2637,14 @@ def _validate_authoring_inputs(
     if "</style" in stylesheet.lower():
         raise _authoring_failure("deck_stylesheet contains a forbidden closing style tag.")
     if deck.deck_authoring_contract == "compact_model_html_v2":
+        if len(stylesheet.encode("utf-8")) > 8 * 1024:
+            raise _authoring_failure("deck_stylesheet exceeds the compact-v2 8192-byte limit.")
+        normalized_stylesheet = _normalize_compact_pptx_stylesheet_font_fallbacks(stylesheet)
+        if normalized_stylesheet != stylesheet:
+            deck.deck_stylesheet = normalized_stylesheet
+        stylesheet = normalized_stylesheet
+        deck.deck_stylesheet_hash = hashlib.sha256(stylesheet.encode("utf-8")).hexdigest() if stylesheet else None
+    if deck.deck_authoring_contract == "compact_model_html_v2":
         _validate_compact_pptx_font_contract(stylesheet, slides)
         if not allow_repair_overlay:
             _validate_compact_source_addressability(stylesheet, slides)
@@ -3001,29 +3009,123 @@ def _css_zero_value(declaration: Any | None) -> bool | None:
 
 
 def _validate_css_font_declarations(css: str, *, label: str, require_base: bool) -> bool:
-    rules = tinycss2.parse_stylesheet(css, skip_comments=True, skip_whitespace=True)
-    return _validate_css_font_rule_nodes(
-        rules,
-        label=label,
-        allow_base=require_base,
-    )
+    try:
+        rules = tinycss2.parse_stylesheet(css, skip_comments=True, skip_whitespace=True)
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise _authoring_failure(
+            f"{label} contains excessively nested or malformed CSS, which is unsupported for compact-v2 authoring."
+        ) from exc
+    if any(getattr(rule, "type", "") == "error" for rule in rules):
+        raise _authoring_failure(
+            f"{label} contains malformed CSS, which is unsupported for compact PPTX font validation."
+        )
+    if any(getattr(rule, "type", "") == "at-rule" for rule in rules):
+        raise _authoring_failure(
+            f"{label} uses a nested at-rule CSS construct, which is unsupported for compact-v2 authoring."
+        )
+    try:
+        return _validate_css_font_rule_nodes(
+            rules,
+            label=label,
+            allow_base=require_base,
+        )
+    except DeckBuildFailure:
+        raise
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise _authoring_failure(
+            f"{label} contains excessively nested or malformed CSS, which is unsupported for compact-v2 authoring."
+        ) from exc
+
+
+def _normalize_compact_pptx_stylesheet_font_fallbacks(css: str) -> str:
+    """Normalize non-portable secondary families in the shared stylesheet.
+
+    The first family still determines whether the declaration is admissible. A
+    model-authored unsafe primary therefore continues to fail closed, while a
+    harmless browser-only fallback cannot spend the single bounded repair.
+    """
+
+    try:
+        rules = tinycss2.parse_stylesheet(css, skip_comments=False, skip_whitespace=False)
+    except (RecursionError, TypeError, ValueError):
+        return css
+    if any(getattr(rule, "type", "") in {"at-rule", "error"} for rule in rules):
+        return css
+    try:
+        changed = _normalize_css_font_fallback_rule_nodes(rules)
+        return tinycss2.serialize(rules) if changed else css
+    except (RecursionError, TypeError, ValueError):
+        return css
+
+
+def _normalize_css_font_fallback_rule_nodes(rules: list[Any]) -> bool:
+    changed = False
+    for rule in rules:
+        rule_type = getattr(rule, "type", "")
+        if rule_type != "qualified-rule":
+            continue
+        declarations = tinycss2.parse_declaration_list(
+            rule.content,
+            skip_comments=False,
+            skip_whitespace=False,
+        )
+        if any(getattr(item, "type", "") in {"at-rule", "error", "qualified-rule"} for item in declarations):
+            continue
+        rule_changed = False
+        for declaration in declarations:
+            if getattr(declaration, "type", "") != "declaration" or declaration.lower_name not in {
+                "font",
+                "font-family",
+            }:
+                continue
+            family_tokens = _font_family_tokens(declaration)
+            if family_tokens is None:
+                continue
+            normalized_families = _portable_font_family_fallbacks(family_tokens)
+            if normalized_families is None:
+                continue
+            family_start = len(declaration.value) - len(family_tokens)
+            prefix = tinycss2.serialize(declaration.value[:family_start])
+            declaration.value = tinycss2.parse_component_value_list(prefix + normalized_families)
+            rule_changed = True
+        if rule_changed:
+            rule.content = tinycss2.parse_component_value_list(tinycss2.serialize(declarations))
+            changed = True
+    return changed
+
+
+def _portable_font_family_fallbacks(tokens: list[Any]) -> str | None:
+    groups: list[list[Any]] = [[]]
+    for token in tokens:
+        if token.type == "literal" and token.value == ",":
+            groups.append([])
+        else:
+            groups[-1].append(token)
+    serialized_groups = [tinycss2.serialize(group).strip() for group in groups]
+    if not serialized_groups or any(not value for value in serialized_groups):
+        return None
+    names = _font_family_names(tokens)
+    if len(names) != len(serialized_groups) or names[0] not in _SAFE_PPTX_FONTS:
+        return None
+    allowed = _SAFE_PPTX_FONTS | _GENERIC_CSS_FONTS
+    retained = [value for value, name in zip(serialized_groups, names, strict=True) if name in allowed]
+    if len(retained) == len(serialized_groups):
+        return None
+    return ", ".join(retained)
 
 
 def _validate_css_font_rule_nodes(rules: list[Any], *, label: str, allow_base: bool) -> bool:
     base_font_declared = False
     for rule in rules:
         rule_type = getattr(rule, "type", "")
-        if rule_type == "at-rule" and getattr(rule, "content", None) is not None:
-            nested = tinycss2.parse_rule_list(rule.content, skip_comments=True, skip_whitespace=True)
-            _validate_css_font_rule_nodes(
-                nested,
-                label=f"{label} @{getattr(rule, 'lower_at_keyword', 'rule')}",
-                # A conditional/grouping rule cannot prove that the canvas
-                # always receives a base font, but every nested override must
-                # still satisfy the same family contract.
-                allow_base=False,
+        if rule_type == "error":
+            raise _authoring_failure(
+                f"{label} contains malformed CSS, which is unsupported for compact PPTX font validation."
             )
-            continue
+        if rule_type == "at-rule":
+            raise _authoring_failure(
+                f"{label} uses a nested at-rule CSS construct, which is unsupported for compact-v2 authoring."
+            )
         if rule_type != "qualified-rule":
             continue
         selector = tinycss2.serialize(rule.prelude).strip()
@@ -3063,7 +3165,12 @@ def _inline_style_values(html: str) -> list[str]:
 
 def _validate_font_declaration_list(css: str, *, label: str, base_selector: bool) -> bool:
     safe_explicit_family = False
-    declarations = tinycss2.parse_declaration_list(css, skip_comments=True, skip_whitespace=True)
+    try:
+        declarations = tinycss2.parse_declaration_list(css, skip_comments=True, skip_whitespace=True)
+    except (RecursionError, TypeError, ValueError) as exc:
+        raise _authoring_failure(
+            f"{label} contains excessively nested or malformed CSS, which is unsupported for compact-v2 authoring."
+        ) from exc
     for declaration in declarations:
         if getattr(declaration, "type", "") in {"at-rule", "error", "qualified-rule"}:
             raise _authoring_failure(
@@ -3076,9 +3183,19 @@ def _validate_font_declaration_list(css: str, *, label: str, base_selector: bool
         if getattr(declaration, "type", "") != "declaration" or declaration.lower_name not in {"font", "font-family"}:
             continue
         family_tokens = _font_family_tokens(declaration)
-        serialized = tinycss2.serialize(declaration.value).strip()
+        try:
+            serialized = tinycss2.serialize(declaration.value).strip()
+        except (RecursionError, TypeError, ValueError) as exc:
+            raise _authoring_failure(
+                f"{label} contains excessively nested or malformed CSS, which is unsupported for compact-v2 authoring."
+            ) from exc
         if family_tokens is None and serialized.lower() == "inherit":
             continue
+        if family_tokens is not None and _font_family_list_has_empty_group(family_tokens):
+            raise _authoring_failure(
+                f"{label} uses malformed PPTX {declaration.lower_name} '{safe_excerpt(serialized, limit=80)}'. "
+                "Font-family lists cannot contain empty entries."
+            )
         families = _font_family_names(family_tokens or [])
         if not families or families[0] not in _SAFE_PPTX_FONTS:
             raise _authoring_failure(
@@ -3133,7 +3250,7 @@ def _font_family_names(tokens: list[Any]) -> list[str]:
     names: list[str] = []
     for group in groups:
         significant = [token for token in group if token.type not in {"comment", "whitespace"}]
-        if len(significant) == 1 and significant[0].type == "string":
+        if len(significant) == 1 and significant[0].type in {"ident", "string"}:
             value = str(significant[0].value)
         else:
             value = tinycss2.serialize(group).strip().strip("\"'")
@@ -3141,6 +3258,16 @@ def _font_family_names(tokens: list[Any]) -> list[str]:
         if normalized:
             names.append(normalized)
     return names
+
+
+def _font_family_list_has_empty_group(tokens: list[Any]) -> bool:
+    groups: list[list[Any]] = [[]]
+    for token in tokens:
+        if token.type == "literal" and token.value == ",":
+            groups.append([])
+        else:
+            groups[-1].append(token)
+    return any(not [token for token in group if token.type not in {"comment", "whitespace"}] for group in groups)
 
 
 def _validate_v2_authoring_sizes(deck: DeckBuild, slides: list[dict[str, Any]]) -> None:

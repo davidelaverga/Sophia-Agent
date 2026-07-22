@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import subprocess
 from pathlib import Path
@@ -1047,6 +1048,162 @@ def test_deck_build_service_rejects_renderer_unsafe_compact_fonts(tmp_path: Path
     assert result.success is False
     assert result.failure_code == "invalid_deck_ir"
     assert "Cambria" in str(result.failure_summary)
+
+
+def test_compact_v2_normalizes_nonportable_secondary_font_fallbacks() -> None:
+    stylesheet = _compact_stylesheet(
+        (
+            "h1{font:700 60px/1.1 Cambria,Georgia,serif}"
+            ".diagram{width:1200px;height:500px}.narrative{font-size:30px}"
+        ),
+        font_family="Calibri,Helvetica,Arial,sans-serif",
+    )
+    deck = SimpleNamespace(
+        deck_stylesheet=stylesheet,
+        deck_stylesheet_hash=hashlib.sha256(stylesheet.encode("utf-8")).hexdigest(),
+        deck_authoring_contract="compact_model_html_v2",
+    )
+
+    deck_service._validate_authoring_inputs(deck, _compact_slides())
+
+    assert "Helvetica" not in deck.deck_stylesheet
+    assert "Georgia" not in deck.deck_stylesheet
+    assert "font-family:Calibri, Arial, sans-serif" in deck.deck_stylesheet
+    assert "font:700 60px/1.1 Cambria, serif" in deck.deck_stylesheet
+    assert deck.deck_stylesheet_hash == hashlib.sha256(deck.deck_stylesheet.encode("utf-8")).hexdigest()
+
+
+def test_compact_v2_malformed_stylesheet_is_a_controlled_authoring_failure() -> None:
+    stylesheet = _compact_stylesheet(font_family="Calibri,Helvetica,sans-serif") + "}"
+    deck = SimpleNamespace(
+        deck_stylesheet=stylesheet,
+        deck_stylesheet_hash=hashlib.sha256(stylesheet.encode("utf-8")).hexdigest(),
+        deck_authoring_contract="compact_model_html_v2",
+    )
+
+    with pytest.raises(deck_service.DeckBuildFailure) as exc:
+        deck_service._validate_authoring_inputs(deck, _compact_slides())
+
+    assert exc.value.code == "invalid_deck_ir"
+    assert "malformed CSS" in exc.value.summary
+
+
+def test_compact_v2_recomputes_hash_from_canonical_stored_stylesheet() -> None:
+    stylesheet = _compact_stylesheet()
+    deck = SimpleNamespace(
+        deck_stylesheet=stylesheet,
+        deck_stylesheet_hash=hashlib.sha256(f"  {stylesheet}  ".encode()).hexdigest(),
+        deck_authoring_contract="compact_model_html_v2",
+    )
+
+    deck_service._validate_authoring_inputs(deck, _compact_slides())
+
+    assert deck.deck_stylesheet_hash == hashlib.sha256(stylesheet.encode("utf-8")).hexdigest()
+
+
+def test_compact_v2_rejects_empty_font_family_entries() -> None:
+    stylesheet = _compact_stylesheet(font_family="Calibri,,sans-serif")
+    deck = SimpleNamespace(
+        deck_stylesheet=stylesheet,
+        deck_stylesheet_hash=hashlib.sha256(stylesheet.encode("utf-8")).hexdigest(),
+        deck_authoring_contract="compact_model_html_v2",
+    )
+
+    with pytest.raises(deck_service.DeckBuildFailure) as exc:
+        deck_service._validate_authoring_inputs(deck, _compact_slides())
+
+    assert exc.value.code == "invalid_deck_ir"
+    assert "empty entries" in exc.value.summary
+
+
+def test_compact_v2_checks_raw_stylesheet_size_before_font_normalization() -> None:
+    oversized_fallbacks = ",".join(["Helvetica"] * 900)
+    stylesheet = _compact_stylesheet(font_family=f"Calibri,{oversized_fallbacks},sans-serif")
+    deck = SimpleNamespace(
+        deck_stylesheet=stylesheet,
+        deck_stylesheet_hash=hashlib.sha256(stylesheet.encode("utf-8")).hexdigest(),
+        deck_authoring_contract="compact_model_html_v2",
+    )
+
+    with pytest.raises(deck_service.DeckBuildFailure) as exc:
+        deck_service._validate_authoring_inputs(deck, _compact_slides())
+
+    assert exc.value.code == "invalid_deck_ir"
+    assert "compact-v2 8192-byte limit" in exc.value.summary
+
+
+def test_compact_v2_checks_forbidden_style_close_before_font_normalization() -> None:
+    stylesheet = _compact_stylesheet(font_family='Calibri,"</style",sans-serif')
+    deck = SimpleNamespace(
+        deck_stylesheet=stylesheet,
+        deck_stylesheet_hash=hashlib.sha256(stylesheet.encode("utf-8")).hexdigest(),
+        deck_authoring_contract="compact_model_html_v2",
+    )
+
+    with pytest.raises(deck_service.DeckBuildFailure) as exc:
+        deck_service._validate_authoring_inputs(deck, _compact_slides())
+
+    assert exc.value.code == "invalid_deck_ir"
+    assert "forbidden closing style tag" in exc.value.summary
+
+
+def test_compact_v2_rejects_deep_at_rules_without_recursing() -> None:
+    stylesheet = "@media all{" * 600 + _compact_stylesheet() + "}" * 600
+    deck = SimpleNamespace(
+        deck_stylesheet=stylesheet,
+        deck_stylesheet_hash=hashlib.sha256(stylesheet.encode("utf-8")).hexdigest(),
+        deck_authoring_contract="compact_model_html_v2",
+    )
+
+    with pytest.raises(deck_service.DeckBuildFailure) as exc:
+        deck_service._validate_authoring_inputs(deck, _compact_slides())
+
+    assert exc.value.code == "invalid_deck_ir"
+    assert "at-rule" in exc.value.summary
+
+
+def test_compact_v2_normalizes_commented_unquoted_primary_font() -> None:
+    stylesheet = _compact_stylesheet(font_family="Calibri /* preferred */,Helvetica,sans-serif")
+    deck = SimpleNamespace(
+        deck_stylesheet=stylesheet,
+        deck_stylesheet_hash=hashlib.sha256(stylesheet.encode("utf-8")).hexdigest(),
+        deck_authoring_contract="compact_model_html_v2",
+    )
+
+    deck_service._validate_authoring_inputs(deck, _compact_slides())
+
+    assert "Helvetica" not in deck.deck_stylesheet
+    assert "Calibri /* preferred */, sans-serif" in deck.deck_stylesheet
+
+
+def test_compact_v2_empty_stylesheet_keeps_absent_hash() -> None:
+    deck = SimpleNamespace(
+        deck_stylesheet="",
+        deck_stylesheet_hash=hashlib.sha256(b"").hexdigest(),
+        deck_authoring_contract="compact_model_html_v2",
+    )
+
+    with pytest.raises(deck_service.DeckBuildFailure):
+        deck_service._validate_authoring_inputs(deck, _compact_slides())
+
+    assert deck.deck_stylesheet_hash is None
+
+
+@pytest.mark.parametrize(("opening", "closing"), [("(", ")"), ("[", "]")])
+def test_compact_v2_deep_component_nesting_is_a_controlled_failure(opening: str, closing: str) -> None:
+    nested = opening * 500 + "Helvetica" + closing * 500
+    stylesheet = _compact_stylesheet(font_family=f"Calibri,{nested},sans-serif")
+    deck = SimpleNamespace(
+        deck_stylesheet=stylesheet,
+        deck_stylesheet_hash=hashlib.sha256(stylesheet.encode("utf-8")).hexdigest(),
+        deck_authoring_contract="compact_model_html_v2",
+    )
+
+    with pytest.raises(deck_service.DeckBuildFailure) as exc:
+        deck_service._validate_authoring_inputs(deck, _compact_slides())
+
+    assert exc.value.code == "invalid_deck_ir"
+    assert "nested or malformed CSS" in exc.value.summary
 
 
 @pytest.mark.parametrize(

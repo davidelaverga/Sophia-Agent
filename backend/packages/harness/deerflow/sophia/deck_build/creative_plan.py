@@ -21,7 +21,7 @@ from deerflow.sophia.deck_build.models import (
 from deerflow.sophia.deck_build.tool_contract import normalize_slide_composition_aliases
 
 _SAFE_ID_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9_.:-]{0,80}$")
-_DECK_ELEMENT_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_DECK_ELEMENT_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _DECK_ID_ATTRIBUTE_RE = re.compile(r"\bdata-deck-id\s*=\s*([\"'])([^\"']+)\1", re.I)
 _SEMANTIC_IMAGE_TEXT_RE = re.compile(
     r"\b(?:include|show|render|display|write|add)\s+(?:the\s+)?"

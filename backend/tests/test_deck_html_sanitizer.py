@@ -207,6 +207,21 @@ def test_rejects_duplicate_semantic_source_ids() -> None:
     assert "duplicate data-deck-id: title" in result.errors
 
 
+def test_accepts_semantic_source_ids_with_underscore() -> None:
+    html = assemble_compact_slide_html(
+        deck_stylesheet=".slide-root { background: #101828; }",
+        html_body=(
+            '<section data-deck-id="hero_panel" data-deck-role="title" '
+            'data-deck-required="true">Hero</section>'
+        ),
+    )
+
+    _sanitized, result = validate_and_sanitize_slide_html(_slide(html), allowed_asset_refs=set())
+
+    assert result.valid is True
+    assert result.source_elements[0]["source_id"] == "hero_panel"
+
+
 def test_compact_slide_shell_positions_the_trusted_canvas() -> None:
     html = assemble_compact_slide_html(
         deck_stylesheet=".slide-root { background: #101828; }",

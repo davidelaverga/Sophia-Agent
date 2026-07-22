@@ -34,7 +34,7 @@ _DATA_URI_RE = re.compile(r"^data:", re.I)
 _FILE_URI_RE = re.compile(r"^file:", re.I)
 _URL_ATTRIBUTE_NAMES = {"src", "href", "poster", "background", "data"}
 _LEGACY_SUBRESOURCE_ATTRIBUTE_NAMES = {"poster", "background", "data"}
-_DECK_ID_RE = re.compile(r"^[a-z][a-z0-9-]{0,63}$")
+_DECK_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,63}$")
 _VOID_TAGS = frozenset(
     {
         "area",

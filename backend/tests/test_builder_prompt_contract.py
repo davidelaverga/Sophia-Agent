@@ -260,6 +260,18 @@ def test_fresh_deck_corrections_require_typed_repair_anchor_ids() -> None:
         assert "repair_anchor_ids" in rendered[name], f"missing typed repair anchors in {name}"
 
 
+def test_presentation_authoring_prompt_requires_office_safe_font_fallbacks() -> None:
+    from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
+
+    prompt = ba._PRESENTATION_AUTHORING_SYSTEM_PROMPT
+
+    assert "Every font-family list, including the family" in prompt
+    assert "component of a font shorthand, must begin with Cambria, Calibri, or Arial" in prompt
+    assert "Office-safe families plus serif, sans-serif" in prompt
+    assert "Every authored element using left, top, right, bottom" in prompt
+    assert "same inline style or the same simple CSS rule" in prompt
+
+
 def test_retired_deck_correction_functions_are_deleted() -> None:
     from deerflow.agents.sophia_agent.middlewares import builder_artifact as ba
 

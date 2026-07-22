@@ -93,6 +93,17 @@ def test_creative_plan_normalizes_renderer_unsafe_typography(tmp_path) -> None:
     assert plan.design_plan.typography.utility == "Calibri"
 
 
+def test_creative_plan_accepts_required_element_ids_with_underscore(tmp_path) -> None:
+    raw = _creative_plan()
+    raw["slide_compositions"][0]["required_element_ids"] = ["title_1"]
+    deck = _deck(tmp_path)
+    deck.slides[0].html_source = (deck.slides[0].html_source or "").replace("title-1", "title_1")
+
+    plan = normalize_creative_plan(raw, deck=deck, request_context="")
+
+    assert plan.slide_compositions[0].required_element_ids == ["title_1"]
+
+
 def test_creative_plan_rejects_unfinished_critique_revision(tmp_path) -> None:
     raw = _creative_plan()
     raw["plan_critique"]["final_scores"]["specificity"] = 2
