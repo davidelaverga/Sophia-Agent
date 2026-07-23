@@ -92,6 +92,7 @@ from deerflow.sophia.deck_quality.canonical import (
     canonical_sha256,
 )
 from deerflow.sophia.deck_quality.cost import SOL_PRICING_VERSION, sol_cost_usd
+from deerflow.sophia.deck_quality.plan import derive_plan_realization_inputs
 from deerflow.sophia.deck_quality.schemas import BlindBrief
 
 LOCKED_DQ1_RUN_CAP_RESERVE_USD = Decimal("1.20")
@@ -213,6 +214,8 @@ _FIXED_SLIDE_CANVAS_HEIGHT_PX = 1080.0
 _MIN_RETAINED_GEOMETRY_WIDTH_PX = 48.0
 _MIN_RETAINED_GEOMETRY_HEIGHT_PX = 24.0
 _MIN_PRIORITY_GEOMETRY_TARGETS_PER_SELECTOR = 2
+_MAX_TEXT_GEOMETRY_AREA_EXPANSION_RATIO = 1.25
+_MAX_TEXT_GEOMETRY_EDGE_DISPLACEMENT_PX = 120.0
 _MIN_AUTHORED_TEXT_BACKGROUND_CONTRAST = 4.5
 _SLIDE_CSS_BACKGROUND_PROPERTIES = frozenset(
     {"background", "background-color"}
@@ -845,6 +848,11 @@ it does not require isolated visual languages. Coordinate all three intervention
 the exact frozen design_plan.signature and rhythm. On each assigned slide, reinforce—never \
 replace—the frozen structural_fingerprint and composition_rationale. Functional reuse of \
 the frozen motif across different semantic beats is expected; cosmetic repetition is forbidden.
+Use frozen_plan_realization as an immutable no-regression ledger. Check every authored \
+geometry, paint, border, and type declaration against its signature, rhythm, per-slide \
+structural_fingerprint, subject-material, and default-look commitments. A repair that \
+introduces weak_signature_realization or weak_fingerprint_realization is invalid even \
+when those codes were absent from the baseline findings.
 When campaign_acceptance.priority_geometry_required is true, every assigned priority \
 selector must contain complete retained left/top/width/height rules for at least two \
 distinct existing semantic elements that are not ancestors or descendants of one another. Use those \
@@ -852,16 +860,26 @@ independent bounded geometry moves to transform the argument: make \
 the subject-specific anchor dominant, make the mechanism visibly directional or closed, \
 and stage the existing final thesis as a decisive full-canvas synthesis.
 Treat every text-bearing geometry target, including a container with text descendants, \
-as translation-or-expansion only: never reduce its authenticated width or height, create \
-a new wrap, cluster moved anchors into one canvas band, or open a newly empty center \
-or quadrant. Synthesis means hierarchy and relationship, not spatial compression.
-The compact CSS budget is a hard ceiling, never a target. Use the fewest selector-specific rules and retained declarations that still satisfy the minimum distinct geometry targets and make those three priority outcomes visible.
+as a bounded translation or restrained expansion: never reduce its authenticated width \
+or height, expand its area above 1.25 times the authenticated area, or displace any outer \
+edge by more than 120px. Preserve the baseline negative-space and hierarchy ratios; never \
+enlarge an empty panel to simulate emphasis, create a new wrap, cluster moved anchors \
+into one canvas band, or open a newly empty center or quadrant. Synthesis means hierarchy \
+and relationship, not spatial compression or inflated empty containers.
+The compact CSS budget is a hard ceiling, never a target. Do not optimize for the \
+minimum rule count after merely satisfying the target count: choose the smallest coherent \
+set of selector-specific interventions that visibly proves all three priority outcomes \
+without generic chrome.
 A border-only repair is invalid. Paint and frames may support a structural intervention, but repeating a rail, band, divider, card, or frame is not a signature and cannot be the primary repair.
 Use at most one thin, purposeful full enclosing frame per authorized slide, with a \
 literal width from 0.5px through 2px, and only around one high-level semantic container \
 whose existing content directly expresses a priority mechanism, signature, or closing \
 synthesis.
 Never frame a title or other text leaf, repeated list or loop nodes, individual cards, or every box. A frame must clarify a high-level relationship without consuming the text's internal space or becoming generic card chrome.
+Preserve the authenticated surface identity of existing semantic containers. Never \
+replace an existing solid signature fill with a different fill or turn a solid focal \
+block into a hollow outlined card. Reuse the frozen motif through hierarchy and spatial \
+relationship, not by swapping established surfaces for new color variants.
 Change font-size or line-height only on one short, uniquely targeted semantic text anchor per slide, conservatively, when the frozen render and body prove the text will retain its current line count without clipping or a new wrap.
 Never apply type changes to a container, repeated nodes, body copy, lists, or quotes. Preserve every existing deck and slide title fully visible.
 Do not add a separate rule for a deferred failure, and do not leave a priority family addressed only in rationale: each priority family needs a retained judge-visible declaration.
@@ -1146,6 +1164,14 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                         "minimum_height_px": int(
                             _MIN_RETAINED_GEOMETRY_HEIGHT_PX
                         ),
+                        "text_container_width_or_height_shrink_allowed": False,
+                        "maximum_text_container_area_expansion_ratio": (
+                            _MAX_TEXT_GEOMETRY_AREA_EXPANSION_RATIO
+                        ),
+                        "maximum_text_container_outer_edge_displacement_px": int(
+                            _MAX_TEXT_GEOMETRY_EDGE_DISPLACEMENT_PX
+                        ),
+                        "baseline_negative_space_and_hierarchy_must_be_preserved": True,
                     },
                     "paint": {
                         "background_properties": sorted(
@@ -1365,6 +1391,18 @@ def build_repair_author_messages(
         context.failing_renders,
         key=lambda item: int(str(item.selector).split(":", 1)[1]),
     )
+    plan_realization = derive_plan_realization_inputs(
+        creative_plan=plans["creative_plan"].content,
+        design_plan=plans["design_plan"].content,
+        selectors=tuple(
+            str(selector)
+            for selector in program.authorized_selectors
+            if str(selector).startswith("slide:")
+        ),
+        explicit_style_constraints=(
+            context.brief.brief.explicit_brand_style_constraints
+        ),
+    )
     payload = {
         "schema_version": "sophia-deck-repair-author-input/v1",
         "identity": {
@@ -1379,6 +1417,23 @@ def build_repair_author_messages(
         "creative_plan_hash": plans["creative_plan"].content_hash,
         "design_plan": plans["design_plan"].content,
         "design_plan_hash": plans["design_plan"].content_hash,
+        "frozen_plan_realization": {
+            "subject_materials": list(plan_realization.subject_materials),
+            "signature": plan_realization.signature,
+            "rhythm": plan_realization.rhythm,
+            "commitments": [
+                commitment.model_dump(mode="json")
+                for commitment in plan_realization.commitments
+            ],
+            "explicit_style_constraints": list(
+                plan_realization.explicit_style_constraints
+            ),
+            "use_as_no_regression_ledger": True,
+            "forbidden_new_failure_codes": [
+                "weak_fingerprint_realization",
+                "weak_signature_realization",
+            ],
+        },
         "repair_constraints": _repair_constraints(program),
         "authorized_sources": [
             _serialized_authorized_source(source) for source in sources
@@ -4955,6 +5010,39 @@ def _authenticated_absolute_slide_canvas_target(
     return True
 
 
+def _literal_px_geometry_winners(
+    winners: dict[
+        str,
+        tuple[tuple[int, int, int, int, int, int], Any, bool] | None,
+    ]
+    | None,
+) -> dict[str, float] | None:
+    if winners is None:
+        return None
+    values: dict[str, float] = {}
+    for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES:
+        winner = winners.get(property_name)
+        if winner is None:
+            return None
+        tokens = _significant_css_value_tokens(winner[1])
+        if (
+            len(tokens) == 1
+            and tokens[0].type == "dimension"
+            and str(getattr(tokens[0], "unit", "")).casefold() == "px"
+        ):
+            numeric = _finite_css_token_value(tokens[0])
+            if numeric is not None:
+                values[property_name] = numeric
+                continue
+        if len(tokens) == 1 and tokens[0].type == "number":
+            numeric = _finite_css_token_value(tokens[0])
+            if numeric == 0:
+                values[property_name] = 0.0
+                continue
+        return None
+    return values
+
+
 def _candidate_geometry_wins_authenticated_cascade(
     element: Tag,
     soup: BeautifulSoup,
@@ -4993,47 +5081,12 @@ def _candidate_geometry_wins_authenticated_cascade(
     if baseline_winners is None:
         return False
 
-    def effective_value(
-        winner: tuple[
-            tuple[int, int, int, int, int, int],
-            Any,
-            bool,
-        ]
-        | None,
-    ) -> tuple[bool, tuple[str, float] | None]:
-        if winner is None:
-            return (False, None)
-        tokens = _significant_css_value_tokens(winner[1])
-        if (
-            len(tokens) == 1
-            and tokens[0].type == "dimension"
-            and str(getattr(tokens[0], "unit", "")).casefold() == "px"
-        ):
-            numeric = _finite_css_token_value(tokens[0])
-            if numeric is not None:
-                return (True, ("px", numeric))
-        if len(tokens) == 1 and tokens[0].type == "number":
-            numeric = _finite_css_token_value(tokens[0])
-            if numeric == 0:
-                return (True, ("px", 0.0))
-        return (False, None)
-
-    final_values = {
-        property_name: effective_value(final_winners[property_name])
-        for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
-    }
-    baseline_values = {
-        property_name: effective_value(baseline_winners[property_name])
-        for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
-    }
-    if any(
-        not known
-        for known, _value in (*final_values.values(), *baseline_values.values())
-    ):
+    final_values = _literal_px_geometry_winners(final_winners)
+    baseline_values = _literal_px_geometry_winners(baseline_winners)
+    if final_values is None or baseline_values is None:
         return False
     return any(
-        final_values[property_name][1]
-        != baseline_values[property_name][1]
+        final_values[property_name] != baseline_values[property_name]
         for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
     )
 
@@ -5336,6 +5389,63 @@ def _candidate_css_targets_manifest_bodies(
                         or any(
                             geometry_box[property_name] < baseline_value
                             for property_name, baseline_value in baseline_size.items()
+                        )
+                    ):
+                        return False
+                    baseline_geometry = _literal_px_geometry_winners(
+                        _geometry_cascade_winners(
+                            matched_geometry_node,
+                            soup,
+                            deck_css=deck_css,
+                            baseline_slide_css=(
+                                baseline_slide_css_by_selector.get(
+                                    update.selector,
+                                    "",
+                                )
+                            ),
+                            candidate_slide_css="",
+                        )
+                    )
+                    if (
+                        baseline_geometry is None
+                        or baseline_geometry["width"] <= 0
+                        or baseline_geometry["height"] <= 0
+                    ):
+                        return False
+                    baseline_area = (
+                        baseline_geometry["width"]
+                        * baseline_geometry["height"]
+                    )
+                    candidate_area = (
+                        geometry_box["width"] * geometry_box["height"]
+                    )
+                    if (
+                        candidate_area
+                        > baseline_area
+                        * _MAX_TEXT_GEOMETRY_AREA_EXPANSION_RATIO
+                    ):
+                        return False
+                    baseline_edges = (
+                        baseline_geometry["left"],
+                        baseline_geometry["top"],
+                        baseline_geometry["left"]
+                        + baseline_geometry["width"],
+                        baseline_geometry["top"]
+                        + baseline_geometry["height"],
+                    )
+                    candidate_edges = (
+                        geometry_box["left"],
+                        geometry_box["top"],
+                        geometry_box["left"] + geometry_box["width"],
+                        geometry_box["top"] + geometry_box["height"],
+                    )
+                    if any(
+                        abs(candidate_edge - baseline_edge)
+                        > _MAX_TEXT_GEOMETRY_EDGE_DISPLACEMENT_PX
+                        for candidate_edge, baseline_edge in zip(
+                            candidate_edges,
+                            baseline_edges,
+                            strict=True,
                         )
                     ):
                         return False

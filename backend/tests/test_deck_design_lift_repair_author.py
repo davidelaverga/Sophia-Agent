@@ -893,10 +893,13 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "reinforce—never replace—the frozen structural_fingerprint and composition_rationale" in system_prompt
     assert "Functional reuse of the frozen motif across different semantic beats is expected" in system_prompt
     assert "cosmetic repetition is forbidden" in system_prompt
+    assert "Use frozen_plan_realization as an immutable no-regression ledger" in system_prompt
+    assert "introduces weak_signature_realization or weak_fingerprint_realization is invalid" in system_prompt
     assert "at least two distinct existing semantic elements" in system_prompt
-    assert "minimum distinct geometry targets" in system_prompt
+    assert "minimum rule count after merely satisfying the target count" in system_prompt
     assert "CSS budget is a hard ceiling, never a target" in system_prompt
-    assert "fewest selector-specific rules and retained declarations" in system_prompt
+    assert "Do not optimize for the minimum rule count" in system_prompt
+    assert "smallest coherent set of selector-specific interventions" in system_prompt
     assert "at most one thin, purposeful full enclosing frame per authorized slide" in system_prompt
     assert "A border-only repair is invalid" in system_prompt
     assert "from 0.5px through 2px" in system_prompt
@@ -914,8 +917,12 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
         in system_prompt
     )
     assert "Treat every text-bearing geometry target" in system_prompt
-    assert "translation-or-expansion only" in system_prompt
+    assert "bounded translation or restrained expansion" in system_prompt
     assert "never reduce its authenticated width or height" in system_prompt
+    assert "expand its area above 1.25 times the authenticated area" in system_prompt
+    assert "displace any outer edge by more than 120px" in system_prompt
+    assert "Preserve the baseline negative-space and hierarchy ratios" in system_prompt
+    assert "never enlarge an empty panel to simulate emphasis" in system_prompt
     assert "cluster moved anchors into one canvas band" in system_prompt
     assert (
         "Synthesis means hierarchy and relationship, not spatial compression"
@@ -932,6 +939,8 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "preserve its effective foreground" in system_prompt
     assert "The safety pair must be visually neutral" in system_prompt
     assert "must not read as a new card, panel, band, rail, or frame" in system_prompt
+    assert "Preserve the authenticated surface identity" in system_prompt
+    assert "turn a solid focal block into a hollow outlined card" in system_prompt
 
     payload_text = messages[1].content[0]["text"]
     payload = json.loads(payload_text.removeprefix("Allowed repair context JSON:\n"))
@@ -941,6 +950,25 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
             "classes": [],
             "ids": [],
         }
+    }
+    assert payload["frozen_plan_realization"] == {
+        "subject_materials": [],
+        "signature": "control-loop trace",
+        "rhythm": "",
+        "commitments": [
+            {
+                "commitment_id": "signature",
+                "dimension": "signature",
+                "promise": "control-loop trace",
+                "selectors": ["slide:1"],
+            }
+        ],
+        "explicit_style_constraints": [],
+        "use_as_no_regression_ledger": True,
+        "forbidden_new_failure_codes": [
+            "weak_fingerprint_realization",
+            "weak_signature_realization",
+        ],
     }
     assert payload["read_only_sources"] == [
         {
@@ -1091,6 +1119,10 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                     "selector_must_match_exactly_one_manifest_element": True,
                     "minimum_width_px": 48,
                     "minimum_height_px": 24,
+                    "text_container_width_or_height_shrink_allowed": False,
+                    "maximum_text_container_area_expansion_ratio": 1.25,
+                    "maximum_text_container_outer_edge_displacement_px": 120,
+                    "baseline_negative_space_and_hierarchy_must_be_preserved": True,
                 },
                 "paint": {
                     "background_properties": [
@@ -1802,13 +1834,13 @@ def test_body_pin_preserves_model_css_addressing_and_metrics() -> None:
         program=_program(source_roles=("body", "slide_css")),
     )
     model_css = (
-        "section{left:96px;top:112px;width:704px;height:336px;"
+        "section{left:96px;top:80px;width:704px;height:336px;"
         "font-size:36px;border:2px solid #0B1F3A;"
         "box-sizing:border-box;padding:12px;"
         "background:#FFFFFF;color:#0B1F3A}"
     )
     retained_css = (
-        "section{left:96px;top:112px;width:704px;height:336px;"
+        "section{left:96px;top:80px;width:704px;height:336px;"
         "font-size:36px;border:2px solid #0B1F3A;"
         "box-sizing:border-box;background:#FFFFFF;color:#0B1F3A;}"
     )
@@ -4476,7 +4508,7 @@ def _three_priority_author_pipeline_case(
     )
     css_by_selector: dict[str, str] = {}
     for index, selector in enumerate(program.authorized_selectors):
-        top = 100 + index * 40
+        top = 100 + index * 35
         subject_left = 120 + index * 10
         mechanism_left = 840 - index * 10
         importance = "!important" if authenticated_geometry else ""
@@ -4589,6 +4621,87 @@ def test_production_author_normalizes_three_priority_text_geometry_shrink(
     )
     assert _candidate_materializes_priority_contract(
         result.candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_production_author_rejects_runaway_text_container_expansion() -> None:
+    request, context, candidate, _raw_css_by_selector = (
+        _three_priority_author_pipeline_case()
+    )
+    first = candidate.source_updates[0]
+    expanded = first.content.replace(
+        "width:640px!important;height:360px!important",
+        "width:672px!important;height:430px!important",
+        1,
+    )
+    assert expanded != first.content
+    candidate = candidate.model_copy(
+        update={
+            "source_updates": (
+                first.model_copy(update={"content": expanded}),
+                *candidate.source_updates[1:],
+            )
+        }
+    )
+    invoker = FakeTwoPhaseInvoker(candidate=candidate)
+    author, _loader, _invoker = _author(
+        request=request,
+        context=context,
+        invoker=invoker,
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert not _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_production_author_rejects_excessive_text_container_displacement(
+) -> None:
+    request, context, candidate, _raw_css_by_selector = (
+        _three_priority_author_pipeline_case()
+    )
+    first = candidate.source_updates[0]
+    displaced = first.content.replace(
+        ".subject{left:120px!important",
+        ".subject{left:210px!important",
+        1,
+    )
+    assert displaced != first.content
+    candidate = candidate.model_copy(
+        update={
+            "source_updates": (
+                first.model_copy(update={"content": displaced}),
+                *candidate.source_updates[1:],
+            )
+        }
+    )
+    invoker = FakeTwoPhaseInvoker(candidate=candidate)
+    author, _loader, _invoker = _author(
+        request=request,
+        context=context,
+        invoker=invoker,
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert not _candidate_materializes_priority_contract(
+        candidate,
         request.program,
         context.authorized_sources,
         context.read_only_sources,
