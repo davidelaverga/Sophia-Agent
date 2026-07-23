@@ -65,7 +65,7 @@ def _instrument(**overrides: object) -> QualityInstrumentLock:
         },
         "judge_plan_hash": "d" * 64,
         "judge_profile_version": "v2",
-        "evidence_preprocessor_version": "deck-evidence-v4",
+        "evidence_preprocessor_version": "deck-evidence-v5",
         "judge_invoker_version": "deck-judge-invoker-v4",
         "assessment_schema_versions": {
             "blind_visual": "v4",

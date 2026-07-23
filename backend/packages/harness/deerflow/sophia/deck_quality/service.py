@@ -5,6 +5,7 @@ from typing import Protocol
 
 from deerflow.sophia.deck_quality.adjudicator import adjudicate_shadow_result, failed_to_judge_decision
 from deerflow.sophia.deck_quality.evidence import (
+    brief_scoped_criteria,
     prepare_blind_visual_evidence,
     prepare_plan_realization_evidence,
     prove_coverage,
@@ -101,6 +102,7 @@ class DeckQualityCoreService:
         policy: AdjudicationPolicy,
         plan_inputs: PlanRealizationInputs,
     ) -> ShadowDecision:
+        scoped_criteria = brief_scoped_criteria(all_criteria, snapshot.brief)
         blind_evidence = prepare_blind_visual_evidence(snapshot, blind_rubric)
         try:
             visual = await self._invoker.assess_blind(blind_evidence)
@@ -125,7 +127,7 @@ class DeckQualityCoreService:
                 visual=visual,
                 mechanical=mechanical,
                 plan=None,
-                criteria=all_criteria,
+                criteria=scoped_criteria,
                 expected_plan_commitment_ids=tuple(item.commitment_id for item in plan_inputs.commitments),
                 rubric_hash=blind_rubric.rubric_hash,
                 policy=policy,
@@ -161,7 +163,7 @@ class DeckQualityCoreService:
             visual=visual,
             mechanical=mechanical,
             plan=plan,
-            criteria=all_criteria,
+            criteria=scoped_criteria,
             expected_plan_commitment_ids=tuple(item.commitment_id for item in plan_inputs.commitments),
             rubric_hash=blind_rubric.rubric_hash,
             policy=policy,

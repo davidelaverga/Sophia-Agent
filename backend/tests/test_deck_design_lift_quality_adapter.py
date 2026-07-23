@@ -19,7 +19,7 @@ from deerflow.sophia.deck_design_lift.quality_adapter import (
 from deerflow.sophia.deck_design_lift.runtime import BlindDeckJudgmentRequest
 from deerflow.sophia.deck_quality.adjudicator import adjudicate_shadow_result
 from deerflow.sophia.deck_quality.canonical import canonical_json_bytes, canonical_sha256
-from deerflow.sophia.deck_quality.evidence import prove_coverage
+from deerflow.sophia.deck_quality.evidence import brief_scoped_criteria, prove_coverage
 from deerflow.sophia.deck_quality.graph import (
     _AssessmentAArtifact,
     _AssessmentCArtifact,
@@ -109,7 +109,7 @@ class FakeInstrument:
     policy: AdjudicationPolicy
 
 
-def _instrument() -> FakeInstrument:
+def _instrument(*, include_explicit_taste: bool = False) -> FakeInstrument:
     rubric_hash = _digest("rubric")
     blind = (
         _criterion(
@@ -123,6 +123,18 @@ def _instrument() -> FakeInstrument:
             assessment="blind_visual",
             critical=False,
             failure_code="low_sequence_rhythm",
+        ),
+        *(
+            (
+                _criterion(
+                    "explicit_user_taste_fit",
+                    assessment="blind_visual",
+                    critical=False,
+                    failure_code="explicit_taste_mismatch",
+                ),
+            )
+            if include_explicit_taste
+            else ()
         ),
     )
     plan = (
@@ -233,8 +245,10 @@ def _fixture(
     artifact_version_id: str = "artifact-version-initial",
     artifact_created_at: datetime = NOW - timedelta(minutes=1),
     requested_at: datetime = NOW,
+    include_explicit_taste: bool = False,
+    explicit_style_constraints: tuple[str, ...] = (),
 ) -> EvidenceFixture:
-    instrument = _instrument()
+    instrument = _instrument(include_explicit_taste=include_explicit_taste)
     artifact_hash = _digest(artifact_version_id)
     artifact_path = "outputs/psi-deck.pptx"
     artifact = BuildArtifactVersion(
@@ -296,6 +310,7 @@ def _fixture(
         subject="Progressive summarization interface",
         audience="Product and engineering leaders",
         goal="Explain the control loop",
+        explicit_brand_style_constraints=explicit_style_constraints,
     )
     creative_plan: dict[str, Any] = {}
     design_plan: dict[str, Any] = {"anti_slop_profile": ["Resist generic technology-deck defaults"]}
@@ -461,6 +476,19 @@ def _fixture(
                 rationale="Rhythm repeats.",
                 evidence_selectors=("slide:2",),
             ),
+            *(
+                (
+                    CriterionScore(
+                        criterion_id="explicit_user_taste_fit",
+                        applicable=True,
+                        score=5,
+                        rationale="The explicit style direction is honored.",
+                        evidence_selectors=("slide:1",),
+                    ),
+                )
+                if include_explicit_taste and explicit_style_constraints
+                else ()
+            ),
         ),
         confidence=0.9,
     )
@@ -499,7 +527,7 @@ def _fixture(
         visual=visual,
         mechanical=mechanics,
         plan=plan,
-        criteria=instrument.all_criteria,
+        criteria=brief_scoped_criteria(instrument.all_criteria, brief),
         expected_plan_commitment_ids=tuple(item.commitment_id for item in plan_inputs.commitments),
         rubric_hash=instrument.blind_rubric.rubric_hash,
         policy=instrument.policy,
@@ -873,6 +901,44 @@ async def test_initial_projects_completed_dq1_and_compiles_three_local_findings(
     assert all(render_inventory[finding.render_evidence[0].path] == finding.render_evidence[0].sha256 for finding in result.findings)
     assert len(store.calls) == 1
     assert {path for path, _limit in objects.calls} == set(fixture.paths.values())
+
+
+@pytest.mark.anyio
+async def test_adapter_excludes_explicit_taste_for_empty_structured_constraints() -> None:
+    fixture = _fixture(include_explicit_taste=True)
+    adapter, *_ = _adapter(fixture)
+
+    result = await adapter.judge_initial(fixture.request)
+
+    assert {
+        score.criterion_id for score in result.evidence.criterion_scores
+    } == {
+        "visual_hierarchy",
+        "sequence_rhythm",
+        "default_look",
+    }
+    assert result.evidence.weighted_score == Decimal("2")
+
+
+@pytest.mark.anyio
+async def test_adapter_includes_explicit_taste_for_nonempty_structured_constraints() -> None:
+    fixture = _fixture(
+        include_explicit_taste=True,
+        explicit_style_constraints=("Use a restrained blue palette.",),
+    )
+    adapter, *_ = _adapter(fixture)
+
+    result = await adapter.judge_initial(fixture.request)
+
+    assert {
+        score.criterion_id for score in result.evidence.criterion_scores
+    } == {
+        "visual_hierarchy",
+        "sequence_rhythm",
+        "explicit_user_taste_fit",
+        "default_look",
+    }
+    assert result.evidence.weighted_score == Decimal("2.75")
 
 
 @pytest.mark.anyio

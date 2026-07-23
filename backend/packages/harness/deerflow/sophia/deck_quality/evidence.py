@@ -4,14 +4,18 @@ from typing import Any
 
 from deerflow.sophia.deck_quality.brief import forbidden_brief_marker
 from deerflow.sophia.deck_quality.schemas import (
+    BlindBrief,
     BlindVisualAssessment,
     BlindVisualEvidence,
     CoverageProof,
     PlanCommitment,
     PlanRealizationEvidence,
     QualityEvidenceSnapshot,
+    RubricCriterionProjection,
     RubricProjection,
 )
+
+_EXPLICIT_USER_TASTE_FIT_CRITERION_ID = "explicit_user_taste_fit"
 
 _BLIND_FORBIDDEN_KEYS = frozenset(
     {
@@ -60,6 +64,31 @@ def assert_blind_context_is_clean(evidence: BlindVisualEvidence) -> None:
         raise ValueError(f"blind evidence contains forbidden prior-memory section: {marker}")
 
 
+def brief_scoped_criteria(
+    criteria: tuple[RubricCriterionProjection, ...],
+    brief: BlindBrief,
+) -> tuple[RubricCriterionProjection, ...]:
+    """Project context-dependent criteria from authenticated brief structure."""
+
+    if brief.explicit_brand_style_constraints:
+        return criteria
+    return tuple(
+        criterion
+        for criterion in criteria
+        if criterion.id != _EXPLICIT_USER_TASTE_FIT_CRITERION_ID
+    )
+
+
+def brief_scoped_rubric(
+    rubric: RubricProjection,
+    brief: BlindBrief,
+) -> RubricProjection:
+    criteria = brief_scoped_criteria(rubric.criteria, brief)
+    if criteria == rubric.criteria:
+        return rubric
+    return rubric.model_copy(update={"criteria": criteria})
+
+
 def prepare_blind_visual_evidence(
     snapshot: QualityEvidenceSnapshot,
     rubric: RubricProjection,
@@ -68,7 +97,7 @@ def prepare_blind_visual_evidence(
         brief=snapshot.brief,
         renders=snapshot.renders,
         visible_text=snapshot.visible_text,
-        rubric=rubric,
+        rubric=brief_scoped_rubric(rubric, snapshot.brief),
     )
     assert_blind_context_is_clean(evidence)
     return evidence

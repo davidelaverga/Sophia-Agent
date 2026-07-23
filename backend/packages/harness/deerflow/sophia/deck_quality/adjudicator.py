@@ -15,6 +15,8 @@ from deerflow.sophia.deck_quality.schemas import (
     ShadowDecision,
 )
 
+_EXPLICIT_USER_TASTE_FIT_CRITERION_ID = "explicit_user_taste_fit"
+
 
 def _decision(
     *,
@@ -199,6 +201,18 @@ def adjudicate_shadow_result(
         return _decision(
             result="failed_to_judge",
             reasons=("criterion_coverage_invalid",),
+            coverage=coverage,
+            visual=visual,
+            mechanical=mechanical,
+            plan=plan,
+            rubric_hash=rubric_hash,
+            policy=policy,
+        )
+    explicit_taste = score_by_id.get(_EXPLICIT_USER_TASTE_FIT_CRITERION_ID)
+    if explicit_taste is not None and not explicit_taste.applicable:
+        return _decision(
+            result="failed_to_judge",
+            reasons=("criterion_applicability_invalid",),
             coverage=coverage,
             visual=visual,
             mechanical=mechanical,

@@ -33,6 +33,7 @@ from deerflow.sophia.deck_quality.cost import (
     validate_sol_plan_locks,
 )
 from deerflow.sophia.deck_quality.evidence import (
+    brief_scoped_criteria,
     prepare_blind_visual_evidence,
     prepare_plan_realization_evidence,
     prove_coverage,
@@ -2305,7 +2306,10 @@ async def _decision(
             visual=visual_stage.assessment,
             mechanical=mechanical_stage.projection,
             plan=plan_stage.assessment,
-            criteria=runtime.instrument.all_criteria,
+            criteria=brief_scoped_criteria(
+                runtime.instrument.all_criteria,
+                loaded.snapshot.brief,
+            ),
             expected_plan_commitment_ids=tuple(item.commitment_id for item in plan_inputs.commitments),
             rubric_hash=runtime.instrument.blind_rubric.rubric_hash,
             policy=runtime.instrument.policy,

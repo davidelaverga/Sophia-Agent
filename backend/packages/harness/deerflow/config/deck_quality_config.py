@@ -35,7 +35,7 @@ class DeckQualityConfig(BaseModel):
     judge_route: str = "deck.judge.visual"
     rubric_version: str = "deck-rubric-v2"
     judge_profile_version: str = "deck-visual-judge-v2"
-    evidence_preprocessor_version: str = "deck-evidence-v4"
+    evidence_preprocessor_version: str = "deck-evidence-v5"
     judge_invoker_version: str = "deck-judge-invoker-v4"
     # Defaults closed. Production may opt in only after an operator explicitly
     # authorizes reusing the baseline provider credential through the DQ-only

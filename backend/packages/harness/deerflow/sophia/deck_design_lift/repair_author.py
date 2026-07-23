@@ -840,6 +840,11 @@ This is the campaign's only repair: use the whole-deck contact sheet and every a
 Only campaign_acceptance.priority_failure_codes are required visible outcomes. Treat every deferred failure as context and a no-regression constraint, not as a request for another intervention.
 Follow campaign_acceptance.priority_selector_by_failure_code exactly: make each priority family's primary judge-visible intervention on its assigned frozen selector.
 Materially resolve exactly those three distinct priority families before considering incidental polish, using family-specific structure rather than repeating one generic decoration.
+The primary-selector assignment determines where each priority family must be proved; \
+it does not require isolated visual languages. Coordinate all three interventions through \
+the exact frozen design_plan.signature and rhythm. On each assigned slide, reinforce—never \
+replace—the frozen structural_fingerprint and composition_rationale. Functional reuse of \
+the frozen motif across different semantic beats is expected; cosmetic repetition is forbidden.
 When campaign_acceptance.priority_geometry_required is true, every assigned priority \
 selector must contain complete retained left/top/width/height rules for at least two \
 distinct existing semantic elements that are not ancestors or descendants of one another. Use those \
@@ -871,6 +876,9 @@ paint exactly for nonpaint repairs. If the deck CSS contains any translucent pai
 every geometry intervention that moves semantic text must also provide a same-rule \
 fully opaque literal background or background-color and fully opaque literal color \
 with at least 4.5:1 contrast.
+When that translucent-paint safety rule requires an opaque pair, flatten the target's \
+existing effective surface against the slide substrate and preserve its effective foreground. \
+The safety pair must be visually neutral and must not read as a new card, panel, band, rail, or frame.
 The author boundary pins body content to the authenticated manifest bytes before compilation, so express every visible repair in the authorized slide_css overlay.
 Target only tags, classes, and IDs listed in the supplied body_selector_inventory.
 Every slide_css output is an overlay only. Never copy, summarize, replace, or reconstruct authenticated baseline slide_css.

@@ -107,7 +107,7 @@ deck_quality:
   judge_route: deck.judge.visual
   rubric_version: deck-rubric-v2
   judge_profile_version: deck-visual-judge-v2
-  evidence_preprocessor_version: deck-evidence-v4
+  evidence_preprocessor_version: deck-evidence-v5
   judge_invoker_version: deck-judge-invoker-v4
   # Explicit operator authorization for this internal canary campaign. The
   # existing OpenAI credential is copied into the DQ-only environment name;

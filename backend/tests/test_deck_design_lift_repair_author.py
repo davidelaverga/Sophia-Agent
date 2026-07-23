@@ -885,6 +885,14 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "deferred failure as context and a no-regression constraint" in system_prompt
     assert "Follow campaign_acceptance.priority_selector_by_failure_code exactly" in system_prompt
     assert "Materially resolve exactly those three distinct priority families" in system_prompt
+    assert (
+        "The primary-selector assignment determines where each priority family must be proved"
+        in system_prompt
+    )
+    assert "Coordinate all three interventions through the exact frozen design_plan.signature and rhythm" in system_prompt
+    assert "reinforce—never replace—the frozen structural_fingerprint and composition_rationale" in system_prompt
+    assert "Functional reuse of the frozen motif across different semantic beats is expected" in system_prompt
+    assert "cosmetic repetition is forbidden" in system_prompt
     assert "at least two distinct existing semantic elements" in system_prompt
     assert "minimum distinct geometry targets" in system_prompt
     assert "CSS budget is a hard ceiling, never a target" in system_prompt
@@ -920,6 +928,10 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "Treat every expected improvement as a required visible outcome" not in system_prompt
     assert "Spend the entire CSS budget" not in system_prompt
     assert "fresh independent rendered judgment can mark satisfied" in system_prompt
+    assert "flatten the target's existing effective surface against the slide substrate" in system_prompt
+    assert "preserve its effective foreground" in system_prompt
+    assert "The safety pair must be visually neutral" in system_prompt
+    assert "must not read as a new card, panel, band, rail, or frame" in system_prompt
 
     payload_text = messages[1].content[0]["text"]
     payload = json.loads(payload_text.removeprefix("Allowed repair context JSON:\n"))

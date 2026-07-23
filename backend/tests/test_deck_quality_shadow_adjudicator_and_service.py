@@ -252,6 +252,51 @@ def test_adjudicator_criterion_coverage_branch_rejects_missing_or_extra_scores()
     assert decision.reason_codes == ("criterion_coverage_invalid",)
 
 
+def test_adjudicator_requires_supplied_explicit_taste_criterion_to_be_applicable() -> None:
+    explicit_taste = _criterion(
+        "explicit_user_taste_fit",
+        assessment="blind_visual",
+    )
+    visual = _visual().model_copy(
+        update={
+            "criterion_scores": (
+                _score(VISUAL_CRITERION.id, 4),
+                _score(explicit_taste.id, None, applicable=False),
+            )
+        }
+    )
+
+    decision = _adjudicate(
+        visual=visual,
+        criteria=(VISUAL_CRITERION, explicit_taste, PLAN_CRITERION),
+    )
+
+    assert decision.result == "failed_to_judge"
+    assert decision.reason_codes == ("criterion_applicability_invalid",)
+
+
+def test_adjudicator_accepts_applicable_explicit_taste_criterion() -> None:
+    explicit_taste = _criterion(
+        "explicit_user_taste_fit",
+        assessment="blind_visual",
+    )
+    visual = _visual().model_copy(
+        update={
+            "criterion_scores": (
+                _score(VISUAL_CRITERION.id, 4),
+                _score(explicit_taste.id, 4),
+            )
+        }
+    )
+
+    decision = _adjudicate(
+        visual=visual,
+        criteria=(VISUAL_CRITERION, explicit_taste, PLAN_CRITERION),
+    )
+
+    assert decision.result == "satisfied"
+
+
 def test_adjudicator_plan_selector_coverage_branch() -> None:
     plan = _plan().model_copy(update={"evaluated_selectors": ("slide:1",)})
     decision = _adjudicate(plan=plan)

@@ -12,6 +12,7 @@ from deerflow.sophia.deck_quality.brief import forbidden_brief_marker, sanitize_
 from deerflow.sophia.deck_quality.canonical import file_sha256
 from deerflow.sophia.deck_quality.evidence import (
     assert_blind_context_is_clean,
+    brief_scoped_criteria,
     prepare_blind_visual_evidence,
     prepare_plan_realization_evidence,
     prove_coverage,
@@ -201,6 +202,40 @@ def test_blind_evidence_contains_only_brief_renders_text_and_blind_rubric() -> N
         "expected_verdict",
         "human_label",
     }.isdisjoint(_recursive_keys(payload))
+
+
+def test_blind_evidence_projects_explicit_taste_only_for_structured_constraints() -> None:
+    base = _rubric("blind_visual")
+    explicit_taste = RubricCriterionProjection(
+        id="explicit_user_taste_fit",
+        assessment="blind_visual",
+        critical=False,
+        weight=1,
+        score_anchors={1: "contradicts", 3: "partial", 5: "honors"},
+        allowed_failure_codes=("explicit_taste_mismatch",),
+    )
+    compiled = base.model_copy(
+        update={"criteria": (*base.criteria, explicit_taste)}
+    )
+    empty_snapshot = _snapshot()
+    constrained_snapshot = empty_snapshot.model_copy(
+        update={
+            "brief": empty_snapshot.brief.model_copy(
+                update={"explicit_brand_style_constraints": ("Use a restrained blue palette.",)}
+            )
+        }
+    )
+
+    empty = prepare_blind_visual_evidence(empty_snapshot, compiled)
+    constrained = prepare_blind_visual_evidence(constrained_snapshot, compiled)
+
+    assert tuple(item.id for item in empty.rubric.criteria) == ("subject_specificity",)
+    assert tuple(item.id for item in constrained.rubric.criteria) == (
+        "subject_specificity",
+        "explicit_user_taste_fit",
+    )
+    assert brief_scoped_criteria(compiled.criteria, empty_snapshot.brief) == empty.rubric.criteria
+    assert compiled.criteria == (base.criteria[0], explicit_taste)
 
 
 def test_blind_request_preprocessor_removes_appended_prior_memory() -> None:

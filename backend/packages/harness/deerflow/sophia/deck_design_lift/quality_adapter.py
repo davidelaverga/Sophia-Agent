@@ -26,7 +26,7 @@ from deerflow.sophia.deck_design_lift.schemas import (
 )
 from deerflow.sophia.deck_quality.adjudicator import adjudicate_shadow_result
 from deerflow.sophia.deck_quality.canonical import canonical_json_bytes, canonical_sha256
-from deerflow.sophia.deck_quality.evidence import prove_coverage
+from deerflow.sophia.deck_quality.evidence import brief_scoped_criteria, prove_coverage
 from deerflow.sophia.deck_quality.graph import (
     _AssessmentAArtifact,
     _AssessmentCArtifact,
@@ -1025,7 +1025,10 @@ class DurableDeckQualityEvidenceAdapter:
             visual=visual_stage.assessment,
             mechanical=mechanical_stage.projection,
             plan=plan_stage.assessment,
-            criteria=self._instrument.all_criteria,
+            criteria=brief_scoped_criteria(
+                self._instrument.all_criteria,
+                evidence_bundle.snapshot.brief,
+            ),
             expected_plan_commitment_ids=tuple(item.commitment_id for item in plan_inputs.commitments),
             rubric_hash=self._instrument.blind_rubric.rubric_hash,
             policy=self._instrument.policy,
@@ -1053,12 +1056,16 @@ class DurableDeckQualityEvidenceAdapter:
                 *verified.plan.criterion_scores,
             )
         }
-        criteria_by_id = {criterion.id: criterion for criterion in self._instrument.all_criteria}
+        scoped_criteria = brief_scoped_criteria(
+            self._instrument.all_criteria,
+            verified.evidence_bundle.snapshot.brief,
+        )
+        criteria_by_id = {criterion.id: criterion for criterion in scoped_criteria}
         if set(score_by_id) != set(criteria_by_id):
             raise DeckQualityEvidenceAdapterError("quality_criterion_coverage_mismatch")
         decision_failures = set(verified.decision.failure_codes)
         scores: list[VersionCriterionScore] = []
-        for criterion in self._instrument.all_criteria:
+        for criterion in scoped_criteria:
             persisted = score_by_id[criterion.id]
             if not persisted.applicable:
                 continue
@@ -1075,7 +1082,7 @@ class DurableDeckQualityEvidenceAdapter:
             )
         if not scores or verified.decision.weighted_score is None:
             raise DeckQualityEvidenceAdapterError("quality_score_projection_incomplete")
-        critical_codes = tuple(code for code in verified.decision.failure_codes if any(criterion.critical and code in criterion.allowed_failure_codes for criterion in self._instrument.all_criteria))
+        critical_codes = tuple(code for code in verified.decision.failure_codes if any(criterion.critical and code in criterion.allowed_failure_codes for criterion in scoped_criteria))
         uncertainties = tuple(
             dict.fromkeys(
                 uncertainty.kind
