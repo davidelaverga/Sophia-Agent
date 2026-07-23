@@ -213,6 +213,7 @@ _FIXED_SLIDE_CANVAS_WIDTH_PX = 1920.0
 _FIXED_SLIDE_CANVAS_HEIGHT_PX = 1080.0
 _MIN_RETAINED_GEOMETRY_WIDTH_PX = 48.0
 _MIN_RETAINED_GEOMETRY_HEIGHT_PX = 24.0
+_STRICT_GEOMETRY_WITNESS_TRANSLATION_PX = 8.0
 _MIN_PRIORITY_GEOMETRY_TARGETS_PER_SELECTOR = 2
 _MAX_TEXT_GEOMETRY_AREA_EXPANSION_RATIO = 1.25
 _MAX_TEXT_GEOMETRY_EDGE_DISPLACEMENT_PX = 120.0
@@ -1990,40 +1991,73 @@ def _strict_geometry_pixel_value(winner: object) -> float | None:
     return None
 
 
-def _strict_geometry_candidate_rule(
-    selector: str,
-    box: dict[str, float],
+def _strict_geometry_effective_box(
+    element: Tag,
+    soup: BeautifulSoup,
     *,
-    important: bool,
-) -> str | None:
+    deck_css: str,
+    baseline_slide_css: str,
+) -> dict[str, float] | None:
+    """Resolve the literal baseline box used by the strict witness."""
+
+    winners = _geometry_cascade_winners(
+        element,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+        candidate_slide_css="",
+    )
+    if winners is None:
+        return None
+    box = {
+        property_name: _strict_geometry_pixel_value(winners[property_name])
+        for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+    }
+    if any(
+        value is None or not math.isfinite(value)
+        for value in box.values()
+    ):
+        return None
+    return {
+        property_name: float(value)
+        for property_name, value in box.items()
+        if value is not None
+    }
+
+
+def _strict_geometry_box_is_wholly_on_canvas(
+    box: dict[str, float],
+) -> bool:
     left, top, width, height = (
         box["left"],
         box["top"],
         box["width"],
         box["height"],
     )
+    return bool(
+        left >= 0
+        and top >= 0
+        and width >= _MIN_RETAINED_GEOMETRY_WIDTH_PX
+        and height >= _MIN_RETAINED_GEOMETRY_HEIGHT_PX
+        and left + width <= _FIXED_SLIDE_CANVAS_WIDTH_PX
+        and top + height <= _FIXED_SLIDE_CANVAS_HEIGHT_PX
+    )
+
+
+def _strict_geometry_candidate_rule(
+    selector: str,
+    box: dict[str, float],
+    *,
+    important: bool,
+) -> str | None:
+    width = box["width"]
+    height = box["height"]
     if (
         width < _MIN_RETAINED_GEOMETRY_WIDTH_PX
         or height < _MIN_RETAINED_GEOMETRY_HEIGHT_PX
     ):
         return None
-    translated: tuple[float, float] | None = None
-    for delta_x, delta_y in (
-        (8.0, 0.0),
-        (-8.0, 0.0),
-        (0.0, 8.0),
-        (0.0, -8.0),
-    ):
-        candidate_left = left + delta_x
-        candidate_top = top + delta_y
-        if (
-            candidate_left >= 0
-            and candidate_top >= 0
-            and candidate_left + width <= _FIXED_SLIDE_CANVAS_WIDTH_PX
-            and candidate_top + height <= _FIXED_SLIDE_CANVAS_HEIGHT_PX
-        ):
-            translated = (candidate_left, candidate_top)
-            break
+    translated = _strict_geometry_translation_origin(box)
     if translated is None:
         return None
     suffix = "!important" if important else ""
@@ -2034,6 +2068,38 @@ def _strict_geometry_candidate_rule(
         f"width:{_css_px_literal(width)}{suffix};"
         f"height:{_css_px_literal(height)}{suffix}}}"
     )
+
+
+def _strict_geometry_translation_origin(
+    box: dict[str, float],
+) -> tuple[float, float] | None:
+    """Return one bounded movement used by the strict geometry witness."""
+
+    left, top, width, height = (
+        box["left"],
+        box["top"],
+        box["width"],
+        box["height"],
+    )
+    if not _strict_geometry_box_is_wholly_on_canvas(box):
+        return None
+    delta = _STRICT_GEOMETRY_WITNESS_TRANSLATION_PX
+    for delta_x, delta_y in (
+        (delta, 0.0),
+        (-delta, 0.0),
+        (0.0, delta),
+        (0.0, -delta),
+    ):
+        candidate_left = left + delta_x
+        candidate_top = top + delta_y
+        if (
+            candidate_left >= 0
+            and candidate_top >= 0
+            and candidate_left + width <= _FIXED_SLIDE_CANVAS_WIDTH_PX
+            and candidate_top + height <= _FIXED_SLIDE_CANVAS_HEIGHT_PX
+        ):
+            return candidate_left, candidate_top
+    return None
 
 
 def _geometry_rule_with_opaque_contrast_pair(value: str) -> str | None:
@@ -2071,25 +2137,13 @@ def _strict_geometry_source_witness(
             element_id = element.attrs.get("id")
             if not isinstance(element_id, str) or element_id not in target_element_ids:
                 continue
-        winners = _geometry_cascade_winners(
+        box = _strict_geometry_effective_box(
             element,
             soup,
             deck_css=deck_css,
             baseline_slide_css=baseline_slide_css,
-            candidate_slide_css="",
         )
-        if winners is None:
-            continue
-        box = {
-            property_name: _strict_geometry_pixel_value(
-                winners[property_name]
-            )
-            for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
-        }
-        if any(
-            value is None or not math.isfinite(value)
-            for value in box.values()
-        ):
+        if box is None:
             continue
         authenticated_size = _authenticated_geometry_size_px(
             element,
@@ -2124,11 +2178,7 @@ def _strict_geometry_source_witness(
             continue
         candidate_rule = _strict_geometry_candidate_rule(
             manifest_selector,
-            {
-                property_name: float(value)
-                for property_name, value in box.items()
-                if value is not None
-            },
+            box,
             important=important,
         )
         if candidate_rule is None or not (

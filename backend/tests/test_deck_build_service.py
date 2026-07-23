@@ -1448,6 +1448,90 @@ def test_compact_v2_normalizes_only_redundant_inline_anchor_geometry() -> None:
     )
 
 
+def test_compact_v2_normalizes_inline_secondary_font_fallbacks_byte_locally() -> None:
+    body = (
+        '<SVG viewBox="0 0 10 10" aria-label="A &amp; B"><text>Ψ</text></SVG>'
+        + _source_pair_body().replace(
+            "<strong>",
+            '<strong STYLE = "font-family:Cambria,Georgia,serif;color:#F8FAFC">',
+            1,
+        )
+    )
+    slides = [{"html_body": body, "slide_css": ""}]
+
+    normalized, report = deck_service._normalize_compact_v2_inline_font_fallbacks(
+        slides,
+    )
+
+    assert normalized is not slides
+    assert normalized[0]["html_body"] == body.replace(
+        "Cambria,Georgia,serif",
+        "Cambria, serif",
+    )
+    assert '<SVG viewBox="0 0 10 10" aria-label="A &amp; B">' in normalized[0]["html_body"]
+    assert " STYLE = " in normalized[0]["html_body"]
+    assert report["normalized_slide_count"] == 1
+    assert report["normalized_attribute_count"] == 1
+    assert report["normalized_declaration_count"] == 1
+
+
+def test_compact_v2_normalizes_inline_font_shorthand_secondary_fallback() -> None:
+    body = _source_pair_body().replace(
+        "<span>Control</span>",
+        '<span style="font:700 24px/1.2 Calibri,Helvetica,sans-serif">Control</span>',
+        1,
+    )
+
+    normalized, _report = deck_service._normalize_compact_v2_inline_font_fallbacks(
+        [{"html_body": body, "slide_css": ""}],
+    )
+
+    assert "font:700 24px/1.2 Calibri, sans-serif" in normalized[0]["html_body"]
+    assert "Helvetica" not in normalized[0]["html_body"]
+
+
+def test_compact_v2_inline_font_normalization_ignores_style_text_in_other_attributes() -> None:
+    body = _source_pair_body().replace(
+        "<strong>",
+        (
+            "<strong "
+            "title=\"Narrative style='font-family:Cambria,Georgia,serif' must remain\" "
+            "data-note=\"style=&quot;font-family:Calibri,Helvetica,sans-serif&quot;\" "
+            'style="font-family:Cambria,Georgia,serif">'
+        ),
+        1,
+    )
+
+    normalized, _report = deck_service._normalize_compact_v2_inline_font_fallbacks(
+        [{"html_body": body, "slide_css": ""}],
+    )
+
+    assert "Narrative style='font-family:Cambria,Georgia,serif' must remain" in normalized[0]["html_body"]
+    assert "style=&quot;font-family:Calibri,Helvetica,sans-serif&quot;" in normalized[0]["html_body"]
+    assert 'style="font-family:Cambria, serif"' in normalized[0]["html_body"]
+
+
+def test_compact_v2_inline_font_normalization_keeps_unsafe_primary_for_validation() -> None:
+    body = _source_pair_body().replace(
+        "<strong>",
+        '<strong style="font-family:Georgia,Cambria,serif">',
+        1,
+    )
+    slides = [{"html_body": body, "slide_css": ""}]
+
+    normalized, report = deck_service._normalize_compact_v2_inline_font_fallbacks(
+        slides,
+    )
+
+    assert normalized is slides
+    assert report["normalization_applied"] is False
+    with pytest.raises(deck_service.DeckBuildFailure, match="unsupported PPTX font-family"):
+        deck_service._validate_compact_pptx_font_contract(
+            _source_pair_stylesheet(),
+            normalized,
+        )
+
+
 def test_compact_v2_normalization_does_not_bypass_invalid_shared_geometry() -> None:
     body = _source_pair_body().replace(
         'data-deck-required="true">',
@@ -1494,7 +1578,8 @@ def test_deck_service_applies_anchor_normalization_only_to_fresh_authoring(
     runtime.state["deck_candidate_compile"] = candidate_compile
     body = _source_pair_body().replace(
         'data-deck-required="true">',
-        'data-deck-required="true" style="position:absolute;width:720px">',
+        'data-deck-required="true" '
+        'style="position:absolute;width:720px;font-family:Cambria,Georgia,serif">',
         1,
     )
     slides = [
@@ -1536,6 +1621,7 @@ def test_deck_service_applies_anchor_normalization_only_to_fresh_authoring(
 
     assert result.failure_code == "test_stop_after_normalization"
     assert ("position:absolute" not in str(observed["body"])) is normalized
+    assert ("Georgia" not in str(observed["body"])) is normalized
 
 
 def test_compact_v2_source_addressability_accepts_reversed_declared_pair() -> None:
@@ -1660,12 +1746,180 @@ def test_compact_v2_source_addressability_rejects_matching_nonzero_margin_rule()
         deck_css=stylesheet,
         minimum=2,
     ) is None
-    with pytest.raises(deck_service.DeckBuildFailure, match="matching nonzero, logical, or vendor margin"):
+    with pytest.raises(deck_service.DeckBuildFailure, match="not literal zero"):
         deck_service._validate_compact_source_addressability(
             stylesheet,
             [
                 {
                     "html_body": _source_pair_body(),
+                    "slide_css": "",
+                    "repair_anchor_ids": ["hero", "proof"],
+                }
+            ],
+        )
+
+
+@pytest.mark.parametrize(
+    "unsafe_rule",
+    (
+        "#hero,#proof{margin:auto}",
+        "#hero,#proof{margin:0 auto}",
+        "#hero{margin-left:1px}",
+        "main #hero{margin-inline:0}",
+        "#hero{-webkit-margin-start:0}",
+        "#hero.foo{margin:auto}",
+        "#hero{margin:auto}#hero{margin:0}",
+    ),
+)
+def test_compact_v2_source_addressability_rejects_unsafe_anchor_margin_rules(
+    unsafe_rule: str,
+) -> None:
+    body = _source_pair_body().replace(
+        'id="hero"',
+        'id="hero" class="foo"',
+        1,
+    )
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="not literal zero"):
+        deck_service._validate_compact_source_addressability(
+            _source_pair_stylesheet() + unsafe_rule,
+            [
+                {
+                    "html_body": body,
+                    "slide_css": "",
+                    "repair_anchor_ids": ["hero", "proof"],
+                }
+            ],
+        )
+
+
+@pytest.mark.parametrize(
+    "safe_rule",
+    (
+        "#hero,#proof{margin:0}",
+        "#hero>*{margin:auto}",
+        ".other#hero{margin:auto}",
+        "#hero{--anchor-margin:0}",
+    ),
+)
+def test_compact_v2_source_addressability_allows_safe_margin_nonmatches(
+    safe_rule: str,
+) -> None:
+    deck_service._validate_compact_source_addressability(
+        _source_pair_stylesheet() + safe_rule,
+        [
+            {
+                "html_body": _source_pair_body(),
+                "slide_css": "",
+                "repair_anchor_ids": ["hero", "proof"],
+            }
+        ],
+    )
+
+
+@pytest.mark.parametrize(
+    "inline_margin",
+    (
+        "margin:auto",
+        "margin-inline:0",
+        "-webkit-margin-start:0",
+    ),
+)
+def test_compact_v2_source_addressability_rejects_unsafe_inline_anchor_margin(
+    inline_margin: str,
+) -> None:
+    body = _source_pair_body().replace(
+        'data-deck-required="true">',
+        f'data-deck-required="true" style="{inline_margin}">',
+        1,
+    )
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="not literal zero"):
+        deck_service._validate_compact_source_addressability(
+            _source_pair_stylesheet(),
+            [
+                {
+                    "html_body": body,
+                    "slide_css": "",
+                    "repair_anchor_ids": ["hero", "proof"],
+                }
+            ],
+        )
+
+
+@pytest.mark.parametrize(
+    "hero_geometry",
+    (
+        "left:0;top:0;width:1920px;height:1080px;",
+        "left:0;top:0;width:1913px;height:1073px;",
+    ),
+)
+def test_compact_v2_source_addressability_requires_eight_px_clearance(
+    hero_geometry: str,
+) -> None:
+    stylesheet = _source_pair_stylesheet().replace(
+        "left:80px;top:80px;width:720px;height:320px;",
+        hero_geometry,
+        1,
+    )
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="at least 8px translation clearance"):
+        deck_service._validate_compact_source_addressability(
+            stylesheet,
+            [
+                {
+                    "html_body": _source_pair_body(),
+                    "slide_css": "",
+                    "repair_anchor_ids": ["hero", "proof"],
+                }
+            ],
+        )
+
+
+@pytest.mark.parametrize(
+    "hero_geometry",
+    (
+        "left:0;top:0;width:1912px;height:1080px;",
+        "left:0;top:0;width:1920px;height:1072px;",
+    ),
+)
+def test_compact_v2_source_addressability_accepts_exact_eight_px_clearance(
+    hero_geometry: str,
+) -> None:
+    stylesheet = _source_pair_stylesheet().replace(
+        "left:80px;top:80px;width:720px;height:320px;",
+        hero_geometry,
+        1,
+    )
+
+    deck_service._validate_compact_source_addressability(
+        stylesheet,
+        [
+            {
+                "html_body": _source_pair_body(),
+                "slide_css": "",
+                "repair_anchor_ids": ["hero", "proof"],
+            }
+        ],
+    )
+
+
+def test_compact_v2_source_addressability_rejects_effective_off_canvas_override() -> None:
+    body = _source_pair_body().replace(
+        'id="hero"',
+        'id="hero" class="foo"',
+        1,
+    )
+    stylesheet = _source_pair_stylesheet() + (
+        "#hero.foo{left:-8px;top:0;width:1920px;height:1080px}"
+    )
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="wholly inside"):
+        deck_service._validate_compact_source_addressability(
+            stylesheet,
+            [
+                {
+                    "html_body": body,
                     "slide_css": "",
                     "repair_anchor_ids": ["hero", "proof"],
                 }
@@ -2229,8 +2483,11 @@ def test_presentation_authoring_prompt_requires_repair_addressable_anchors() -> 
     assert "position:absolute, box-sizing:border-box, margin:0" in prompt
     assert "at least 48x24px and wholly inside the canvas" in prompt
     assert "geometry out of slide_css and inline styles" in prompt
-    assert "No other CSS selector matching an anchor may declare a nonzero margin" in prompt
+    assert "at least 8px of free canvas" in prompt
+    assert "auto, nonzero, or otherwise non-literal-zero physical margin" in prompt
     assert "logical or vendor margin property" in prompt
+    assert "rather than overriding it with a later margin:0 reset" in prompt
+    assert "Grouped physical margin:0 is safe but unnecessary" in prompt
     assert "reset margins on anchor descendants with separate descendant selectors" in prompt
     assert "Do not use !important, right, bottom, inset, min/max sizing" in prompt
     assert "do not put at-rules or nested rules in authored CSS" in prompt

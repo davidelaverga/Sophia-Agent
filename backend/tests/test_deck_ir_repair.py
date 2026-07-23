@@ -55,6 +55,68 @@ def test_retryable_invalid_deck_ir_parses_zero_based_slide_field_target() -> Non
     assert instruction.validation_error.field == "html_body"
     assert "zero-based index 1 = visible slide 2" in instruction.repair_message
     assert "do not change only creative_plan" in instruction.repair_message
+    assert "Add or repair the complete declared pair together" in instruction.repair_message
+    assert "Never change DOM structure" in instruction.repair_message
+
+
+def test_font_fallback_repair_changes_only_family_tokens() -> None:
+    instruction = deck_ir_repair_instruction_from_failure(
+        failure_code="invalid_deck_ir",
+        failure_summary=(
+            "slides[0].html_body inline style uses a non-portable PPTX font fallback in "
+            "'Cambria,Georgia,serif'."
+        ),
+        retryable=True,
+        attempt_count=0,
+    )
+
+    assert "Change only the offending family tokens" in instruction.repair_message
+    assert "Preserve the surrounding style declaration" in instruction.repair_message
+    assert "Add or repair the complete declared pair" not in instruction.repair_message
+
+
+def test_anchor_margin_repair_removes_only_unsafe_declaration() -> None:
+    instruction = deck_ir_repair_instruction_from_failure(
+        failure_code="invalid_deck_ir",
+        failure_summary=(
+            "slides[0].html_body or deck_stylesheet has a margin declaration matching a declared "
+            "repair anchor that is auto, nonzero, or otherwise not literal zero."
+        ),
+        retryable=True,
+        attempt_count=0,
+    )
+
+    assert "Remove only the matching auto" in instruction.repair_message
+    assert "do not override it with a later margin:0 reset" in instruction.repair_message
+    assert "do not rebuild the anchor pair" in instruction.repair_message
+
+
+def test_anchor_clearance_repair_changes_only_geometry() -> None:
+    instruction = deck_ir_repair_instruction_from_failure(
+        failure_code="invalid_deck_ir",
+        failure_summary=(
+            "slides[0].deck_stylesheet effective repair-anchor geometry must remain wholly inside the "
+            "1920x1080 canvas and leave at least 8px translation clearance."
+        ),
+        retryable=True,
+        attempt_count=0,
+    )
+
+    assert "Adjust only the failing anchor's literal px" in instruction.repair_message
+    assert "Remove only the matching auto" not in instruction.repair_message
+
+
+def test_generic_ir_repair_preserves_anchor_layers_without_reauthoring() -> None:
+    instruction = deck_ir_repair_instruction_from_failure(
+        failure_code="invalid_deck_ir",
+        failure_summary="Slide 2 narrative is required and must be <= 280 chars.",
+        retryable=True,
+        attempt_count=0,
+    )
+
+    assert "Never change DOM structure" in instruction.repair_message
+    assert "unless the validation summary explicitly names that layer" in instruction.repair_message
+    assert "Add or repair the complete declared pair" not in instruction.repair_message
 
 
 def test_non_retryable_failure_does_not_retry() -> None:

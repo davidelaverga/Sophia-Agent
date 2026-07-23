@@ -4,6 +4,7 @@ import contextlib
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import subprocess  # noqa: S404 - fixed Python script path with sanitized args.
@@ -121,6 +122,40 @@ _FONT_SIZE_KEYWORDS = {
 _BASE_FONT_SELECTORS = {"*", ".slide-root", "body", "html", "main", "main.slide-root"}
 _COMPACT_SOURCE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _COMPACT_SOURCE_GEOMETRY_PROPERTIES = ("left", "top", "width", "height")
+_COMPACT_SOURCE_PHYSICAL_MARGIN_PROPERTIES = frozenset(
+    {
+        "margin",
+        "margin-bottom",
+        "margin-left",
+        "margin-right",
+        "margin-top",
+    }
+)
+_COMPACT_SOURCE_LOGICAL_MARGIN_PROPERTIES = frozenset(
+    {
+        "margin-block",
+        "margin-block-end",
+        "margin-block-start",
+        "margin-inline",
+        "margin-inline-end",
+        "margin-inline-start",
+    }
+)
+_COMPACT_SOURCE_VENDOR_MARGIN_PROPERTIES = frozenset(
+    {
+        "-moz-margin-end",
+        "-moz-margin-left-value",
+        "-moz-margin-right-value",
+        "-moz-margin-start",
+        "-webkit-margin-after",
+        "-webkit-margin-before",
+        "-webkit-margin-bottom-collapse",
+        "-webkit-margin-collapse",
+        "-webkit-margin-end",
+        "-webkit-margin-start",
+        "-webkit-margin-top-collapse",
+    }
+)
 _COMPACT_SOURCE_INLINE_DUPLICATE_PROPERTIES = frozenset(
     {
         "position",
@@ -257,6 +292,32 @@ class DeckBuildService:
                 deck.deck_authoring_contract == "compact_model_html_v2"
                 and _state_value(runtime, "deck_candidate_compile") is not True
             ):
+                slides, font_normalization = _normalize_compact_v2_inline_font_fallbacks(
+                    slides,
+                )
+                if font_normalization["normalized_declaration_count"] > 0:
+                    logger.info(
+                        "[DeckIRNormalization] compact-v2 inline font fallbacks normalized "
+                        "normalized_slides=%d normalized_attributes=%d normalized_declarations=%d "
+                        "rawContentExcluded=true",
+                        font_normalization["normalized_slide_count"],
+                        font_normalization["normalized_attribute_count"],
+                        font_normalization["normalized_declaration_count"],
+                    )
+                    with deck_span(
+                        "deck.ir.normalize",
+                        runtime=runtime,
+                        build_id=build_id,
+                        visual_policy=deck.visual_policy,
+                        status=deck.status,
+                        slide_count=len(slides),
+                        run_type="tool",
+                        inputs={
+                            "authoring_contract": deck.deck_authoring_contract,
+                            "normalization_kind": "inline_font_fallbacks",
+                        },
+                    ) as run:
+                        finish_span(run, font_normalization)
                 slides, normalization = _normalize_compact_v2_anchor_inline_geometry(
                     deck.deck_stylesheet or "",
                     slides,
@@ -2731,6 +2792,10 @@ def _normalize_compact_v2_anchor_inline_geometry(
                 item
                 for item in declarations
                 if item.lower_name in _COMPACT_SOURCE_INLINE_DUPLICATE_PROPERTIES
+                and (
+                    item.lower_name != "margin"
+                    or _compact_margin_declaration_is_literal_zero(item)
+                )
             ]
             if not removed:
                 continue
@@ -2762,6 +2827,222 @@ def _normalize_compact_v2_anchor_inline_geometry(
         "normalized_anchor_count": normalized_anchor_count,
         "removed_declaration_count": removed_declaration_count,
         "removed_property_names": sorted(removed_properties),
+        "strict_validator_bypassed": False,
+        "candidate_compile_changed": False,
+        "raw_content_excluded": True,
+    }
+
+
+class _InlineFontFallbackNormalizer(HTMLParser):
+    """Collect byte-local start-tag rewrites without serializing the DOM."""
+
+    def __init__(self, source: str) -> None:
+        super().__init__(convert_charrefs=False)
+        self._source = source
+        self._line_offsets = [0, *(match.end() for match in re.finditer(r"\n", source))]
+        self.replacements: list[tuple[int, int, str]] = []
+        self.normalized_attribute_count = 0
+        self.normalized_declaration_count = 0
+
+    def handle_starttag(
+        self,
+        _tag: str,
+        _attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self._collect_start_tag()
+
+    def handle_startendtag(
+        self,
+        _tag: str,
+        _attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self._collect_start_tag()
+
+    def _collect_start_tag(self) -> None:
+        raw_tag = self.get_starttag_text()
+        if not isinstance(raw_tag, str) or not raw_tag:
+            return
+        normalized_tag, attribute_count, declaration_count = (
+            _normalize_start_tag_inline_font_fallbacks(raw_tag)
+        )
+        if not declaration_count:
+            return
+        line, column = self.getpos()
+        if line < 1 or line > len(self._line_offsets):
+            return
+        start = self._line_offsets[line - 1] + column
+        end = start + len(raw_tag)
+        if self._source[start:end] != raw_tag:
+            return
+        self.replacements.append((start, end, normalized_tag))
+        self.normalized_attribute_count += attribute_count
+        self.normalized_declaration_count += declaration_count
+
+
+def _normalize_start_tag_inline_font_fallbacks(
+    raw_tag: str,
+) -> tuple[str, int, int]:
+    replacements: list[tuple[int, int, str]] = []
+    normalized_declaration_count = 0
+    for value_start, value_end in _quoted_style_attribute_value_spans(raw_tag):
+        value = raw_tag[value_start:value_end]
+        normalized, declaration_count = _normalize_inline_font_style_value(value)
+        if not declaration_count:
+            continue
+        replacements.append((value_start, value_end, normalized))
+        normalized_declaration_count += declaration_count
+    if not replacements:
+        return raw_tag, 0, 0
+    normalized_tag = raw_tag
+    for start, end, normalized in reversed(replacements):
+        normalized_tag = normalized_tag[:start] + normalized + normalized_tag[end:]
+    return normalized_tag, len(replacements), normalized_declaration_count
+
+
+def _quoted_style_attribute_value_spans(
+    raw_tag: str,
+) -> tuple[tuple[int, int], ...]:
+    """Locate real quoted style attributes while skipping other values."""
+
+    length = len(raw_tag)
+    index = 1 if raw_tag.startswith("<") else 0
+    if index < length and raw_tag[index] == "/":
+        index += 1
+    while (
+        index < length
+        and not raw_tag[index].isspace()
+        and raw_tag[index] not in {"/", ">"}
+    ):
+        index += 1
+    spans: list[tuple[int, int]] = []
+    while index < length:
+        while index < length and raw_tag[index].isspace():
+            index += 1
+        if index >= length or raw_tag[index] == ">":
+            break
+        if raw_tag[index] == "/" and index + 1 < length and raw_tag[index + 1] == ">":
+            break
+        name_start = index
+        while (
+            index < length
+            and not raw_tag[index].isspace()
+            and raw_tag[index] not in {"=", "/", ">"}
+        ):
+            index += 1
+        name = raw_tag[name_start:index].casefold()
+        while index < length and raw_tag[index].isspace():
+            index += 1
+        if index >= length or raw_tag[index] != "=":
+            if index == name_start:
+                index += 1
+            continue
+        index += 1
+        while index < length and raw_tag[index].isspace():
+            index += 1
+        if index >= length:
+            break
+        quote = raw_tag[index]
+        if quote not in {'"', "'"}:
+            while (
+                index < length
+                and not raw_tag[index].isspace()
+                and raw_tag[index] not in {"/", ">"}
+            ):
+                index += 1
+            continue
+        value_start = index + 1
+        value_end = raw_tag.find(quote, value_start)
+        if value_end < 0:
+            break
+        if name == "style":
+            spans.append((value_start, value_end))
+        index = value_end + 1
+    return tuple(spans)
+
+
+def _normalize_inline_font_style_value(value: str) -> tuple[str, int]:
+    try:
+        declarations = tinycss2.parse_declaration_list(
+            value,
+            skip_comments=False,
+            skip_whitespace=False,
+        )
+    except (RecursionError, TypeError, ValueError):
+        return value, 0
+    if any(
+        getattr(item, "type", "") in {"at-rule", "error", "qualified-rule"}
+        for item in declarations
+    ):
+        return value, 0
+    normalized_count = 0
+    for declaration in declarations:
+        if (
+            getattr(declaration, "type", "") != "declaration"
+            or declaration.lower_name not in {"font", "font-family"}
+        ):
+            continue
+        family_tokens = _font_family_tokens(declaration)
+        if family_tokens is None:
+            continue
+        normalized_families = _portable_font_family_fallbacks(family_tokens)
+        if normalized_families is None:
+            continue
+        family_start = len(declaration.value) - len(family_tokens)
+        prefix = tinycss2.serialize(declaration.value[:family_start])
+        declaration.value = tinycss2.parse_component_value_list(
+            prefix + normalized_families
+        )
+        normalized_count += 1
+    if not normalized_count:
+        return value, 0
+    normalized = tinycss2.serialize(declarations)
+    if (
+        not value.rstrip().endswith(";")
+        and normalized.rstrip().endswith(";")
+    ):
+        trailing = normalized[len(normalized.rstrip()) :]
+        normalized = normalized.rstrip()[:-1] + trailing
+    return normalized, normalized_count
+
+
+def _normalize_compact_v2_inline_font_fallbacks(
+    slides: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Remove unsupported secondary font families from fresh inline CSS."""
+
+    normalized_slides = slides
+    normalized_slide_count = 0
+    normalized_attribute_count = 0
+    normalized_declaration_count = 0
+    for index, raw in enumerate(slides):
+        body = raw.get("html_body")
+        if not isinstance(body, str) or not body.strip():
+            continue
+        normalizer = _InlineFontFallbackNormalizer(body)
+        try:
+            normalizer.feed(body)
+            normalizer.close()
+        except (RecursionError, TypeError, ValueError):
+            continue
+        if not normalizer.replacements:
+            continue
+        normalized_body = body
+        for start, end, replacement in reversed(normalizer.replacements):
+            normalized_body = (
+                normalized_body[:start] + replacement + normalized_body[end:]
+            )
+        if normalized_slides is slides:
+            normalized_slides = [dict(slide) for slide in slides]
+        normalized_slides[index]["html_body"] = normalized_body
+        normalized_slide_count += 1
+        normalized_attribute_count += normalizer.normalized_attribute_count
+        normalized_declaration_count += normalizer.normalized_declaration_count
+    return normalized_slides, {
+        "normalization_applied": normalized_declaration_count > 0,
+        "normalized_slide_count": normalized_slide_count,
+        "normalized_attribute_count": normalized_attribute_count,
+        "normalized_declaration_count": normalized_declaration_count,
+        "unsafe_primary_accepted": False,
         "strict_validator_bypassed": False,
         "candidate_compile_changed": False,
         "raw_content_excluded": True,
@@ -2830,6 +3111,96 @@ def _validate_compact_pptx_font_contract(stylesheet: str, slides: list[dict[str,
             )
 
 
+def _compact_margin_declaration_is_literal_zero(declaration: Any) -> bool:
+    tokens = [
+        token
+        for token in declaration.value
+        if getattr(token, "type", "") not in {"comment", "whitespace"}
+    ]
+    maximum = 4 if declaration.lower_name == "margin" else 1
+    if not 1 <= len(tokens) <= maximum:
+        return False
+    for token in tokens:
+        if getattr(token, "type", "") not in {
+            "dimension",
+            "number",
+            "percentage",
+        }:
+            return False
+        try:
+            value = float(token.value)
+        except (TypeError, ValueError):
+            return False
+        if not math.isfinite(value) or value != 0:
+            return False
+    return True
+
+
+def _compact_margin_issue_in_declarations(
+    declarations: list[Any],
+) -> str | None:
+    for declaration in declarations:
+        if getattr(declaration, "type", "") != "declaration":
+            continue
+        name = declaration.lower_name
+        if name in _COMPACT_SOURCE_LOGICAL_MARGIN_PROPERTIES:
+            return "logical"
+        if name in _COMPACT_SOURCE_VENDOR_MARGIN_PROPERTIES:
+            return "vendor"
+        if (
+            name in _COMPACT_SOURCE_PHYSICAL_MARGIN_PROPERTIES
+            and not _compact_margin_declaration_is_literal_zero(declaration)
+        ):
+            return "physical_not_literal_zero"
+    return None
+
+
+def _compact_declared_anchor_margin_issue(
+    stylesheet: str,
+    soup: BeautifulSoup,
+    anchors: tuple[Tag, ...],
+) -> str | None:
+    anchor_markers = {id(anchor) for anchor in anchors}
+    rules = tinycss2.parse_stylesheet(
+        stylesheet,
+        skip_comments=True,
+        skip_whitespace=True,
+    )
+    for rule in rules:
+        if getattr(rule, "type", "") != "qualified-rule":
+            continue
+        selector = tinycss2.serialize(rule.prelude).strip()
+        try:
+            matches_anchor = any(
+                id(match) in anchor_markers for match in soup.select(selector)
+            )
+        except Exception:
+            continue
+        if not matches_anchor:
+            continue
+        declarations = tinycss2.parse_declaration_list(
+            rule.content,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        issue = _compact_margin_issue_in_declarations(declarations)
+        if issue is not None:
+            return issue
+    for anchor in anchors:
+        inline_style = anchor.attrs.get("style")
+        if not isinstance(inline_style, str) or not inline_style.strip():
+            continue
+        declarations = tinycss2.parse_declaration_list(
+            inline_style,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        issue = _compact_margin_issue_in_declarations(declarations)
+        if issue is not None:
+            return issue
+    return None
+
+
 def _validate_compact_source_addressability(
     stylesheet: str,
     slides: list[dict[str, Any]],
@@ -2886,6 +3257,34 @@ def _validate_compact_source_addressability(
                     "HTML IDs must be unique within one slide."
                 )
             body_ids.append(element_id)
+        assembled_soup = BeautifulSoup(
+            assemble_compact_slide_html(
+                deck_stylesheet="",
+                html_body=body,
+                slide_css="",
+            ),
+            "html.parser",
+        )
+        assembled_anchors = tuple(
+            anchor
+            for identifier in declared_anchor_ids
+            for anchor in (assembled_soup.find(id=identifier),)
+            if isinstance(anchor, Tag)
+        )
+        if (
+            len(assembled_anchors) == 2
+            and _compact_declared_anchor_margin_issue(
+                stylesheet,
+                assembled_soup,
+                assembled_anchors,
+            )
+            is not None
+        ):
+            raise _authoring_failure(
+                f"slides[{index}].html_body or deck_stylesheet has a margin declaration matching a declared "
+                "repair anchor that is auto, nonzero, or otherwise not literal zero, or uses a logical/vendor "
+                "margin property. Remove the unsafe declaration; do not override it with a later margin:0 reset."
+            )
         anchors = tuple(
             element
             for element in soup.contents
@@ -2904,8 +3303,31 @@ def _validate_compact_source_addressability(
         # depend on the campaign repair author. The witness itself remains
         # unchanged and authoritative.
         from deerflow.sophia.deck_design_lift.repair_author import (  # noqa: PLC0415
+            _strict_geometry_effective_box,
             _strict_geometry_source_witness,
+            _strict_geometry_translation_origin,
         )
+
+        translation_blocked = False
+        for anchor in assembled_anchors:
+            effective_box = _strict_geometry_effective_box(
+                anchor,
+                assembled_soup,
+                deck_css=stylesheet,
+                baseline_slide_css=slide_css,
+            )
+            if (
+                effective_box is not None
+                and _strict_geometry_translation_origin(effective_box) is None
+            ):
+                translation_blocked = True
+                break
+        if translation_blocked:
+            raise _authoring_failure(
+                f"slides[{index}].deck_stylesheet effective repair-anchor geometry must remain wholly inside the "
+                "1920x1080 canvas and leave at least 8px translation clearance on one horizontal or vertical side "
+                "of each whole anchor. Adjust only its literal px left/top/width/height."
+            )
 
         anchors = tuple(
             anchor

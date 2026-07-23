@@ -107,17 +107,58 @@ def deck_ir_repair_instruction_from_failure(
             validation_error=validation_error,
         )
     field_phrase = _field_phrase(validation_error)
+    targeted_guidance = _targeted_deck_ir_repair_guidance(failure_summary)
     return DeckIRRepairInstruction(
         should_retry=True,
         repair_message=(
             "Repair the Deck IR and call prepare_deck_build exactly once more. "
-            f"{field_phrase}{failure_summary.strip()} Keep the same deck title, output path, "
+            f"{field_phrase}{failure_summary.strip()} {targeted_guidance}Keep the same deck title, output path, "
             "register, and visual policy. Edit the exact failing slide field plus every later slide with the same "
-            "structural violation; do not change only creative_plan. Do not end the build until this single repair "
-            "retry is attempted."
+            "structural violation; do not change only creative_plan. Never change DOM structure, semantic "
+            "attributes, repair_anchor_ids, or anchor geometry unless the validation summary explicitly names "
+            "that layer. Preserve every other prior argument and unrelated slide content. Do not end the build "
+            "until this single repair retry is attempted."
         ),
         validation_error=validation_error,
     )
+
+
+def _targeted_deck_ir_repair_guidance(failure_summary: str) -> str:
+    lowered = (failure_summary or "").casefold()
+    if "non-portable pptx font fallback" in lowered:
+        return (
+            "Change only the offending family tokens, removing unsupported secondary fallbacks after the safe "
+            "Office primary. Preserve the surrounding style declaration, DOM, semantic attributes, "
+            "repair_anchor_ids, deck_stylesheet, and anchor geometry. "
+        )
+    if (
+        "margin declaration matching a declared repair anchor" in lowered
+        or "not literal zero" in lowered
+    ):
+        return (
+            "Remove only the matching auto, nonzero, non-literal-zero, logical, or vendor margin declaration; "
+            "do not override it with a later margin:0 reset and do not rebuild the anchor pair. "
+        )
+    if "must contain both repair anchors declared by repair_anchor_ids" in lowered:
+        return (
+            "Add or repair the complete declared pair together: two top-level visible section/div anchors and one "
+            "standalone #id rule per anchor with position:absolute, box-sizing:border-box, margin:0, and literal "
+            "px left/top/width/height. Preserve all other source. "
+        )
+    if (
+        "translation clearance" in lowered
+        or "effective repair-anchor geometry" in lowered
+    ):
+        return (
+            "Adjust only the failing anchor's literal px left/top/width/height so its effective baseline box is "
+            "wholly on canvas with at least 8px movement clearance on one horizontal or vertical side. "
+        )
+    if "cannot prove two compact-v2 source geometry anchors" in lowered:
+        return (
+            "Repair only the two declared anchors' standalone geometry or a conflicting matching cascade rule; "
+            "preserve their DOM, semantic attributes, and all unrelated CSS. "
+        )
+    return ""
 
 
 def _validation_error_from_failure(

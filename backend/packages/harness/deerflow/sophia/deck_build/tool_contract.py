@@ -365,11 +365,13 @@ class PrepareDeckBuildInput(BaseModel):
             "Shared compiler-supported CSS for every slide. It must style the main 1920x1080 canvas with an opaque "
             "background. For each slide's two repair-addressable anchors, use the anchor's short HTML #id in a flat "
             "rule that declares position:absolute, box-sizing:border-box, margin:0, and finite pixel left, top, width, "
-            "and height. Keep each anchor at least 48x24px and wholly on canvas; do not use !important, right, bottom, "
-            "inset, min/max sizing, transform, or opacity for an anchor. Do not use at-rules or nested CSS anywhere "
-            "in deck_stylesheet. No other CSS "
-            "selector matching an anchor may declare a nonzero margin or any logical or vendor margin property; "
-            "reset margins on anchor descendants with separate descendant selectors."
+            "and height. Keep each effective baseline box at least 48x24px and wholly on canvas, with at least 8px "
+            "of free canvas on one horizontal or vertical side so the whole anchor can translate by 8px. Do not use "
+            "!important, right, bottom, inset, min/max sizing, transform, or opacity for an anchor. Do not use at-rules "
+            "or nested CSS anywhere in deck_stylesheet. No selector or inline style matching an anchor may declare "
+            "auto, nonzero, or otherwise non-literal-zero physical margin, or any logical or vendor margin property; "
+            "remove an unsafe declaration rather than overriding it with a later margin:0 reset. Grouped physical "
+            "margin:0 is safe but unnecessary; reset margins on anchor descendants with separate descendant selectors."
         ),
     )
     deck_register: str = Field(
