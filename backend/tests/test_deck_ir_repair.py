@@ -38,6 +38,25 @@ def test_retryable_invalid_deck_ir_second_attempt_does_not_retry() -> None:
     assert instruction.should_retry is False
 
 
+def test_retryable_invalid_deck_ir_parses_zero_based_slide_field_target() -> None:
+    instruction = deck_ir_repair_instruction_from_failure(
+        failure_code="invalid_deck_ir",
+        failure_summary=(
+            "slides[1].html_body must contain both repair anchors declared by "
+            "repair_anchor_ids."
+        ),
+        retryable=True,
+        attempt_count=0,
+    )
+
+    assert instruction.should_retry is True
+    assert instruction.validation_error is not None
+    assert instruction.validation_error.slide_index == 1
+    assert instruction.validation_error.field == "html_body"
+    assert "zero-based index 1 = visible slide 2" in instruction.repair_message
+    assert "do not change only creative_plan" in instruction.repair_message
+
+
 def test_non_retryable_failure_does_not_retry() -> None:
     instruction = deck_ir_repair_instruction_from_failure(
         failure_code="deck_native_unavailable",

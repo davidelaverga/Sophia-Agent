@@ -1385,6 +1385,159 @@ def test_compact_v2_source_addressability_accepts_strict_dq2_pair_with_interior_
     ) is not None
 
 
+def test_compact_v2_normalizes_only_redundant_inline_anchor_geometry() -> None:
+    body = _source_pair_body().replace(
+        'data-deck-required="true">',
+        'data-deck-required="true" '
+        'style="position:absolute;left:80px;top:80px;width:720px;height:320px;'
+        'box-sizing:border-box;margin:0;color:#F8FAFC">',
+        1,
+    ).replace(
+        'data-deck-required="true">',
+        'data-deck-required="true" '
+        'style="width:720px;height:320px;background:#182230">',
+        1,
+    )
+    slides = [
+        {
+            "html_body": body,
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="both repair anchors declared"):
+        deck_service._validate_compact_source_addressability(
+            _source_pair_stylesheet(),
+            slides,
+        )
+
+    normalized, report = deck_service._normalize_compact_v2_anchor_inline_geometry(
+        _source_pair_stylesheet(),
+        slides,
+    )
+
+    assert normalized is not slides
+    assert normalized[0] is not slides[0]
+    assert report == {
+        "normalization_applied": True,
+        "normalized_slide_count": 1,
+        "normalized_anchor_count": 2,
+        "removed_declaration_count": 9,
+        "removed_property_names": [
+            "box-sizing",
+            "height",
+            "left",
+            "margin",
+            "position",
+            "top",
+            "width",
+        ],
+        "strict_validator_bypassed": False,
+        "candidate_compile_changed": False,
+        "raw_content_excluded": True,
+    }
+    assert "position:absolute" in slides[0]["html_body"]
+    assert "color:#F8FAFC" in normalized[0]["html_body"]
+    assert "background:#182230" in normalized[0]["html_body"]
+    assert "position:absolute" not in normalized[0]["html_body"]
+    assert "width:720px" not in normalized[0]["html_body"]
+    deck_service._validate_compact_source_addressability(
+        _source_pair_stylesheet(),
+        normalized,
+    )
+
+
+def test_compact_v2_normalization_does_not_bypass_invalid_shared_geometry() -> None:
+    body = _source_pair_body().replace(
+        'data-deck-required="true">',
+        'data-deck-required="true" style="position:absolute;width:720px">',
+        1,
+    )
+    slides = [
+        {
+            "html_body": body,
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+    stylesheet = _source_pair_stylesheet(second_position="static")
+
+    normalized, report = deck_service._normalize_compact_v2_anchor_inline_geometry(
+        stylesheet,
+        slides,
+    )
+
+    assert normalized is not slides
+    assert normalized[0]["html_body"] != slides[0]["html_body"]
+    assert "position:absolute" not in normalized[0]["html_body"]
+    assert report["normalized_anchor_count"] == 1
+    with pytest.raises(deck_service.DeckBuildFailure, match="both repair anchors declared"):
+        deck_service._validate_compact_source_addressability(
+            stylesheet,
+            normalized,
+        )
+
+
+@pytest.mark.parametrize(
+    ("candidate_compile", "normalized"),
+    [(False, True), (True, False)],
+)
+def test_deck_service_applies_anchor_normalization_only_to_fresh_authoring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_compile: bool,
+    normalized: bool,
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state["builder_pptx_requested_slide_count"] = 1
+    runtime.state["deck_candidate_compile"] = candidate_compile
+    body = _source_pair_body().replace(
+        'data-deck-required="true">',
+        'data-deck-required="true" style="position:absolute;width:720px">',
+        1,
+    )
+    slides = [
+        {
+            "title": "PSI control",
+            "narrative": "Motives arbitrate action.",
+            "html_body": body,
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+    observed: dict[str, object] = {}
+    service = DeckBuildService()
+
+    def stop_after_normalization(
+        _deck: object,
+        normalized_slides: list[dict[str, object]],
+        _output_path: str,
+        _runtime: object,
+    ) -> None:
+        observed["body"] = normalized_slides[0]["html_body"]
+        raise deck_service.DeckBuildFailure(
+            "test_stop_after_normalization",
+            "test stop",
+            retryable=False,
+        )
+
+    monkeypatch.setattr(service, "_validate_inputs", stop_after_normalization)
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="PSI Agent Architecture",
+        slides=slides,
+        output_path=f"{_OUTPUTS}deck.pptx",
+        authoring_contract="compact_model_html_v2",
+        deck_stylesheet=_source_pair_stylesheet(),
+        creative_plan={},
+    )
+
+    assert result.failure_code == "test_stop_after_normalization"
+    assert ("position:absolute" not in str(observed["body"])) is normalized
+
+
 def test_compact_v2_source_addressability_accepts_reversed_declared_pair() -> None:
     deck_service._validate_compact_source_addressability(
         _source_pair_stylesheet(),

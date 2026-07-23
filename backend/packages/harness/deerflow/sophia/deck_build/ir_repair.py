@@ -35,6 +35,9 @@ class DeckIRRepairInstruction:
 
 
 _SLIDE_FIELD_RE = re.compile(r"\bSlide\s+(?P<slide>\d+)\s+(?P<field>[A-Za-z_][\w-]*)\b")
+_ZERO_BASED_SLIDE_FIELD_RE = re.compile(
+    r"\bslides\[(?P<slide>\d+)\]\.(?P<field>[A-Za-z_][\w-]*)\b"
+)
 _HEX_COLOR_RE = re.compile(r"^#?(?P<hex>[0-9A-Fa-f]{6})$")
 _OVERLAP_PAIR_RE = re.compile(r"\boverlaps\s+(?P<other>[^\s,;:]+)", re.I)
 _OVERLAP_MOVE_DELTA_RE = re.compile(
@@ -109,7 +112,9 @@ def deck_ir_repair_instruction_from_failure(
         repair_message=(
             "Repair the Deck IR and call prepare_deck_build exactly once more. "
             f"{field_phrase}{failure_summary.strip()} Keep the same deck title, output path, "
-            "register, and visual policy. Do not end the build until this single repair retry is attempted."
+            "register, and visual policy. Edit the exact failing slide field plus every later slide with the same "
+            "structural violation; do not change only creative_plan. Do not end the build until this single repair "
+            "retry is attempted."
         ),
         validation_error=validation_error,
     )
@@ -121,7 +126,8 @@ def _validation_error_from_failure(
     failure_summary: str,
     retryable: bool,
 ) -> DeckIRValidationError:
-    match = _SLIDE_FIELD_RE.search(failure_summary or "")
+    zero_based_match = _ZERO_BASED_SLIDE_FIELD_RE.search(failure_summary or "")
+    match = zero_based_match or _SLIDE_FIELD_RE.search(failure_summary or "")
     slide_index = int(match.group("slide")) if match else None
     field = match.group("field") if match else None
     return DeckIRValidationError(
@@ -136,6 +142,11 @@ def _validation_error_from_failure(
 def _field_phrase(error: DeckIRValidationError) -> str:
     if error.slide_index is None or not error.field:
         return ""
+    if _ZERO_BASED_SLIDE_FIELD_RE.search(error.summary or ""):
+        return (
+            f"Exact target: slides[{error.slide_index}].{error.field} "
+            f"(zero-based index {error.slide_index} = visible slide {error.slide_index + 1}). "
+        )
     return f"Slide {error.slide_index} has an invalid {error.field}: "
 
 

@@ -3,6 +3,7 @@ from __future__ import annotations
 import contextlib
 import hashlib
 import json
+import logging
 import os
 import re
 import subprocess  # noqa: S404 - fixed Python script path with sanitized args.
@@ -120,6 +121,14 @@ _FONT_SIZE_KEYWORDS = {
 _BASE_FONT_SELECTORS = {"*", ".slide-root", "body", "html", "main", "main.slide-root"}
 _COMPACT_SOURCE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _COMPACT_SOURCE_GEOMETRY_PROPERTIES = ("left", "top", "width", "height")
+_COMPACT_SOURCE_INLINE_DUPLICATE_PROPERTIES = frozenset(
+    {
+        "position",
+        "box-sizing",
+        "margin",
+        *_COMPACT_SOURCE_GEOMETRY_PROPERTIES,
+    }
+)
 _BANNED_STYLE_RE = re.compile(r"\b(chalkboard|blackboard|whiteboard|handwritten|sketch|cyberpunk|neon)\b", re.I)
 _BANNED_TEXT_RE = re.compile(r"THE TEXT READS|title reads|large readable text|paragraph text|axis labels?|formula", re.I)
 _NEGATED_BANNED_TERM_RE = re.compile(r"(?:\bno\b|\bnot\b|\bwithout\b|\bavoid\b|\bnever\b|\bdo\s+not\b)\W*$", re.I)
@@ -163,6 +172,8 @@ _NON_REPAIRABLE_IMAGE_ERROR_CLASSES = {
     "sandbox_path_rejected",
     "shell_error",
 }
+
+logger = logging.getLogger(__name__)
 
 
 DeckCompiler = Callable[[ToolRuntime, str, str, str], dict[str, Any]]
@@ -242,6 +253,37 @@ class DeckBuildService:
             updated_at=now,
         )
         try:
+            if (
+                deck.deck_authoring_contract == "compact_model_html_v2"
+                and _state_value(runtime, "deck_candidate_compile") is not True
+            ):
+                slides, normalization = _normalize_compact_v2_anchor_inline_geometry(
+                    deck.deck_stylesheet or "",
+                    slides,
+                )
+                if normalization["normalized_anchor_count"] > 0:
+                    logger.info(
+                        "[DeckIRNormalization] compact-v2 duplicate anchor geometry removed "
+                        "normalized_slides=%d normalized_anchors=%d removed_declarations=%d "
+                        "rawContentExcluded=true",
+                        normalization["normalized_slide_count"],
+                        normalization["normalized_anchor_count"],
+                        normalization["removed_declaration_count"],
+                    )
+                    with deck_span(
+                        "deck.ir.normalize",
+                        runtime=runtime,
+                        build_id=build_id,
+                        visual_policy=deck.visual_policy,
+                        status=deck.status,
+                        slide_count=len(slides),
+                        run_type="tool",
+                        inputs={
+                            "authoring_contract": deck.deck_authoring_contract,
+                            "normalization_kind": "duplicate_anchor_inline_geometry",
+                        },
+                    ) as run:
+                        finish_span(run, normalization)
             deadline_setter = getattr(self._native_service, "set_deadline_epoch_ms", None)
             if callable(deadline_setter):
                 deadline_setter(_service_deadline_epoch_ms(runtime))
@@ -2622,6 +2664,108 @@ def _timeout_stream_text(value: object) -> str:
 
 def _authoring_failure(summary: str) -> DeckBuildFailure:
     return DeckBuildFailure("invalid_deck_ir", summary, retryable=True)
+
+
+def _normalize_compact_v2_anchor_inline_geometry(
+    stylesheet: str,
+    slides: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Remove only redundant inline geometry backed by a strict shared rule.
+
+    Compact-v2 deliberately keeps repair-anchor geometry in the shared
+    stylesheet. Models occasionally duplicate that already-authoritative
+    geometry inline. When the declared anchor has a complete, safe ``#id``
+    geometry witness, removing the duplicate declarations is semantics
+    preserving and lets the unchanged strict validator remain authoritative.
+    Invalid or missing shared geometry, malformed inline CSS, nested anchors,
+    and every non-geometry declaration continue through to the normal
+    fail-closed validation path.
+    """
+
+    shared_geometry = _compact_shared_id_geometry(stylesheet)
+    normalized_slides = slides
+    normalized_slide_indexes: list[int] = []
+    normalized_anchor_count = 0
+    removed_declaration_count = 0
+    removed_properties: set[str] = set()
+
+    for index, raw in enumerate(slides):
+        declared = raw.get("repair_anchor_ids")
+        if (
+            not isinstance(declared, list)
+            or len(declared) != 2
+            or any(not isinstance(identifier, str) for identifier in declared)
+        ):
+            continue
+        body = raw.get("html_body")
+        if not isinstance(body, str) or not body.strip():
+            continue
+        try:
+            soup = BeautifulSoup(body, "html.parser")
+        except Exception:  # noqa: BLE001 - strict validation reports the source error.
+            continue
+
+        slide_changed = False
+        for element in soup.contents:
+            if not isinstance(element, Tag):
+                continue
+            element_id = element.attrs.get("id")
+            if (
+                str(element.name).casefold() not in {"div", "section"}
+                or not isinstance(element_id, str)
+                or element_id not in declared
+                or element_id not in shared_geometry
+            ):
+                continue
+            inline_style = element.attrs.get("style")
+            if not isinstance(inline_style, str) or not inline_style.strip():
+                continue
+            declarations = tinycss2.parse_declaration_list(
+                inline_style,
+                skip_comments=True,
+                skip_whitespace=True,
+            )
+            if any(getattr(item, "type", "") != "declaration" for item in declarations):
+                continue
+            removed = [
+                item
+                for item in declarations
+                if item.lower_name in _COMPACT_SOURCE_INLINE_DUPLICATE_PROPERTIES
+            ]
+            if not removed:
+                continue
+            retained = [
+                item
+                for item in declarations
+                if item.lower_name not in _COMPACT_SOURCE_INLINE_DUPLICATE_PROPERTIES
+            ]
+            serialized = tinycss2.serialize(retained).strip()
+            if serialized:
+                element.attrs["style"] = serialized
+            else:
+                element.attrs.pop("style", None)
+            slide_changed = True
+            normalized_anchor_count += 1
+            removed_declaration_count += len(removed)
+            removed_properties.update(item.lower_name for item in removed)
+
+        if not slide_changed:
+            continue
+        if normalized_slides is slides:
+            normalized_slides = [dict(slide) for slide in slides]
+        normalized_slides[index]["html_body"] = str(soup)
+        normalized_slide_indexes.append(index)
+
+    return normalized_slides, {
+        "normalization_applied": normalized_anchor_count > 0,
+        "normalized_slide_count": len(normalized_slide_indexes),
+        "normalized_anchor_count": normalized_anchor_count,
+        "removed_declaration_count": removed_declaration_count,
+        "removed_property_names": sorted(removed_properties),
+        "strict_validator_bypassed": False,
+        "candidate_compile_changed": False,
+        "raw_content_excluded": True,
+    }
 
 
 def _validate_authoring_inputs(
