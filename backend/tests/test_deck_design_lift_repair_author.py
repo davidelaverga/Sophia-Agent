@@ -1197,10 +1197,19 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                         "authenticated_deck_css",
                         "authenticated_inline_style",
                     ],
-                    "read_only_background_paint_policy": (
-                        "opaque_literal_or_provably_transparent_no_image"
-                    ),
+                    "read_only_background_paint_policy": {
+                        "authenticated_deck_css": (
+                            "literal_color_including_translucent_or_"
+                            "provably_transparent_no_image"
+                        ),
+                        "authenticated_inline_style": (
+                            "opaque_literal_or_"
+                            "provably_transparent_no_image"
+                        ),
+                    },
                     "unsupported_read_only_paint_rejected_before_provider": True,
+                    "translucent_deck_css_paint_is_immutable": True,
+                    "semantic_text_geometry_with_any_translucent_deck_css_paint_requires_same_rule_opaque_candidate_pair": True,
                 },
                 "text_transform": {
                     "allowed": False,
@@ -1556,6 +1565,28 @@ def test_v32_combined_absolute_pair_passes_strict_source_feasibility() -> None:
             'box-sizing:border-box;left:800px;top:520px;'
             'width:640px;height:360px">Control loop</section>'
         )
+    )
+
+    assert _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_translucent_deck_paint_has_safe_geometry_witness() -> None:
+    request, context = _v32_priority_geometry_context(
+        body=(
+            '<section class="subject" style="position:absolute;'
+            'box-sizing:border-box;left:80px;top:80px;'
+            'width:640px;height:360px">Current PSI</section>'
+            '<section class="mechanism" style="position:absolute;'
+            'box-sizing:border-box;left:800px;top:520px;'
+            'width:640px;height:360px">Control loop</section>'
+        ),
+        deck_css=(
+            "section{background:rgba(29,32,39,.5);color:#FFFFFF}"
+        ),
     )
 
     assert _priority_geometry_sources_are_feasible(
@@ -5205,6 +5236,202 @@ def test_authenticated_shared_contrast_does_not_block_nonpaint_overlay() -> None
     assert len(invoker.invoke_calls) == 1
 
 
+@pytest.mark.parametrize(
+    "paint",
+    ("#1D202780", "rgba(29,32,39,.5)"),
+)
+def test_authenticated_translucent_deck_paint_allows_nonpaint_overlay(
+    paint: str,
+) -> None:
+    request = _request()
+    context = _with_deck_css(
+        _context(request=request),
+        f"section{{background:{paint};color:#FFFFFF}}",
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=_candidate()),
+    )
+
+    result = _run(author(request))
+
+    assert result.candidate.source_updates[1].content == (
+        RETAINED_SLIDE_CSS_TEXT
+    )
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_geometry_over_translucent_deck_paint_requires_opaque_pair() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;"
+            "width:320px;height:180px}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            ".target{position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px;"
+            "background:#1D202780;color:#FFFFFF}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_geometry_over_translucent_deck_paint_allows_opaque_pair() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;"
+            "width:320px;height:180px;"
+            "background:#1D2027;color:#FFFFFF}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            ".target{position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px;"
+            "background:#1D202780;color:#FFFFFF}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    slide_css = next(
+        update.content
+        for update in result.candidate.source_updates
+        if update.source_role == "slide_css"
+    )
+    assert "background:#1D2027;" in slide_css
+    assert "color:#FFFFFF;" in slide_css
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_geometry_over_translucent_deck_paint_rejects_split_pair() -> None:
+    body = '<section class="target">Current PSI control loop</section>'
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;"
+            "width:320px;height:180px}"
+            ".target{background:#1D2027;color:#FFFFFF}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            ".target{position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px;"
+            "background:#1D202780;color:#FFFFFF}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_geometry_over_translucent_deck_paint_rejects_descendant_pair() -> None:
+    body = (
+        '<section class="target">'
+        '<span class="label">Current PSI control loop</span>'
+        "</section>"
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;"
+            "width:320px;height:180px}"
+            ".label{background:#1D2027;color:#FFFFFF}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            ".target{position:absolute;left:80px;top:80px;"
+            "width:640px;height:360px;"
+            "background:#1D202780;color:#FFFFFF}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_geometry_rejects_unpaired_translucent_sibling_surface() -> None:
+    body = (
+        '<section class="target">Current PSI control loop</section>'
+        '<aside class="panel"></aside>'
+    )
+    request, context, candidate = _contrast_candidate(
+        body=body,
+        css=(
+            ".target{left:120px;top:120px;"
+            "width:320px;height:180px}"
+        ),
+    )
+    context = _with_deck_css(
+        context,
+        (
+            ".target{position:absolute;left:80px;top:80px;"
+            "width:320px;height:180px;color:#FFFFFF}"
+            ".panel{position:absolute;left:400px;top:80px;"
+            "width:320px;height:180px;background:#1D202780}"
+        ),
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        context=context,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "candidate_invalid")
+    assert error.value.trace_error_code == "candidate_source_contract_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
 def test_authenticated_slide_contrast_does_not_block_nonpaint_overlay() -> None:
     request = _request()
     baseline_css = "section{background:#FFFFFF;color:#FFFFFF}"
@@ -5896,6 +6123,39 @@ def test_read_only_background_image_is_rejected_before_provider(
                 )
             }
         )
+    author, _loader, invoker = _author(request=request, context=context)
+
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "context_invalid")
+    assert invoker.prepare_calls == []
+    assert invoker.invoke_calls == []
+
+
+def test_read_only_inline_translucent_paint_is_rejected_before_provider() -> None:
+    request = _request()
+    context = _context(request=request)
+    body = (
+        '<section style="background:rgba(29,32,39,.5);color:#FFFFFF">'
+        "<h1>Current PSI control loop</h1></section>"
+    )
+    body_hash = hashlib.sha256(body.encode()).hexdigest()
+    context = context.model_copy(
+        update={
+            "authorized_sources": tuple(
+                source.model_copy(
+                    update={
+                        "text": body,
+                        "manifest_source_hash": body_hash,
+                    }
+                )
+                if source.source_role == "body"
+                else source
+                for source in context.authorized_sources
+            )
+        }
+    )
     author, _loader, invoker = _author(request=request, context=context)
 
     with pytest.raises(DeckRepairAuthorError) as error:

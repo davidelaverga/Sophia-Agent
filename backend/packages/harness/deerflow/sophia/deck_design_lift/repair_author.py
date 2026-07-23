@@ -866,6 +866,11 @@ Deterministic comparison must also approve it without a critical, mechanical, co
 Return exactly one slide_css update for every authorized selector and do not return body updates.
 The author boundary deterministically inserts every authorized body as an addressing echo from the authenticated manifest source, byte-for-byte, after validating your slide_css targets.
 Use read_only_sources only to account for the authenticated shared CSS cascade; never return an update for a read-only source.
+Authenticated read-only deck CSS may contain a literal translucent color. Preserve that \
+paint exactly for nonpaint repairs. If the deck CSS contains any translucent paint, \
+every geometry intervention that moves semantic text must also provide a same-rule \
+fully opaque literal background or background-color and fully opaque literal color \
+with at least 4.5:1 contrast.
 The author boundary pins body content to the authenticated manifest bytes before compilation, so express every visible repair in the authorized slide_css overlay.
 Target only tags, classes, and IDs listed in the supplied body_selector_inventory.
 Every slide_css output is an overlay only. Never copy, summarize, replace, or reconstruct authenticated baseline slide_css.
@@ -1251,10 +1256,19 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                             "authenticated_deck_css",
                             "authenticated_inline_style",
                         ],
-                        "read_only_background_paint_policy": (
-                            "opaque_literal_or_provably_transparent_no_image"
-                        ),
+                        "read_only_background_paint_policy": {
+                            "authenticated_deck_css": (
+                                "literal_color_including_translucent_or_"
+                                "provably_transparent_no_image"
+                            ),
+                            "authenticated_inline_style": (
+                                "opaque_literal_or_"
+                                "provably_transparent_no_image"
+                            ),
+                        },
                         "unsupported_read_only_paint_rejected_before_provider": True,
+                        "translucent_deck_css_paint_is_immutable": True,
+                        "semantic_text_geometry_with_any_translucent_deck_css_paint_requires_same_rule_opaque_candidate_pair": True,
                     },
                     "text_transform": {
                         "allowed": False,
@@ -1495,7 +1509,9 @@ def _css_color_is_transparent_or_ambiguous(declaration: Any) -> bool:
     return not isinstance(alpha, (int, float)) or alpha <= 0
 
 
-def _css_opaque_rgb(declaration: Any) -> tuple[float, float, float] | None:
+def _css_literal_rgba(
+    declaration: Any,
+) -> tuple[float, float, float, float] | None:
     tokens = _significant_css_value_tokens(declaration)
     if len(tokens) != 1:
         return None
@@ -1513,7 +1529,7 @@ def _css_opaque_rgb(declaration: Any) -> tuple[float, float, float] | None:
         not isinstance(alpha, (int, float))
         or isinstance(alpha, bool)
         or not math.isfinite(alpha)
-        or alpha < 1.0
+        or alpha < 0
         or alpha > 1.0
         or any(
             not isinstance(channel, (int, float))
@@ -1525,7 +1541,17 @@ def _css_opaque_rgb(declaration: Any) -> tuple[float, float, float] | None:
         )
     ):
         return None
-    return tuple(float(channel) for channel in channels)
+    return (
+        *(float(channel) for channel in channels),
+        float(alpha),
+    )
+
+
+def _css_opaque_rgb(declaration: Any) -> tuple[float, float, float] | None:
+    rgba = _css_literal_rgba(declaration)
+    if rgba is None or rgba[3] != 1.0:
+        return None
+    return rgba[:3]
 
 
 def _css_background_is_provably_transparent_or_none(
@@ -1570,14 +1596,41 @@ def _read_only_background_declaration_is_supported(
     )
 
 
+def _read_only_deck_background_declaration_is_supported(
+    declaration: Any,
+) -> bool:
+    """Admit immutable literal translucency while rejecting image ambiguity."""
+
+    return _read_only_background_declaration_is_supported(
+        declaration
+    ) or (
+        declaration.lower_name in _SLIDE_CSS_BACKGROUND_PROPERTIES
+        and _css_literal_rgba(declaration) is not None
+    )
+
+
 def _stylesheet_has_unsupported_read_only_background_paint(
     value: str,
 ) -> bool:
     return any(
-        not _read_only_background_declaration_is_supported(declaration)
+        not _read_only_deck_background_declaration_is_supported(
+            declaration
+        )
         for declaration in _stylesheet_declarations(value)
         if declaration.lower_name in _ALL_CSS_BACKGROUND_PAINT_PROPERTIES
     )
+
+
+def _stylesheet_has_translucent_literal_background_paint(
+    value: str,
+) -> bool:
+    for declaration in _stylesheet_declarations(value):
+        if declaration.lower_name not in _SLIDE_CSS_BACKGROUND_PROPERTIES:
+            continue
+        rgba = _css_literal_rgba(declaration)
+        if rgba is not None and 0 < rgba[3] < 1:
+            return True
+    return False
 
 
 def _html_has_unsupported_inline_background_paint(value: str) -> bool:
@@ -1920,6 +1973,12 @@ def _strict_geometry_candidate_rule(
     )
 
 
+def _geometry_rule_with_opaque_contrast_pair(value: str) -> str | None:
+    if not value.endswith("}"):
+        return None
+    return value[:-1] + ";background:#000;color:#fff}"
+
+
 def _strict_geometry_source_witness(
     *,
     body: str,
@@ -2026,6 +2085,26 @@ def _strict_geometry_source_witness(
             )
         ):
             continue
+        if _slide_css_has_unsafe_text_background(
+            candidate_rule,
+            body,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+        ):
+            paired_candidate_rule = (
+                _geometry_rule_with_opaque_contrast_pair(candidate_rule)
+            )
+            if (
+                paired_candidate_rule is None
+                or _slide_css_has_unsafe_text_background(
+                    paired_candidate_rule,
+                    body,
+                    deck_css=deck_css,
+                    baseline_slide_css=baseline_slide_css,
+                )
+            ):
+                continue
+            candidate_rule = paired_candidate_rule
         eligible.append((element, candidate_rule))
 
     overlay_budget = repair_overlay_utf8_budget(
@@ -2427,6 +2506,11 @@ def _slide_css_has_unsafe_text_background(
             or slide_rules is None
         ):
             return True
+        deck_has_translucent_paint = (
+            _stylesheet_has_translucent_literal_background_paint(
+                deck_css
+            )
+        )
         rule_sources = (
             *((False, rule) for rule in deck_rules),
             *((False, rule) for rule in baseline_rules),
@@ -2441,6 +2525,10 @@ def _slide_css_has_unsafe_text_background(
             int,
             tuple[tuple[int, int, int, int, int, int], Any, bool],
         ] = {}
+        candidate_geometry_targets: list[Tag] = []
+        candidate_geometry_rules: list[
+            tuple[tuple[Tag, ...], Any | None, Any | None]
+        ] = []
         for order, (candidate_authored, rule) in enumerate(rule_sources):
             declarations = tuple(
                 item
@@ -2459,7 +2547,17 @@ def _slide_css_has_unsafe_text_background(
                 declarations,
                 frozenset({"color"}),
             )
-            if background is None and foreground is None:
+            geometry_names = {
+                declaration.lower_name
+                for declaration in declarations
+                if declaration.lower_name
+                in _SLIDE_CSS_GEOMETRY_PROPERTIES
+            }
+            if (
+                background is None
+                and foreground is None
+                and not (candidate_authored and geometry_names)
+            ):
                 continue
             selector_matches = _qualified_rule_selector_matches(rule, soup)
             if selector_matches is None:
@@ -2475,7 +2573,27 @@ def _slide_css_has_unsafe_text_background(
                 if candidate_authored and background is not None:
                     return True
                 continue
-            text_containers = (
+            if candidate_authored and geometry_names:
+                if geometry_names != set(
+                    _SLIDE_CSS_GEOMETRY_PROPERTIES
+                ):
+                    return True
+                candidate_geometry_targets.extend(all_matches)
+                candidate_geometry_rules.append(
+                    (
+                        tuple(
+                            element
+                            for element in all_matches
+                            if any(
+                                _element_is_within(owner, element)
+                                for owner in text_owners
+                            )
+                        ),
+                        background,
+                        foreground,
+                    )
+                )
+            painted_text_containers = (
                 tuple(
                     element
                     for element in all_matches
@@ -2487,7 +2605,7 @@ def _slide_css_has_unsafe_text_background(
                 if background is not None
                 else ()
             )
-            if candidate_authored and text_containers:
+            if candidate_authored and painted_text_containers:
                 background_rgb = _css_opaque_rgb(background)
                 foreground_rgb = (
                     _css_opaque_rgb(foreground)
@@ -2550,7 +2668,42 @@ def _slide_css_has_unsafe_text_background(
                 inline=True,
             )
 
+        for (
+            geometry_text_containers,
+            geometry_background,
+            geometry_foreground,
+        ) in candidate_geometry_rules:
+            if (
+                not deck_has_translucent_paint
+                or not geometry_text_containers
+            ):
+                continue
+            background_rgb = (
+                _css_opaque_rgb(geometry_background)
+                if geometry_background is not None
+                else None
+            )
+            foreground_rgb = (
+                _css_opaque_rgb(geometry_foreground)
+                if geometry_foreground is not None
+                else None
+            )
+            if (
+                background_rgb is None
+                or foreground_rgb is None
+                or _css_contrast_ratio(
+                    foreground_rgb,
+                    background_rgb,
+                )
+                < _MIN_AUTHORED_TEXT_BACKGROUND_CONTRAST
+            ):
+                return True
+
         for owner in text_owners:
+            candidate_changed_geometry = any(
+                _element_is_within(owner, target)
+                for target in candidate_geometry_targets
+            )
             current: Tag | None = owner
             while current is not None:
                 background_winner = background_winners.get(id(current))
@@ -2576,6 +2729,7 @@ def _slide_css_has_unsafe_text_background(
                     candidate_changed_contrast = (
                         background_winner[2]
                         or (foreground is not None and foreground[1])
+                        or candidate_changed_geometry
                     )
                     if not candidate_changed_contrast:
                         break
