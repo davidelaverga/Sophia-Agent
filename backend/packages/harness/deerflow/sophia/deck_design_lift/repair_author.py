@@ -229,6 +229,8 @@ _MIN_MECHANISM_RING_ANGLE_GAP_DEGREES = 24.0
 _MAX_MECHANISM_RING_ANGLE_GAP_DEGREES = 144.0
 _MAX_MECHANISM_REENTRY_DISTANCE_PX = 480.0
 _MIN_PRIORITY_FONT_SIZE_INCREASE_PX = 4.0
+_MIN_PSI_SUBJECT_FONT_SIZE_PX = 30.0
+_MIN_PSI_CLOSING_FONT_SIZE_PX = 36.0
 _MAX_PRIORITY_FONT_ANCHOR_CHARACTERS = 160
 _MAX_PRIORITY_FONT_ANCHOR_WORDS = 24
 _FROZEN_PSI_CAMPAIGN_BRIEF_REQUEST_SHA256 = (
@@ -241,7 +243,22 @@ _PSI_MECHANISM_STAGE_LABELS = (
     "action",
     "feedback",
 )
+_PSI_MECHANISM_CONNECTOR_CLASSES = frozenset(
+    {"arrow", "connect", "connector", "edge"}
+)
+_TITLE_LIKE_ELEMENT_TOKENS = frozenset(
+    {
+        "heading",
+        "slide-heading",
+        "slide-title",
+        "slide_heading",
+        "slide_title",
+        "slidetitle",
+        "title",
+    }
+)
 _PSI_SUBJECT_ANCHOR_PHRASES = (
+    "psi agent architecture",
     "reasoning proposes",
     "motivation decides",
     "motivation is the control signal",
@@ -1003,6 +1020,8 @@ font-size anchor only when an authenticated inline font-size would otherwise win
 The target must be the unique short direct-text leaf inside the authenticated subject, \
 arbitration, or closing semantic container—not a container, title, or duplicate phrase \
 elsewhere—and its effective size must increase by at least 4px.
+When an authenticated semantic target supplies required_minimum_effective_font_size_px, \
+meet or exceed that exact baseline-derived lower bound without exceeding 64px.
 Never apply type changes to a container, repeated nodes, body copy, lists, or quotes. Preserve every existing deck and slide title fully visible.
 Do not add a separate rule for a deferred failure, and do not leave a priority family addressed only in rationale: each priority family needs a retained judge-visible declaration.
 Before returning, recheck the three priority outcomes and every locked constraint against the whole-deck contact sheet.
@@ -1378,12 +1397,17 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                                 _MAX_MECHANISM_TOPOLOGY_EDGE_DISPLACEMENT_PX
                             ),
                             "selector_family": "weak_mechanism_visualization",
-                            "eligible_manifest_classes": ["arrow", "node"],
+                            "eligible_manifest_classes": sorted(
+                                {
+                                    *_PSI_MECHANISM_CONNECTOR_CLASSES,
+                                    "node",
+                                }
+                            ),
                             "required_authenticated_containing_block_role": (
                                 "unique_common_parent_of_five_stage_nodes_and_four_connectors"
                             ),
                             "required_direct_node_count": 5,
-                            "required_direct_arrow_count": 4,
+                            "required_direct_connector_count": 4,
                             "all_topology_elements_must_be_direct_children": True,
                             "required_stage_order_winding_degrees": 360,
                             "multiple_windings_allowed": False,
@@ -2990,9 +3014,9 @@ def _priority_semantic_sources_are_feasible(
                 )
             )
             anchor_size = (
-                36
+                _MIN_PSI_CLOSING_FONT_SIZE_PX
                 if failure_code == "weak_closing_synthesis"
-                else 30
+                else _MIN_PSI_SUBJECT_FONT_SIZE_PX
             )
             anchor_container = (
                 peer
@@ -3330,6 +3354,16 @@ def _authenticated_priority_semantic_target_contract(
             if topology is None or reentry is None:
                 continue
             topology_container, nodes, arrows = topology
+            if not all(
+                _authenticated_mechanism_connector_has_visible_evidence(
+                    arrow,
+                    soup,
+                    deck_css=deck_css,
+                    baseline_slide_css=baseline,
+                )
+                for arrow in arrows
+            ):
+                continue
             topology_selector = _shortest_unique_manifest_selector(
                 topology_container,
                 soup,
@@ -3394,13 +3428,33 @@ def _authenticated_priority_semantic_target_contract(
         )
         if anchor is not None and anchor_selector is None:
             continue
-        result[failure_code] = {
+        semantic_target: dict[str, JsonValue] = {
             "slide_selector": slide_selector,
             "primary_geometry_selector": primary_selector,
             "peer_geometry_selector": peer_selector,
             "font_anchor_selector": anchor_selector,
             "model_may_change_semantic_text": False,
         }
+        if anchor is not None:
+            minimum_effective_font_size_px = (
+                _priority_semantic_font_size_target(
+                    element=anchor,
+                    soup=soup,
+                    deck_css=deck_css,
+                    baseline_slide_css=baseline,
+                    role_floor_px=(
+                        _MIN_PSI_CLOSING_FONT_SIZE_PX
+                        if failure_code == "weak_closing_synthesis"
+                        else _MIN_PSI_SUBJECT_FONT_SIZE_PX
+                    ),
+                )
+            )
+            if minimum_effective_font_size_px is None:
+                continue
+            semantic_target[
+                "required_minimum_effective_font_size_px"
+            ] = minimum_effective_font_size_px
+        result[failure_code] = semantic_target
     required_semantic_codes = set(selector_map).intersection(
         semantically_enforced_codes
     )
@@ -6378,6 +6432,16 @@ def _is_authenticated_mechanism_topology_target(
         id(item) for item in (*topology_nodes, *topology_arrows)
     }:
         return False
+    if (
+        id(element) in {id(item) for item in topology_arrows}
+        and not _authenticated_mechanism_connector_has_visible_evidence(
+            element,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+        )
+    ):
+        return False
     containing_block = _authenticated_geometry_containing_block(
         element,
         soup,
@@ -6680,9 +6744,24 @@ def _candidate_css_targets_manifest_bodies(
                     _element_is_within(owner, matched_geometry_node)
                     for owner in semantic_text_owners
                 )
-                if not has_semantic_text:
+                authenticated_topology_target = (
+                    update.selector == mechanism_topology_selector
+                    and _is_authenticated_mechanism_topology_target(
+                        matched_geometry_node,
+                        soup,
+                        deck_css=deck_css,
+                        baseline_slide_css=(
+                            baseline_slide_css_by_selector.get(
+                                update.selector,
+                                "",
+                            )
+                        ),
+                        candidate_slide_css=update.content,
+                    )
+                )
+                if not (has_semantic_text or authenticated_topology_target):
                     return False
-                if has_semantic_text:
+                if has_semantic_text or authenticated_topology_target:
                     baseline_size = _authenticated_geometry_size_px(
                         matched_geometry_node,
                         soup,
@@ -6731,19 +6810,7 @@ def _candidate_css_targets_manifest_bodies(
                         geometry_box["width"] * geometry_box["height"]
                     )
                     topology_displacement_exception = (
-                        update.selector == mechanism_topology_selector
-                        and _is_authenticated_mechanism_topology_target(
-                            matched_geometry_node,
-                            soup,
-                            deck_css=deck_css,
-                            baseline_slide_css=(
-                                baseline_slide_css_by_selector.get(
-                                    update.selector,
-                                    "",
-                                )
-                            ),
-                            candidate_slide_css=update.content,
-                        )
+                        authenticated_topology_target
                     )
                     if (
                         candidate_area
@@ -6834,6 +6901,27 @@ def _element_matches_semantic_phrases(
     return sum(phrase in text for phrase in phrases) >= minimum
 
 
+def _element_is_title_like(element: Tag) -> bool:
+    tag_name = str(element.name).casefold()
+    if tag_name in {"h1", "h2", "h3", "h4", "h5", "h6"}:
+        return True
+    role = element.attrs.get("role")
+    if (
+        isinstance(role, str)
+        and "heading" in {token.casefold() for token in role.split()}
+    ):
+        return True
+    classes = element.attrs.get("class")
+    tokens = {
+        str(item).casefold()
+        for item in (classes if isinstance(classes, list) else ())
+    }
+    element_id = element.attrs.get("id")
+    if isinstance(element_id, str):
+        tokens.add(element_id.casefold())
+    return bool(tokens.intersection(_TITLE_LIKE_ELEMENT_TOKENS))
+
+
 def _unique_short_semantic_anchor(
     soup: BeautifulSoup,
     *,
@@ -6843,7 +6931,9 @@ def _unique_short_semantic_anchor(
         element
         for element in _semantic_text_owners(soup)
         if (
-            (direct_text := _normalized_direct_element_text(element))
+            str(element.name).casefold() in {"p", "div"}
+            and not _element_is_title_like(element)
+            and (direct_text := _normalized_direct_element_text(element))
             and any(phrase in direct_text for phrase in phrases)
             and len(direct_text) <= _MAX_PRIORITY_FONT_ANCHOR_CHARACTERS
             and len(direct_text.split()) <= _MAX_PRIORITY_FONT_ANCHOR_WORDS
@@ -7206,10 +7296,189 @@ def _mechanism_stage_for_node(element: Tag) -> str | None:
 
 def _is_mechanism_connector_element(element: Tag) -> bool:
     classes = element.attrs.get("class")
+    class_tokens = {
+        str(item).casefold()
+        for item in (classes if isinstance(classes, list) else ())
+    }
     return bool(
-        "arrow" in (classes if isinstance(classes, list) else ())
+        class_tokens.intersection(_PSI_MECHANISM_CONNECTOR_CLASSES)
         or _normalized_direct_element_text(element)
         in _PSI_MECHANISM_CONNECTOR_GLYPHS
+    )
+
+
+def _css_full_border_is_provably_visible(declaration: Any) -> bool:
+    tokens = _significant_css_value_tokens(declaration)
+    if len(tokens) != 3:
+        return False
+    width_count = 0
+    style_count = 0
+    color_count = 0
+    for token in tokens:
+        value = _finite_css_token_value(token)
+        if (
+            token.type == "dimension"
+            and str(getattr(token, "unit", "")).casefold() == "px"
+            and value is not None
+            and 0 < value <= 64.0
+        ):
+            width_count += 1
+            continue
+        if (
+            token.type == "ident"
+            and str(token.value).casefold()
+            in {"dashed", "dotted", "double", "solid"}
+        ):
+            style_count += 1
+            continue
+        try:
+            color = parse_color(token)
+        except Exception:
+            continue
+        alpha = getattr(color, "alpha", None)
+        if (
+            isinstance(alpha, (int, float))
+            and not isinstance(alpha, bool)
+            and math.isfinite(alpha)
+            and alpha > 0
+        ):
+            color_count += 1
+    return (width_count, style_count, color_count) == (1, 1, 1)
+
+
+def _authenticated_mechanism_connector_has_visible_evidence(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> bool:
+    """Require a glyph or authenticated literal paint for an empty edge."""
+
+    if (
+        _normalized_direct_element_text(element)
+        in _PSI_MECHANISM_CONNECTOR_GLYPHS
+    ):
+        return True
+    background_winners: dict[
+        int,
+        tuple[tuple[int, int, int, int, int, int], Any, bool],
+    ] = {}
+    border_winners: dict[
+        int,
+        tuple[tuple[int, int, int, int, int, int], Any, bool],
+    ] = {}
+    order = 0
+    for source in (deck_css, baseline_slide_css):
+        rules = _stylesheet_qualified_rules(source)
+        if rules is None:
+            return False
+        for rule in rules:
+            try:
+                declarations = tuple(
+                    tinycss2.parse_declaration_list(
+                        rule.content,
+                        skip_comments=True,
+                        skip_whitespace=True,
+                    )
+                )
+            except Exception:
+                return False
+            if (
+                any(item.type != "declaration" for item in declarations)
+                or any(item.lower_name == "all" for item in declarations)
+            ):
+                return False
+            selector_matches = _qualified_rule_selector_matches(rule, soup)
+            if selector_matches is None:
+                return False
+            background = _final_css_declaration(
+                declarations,
+                _SLIDE_CSS_BACKGROUND_PROPERTIES,
+            )
+            border = _final_css_declaration(
+                declarations,
+                frozenset({"border"}),
+            )
+            for specificity, matches in selector_matches:
+                for match in matches:
+                    if match is not element:
+                        continue
+                    if background is not None:
+                        _record_css_winner(
+                            background_winners,
+                            element=element,
+                            declaration=background,
+                            specificity=specificity,
+                            order=order,
+                            candidate_authored=False,
+                        )
+                    if border is not None:
+                        _record_css_winner(
+                            border_winners,
+                            element=element,
+                            declaration=border,
+                            specificity=specificity,
+                            order=order,
+                            candidate_authored=False,
+                        )
+            order += 1
+
+    style = element.attrs.get("style")
+    if isinstance(style, str) and style.strip():
+        try:
+            declarations = tuple(
+                tinycss2.parse_declaration_list(
+                    style,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+            )
+        except Exception:
+            return False
+        if (
+            any(item.type != "declaration" for item in declarations)
+            or any(item.lower_name == "all" for item in declarations)
+        ):
+            return False
+        background = _final_css_declaration(
+            declarations,
+            _SLIDE_CSS_BACKGROUND_PROPERTIES,
+        )
+        border = _final_css_declaration(
+            declarations,
+            frozenset({"border"}),
+        )
+        if background is not None:
+            _record_css_winner(
+                background_winners,
+                element=element,
+                declaration=background,
+                specificity=(0, 0, 0),
+                order=order,
+                candidate_authored=False,
+                inline=True,
+            )
+        if border is not None:
+            _record_css_winner(
+                border_winners,
+                element=element,
+                declaration=border,
+                specificity=(0, 0, 0),
+                order=order,
+                candidate_authored=False,
+                inline=True,
+            )
+
+    background_winner = background_winners.get(id(element))
+    if background_winner is not None:
+        rgba = _css_literal_rgba(background_winner[1])
+        if rgba is not None and rgba[3] > 0:
+            return True
+    border_winner = border_winners.get(id(element))
+    return bool(
+        border_winner is not None
+        and _css_full_border_is_provably_visible(border_winner[1])
     )
 
 
@@ -7588,15 +7857,16 @@ def _effective_font_size_winner(
     )
 
 
-def _candidate_font_size_rule_that_wins(
+def _priority_semantic_font_size_target(
     *,
-    selector: str,
     element: Tag,
     soup: BeautifulSoup,
     deck_css: str,
     baseline_slide_css: str,
-    size_px: float,
-) -> str | None:
+    role_floor_px: float,
+) -> float | None:
+    """Return the exact safe minimum for one authenticated type anchor."""
+
     baseline_winner = _effective_font_size_winner(
         element,
         soup,
@@ -7606,11 +7876,32 @@ def _candidate_font_size_rule_that_wins(
     )
     if baseline_winner is None:
         return None
-    size_px = max(
-        size_px,
+    target_size_px = max(
+        role_floor_px,
         baseline_winner[0] + _MIN_PRIORITY_FONT_SIZE_INCREASE_PX,
     )
-    if size_px > _MAX_AUTHORED_FONT_SIZE_PX:
+    if target_size_px > _MAX_AUTHORED_FONT_SIZE_PX:
+        return None
+    return target_size_px
+
+
+def _candidate_font_size_rule_that_wins(
+    *,
+    selector: str,
+    element: Tag,
+    soup: BeautifulSoup,
+    deck_css: str,
+    baseline_slide_css: str,
+    size_px: float,
+) -> str | None:
+    size_px = _priority_semantic_font_size_target(
+        element=element,
+        soup=soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+        role_floor_px=size_px,
+    )
+    if size_px is None:
         return None
     for important in (False, True):
         rule = (
@@ -7753,7 +8044,10 @@ def _candidate_font_size_targets(
         if len(matched) != 1:
             return None
         target = next(iter(matched.values()))
-        if id(target) not in semantic_text_owner_ids:
+        if (
+            id(target) not in semantic_text_owner_ids
+            or _element_is_title_like(target)
+        ):
             return None
         target_elements.append(target)
     targets: list[tuple[Tag, float, float]] = []
@@ -8123,7 +8417,7 @@ def _closing_synthesis_is_materialized(
     if candidate_area > baseline_area * 1.01:
         return False
     return any(
-        value >= 36.0
+        value >= _MIN_PSI_CLOSING_FONT_SIZE_PX
         and value >= baseline_value + _MIN_PRIORITY_FONT_SIZE_INCREASE_PX
         and str(element.name).casefold() in {"p", "div"}
         and _priority_font_anchor_is_bound_short_leaf(
@@ -8219,7 +8513,7 @@ def _subject_or_default_look_is_materialized(
         return False
     if semantic_anchor_phrases == _PSI_ARBITRATION_ANCHOR_PHRASES:
         return not font_size_targets or any(
-            value >= 30.0
+            value >= _MIN_PSI_SUBJECT_FONT_SIZE_PX
             and value
             >= baseline_value + _MIN_PRIORITY_FONT_SIZE_INCREASE_PX
             and str(element.name).casefold() in {"p", "div"}
@@ -8231,7 +8525,7 @@ def _subject_or_default_look_is_materialized(
             for element, value, baseline_value in font_size_targets
         )
     return len(font_size_targets) == 1 and any(
-        value >= 30.0
+        value >= _MIN_PSI_SUBJECT_FONT_SIZE_PX
         and value >= baseline_value + _MIN_PRIORITY_FONT_SIZE_INCREASE_PX
         and str(element.name).casefold() in {"p", "div"}
         and _priority_font_anchor_is_bound_short_leaf(

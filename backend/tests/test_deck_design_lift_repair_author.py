@@ -1193,12 +1193,18 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                         "mechanism_topology_outer_edge_displacement_exception": {
                             "maximum_px": 560,
                             "selector_family": "weak_mechanism_visualization",
-                            "eligible_manifest_classes": ["arrow", "node"],
+                            "eligible_manifest_classes": [
+                                "arrow",
+                                "connect",
+                                "connector",
+                                "edge",
+                                "node",
+                            ],
                             "required_authenticated_containing_block_role": (
                                 "unique_common_parent_of_five_stage_nodes_and_four_connectors"
                             ),
                         "required_direct_node_count": 5,
-                        "required_direct_arrow_count": 4,
+                        "required_direct_connector_count": 4,
                         "all_topology_elements_must_be_direct_children": True,
                         "required_stage_order_winding_degrees": 360,
                         "multiple_windings_allowed": False,
@@ -1746,6 +1752,35 @@ def _psi_semantic_geometry_bodies(
     }
 
 
+def _production_shaped_psi_semantic_geometry_bodies() -> dict[str, str]:
+    absolute = "position:absolute;box-sizing:border-box;"
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:1"] = (
+        f'<h1 style="{absolute}left:120px;top:80px;'
+        'width:1680px;height:110px">'
+        "Motivation is the control signal for action selection.</h1>"
+        f'<section id="cover-thesis" style="{absolute}left:120px;top:250px;'
+        'width:1000px;height:660px">'
+        '<p class="mut" style="font-size:26px">PSI AGENT ARCHITECTURE</p>'
+        "<p>Competing motives determine which action proceeds.</p></section>"
+        f'<div id="cover-rationale" style="{absolute}left:1160px;top:250px;'
+        'width:640px;height:660px">'
+        "Product and engineering leaders can inspect irreversible action."
+        "</div>"
+    )
+    bodies["slide:2"] = (
+        bodies["slide:2"]
+        .replace('class="arrow"', 'class="connect"')
+        .replace(">→</div>", "></div>")
+        .replace(">↓</div>", "></div>")
+    )
+    bodies["slide:5"] = bodies["slide:5"].replace(
+        '<p class="close-big">',
+        '<p class="tt" style="font-size:38px">',
+    )
+    return bodies
+
+
 def _psi_semantic_candidate(
     *,
     slide_one_css: str | None = None,
@@ -2093,6 +2128,263 @@ def test_v32_glyph_connectors_do_not_require_arrow_class() -> None:
         request.program,
         context.authorized_sources,
         context.read_only_sources,
+    )
+
+
+@pytest.mark.parametrize("connector_class", ["connect", "connector", "edge"])
+def test_v48_empty_authenticated_connector_role_classes_are_supported(
+    connector_class: str,
+) -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:2"] = (
+        bodies["slide:2"]
+        .replace('class="arrow"', f'class="{connector_class}"')
+        .replace(">→</div>", "></div>")
+        .replace(">↓</div>", "></div>")
+    )
+    candidate = _psi_semantic_candidate().model_copy(
+        update={
+            "source_updates": tuple(
+                update.model_copy(
+                    update={
+                        "content": update.content.replace(
+                            ".arrow",
+                            f".{connector_class}",
+                        )
+                    }
+                )
+                if update.selector == "slide:2"
+                else update
+                for update in _psi_semantic_candidate().source_updates
+            )
+        }
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+        deck_css=(
+            DECK_CSS_TEXT
+            + f".{connector_class}{{background:#3B82F6}}"
+        ),
+    )
+
+    assert _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+    assert _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v48_unpainted_empty_connector_fails_closed() -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:2"] = (
+        bodies["slide:2"]
+        .replace('class="arrow"', 'class="connect"')
+        .replace(">→</div>", "></div>")
+        .replace(">↓</div>", "></div>")
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+
+    assert not _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+@pytest.mark.parametrize("connector_class", ["connected", "edges"])
+def test_v48_partial_connector_class_names_fail_closed(
+    connector_class: str,
+) -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:2"] = (
+        bodies["slide:2"]
+        .replace('class="arrow"', f'class="{connector_class}"')
+        .replace(">→</div>", "></div>")
+        .replace(">↓</div>", "></div>")
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+        deck_css=(
+            DECK_CSS_TEXT
+            + f".{connector_class}{{background:#3B82F6}}"
+        ),
+    )
+
+    assert not _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+@pytest.mark.parametrize(
+    "title_attributes",
+    [
+        'class="title"',
+        'id="slide-title"',
+        'role="heading"',
+        'role="banner heading"',
+    ],
+)
+def test_v48_title_like_div_is_not_a_semantic_type_anchor(
+    title_attributes: str,
+) -> None:
+    bodies = _production_shaped_psi_semantic_geometry_bodies()
+    bodies["slide:1"] = (
+        bodies["slide:1"]
+        .replace("<h1 style=", f"<div {title_attributes} style=", 1)
+        .replace("</h1>", "</div>", 1)
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+        deck_css=DECK_CSS_TEXT + ".connect{background:#3B82F6}",
+    )
+
+    assert _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+        semantic_campaign_required=True,
+    )
+
+
+def test_v48_title_only_subject_phrase_fails_closed() -> None:
+    bodies = _production_shaped_psi_semantic_geometry_bodies()
+    bodies["slide:1"] = (
+        bodies["slide:1"]
+        .replace('<h1 style=', '<div class="title" style=', 1)
+        .replace("</h1>", "</div>", 1)
+        .replace("PSI AGENT ARCHITECTURE", "ARCHITECTURE OVERVIEW", 1)
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+        deck_css=DECK_CSS_TEXT + ".connect{background:#3B82F6}",
+    )
+
+    assert not _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+        semantic_campaign_required=True,
+    )
+
+
+def test_v48_candidate_cannot_enlarge_title_like_subject_leaf() -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:1"] = bodies["slide:1"].replace(
+        "</p></section>",
+        (
+            '</p><div class="title">'
+            "PSI Agent Architecture</div></section>"
+        ),
+        1,
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+    candidate = _psi_semantic_candidate(
+        slide_one_css=(
+            "#thesis-block{left:72px!important;top:120px!important;"
+            "width:1040px!important;height:720px!important}"
+            "#stakes-panel{left:1220px!important;top:120px!important;"
+            "width:620px!important;height:720px!important}"
+            ".title{font-size:30px}"
+        )
+    )
+
+    assert _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+        semantic_campaign_required=True,
+    )
+    assert not _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+        semantic_campaign_required=True,
+    )
+
+
+def test_v48_production_shaped_semantics_expose_exact_type_targets() -> None:
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=_production_shaped_psi_semantic_geometry_bodies(),
+        deck_css=DECK_CSS_TEXT + ".connect{background:#3B82F6}",
+    )
+
+    assert _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+        semantic_campaign_required=True,
+    )
+    messages = build_repair_author_messages(
+        context=context,
+        program=request.program,
+    )
+    payload = json.loads(
+        messages[1].content[0]["text"].removeprefix(
+            "Allowed repair context JSON:\n"
+        )
+    )
+    targets = payload["repair_constraints"][
+        "authenticated_priority_semantic_targets"
+    ]
+
+    subject_anchor_selector = targets["default_look_gravity"][
+        "font_anchor_selector"
+    ]
+    assert subject_anchor_selector.startswith("p")
+    assert "h1" not in subject_anchor_selector
+    assert (
+        targets["default_look_gravity"][
+            "required_minimum_effective_font_size_px"
+        ]
+        == 30.0
+    )
+    closing_anchor_selector = targets["weak_closing_synthesis"][
+        "font_anchor_selector"
+    ]
+    assert closing_anchor_selector.startswith("p")
+    assert "h1" not in closing_anchor_selector
+    assert (
+        targets["weak_closing_synthesis"][
+            "required_minimum_effective_font_size_px"
+        ]
+        == 42.0
+    )
+    assert len(
+        targets["weak_mechanism_visualization"][
+            "connector_selectors"
+        ]
+    ) == 4
+
+
+def test_v48_semantic_type_target_above_64px_fails_closed() -> None:
+    bodies = _production_shaped_psi_semantic_geometry_bodies()
+    bodies["slide:5"] = bodies["slide:5"].replace(
+        "font-size:38px",
+        "font-size:61px",
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+        deck_css=DECK_CSS_TEXT + ".connect{background:#3B82F6}",
+    )
+
+    assert not _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+        semantic_campaign_required=True,
     )
 
 
