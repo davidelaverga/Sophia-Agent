@@ -5,6 +5,7 @@ import hmac
 from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from itertools import combinations
 from pathlib import Path
 from typing import Protocol
 
@@ -13,6 +14,7 @@ from pydantic import BaseModel
 from deerflow.sophia.build_manifest import BuildManifest, manifest_components_by_selector
 from deerflow.sophia.build_versions import BuildArtifactVersion
 from deerflow.sophia.deck_design_lift import compiler as repair_compiler
+from deerflow.sophia.deck_design_lift.comparator import PSI_PRIORITY_CODE_ORDER
 from deerflow.sophia.deck_design_lift.runtime import (
     BlindDeckJudgmentRequest,
     InitialRenderedJudgment,
@@ -1116,6 +1118,59 @@ class DurableDeckQualityEvidenceAdapter:
     ) -> tuple[JudgmentRepairFinding, ...]:
         supported_codes = frozenset(repair_compiler._FAILURE_INSTRUCTIONS)
         decision_codes = tuple(code for code in verified.decision.failure_codes if code in supported_codes)
+        decision_code_set = frozenset(decision_codes)
+        priority_codes = frozenset(PSI_PRIORITY_CODE_ORDER)
+        admitted_codes = (
+            *(
+                code
+                for code in PSI_PRIORITY_CODE_ORDER
+                if code in decision_codes
+            ),
+            *(
+                code
+                for code in decision_codes
+                if code not in priority_codes
+            ),
+        )
+        score_by_id = {
+            score.criterion_id: score
+            for score in (
+                *verified.visual.criterion_scores,
+                *verified.plan.criterion_scores,
+            )
+        }
+        scoped_criteria = brief_scoped_criteria(
+            self._instrument.all_criteria,
+            verified.evidence_bundle.snapshot.brief,
+        )
+        critical_requirements: list[
+            tuple[frozenset[str], frozenset[str]]
+        ] = []
+        for criterion in scoped_criteria:
+            score = score_by_id.get(criterion.id)
+            if (
+                not criterion.critical
+                or score is None
+                or not score.applicable
+                or score.score is None
+                or score.score >= self._instrument.policy.critical_score_floor
+            ):
+                continue
+            required_codes = (
+                frozenset(criterion.allowed_failure_codes)
+                & supported_codes
+                & decision_code_set
+            )
+            if not required_codes:
+                raise DeckQualityEvidenceAdapterError(
+                    "critical_repair_findings_unavailable"
+                )
+            critical_requirements.append(
+                (
+                    required_codes,
+                    frozenset(str(item) for item in score.evidence_selectors),
+                )
+            )
         decision_selectors = set(verified.decision.evidence_selectors)
         seeds: list[_FindingSeed] = []
         for finding in verified.visual.slide_findings:
@@ -1153,31 +1208,97 @@ class DurableDeckQualityEvidenceAdapter:
             raise DeckQualityEvidenceAdapterError("repair_findings_unavailable")
         seeds.sort(
             key=lambda item: (
-                decision_codes.index(item.failure_code),
+                admitted_codes.index(item.failure_code),
                 item.source_rank,
                 _selector_sort_key(item.selector),
             )
         )
+        ordered_selectors = tuple(
+            dict.fromkeys(seed.selector for seed in seeds)
+        )
+        critical_selector_options: list[frozenset[str]] = []
+        for required_codes, evidence_selectors in critical_requirements:
+            options = frozenset(
+                seed.selector
+                for seed in seeds
+                if (
+                    seed.failure_code in required_codes
+                    and seed.selector in evidence_selectors
+                )
+            )
+            if not options:
+                raise DeckQualityEvidenceAdapterError(
+                    "critical_repair_findings_unavailable"
+                )
+            critical_selector_options.append(options)
+        selected_cover: tuple[str, ...] | None = None
+        for size in range(1, min(3, len(ordered_selectors)) + 1):
+            selected_cover = next(
+                (
+                    candidate
+                    for candidate in combinations(ordered_selectors, size)
+                    if all(
+                        any(selector in options for selector in candidate)
+                        for options in critical_selector_options
+                    )
+                ),
+                None,
+            )
+            if selected_cover is not None:
+                break
+        if critical_selector_options and selected_cover is None:
+            raise DeckQualityEvidenceAdapterError(
+                "critical_repair_findings_unavailable"
+            )
         selected: list[str] = []
-        for code in decision_codes:
+        for options in critical_selector_options:
+            candidate = next(
+                (
+                    selector
+                    for selector in (selected_cover or ())
+                    if selector in options
+                ),
+                None,
+            )
+            if candidate is not None and candidate not in selected:
+                selected.append(candidate)
+        selected.extend(
+            selector
+            for selector in (selected_cover or ())
+            if selector not in selected
+        )
+        for code in admitted_codes:
+            if len(selected) == 3:
+                break
+            if any(
+                seed.failure_code == code and seed.selector in selected
+                for seed in seeds
+            ):
+                continue
             candidate = next(
                 (item.selector for item in seeds if item.failure_code == code and item.selector not in selected),
                 None,
             )
             if candidate is not None:
                 selected.append(candidate)
+        for selector in ordered_selectors:
             if len(selected) == 3:
                 break
+            if selector not in selected:
+                selected.append(selector)
         if not selected:
             raise DeckQualityEvidenceAdapterError("repair_findings_unavailable")
-        selected_set = set(selected)
         unique_seeds: list[_FindingSeed] = []
         identities: set[tuple[str, str]] = set()
-        for seed in seeds:
-            identity = (seed.selector, seed.failure_code)
-            if seed.selector in selected_set and identity not in identities:
-                unique_seeds.append(seed)
-                identities.add(identity)
+        for selector in selected:
+            for seed in seeds:
+                identity = (seed.selector, seed.failure_code)
+                if (
+                    seed.selector == selector
+                    and identity not in identities
+                ):
+                    unique_seeds.append(seed)
+                    identities.add(identity)
 
         components = manifest_components_by_selector(verified.manifest)
         render_by_selector = {str(item.selector): item for item in verified.evidence_bundle.snapshot.renders.slides}
@@ -1216,6 +1337,15 @@ class DurableDeckQualityEvidenceAdapter:
             )
         if not findings:
             raise DeckQualityEvidenceAdapterError("repair_findings_unavailable")
+        for required_codes, evidence_selectors in critical_requirements:
+            if not any(
+                finding.failure_code in required_codes
+                and finding.target_selector in evidence_selectors
+                for finding in findings
+            ):
+                raise DeckQualityEvidenceAdapterError(
+                    "critical_repair_findings_unavailable"
+                )
         return tuple(findings)
 
     @staticmethod

@@ -247,6 +247,7 @@ def _fixture(
     requested_at: datetime = NOW,
     include_explicit_taste: bool = False,
     explicit_style_constraints: tuple[str, ...] = (),
+    slide_selectors: tuple[str, ...] = SLIDE_SELECTORS,
 ) -> EvidenceFixture:
     instrument = _instrument(include_explicit_taste=include_explicit_taste)
     artifact_hash = _digest(artifact_version_id)
@@ -282,7 +283,7 @@ def _fixture(
             width=1280,
             height=720,
         )
-        for index, selector in enumerate(SLIDE_SELECTORS, start=1)
+        for index, selector in enumerate(slide_selectors, start=1)
     )
     contact = ImageEvidence(
         selector="contact-sheet",
@@ -292,10 +293,10 @@ def _fixture(
         height=1440,
     )
     renders = RenderEvidence(
-        expected_slide_count=4,
+        expected_slide_count=len(slide_selectors),
         contact_sheet=contact,
         slides=images,
-        selectors=SLIDE_SELECTORS,
+        selectors=slide_selectors,
     )
     visible_text = tuple(
         VisibleTextSlide(
@@ -303,7 +304,7 @@ def _fixture(
             text=f"PSI semantic content {index}",
             source_hash=_digest(f"visible-text-{index}"),
         )
-        for index, selector in enumerate(SLIDE_SELECTORS, start=1)
+        for index, selector in enumerate(slide_selectors, start=1)
     )
     brief = BlindBrief(
         request="Build a five-slide PSI production deck.",
@@ -351,7 +352,7 @@ def _fixture(
         sha256=artifact_hash,
         size_bytes=1024,
     )
-    build_record = {"build_id": BUILD_ID, "slide_count": 4}
+    build_record = {"build_id": BUILD_ID, "slide_count": len(slide_selectors)}
     bundle = SnapshotEvidenceBundle(
         quality_run_id=quality_run_id,
         thread_id=THREAD_ID,
@@ -366,7 +367,7 @@ def _fixture(
         object_path=f"{root}/render_source/objects/{_digest('pdf')}.pdf",
         sha256=_digest("pdf"),
         size_bytes=100,
-        page_count=4,
+        page_count=len(slide_selectors),
     )
     render_source = RenderSourceReference(
         manifest_path=f"{root}/render_source/manifest.json",
@@ -414,7 +415,7 @@ def _fixture(
         input_manifest_hash=input_manifest_hash,
         artifact=artifact_reference,
         render_source=render_source,
-        selectors=SLIDE_SELECTORS,
+        selectors=slide_selectors,
         source_hashes=SnapshotSourceHashes(
             input_manifest=input_manifest_hash,
             artifact=artifact_hash,
@@ -441,7 +442,7 @@ def _fixture(
 
     visual = BlindVisualAssessment(
         coverage_confirmed=True,
-        evaluated_selectors=SLIDE_SELECTORS,
+        evaluated_selectors=slide_selectors,
         overall_impression="The hierarchy and sequence remain too generic.",
         deck_failure_codes=("weak_visual_hierarchy", "low_sequence_rhythm"),
         slide_findings=(
@@ -495,19 +496,19 @@ def _fixture(
     plan_inputs = derive_plan_realization_inputs(
         creative_plan=creative_plan,
         design_plan=design_plan,
-        selectors=SLIDE_SELECTORS,
+        selectors=slide_selectors,
         explicit_style_constraints=brief.explicit_brand_style_constraints,
     )
     assert tuple(item.commitment_id for item in plan_inputs.commitments) == ("default-look-resistance",)
     plan = PlanRealizationAssessment(
-        evaluated_selectors=SLIDE_SELECTORS,
+        evaluated_selectors=slide_selectors,
         commitments=(
             CommitmentRealization(
                 commitment_id="default-look-resistance",
                 dimension="default_look",
                 status="not_realized",
                 observation="The generic card system overrides the PSI mechanism.",
-                evidence_selectors=SLIDE_SELECTORS,
+                evidence_selectors=slide_selectors,
             ),
         ),
         criterion_scores=(
@@ -683,7 +684,10 @@ def _fixture(
         decision_result=decision.result,
         decision_failure_codes=decision.failure_codes,
         decision_weighted_score=decision.weighted_score,
-        safe_metrics={"slide_count": 4, "coverage_complete": True},
+        safe_metrics={
+            "slide_count": len(slide_selectors),
+            "coverage_complete": True,
+        },
         trace_ids=trace_ids,
         stage_artifact_hashes=stage_hashes,
         safe_trace_root_input=safe_root,
@@ -707,7 +711,7 @@ def _fixture(
                 "slide_css": f"deck_build/slides/slide-{index:04d}.css",
             },
         )
-        for index, selector in enumerate(SLIDE_SELECTORS, start=1)
+        for index, selector in enumerate(slide_selectors, start=1)
     ]
     build_manifest = BuildManifest(
         manifest_revision=artifact.manifest_revision,
@@ -840,6 +844,154 @@ def _adapter(
     )
 
 
+def _v46_shaped_compiler_snapshot(
+    adapter: DurableDeckQualityEvidenceAdapter,
+    verified: Any,
+    *,
+    readability_selector: str = "slide:3",
+    readability_last: bool = False,
+) -> Any:
+    readability = _criterion(
+        "rendered_readability",
+        assessment="blind_visual",
+        critical=True,
+        failure_code="rendered_readability_failure",
+    )
+    closing = _criterion(
+        "closing_synthesis",
+        assessment="blind_visual",
+        critical=True,
+        failure_code="weak_closing_synthesis",
+    )
+    subject = _criterion(
+        "subject_specificity",
+        assessment="blind_visual",
+        critical=True,
+        failure_code="weak_subject_specificity",
+    )
+    default_look = _criterion(
+        "default_look",
+        assessment="plan_realization",
+        critical=True,
+        failure_code="default_look_gravity",
+    )
+    mechanism = _criterion(
+        "mechanism_visualization",
+        assessment="blind_visual",
+        critical=False,
+        failure_code="weak_mechanism_visualization",
+    )
+    criteria = (
+        (closing, subject, default_look, readability, mechanism)
+        if readability_last
+        else (readability, closing, subject, default_look, mechanism)
+    )
+    adapter._instrument = replace(  # noqa: SLF001 - focused compiler boundary test
+        adapter._instrument,  # noqa: SLF001 - focused compiler boundary test
+        all_criteria=criteria,
+    )
+    visual = verified.visual.model_copy(
+        update={
+            "deck_failure_codes": (
+                "rendered_readability_failure",
+                "weak_closing_synthesis",
+                "weak_mechanism_visualization",
+                "weak_subject_specificity",
+            ),
+            "slide_findings": (
+                EvidenceFinding(
+                    code="weak_mechanism_visualization",
+                    observation="The control loop remains a linear rail.",
+                    evidence_selectors=("slide:2",),
+                ),
+                EvidenceFinding(
+                    code="weak_closing_synthesis",
+                    observation="The closing question is visually subordinate.",
+                    evidence_selectors=("slide:5",),
+                ),
+                EvidenceFinding(
+                    code="rendered_readability_failure",
+                    observation="Scenario labels are occluded by their bars.",
+                    evidence_selectors=(readability_selector,),
+                ),
+                EvidenceFinding(
+                    code="weak_subject_specificity",
+                    observation="The opening claim remains transferable.",
+                    evidence_selectors=("slide:1",),
+                ),
+            ),
+            "criterion_scores": (
+                CriterionScore(
+                    criterion_id="rendered_readability",
+                    applicable=True,
+                    score=1,
+                    rationale="Labels are not legible.",
+                    evidence_selectors=(readability_selector,),
+                ),
+                CriterionScore(
+                    criterion_id="closing_synthesis",
+                    applicable=True,
+                    score=2,
+                    rationale="The final synthesis is weak.",
+                    evidence_selectors=("slide:5",),
+                ),
+                CriterionScore(
+                    criterion_id="subject_specificity",
+                    applicable=True,
+                    score=2,
+                    rationale="The opening is generic.",
+                    evidence_selectors=("slide:1",),
+                ),
+                CriterionScore(
+                    criterion_id="mechanism_visualization",
+                    applicable=True,
+                    score=2,
+                    rationale="The mechanism remains linear.",
+                    evidence_selectors=("slide:2",),
+                ),
+            ),
+        }
+    )
+    plan = verified.plan.model_copy(
+        update={
+            "criterion_scores": (
+                CriterionScore(
+                    criterion_id="default_look",
+                    applicable=True,
+                    score=2,
+                    rationale="The visual system remains transferable.",
+                    evidence_selectors=("slide:3",),
+                ),
+            ),
+        }
+    )
+    decision = verified.decision.model_copy(
+        update={
+            "failure_codes": tuple(
+                sorted(
+                    {
+                        *visual.deck_failure_codes,
+                        *plan.failure_codes,
+                    }
+                )
+            ),
+            "evidence_selectors": (
+                "slide:1",
+                "slide:2",
+                "slide:3",
+                "slide:4",
+                "slide:5",
+            ),
+        }
+    )
+    return replace(
+        verified,
+        visual=visual,
+        plan=plan,
+        decision=decision,
+    )
+
+
 @pytest.mark.parametrize(
     "failure_code",
     (
@@ -886,8 +1038,8 @@ async def test_initial_projects_completed_dq1_and_compiles_three_local_findings(
     )
     assert tuple(dict.fromkeys(finding.target_selector for finding in result.findings)) == (
         "slide:1",
+        "slide:3",
         "slide:2",
-        "slide:4",
     )
     assert {finding.failure_code for finding in result.findings} == {
         "default_look_gravity",
@@ -1300,3 +1452,359 @@ async def test_needs_revision_without_valid_persisted_findings_fails_closed() ->
         adapter._compile_findings(  # noqa: SLF001 - focused fail-closed compiler test
             replace(verified, visual=visual, plan=plan)
         )
+
+
+@pytest.mark.anyio
+async def test_v46_critical_rubric_order_admits_readability_closing_and_subject() -> None:
+    fixture = _fixture(
+        slide_selectors=(
+            "slide:1",
+            "slide:2",
+            "slide:3",
+            "slide:4",
+            "slide:5",
+        )
+    )
+    adapter, *_ = _adapter(fixture)
+    verified = await adapter.load_initial_snapshot(fixture.request)
+
+    findings = adapter._compile_findings(  # noqa: SLF001 - focused compiler test
+        _v46_shaped_compiler_snapshot(adapter, verified)
+    )
+
+    assert tuple(
+        dict.fromkeys(finding.target_selector for finding in findings)
+    ) == (
+        "slide:3",
+        "slide:5",
+        "slide:1",
+    )
+    pairs = {
+        (finding.failure_code, finding.target_selector)
+        for finding in findings
+    }
+    assert {
+        ("rendered_readability_failure", "slide:3"),
+        ("weak_closing_synthesis", "slide:5"),
+        ("weak_subject_specificity", "slide:1"),
+    } <= pairs
+    assert "weak_mechanism_visualization" not in {
+        finding.failure_code for finding in findings
+    }
+
+
+@pytest.mark.anyio
+async def test_off_target_critical_readability_fails_closed_before_repair() -> None:
+    fixture = _fixture(
+        slide_selectors=(
+            "slide:1",
+            "slide:2",
+            "slide:3",
+            "slide:4",
+            "slide:5",
+        )
+    )
+    adapter, *_ = _adapter(fixture)
+    verified = await adapter.load_initial_snapshot(fixture.request)
+    off_target = _v46_shaped_compiler_snapshot(
+        adapter,
+        verified,
+        readability_selector="slide:4",
+        readability_last=True,
+    )
+
+    with pytest.raises(
+        DeckQualityEvidenceAdapterError,
+        match="critical_repair_findings_unavailable",
+    ):
+        adapter._compile_findings(  # noqa: SLF001 - focused fail-closed test
+            off_target
+        )
+
+
+@pytest.mark.anyio
+async def test_below_floor_critical_without_decision_failure_code_fails_closed() -> None:
+    fixture = _fixture(
+        slide_selectors=(
+            "slide:1",
+            "slide:2",
+            "slide:3",
+            "slide:4",
+            "slide:5",
+        )
+    )
+    adapter, *_ = _adapter(fixture)
+    verified = await adapter.load_initial_snapshot(fixture.request)
+    shaped = _v46_shaped_compiler_snapshot(adapter, verified)
+    shaped = replace(
+        shaped,
+        decision=shaped.decision.model_copy(
+            update={
+                "failure_codes": tuple(
+                    code
+                    for code in shaped.decision.failure_codes
+                    if code != "rendered_readability_failure"
+                )
+            }
+        ),
+    )
+
+    with pytest.raises(
+        DeckQualityEvidenceAdapterError,
+        match="critical_repair_findings_unavailable",
+    ):
+        adapter._compile_findings(  # noqa: SLF001 - focused fail-closed test
+            shaped
+        )
+
+
+@pytest.mark.anyio
+async def test_critical_selector_reservation_uses_minimal_three_selector_cover() -> None:
+    fixture = _fixture(
+        slide_selectors=(
+            "slide:1",
+            "slide:2",
+            "slide:3",
+            "slide:4",
+            "slide:5",
+        )
+    )
+    adapter, *_ = _adapter(fixture)
+    verified = await adapter.load_initial_snapshot(fixture.request)
+    shaped = _v46_shaped_compiler_snapshot(adapter, verified)
+    visual = shaped.visual.model_copy(
+        update={
+            "slide_findings": tuple(
+                finding.model_copy(
+                    update={
+                        "evidence_selectors": (
+                            ("slide:1", "slide:2")
+                            if finding.code == "rendered_readability_failure"
+                            else (
+                                ("slide:2",)
+                                if finding.code == "weak_closing_synthesis"
+                                else (
+                                    ("slide:3",)
+                                    if finding.code == "weak_subject_specificity"
+                                    else finding.evidence_selectors
+                                )
+                            )
+                        )
+                    }
+                )
+                for finding in shaped.visual.slide_findings
+            ),
+            "criterion_scores": tuple(
+                score.model_copy(
+                    update={
+                        "evidence_selectors": (
+                            ("slide:1", "slide:2")
+                            if score.criterion_id == "rendered_readability"
+                            else (
+                                ("slide:2",)
+                                if score.criterion_id == "closing_synthesis"
+                                else (
+                                    ("slide:3",)
+                                    if score.criterion_id == "subject_specificity"
+                                    else score.evidence_selectors
+                                )
+                            )
+                        )
+                    }
+                )
+                for score in shaped.visual.criterion_scores
+            ),
+        }
+    )
+    plan = shaped.plan.model_copy(
+        update={
+            "commitments": tuple(
+                commitment.model_copy(
+                    update={"evidence_selectors": ("slide:4",)}
+                )
+                for commitment in shaped.plan.commitments
+            ),
+            "criterion_scores": tuple(
+                score.model_copy(
+                    update={"evidence_selectors": ("slide:4",)}
+                )
+                if score.criterion_id == "default_look"
+                else score
+                for score in shaped.plan.criterion_scores
+            ),
+        }
+    )
+
+    findings = adapter._compile_findings(  # noqa: SLF001 - focused compiler test
+        replace(shaped, visual=visual, plan=plan)
+    )
+
+    assert tuple(
+        dict.fromkeys(finding.target_selector for finding in findings)
+    ) == (
+        "slide:2",
+        "slide:3",
+        "slide:4",
+    )
+    assert (
+        "rendered_readability_failure",
+        "slide:2",
+    ) in {
+        (finding.failure_code, finding.target_selector)
+        for finding in findings
+    }
+
+
+@pytest.mark.anyio
+async def test_evidence_bound_fill_reaches_three_distinct_selectors() -> None:
+    fixture = _fixture(
+        slide_selectors=(
+            "slide:1",
+            "slide:2",
+            "slide:3",
+            "slide:4",
+            "slide:5",
+        )
+    )
+    adapter, *_ = _adapter(fixture)
+    verified = await adapter.load_initial_snapshot(fixture.request)
+    shaped = _v46_shaped_compiler_snapshot(adapter, verified)
+    critical_codes = {
+        "rendered_readability_failure",
+        "weak_closing_synthesis",
+        "weak_subject_specificity",
+    }
+    visual = shaped.visual.model_copy(
+        update={
+            "slide_findings": tuple(
+                finding.model_copy(
+                    update={
+                        "evidence_selectors": (
+                            ("slide:1",)
+                            if finding.code in critical_codes
+                            else (
+                                ("slide:2", "slide:3")
+                                if finding.code
+                                == "weak_mechanism_visualization"
+                                else finding.evidence_selectors
+                            )
+                        )
+                    }
+                )
+                for finding in shaped.visual.slide_findings
+            ),
+            "criterion_scores": tuple(
+                score.model_copy(
+                    update={"evidence_selectors": ("slide:1",)}
+                )
+                if score.criterion_id
+                in {
+                    "rendered_readability",
+                    "closing_synthesis",
+                    "subject_specificity",
+                }
+                else score
+                for score in shaped.visual.criterion_scores
+            ),
+        }
+    )
+    plan = shaped.plan.model_copy(
+        update={
+            "commitments": tuple(
+                commitment.model_copy(
+                    update={"evidence_selectors": ("slide:1",)}
+                )
+                for commitment in shaped.plan.commitments
+            ),
+            "criterion_scores": tuple(
+                score.model_copy(
+                    update={"evidence_selectors": ("slide:1",)}
+                )
+                if score.criterion_id == "default_look"
+                else score
+                for score in shaped.plan.criterion_scores
+            ),
+        }
+    )
+
+    findings = adapter._compile_findings(  # noqa: SLF001 - focused compiler test
+        replace(shaped, visual=visual, plan=plan)
+    )
+
+    assert tuple(
+        dict.fromkeys(finding.target_selector for finding in findings)
+    ) == (
+        "slide:1",
+        "slide:2",
+        "slide:3",
+    )
+
+
+@pytest.mark.anyio
+async def test_noncritical_selector_fill_uses_shared_psi_priority_order() -> None:
+    fixture = _fixture()
+    adapter, *_ = _adapter(fixture)
+    verified = await adapter.load_initial_snapshot(fixture.request)
+    visual_scores = tuple(
+        score.model_copy(update={"score": 3})
+        if score.criterion_id == "visual_hierarchy"
+        else score
+        for score in verified.visual.criterion_scores
+    )
+    plan_scores = tuple(
+        score.model_copy(update={"score": 3})
+        if score.criterion_id == "default_look"
+        else score
+        for score in verified.plan.criterion_scores
+    )
+    visual = verified.visual.model_copy(
+        update={
+            "slide_findings": (
+                *verified.visual.slide_findings,
+                EvidenceFinding(
+                    code="weak_mechanism_visualization",
+                    observation="The mechanism remains a linear rail.",
+                    evidence_selectors=("slide:3",),
+                ),
+                EvidenceFinding(
+                    code="weak_closing_synthesis",
+                    observation="The final beat lacks synthesis.",
+                    evidence_selectors=("slide:4",),
+                ),
+            ),
+            "criterion_scores": visual_scores,
+        }
+    )
+    plan = verified.plan.model_copy(
+        update={"criterion_scores": plan_scores}
+    )
+    decision = verified.decision.model_copy(
+        update={
+            "failure_codes": tuple(
+                sorted(
+                    {
+                        *verified.decision.failure_codes,
+                        "weak_closing_synthesis",
+                        "weak_mechanism_visualization",
+                    }
+                )
+            ),
+        }
+    )
+
+    findings = adapter._compile_findings(  # noqa: SLF001 - focused compiler test
+        replace(
+            verified,
+            visual=visual,
+            plan=plan,
+            decision=decision,
+        )
+    )
+
+    assert tuple(
+        dict.fromkeys(finding.target_selector for finding in findings)
+    ) == (
+        "slide:3",
+        "slide:4",
+        "slide:2",
+    )

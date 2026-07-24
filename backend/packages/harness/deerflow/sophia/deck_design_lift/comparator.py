@@ -16,6 +16,19 @@ PSI_FAILURE_FAMILY_BY_CODE = {
     "weak_closing_synthesis": "weak_closing_synthesis",
     "weak_mechanism_visualization": "weak_mechanism_visualization",
 }
+# Stable campaign tie-break shared by repair-program admission and repair
+# authorship.  It is deliberately independent of persisted/compiler
+# serialization order so the same frozen findings yield the same PSI target
+# families at every boundary.
+PSI_PRIORITY_CODE_ORDER = (
+    "weak_mechanism_visualization",
+    "weak_closing_synthesis",
+    "default_look_gravity",
+    "low_sequence_rhythm",
+    "weak_narrative_pacing",
+    "weak_subject_specificity",
+    "weak_signature_realization",
+)
 PSI_REQUIRED_RESOLVED_FAMILY_COUNT = 3
 
 

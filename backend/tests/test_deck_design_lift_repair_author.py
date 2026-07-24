@@ -32,9 +32,13 @@ from deerflow.sophia.deck_design_lift.repair_author import (
     RepairPlanContext,
     RepairSkillExcerptContext,
     RepairSourceContext,
+    _brief_requires_frozen_psi_semantics,
     _campaign_acceptance_contract,
     _candidate_materializes_priority_contract,
+    _candidate_materializes_priority_semantics,
+    _candidate_materializes_required_critical_selectors,
     _priority_geometry_sources_are_feasible,
+    _priority_semantic_sources_are_feasible,
     _retained_slide_css,
     _strict_geometry_candidate_rule,
     build_repair_author_messages,
@@ -82,6 +86,33 @@ RETAINED_SLIDE_CSS_TEXT = (
 )
 DECK_CSS_TEXT = ":root{}*{box-sizing:border-box}"
 SKILL_EXCERPT = "Use one subject-specific mechanism visual and preserve factual text."
+FROZEN_PSI_CAMPAIGN_REQUEST = (
+    "Create one native, editable PowerPoint presentation with exactly five "
+    "slides for product and engineering leaders, titled “PSI Agent "
+    "Architecture.” Explain the thesis that motivation is the control signal "
+    "for autonomous agents: not a mood layer bolted onto reasoning, but a "
+    "PSI-derived architecture in which competing motives arbitrate action."
+    "\n\nAcross the five-slide sequence, cover:\n\n"
+    "1. The thesis and why it matters to product and engineering leaders.\n"
+    "2. The control loop: perception → appraisal → motives → action → "
+    "feedback, with outcomes re-entering perception on the next cycle.\n"
+    "3. A destructive-request scenario in which a user asks the agent to "
+    "delete every record in a shared workspace immediately and without "
+    "confirmation. Show Helpfulness competing with Caution; explain that "
+    "Caution wins because the action is irreversible, so the agent requests "
+    "explicit confirmation. The selected action is licensed by the "
+    "highest-weighted motive rather than a fixed policy branch.\n"
+    "4. A baseline prompt-and-tool agent versus a PSI motivation-governed "
+    "agent, comparing action selection, failure under pressure, arbitration "
+    "mechanism, and debuggability.\n"
+    "5. Close with these operational questions: Can you name every motive in "
+    "the agent explicitly? Do competing motives have inspectable, tunable "
+    "weights? Does the loop log which motive won and why? Does caution "
+    "outweigh helpfulness when actions are irreversible? End with: “Govern "
+    "the motive, not just the words.”\n\n"
+    "Keep semantic text native and editable, preserve the factual content "
+    "above, and do not prescribe the final visual design."
+)
 
 
 def _run(awaitable):
@@ -882,7 +913,16 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "from 12px through 64px" in system_prompt
     assert "campaign's only repair" in system_prompt
     assert "decisive, presentation-scale design lift" in system_prompt
-    assert "Only campaign_acceptance.priority_failure_codes are required visible outcomes" in system_prompt
+    assert (
+        "Only campaign_acceptance.required_visible_failure_codes are required visible outcomes"
+        in system_prompt
+    )
+    assert (
+        "required_critical_selectors_by_failure_code exactly"
+        in system_prompt
+    )
+    assert "do not add scope or a fourth slide" in system_prompt
+    assert "non-uniform material geometry intervention" in system_prompt
     assert "deferred failure as context and a no-regression constraint" in system_prompt
     assert "Follow campaign_acceptance.priority_selector_by_failure_code exactly" in system_prompt
     assert "Materially resolve exactly those three distinct priority families" in system_prompt
@@ -1000,12 +1040,30 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
             "weak_signature_realization": "weak_signature_realization",
             "weak_mechanism_visualization": "weak_mechanism_visualization",
         },
-        "priority_selector_by_failure_code": {
-            "weak_subject_specificity": "slide:1",
-            "weak_signature_realization": "slide:1",
-            "weak_mechanism_visualization": "slide:1",
-        },
-        "distinct_priority_selector_count": 1,
+            "priority_selector_by_failure_code": {
+                "weak_subject_specificity": "slide:1",
+                "weak_signature_realization": "slide:1",
+                "weak_mechanism_visualization": "slide:1",
+            },
+            "required_critical_failure_codes": [
+                "weak_subject_specificity",
+                "weak_signature_realization",
+            ],
+            "required_critical_selectors_by_failure_code": {
+                "weak_subject_specificity": ["slide:1"],
+                "weak_signature_realization": ["slide:1"],
+            },
+            "required_visible_failure_codes": [
+                "weak_mechanism_visualization",
+                "weak_subject_specificity",
+                "weak_signature_realization",
+            ],
+            "required_selectors_by_failure_code": {
+                "weak_mechanism_visualization": ["slide:1"],
+                "weak_subject_specificity": ["slide:1"],
+                "weak_signature_realization": ["slide:1"],
+            },
+            "distinct_priority_selector_count": 1,
         "priority_geometry_required": False,
         "minimum_distinct_geometry_targets_per_priority_selector": 0,
         "psi_failure_family_by_code": {
@@ -1013,8 +1071,12 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
             "weak_signature_realization": "weak_signature_realization",
             "weak_mechanism_visualization": "weak_mechanism_visualization",
         },
-        "deferred_failure_codes": [],
-        "priority_failure_codes_are_required_visible_outcomes": True,
+            "deferred_failure_codes": [],
+            "priority_failure_codes_are_required_visible_outcomes": True,
+            "critical_failure_codes_are_required_visible_outcomes": True,
+            "required_critical_selector_materiality": (
+                "non_uniform_material_geometry_or_bounded_effective_font_size"
+            ),
         "priority_primary_retained_properties": [
             "background",
             "background-color",
@@ -1128,11 +1190,13 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                     "text_container_width_or_height_shrink_allowed": False,
                     "maximum_text_container_area_expansion_ratio": 1.25,
                     "maximum_text_container_outer_edge_displacement_px": 120,
-                    "mechanism_topology_outer_edge_displacement_exception": {
-                        "maximum_px": 560,
-                        "selector_family": "weak_mechanism_visualization",
-                        "eligible_manifest_classes": ["arrow", "node"],
-                        "required_authenticated_containing_block_id": "loop-ring",
+                        "mechanism_topology_outer_edge_displacement_exception": {
+                            "maximum_px": 560,
+                            "selector_family": "weak_mechanism_visualization",
+                            "eligible_manifest_classes": ["arrow", "node"],
+                            "required_authenticated_containing_block_role": (
+                                "unique_common_parent_of_five_stage_nodes_and_four_connectors"
+                            ),
                         "required_direct_node_count": 5,
                         "required_direct_arrow_count": 4,
                         "all_topology_elements_must_be_direct_children": True,
@@ -1169,9 +1233,10 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                         "effective_candidate_cascade_winner_required": True,
                         "minimum_effective_size_increase_px": 4,
                         "priority_anchor_must_be_short_direct_text_leaf": True,
-                        "priority_anchor_required_containers": [
-                            "closing-panel",
-                            "thesis-block",
+                        "priority_anchor_required_semantic_roles": [
+                            "closing_synthesis",
+                            "psi_subject_thesis",
+                            "destructive_request_arbitration",
                         ],
                     },
                 "line_height": {
@@ -1380,9 +1445,19 @@ def test_campaign_acceptance_prioritizes_css_only_repairable_psi_families() -> N
     assert acceptance["deferred_failure_codes"] == [
         "weak_fingerprint_realization",
         "weak_memorability",
-        "weak_signature_realization",
         "weak_spatial_tension",
+    ]
+    assert acceptance["required_critical_failure_codes"] == [
+        "weak_closing_synthesis",
         "weak_subject_specificity",
+        "weak_signature_realization",
+    ]
+    assert acceptance["required_visible_failure_codes"] == [
+        "weak_mechanism_visualization",
+        "weak_closing_synthesis",
+        "default_look_gravity",
+        "weak_subject_specificity",
+        "weak_signature_realization",
     ]
 
 
@@ -1901,6 +1976,457 @@ def test_v32_exact_priority_semantics_accept_nested_ring_geometry() -> None:
         request.program,
         context.authorized_sources,
         context.read_only_sources,
+    )
+
+
+def test_v32_priority_semantics_are_independent_of_manifest_ids() -> None:
+    renamed_ids = {
+        "thesis-block": "cover-thesis",
+        "stakes-panel": "cover-rationale",
+        "loop-ring": "psi-cycle",
+        "reentry-note": "cycle-return",
+        "question-list": "ops-checklist",
+        "closing-panel": "closing-banner",
+    }
+    bodies = _psi_semantic_geometry_bodies()
+    for selector, body in bodies.items():
+        for original, renamed in renamed_ids.items():
+            body = body.replace(original, renamed)
+        bodies[selector] = body
+    candidate = _psi_semantic_candidate()
+    for original, renamed in renamed_ids.items():
+        candidate = candidate.model_copy(
+            update={
+                "source_updates": tuple(
+                    update.model_copy(
+                        update={
+                            "content": update.content.replace(
+                                original,
+                                renamed,
+                            )
+                        }
+                    )
+                    for update in candidate.source_updates
+                )
+            }
+        )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+
+    assert _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+    assert _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+    messages = build_repair_author_messages(
+        context=context,
+        program=request.program,
+    )
+    payload = json.loads(
+        messages[1].content[0]["text"].removeprefix(
+            "Allowed repair context JSON:\n"
+        )
+    )
+    semantic_targets = payload["repair_constraints"][
+        "authenticated_priority_semantic_targets"
+    ]
+    assert semantic_targets["weak_mechanism_visualization"][
+        "topology_container_selector"
+    ] == "#psi-cycle"
+    assert semantic_targets["weak_mechanism_visualization"][
+        "reentry_witness_selector"
+    ] == "#cycle-return"
+    assert semantic_targets["default_look_gravity"][
+        "primary_geometry_selector"
+    ] == "#cover-thesis"
+    assert semantic_targets["default_look_gravity"][
+        "peer_geometry_selector"
+    ] == "#cover-rationale"
+    assert semantic_targets["weak_closing_synthesis"][
+        "primary_geometry_selector"
+    ] == "#ops-checklist"
+    assert semantic_targets["weak_closing_synthesis"][
+        "peer_geometry_selector"
+    ] == "#closing-banner"
+    assert not any(
+        original in json.dumps(semantic_targets, sort_keys=True)
+        for original in renamed_ids
+    )
+
+
+def test_v32_glyph_connectors_do_not_require_arrow_class() -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:2"] = bodies["slide:2"].replace(
+        'class="arrow"',
+        'class="connector"',
+    )
+    candidate = _psi_semantic_candidate().model_copy(
+        update={
+            "source_updates": tuple(
+                update.model_copy(
+                    update={"content": update.content.replace(".arrow", ".connector")}
+                )
+                if update.selector == "slide:2"
+                else update
+                for update in _psi_semantic_candidate().source_updates
+            )
+        }
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+
+    assert _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+    assert _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_duplicate_closing_anchor_is_ambiguous_before_provider() -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:5"] += (
+        '<p id="duplicate-close">'
+        "Govern the motive, not just the words.</p>"
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+
+    assert not _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_campaign_semantics_reject_off_target_priority_assignment() -> None:
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=_psi_semantic_geometry_bodies(),
+    )
+    acceptance = _campaign_acceptance_contract(request.program)
+    selector_map = dict(
+        acceptance["priority_selector_by_failure_code"]
+    )
+    selector_map["weak_subject_specificity"] = "slide:2"
+    off_target_acceptance = {
+        **acceptance,
+        "priority_selector_by_failure_code": selector_map,
+    }
+
+    assert not _priority_semantic_sources_are_feasible(
+        acceptance=off_target_acceptance,
+        authorized_sources=context.authorized_sources,
+        read_only_sources=context.read_only_sources,
+    )
+    assert not _candidate_materializes_priority_semantics(
+        candidate=_psi_semantic_candidate(),
+        acceptance=off_target_acceptance,
+        authorized_sources=context.authorized_sources,
+        read_only_sources=context.read_only_sources,
+    )
+
+
+def test_v32_subset_campaign_semantics_reject_off_target_assignment() -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    absolute = "position:absolute;box-sizing:border-box;"
+    bodies["slide:2"] = (
+        f'<section id="scenario" style="{absolute}left:80px;top:140px;'
+        'width:720px;height:760px">'
+        "Delete every record in the shared workspace without confirmation."
+        "</section>"
+        f'<div id="arbitration" style="{absolute}left:880px;top:140px;'
+        'width:920px;height:760px">'
+        "Caution wins because the irreversible action requires explicit "
+        "confirmation from the highest-weighted motive.</div>"
+    )
+    bodies["slide:5"] = (
+        f'<section id="comparison" style="{absolute}left:80px;top:140px;'
+        'width:820px;height:760px">Architecture comparison</section>'
+        f'<div id="tradeoffs" style="{absolute}left:980px;top:140px;'
+        'width:820px;height:760px">Operational tradeoffs</div>'
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+    acceptance = _campaign_acceptance_contract(request.program)
+    selector_map = dict(
+        acceptance["priority_selector_by_failure_code"]
+    )
+    selector_map["weak_subject_specificity"] = "slide:2"
+
+    assert not _priority_semantic_sources_are_feasible(
+        acceptance={
+            **acceptance,
+            "priority_selector_by_failure_code": selector_map,
+        },
+        authorized_sources=context.authorized_sources,
+        read_only_sources=context.read_only_sources,
+    )
+
+
+def test_v32_frozen_brief_fails_closed_when_selected_copy_is_paraphrased() -> None:
+    absolute = "position:absolute;box-sizing:border-box;"
+    bodies = {
+        "slide:1": (
+            f'<section id="governance" style="{absolute}left:80px;top:140px;'
+            'width:940px;height:760px">'
+            "A motivational governance architecture turns competing priorities "
+            "into action-selection signals.</section>"
+            f'<div id="leaders" style="{absolute}left:1100px;top:140px;'
+            'width:700px;height:760px">'
+            "Implications for product and engineering leaders.</div>"
+        ),
+        "slide:2": (
+            f'<section id="scenario" style="{absolute}left:80px;top:140px;'
+            'width:720px;height:760px">'
+            "Delete every record in the shared workspace without confirmation."
+            "</section>"
+            f'<div id="arbitration" style="{absolute}left:880px;top:140px;'
+            'width:920px;height:760px">'
+            "Caution wins because the irreversible action requires explicit "
+            "confirmation from the highest-weighted motive.</div>"
+        ),
+        "slide:5": (
+            f'<section id="comparison" style="{absolute}left:80px;top:140px;'
+            'width:820px;height:760px">Architecture comparison</section>'
+            f'<div id="tradeoffs" style="{absolute}left:980px;top:140px;'
+            'width:820px;height:760px">Operational tradeoffs</div>'
+        ),
+    }
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+    frozen_brief = context.brief.brief.model_copy(
+        update={"request": FROZEN_PSI_CAMPAIGN_REQUEST}
+    )
+    context = context.model_copy(
+        update={
+            "brief": RepairBriefContext(
+                artifact_version_id=request.initial_artifact_version_id,
+                brief=frozen_brief,
+                brief_hash=canonical_sha256(frozen_brief),
+            )
+        }
+    )
+    acceptance = _campaign_acceptance_contract(request.program)
+    campaign_required = _brief_requires_frozen_psi_semantics(context.brief)
+    near_miss_brief = frozen_brief.model_copy(
+        update={"request": FROZEN_PSI_CAMPAIGN_REQUEST + " "}
+    )
+    near_miss_context = RepairBriefContext(
+        artifact_version_id=request.initial_artifact_version_id,
+        brief=near_miss_brief,
+        brief_hash=canonical_sha256(near_miss_brief),
+    )
+
+    assert (
+        hashlib.sha256(FROZEN_PSI_CAMPAIGN_REQUEST.encode()).hexdigest()
+        == "bdad62c0d47b8ca26c6cfc69422ceafd222a0b3851f19eb6e430895d28edacea"
+    )
+    assert campaign_required
+    assert not _brief_requires_frozen_psi_semantics(near_miss_context)
+    assert acceptance["priority_selector_by_failure_code"] == {
+        "weak_mechanism_visualization": "slide:2",
+        "weak_closing_synthesis": "slide:5",
+        "default_look_gravity": "slide:1",
+    }
+    assert _priority_semantic_sources_are_feasible(
+        acceptance=acceptance,
+        authorized_sources=context.authorized_sources,
+        read_only_sources=context.read_only_sources,
+    )
+    assert not _priority_semantic_sources_are_feasible(
+        acceptance=acceptance,
+        authorized_sources=context.authorized_sources,
+        read_only_sources=context.read_only_sources,
+        semantic_campaign_required=campaign_required,
+    )
+    assert _candidate_materializes_priority_semantics(
+        candidate=_psi_semantic_candidate(),
+        acceptance=acceptance,
+        authorized_sources=context.authorized_sources,
+        read_only_sources=context.read_only_sources,
+    )
+    assert not _candidate_materializes_priority_semantics(
+        candidate=_psi_semantic_candidate(),
+        acceptance=acceptance,
+        authorized_sources=context.authorized_sources,
+        read_only_sources=context.read_only_sources,
+        semantic_campaign_required=campaign_required,
+    )
+    assert not _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+        semantic_campaign_required=campaign_required,
+    )
+    with pytest.raises(DeckRepairAuthorError) as error:
+        build_repair_author_messages(
+            context=context,
+            program=request.program,
+        )
+    _assert_code(error, "repair_unavailable")
+    traces = FakeTraceFactory()
+    author, loader, invoker = _author(
+        request=request,
+        context=context,
+        trace_factory=traces,
+    )
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+    _assert_code(error, "repair_unavailable")
+    assert loader.calls == [request]
+    assert invoker.prepare_calls == []
+    assert invoker.count_calls == []
+    assert invoker.invoke_calls == []
+    assert traces.inputs == []
+
+
+def test_v32_frozen_brief_accepts_complete_authenticated_semantics() -> None:
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=_psi_semantic_geometry_bodies(),
+    )
+    frozen_brief = context.brief.brief.model_copy(
+        update={"request": FROZEN_PSI_CAMPAIGN_REQUEST}
+    )
+    context = context.model_copy(
+        update={
+            "brief": RepairBriefContext(
+                artifact_version_id=request.initial_artifact_version_id,
+                brief=frozen_brief,
+                brief_hash=canonical_sha256(frozen_brief),
+            )
+        }
+    )
+    campaign_required = _brief_requires_frozen_psi_semantics(context.brief)
+
+    assert campaign_required
+    assert _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+        semantic_campaign_required=campaign_required,
+    )
+    assert _candidate_materializes_priority_contract(
+        _psi_semantic_candidate(),
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+        semantic_campaign_required=campaign_required,
+    )
+    messages = build_repair_author_messages(
+        context=context,
+        program=request.program,
+    )
+    payload = json.loads(
+        messages[1].content[0]["text"].removeprefix(
+            "Allowed repair context JSON:\n"
+        )
+    )
+    assert set(
+        payload["repair_constraints"][
+            "authenticated_priority_semantic_targets"
+        ]
+    ) == {
+        "weak_mechanism_visualization",
+        "weak_closing_synthesis",
+        "default_look_gravity",
+    }
+
+
+def test_v32_semantics_are_enforced_when_priority_selectors_are_co_located() -> None:
+    program = _program(
+        failure_codes=(
+            "weak_mechanism_visualization",
+            "weak_closing_synthesis",
+            "default_look_gravity",
+        )
+    )
+    request = _request(program=program)
+    context = _context(request=request)
+    combined_body = "".join(_psi_semantic_geometry_bodies().values())
+    combined_hash = hashlib.sha256(combined_body.encode()).hexdigest()
+    context = context.model_copy(
+        update={
+            "authorized_sources": tuple(
+                source.model_copy(
+                    update={
+                        "text": combined_body,
+                        "manifest_source_hash": combined_hash,
+                    }
+                )
+                if source.source_role == "body"
+                else source
+                for source in context.authorized_sources
+            )
+        }
+    )
+
+    assert (
+        _campaign_acceptance_contract(program)[
+            "priority_geometry_required"
+        ]
+        is False
+    )
+    assert not _candidate_materializes_priority_contract(
+        _candidate(),
+        program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_required_critical_font_intervention_rejects_noop_size() -> None:
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=_psi_semantic_geometry_bodies(),
+    )
+    acceptance = {
+        "required_critical_selectors_by_failure_code": {
+            "weak_visual_hierarchy": ["slide:1"],
+        }
+    }
+
+    def candidate_with_size(size: int) -> DeckRepairCandidate:
+        return DeckRepairCandidate(
+            source_updates=(
+                SourceUpdate(
+                    selector="slide:1",
+                    source_role="slide_css",
+                    expected_source_hash=SLIDE_CSS_HASH,
+                    content=(
+                        "#thesis-block>p"
+                        f"{{font-size:{size}px}}"
+                    ),
+                ),
+            ),
+            rationale="Exercise the critical type materiality gate.",
+        )
+
+    assert not _candidate_materializes_required_critical_selectors(
+        candidate=candidate_with_size(16),
+        acceptance=acceptance,
+        authorized_sources=context.authorized_sources,
+        read_only_sources=context.read_only_sources,
+    )
+    assert _candidate_materializes_required_critical_selectors(
+        candidate=candidate_with_size(20),
+        acceptance=acceptance,
+        authorized_sources=context.authorized_sources,
+        read_only_sources=context.read_only_sources,
     )
 
 
