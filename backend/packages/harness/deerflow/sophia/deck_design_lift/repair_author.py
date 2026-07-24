@@ -21,7 +21,7 @@ import unicodedata
 from collections.abc import Awaitable
 from decimal import Decimal
 from html.parser import HTMLParser
-from itertools import combinations, product
+from itertools import combinations, permutations, product
 from typing import Annotated, Any, Literal, Protocol
 
 import anyio
@@ -217,6 +217,34 @@ _STRICT_GEOMETRY_WITNESS_TRANSLATION_PX = 8.0
 _MIN_PRIORITY_GEOMETRY_TARGETS_PER_SELECTOR = 2
 _MAX_TEXT_GEOMETRY_AREA_EXPANSION_RATIO = 1.25
 _MAX_TEXT_GEOMETRY_EDGE_DISPLACEMENT_PX = 120.0
+_MAX_MECHANISM_TOPOLOGY_EDGE_DISPLACEMENT_PX = 560.0
+_MIN_PRIORITY_RELATIONSHIP_CHANGE_PX = 32.0
+_MAX_PRIORITY_UNIFORM_TRANSLATION_DRIFT_PX = 8.0
+_PRIORITY_OUTER_GUTTER_FLOOR_PX = 40.0
+_MIN_MECHANISM_RING_RADIUS_PX = 120.0
+_MAX_MECHANISM_RING_RADIUS_RATIO = 2.0
+_MIN_MECHANISM_RING_ANGLE_GAP_DEGREES = 24.0
+_MAX_MECHANISM_RING_ANGLE_GAP_DEGREES = 144.0
+_MAX_MECHANISM_REENTRY_DISTANCE_PX = 480.0
+_MIN_PRIORITY_FONT_SIZE_INCREASE_PX = 4.0
+_MAX_PRIORITY_FONT_ANCHOR_CHARACTERS = 160
+_MAX_PRIORITY_FONT_ANCHOR_WORDS = 24
+_PSI_MECHANISM_STAGE_LABELS = (
+    "perception",
+    "appraisal",
+    "motives",
+    "action",
+    "feedback",
+)
+_PSI_SUBJECT_ANCHOR_PHRASES = (
+    "reasoning proposes",
+    "motivation decides",
+    "motivation is the control signal",
+)
+_PSI_CLOSING_ANCHOR_PHRASES = (
+    "govern the motive",
+    "govern the motive, not just the words",
+)
 _MIN_AUTHORED_TEXT_BACKGROUND_CONTRAST = 4.5
 _SLIDE_CSS_BACKGROUND_PROPERTIES = frozenset(
     {"background", "background-color"}
@@ -295,13 +323,13 @@ _CRITICAL_PSI_FAILURE_CODES = frozenset(
 # frozen findings must yield the same three-family assignment even when
 # selector repairs or expected improvements are presented in another order.
 _PSI_PRIORITY_CODE_ORDER = (
-    "weak_subject_specificity",
-    "weak_signature_realization",
-    "weak_closing_synthesis",
     "weak_mechanism_visualization",
+    "weak_closing_synthesis",
+    "default_look_gravity",
     "low_sequence_rhythm",
     "weak_narrative_pacing",
-    "default_look_gravity",
+    "weak_subject_specificity",
+    "weak_signature_realization",
 )
 _PSI_PRIORITY_CODE_RANK = {
     code: index for index, code in enumerate(_PSI_PRIORITY_CODE_ORDER)
@@ -860,10 +888,33 @@ distinct existing semantic elements that are not ancestors or descendants of one
 independent bounded geometry moves to transform the argument: make \
 the subject-specific anchor dominant, make the mechanism visibly directional or closed, \
 and stage the existing final thesis as a decisive full-canvas synthesis.
+For weak_mechanism_visualization, do not move one enclosing loop container as a proxy \
+for redesign. Reposition all five existing Perception, Appraisal, Motives, Action, and \
+Feedback nodes into that semantic order around one visibly closed ring, and reposition \
+every existing directional connector between the corresponding adjacent nodes. Preserve \
+and visibly integrate the existing feedback-to-perception re-entry note as the closure witness. The \
+five node centers must surround a shared center in exactly one 360-degree winding with no \
+large angular break; a crossing double-winding or pentagram is invalid. All five nodes and \
+all four connectors must remain direct children of the unchanged authenticated #loop-ring. \
+A frame, uniform translation, or detached feedback note is not mechanism proof.
+For weak_closing_synthesis, make the existing operational-question mass and the existing \
+“Govern the motive, not just the words.” mass read as one aligned bookend composition. \
+Keep at least a 32px inter-column gap, align their primary top anchors within 16px, keep \
+the closing surface solid, and give only the short final thesis a decisive type hierarchy. \
+Do not enlarge the closing panel or collapse an authenticated outer gutter.
+For default_look_gravity, preserve the frozen 60/40 thesis-and-stakes split, keep at \
+least a 32px inter-column gap, align the paired content anchors within 16px, and make \
+the existing PSI-specific “Reasoning proposes… Motivation decides…” anchor—not generic \
+chrome or the generic title—the hierarchy witness. Do not widen a paragraph measure or \
+increase the area of an unchanged low-occupancy panel.
 Treat every text-bearing geometry target, including a container with text descendants, \
 as a bounded translation or restrained expansion: never reduce its authenticated width \
-or height, expand its area above 1.25 times the authenticated area, or displace any outer \
-edge by more than 120px. Preserve the baseline negative-space and hierarchy ratios; never \
+or height or expand its area above 1.25 times the authenticated area. Except for the \
+existing .node and .arrow children of the unchanged authenticated #loop-ring on the \
+weak_mechanism_visualization selector, never displace any outer edge by more than 120px. \
+Those topology children may translate by at most 560px only as needed to form the closed \
+ring, must retain their authenticated width and height, and must remain fully inside that \
+unchanged parent. Preserve the baseline negative-space and hierarchy ratios; never \
 enlarge an empty panel to simulate emphasis, create a new wrap, cluster moved anchors \
 into one canvas band, or open a newly empty center or quadrant. Synthesis means hierarchy \
 and relationship, not spatial compression or inflated empty containers.
@@ -881,7 +932,12 @@ Preserve the authenticated surface identity of existing semantic containers. Nev
 replace an existing solid signature fill with a different fill or turn a solid focal \
 block into a hollow outlined card. Reuse the frozen motif through hierarchy and spatial \
 relationship, not by swapping established surfaces for new color variants.
-Change font-size or line-height only on one short, uniquely targeted semantic text anchor per slide, conservatively, when the frozen render and body prove the text will retain its current line count without clipping or a new wrap.
+Change font-size or line-height only on one short, uniquely targeted semantic text anchor \
+per slide, conservatively, when the frozen render and body prove the text will retain its \
+current line count without clipping or a new wrap. Use !important on that unique \
+font-size anchor only when an authenticated inline font-size would otherwise win the cascade. \
+The target must be the short direct-text leaf inside #thesis-block or #closing-panel—not a \
+container, title, or duplicate phrase elsewhere—and its effective size must increase by at least 4px.
 Never apply type changes to a container, repeated nodes, body copy, lists, or quotes. Preserve every existing deck and slide title fully visible.
 Do not add a separate rule for a deferred failure, and do not leave a priority family addressed only in rationale: each priority family needs a retained judge-visible declaration.
 Before returning, recheck the three priority outcomes and every locked constraint against the whole-deck contact sheet.
@@ -932,15 +988,18 @@ qualified rule as finite literal px values, resolve to exactly one existing mani
 element, remain wholly inside the fixed 1920x1080 canvas, and keep width at least 48px \
 and height at least 24px. Partial, ambiguous, collapsed, or off-canvas geometry is \
 stripped and cannot satisfy a priority.
-Choose only a top-level semantic container whose authenticated layout already uses \
-absolute slide-canvas coordinates. Never apply geometry to a static element or a nested \
-child whose left/top values are local to another positioned container.
+Choose an authenticated absolutely positioned semantic target. A target may be relative \
+to the slide canvas or, only for a mechanism topology, relative to exactly one existing \
+authenticated absolutely positioned containing block whose own literal box is relative to the slide \
+canvas. Keep every locally positioned target wholly inside that containing block. Never \
+target a static element, cross a second positioned ancestor, or move the containing block \
+as a proxy for moving its internal mechanism nodes.
 Use fully opaque literal full-border colors, border widths from 0.5px through 2px, and literal px or percentage border radii. Do not use variables, calc(), or inheritance keywords.
 Use !important only on all four left/top/width/height declarations in a geometry \
 rule when the exact authenticated target already declares any of those geometry \
 properties inline; all four geometry declarations must use it there, and all four \
 must omit it otherwise.
-Never use !important for paint, typography, borders, or any other declaration, and never target authenticated inline geometry that is itself !important.
+Never use !important for paint, line-height, borders, or any other declaration except the one uniquely targeted font-size anchor described above, and never target authenticated inline geometry that is itself !important.
 Do not target an element whose inline style uses all, inset shorthands, logical size properties, right/bottom positioning, or min/max size constraints; those geometry-affecting aliases are intentionally fail-closed.
 Do not use at-rules or nested CSS rules in slide_css; this is one fixed 1920x1080 canvas with no responsive or conditional repair variants.
 Use font-size only as one finite literal px value from 12px through 64px.
@@ -1027,13 +1086,13 @@ def _campaign_acceptance_contract(
             if set(selector_group) != authorized_slide_css_selectors:
                 continue
             candidate_key = (
-                sum(selector_specificity),
-                selector_specificity,
-                -critical_count,
                 tuple(
                     _psi_priority_code_sort_key(code)
                     for code in code_group
                 ),
+                sum(selector_specificity),
+                selector_specificity,
+                -critical_count,
                 tuple(
                     _priority_selector_sort_key(selector)
                     for selector in selector_group
@@ -1091,6 +1150,18 @@ def _campaign_acceptance_contract(
         "cosmetic_rearrangement_is_insufficient": True,
         "forbidden_regressions_remain_binding": True,
     }
+
+
+def _mechanism_topology_selector(
+    program: DeckRepairProgram,
+) -> str | None:
+    selector_map = _campaign_acceptance_contract(program).get(
+        "priority_selector_by_failure_code"
+    )
+    if not isinstance(selector_map, dict):
+        return None
+    selector = selector_map.get("weak_mechanism_visualization")
+    return str(selector) if selector is not None else None
 
 
 def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
@@ -1158,6 +1229,9 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                         "canvas_width_px": int(_FIXED_SLIDE_CANVAS_WIDTH_PX),
                         "canvas_height_px": int(_FIXED_SLIDE_CANVAS_HEIGHT_PX),
                         "must_remain_fully_on_canvas": True,
+                        "one_authenticated_absolute_containing_block_allowed": True,
+                        "local_target_must_remain_fully_inside_containing_block": True,
+                        "second_positioned_ancestor_allowed": False,
                         "selector_must_match_exactly_one_manifest_element": True,
                         "minimum_width_px": int(
                             _MIN_RETAINED_GEOMETRY_WIDTH_PX
@@ -1171,6 +1245,37 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                         ),
                         "maximum_text_container_outer_edge_displacement_px": int(
                             _MAX_TEXT_GEOMETRY_EDGE_DISPLACEMENT_PX
+                        ),
+                        "mechanism_topology_outer_edge_displacement_exception": {
+                            "maximum_px": int(
+                                _MAX_MECHANISM_TOPOLOGY_EDGE_DISPLACEMENT_PX
+                            ),
+                            "selector_family": "weak_mechanism_visualization",
+                            "eligible_manifest_classes": ["arrow", "node"],
+                            "required_authenticated_containing_block_id": (
+                                "loop-ring"
+                            ),
+                            "required_direct_node_count": 5,
+                            "required_direct_arrow_count": 4,
+                            "all_topology_elements_must_be_direct_children": True,
+                            "required_stage_order_winding_degrees": 360,
+                            "multiple_windings_allowed": False,
+                            "containing_block_must_remain_unchanged": True,
+                            "authenticated_width_and_height_must_remain_unchanged": True,
+                            "target_must_remain_fully_inside_containing_block": True,
+                        },
+                        "minimum_material_relationship_change_px": int(
+                            _MIN_PRIORITY_RELATIONSHIP_CHANGE_PX
+                        ),
+                        "maximum_uniform_translation_drift_px": int(
+                            _MAX_PRIORITY_UNIFORM_TRANSLATION_DRIFT_PX
+                        ),
+                        "outer_gutter_floor_px": int(
+                            _PRIORITY_OUTER_GUTTER_FLOOR_PX
+                        ),
+                        "outer_gutter_policy": (
+                            "candidate_each_edge_at_least_min_of_authenticated_"
+                            "edge_gutter_and_floor"
                         ),
                         "baseline_negative_space_and_hierarchy_must_be_preserved": True,
                     },
@@ -1189,6 +1294,16 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                         "unit": "px",
                         "minimum_inclusive": int(_MIN_AUTHORED_FONT_SIZE_PX),
                         "maximum_inclusive": int(_MAX_AUTHORED_FONT_SIZE_PX),
+                        "important_allowed_only_for_unique_semantic_anchor": True,
+                        "effective_candidate_cascade_winner_required": True,
+                        "minimum_effective_size_increase_px": int(
+                            _MIN_PRIORITY_FONT_SIZE_INCREASE_PX
+                        ),
+                        "priority_anchor_must_be_short_direct_text_leaf": True,
+                        "priority_anchor_required_containers": [
+                            "closing-panel",
+                            "thesis-block",
+                        ],
                     },
                     "line_height": {
                         "unitless_range_inclusive": [
@@ -1216,7 +1331,11 @@ def _repair_constraints(program: DeckRepairProgram) -> dict[str, JsonValue]:
                         "px_range_inclusive": [0, _MAX_RETAINED_BORDER_RADIUS_PX],
                         "percentage_range_inclusive": [0, 50],
                     },
-                    "important_allowed_for_non_geometry": False,
+                    "important_allowed_for_non_geometry": ["font-size"],
+                    "important_non_geometry_scope": (
+                        "unique_semantic_anchor_only_when_required_to_beat_"
+                        "authenticated_inline_font_size"
+                    ),
                     "variables_or_calculations_allowed": False,
                 },
                 "forbidden_native_properties": sorted(
@@ -1971,6 +2090,61 @@ def _strict_unique_manifest_selector(
     return selector
 
 
+def _shortest_unique_manifest_selector(
+    element: Tag,
+    soup: BeautifulSoup,
+    inventory: dict[str, list[str]],
+) -> str | None:
+    """Return the shortest authenticated selector that resolves only this node."""
+
+    candidates: set[str] = set()
+    strict = _strict_unique_manifest_selector(element, soup, inventory)
+    if strict is not None:
+        candidates.add(strict)
+    element_id = element.attrs.get("id")
+    if isinstance(element_id, str) and element_id:
+        candidates.add(f"#{element_id}")
+    parent = _parent_tag(element)
+    if parent is not None:
+        siblings = tuple(
+            child for child in parent.children if isinstance(child, Tag)
+        )
+        index = next(
+            (
+                position
+                for position, child in enumerate(siblings, start=1)
+                if child is element
+            ),
+            None,
+        )
+        if index is not None:
+            tag = str(element.name).casefold()
+            candidates.add(f"{tag}:nth-child({index})")
+            classes = element.attrs.get("class")
+            if isinstance(classes, list):
+                for raw_class in classes:
+                    class_name = str(raw_class)
+                    if class_name:
+                        candidates.add(
+                            f".{class_name}:nth-child({index})"
+                        )
+                        candidates.add(
+                            f"{tag}.{class_name}:nth-child({index})"
+                        )
+    for selector in sorted(candidates, key=lambda value: (len(value), value)):
+        try:
+            matches = soup.select(selector)
+        except Exception:
+            continue
+        if (
+            len(matches) == 1
+            and matches[0] is element
+            and _selector_uses_only_manifest_atoms(selector, inventory)
+        ):
+            return selector
+    return None
+
+
 def _strict_geometry_pixel_value(winner: object) -> float | None:
     if winner is None:
         return None
@@ -2049,6 +2223,8 @@ def _strict_geometry_candidate_rule(
     box: dict[str, float],
     *,
     important: bool,
+    bounds_width: float = _FIXED_SLIDE_CANVAS_WIDTH_PX,
+    bounds_height: float = _FIXED_SLIDE_CANVAS_HEIGHT_PX,
 ) -> str | None:
     width = box["width"]
     height = box["height"]
@@ -2057,7 +2233,11 @@ def _strict_geometry_candidate_rule(
         or height < _MIN_RETAINED_GEOMETRY_HEIGHT_PX
     ):
         return None
-    translated = _strict_geometry_translation_origin(box)
+    translated = _strict_geometry_translation_origin(
+        box,
+        bounds_width=bounds_width,
+        bounds_height=bounds_height,
+    )
     if translated is None:
         return None
     suffix = "!important" if important else ""
@@ -2072,6 +2252,9 @@ def _strict_geometry_candidate_rule(
 
 def _strict_geometry_translation_origin(
     box: dict[str, float],
+    *,
+    bounds_width: float = _FIXED_SLIDE_CANVAS_WIDTH_PX,
+    bounds_height: float = _FIXED_SLIDE_CANVAS_HEIGHT_PX,
 ) -> tuple[float, float] | None:
     """Return one bounded movement used by the strict geometry witness."""
 
@@ -2081,7 +2264,14 @@ def _strict_geometry_translation_origin(
         box["width"],
         box["height"],
     )
-    if not _strict_geometry_box_is_wholly_on_canvas(box):
+    if (
+        left < 0
+        or top < 0
+        or width < _MIN_RETAINED_GEOMETRY_WIDTH_PX
+        or height < _MIN_RETAINED_GEOMETRY_HEIGHT_PX
+        or left + width > bounds_width
+        or top + height > bounds_height
+    ):
         return None
     delta = _STRICT_GEOMETRY_WITNESS_TRANSLATION_PX
     for delta_x, delta_y in (
@@ -2095,8 +2285,8 @@ def _strict_geometry_translation_origin(
         if (
             candidate_left >= 0
             and candidate_top >= 0
-            and candidate_left + width <= _FIXED_SLIDE_CANVAS_WIDTH_PX
-            and candidate_top + height <= _FIXED_SLIDE_CANVAS_HEIGHT_PX
+            and candidate_left + width <= bounds_width
+            and candidate_top + height <= bounds_height
         ):
             return candidate_left, candidate_top
     return None
@@ -2176,10 +2366,37 @@ def _strict_geometry_source_witness(
         important = _inline_geometry_requires_important(element)
         if important is None:
             continue
+        containing_block = _authenticated_geometry_containing_block(
+            element,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+            candidate_slide_css="",
+        )
+        if containing_block is None:
+            continue
+        bounds_width = _FIXED_SLIDE_CANVAS_WIDTH_PX
+        bounds_height = _FIXED_SLIDE_CANVAS_HEIGHT_PX
+        if not (
+            containing_block.name == "main"
+            and containing_block.attrs.get("data-slide-canvas") == "true"
+        ):
+            parent_box = _strict_geometry_effective_box(
+                containing_block,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline_slide_css,
+            )
+            if parent_box is None:
+                continue
+            bounds_width = parent_box["width"]
+            bounds_height = parent_box["height"]
         candidate_rule = _strict_geometry_candidate_rule(
             manifest_selector,
             box,
             important=important,
+            bounds_width=bounds_width,
+            bounds_height=bounds_height,
         )
         if candidate_rule is None or not (
             _authenticated_absolute_slide_canvas_target(
@@ -2188,6 +2405,7 @@ def _strict_geometry_source_witness(
                 deck_css=deck_css,
                 baseline_slide_css=baseline_slide_css,
                 candidate_slide_css=candidate_rule,
+                allow_one_positioned_containing_block=True,
             )
             and _candidate_geometry_wins_authenticated_cascade(
                 element,
@@ -2283,6 +2501,303 @@ def _strict_geometry_source_witness(
     return None
 
 
+def _priority_semantic_sources_are_feasible(
+    *,
+    acceptance: dict[str, JsonValue],
+    authorized_sources: tuple[RepairSourceContext, ...],
+    read_only_sources: tuple[RepairSourceContext, ...],
+) -> bool:
+    """Prove the three CSS-solvable PSI families have writable source anchors."""
+
+    selector_map = acceptance.get("priority_selector_by_failure_code")
+    if not isinstance(selector_map, dict):
+        return False
+    required_codes = {
+        "weak_mechanism_visualization",
+        "weak_closing_synthesis",
+        "default_look_gravity",
+    }
+    if set(selector_map) != required_codes:
+        return True
+    body_by_selector = {
+        str(source.selector): source.text
+        for source in authorized_sources
+        if source.source_role == "body"
+    }
+    baseline_by_selector = {
+        str(source.selector): source.text
+        for source in authorized_sources
+        if source.source_role == "slide_css"
+    }
+    deck_css_sources = tuple(
+        source.text
+        for source in read_only_sources
+        if source.source_role == "deck_css"
+    )
+    if len(deck_css_sources) != 1:
+        return False
+    deck_css = deck_css_sources[0]
+
+    for failure_code, raw_selector in selector_map.items():
+        selector = str(raw_selector)
+        body = body_by_selector.get(selector)
+        baseline = baseline_by_selector.get(selector)
+        if body is None or baseline is None:
+            return False
+        try:
+            soup = BeautifulSoup(
+                assemble_compact_slide_html(
+                    deck_stylesheet="",
+                    html_body=body,
+                    slide_css="",
+                ),
+                "html.parser",
+            )
+        except Exception:
+            return False
+        inventory = _body_selector_inventory(body)
+        semantic_text_owner_ids = {
+            id(element) for element in _semantic_text_owners(soup)
+        }
+        eligible: dict[int, tuple[Tag, str]] = {}
+        for element in soup.find_all(True):
+            if not isinstance(element, Tag):
+                continue
+            box = _strict_geometry_effective_box(
+                element,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline,
+            )
+            manifest_selector = _shortest_unique_manifest_selector(
+                element,
+                soup,
+                inventory,
+            )
+            important = _inline_geometry_requires_important(element)
+            if (
+                box is None
+                or manifest_selector is None
+                or important is None
+                or _authenticated_position_value(
+                    element,
+                    soup,
+                    deck_css=deck_css,
+                    baseline_slide_css=baseline,
+                )
+                != "absolute"
+            ):
+                continue
+            containing_block = _authenticated_geometry_containing_block(
+                element,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline,
+                candidate_slide_css="",
+            )
+            if containing_block is None:
+                continue
+            bounds_width = _FIXED_SLIDE_CANVAS_WIDTH_PX
+            bounds_height = _FIXED_SLIDE_CANVAS_HEIGHT_PX
+            if not (
+                containing_block.name == "main"
+                and containing_block.attrs.get("data-slide-canvas") == "true"
+            ):
+                parent_box = _strict_geometry_effective_box(
+                    containing_block,
+                    soup,
+                    deck_css=deck_css,
+                    baseline_slide_css=baseline,
+                )
+                if parent_box is None:
+                    continue
+                bounds_width = parent_box["width"]
+                bounds_height = parent_box["height"]
+            rule = _strict_geometry_candidate_rule(
+                manifest_selector,
+                box,
+                important=important,
+                bounds_width=bounds_width,
+                bounds_height=bounds_height,
+            )
+            if (
+                rule is None
+                or not _candidate_geometry_wins_authenticated_cascade(
+                    element,
+                    soup,
+                    deck_css=deck_css,
+                    baseline_slide_css=baseline,
+                    candidate_slide_css=rule,
+                )
+            ):
+                continue
+            eligible[id(element)] = (element, rule)
+
+        required_rules: list[str] = []
+        if failure_code == "weak_mechanism_visualization":
+            topology = _authenticated_loop_topology_inventory(soup)
+            if topology is None:
+                return False
+            loop_ring, topology_nodes, topology_arrows = topology
+            loop_containing_block = _authenticated_geometry_containing_block(
+                loop_ring,
+                soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline,
+                candidate_slide_css="",
+            )
+            if (
+                loop_containing_block is None
+                or loop_containing_block.name != "main"
+                or loop_containing_block.attrs.get("data-slide-canvas")
+                != "true"
+            ):
+                return False
+            topology_node_ids = {id(element) for element in topology_nodes}
+            topology_arrow_ids = {
+                id(element) for element in topology_arrows
+            }
+            selected_ids: set[int] = set()
+            for stage in _PSI_MECHANISM_STAGE_LABELS:
+                matches = tuple(
+                    item
+                    for item in eligible.values()
+                    if id(item[0]) in topology_node_ids
+                    and _is_authenticated_mechanism_topology_target(
+                        item[0],
+                        soup,
+                        deck_css=deck_css,
+                        baseline_slide_css=baseline,
+                        candidate_slide_css="",
+                    )
+                    and {
+                        label
+                        for label in _PSI_MECHANISM_STAGE_LABELS
+                        if label in _normalized_element_text(item[0])
+                    }
+                    == {stage}
+                )
+                if not matches:
+                    return False
+                chosen = min(
+                    matches,
+                    key=lambda item: len(_normalized_element_text(item[0])),
+                )
+                selected_ids.add(id(chosen[0]))
+                required_rules.append(chosen[1])
+            arrows = tuple(
+                item
+                for item in eligible.values()
+                if id(item[0]) in topology_arrow_ids
+                and _is_authenticated_mechanism_topology_target(
+                    item[0],
+                    soup,
+                    deck_css=deck_css,
+                    baseline_slide_css=baseline,
+                    candidate_slide_css="",
+                )
+                and id(item[0]) not in selected_ids
+            )
+            if len(arrows) != 4:
+                return False
+            required_rules.extend(item[1] for item in arrows[:4])
+            reentry = next(
+                (
+                    item
+                    for item in eligible.values()
+                    if item[0].attrs.get("id") == "reentry-note"
+                ),
+                None,
+            )
+            if (
+                reentry is None
+                or not {"feedback", "perception"}.issubset(
+                    set(_normalized_element_text(reentry[0]).split())
+                )
+            ):
+                return False
+        else:
+            required_ids = (
+                ("question-list", "closing-panel")
+                if failure_code == "weak_closing_synthesis"
+                else ("thesis-block", "stakes-panel")
+            )
+            for required_id in required_ids:
+                match = next(
+                    (
+                        item
+                        for item in eligible.values()
+                        if item[0].attrs.get("id") == required_id
+                    ),
+                    None,
+                )
+                if match is None:
+                    return False
+                required_rules.append(match[1])
+            anchor_phrases = (
+                _PSI_CLOSING_ANCHOR_PHRASES
+                if failure_code == "weak_closing_synthesis"
+                else _PSI_SUBJECT_ANCHOR_PHRASES
+            )
+            anchor_container_id = (
+                "closing-panel"
+                if failure_code == "weak_closing_synthesis"
+                else "thesis-block"
+            )
+            anchor_size = (
+                36
+                if failure_code == "weak_closing_synthesis"
+                else 30
+            )
+            anchor_element = next(
+                (
+                    element
+                    for element in soup.find_all(True)
+                    if isinstance(element, Tag)
+                    and id(element) in semantic_text_owner_ids
+                    and str(element.name).casefold() in {"p", "div"}
+                    and _priority_font_anchor_is_bound_short_leaf(
+                        element,
+                        container_id=anchor_container_id,
+                        anchor_phrases=anchor_phrases,
+                    )
+                    and _shortest_unique_manifest_selector(
+                        element,
+                        soup,
+                        inventory,
+                    )
+                    is not None
+                ),
+                None,
+            )
+            if anchor_element is None:
+                return False
+            anchor_selector = _shortest_unique_manifest_selector(
+                anchor_element,
+                soup,
+                inventory,
+            )
+            if anchor_selector is None:
+                return False
+            font_rule = _candidate_font_size_rule_that_wins(
+                selector=anchor_selector,
+                element=anchor_element,
+                soup=soup,
+                deck_css=deck_css,
+                baseline_slide_css=baseline,
+                size_px=float(anchor_size),
+            )
+            if font_rule is None:
+                return False
+            required_rules.append(font_rule)
+        if (
+            len("".join(required_rules).encode("utf-8"))
+            > repair_overlay_utf8_budget(baseline=baseline)
+        ):
+            return False
+    return True
+
+
 def _priority_geometry_sources_are_feasible(
     program: DeckRepairProgram,
     authorized_sources: tuple[RepairSourceContext, ...],
@@ -2292,6 +2807,12 @@ def _priority_geometry_sources_are_feasible(
 
     try:
         acceptance = _campaign_acceptance_contract(program)
+        if not _priority_semantic_sources_are_feasible(
+            acceptance=acceptance,
+            authorized_sources=authorized_sources,
+            read_only_sources=read_only_sources,
+        ):
+            return False
         if acceptance["priority_geometry_required"] is not True:
             return True
         minimum = acceptance[
@@ -2415,12 +2936,16 @@ def _priority_geometry_sources_are_feasible(
                 program,
                 authorized_sources,
                 read_only_sources,
+                require_semantic_outcomes=False,
             )
             and _candidate_css_targets_manifest_bodies(
                 canonical_candidate,
                 authorized_sources,
                 read_only_sources=read_only_sources,
                 require_geometry=False,
+                mechanism_topology_selector=_mechanism_topology_selector(
+                    program
+                ),
             )
         )
     except Exception:
@@ -3039,7 +3564,10 @@ def _retained_css_declaration_is_safe(declaration: Any) -> bool:
     name = declaration.lower_name
     if name not in _RETAINED_SLIDE_CSS_PROPERTIES:
         return False
-    if bool(declaration.important) and name not in _SLIDE_CSS_GEOMETRY_PROPERTIES:
+    if bool(declaration.important) and name not in {
+        *_SLIDE_CSS_GEOMETRY_PROPERTIES,
+        "font-size",
+    }:
         return False
     tokens = _significant_css_value_tokens(declaration)
     if name in _SLIDE_CSS_GEOMETRY_PROPERTIES:
@@ -4849,6 +5377,7 @@ def _authenticated_absolute_slide_canvas_target(
     deck_css: str,
     baseline_slide_css: str,
     candidate_slide_css: str,
+    allow_one_positioned_containing_block: bool = False,
 ) -> bool:
     """Prove geometry is absolute and relative to the slide canvas.
 
@@ -4989,15 +5518,29 @@ def _authenticated_absolute_slide_canvas_target(
         return False
     ancestor = _parent_tag(element)
     while ancestor is not None and ancestor is not canvas:
+        ancestor_position = _authenticated_position_value(
+            ancestor,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+        )
+        if ancestor_position != "static":
+            if (
+                not allow_one_positioned_containing_block
+                or ancestor_position != "absolute"
+                or not _authenticated_absolute_slide_canvas_target(
+                    ancestor,
+                    soup,
+                    deck_css=deck_css,
+                    baseline_slide_css=baseline_slide_css,
+                    candidate_slide_css=candidate_slide_css,
+                )
+            ):
+                return False
+            ancestor = canvas
+            break
         if (
-            _authenticated_position_value(
-                ancestor,
-                soup,
-                deck_css=deck_css,
-                baseline_slide_css=baseline_slide_css,
-            )
-            != "static"
-            or not _authenticated_display_generates_box(
+            not _authenticated_display_generates_box(
                 ancestor,
                 soup,
                 deck_css=deck_css,
@@ -5093,6 +5636,205 @@ def _literal_px_geometry_winners(
     return values
 
 
+def _authenticated_geometry_containing_block(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+    candidate_slide_css: str,
+) -> Tag | None:
+    """Return the trusted canvas or one trusted positioned parent."""
+
+    try:
+        canvases = soup.select(
+            'main.slide-root[data-slide-canvas="true"]'
+        )
+    except Exception:
+        return None
+    if len(canvases) != 1 or not isinstance(canvases[0], Tag):
+        return None
+    canvas = canvases[0]
+    ancestor = _parent_tag(element)
+    while ancestor is not None:
+        if ancestor is canvas:
+            return canvas
+        position = _authenticated_position_value(
+            ancestor,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+        )
+        if position != "static":
+            if (
+                position != "absolute"
+                or not _authenticated_absolute_slide_canvas_target(
+                    ancestor,
+                    soup,
+                    deck_css=deck_css,
+                    baseline_slide_css=baseline_slide_css,
+                    candidate_slide_css=candidate_slide_css,
+                )
+            ):
+                return None
+            return ancestor
+        ancestor = _parent_tag(ancestor)
+    return None
+
+
+def _containing_block_has_nonzero_or_ambiguous_insets(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+    candidate_slide_css: str,
+) -> bool:
+    """Require a zero-border, zero-padding child coordinate origin."""
+
+    def declaration_is_safe(declaration: Any) -> bool:
+        name = declaration.lower_name
+        if name == "border-radius":
+            return True
+        if not (name.startswith("border") or name.startswith("padding")):
+            return True
+        tokens = _significant_css_value_tokens(declaration)
+        if (
+            name.startswith("border")
+            and len(tokens) == 1
+            and tokens[0].type == "ident"
+            and str(tokens[0].value).casefold() == "none"
+        ):
+            return True
+        return bool(tokens) and all(
+            (
+                token.type == "number"
+                and _finite_css_token_value(token) == 0
+            )
+            or (
+                token.type == "dimension"
+                and _finite_css_token_value(token) == 0
+            )
+            for token in tokens
+        )
+
+    for source in (deck_css, baseline_slide_css, candidate_slide_css):
+        rules = _stylesheet_qualified_rules(source)
+        if rules is None:
+            return True
+        for rule in rules:
+            selector_matches = _qualified_rule_selector_matches(rule, soup)
+            if selector_matches is None:
+                return True
+            if not any(
+                any(match is element for match in matches)
+                for _specificity, matches in selector_matches
+            ):
+                continue
+            declarations = tuple(
+                item
+                for item in tinycss2.parse_declaration_list(
+                    rule.content,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+                if item.type == "declaration"
+            )
+            if any(not declaration_is_safe(item) for item in declarations):
+                return True
+    inline = element.attrs.get("style")
+    if isinstance(inline, str) and inline.strip():
+        declarations = tuple(
+            item
+            for item in tinycss2.parse_declaration_list(
+                inline,
+                skip_comments=True,
+                skip_whitespace=True,
+            )
+            if item.type == "declaration"
+        )
+        if any(not declaration_is_safe(item) for item in declarations):
+            return True
+    return False
+
+
+def _geometry_box_in_canvas_coordinates(
+    element: Tag,
+    soup: BeautifulSoup,
+    box: dict[str, float],
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+    candidate_slide_css: str,
+) -> dict[str, float] | None:
+    """Resolve one direct or one-level-local literal box to canvas space."""
+
+    containing_block = _authenticated_geometry_containing_block(
+        element,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+        candidate_slide_css=candidate_slide_css,
+    )
+    if containing_block is None:
+        return None
+    if (
+        containing_block.name == "main"
+        and containing_block.attrs.get("data-slide-canvas") == "true"
+    ):
+        return box if _strict_geometry_box_is_wholly_on_canvas(box) else None
+    if _containing_block_has_nonzero_or_ambiguous_insets(
+        containing_block,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+        candidate_slide_css=candidate_slide_css,
+    ):
+        return None
+
+    parent_winners = _geometry_cascade_winners(
+        containing_block,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+        candidate_slide_css=candidate_slide_css,
+    )
+    parent_box = _literal_px_geometry_winners(parent_winners)
+    baseline_parent_box = _literal_px_geometry_winners(
+        _geometry_cascade_winners(
+            containing_block,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+            candidate_slide_css="",
+        )
+    )
+    if (
+        parent_box is None
+        or baseline_parent_box is None
+        or parent_box != baseline_parent_box
+        or not _strict_geometry_box_is_wholly_on_canvas(parent_box)
+        or box["left"] < 0
+        or box["top"] < 0
+        or box["width"] < _MIN_RETAINED_GEOMETRY_WIDTH_PX
+        or box["height"] < _MIN_RETAINED_GEOMETRY_HEIGHT_PX
+        or box["left"] + box["width"] > parent_box["width"]
+        or box["top"] + box["height"] > parent_box["height"]
+    ):
+        return None
+    canvas_box = {
+        "left": parent_box["left"] + box["left"],
+        "top": parent_box["top"] + box["top"],
+        "width": box["width"],
+        "height": box["height"],
+    }
+    return (
+        canvas_box
+        if _strict_geometry_box_is_wholly_on_canvas(canvas_box)
+        else None
+    )
+
+
 def _candidate_geometry_wins_authenticated_cascade(
     element: Tag,
     soup: BeautifulSoup,
@@ -5107,6 +5849,7 @@ def _candidate_geometry_wins_authenticated_cascade(
         deck_css=deck_css,
         baseline_slide_css=baseline_slide_css,
         candidate_slide_css=candidate_slide_css,
+        allow_one_positioned_containing_block=True,
     ):
         return False
     final_winners = _geometry_cascade_winners(
@@ -5135,9 +5878,64 @@ def _candidate_geometry_wins_authenticated_cascade(
     baseline_values = _literal_px_geometry_winners(baseline_winners)
     if final_values is None or baseline_values is None:
         return False
+    if (
+        _geometry_box_in_canvas_coordinates(
+            element,
+            soup,
+            final_values,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+            candidate_slide_css=candidate_slide_css,
+        )
+        is None
+        or _geometry_box_in_canvas_coordinates(
+            element,
+            soup,
+            baseline_values,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+            candidate_slide_css="",
+        )
+        is None
+    ):
+        return False
     return any(
         final_values[property_name] != baseline_values[property_name]
         for property_name in _SLIDE_CSS_GEOMETRY_PROPERTIES
+    )
+
+
+def _is_authenticated_mechanism_topology_target(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+    candidate_slide_css: str,
+) -> bool:
+    raw_classes = element.attrs.get("class")
+    classes = (
+        frozenset(
+            item
+            for item in raw_classes
+            if isinstance(item, str)
+        )
+        if isinstance(raw_classes, list)
+        else frozenset()
+    )
+    if not classes.intersection({"arrow", "node"}):
+        return False
+    containing_block = _authenticated_geometry_containing_block(
+        element,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+        candidate_slide_css=candidate_slide_css,
+    )
+    return bool(
+        containing_block is not None
+        and containing_block.attrs.get("id") == "loop-ring"
+        and element.parent is containing_block
     )
 
 
@@ -5299,6 +6097,7 @@ def _candidate_css_targets_manifest_bodies(
     require_geometry: bool = True,
     required_selectors: frozenset[str] | None = None,
     minimum_distinct_geometry_targets_per_selector: int = 1,
+    mechanism_topology_selector: str | None = None,
 ) -> bool:
     if (
         type(minimum_distinct_geometry_targets_per_selector) is not int
@@ -5349,6 +6148,16 @@ def _candidate_css_targets_manifest_bodies(
         except Exception:
             return False
         semantic_text_owners = _semantic_text_owners(soup)
+        if not _candidate_important_font_size_targets_are_safe(
+            candidate_slide_css=update.content,
+            soup=soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css_by_selector.get(
+                update.selector,
+                "",
+            ),
+        ):
+            return False
         matched_rule = False
         selector_geometry_nodes: dict[int, Tag] = {}
         for (
@@ -5469,10 +6278,34 @@ def _candidate_css_targets_manifest_bodies(
                     candidate_area = (
                         geometry_box["width"] * geometry_box["height"]
                     )
+                    topology_displacement_exception = (
+                        update.selector == mechanism_topology_selector
+                        and _is_authenticated_mechanism_topology_target(
+                            matched_geometry_node,
+                            soup,
+                            deck_css=deck_css,
+                            baseline_slide_css=(
+                                baseline_slide_css_by_selector.get(
+                                    update.selector,
+                                    "",
+                                )
+                            ),
+                            candidate_slide_css=update.content,
+                        )
+                    )
                     if (
                         candidate_area
                         > baseline_area
                         * _MAX_TEXT_GEOMETRY_AREA_EXPANSION_RATIO
+                        or (
+                            topology_displacement_exception
+                            and (
+                                geometry_box["width"]
+                                != baseline_geometry["width"]
+                                or geometry_box["height"]
+                                != baseline_geometry["height"]
+                            )
+                        )
                     ):
                         return False
                     baseline_edges = (
@@ -5491,7 +6324,11 @@ def _candidate_css_targets_manifest_bodies(
                     )
                     if any(
                         abs(candidate_edge - baseline_edge)
-                        > _MAX_TEXT_GEOMETRY_EDGE_DISPLACEMENT_PX
+                        > (
+                            _MAX_MECHANISM_TOPOLOGY_EDGE_DISPLACEMENT_PX
+                            if topology_displacement_exception
+                            else _MAX_TEXT_GEOMETRY_EDGE_DISPLACEMENT_PX
+                        )
                         for candidate_edge, baseline_edge in zip(
                             candidate_edges,
                             baseline_edges,
@@ -5514,11 +6351,1088 @@ def _candidate_css_targets_manifest_bodies(
     )
 
 
+def _normalized_element_text(element: Tag) -> str:
+    return " ".join(
+        element.get_text(" ", strip=True).casefold().split()
+    )
+
+
+def _normalized_direct_element_text(element: Tag) -> str:
+    return " ".join(
+        " ".join(
+            str(text_node).strip()
+            for text_node in element.find_all(
+                string=True,
+                recursive=False,
+            )
+            if str(text_node).strip()
+        )
+        .casefold()
+        .split()
+    )
+
+
+def _priority_font_anchor_is_bound_short_leaf(
+    element: Tag,
+    *,
+    container_id: str,
+    anchor_phrases: tuple[str, ...],
+) -> bool:
+    direct_text = _normalized_direct_element_text(element)
+    return bool(
+        direct_text
+        and any(phrase in direct_text for phrase in anchor_phrases)
+        and len(direct_text) <= _MAX_PRIORITY_FONT_ANCHOR_CHARACTERS
+        and len(direct_text.split()) <= _MAX_PRIORITY_FONT_ANCHOR_WORDS
+        and element.find_parent(id=container_id) is not None
+        and not any(
+            _normalized_element_text(descendant)
+            for descendant in element.find_all(True)
+            if isinstance(descendant, Tag)
+        )
+    )
+
+
+def _authenticated_loop_topology_inventory(
+    soup: BeautifulSoup,
+) -> tuple[Tag, tuple[Tag, ...], tuple[Tag, ...]] | None:
+    loop_rings = tuple(
+        element
+        for element in soup.select("#loop-ring")
+        if isinstance(element, Tag)
+    )
+    if len(loop_rings) != 1:
+        return None
+    loop_ring = loop_rings[0]
+    direct_children = tuple(
+        child
+        for child in loop_ring.find_all(recursive=False)
+        if isinstance(child, Tag)
+    )
+    nodes = tuple(
+        child
+        for child in direct_children
+        if "node"
+        in (
+            child.attrs.get("class")
+            if isinstance(child.attrs.get("class"), list)
+            else ()
+        )
+    )
+    arrows = tuple(
+        child
+        for child in direct_children
+        if "arrow"
+        in (
+            child.attrs.get("class")
+            if isinstance(child.attrs.get("class"), list)
+            else ()
+        )
+    )
+    global_nodes = tuple(
+        element
+        for element in soup.select(".node")
+        if isinstance(element, Tag)
+    )
+    global_arrows = tuple(
+        element
+        for element in soup.select(".arrow")
+        if isinstance(element, Tag)
+    )
+    if (
+        len(nodes) != len(_PSI_MECHANISM_STAGE_LABELS)
+        or len(arrows) != 4
+        or {id(element) for element in nodes}
+        != {id(element) for element in global_nodes}
+        or {id(element) for element in arrows}
+        != {id(element) for element in global_arrows}
+    ):
+        return None
+    return loop_ring, nodes, arrows
+
+
+def _priority_geometry_records(
+    *,
+    candidate_slide_css: str,
+    body: str,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> tuple[dict[str, Any], ...] | None:
+    """Resolve candidate-authored geometry to authenticated canvas-space boxes."""
+
+    selector_contract = _stylesheet_selector_contract(candidate_slide_css)
+    if not selector_contract:
+        return None
+    try:
+        soup = BeautifulSoup(
+            assemble_compact_slide_html(
+                deck_stylesheet="",
+                html_body=body,
+                slide_css="",
+            ),
+            "html.parser",
+        )
+    except Exception:
+        return None
+    matched_elements: dict[int, Tag] = {}
+    for selector_arms, has_geometry, _importance, geometry_box in selector_contract:
+        if not has_geometry:
+            continue
+        if geometry_box is None:
+            return None
+        rule_matches: dict[int, Tag] = {}
+        for selector in selector_arms:
+            try:
+                rule_matches.update(
+                    {
+                        id(match): match
+                        for match in soup.select(selector)
+                        if isinstance(match, Tag)
+                    }
+                )
+            except Exception:
+                return None
+        if len(rule_matches) != 1:
+            return None
+        matched_elements.update(rule_matches)
+
+    records: list[dict[str, Any]] = []
+    for element in matched_elements.values():
+        baseline_local = _strict_geometry_effective_box(
+            element,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+        )
+        candidate_winners = _geometry_cascade_winners(
+            element,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+            candidate_slide_css=candidate_slide_css,
+        )
+        candidate_local = _literal_px_geometry_winners(candidate_winners)
+        if baseline_local is None or candidate_local is None:
+            return None
+        baseline_canvas = _geometry_box_in_canvas_coordinates(
+            element,
+            soup,
+            baseline_local,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+            candidate_slide_css="",
+        )
+        candidate_canvas = _geometry_box_in_canvas_coordinates(
+            element,
+            soup,
+            candidate_local,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+            candidate_slide_css=candidate_slide_css,
+        )
+        if baseline_canvas is None or candidate_canvas is None:
+            return None
+        raw_classes = element.attrs.get("class")
+        records.append(
+            {
+                "element": element,
+                "text": _normalized_element_text(element),
+                "id": (
+                    element.attrs.get("id")
+                    if isinstance(element.attrs.get("id"), str)
+                    else None
+                ),
+                "classes": frozenset(
+                    item
+                    for item in raw_classes
+                    if isinstance(item, str)
+                )
+                if isinstance(raw_classes, list)
+                else frozenset(),
+                "baseline_local": baseline_local,
+                "candidate_local": candidate_local,
+                "baseline_canvas": baseline_canvas,
+                "candidate_canvas": candidate_canvas,
+            }
+        )
+    return tuple(records)
+
+
+def _box_center(box: dict[str, float]) -> tuple[float, float]:
+    return (
+        box["left"] + box["width"] / 2.0,
+        box["top"] + box["height"] / 2.0,
+    )
+
+
+def _box_outer_gutters(box: dict[str, float]) -> tuple[float, ...]:
+    return (
+        box["left"],
+        box["top"],
+        _FIXED_SLIDE_CANVAS_WIDTH_PX - box["left"] - box["width"],
+        _FIXED_SLIDE_CANVAS_HEIGHT_PX - box["top"] - box["height"],
+    )
+
+
+def _priority_geometry_respects_outer_gutters(
+    records: tuple[dict[str, Any], ...],
+) -> bool:
+    for record in records:
+        baseline_gutters = _box_outer_gutters(record["baseline_canvas"])
+        candidate_gutters = _box_outer_gutters(record["candidate_canvas"])
+        if any(
+            candidate_gutter + 0.5
+            < min(baseline_gutter, _PRIORITY_OUTER_GUTTER_FLOOR_PX)
+            for baseline_gutter, candidate_gutter in zip(
+                baseline_gutters,
+                candidate_gutters,
+                strict=True,
+            )
+        ):
+            return False
+    return True
+
+
+def _priority_geometry_is_material(
+    records: tuple[dict[str, Any], ...],
+) -> bool:
+    if (
+        len(records) < _MIN_PRIORITY_GEOMETRY_TARGETS_PER_SELECTOR
+        or not _priority_geometry_respects_outer_gutters(records)
+    ):
+        return False
+    relationship_changes: list[float] = []
+    movement_deltas: list[tuple[float, float]] = []
+    for record in records:
+        baseline_center = _box_center(record["baseline_canvas"])
+        candidate_center = _box_center(record["candidate_canvas"])
+        movement_deltas.append(
+            (
+                candidate_center[0] - baseline_center[0],
+                candidate_center[1] - baseline_center[1],
+            )
+        )
+    for first, second in combinations(records, 2):
+        first_baseline = _box_center(first["baseline_canvas"])
+        second_baseline = _box_center(second["baseline_canvas"])
+        first_candidate = _box_center(first["candidate_canvas"])
+        second_candidate = _box_center(second["candidate_canvas"])
+        relationship_changes.append(
+            math.hypot(
+                (second_candidate[0] - first_candidate[0])
+                - (second_baseline[0] - first_baseline[0]),
+                (second_candidate[1] - first_candidate[1])
+                - (second_baseline[1] - first_baseline[1]),
+            )
+        )
+    if not relationship_changes or max(relationship_changes) < (
+        _MIN_PRIORITY_RELATIONSHIP_CHANGE_PX
+    ):
+        return False
+    return any(
+        math.hypot(
+            second_delta[0] - first_delta[0],
+            second_delta[1] - first_delta[1],
+        )
+        > _MAX_PRIORITY_UNIFORM_TRANSLATION_DRIFT_PX
+        for first_delta, second_delta in combinations(movement_deltas, 2)
+    )
+
+
+def _effective_font_size_winner(
+    element: Tag,
+    soup: BeautifulSoup,
+    *,
+    deck_css: str,
+    baseline_slide_css: str,
+    candidate_slide_css: str,
+) -> tuple[float, bool] | None:
+    """Resolve one literal-pixel font-size winner, including inheritance."""
+
+    winners: dict[
+        int,
+        tuple[tuple[int, int, int, int, int, int], Any, bool],
+    ] = {}
+    order = 0
+    for candidate_authored, source in (
+        (False, deck_css),
+        (False, baseline_slide_css),
+        (True, candidate_slide_css),
+    ):
+        rules = _stylesheet_qualified_rules(source)
+        if rules is None:
+            return None
+        for rule in rules:
+            try:
+                declarations = tuple(
+                    tinycss2.parse_declaration_list(
+                        rule.content,
+                        skip_comments=True,
+                        skip_whitespace=True,
+                    )
+                )
+            except Exception:
+                return None
+            if any(item.type != "declaration" for item in declarations):
+                return None
+            selector_matches = _qualified_rule_selector_matches(rule, soup)
+            if selector_matches is None:
+                return None
+            for specificity, matches in selector_matches:
+                for match in matches:
+                    if not isinstance(match, Tag):
+                        continue
+                    if any(
+                        item.lower_name in {"all", "font"}
+                        for item in declarations
+                    ) and (
+                        match is element or _element_is_within(element, match)
+                    ):
+                        return None
+                    declaration = _final_css_declaration(
+                        declarations,
+                        frozenset({"font-size"}),
+                    )
+                    if declaration is not None:
+                        _record_css_winner(
+                            winners,
+                            element=match,
+                            declaration=declaration,
+                            specificity=specificity,
+                            order=order,
+                            candidate_authored=candidate_authored,
+                        )
+            order += 1
+
+    current: Tag | None = element
+    while current is not None:
+        style = current.attrs.get("style")
+        if isinstance(style, str) and style.strip():
+            try:
+                declarations = tuple(
+                    tinycss2.parse_declaration_list(
+                        style,
+                        skip_comments=True,
+                        skip_whitespace=True,
+                    )
+                )
+            except Exception:
+                return None
+            if any(item.type != "declaration" for item in declarations):
+                return None
+            if any(
+                item.lower_name in {"all", "font"}
+                for item in declarations
+            ):
+                return None
+            declaration = _final_css_declaration(
+                declarations,
+                frozenset({"font-size"}),
+            )
+            if declaration is not None:
+                _record_css_winner(
+                    winners,
+                    element=current,
+                    declaration=declaration,
+                    specificity=(0, 0, 0),
+                    order=order,
+                    candidate_authored=False,
+                    inline=True,
+                )
+        current = _parent_tag(current)
+
+    winner = _inherited_css_winner(element, winners)
+    if winner is None:
+        return 16.0, False
+    declaration, candidate_authored = winner
+    tokens = _significant_css_value_tokens(declaration)
+    if (
+        len(tokens) != 1
+        or tokens[0].type != "dimension"
+        or str(getattr(tokens[0], "unit", "")).casefold() != "px"
+    ):
+        return None
+    value = _finite_css_token_value(tokens[0])
+    return (
+        (value, candidate_authored)
+        if value is not None
+        else None
+    )
+
+
+def _candidate_font_size_rule_that_wins(
+    *,
+    selector: str,
+    element: Tag,
+    soup: BeautifulSoup,
+    deck_css: str,
+    baseline_slide_css: str,
+    size_px: float,
+) -> str | None:
+    baseline_winner = _effective_font_size_winner(
+        element,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+        candidate_slide_css="",
+    )
+    if baseline_winner is None:
+        return None
+    size_px = max(
+        size_px,
+        baseline_winner[0] + _MIN_PRIORITY_FONT_SIZE_INCREASE_PX,
+    )
+    if size_px > _MAX_AUTHORED_FONT_SIZE_PX:
+        return None
+    for important in (False, True):
+        rule = (
+            f"{selector}{{font-size:{_css_px_literal(size_px)}"
+            f"{'!important' if important else ''}}}"
+        )
+        try:
+            retained = _retained_slide_css(rule)
+        except Exception:
+            continue
+        winner = _effective_font_size_winner(
+            element,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+            candidate_slide_css=retained,
+        )
+        if (
+            winner is not None
+            and winner[0] == size_px
+            and winner[1] is True
+        ):
+            return retained
+    return None
+
+
+def _candidate_important_font_size_targets_are_safe(
+    *,
+    candidate_slide_css: str,
+    soup: BeautifulSoup,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> bool:
+    rules = _stylesheet_qualified_rules(candidate_slide_css)
+    if rules is None:
+        return False
+    semantic_text_owner_ids = {
+        id(element) for element in _semantic_text_owners(soup)
+    }
+    important_targets: list[Tag] = []
+    for rule in rules:
+        declarations = tuple(
+            item
+            for item in tinycss2.parse_declaration_list(
+                rule.content,
+                skip_comments=True,
+                skip_whitespace=True,
+            )
+            if item.type == "declaration"
+        )
+        declaration = _final_css_declaration(
+            declarations,
+            frozenset({"font-size"}),
+        )
+        if declaration is None or not bool(declaration.important):
+            continue
+        matched: dict[int, Tag] = {}
+        try:
+            for selector in _selector_arms(list(rule.prelude)):
+                matched.update(
+                    {
+                        id(element): element
+                        for element in soup.select(selector)
+                        if isinstance(element, Tag)
+                    }
+                )
+        except Exception:
+            return False
+        if len(matched) != 1:
+            return False
+        target = next(iter(matched.values()))
+        if id(target) not in semantic_text_owner_ids:
+            return False
+        winner = _effective_font_size_winner(
+            target,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+            candidate_slide_css=candidate_slide_css,
+        )
+        if winner is None or winner[1] is not True:
+            return False
+        important_targets.append(target)
+    return len(important_targets) <= 1
+
+
+def _candidate_font_size_targets(
+    *,
+    candidate_slide_css: str,
+    body: str,
+    deck_css: str,
+    baseline_slide_css: str,
+) -> tuple[tuple[Tag, float, float], ...] | None:
+    try:
+        soup = BeautifulSoup(
+            assemble_compact_slide_html(
+                deck_stylesheet="",
+                html_body=body,
+                slide_css="",
+            ),
+            "html.parser",
+        )
+        rules = _stylesheet_qualified_rules(candidate_slide_css)
+    except Exception:
+        return None
+    if rules is None:
+        return None
+    semantic_text_owner_ids = {
+        id(element) for element in _semantic_text_owners(soup)
+    }
+    target_elements: list[Tag] = []
+    for rule in rules:
+        declarations = tuple(
+            item
+            for item in tinycss2.parse_declaration_list(
+                rule.content,
+                skip_comments=True,
+                skip_whitespace=True,
+            )
+            if item.type == "declaration"
+        )
+        declaration = _final_css_declaration(
+            declarations,
+            frozenset({"font-size"}),
+        )
+        if declaration is None:
+            continue
+        matched: dict[int, Tag] = {}
+        try:
+            for selector in _selector_arms(list(rule.prelude)):
+                matched.update(
+                    {
+                        id(element): element
+                        for element in soup.select(selector)
+                        if isinstance(element, Tag)
+                    }
+                )
+        except Exception:
+            return None
+        if len(matched) != 1:
+            return None
+        target = next(iter(matched.values()))
+        if id(target) not in semantic_text_owner_ids:
+            return None
+        target_elements.append(target)
+    targets: list[tuple[Tag, float, float]] = []
+    for element in target_elements:
+        baseline_winner = _effective_font_size_winner(
+            element,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+            candidate_slide_css="",
+        )
+        winner = _effective_font_size_winner(
+            element,
+            soup,
+            deck_css=deck_css,
+            baseline_slide_css=baseline_slide_css,
+            candidate_slide_css=candidate_slide_css,
+        )
+        if (
+            baseline_winner is None
+            or winner is None
+            or winner[1] is not True
+        ):
+            return None
+        targets.append((element, winner[0], baseline_winner[0]))
+    return tuple(targets)
+
+
+def _mechanism_ring_is_materialized(
+    records: tuple[dict[str, Any], ...],
+    *,
+    body: str,
+) -> bool:
+    if any(record["id"] == "loop-ring" for record in records):
+        return False
+    try:
+        soup = BeautifulSoup(
+            assemble_compact_slide_html(
+                deck_stylesheet="",
+                html_body=body,
+                slide_css="",
+            ),
+            "html.parser",
+        )
+        topology = _authenticated_loop_topology_inventory(soup)
+    except Exception:
+        return False
+    if topology is None:
+        return False
+    _loop_ring, body_nodes, body_arrows = topology
+    node_records = tuple(
+        record for record in records if "node" in record["classes"]
+    )
+    arrow_records = tuple(
+        record for record in records if "arrow" in record["classes"]
+    )
+    if (
+        len(body_nodes) != len(node_records)
+        or len(body_nodes) != len(_PSI_MECHANISM_STAGE_LABELS)
+        or len(body_arrows) != len(arrow_records)
+        or len(body_arrows) != 4
+        or any(
+            not isinstance(record["element"].parent, Tag)
+            or record["element"].parent.attrs.get("id") != "loop-ring"
+            for record in (*node_records, *arrow_records)
+        )
+    ):
+        return False
+    records_by_stage: dict[str, tuple[dict[str, Any], ...]] = {}
+    for stage in _PSI_MECHANISM_STAGE_LABELS:
+        records_by_stage[stage] = tuple(
+            record
+            for record in records
+            if "node" in record["classes"]
+            and {
+                    label
+                    for label in _PSI_MECHANISM_STAGE_LABELS
+                    if label in record["text"]
+                }
+                == {stage}
+        )
+        if not records_by_stage[stage]:
+            return False
+
+    ring_records: tuple[dict[str, Any], ...] | None = None
+    for candidate_records in product(
+        *(records_by_stage[stage] for stage in _PSI_MECHANISM_STAGE_LABELS)
+    ):
+        if len({id(record["element"]) for record in candidate_records}) != len(
+            _PSI_MECHANISM_STAGE_LABELS
+        ):
+            continue
+        centers = tuple(
+            _box_center(record["candidate_canvas"])
+            for record in candidate_records
+        )
+        centroid = (
+            sum(center[0] for center in centers) / len(centers),
+            sum(center[1] for center in centers) / len(centers),
+        )
+        radii = tuple(
+            math.hypot(
+                center[0] - centroid[0],
+                center[1] - centroid[1],
+            )
+            for center in centers
+        )
+        if (
+            min(radii) < _MIN_MECHANISM_RING_RADIUS_PX
+            or max(radii) / min(radii) > _MAX_MECHANISM_RING_RADIUS_RATIO
+        ):
+            continue
+        angles = tuple(
+            math.atan2(
+                center[1] - centroid[1],
+                center[0] - centroid[0],
+            )
+            for center in centers
+        )
+        ordered = False
+        for direction in (1.0, -1.0):
+            gaps = tuple(
+                math.degrees(
+                    (
+                        direction * (angles[(index + 1) % len(angles)] - angle)
+                    )
+                    % (2.0 * math.pi)
+                )
+                for index, angle in enumerate(angles)
+            )
+            if all(
+                _MIN_MECHANISM_RING_ANGLE_GAP_DEGREES
+                <= gap
+                <= _MAX_MECHANISM_RING_ANGLE_GAP_DEGREES
+                for gap in gaps
+            ) and math.isclose(
+                sum(gaps),
+                360.0,
+                rel_tol=0.0,
+                abs_tol=1e-6,
+            ):
+                ordered = True
+                break
+        if ordered:
+            ring_records = candidate_records
+            break
+    if ring_records is None:
+        return False
+
+    if (
+        not _priority_geometry_is_material(
+            (*ring_records, *arrow_records)
+        )
+    ):
+        return False
+    stage_centers = tuple(
+        _box_center(record["candidate_canvas"]) for record in ring_records
+    )
+    edge_midpoints = tuple(
+        (
+            (stage_centers[index][0] + stage_centers[index + 1][0]) / 2.0,
+            (stage_centers[index][1] + stage_centers[index + 1][1]) / 2.0,
+        )
+        for index in range(4)
+    )
+    return any(
+        all(
+            math.hypot(
+                _box_center(arrow["candidate_canvas"])[0] - midpoint[0],
+                _box_center(arrow["candidate_canvas"])[1] - midpoint[1],
+            )
+            <= 220.0
+            for arrow, midpoint in zip(
+                ordered_arrows,
+                edge_midpoints,
+                strict=True,
+            )
+        )
+        for ordered_arrows in permutations(arrow_records, 4)
+    )
+
+
+def _point_to_box_distance(
+    point: tuple[float, float],
+    box: dict[str, float],
+) -> float:
+    horizontal = max(
+        box["left"] - point[0],
+        0.0,
+        point[0] - box["left"] - box["width"],
+    )
+    vertical = max(
+        box["top"] - point[1],
+        0.0,
+        point[1] - box["top"] - box["height"],
+    )
+    return math.hypot(horizontal, vertical)
+
+
+def _mechanism_reentry_is_authenticated(
+    *,
+    body: str,
+    records: tuple[dict[str, Any], ...],
+    deck_css: str,
+    baseline_slide_css: str,
+    candidate_slide_css: str,
+) -> bool:
+    """Require an immutable, spatially integrated loop-closing label."""
+
+    try:
+        soup = BeautifulSoup(
+            assemble_compact_slide_html(
+                deck_stylesheet="",
+                html_body=body,
+                slide_css="",
+            ),
+            "html.parser",
+        )
+        matches = tuple(
+            element
+            for element in soup.select("#reentry-note")
+            if isinstance(element, Tag)
+        )
+    except Exception:
+        return False
+    if len(matches) != 1:
+        return False
+    reentry = matches[0]
+    words = set(_normalized_element_text(reentry).split())
+    style = reentry.attrs.get("style")
+    if (
+        not {"feedback", "perception"}.issubset(words)
+        or reentry.has_attr("hidden")
+        or (
+            isinstance(style, str)
+            and _inline_style_hides_text(style)
+        )
+    ):
+        return False
+    reentry_winners = _geometry_cascade_winners(
+        reentry,
+        soup,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+        candidate_slide_css=candidate_slide_css,
+    )
+    if reentry_winners is None:
+        return False
+    local_box = _literal_px_geometry_winners(reentry_winners)
+    if local_box is None:
+        return False
+    reentry_box = _geometry_box_in_canvas_coordinates(
+        reentry,
+        soup,
+        local_box,
+        deck_css=deck_css,
+        baseline_slide_css=baseline_slide_css,
+        candidate_slide_css=candidate_slide_css,
+    )
+    if reentry_box is None:
+        return False
+    stage_records = {
+        stage: next(
+            (
+                record
+                for record in records
+                if "node" in record["classes"]
+                and {
+                    label
+                    for label in _PSI_MECHANISM_STAGE_LABELS
+                    if label in record["text"]
+                }
+                == {stage}
+            ),
+            None,
+        )
+        for stage in ("feedback", "perception")
+    }
+    return all(
+        record is not None
+        and _point_to_box_distance(
+            _box_center(record["candidate_canvas"]),
+            reentry_box,
+        )
+        <= _MAX_MECHANISM_REENTRY_DISTANCE_PX
+        for record in stage_records.values()
+    )
+
+
+def _closing_synthesis_is_materialized(
+    records: tuple[dict[str, Any], ...],
+    *,
+    font_size_targets: tuple[tuple[Tag, float, float], ...],
+) -> bool:
+    question = next(
+        (record for record in records if record["id"] == "question-list"),
+        None,
+    )
+    closing = next(
+        (record for record in records if record["id"] == "closing-panel"),
+        None,
+    )
+    if (
+        question is None
+        or closing is None
+        or len(font_size_targets) != 1
+    ):
+        return False
+    if not _priority_geometry_is_material((question, closing)):
+        return False
+    question_box = question["candidate_canvas"]
+    closing_box = closing["candidate_canvas"]
+    if (
+        abs(question_box["top"] - closing_box["top"]) > 16.0
+        or closing_box["left"]
+        - (question_box["left"] + question_box["width"])
+        < 32.0
+    ):
+        return False
+    baseline_area = (
+        closing["baseline_canvas"]["width"]
+        * closing["baseline_canvas"]["height"]
+    )
+    candidate_area = closing_box["width"] * closing_box["height"]
+    if candidate_area > baseline_area * 1.01:
+        return False
+    return any(
+        value >= 36.0
+        and value >= baseline_value + _MIN_PRIORITY_FONT_SIZE_INCREASE_PX
+        and str(element.name).casefold() in {"p", "div"}
+        and _priority_font_anchor_is_bound_short_leaf(
+            element,
+            container_id="closing-panel",
+            anchor_phrases=_PSI_CLOSING_ANCHOR_PHRASES,
+        )
+        for element, value, baseline_value in font_size_targets
+    )
+
+
+def _default_look_is_materialized(
+    records: tuple[dict[str, Any], ...],
+    *,
+    font_size_targets: tuple[tuple[Tag, float, float], ...],
+) -> bool:
+    thesis = next(
+        (record for record in records if record["id"] == "thesis-block"),
+        None,
+    )
+    stakes = next(
+        (record for record in records if record["id"] == "stakes-panel"),
+        None,
+    )
+    if (
+        thesis is None
+        or stakes is None
+        or len(font_size_targets) != 1
+    ):
+        return False
+    if not _priority_geometry_is_material((thesis, stakes)):
+        return False
+    thesis_box = thesis["candidate_canvas"]
+    stakes_box = stakes["candidate_canvas"]
+    if (
+        abs(thesis_box["top"] - stakes_box["top"]) > 16.0
+        or stakes_box["left"] - (thesis_box["left"] + thesis_box["width"])
+        < 32.0
+        or thesis_box["width"] > thesis["baseline_canvas"]["width"] + 0.5
+        or (
+            stakes_box["width"] * stakes_box["height"]
+            > stakes["baseline_canvas"]["width"]
+            * stakes["baseline_canvas"]["height"]
+            * 1.01
+        )
+    ):
+        return False
+    return any(
+        value >= 30.0
+        and value >= baseline_value + _MIN_PRIORITY_FONT_SIZE_INCREASE_PX
+        and str(element.name).casefold() in {"p", "div"}
+        and _priority_font_anchor_is_bound_short_leaf(
+            element,
+            container_id="thesis-block",
+            anchor_phrases=_PSI_SUBJECT_ANCHOR_PHRASES,
+        )
+        for element, value, baseline_value in font_size_targets
+    )
+
+
+def _candidate_materializes_priority_semantics(
+    *,
+    candidate: DeckRepairCandidate,
+    acceptance: dict[str, JsonValue],
+    authorized_sources: tuple[RepairSourceContext, ...],
+    read_only_sources: tuple[RepairSourceContext, ...],
+) -> bool:
+    selector_map = acceptance["priority_selector_by_failure_code"]
+    if not isinstance(selector_map, dict):
+        return False
+    if set(selector_map) != {
+        "weak_mechanism_visualization",
+        "weak_closing_synthesis",
+        "default_look_gravity",
+    }:
+        return True
+    css_by_selector = {
+        str(update.selector): update.content
+        for update in candidate.source_updates
+        if update.source_role == "slide_css"
+    }
+    body_by_selector = {
+        str(source.selector): source.text
+        for source in authorized_sources
+        if source.source_role == "body"
+    }
+    baseline_by_selector = {
+        str(source.selector): source.text
+        for source in authorized_sources
+        if source.source_role == "slide_css"
+    }
+    deck_css_sources = tuple(
+        source.text
+        for source in (*authorized_sources, *read_only_sources)
+        if source.source_role == "deck_css"
+    )
+    if len(deck_css_sources) > 1:
+        return False
+    deck_css = deck_css_sources[0] if deck_css_sources else ""
+    cached: dict[
+        str,
+        tuple[
+            tuple[dict[str, Any], ...],
+            tuple[tuple[Tag, float, float], ...],
+        ],
+    ] = {}
+    for failure_code, raw_selector in selector_map.items():
+        selector = str(raw_selector)
+        if selector not in cached:
+            css = css_by_selector.get(selector)
+            body = body_by_selector.get(selector)
+            baseline = baseline_by_selector.get(selector)
+            if css is None or body is None or baseline is None:
+                return False
+            records = _priority_geometry_records(
+                candidate_slide_css=css,
+                body=body,
+                deck_css=deck_css,
+                baseline_slide_css=baseline,
+            )
+            font_targets = _candidate_font_size_targets(
+                candidate_slide_css=css,
+                body=body,
+                deck_css=deck_css,
+                baseline_slide_css=baseline,
+            )
+            if (
+                records is None
+                or font_targets is None
+                or not _priority_geometry_respects_outer_gutters(records)
+            ):
+                return False
+            cached[selector] = (records, font_targets)
+        records, font_targets = cached[selector]
+        if (
+            failure_code == "weak_mechanism_visualization"
+            and (
+                bool(font_targets)
+                or
+                not _mechanism_ring_is_materialized(
+                    records,
+                    body=body_by_selector[selector],
+                )
+                or not _mechanism_reentry_is_authenticated(
+                    body=body_by_selector[selector],
+                    records=records,
+                    deck_css=deck_css,
+                    baseline_slide_css=baseline_by_selector[selector],
+                    candidate_slide_css=css_by_selector[selector],
+                )
+            )
+        ):
+            return False
+        if (
+            failure_code == "weak_closing_synthesis"
+            and not _closing_synthesis_is_materialized(
+                records,
+                font_size_targets=font_targets,
+            )
+        ):
+            return False
+        if (
+            failure_code == "default_look_gravity"
+            and not _default_look_is_materialized(
+                records,
+                font_size_targets=font_targets,
+            )
+        ):
+            return False
+    return True
+
+
 def _candidate_materializes_priority_contract(
     candidate: DeckRepairCandidate,
     program: DeckRepairProgram,
     authorized_sources: tuple[RepairSourceContext, ...],
     read_only_sources: tuple[RepairSourceContext, ...] = (),
+    *,
+    require_semantic_outcomes: bool = True,
 ) -> bool:
     try:
         acceptance = _campaign_acceptance_contract(program)
@@ -5551,13 +7465,25 @@ def _candidate_materializes_priority_contract(
             ]
             if type(minimum_targets) is not int or minimum_targets < 1:
                 return False
-            return _candidate_css_targets_manifest_bodies(
+            geometry_contract_satisfied = _candidate_css_targets_manifest_bodies(
                 candidate,
                 authorized_sources,
                 read_only_sources=read_only_sources,
                 require_geometry=True,
                 required_selectors=priority_selectors,
                 minimum_distinct_geometry_targets_per_selector=minimum_targets,
+                mechanism_topology_selector=_mechanism_topology_selector(
+                    program
+                ),
+            )
+            return geometry_contract_satisfied and (
+                not require_semantic_outcomes
+                or _candidate_materializes_priority_semantics(
+                    candidate=candidate,
+                    acceptance=acceptance,
+                    authorized_sources=authorized_sources,
+                    read_only_sources=read_only_sources,
+                )
             )
         return True
     except Exception:
@@ -6044,6 +7970,9 @@ def _validate_invocation_result(
         context.authorized_sources,
         read_only_sources=context.read_only_sources,
         require_geometry=False,
+        mechanism_topology_selector=_mechanism_topology_selector(
+            request.program
+        ),
     ):
         raise DeckRepairAuthorError(
             "candidate_invalid",

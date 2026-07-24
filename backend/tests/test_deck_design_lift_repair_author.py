@@ -837,7 +837,8 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
         in system_prompt
     )
     assert "all four must omit it otherwise" in system_prompt
-    assert "Never use !important for paint, typography, borders" in system_prompt
+    assert "Never use !important for paint, line-height, borders" in system_prompt
+    assert "one uniquely targeted font-size anchor" in system_prompt
     assert "inline geometry that is itself !important" in system_prompt
     assert "geometry-affecting aliases are intentionally fail-closed" in system_prompt
     assert "Move or resize only existing elements on the assigned priority selectors" in system_prompt
@@ -907,8 +908,10 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
     assert "resolve to exactly one existing manifest element" in system_prompt
     assert "width at least 48px" in system_prompt
     assert "height at least 24px" in system_prompt
-    assert "authenticated layout already uses absolute slide-canvas coordinates" in system_prompt
-    assert "Never apply geometry to a static element or a nested child" in system_prompt
+    assert "authenticated absolutely positioned semantic target" in system_prompt
+    assert "exactly one existing authenticated absolutely positioned containing block" in system_prompt
+    assert "Keep every locally positioned target wholly inside that containing block" in system_prompt
+    assert "cross a second positioned ancestor" in system_prompt
     assert "one high-level semantic container" in system_prompt
     assert "Never frame a title or other text leaf, repeated list or loop nodes" in system_prompt
     assert "without clipping or a new wrap" in system_prompt
@@ -988,9 +991,9 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
         "author_target_resolved_family_count": 3,
         "campaign_floor_feasible": True,
         "priority_failure_codes": [
+            "weak_mechanism_visualization",
             "weak_subject_specificity",
             "weak_signature_realization",
-            "weak_mechanism_visualization",
         ],
         "priority_psi_failure_family_by_code": {
             "weak_subject_specificity": "weak_subject_specificity",
@@ -1116,12 +1119,36 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                     "canvas_width_px": 1920,
                     "canvas_height_px": 1080,
                     "must_remain_fully_on_canvas": True,
+                    "one_authenticated_absolute_containing_block_allowed": True,
+                    "local_target_must_remain_fully_inside_containing_block": True,
+                    "second_positioned_ancestor_allowed": False,
                     "selector_must_match_exactly_one_manifest_element": True,
                     "minimum_width_px": 48,
                     "minimum_height_px": 24,
                     "text_container_width_or_height_shrink_allowed": False,
                     "maximum_text_container_area_expansion_ratio": 1.25,
                     "maximum_text_container_outer_edge_displacement_px": 120,
+                    "mechanism_topology_outer_edge_displacement_exception": {
+                        "maximum_px": 560,
+                        "selector_family": "weak_mechanism_visualization",
+                        "eligible_manifest_classes": ["arrow", "node"],
+                        "required_authenticated_containing_block_id": "loop-ring",
+                        "required_direct_node_count": 5,
+                        "required_direct_arrow_count": 4,
+                        "all_topology_elements_must_be_direct_children": True,
+                        "required_stage_order_winding_degrees": 360,
+                        "multiple_windings_allowed": False,
+                        "containing_block_must_remain_unchanged": True,
+                        "authenticated_width_and_height_must_remain_unchanged": True,
+                        "target_must_remain_fully_inside_containing_block": True,
+                    },
+                    "minimum_material_relationship_change_px": 32,
+                    "maximum_uniform_translation_drift_px": 8,
+                    "outer_gutter_floor_px": 40,
+                    "outer_gutter_policy": (
+                        "candidate_each_edge_at_least_min_of_authenticated_"
+                        "edge_gutter_and_floor"
+                    ),
                     "baseline_negative_space_and_hierarchy_must_be_preserved": True,
                 },
                 "paint": {
@@ -1134,11 +1161,19 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                     "fully_opaque_literal_colors_only": True,
                     "minimum_contrast_ratio": 4.5,
                 },
-                "font_size": {
-                    "unit": "px",
-                    "minimum_inclusive": 12,
-                    "maximum_inclusive": 64,
-                },
+                    "font_size": {
+                        "unit": "px",
+                        "minimum_inclusive": 12,
+                        "maximum_inclusive": 64,
+                        "important_allowed_only_for_unique_semantic_anchor": True,
+                        "effective_candidate_cascade_winner_required": True,
+                        "minimum_effective_size_increase_px": 4,
+                        "priority_anchor_must_be_short_direct_text_leaf": True,
+                        "priority_anchor_required_containers": [
+                            "closing-panel",
+                            "thesis-block",
+                        ],
+                    },
                 "line_height": {
                     "unitless_range_inclusive": [0.8, 3.0],
                     "px_range_inclusive": [8.0, 96.0],
@@ -1156,7 +1191,11 @@ def test_compact_v2_slide_css_contract_is_serialized_in_both_prompt_surfaces() -
                     "px_range_inclusive": [0, 1080.0],
                     "percentage_range_inclusive": [0, 50],
                 },
-                "important_allowed_for_non_geometry": False,
+                    "important_allowed_for_non_geometry": ["font-size"],
+                    "important_non_geometry_scope": (
+                        "unique_semantic_anchor_only_when_required_to_beat_"
+                        "authenticated_inline_font_size"
+                    ),
                 "variables_or_calculations_allowed": False,
             },
             "forbidden_native_properties": [
@@ -1297,14 +1336,14 @@ def test_campaign_acceptance_prioritizes_only_available_psi_floor_families() -> 
     assert acceptance["available_family_count"] == 3
     assert acceptance["author_target_resolved_family_count"] == 3
     assert acceptance["priority_failure_codes"] == [
+        "low_sequence_rhythm",
         "weak_subject_specificity",
         "weak_signature_realization",
-        "low_sequence_rhythm",
     ]
     assert "weak_memorability" not in acceptance["psi_failure_family_by_code"]
 
 
-def test_campaign_acceptance_prioritizes_exactly_three_critical_psi_families() -> None:
+def test_campaign_acceptance_prioritizes_css_only_repairable_psi_families() -> None:
     program = _program(
         failure_codes=(
             "default_look_gravity",
@@ -1329,21 +1368,21 @@ def test_campaign_acceptance_prioritizes_exactly_three_critical_psi_families() -
     acceptance = payload["repair_constraints"]["campaign_acceptance"]
     assert acceptance["available_family_count"] == 5
     assert acceptance["priority_failure_codes"] == [
-        "weak_subject_specificity",
-        "weak_signature_realization",
+        "weak_mechanism_visualization",
         "weak_closing_synthesis",
+        "default_look_gravity",
     ]
     assert acceptance["priority_psi_failure_family_by_code"] == {
+        "default_look_gravity": "default_look_gravity",
         "weak_closing_synthesis": "weak_closing_synthesis",
-        "weak_signature_realization": "weak_signature_realization",
-        "weak_subject_specificity": "weak_subject_specificity",
+        "weak_mechanism_visualization": "weak_mechanism_visualization",
     }
     assert acceptance["deferred_failure_codes"] == [
-        "default_look_gravity",
         "weak_fingerprint_realization",
-        "weak_mechanism_visualization",
         "weak_memorability",
+        "weak_signature_realization",
         "weak_spatial_tension",
+        "weak_subject_specificity",
     ]
 
 
@@ -1353,14 +1392,14 @@ def test_campaign_acceptance_prefers_localized_mechanism_and_closing() -> None:
     )
 
     assert acceptance["priority_failure_codes"] == [
-        "weak_subject_specificity",
-        "weak_closing_synthesis",
         "weak_mechanism_visualization",
+        "weak_closing_synthesis",
+        "default_look_gravity",
     ]
     assert acceptance["priority_selector_by_failure_code"] == {
-        "weak_subject_specificity": "slide:1",
-        "weak_closing_synthesis": "slide:5",
         "weak_mechanism_visualization": "slide:2",
+        "weak_closing_synthesis": "slide:5",
+        "default_look_gravity": "slide:1",
     }
     assert acceptance["distinct_priority_selector_count"] == 3
     assert acceptance["priority_geometry_required"] is True
@@ -1502,12 +1541,14 @@ def test_priority_geometry_infeasible_context_is_rejected_before_provider(
 
 def _v32_priority_geometry_context(
     *,
-    body: str,
+    body: str | None = None,
+    body_by_selector: dict[str, str] | None = None,
     deck_css: str = DECK_CSS_TEXT,
 ) -> tuple[RepairInvocationRequest, RepairAuthorContext]:
+    if (body is None) == (body_by_selector is None):
+        raise ValueError("provide exactly one body source fixture")
     program = _specificity_first_three_selector_program()
     request = _request(program=program)
-    body_hash = hashlib.sha256(body.encode()).hexdigest()
     base = _context(request=request)
     sources = tuple(
         RepairSourceContext(
@@ -1523,12 +1564,22 @@ def _v32_priority_geometry_context(
             manifest_source_hash=(
                 SLIDE_CSS_HASH
                 if source_role == "slide_css"
-                else body_hash
+                else hashlib.sha256(
+                    (
+                        body
+                        if body is not None
+                        else body_by_selector[selector]
+                    ).encode()
+                ).hexdigest()
             ),
             text=(
                 BASELINE_SLIDE_CSS_TEXT
                 if source_role == "slide_css"
-                else body
+                else (
+                    body
+                    if body is not None
+                    else body_by_selector[selector]
+                )
             ),
         )
         for selector in program.authorized_selectors
@@ -1567,6 +1618,129 @@ def _v32_priority_geometry_context(
     )
 
 
+def _psi_semantic_geometry_bodies(
+    *,
+    include_reentry: bool = True,
+) -> dict[str, str]:
+    absolute = "position:absolute;box-sizing:border-box;"
+    reentry = (
+        f'<div id="reentry-note" style="{absolute}left:120px;top:900px;'
+        'width:1600px;height:80px">Feedback re-enters Perception</div>'
+        if include_reentry
+        else ""
+    )
+    return {
+        "slide:1": (
+            f'<section id="thesis-block" style="{absolute}left:80px;top:120px;'
+            'width:1040px;height:720px">'
+            "<p>Reasoning proposes. Motivation decides.</p></section>"
+            f'<div id="stakes-panel" style="{absolute}left:1180px;top:120px;'
+            'width:620px;height:720px">Product and engineering stakes</div>'
+        ),
+        "slide:2": (
+            f'<div id="loop-ring" style="{absolute}left:160px;top:140px;'
+            'width:1600px;height:680px">'
+            f'<div class="node" style="{absolute}left:40px;top:260px;'
+            'width:240px;height:120px">Perception</div>'
+            f'<div class="arrow" style="{absolute}left:300px;top:160px;'
+            'width:80px;height:40px">→</div>'
+            f'<div class="node" style="{absolute}left:400px;top:40px;'
+            'width:240px;height:120px">Appraisal</div>'
+            f'<div class="arrow" style="{absolute}left:660px;top:160px;'
+            'width:80px;height:40px">→</div>'
+            f'<div class="node" style="{absolute}left:760px;top:260px;'
+            'width:240px;height:120px">Motives</div>'
+            f'<div class="arrow" style="{absolute}left:1020px;top:160px;'
+            'width:80px;height:40px">→</div>'
+            f'<div class="node" style="{absolute}left:1120px;top:40px;'
+            'width:240px;height:120px">Action</div>'
+            f'<div class="arrow" style="{absolute}left:1380px;top:260px;'
+            'width:80px;height:80px">↓</div>'
+            f'<div class="node" style="{absolute}left:1120px;top:420px;'
+            'width:240px;height:120px">Feedback</div>'
+            "</div>"
+            + reentry
+        ),
+        "slide:5": (
+            f'<section id="question-list" style="{absolute}left:80px;top:140px;'
+            'width:1080px;height:760px">Can you name every motive explicitly?</section>'
+            f'<div id="closing-panel" style="{absolute}left:1220px;top:140px;'
+            'width:620px;height:760px">'
+            '<p class="close-big">Govern the motive, not just the words.</p></div>'
+        ),
+    }
+
+
+def _psi_semantic_candidate(
+    *,
+    slide_one_css: str | None = None,
+    slide_two_css: str | None = None,
+    slide_five_css: str | None = None,
+) -> DeckRepairCandidate:
+    css_by_selector = {
+        "slide:1": slide_one_css
+        or (
+            "#thesis-block{left:72px!important;top:120px!important;"
+            "width:1040px!important;height:720px!important}"
+            "#stakes-panel{left:1220px!important;top:120px!important;"
+            "width:620px!important;height:720px!important}"
+            "#thesis-block>p{font-size:30px}"
+        ),
+        "slide:2": slide_two_css
+        or (
+            ".node:nth-child(1){left:130px!important;top:280px!important;"
+            "width:240px!important;height:120px!important}"
+            ".node:nth-child(3){left:392px!important;top:40px!important;"
+            "width:240px!important;height:120px!important}"
+            ".node:nth-child(5){left:880px!important;top:40px!important;"
+            "width:240px!important;height:120px!important}"
+            ".node:nth-child(7){left:1230px!important;top:280px!important;"
+            "width:240px!important;height:120px!important}"
+            ".node:nth-child(9){left:680px!important;top:520px!important;"
+            "width:240px!important;height:120px!important}"
+            ".arrow:nth-child(2){left:345px!important;top:200px!important;"
+            "width:80px!important;height:40px!important}"
+            ".arrow:nth-child(4){left:720px!important;top:80px!important;"
+            "width:80px!important;height:40px!important}"
+            ".arrow:nth-child(6){left:1135px!important;top:200px!important;"
+            "width:80px!important;height:40px!important}"
+            ".arrow:nth-child(8){left:1035px!important;top:440px!important;"
+            "width:80px!important;height:80px!important}"
+        ),
+        "slide:5": slide_five_css
+        or (
+            "#question-list{left:72px!important;top:140px!important;"
+            "width:1080px!important;height:760px!important}"
+            "#closing-panel{left:1260px!important;top:140px!important;"
+            "width:620px!important;height:760px!important}"
+            ".close-big{font-size:36px}"
+        ),
+    }
+    retained_by_selector = {
+        selector: _retained_slide_css(css)
+        for selector, css in css_by_selector.items()
+    }
+    assert all(
+        len(css.encode()) <= repair_overlay_utf8_budget(baseline="")
+        for css in retained_by_selector.values()
+    )
+    return DeckRepairCandidate(
+        source_updates=tuple(
+            SourceUpdate(
+                selector=selector,
+                source_role="slide_css",
+                expected_source_hash=SLIDE_CSS_HASH,
+                content=retained_by_selector[selector],
+            )
+            for selector in ("slide:1", "slide:2", "slide:5")
+        ),
+        rationale=(
+            "Materialize the PSI loop, the subject-specific hierarchy, and "
+            "the closing synthesis without changing frozen body copy."
+        ),
+    )
+
+
 def test_v32_static_group_layout_is_rejected_before_provider_admission() -> None:
     request, context = _v32_priority_geometry_context(
         body=(
@@ -1601,14 +1775,7 @@ def test_v32_static_group_layout_is_rejected_before_provider_admission() -> None
 
 def test_v32_combined_absolute_pair_passes_strict_source_feasibility() -> None:
     request, context = _v32_priority_geometry_context(
-        body=(
-            '<section class="subject" style="position:absolute;'
-            'box-sizing:border-box;left:80px;top:80px;'
-            'width:640px;height:360px">Current PSI</section>'
-            '<section class="mechanism" style="position:absolute;'
-            'box-sizing:border-box;left:800px;top:520px;'
-            'width:640px;height:360px">Control loop</section>'
-        )
+        body_by_selector=_psi_semantic_geometry_bodies(),
     )
 
     assert _priority_geometry_sources_are_feasible(
@@ -1620,20 +1787,451 @@ def test_v32_combined_absolute_pair_passes_strict_source_feasibility() -> None:
 
 def test_v32_translucent_deck_paint_has_safe_geometry_witness() -> None:
     request, context = _v32_priority_geometry_context(
-        body=(
-            '<section class="subject" style="position:absolute;'
-            'box-sizing:border-box;left:80px;top:80px;'
-            'width:640px;height:360px">Current PSI</section>'
-            '<section class="mechanism" style="position:absolute;'
-            'box-sizing:border-box;left:800px;top:520px;'
-            'width:640px;height:360px">Control loop</section>'
-        ),
+        body_by_selector=_psi_semantic_geometry_bodies(),
         deck_css=(
             "section{background:rgba(29,32,39,.5);color:#FFFFFF}"
         ),
     )
 
     assert _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_mechanism_without_reentry_is_rejected_before_provider() -> None:
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=_psi_semantic_geometry_bodies(
+            include_reentry=False,
+        ),
+    )
+    traces = FakeTraceFactory()
+    author, loader, invoker = _author(
+        request=request,
+        context=context,
+        trace_factory=traces,
+    )
+
+    assert not _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+    with pytest.raises(DeckRepairAuthorError) as error:
+        _run(author(request))
+
+    _assert_code(error, "repair_unavailable")
+    assert loader.calls == [request]
+    assert invoker.prepare_calls == []
+    assert invoker.count_calls == []
+    assert invoker.invoke_calls == []
+    assert traces.inputs == []
+
+
+def test_v32_mechanism_with_extra_connector_is_rejected() -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:2"] = bodies["slide:2"].replace(
+        '</div></div><div id="reentry-note"',
+        (
+            '</div><div class="arrow" style="position:absolute;'
+            'box-sizing:border-box;left:700px;top:560px;'
+            'width:80px;height:40px">↺</div></div>'
+            '<div id="reentry-note"'
+        ),
+        1,
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+
+    assert bodies["slide:2"].count('class="arrow"') == 5
+    assert not _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+    assert not _candidate_materializes_priority_contract(
+        _psi_semantic_candidate(),
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_mechanism_without_authenticated_loop_parent_is_rejected() -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    opening = (
+        '<div id="loop-ring" style="position:absolute;'
+        'box-sizing:border-box;left:160px;top:140px;'
+        'width:1600px;height:680px">'
+    )
+    assert opening in bodies["slide:2"]
+    bodies["slide:2"] = bodies["slide:2"].replace(opening, "", 1)
+    bodies["slide:2"] = bodies["slide:2"].replace(
+        '</div></div><div id="reentry-note"',
+        '</div><div id="reentry-note"',
+        1,
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+
+    assert 'id="loop-ring"' not in bodies["slide:2"]
+    assert not _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+    assert not _candidate_materializes_priority_contract(
+        _psi_semantic_candidate(),
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_exact_priority_semantics_accept_nested_ring_geometry() -> None:
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=_psi_semantic_geometry_bodies(),
+    )
+
+    assert _candidate_materializes_priority_contract(
+        _psi_semantic_candidate(),
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_exact_priority_semantics_reject_uniform_pair_translation() -> None:
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=_psi_semantic_geometry_bodies(),
+    )
+    candidate = _psi_semantic_candidate(
+        slide_one_css=(
+            "#thesis-block{left:88px!important;top:120px!important;"
+            "width:1040px!important;height:720px!important}"
+            "#stakes-panel{left:1199px!important;top:120px!important;"
+            "width:620px!important;height:720px!important;"
+            "border:1px solid #0B1F3A;box-sizing:border-box}"
+            "#thesis-block>p{font-size:30px}"
+        ),
+    )
+
+    assert not _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_exact_priority_semantics_reject_collapsed_outer_gutter() -> None:
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=_psi_semantic_geometry_bodies(),
+    )
+    candidate = _psi_semantic_candidate(
+        slide_five_css=(
+            "#question-list{left:72px!important;top:140px!important;"
+            "width:1080px!important;height:760px!important}"
+            "#closing-panel{left:1290px!important;top:140px!important;"
+            "width:620px!important;height:760px!important}"
+            ".close-big{font-size:36px}"
+        ),
+    )
+
+    assert not _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_exact_priority_semantics_reject_nested_local_overflow() -> None:
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=_psi_semantic_geometry_bodies(),
+    )
+    valid_mechanism_css = next(
+        update.content
+        for update in _psi_semantic_candidate().source_updates
+        if update.selector == "slide:2"
+    )
+    candidate = _psi_semantic_candidate(
+        slide_two_css=valid_mechanism_css.replace(
+            ".node:nth-child(1){left:130px!important",
+            ".node:nth-child(1){left:1500px!important",
+            1,
+        ),
+    )
+
+    assert not _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_exact_priority_semantics_reject_double_winding_ring() -> None:
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=_psi_semantic_geometry_bodies(),
+    )
+    candidate = _psi_semantic_candidate(
+        slide_two_css=(
+            ".node:nth-child(1){left:430px!important;top:280px!important;"
+            "width:240px!important;height:120px!important}"
+            ".node:nth-child(3){left:882px!important;top:133px!important;"
+            "width:240px!important;height:120px!important}"
+            ".node:nth-child(5){left:603px!important;top:518px!important;"
+            "width:240px!important;height:120px!important}"
+            ".node:nth-child(7){left:603px!important;top:42px!important;"
+            "width:240px!important;height:120px!important}"
+            ".node:nth-child(9){left:882px!important;top:427px!important;"
+            "width:240px!important;height:120px!important}"
+            ".arrow:nth-child(2){left:736px!important;top:246.5px!important;"
+            "width:80px!important;height:40px!important}"
+            ".arrow:nth-child(4){left:822.5px!important;top:365.5px!important;"
+            "width:80px!important;height:40px!important}"
+            ".arrow:nth-child(6){left:683px!important;top:320px!important;"
+            "width:80px!important;height:40px!important}"
+            ".arrow:nth-child(8){left:822.5px!important;top:254.5px!important;"
+            "width:80px!important;height:80px!important}"
+        ),
+    )
+
+    assert not _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_exact_priority_semantics_reject_noop_font_cascade() -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:1"] = bodies["slide:1"].replace(
+        "<p>",
+        '<p style="font-size:18px">',
+        1,
+    )
+    bodies["slide:5"] = bodies["slide:5"].replace(
+        '<p class="close-big">',
+        '<p class="close-big" style="font-size:18px">',
+        1,
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+    nonwinning = _psi_semantic_candidate()
+    winning = nonwinning.model_copy(
+        update={
+            "source_updates": tuple(
+                update.model_copy(
+                    update={
+                        "content": update.content.replace(
+                            "font-size:30px",
+                            "font-size:30px!important",
+                        ).replace(
+                            "font-size:36px",
+                            "font-size:36px!important",
+                        )
+                    }
+                )
+                for update in nonwinning.source_updates
+            )
+        }
+    )
+
+    assert _priority_geometry_sources_are_feasible(
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+    assert not _candidate_materializes_priority_contract(
+        nonwinning,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+    assert _candidate_materializes_priority_contract(
+        winning,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_exact_priority_semantics_reject_parent_font_proxy() -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:5"] = bodies["slide:5"].replace(
+        '<p class="close-big">',
+        (
+            'Govern the motive, not just the words. '
+            '<p class="close-big" '
+            'style="font-size:18px">'
+        ),
+        1,
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+    candidate = _psi_semantic_candidate(
+        slide_five_css=(
+            "#question-list{left:72px!important;top:140px!important;"
+            "width:1080px!important;height:760px!important}"
+            "#closing-panel{left:1260px!important;top:140px!important;"
+            "width:620px!important;height:760px!important;"
+            "font-size:36px!important}"
+        ),
+    )
+
+    assert not _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_exact_priority_semantics_reject_same_size_font_noop() -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:1"] = bodies["slide:1"].replace(
+        "<p>",
+        '<p style="font-size:30px">',
+        1,
+    )
+    bodies["slide:5"] = bodies["slide:5"].replace(
+        '<p class="close-big">',
+        '<p class="close-big" style="font-size:36px">',
+        1,
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+    candidate = _psi_semantic_candidate()
+    candidate = candidate.model_copy(
+        update={
+            "source_updates": tuple(
+                update.model_copy(
+                    update={
+                        "content": update.content.replace(
+                            "font-size:30px",
+                            "font-size:30px!important",
+                        ).replace(
+                            "font-size:36px",
+                            "font-size:36px!important",
+                        )
+                    }
+                )
+                for update in candidate.source_updates
+            )
+        }
+    )
+
+    assert not _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_exact_priority_semantics_reject_detached_duplicate_font_anchor(
+) -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:5"] += (
+        '<p id="detached-close" style="font-size:18px">'
+        "Govern the motive, not just the words.</p>"
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+    candidate = _psi_semantic_candidate(
+        slide_five_css=(
+            "#question-list{left:72px!important;top:140px!important;"
+            "width:1080px!important;height:760px!important}"
+            "#closing-panel{left:1260px!important;top:140px!important;"
+            "width:620px!important;height:760px!important}"
+            "#detached-close{font-size:36px!important}"
+        ),
+    )
+
+    assert not _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_exact_priority_semantics_reject_extra_font_anchor() -> None:
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=_psi_semantic_geometry_bodies(),
+    )
+    candidate = _psi_semantic_candidate(
+        slide_one_css=(
+            "#thesis-block{left:72px!important;top:120px!important;"
+            "width:1040px!important;height:720px!important}"
+            "#stakes-panel{left:1220px!important;top:120px!important;"
+            "width:620px!important;height:720px!important}"
+            "#thesis-block>p{font-size:30px}"
+            "#stakes-panel{font-size:64px!important}"
+        ),
+    )
+
+    assert not _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_exact_priority_materiality_cannot_come_from_unrelated_element(
+) -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:1"] += (
+        '<div id="extra" style="position:absolute;box-sizing:border-box;'
+        'left:80px;top:900px;width:400px;height:80px">Context footer</div>'
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+    candidate = _psi_semantic_candidate(
+        slide_one_css=(
+            "#thesis-block{left:88px!important;top:128px!important;"
+            "width:1040px!important;height:720px!important}"
+            "#stakes-panel{left:1188px!important;top:128px!important;"
+            "width:620px!important;height:720px!important}"
+            "#extra{left:128px!important;top:900px!important;"
+            "width:400px!important;height:80px!important}"
+            "#thesis-block>p{font-size:30px}"
+        ),
+    )
+
+    assert not _candidate_materializes_priority_contract(
+        candidate,
+        request.program,
+        context.authorized_sources,
+        context.read_only_sources,
+    )
+
+
+def test_v32_exact_priority_semantics_reject_detached_reentry_note() -> None:
+    bodies = _psi_semantic_geometry_bodies()
+    bodies["slide:2"] = bodies["slide:2"].replace(
+        "left:120px;top:900px;width:1600px;height:80px",
+        "left:1600px;top:40px;width:240px;height:80px",
+        1,
+    )
+    request, context = _v32_priority_geometry_context(
+        body_by_selector=bodies,
+    )
+
+    assert not _candidate_materializes_priority_contract(
+        _psi_semantic_candidate(),
         request.program,
         context.authorized_sources,
         context.read_only_sources,
@@ -4882,7 +5480,6 @@ def test_slide_css_strips_every_directional_border_longhand(
         "border:1px solid rgba(11,31,58,.5)",
         "border-width:calc(100% + 1px)",
         "box-sizing:inherit",
-        "font-size:32px!important",
         "border:1px solid transparent",
         "border-radius:51%",
         "border-radius:-1px",
@@ -4912,6 +5509,33 @@ def test_slide_css_rejects_candidate_without_safe_retained_value(
 
     _assert_code(error, "candidate_invalid")
     assert error.value.trace_error_code == "candidate_canonicalization_invalid"
+    assert len(invoker.invoke_calls) == 1
+
+
+def test_slide_css_retains_bounded_important_font_size() -> None:
+    request = _request()
+    candidate = _candidate().model_copy(
+        update={
+            "source_updates": (
+                _candidate().source_updates[0],
+                _candidate().source_updates[1].model_copy(
+                    update={
+                        "content": "h1{font-size:32px!important}"
+                    }
+                ),
+            )
+        }
+    )
+    author, _loader, invoker = _author(
+        request=request,
+        invoker=FakeTwoPhaseInvoker(candidate=candidate),
+    )
+
+    result = _run(author(request))
+
+    assert result.candidate.source_updates[1].content == (
+        "h1{font-size:32px!important;}"
+    )
     assert len(invoker.invoke_calls) == 1
 
 
