@@ -258,11 +258,16 @@ def test_compact_v2_profile_is_required_in_model_schema_and_bounded() -> None:
     stylesheet = schema["properties"]["deck_stylesheet"]
     assert "each slide's two repair-addressable anchors" in stylesheet["description"]
     assert "position:absolute, box-sizing:border-box, margin:0" in stylesheet["description"]
-    assert "at least 48x24px and wholly on canvas" in stylesheet["description"]
+    assert "effective baseline box at least 48x24px and wholly on canvas" in stylesheet["description"]
+    assert "at least 8px of free canvas" in stylesheet["description"]
     assert "Do not use at-rules or nested CSS anywhere in deck_stylesheet" in stylesheet["description"]
-    assert "No other CSS selector matching an anchor may declare a nonzero margin" in stylesheet["description"]
+    assert "auto, nonzero, or otherwise non-literal-zero physical margin" in stylesheet["description"]
     assert "logical or vendor margin property" in stylesheet["description"]
+    assert "rather than overriding it with a later margin:0 reset" in stylesheet["description"]
+    assert "Grouped physical margin:0 is safe but unnecessary" in stylesheet["description"]
     assert "reset margins on anchor descendants with separate descendant selectors" in stylesheet["description"]
+    assert "unrelated visible text-bearing rectangles disjoint with at least a 16px gutter" in stylesheet["description"]
+    assert "non-text background with no native text frame" in stylesheet["description"]
 
     slide = _compact_slide()
     slide["html_body"] = "x" * (4 * 1024 + 1)

@@ -56,6 +56,9 @@ def test_retryable_invalid_deck_ir_parses_zero_based_slide_field_target() -> Non
     assert "zero-based index 1 = visible slide 2" in instruction.repair_message
     assert "do not change only creative_plan" in instruction.repair_message
     assert "Add or repair the complete declared pair together" in instruction.repair_message
+    assert "Prefer promoting two existing top-level visible content containers" in instruction.repair_message
+    assert "do not add overlay wrappers or duplicate visible text" in instruction.repair_message
+    assert "at least a 16px gutter" in instruction.repair_message
     assert "Never change DOM structure" in instruction.repair_message
 
 
@@ -188,6 +191,8 @@ def test_mechanical_repair_instruction_targets_exact_contrast_text_colors_and_so
     assert targets[0]["recommended_foreground"] == "#000000"
     assert targets[0]["recommended_contrast_ratio"] >= 4.5
     assert targets[1]["source_ids"] == ["s4-phase2"]
+    assert "Keep peer text 16px apart" in instruction["repair_message"]
+    assert "text may overlap only non-text backgrounds" in instruction["repair_message"]
     assert targets[1]["recommended_contrast_ratio"] >= 3.0
     message = instruction["repair_message"]
     assert 'data-deck-id="s2-map"' in message

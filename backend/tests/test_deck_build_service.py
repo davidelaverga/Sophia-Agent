@@ -26,7 +26,7 @@ from deerflow.sophia.deck_build import service as deck_service
 from deerflow.sophia.deck_build.mechanical_gates import MechanicalGateIssue, MechanicalGateResult
 from deerflow.sophia.deck_build.service import DeckBuildService
 from deerflow.sophia.deck_build.storage import load_deck_build
-from deerflow.sophia.deck_build.tool_contract import DeckCreativePlanInput
+from deerflow.sophia.deck_build.tool_contract import DeckCreativePlanInput, PrepareDeckBuildInput
 from deerflow.sophia.deck_build.tracing import NATIVE_DECK_COMPILE_MODE
 from deerflow.sophia.deck_native.models import (
     NativeDeckInspectResult,
@@ -2492,11 +2492,28 @@ def test_presentation_authoring_prompt_requires_repair_addressable_anchors() -> 
     assert "Do not use !important, right, bottom, inset, min/max sizing" in prompt
     assert "do not put at-rules or nested rules in authored CSS" in prompt
     assert "Flex and grid remain available inside either anchor" in prompt
+    assert "Use real content containers as the two anchors" in prompt
+    assert "never duplicate visible content into extra positioned overlay anchors" in prompt
+    assert "unrelated visible text-bearing rectangles disjoint with at least a 16px gutter" in prompt
+    assert "non-text background with no native text frame" in prompt
+    assert "exact-edge connector or background touching remains allowed" in prompt
     assert 'repair_anchor_ids=["hero","proof"]' in prompt
     assert '<section id="hero" data-deck-id="hero"' in prompt
     assert "slide_css omitted or empty for every slide" in prompt
     assert "authenticated repair overlay retains its full budget" in prompt
     assert "only small slide_css overrides" not in prompt
+
+
+def test_compact_authoring_schema_requires_collision_safe_text_geometry() -> None:
+    schema = PrepareDeckBuildInput.model_json_schema()
+    slide = schema["$defs"]["DeckSlideInput"]["properties"]["html_body"]["description"]
+    stylesheet = schema["properties"]["deck_stylesheet"]["description"]
+
+    assert "real content containers for the anchors" in slide
+    assert "never duplicate visible content into extra positioned overlay anchors" in slide
+    assert "unrelated visible text-bearing rectangles disjoint with at least a 16px gutter" in stylesheet
+    assert "non-text background with no native text frame" in stylesheet
+    assert "exact-edge connector or background touching remains allowed" in stylesheet
 
 
 def test_presentation_authoring_prompt_sets_role_aware_font_floors() -> None:

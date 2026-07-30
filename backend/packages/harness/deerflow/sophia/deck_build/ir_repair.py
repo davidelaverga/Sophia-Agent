@@ -79,7 +79,8 @@ _MECHANICAL_REPAIR_PREAMBLE = (
     "gridline C_in to CSS px with Cpx=96*C_in; for source Wpx/Hpx: left-edge left=Cpx; "
     "right-edge left=Cpx-Wpx; hcenter left=Cpx-Wpx/2; top-edge top=Cpx; "
     "bottom-edge top=Cpx-Hpx; vcenter top=Cpx-Hpx/2. "
-    "Use supplied contrast colors. Then call prepare_deck_build once with the complete prior input."
+    "Use given colors. Keep peer text 16px apart; text may overlap only non-text backgrounds. "
+    "Then call prepare_deck_build once with the complete prior input."
 )
 _OVERLAP_REPAIR_GUIDANCE = (
     "OVERLAP boxes/hints use native inches; CSS delta px=96*native delta in, including nested sources "
@@ -141,9 +142,12 @@ def _targeted_deck_ir_repair_guidance(failure_summary: str) -> str:
         )
     if "must contain both repair anchors declared by repair_anchor_ids" in lowered:
         return (
-            "Add or repair the complete declared pair together: two top-level visible section/div anchors and one "
-            "standalone #id rule per anchor with position:absolute, box-sizing:border-box, margin:0, and literal "
-            "px left/top/width/height. Preserve all other source. "
+            "Add or repair the complete declared pair together. Prefer promoting two existing top-level visible "
+            "content containers by assigning the required safe ids and deck attributes; do not add overlay wrappers "
+            "or duplicate visible text. Each anchor needs one standalone #id rule with position:absolute, "
+            "box-sizing:border-box, margin:0, and literal px left/top/width/height. Keep the two anchor rectangles "
+            "and unrelated visible text-bearing rectangles disjoint in canvas-global coordinates with at least a "
+            "16px gutter. Preserve all other source. "
         )
     if (
         "translation clearance" in lowered

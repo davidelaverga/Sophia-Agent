@@ -1,0 +1,16 @@
+{
+  "schema_version": "sophia-dq2-browser-summary/v1",
+  "experiment_id": "dq2-psi-agent-architecture-20260730t084230z",
+  "production_url": "https://www.sophia-ei.com/session",
+  "authenticated": true,
+  "fresh_session": true,
+  "prompt_submitted_exactly_once": true,
+  "prompt_submitted_at": "2026-07-30T08:42:30.459Z",
+  "prompt_sha256": "bdad62c0d47b8ca26c6cfc69422ceafd222a0b3851f19eb6e430895d28edacea",
+  "observed_builder_phase": "failed",
+  "observed_failure_stage": "deck_build_service",
+  "observed_failure_code": "deck_prepare_retry_exhausted",
+  "retry_clicked": false,
+  "raw_prompt_archived": false,
+  "raw_user_identity_archived": false
+}

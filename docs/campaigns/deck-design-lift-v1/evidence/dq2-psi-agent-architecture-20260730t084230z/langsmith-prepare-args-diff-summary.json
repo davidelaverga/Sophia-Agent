@@ -1,0 +1,33 @@
+{
+  "schema_version": "sophia-langsmith-prepare-args-diff-summary/v1",
+  "experiment_id": "dq2-psi-agent-architecture-20260730t084230z",
+  "initial_prepare_span_id": "019fb231-e2f4-7a83-b6e5-a63e47f69686",
+  "repaired_prepare_span_id": "019fb232-cf79-7af2-ac53-9e65d820cc01",
+  "top_level_unchanged_fields": [
+    "authoring_contract",
+    "creative_plan",
+    "deck_title",
+    "output_path",
+    "slides"
+  ],
+  "all_slide_objects_equal": true,
+  "all_slide_html_equal": true,
+  "deck_stylesheet_changed": true,
+  "deck_stylesheet_initial_bytes": 2863,
+  "deck_stylesheet_repaired_bytes": 2931,
+  "changed_anchor_rule_count": 10,
+  "only_change_was_explicit_zero_margin": true,
+  "slide_2_html_bytes": 1885,
+  "slide_2_anchor_ids": [
+    "loop",
+    "legend"
+  ],
+  "slide_2_anchor_boxes_overlap": false,
+  "slide_2_anchor_horizontal_gap_px": 60,
+  "new_or_duplicate_anchor_added": false,
+  "overlap_source_attribution_proven": false,
+  "attribution_limit": "The persisted trace lacks a native shape ID to source element mapping for the reciprocal overlap pair.",
+  "read_only": true,
+  "sanitized": true,
+  "raw_provider_payloads_emitted": false
+}

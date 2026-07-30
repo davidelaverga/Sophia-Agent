@@ -123,9 +123,17 @@ def test_authoritative_prompt_surfaces_require_repair_addressable_anchors() -> N
         assert "`margin:0`" in text
         assert "48x24px" in text
         assert "anchor geometry out of `slide_css` and inline styles" in text
-        assert "No other CSS selector matching an anchor may declare a nonzero margin" in text
+        assert "at least 8px of free canvas" in text
+        assert "auto, nonzero, or otherwise non-literal-zero physical margin" in text
         assert "logical or vendor margin property" in text
+        assert "rather than overriding it with a later `margin:0` reset" in text
+        assert "Grouped physical `margin:0` is safe but unnecessary" in text
         assert "reset margins on anchor descendants with separate descendant selectors" in text
+        assert "real content containers as the anchors" in text
+        assert "never duplicate visible content into extra positioned overlay anchors" in text
+        assert "unrelated visible text-bearing rectangles disjoint with at least a 16px gutter" in text
+        assert "non-text background with no native text frame" in text
+        assert "exact-edge connector or background touching remains allowed" in text
         assert "Flex and grid" in text
         assert '`repair_anchor_ids=["hero","proof"]`' in text
         assert "omit `slide_css` or pass an empty string" in text.lower()

@@ -1,0 +1,20 @@
+{
+  "schema_version": "sophia-dq2-render-log-summary/v1",
+  "experiment_id": "dq2-psi-agent-architecture-20260730t082351z",
+  "queried_after_utc": "2026-07-30T08:23:51.133Z",
+  "gateway_deploy_live": true,
+  "langgraph_deploy_live": true,
+  "deployed_commit_sha": "34217a8aa3b88e59c1ccbb2f4a187a8804adccb4",
+  "builder_terminal_accepted_at": "2026-07-30T08:27:42.141938Z",
+  "builder_root_trace_id": "019fb21f-91d6-7173-87f8-8e2f99946db2",
+  "build_id": "build_01KYS1Z4EKQZDTWN60WMFDNR95",
+  "prepare_call_count": 2,
+  "prepare_execution_count": 2,
+  "prepare_result_count": 2,
+  "prepare_repair_count": 1,
+  "terminal_code": "deck_prepare_retry_exhausted",
+  "artifact_published": false,
+  "dq1_dispatched": false,
+  "read_only": true,
+  "sanitized": true
+}

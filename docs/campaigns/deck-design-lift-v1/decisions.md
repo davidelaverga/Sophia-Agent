@@ -25,3 +25,41 @@ The first successful production target must prefer a blind second verdict of `sa
 ## DQ2-006 — Improve the procedure, never the fixture manually
 
 The supplied PPTX is a diagnostic negative anchor only. Campaign success must start with a fresh normal-builder artifact from `sophia-ei.com`; no fixture seeding, screenshot-backed slide, or manual artifact edit can satisfy the mission.
+
+## DQ2-007 — A consumed run is terminal; iteration uses a fresh experiment
+
+The failed production run `dq2-campaign-20260719t102932z` consumed its sole repair call and is permanently ineligible for retry. Its transaction was rolled back with the original manifest unchanged. The campaign specification scopes “no retry” to that campaign run while directing the coding agent to repeat fresh production attempts until success. Further work therefore uses a new normal-app deck and new campaign, experiment, operation, and transaction identities, with one repair maximum in that new loop.
+
+## DQ2-008 — Persist the repair result before terminal trace completion
+
+A successful provider response must be canonicalized, stored immutably, and exact-read back before the pre-admitted LangSmith run is terminalized. Candidate materialization remains blocked until the terminal trace is proven exact. A trace completion exception leaves the transaction prepared so recovery can reopen only the deterministic existing trace and reuse only the persisted result; it can never call the provider again.
+
+## DQ2-009 — Seal trace-admission failures even when generation was never called
+
+Experiment `dq2-psi-agent-architecture-20260719t142956z` wrote its invoke-once intent and passed the exact 25,238-token cost preflight, then failed while validating the LangSmith project before repair generation. Although the generation count is zero, the transaction and operation are terminal: an intent without a canonical result cannot be reused safely. Iteration must use a new normal-app deck and wholly new campaign identities.
+
+## DQ2-010 — Gate the next fresh experiment on exact LangSmith read health
+
+Generic metadata-ingestion HTTP 204 responses do not prove that DQ-2's project/run API is usable. Before exposing another fresh deck to DQ-2, require a read-only `read_project` identity check against the exact EU endpoint, workspace, project name, and project UUID, followed by a deterministic run read. No write probe or synthetic trace may substitute for this check.
+
+## DQ2-011 — Resolve an ambiguous invocation only from provider-side per-call logs
+
+Experiment `dq2-psi-agent-architecture-20260719t173509z` created its deterministic LangSmith root but failed closed during immediate readback. Render and storage could prove only an upper bound of one repair generation. The authenticated OpenAI Platform Logs UI was therefore used as the authoritative per-call audit surface: project `Sophia`, source `Responses`, model `gpt-5.6-sol`, the exact 1.11-second hard window, and a widened five-minute window all contained zero matching generation records. Prompt and response content were not opened. That evidence releases the campaign to a new experiment; timing inference alone never may.
+
+## DQ2-012 — Treat compiler contracts as repair-author contracts
+
+Experiment `dq2-psi-agent-architecture-20260720t092819z` completed exactly one repair generation, terminalized the exact LangSmith EU trace, and persisted the canonical structured result. Candidate materialization then failed because the model-authored slide-2 CSS exceeded the compact-v2 1024-byte limit; a read-only relaxed-limit diagnostic also found three slide-2 native alignment residues. The operation is consumed and terminal. Before another generation, every non-schema compiler constraint needed for successful materialization must be serialized into the sealed author prompt and structured repair constraints, then locally regression-tested.
+
+## DQ2-013 — Preserve visible content by normalized token sequence
+
+Experiment `dq2-psi-agent-architecture-20260720t101520z` satisfied the new compact CSS and geometry contract, rebuilt a native five-slide deck, and passed mechanics, retention, contrast, native inventory, unchanged-render collateral, and editability checks. The authoritative content proof then rejected one additional visible Unicode symbol on slide 2. The operation is consumed and terminal. Future body updates must preserve the exact normalized visible HTML token sequence: markup may be restructured, but visible glyphs, symbols, labels, and words may not be added, removed, rewritten, split, merged, or reordered. A raw text-node comparison is deliberately rejected because valid slide-5 restructuring changed node boundaries without changing the rendered token sequence.
+
+## DQ2-014 — Abandon a mechanically exhausted baseline without app-level retry
+
+Experiment `dq2-psi-agent-architecture-20260730t082351z` submitted the frozen brief exactly once through a wholly fresh authenticated production session. The first authoring pass failed mechanics because a non-text shape extended off-slide and native alignment regressed. The bounded service-quality repair removed those defects but left three material overlaps, so the builder failed closed before artifact publication or DQ-1. The app-level `try again` action was not used. Because the same deployed commit previously produced a mechanically valid five-slide baseline, this single failure does not justify a broad runtime change. Continue with a wholly fresh session and new baseline identity; if the same mechanical family recurs, stop and patch the authoring or lint contract before another production attempt.
+
+## DQ2-015 — Prevent repair collateral without expanding the one-repair budget
+
+Experiment `dq2-psi-agent-architecture-20260730t084230z` used a wholly fresh normal-app session and again failed closed before artifact publication. Its first call violated the strict slide-1 repair-anchor contract. The sole bounded repair corrected the IR and produced exactly five native/editable slides, but one reciprocal text-shape collision pair remained on slide 2 and failed mechanics.
+
+The repeated overlap family is authoring collateral, not a reason to relax gates or expand retry count. D2.1.1 continues to permit exactly one shared input-repair retry. Harden the first-pass and repair prompts instead: use existing content containers as anchors, never add duplicate overlay text, keep unrelated visible text-bearing rectangles at least 16px apart in canvas-global space, permit containment only in non-text backgrounds, and preserve connector/background edge touching. Deploy that contract before another production attempt.

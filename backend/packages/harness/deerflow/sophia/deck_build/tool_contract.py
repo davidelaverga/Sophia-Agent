@@ -285,7 +285,9 @@ class DeckSlideInput(BaseModel):
             "ASCII letter followed by at most "
             "31 lowercase ASCII letters, digits, underscore, or hyphen, for a maximum of 32 characters. Each "
             "anchor's data-deck-id must be unique within its slide, its data-deck-role must be nonempty, and "
-            "data-deck-required must equal true. A declared anchor's inline style must not contain position, "
+            "data-deck-required must equal true. Use real content containers for the anchors; never duplicate "
+            "visible content into extra positioned overlay anchors merely to satisfy this contract. A declared "
+            "anchor's inline style must not contain position, "
             "box-sizing, margin, left, top, width, or height; put that geometry only in deck_stylesheet."
         ),
     )
@@ -371,7 +373,10 @@ class PrepareDeckBuildInput(BaseModel):
             "or nested CSS anywhere in deck_stylesheet. No selector or inline style matching an anchor may declare "
             "auto, nonzero, or otherwise non-literal-zero physical margin, or any logical or vendor margin property; "
             "remove an unsafe declaration rather than overriding it with a later margin:0 reset. Grouped physical "
-            "margin:0 is safe but unnecessary; reset margins on anchor descendants with separate descendant selectors."
+            "margin:0 is safe but unnecessary; reset margins on anchor descendants with separate descendant selectors. "
+            "In canvas-global coordinates, keep every pair of unrelated visible text-bearing rectangles disjoint "
+            "with at least a 16px gutter. Intentional containment is allowed only inside a non-text background with "
+            "no native text frame; exact-edge connector or background touching remains allowed."
         ),
     )
     deck_register: str = Field(
