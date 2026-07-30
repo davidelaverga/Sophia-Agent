@@ -122,6 +122,11 @@ _FONT_SIZE_KEYWORDS = {
 _BASE_FONT_SELECTORS = {"*", ".slide-root", "body", "html", "main", "main.slide-root"}
 _COMPACT_SOURCE_ID_RE = re.compile(r"^[a-z][a-z0-9_-]{0,31}$")
 _COMPACT_SOURCE_GEOMETRY_PROPERTIES = ("left", "top", "width", "height")
+_COMPACT_SOURCE_ANCHOR_INVARIANT_PROPERTIES = (
+    "position",
+    "box-sizing",
+    "margin",
+)
 _COMPACT_SOURCE_PHYSICAL_MARGIN_PROPERTIES = frozenset(
     {
         "margin",
@@ -318,6 +323,37 @@ class DeckBuildService:
                         },
                     ) as run:
                         finish_span(run, font_normalization)
+                normalized_stylesheet, invariant_normalization = (
+                    _normalize_compact_v2_anchor_invariant_contract(
+                        deck.deck_stylesheet or "",
+                        slides,
+                    )
+                )
+                if invariant_normalization["normalized_anchor_rule_count"] > 0:
+                    deck.deck_stylesheet = normalized_stylesheet
+                    deck.deck_stylesheet_hash = hashlib.sha256(
+                        normalized_stylesheet.encode("utf-8")
+                    ).hexdigest()
+                    logger.info(
+                        "[DeckIRNormalization] compact-v2 anchor invariants completed "
+                        "normalized_rules=%d injected_declarations=%d rawContentExcluded=true",
+                        invariant_normalization["normalized_anchor_rule_count"],
+                        invariant_normalization["injected_declaration_count"],
+                    )
+                    with deck_span(
+                        "deck.ir.normalize",
+                        runtime=runtime,
+                        build_id=build_id,
+                        visual_policy=deck.visual_policy,
+                        status=deck.status,
+                        slide_count=len(slides),
+                        run_type="tool",
+                        inputs={
+                            "authoring_contract": deck.deck_authoring_contract,
+                            "normalization_kind": "anchor_invariant_contract_completion",
+                        },
+                    ) as run:
+                        finish_span(run, invariant_normalization)
                 slides, normalization = _normalize_compact_v2_anchor_inline_geometry(
                     deck.deck_stylesheet or "",
                     slides,
@@ -2725,6 +2761,275 @@ def _timeout_stream_text(value: object) -> str:
 
 def _authoring_failure(summary: str) -> DeckBuildFailure:
     return DeckBuildFailure("invalid_deck_ir", summary, retryable=True)
+
+
+def _normalize_compact_v2_anchor_invariant_contract(
+    stylesheet: str,
+    slides: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Complete one mechanically unambiguous fresh-authoring anchor contract.
+
+    Some model-authored compact-v2 decks contain a unique, unused class rule
+    with exactly the three mandatory anchor invariants while every declared
+    anchor already has a standalone, safe four-field ``#id`` geometry rule.
+    That source is invalid and does not compile, but its intended absolute-box
+    contract is mechanically unambiguous. In that one bounded case, copy only
+    the mandatory constants into the existing ID rules. Every other source
+    remains unchanged and proceeds to the normal fail-closed validator.
+    """
+
+    def report(
+        *,
+        normalized_rule_count: int = 0,
+        injected_declaration_count: int = 0,
+        carrier_selector_hash: str | None = None,
+        stylesheet_after: str = stylesheet,
+    ) -> dict[str, Any]:
+        return {
+            "normalization_applied": normalized_rule_count > 0,
+            "normalized_anchor_rule_count": normalized_rule_count,
+            "injected_declaration_count": injected_declaration_count,
+            "carrier_selector_sha256": carrier_selector_hash,
+            "stylesheet_bytes_before": len(stylesheet.encode("utf-8")),
+            "stylesheet_bytes_after": len(stylesheet_after.encode("utf-8")),
+            "html_body_changed": False,
+            "strict_validator_bypassed": False,
+            "candidate_compile_changed": False,
+            "raw_content_excluded": True,
+        }
+
+    try:
+        rules = tinycss2.parse_stylesheet(
+            stylesheet,
+            skip_comments=False,
+            skip_whitespace=False,
+        )
+    except Exception:  # noqa: BLE001 - strict validation reports source errors.
+        return stylesheet, report()
+    if any(getattr(rule, "type", "") in {"at-rule", "error"} for rule in rules):
+        return stylesheet, report()
+
+    soups: list[BeautifulSoup] = []
+    selector_soups: list[BeautifulSoup] = []
+    anchor_markers_by_soup: list[set[int]] = []
+    selector_anchor_markers_by_soup: list[set[int]] = []
+    declared_ids_by_soup: list[set[str]] = []
+    declared_ids: list[str] = []
+    for raw in slides:
+        declared = raw.get("repair_anchor_ids")
+        if (
+            not isinstance(declared, list)
+            or len(declared) != 2
+            or any(
+                not isinstance(identifier, str)
+                or _COMPACT_SOURCE_ID_RE.fullmatch(identifier) is None
+                for identifier in declared
+            )
+            or len(set(declared)) != 2
+        ):
+            return stylesheet, report()
+        body = raw.get("html_body")
+        if not isinstance(body, str) or not body.strip():
+            return stylesheet, report()
+        try:
+            soup = BeautifulSoup(body, "html.parser")
+        except Exception:  # noqa: BLE001 - strict validation reports source errors.
+            return stylesheet, report()
+        anchors: list[Tag] = []
+        anchor_data_ids: set[str] = set()
+        for identifier in declared:
+            matches = soup.find_all(id=identifier)
+            if len(matches) != 1 or not isinstance(matches[0], Tag):
+                return stylesheet, report()
+            anchor = matches[0]
+            if (
+                not any(anchor is element for element in soup.contents)
+                or not _compact_source_anchor_is_eligible(
+                    anchor,
+                    {identifier: (0.0, 0.0, 48.0, 24.0)},
+                )
+            ):
+                return stylesheet, report()
+            data_id = str(anchor.attrs.get("data-deck-id") or "").strip()
+            if data_id in anchor_data_ids:
+                return stylesheet, report()
+            anchor_data_ids.add(data_id)
+            anchors.append(anchor)
+            declared_ids.append(identifier)
+        soups.append(soup)
+        anchor_markers_by_soup.append({id(anchor) for anchor in anchors})
+        declared_ids_by_soup.append(set(declared))
+        selector_soup = BeautifulSoup(
+            assemble_compact_slide_html(
+                deck_stylesheet="",
+                html_body=body,
+                slide_css="",
+            ),
+            "html.parser",
+        )
+        selector_anchors = [selector_soup.find(id=identifier) for identifier in declared]
+        if any(not isinstance(anchor, Tag) for anchor in selector_anchors):
+            return stylesheet, report()
+        selector_soups.append(selector_soup)
+        selector_anchor_markers_by_soup.append(
+            {id(anchor) for anchor in selector_anchors}
+        )
+
+    unique_ids = tuple(dict.fromkeys(declared_ids))
+    if not unique_ids:
+        return stylesheet, report()
+    for identifier in unique_ids:
+        for soup, anchor_markers, slide_declared_ids in zip(
+            soups,
+            anchor_markers_by_soup,
+            declared_ids_by_soup,
+            strict=True,
+        ):
+            occurrences = soup.find_all(id=identifier)
+            expected_count = 1 if identifier in slide_declared_ids else 0
+            if len(occurrences) != expected_count or (
+                expected_count == 1 and id(occurrences[0]) not in anchor_markers
+            ):
+                return stylesheet, report()
+    qualified_rules = [
+        rule for rule in rules if getattr(rule, "type", "") == "qualified-rule"
+    ]
+    target_rules: dict[str, Any] = {}
+    target_rule_markers: set[int] = set()
+    geometry_names = set(_COMPACT_SOURCE_GEOMETRY_PROPERTIES)
+    for identifier in unique_ids:
+        matches = [
+            rule
+            for rule in qualified_rules
+            if tinycss2.serialize(rule.prelude).strip() == f"#{identifier}"
+        ]
+        if len(matches) != 1:
+            return stylesheet, report()
+        rule = matches[0]
+        declarations = tinycss2.parse_declaration_list(
+            rule.content,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        if (
+            any(getattr(item, "type", "") != "declaration" for item in declarations)
+            or any(bool(getattr(item, "important", False)) for item in declarations)
+        ):
+            return stylesheet, report()
+        final = {item.lower_name: item for item in declarations}
+        if len(final) != len(declarations) or set(final) != geometry_names:
+            return stylesheet, report()
+        values = tuple(
+            _css_absolute_px_value(final.get(property_name))
+            for property_name in _COMPACT_SOURCE_GEOMETRY_PROPERTIES
+        )
+        if any(value is None for value in values):
+            return stylesheet, report()
+        left, top, width, height = (float(value) for value in values if value is not None)
+        if (
+            left < 0
+            or top < 0
+            or width < 48
+            or height < 24
+            or left + width > 1920
+            or top + height > 1080
+            or not (
+                left >= 8
+                or top >= 8
+                or left + width <= 1912
+                or top + height <= 1072
+            )
+        ):
+            return stylesheet, report()
+        target_rules[identifier] = rule
+        target_rule_markers.add(id(rule))
+
+    carrier_candidates: list[tuple[Any, str]] = []
+    invariant_names = set(_COMPACT_SOURCE_ANCHOR_INVARIANT_PROPERTIES)
+    for rule in qualified_rules:
+        if id(rule) in target_rule_markers:
+            continue
+        selector = tinycss2.serialize(rule.prelude).strip()
+        if (
+            selector in _BASE_FONT_SELECTORS
+            or re.fullmatch(r"\.[a-z][a-z0-9_-]{0,31}", selector) is None
+        ):
+            continue
+        declarations = tinycss2.parse_declaration_list(
+            rule.content,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        if (
+            any(getattr(item, "type", "") != "declaration" for item in declarations)
+            or any(bool(getattr(item, "important", False)) for item in declarations)
+        ):
+            continue
+        final = {item.lower_name: item for item in declarations}
+        if len(final) != len(declarations) or set(final) != invariant_names:
+            continue
+        if (
+            _css_single_identifier(final.get("position")) != "absolute"
+            or _css_single_identifier(final.get("box-sizing")) != "border-box"
+            or _css_zero_value(final.get("margin")) is not True
+        ):
+            continue
+        try:
+            if any(soup.select(selector) for soup in selector_soups):
+                continue
+        except Exception:
+            continue
+        carrier_candidates.append((rule, selector))
+    if len(carrier_candidates) != 1:
+        return stylesheet, report()
+    carrier_rule, carrier_selector = carrier_candidates[0]
+
+    protected_names = geometry_names | invariant_names
+    for rule in qualified_rules:
+        if id(rule) in target_rule_markers or rule is carrier_rule:
+            continue
+        declarations = tinycss2.parse_declaration_list(
+            rule.content,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        if not any(
+            getattr(item, "type", "") == "declaration"
+            and item.lower_name in protected_names
+            for item in declarations
+        ):
+            continue
+        selector = tinycss2.serialize(rule.prelude).strip()
+        try:
+            for soup, anchor_markers in zip(
+                selector_soups,
+                selector_anchor_markers_by_soup,
+                strict=True,
+            ):
+                if any(id(match) in anchor_markers for match in soup.select(selector)):
+                    return stylesheet, report()
+        except Exception:
+            return stylesheet, report()
+
+    invariant_prefix = "position:absolute;box-sizing:border-box;margin:0;"
+    for rule in target_rules.values():
+        rule.content = tinycss2.parse_component_value_list(
+            invariant_prefix + tinycss2.serialize(rule.content)
+        )
+    normalized_stylesheet = tinycss2.serialize(rules)
+    if len(normalized_stylesheet.encode("utf-8")) > 8 * 1024:
+        return stylesheet, report()
+    if not set(unique_ids) <= set(_compact_shared_id_geometry(normalized_stylesheet)):
+        return stylesheet, report()
+    selector_hash = hashlib.sha256(carrier_selector.encode("utf-8")).hexdigest()
+    return normalized_stylesheet, report(
+        normalized_rule_count=len(target_rules),
+        injected_declaration_count=(
+            len(target_rules) * len(_COMPACT_SOURCE_ANCHOR_INVARIANT_PROPERTIES)
+        ),
+        carrier_selector_hash=selector_hash,
+        stylesheet_after=normalized_stylesheet,
+    )
 
 
 def _normalize_compact_v2_anchor_inline_geometry(

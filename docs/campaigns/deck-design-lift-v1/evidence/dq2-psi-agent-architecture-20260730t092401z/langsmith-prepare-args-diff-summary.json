@@ -1,0 +1,74 @@
+{
+  "schema_version": "sophia-langsmith-prepare-args-diff-summary/v1",
+  "experiment_id": "dq2-psi-agent-architecture-20260730t092401z",
+  "initial_prepare_span_id": "019fb257-bb18-7090-b8c8-35ad3c524adb",
+  "repaired_prepare_span_id": "019fb258-8328-7ad0-9c8c-7166cf9ed273",
+  "top_level_unchanged_fields": [
+    "authoring_contract",
+    "creative_plan",
+    "deck_title",
+    "output_path"
+  ],
+  "top_level_changed_fields": [
+    "deck_stylesheet",
+    "slides"
+  ],
+  "all_slide_objects_equal": false,
+  "all_slide_html_equal": false,
+  "changed_slide_indexes": [
+    1,
+    3
+  ],
+  "changed_slide_html_indexes": [
+    1,
+    3
+  ],
+  "slide_html_byte_deltas": [
+    {
+      "slide_index": 1,
+      "initial_bytes": 1172,
+      "repaired_bytes": 1001
+    },
+    {
+      "slide_index": 3,
+      "initial_bytes": 1646,
+      "repaired_bytes": 1441
+    }
+  ],
+  "deck_stylesheet_changed": true,
+  "deck_stylesheet_initial_bytes": 2068,
+  "deck_stylesheet_repaired_bytes": 2218,
+  "initial_result_safe_codes": [
+    "invalid_deck_ir",
+    "prepare_deck_build"
+  ],
+  "repaired_result_safe_codes": [
+    "invalid_deck_ir",
+    "prepare_deck_build"
+  ],
+  "initial_result_safe_selectors": [],
+  "repaired_result_safe_selectors": [],
+  "initial_failure_classification": "unique_unused_anchor_invariant_carrier",
+  "initial_source_anchor_count": 10,
+  "initial_source_invariant_carrier_count": 1,
+  "initial_source_invariant_carrier_used_by_slide_html": false,
+  "classification_scope": "initial_and_repaired_prepare",
+  "unchanged_anchor_rule_selectors": [
+    "#hero",
+    "#why"
+  ],
+  "opening_anchor_tags_identical": true,
+  "missing_anchor_invariants_in_both_calls": [
+    "position:absolute",
+    "box-sizing:border-box",
+    "margin:0"
+  ],
+  "repaired_failure_classification": "unique_unused_anchor_invariant_carrier",
+  "repaired_failure_source_attribution_proven": true,
+  "prior_args_included_in_repair_context": true,
+  "repair_instruction_included_in_repair_context": true,
+  "repair_context_truncated": false,
+  "read_only": true,
+  "sanitized": true,
+  "raw_provider_payloads_emitted": false
+}

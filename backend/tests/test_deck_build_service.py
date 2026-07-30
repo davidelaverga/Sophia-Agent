@@ -1284,6 +1284,41 @@ def _source_pair_body() -> str:
     )
 
 
+def _v51_incomplete_anchor_contract() -> tuple[str, list[dict[str, object]]]:
+    pairs = (
+        ("hero", "why"),
+        ("loopwhy", "loopsteps"),
+        ("scenario", "motives"),
+        ("tablehead", "tablewrap"),
+        ("qwrap", "cta"),
+    )
+    slides: list[dict[str, object]] = []
+    rules = [
+        "main{font-family:Calibri,Arial,sans-serif}",
+        ".eb{position:absolute;box-sizing:border-box;margin:0}",
+    ]
+    for index, (first, second) in enumerate(pairs):
+        slides.append(
+            {
+                "html_body": (
+                    f'<section id="{first}" data-deck-id="{first}" data-deck-role="title" '
+                    f'data-deck-required="true"><h1>Slide {index + 1}</h1></section>'
+                    f'<div id="{second}" data-deck-id="{second}" data-deck-role="narrative" '
+                    'data-deck-required="true"><p>Inspectable motive arbitration.</p></div>'
+                ),
+                "slide_css": "",
+                "repair_anchor_ids": [first, second],
+            }
+        )
+        rules.extend(
+            (
+                f"#{first}{{left:120px;top:100px;width:1120px;height:320px}}",
+                f"#{second}{{left:120px;top:480px;width:1680px;height:400px}}",
+            )
+        )
+    return "".join(rules), slides
+
+
 @pytest.mark.parametrize(
     ("body", "stylesheet"),
     [
@@ -1446,6 +1481,141 @@ def test_compact_v2_normalizes_only_redundant_inline_anchor_geometry() -> None:
         _source_pair_stylesheet(),
         normalized,
     )
+
+
+def test_compact_v2_completes_v51_anchor_invariant_contract_before_strict_validation() -> None:
+    stylesheet, slides = _v51_incomplete_anchor_contract()
+    original_bodies = [slide["html_body"] for slide in slides]
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="both repair anchors declared"):
+        deck_service._validate_compact_source_addressability(stylesheet, slides)
+
+    normalized, report = deck_service._normalize_compact_v2_anchor_invariant_contract(
+        stylesheet,
+        slides,
+    )
+
+    assert normalized != stylesheet
+    assert [slide["html_body"] for slide in slides] == original_bodies
+    assert report["normalization_applied"] is True
+    assert report["normalized_anchor_rule_count"] == 10
+    assert report["injected_declaration_count"] == 30
+    assert report["html_body_changed"] is False
+    assert report["strict_validator_bypassed"] is False
+    assert report["candidate_compile_changed"] is False
+    assert report["raw_content_excluded"] is True
+    assert len(report["carrier_selector_sha256"]) == 64
+    assert set(deck_service._compact_shared_id_geometry(normalized)) == {
+        identifier
+        for slide in slides
+        for identifier in slide["repair_anchor_ids"]
+    }
+    deck_service._validate_compact_source_addressability(normalized, slides)
+
+    second, second_report = deck_service._normalize_compact_v2_anchor_invariant_contract(
+        normalized,
+        slides,
+    )
+    assert second == normalized
+    assert second_report["normalization_applied"] is False
+    assert second_report["normalized_anchor_rule_count"] == 0
+
+
+@pytest.mark.parametrize(
+    "stylesheet_suffix",
+    (
+        ".other{position:absolute;box-sizing:border-box;margin:0}",
+        "section{position:relative}",
+        "main #hero{position:relative}",
+    ),
+)
+def test_compact_v2_anchor_invariant_completion_fails_closed_on_ambiguity(
+    stylesheet_suffix: str,
+) -> None:
+    stylesheet, slides = _v51_incomplete_anchor_contract()
+
+    normalized, report = deck_service._normalize_compact_v2_anchor_invariant_contract(
+        stylesheet + stylesheet_suffix,
+        slides,
+    )
+
+    assert normalized == stylesheet + stylesheet_suffix
+    assert report["normalization_applied"] is False
+
+
+def test_compact_v2_anchor_invariant_completion_rejects_used_carrier() -> None:
+    stylesheet, slides = _v51_incomplete_anchor_contract()
+    slides[0]["html_body"] = str(slides[0]["html_body"]).replace(
+        'id="hero"',
+        'id="hero" class="eb"',
+        1,
+    )
+
+    normalized, report = deck_service._normalize_compact_v2_anchor_invariant_contract(
+        stylesheet,
+        slides,
+    )
+
+    assert normalized == stylesheet
+    assert report["normalization_applied"] is False
+
+
+def test_compact_v2_anchor_invariant_completion_rejects_undeclared_cross_slide_id() -> None:
+    stylesheet, slides = _v51_incomplete_anchor_contract()
+    slides[1]["html_body"] = (
+        str(slides[1]["html_body"])
+        + '<span id="hero" data-deck-id="unrelated">Unrelated slide-local element</span>'
+    )
+
+    normalized, report = deck_service._normalize_compact_v2_anchor_invariant_contract(
+        stylesheet,
+        slides,
+    )
+
+    assert normalized == stylesheet
+    assert report["normalization_applied"] is False
+
+
+@pytest.mark.parametrize(
+    "carrier",
+    (
+        ".eb{position:relative;box-sizing:border-box;margin:0}",
+        ".eb{position:absolute;box-sizing:border-box;margin:1px}",
+        ".eb{position:absolute;box-sizing:border-box;margin:0;color:#fff}",
+        ".eb{position:absolute!important;box-sizing:border-box;margin:0}",
+        ".slide-root{position:absolute;box-sizing:border-box;margin:0}",
+    ),
+)
+def test_compact_v2_anchor_invariant_completion_rejects_noncanonical_carrier(
+    carrier: str,
+) -> None:
+    stylesheet, slides = _v51_incomplete_anchor_contract()
+    stylesheet = stylesheet.replace(
+        ".eb{position:absolute;box-sizing:border-box;margin:0}",
+        carrier,
+    )
+
+    normalized, report = deck_service._normalize_compact_v2_anchor_invariant_contract(
+        stylesheet,
+        slides,
+    )
+
+    assert normalized == stylesheet
+    assert report["normalization_applied"] is False
+
+
+def test_compact_v2_anchor_invariant_completion_rejects_unsafe_geometry_and_budget() -> None:
+    stylesheet, slides = _v51_incomplete_anchor_contract()
+    unsafe = stylesheet.replace("width:1120px", "width:calc(100% - 20px)", 1)
+    oversized = stylesheet + "/*" + ("x" * (8 * 1024)) + "*/"
+
+    for candidate in (unsafe, oversized):
+        normalized, report = deck_service._normalize_compact_v2_anchor_invariant_contract(
+            candidate,
+            slides,
+        )
+        assert normalized == candidate
+        assert report["normalization_applied"] is False
 
 
 def test_compact_v2_normalizes_inline_secondary_font_fallbacks_byte_locally() -> None:
@@ -1622,6 +1792,61 @@ def test_deck_service_applies_anchor_normalization_only_to_fresh_authoring(
     assert result.failure_code == "test_stop_after_normalization"
     assert ("position:absolute" not in str(observed["body"])) is normalized
     assert ("Georgia" not in str(observed["body"])) is normalized
+
+
+@pytest.mark.parametrize(
+    ("candidate_compile", "normalized"),
+    [(False, True), (True, False)],
+)
+def test_deck_service_completes_anchor_invariants_only_for_fresh_authoring(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    candidate_compile: bool,
+    normalized: bool,
+) -> None:
+    stylesheet, all_slides = _v51_incomplete_anchor_contract()
+    slide = {
+        **all_slides[0],
+        "title": "PSI control",
+        "narrative": "Motives arbitrate action.",
+    }
+    runtime = _runtime(tmp_path / "outputs")
+    runtime.state["builder_pptx_requested_slide_count"] = 1
+    runtime.state["deck_candidate_compile"] = candidate_compile
+    observed: dict[str, object] = {}
+    service = DeckBuildService()
+
+    def stop_after_normalization(
+        deck: object,
+        _normalized_slides: list[dict[str, object]],
+        _output_path: str,
+        _runtime: object,
+    ) -> None:
+        observed["stylesheet"] = deck.deck_stylesheet
+        observed["stylesheet_hash"] = deck.deck_stylesheet_hash
+        raise deck_service.DeckBuildFailure(
+            "test_stop_after_normalization",
+            "test stop",
+            retryable=False,
+        )
+
+    monkeypatch.setattr(service, "_validate_inputs", stop_after_normalization)
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="PSI Agent Architecture",
+        slides=[slide],
+        output_path=f"{_OUTPUTS}deck.pptx",
+        authoring_contract="compact_model_html_v2",
+        deck_stylesheet=stylesheet,
+        creative_plan={},
+    )
+
+    assert result.failure_code == "test_stop_after_normalization"
+    assert (str(observed["stylesheet"]) != stylesheet) is normalized
+    assert observed["stylesheet_hash"] == hashlib.sha256(
+        str(observed["stylesheet"]).encode("utf-8")
+    ).hexdigest()
 
 
 def test_compact_v2_source_addressability_accepts_reversed_declared_pair() -> None:
