@@ -1,0 +1,33 @@
+{
+  "schema_version": 1,
+  "amendment_id": "FC-01-v1.2-AMENDMENT-A",
+  "state": "AMENDMENT_READY_FOR_JOINT_APPROVAL",
+  "created_at": "2026-08-17T17:18:02Z",
+  "receipt_self_binding": false,
+  "execution_authorized": false,
+  "payload_evidence_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z",
+  "payload_changed_paths_sha256": "6efaa8062b2e33a98cf18ec8cf3c10a6bd0da2263ce978c79d52d94bae63e69a",
+  "path_scope": {
+    "prior_files_modified_deleted_or_renamed": false,
+    "payload_paths_exactly_allowlisted": true
+  },
+  "unsigned_payload_bindings": {
+    "payload_commit": "0cf6b1b8c9d24c0218ee1767c627137826cf6f35",
+    "payload_parent_commit": "6c2ca09280cd425d431df41040555caadcdde520",
+    "payload_repository_tree": "4c3b40feee1ed001ad13e3e9d8d70a7b12d51e73",
+    "payload_evidence_subtree": "c4b180f7b9fa1bceb85d7c139762babb40a4d820",
+    "payload_sha256sums_sha256": "fc0a7a4481b4e14e4c8e8ff79aa607be83a4a99616d8aed764a7675eae3587bf",
+    "amendment_document_sha256": "d362517a1df1b25ec519ac9f45113e7a96a893b5cb65305ea62052b6bf52da10",
+    "blocker_register_sha256": "a2f1e1953e03e3722d38e46b34579fab49a6b1922837e1edb21b3217aafd7c2d",
+    "authorized_scope_sha256": "7d6cda7a67d124b5b983894e590b775a1bd538deb2491f42c569d37ea533dcd8",
+    "repair_budget_sha256": "c8a7da628b612bf035195a6d5a265adfef712f4716ce01a5a52980f5856eb239",
+    "candidate_identity_budget_sha256": "38cb54101c4d684ded2590ea697549fd1476c48258783a956e9f350edd05844d",
+    "main_evaluator_sha256": "270df0a002643c2aed95bdb9536157c59bd87a777e09ddde096d491e33af2131",
+    "approval_evaluator_sha256": "3640780bd6622f486eedfb4948d0713f9c0822edde3c1ff7af2bfcd53e05b9e9",
+    "predecessor_control_head": "6c2ca09280cd425d431df41040555caadcdde520",
+    "frozen_main_commit": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+    "frozen_main_tree": "d859ff917a5f82e66423ebabaeea1be9b74cddb6",
+    "frozen_campaign_commit": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+    "frozen_campaign_tree": "8c27bc52b2a022d4a0b7c398172195442bccf15e"
+  }
+}
