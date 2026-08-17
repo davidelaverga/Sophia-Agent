@@ -1,0 +1,43 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-17T11:55:26Z",
+  "surface": "Sophia production web entry",
+  "apex_response": "308_REDIRECT_TO_WWW",
+  "www_response": 200,
+  "page_title": "Sophia – Voice-first emotional companion",
+  "visible_signed_out_heading": "She remembers. She notices.",
+  "signed_in": false,
+  "authentication_attempted": false,
+  "browser_console_errors": 0,
+  "app_version": {
+    "build_id": "7092042b13f3edc40468fd614685d7ede3b21f2a",
+    "deployment_id": "dpl_Bv2yaEMssrnz6JnGhQtsxP9RgQjR"
+  },
+  "deep_health": {
+    "http_status": 200,
+    "frontend": "HEALTHY",
+    "backend": "HEALTHY"
+  },
+  "gateway_health": {
+    "http_status": 200,
+    "status": "healthy",
+    "reported_source": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+    "deck_quality_readiness": "ready"
+  },
+  "langgraph_health": {
+    "ok_http_status": 200,
+    "info_http_status": 200,
+    "host_kind": "self-hosted",
+    "server_version": "0.8.1",
+    "python_runtime_version": "1.2.0"
+  },
+  "voice_candidate_health": {
+    "health_http_status": 200,
+    "ready_http_status": 200,
+    "source_identity": "UNKNOWN",
+    "gateway_target_binding": "UNKNOWN"
+  },
+  "direct_access_result": "PASS_SIGNED_OUT_ENTRY_ONLY",
+  "synthetic_product_scenario_run": false,
+  "mutation": false
+}

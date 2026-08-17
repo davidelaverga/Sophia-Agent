@@ -1,0 +1,87 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-17T11:52:42Z",
+  "repository": "davidelaverga/Sophia-Agent",
+  "main": {
+    "ref": "origin/main",
+    "commit": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+    "tree": "d859ff917a5f82e66423ebabaeea1be9b74cddb6"
+  },
+  "campaign": {
+    "ref": "origin/codex/sophia-observability-v1",
+    "commit": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+    "tree": "8c27bc52b2a022d4a0b7c398172195442bccf15e"
+  },
+  "merge_base": {
+    "commit": "5d9a0b301368e5c881207231b3d16e8e09b5817c",
+    "tree": "0b3e0a1ad8341211cc65ba3ac87282ec8f5b1607"
+  },
+  "divergence": {
+    "main_only_commits": 73,
+    "campaign_only_commits": 392
+  },
+  "three_dot_diff": {
+    "files": 592,
+    "additions": 218232,
+    "deletions": 8107,
+    "added": 427,
+    "modified": 158,
+    "deleted": 7,
+    "binary": 19,
+    "name_only_sha256": "af4bc549091aee7f9925529a6971596a6f3aafdfde72b505a0a308e3303470a1",
+    "name_status_sha256": "649a29a5332c7ce1f6e947b9d7689640129f13d9d8806603207c2e4e85eff6ea"
+  },
+  "pull_requests": {
+    "144": {
+      "state": "OPEN",
+      "draft": false,
+      "mergeability": "CONFLICTING_DIRTY",
+      "exact_head_checks": 0,
+      "merge_vehicle": false
+    },
+    "139": {
+      "state": "OPEN",
+      "draft": false,
+      "mergeability": "CONFLICTING_DIRTY",
+      "head": "956b6272f4d91ad0c5d806d9a037c0e1335b6392",
+      "relationship": "superseded ancestor of PR 144"
+    },
+    "137": {
+      "state": "MERGED",
+      "merge_commit": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7"
+    }
+  },
+  "main_controls": {
+    "protected": false,
+    "rulesets": 0,
+    "required_checks": []
+  },
+  "merge_simulation": {
+    "method": "read-only git merge-tree at exact source lock",
+    "explicit_conflicts": 4,
+    "silent_overlaps": 10
+  },
+  "control_branch": {
+    "ref": "campaign/fc01-control-v1",
+    "base_commit": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+    "base_tree": "d859ff917a5f82e66423ebabaeea1be9b74cddb6",
+    "allowed_path": "docs/campaigns/foundation-mainline-v1/**",
+    "evidence_payload_commit": null,
+    "evidence_payload_commit_reason": "Recorded in mutable campaign state after the first evidence-only commit to avoid self-reference."
+  },
+  "shared_worktree": {
+    "head": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+    "status_sha256": "3e26264050f8294509652b2f742aade3d8a6a1450f643659b3ff96e99060e47e",
+    "staged_paths": 0,
+    "unstaged_tracked_paths": 8,
+    "untracked_paths": 582,
+    "isolated": true,
+    "preserved": true
+  },
+  "source_drift": [
+    "Source heads, merge base, and divergence match the FC-01 starting anchors.",
+    "The dirty checkout differs from the stale two-file planning snapshot.",
+    "PR 144 has 33 non-outdated unresolved threads rather than only the one named P2.",
+    "Main has no branch protection or ruleset."
+  ]
+}

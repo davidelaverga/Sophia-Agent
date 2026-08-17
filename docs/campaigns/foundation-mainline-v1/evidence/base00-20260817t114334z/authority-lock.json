@@ -1,0 +1,47 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-17T11:43:34Z",
+  "authority_order": [
+    {
+      "basename": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c"
+    },
+    {
+      "basename": "Sophia_Repository_Strategy_Selective_Refoundation_2026-08-16.md",
+      "sha256": "8574f7b67834db546339df3f4e06209d4fc06125f8899ae5a1b6a316eaa9f190"
+    },
+    {
+      "basename": "00_Sophia_Final_Program_Control_Map_2026-08-10.md",
+      "sha256": "5a2d15b4f499e7832fabf3bbaa1f957e754a55f9210dcb1f11950aad871406fc"
+    },
+    {
+      "basename": "07_Sophia_Synthetic_Vertical_Campaign_and_Evidence_Protocol_2026-08-10.md",
+      "sha256": "c4302826b44fb95288feceb242702bc01abdd61951aba793b27b800054531362"
+    },
+    {
+      "basename": "09_Sophia_Future_Spec_Authoring_Contract_2026-08-10.md",
+      "sha256": "10b922c45f7ec722a3e15ade49c5506c1072e2aece68ddc5f108dc7547eb9d7e"
+    },
+    {
+      "basename": "M00_CURRENT_PRODUCTION_CAMPAIGN_CLOSEOUT(1).md",
+      "sha256": "7d0eb86a079544e7f4f8d31cc6accb2bc05815d2f3617839d90f33fe49e39866"
+    },
+    {
+      "basename": "M01_RUNTIME_RELIABILITY_AND_DURABLE_INPUT(1).md",
+      "sha256": "f8d3343c2f6c42f2da88b43c81c9599650631228486fa541fc7f887fa337cb48"
+    },
+    {
+      "basename": "pasted-text-1.txt",
+      "sha256": "2e0e07ea498ed4c0c62aecf7430f00f56bb2b9c4b29cc560e4e1fab095103ac5"
+    }
+  ],
+  "instruction_files_read": [
+    "AGENTS.md",
+    "backend/AGENTS.md",
+    "frontend/AGENTS.md",
+    "CLAUDE.md",
+    "backend/CLAUDE.md",
+    "frontend/CLAUDE.md"
+  ],
+  "supersession_note": "FC-01 controls scope and sequence where older repository guidance conflicts."
+}

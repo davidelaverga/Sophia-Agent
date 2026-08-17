@@ -1,0 +1,264 @@
+{
+  "schema_version": 1,
+  "source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+  "overall": "BLOCKED",
+  "isolation": {
+    "worktree_kind": "detached temporary worktree",
+    "head_matches_source": true,
+    "final_status": "CLEAN_DETACHED_HEAD",
+    "worktree_diff_exit_code": 0,
+    "index_diff_exit_code": 0,
+    "shared_tracked_user_changes_preserved": true,
+    "product_files_edited": false
+  },
+  "determinism_policy": {
+    "provider_credentials_unset": true,
+    "langsmith_tracing_disabled": true,
+    "external_provider_endpoints_sinkholed": true,
+    "provider_or_langsmith_writes": false
+  },
+  "toolchain": {
+    "uv": "0.10.11",
+    "python": "3.12.13",
+    "node": "22.19.0",
+    "pnpm_runtime": "10.32.1",
+    "package_manager_declared": "10.26.2"
+  },
+  "dependency_bootstrap": [
+    {
+      "area": "backend",
+      "command": "uv sync --group dev",
+      "status": "PASS",
+      "duration_seconds": 7.79
+    },
+    {
+      "area": "frontend",
+      "command": "pnpm install --frozen-lockfile",
+      "status": "PASS",
+      "duration_seconds": 78.13
+    },
+    {
+      "area": "voice",
+      "command": "uv-managed Python 3.12 virtual environment plus requirements and pytest",
+      "status": "PASS",
+      "duration_seconds": 98.13,
+      "risk": "Voice requirements use unbounded lower bounds and resolved to a newer API/plugin mix."
+    }
+  ],
+  "suites": [
+    {
+      "name": "backend_ruff",
+      "command": "cd backend && uv run ruff check .",
+      "status": "FAIL",
+      "passed": null,
+      "failed": 3,
+      "skipped": 0,
+      "duration_seconds": 1.0,
+      "classification": "CAMPAIGN_REGRESSION_RELEASE_GATE",
+      "failures": [
+        "Unused import in asset policy.",
+        "Overlong line in HTML design renderer.",
+        "Unsorted imports in deck image asset tests."
+      ]
+    },
+    {
+      "name": "backend_focused_builder_gateway",
+      "command": "cd backend && PYTHONPATH=. uv run pytest tests/test_builder_progress_middleware.py tests/test_builder_progress_endpoint.py tests/test_builder_events_worker.py tests/test_builder_canvas_worker.py tests/test_builder_canvas_routes.py tests/test_gateway_app_mounts.py tests/test_companion_wakeup.py tests/test_gateway_sophia.py tests/test_start_builder_task.py -q",
+      "status": "PASS",
+      "passed": 274,
+      "failed": 0,
+      "skipped": 0,
+      "pytest_duration_seconds": 116.56,
+      "wall_duration_seconds": 121.11,
+      "classification": "PASS"
+    },
+    {
+      "name": "backend_full",
+      "command": "cd backend && PYTHONPATH=. uv run pytest tests/ -q",
+      "status": "FAIL",
+      "passed": 5416,
+      "failed": 57,
+      "skipped": 161,
+      "warnings": 4,
+      "pytest_duration_seconds": 1288.73,
+      "wall_duration_seconds": 1304.63,
+      "classification": "MIXED_CAMPAIGN_REGRESSION_TEST_INFRASTRUCTURE_AND_NOT_RUN",
+      "failure_groups": [
+        {
+          "count": 35,
+          "classification": "CAMPAIGN_EVIDENCE_CONTRACT_REGRESSION",
+          "detail": "Deck-craft skill bytes no longer match the committed hash lock; standalone reproduces 35 failures and 6 passes."
+        },
+        {
+          "count": 5,
+          "classification": "CAMPAIGN_FIXTURE_CONTRACT_REGRESSION",
+          "detail": "Committed smoke renders exceed the direct-evidence maximum dimension."
+        },
+        {
+          "count": 17,
+          "classification": "TEST_INFRASTRUCTURE_ORDER_ISOLATION",
+          "detail": "Shadow-persistence tests fail only in the full suite and pass 31 of 31 standalone."
+        }
+      ],
+      "skip_audit": "UNKNOWN"
+    },
+    {
+      "name": "backend_migration_static_contracts",
+      "command": "cd backend && PYTHONPATH=. uv run pytest tests/test_supabase_target_migrations.py tests/test_build_mutation_migration.py tests/test_apply_dq1_migrations.py tests/test_apply_dq2_migrations.py tests/test_deck_quality_publication_atomic_migration.py tests/test_producer_failure_signal_migration.py tests/test_deck_quality_dispatch_intent_migration.py tests/test_deck_quality_trace_grace_recovery_migration.py -q",
+      "status": "PASS",
+      "passed": 92,
+      "failed": 0,
+      "skipped": 0,
+      "pytest_duration_seconds": 0.91,
+      "wall_duration_seconds": 3.68,
+      "classification": "PASS_STATIC_ONLY"
+    },
+    {
+      "name": "backend_typecheck",
+      "status": "NOT_CONFIGURED",
+      "classification": "NOT_RUN",
+      "reason": "No backend typechecker is configured in the development dependency group."
+    },
+    {
+      "name": "frontend_typecheck",
+      "command": "cd frontend && pnpm typecheck",
+      "status": "PASS",
+      "duration_seconds": 44.7,
+      "classification": "PASS"
+    },
+    {
+      "name": "frontend_lint",
+      "command": "cd frontend && pnpm lint",
+      "status": "PASS_WITH_WARNINGS",
+      "errors": 0,
+      "warnings": 58,
+      "duration_seconds": 95.87,
+      "classification": "PRE_EXISTING_NONCRITICAL_DEBT_UNWAIVED",
+      "owner_issue_expiry_receipt": "UNKNOWN"
+    },
+    {
+      "name": "frontend_unit",
+      "command": "cd frontend && pnpm test -- --reporter=default",
+      "status": "FAIL",
+      "passed": 1550,
+      "failed": 31,
+      "skipped": 0,
+      "test_files_passed": 181,
+      "test_files_failed": 7,
+      "duration_seconds": 256.89,
+      "deterministic_repeat_same_counts": true,
+      "classification": "CAMPAIGN_PRODUCT_AND_TEST_CONTRACT_REGRESSION",
+      "failure_groups": [
+        {
+          "count": 7,
+          "classification": "PRODUCT_NULL_SAFETY_REGRESSION",
+          "detail": "Voice benchmark analysis dereferences an absent nested artifact snapshot."
+        },
+        {
+          "count": 24,
+          "classification": "CAMPAIGN_TEST_CONTRACT_DRIFT",
+          "detail": "Runtime ownership, chrome fade/layout, settings, CSP, and recap-memory contracts are red on the clean campaign head."
+        }
+      ]
+    },
+    {
+      "name": "frontend_production_build",
+      "command": "cd frontend && pnpm build with local-only auth placeholders and telemetry disabled",
+      "status": "FAIL",
+      "duration_seconds": 92.19,
+      "classification": "NON_HERMETIC_PRODUCT_PACKAGING_BLOCKER",
+      "reason": "Production compilation attempts to fetch two remote Google fonts while external network access is deliberately blocked."
+    },
+    {
+      "name": "frontend_canonical_playwright_setup",
+      "command": "cd frontend && pnpm exec playwright install chromium",
+      "status": "NOT_RUN",
+      "duration_seconds": 67.01,
+      "classification": "TEST_INFRASTRUCTURE",
+      "reason": "Browser archive installation stopped with insufficient disk space."
+    },
+    {
+      "name": "frontend_memory_e2e_supplemental_system_browser",
+      "status": "FAIL",
+      "passed": 2,
+      "failed": 2,
+      "skipped": 0,
+      "duration_seconds": 261.24,
+      "classification": "TEST_INFRASTRUCTURE_UNKNOWN",
+      "reason": "Both failures timed out waiting for session start while the test server also reported font fallback and build-cache contention. This noncanonical run does not exonerate product behavior."
+    },
+    {
+      "name": "voice_focused_contracts",
+      "command": "voice Python 3.12 -m pytest voice/tests/test_server_readiness.py voice/tests/test_realtime_normalizer.py voice/tests/test_realtime_dogfood_session.py voice/tests/test_artifact_visibility_proof.py -q",
+      "status": "PASS",
+      "passed": 44,
+      "failed": 0,
+      "skipped": 0,
+      "warnings": 2,
+      "pytest_duration_seconds": 9.39,
+      "wall_duration_seconds": 11.75,
+      "classification": "PASS"
+    },
+    {
+      "name": "voice_full",
+      "command": "voice Python 3.12 -m pytest voice/tests -q --tb=no",
+      "status": "FAIL",
+      "passed": 390,
+      "failed": 100,
+      "skipped": 0,
+      "warnings": 7,
+      "pytest_duration_seconds": 11.8,
+      "classification": "MIXED_DEPENDENCY_BRANCH_CONTRACT_AND_MISSING_CREDENTIAL",
+      "failure_groups": [
+        {
+          "count": 1,
+          "classification": "MISSING_CREDENTIAL_NOT_RUN"
+        },
+        {
+          "count": 42,
+          "classification": "DEPENDENCY_INFRASTRUCTURE",
+          "detail": "Unbounded voice dependencies resolved to incompatible API/plugin behavior."
+        },
+        {
+          "count": 57,
+          "classification": "CAMPAIGN_TEST_CODE_CONTRACT_DRIFT",
+          "detail": "Failures persist under a controlled exact dependency comparison."
+        }
+      ]
+    },
+    {
+      "name": "github_gvis_history",
+      "status": "NOT_RUN",
+      "total_runs": 62,
+      "successes": 0,
+      "failures": 62,
+      "classification": "MISSING_CREDENTIAL_AND_TEST_INFRASTRUCTURE",
+      "reason": "Latest matrix job had blank provider-key environments and produced no deliverable."
+    },
+    {
+      "name": "pr_144_exact_head_ci",
+      "status": "NOT_RUN",
+      "checks": 0,
+      "actions_runs": 0,
+      "classification": "MISSING_CI_EVIDENCE"
+    }
+  ],
+  "summary": {
+    "passing_high_value_lanes": [
+      "Focused Builder/Gateway backend",
+      "Static migration contracts",
+      "Frontend typecheck",
+      "Frontend lint command",
+      "Focused Voice contracts"
+    ],
+    "release_blockers": [
+      "Backend lint errors.",
+      "Backend full-suite product/evidence regressions and unresolved order dependence.",
+      "Frontend unit regressions and non-hermetic production build.",
+      "Voice dependency and branch contract failures.",
+      "Canonical browser E2E not run.",
+      "Skipped backend tests not audited.",
+      "No exact-head PR CI and no credentialed G-VIS result."
+    ]
+  }
+}

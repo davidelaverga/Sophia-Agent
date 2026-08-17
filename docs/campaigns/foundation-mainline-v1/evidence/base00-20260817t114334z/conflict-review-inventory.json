@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "source_lock": {
+    "main": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+    "campaign": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+    "merge_base": "5d9a0b301368e5c881207231b3d16e8e09b5817c"
+  },
+  "explicit_conflicts": [
+    "COMPOUND_LOG.md",
+    "backend/packages/harness/deerflow/agents/sophia_agent/middlewares/mem0_retrieval.py",
+    "backend/tests/test_artifacts_router.py",
+    "backend/tests/test_sophia_vision_tools.py"
+  ],
+  "silent_overlaps": [
+    "CLAUDE.md",
+    "README.md",
+    "backend/CLAUDE.md",
+    "backend/app/gateway/artifact_registry.py",
+    "backend/app/gateway/routers/artifacts.py",
+    "backend/packages/harness/deerflow/sophia/tools/start_builder_task.py",
+    "backend/tests/test_artifact_registry.py",
+    "backend/tests/test_builder_mem0_retrieval.py",
+    "backend/tests/test_sophia_middlewares.py",
+    "backend/tests/test_start_builder_task.py"
+  ],
+  "pr_144_review_threads": {
+    "total": 276,
+    "resolved": 9,
+    "unresolved_outdated": 234,
+    "unresolved_non_outdated": 33,
+    "unresolved_non_outdated_p1": 3,
+    "unresolved_non_outdated_p2": 30
+  },
+  "source_valid_p1": [
+    {
+      "finding": "Internal builder-events route remains unauthenticated while accepting caller-controlled terminal/artifact data.",
+      "release_disposition": "UNRESOLVED"
+    },
+    {
+      "finding": "Production Compose enables DQ shadow but omits the Gateway LangGraph service target.",
+      "release_disposition": "UNRESOLVED"
+    }
+  ],
+  "source_addressed_p1": [
+    {
+      "finding": "Docker context excluded required skills.",
+      "source_observation": "Current ignore rules re-include the required skill directories.",
+      "review_thread_resolution": "UNRESOLVED"
+    }
+  ],
+  "latest_exact_head_p2": {
+    "path": "backend/packages/harness/deerflow/sophia/report_contract.py",
+    "line": 336,
+    "finding": "aria-hidden is treated as visual hiding even though it only removes an element from the accessibility tree.",
+    "release_disposition": "UNRESOLVED"
+  },
+  "remaining_non_outdated_p2_reproduction": "UNKNOWN",
+  "fc01c_rule": "Recompute and semantically disposition every conflict and silent overlap on the integration source lock; Git auto-merge is not approval."
+}

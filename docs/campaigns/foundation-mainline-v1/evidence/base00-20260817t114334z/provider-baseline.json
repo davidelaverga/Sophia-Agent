@@ -1,0 +1,169 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-17T11:55:26Z",
+  "observation_policy": "Read-only public receipts and metadata-only authenticated LangSmith reads; no provider mutation or login.",
+  "services": [
+    {
+      "service": "vercel_frontend",
+      "commit_sha_or_provider_source_identity": "7092042b13f3edc40468fd614685d7ede3b21f2a",
+      "deployment_id": "dpl_Bv2yaEMssrnz6JnGhQtsxP9RgQjR",
+      "build_or_image_digest": null,
+      "boot_or_connection_epoch": null,
+      "runtime_path": "www production alias",
+      "durable_store_kind": null,
+      "status": "HEALTHY_APP_LEVEL",
+      "not_applicable_reasons": {
+        "build_or_image_digest": "Not exposed by the public application receipt.",
+        "boot_or_connection_epoch": "Not exposed by the browser surface.",
+        "durable_store_kind": "Browser/frontend surface has no service-local durable store."
+      },
+      "source_relation": "Ancestor of the campaign head with no frontend-file difference to that head.",
+      "provider_branch": "UNKNOWN",
+      "preview_policy": "UNKNOWN",
+      "auto_promotion_behavior": "UNKNOWN",
+      "rollback_candidate": {
+        "source": "a8cbf8f1cc4faa470baa0e6e622c13820e1064d5",
+        "provider_deployment_id": "dpl_CmGV84tusPxecCX7EJxB9fABEvbk",
+        "github_deployment_id": 5173929081,
+        "historical_success_at": "2026-06-23",
+        "provider_selectable_now": "UNKNOWN"
+      }
+    },
+    {
+      "service": "render_gateway",
+      "provider_service_id": "srv-d7be5s9r0fns7397l4g0",
+      "commit_sha_or_provider_source_identity": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+      "deployment_id": "UNKNOWN",
+      "build_or_image_digest": null,
+      "boot_or_connection_epoch": null,
+      "runtime_path": "deer-flow-gateway",
+      "durable_store_kind": "SUPABASE_CONFIGURED_RUNTIME_BINDING_INFERRED",
+      "status": "HEALTHY_APP_LEVEL",
+      "not_applicable_reasons": {
+        "build_or_image_digest": "Render control-plane access unavailable.",
+        "boot_or_connection_epoch": "Public health receipt exposes no boot epoch."
+      },
+      "branch": "UNKNOWN",
+      "auto_deploy": "UNKNOWN",
+      "rollback_candidate": {
+        "provider_deployment_id": "dep-d9lhe9bm8hqs738o0300",
+        "source": "74b4966fe2f7a2e66e3e9b343584c98cbfa2e2ea",
+        "historical_only": true,
+        "repository_declared_rollback_source": "34217a8aa3b88e59c1ccbb2f4a187a8804adccb4",
+        "declared_rollback_source_deployment_id": "UNKNOWN",
+        "provider_selectable_now": "UNKNOWN"
+      }
+    },
+    {
+      "service": "render_langgraph",
+      "provider_service_id": "srv-d7be5s9r0fns7397l4fg",
+      "commit_sha_or_provider_source_identity": "UNKNOWN",
+      "deployment_id": "UNKNOWN",
+      "build_or_image_digest": null,
+      "boot_or_connection_epoch": null,
+      "runtime_path": "self-hosted LangGraph server 0.8.1 / langgraph-py 1.2.0",
+      "durable_store_kind": "IN_MEMORY_STRONG_SOURCE_CONFIG_INFERENCE_LIVE_CLASS_UNKNOWN",
+      "status": "HEALTHY_APP_LEVEL",
+      "not_applicable_reasons": {
+        "build_or_image_digest": "Render control-plane access unavailable.",
+        "boot_or_connection_epoch": "Public info receipt exposes no revision or epoch."
+      },
+      "branch": "UNKNOWN",
+      "auto_deploy": "UNKNOWN",
+      "historical_langsmith_source_observation": {
+        "source": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+        "latest_successes_at": [
+          "2026-08-02T07:30:00Z",
+          "2026-08-02T07:33:00Z"
+        ],
+        "current_identity_proof": false
+      },
+      "rollback_candidate": {
+        "provider_deployment_id": "dep-d9lhe9ajnfac73ai72tg",
+        "source": "74b4966fe2f7a2e66e3e9b343584c98cbfa2e2ea",
+        "historical_only": true,
+        "repository_declared_rollback_source": "34217a8aa3b88e59c1ccbb2f4a187a8804adccb4",
+        "declared_rollback_source_deployment_id": "UNKNOWN",
+        "provider_selectable_now": "UNKNOWN"
+      }
+    },
+    {
+      "service": "render_voice_primary_candidate",
+      "provider_service_id": "srv-d7be5s9r0fns7397l4f0",
+      "commit_sha_or_provider_source_identity": "UNKNOWN",
+      "deployment_id": "UNKNOWN",
+      "build_or_image_digest": null,
+      "boot_or_connection_epoch": null,
+      "runtime_path": "FastAPI voice service 0.1.0 with current route families",
+      "durable_store_kind": null,
+      "status": "HEALTHY_APP_LEVEL",
+      "not_applicable_reasons": {
+        "build_or_image_digest": "Render control-plane access unavailable.",
+        "boot_or_connection_epoch": "Health and readiness bodies are empty.",
+        "durable_store_kind": "No service-local persistence identity is exposed."
+      },
+      "branch": "UNKNOWN",
+      "auto_deploy": "UNKNOWN",
+      "gateway_routes_to_this_service": "UNKNOWN",
+      "rollback_candidate": "UNKNOWN"
+    }
+  ],
+  "render_access": {
+    "cli": "installed",
+    "authentication": "UNAVAILABLE_EXPIRED_OR_UNAUTHORIZED",
+    "dashboard_session": "UNAVAILABLE",
+    "mutation_attempted": false
+  },
+  "vercel_access": {
+    "cli": "UNAVAILABLE",
+    "authentication": "UNAVAILABLE",
+    "dashboard_session": "UNAVAILABLE",
+    "mutation_attempted": false
+  },
+  "deployment_trigger_mapping": {
+    "render": "UNKNOWN",
+    "render_source_reason": "Blueprint defines three services but no repository, branch, or auto-deploy keys.",
+    "historical_render_snapshot": "All three services were recorded on main with auto-deploy disabled and standard plans on 2026-07-07; current provider truth is unknown and tracked Gateway plan is now starter.",
+    "vercel_tracked_config": "frontend root; main deployments enabled",
+    "vercel_provider_truth": "UNKNOWN",
+    "github_actions_deploy_workflow": false
+  },
+  "voice_routing_risk": {
+    "blueprint_key_name": "SOPHIA_VOICE_SERVER_URL",
+    "gateway_reader_key_name": "VOICE_SERVER_URL",
+    "live_gateway_target": "UNKNOWN",
+    "legacy_public_surface_is_production_voice": false
+  },
+  "langsmith": {
+    "endpoint_host": "eu.api.smith.langchain.com",
+    "intended_project": "Sophia",
+    "routing_key_names": [
+      "LANGSMITH_TRACING",
+      "LANGSMITH_ENDPOINT",
+      "LANGSMITH_PROJECT",
+      "LANGSMITH_API_KEY",
+      "LANGSMITH_WORKSPACE_ID",
+      "LANGSMITH_PROJECT_UUID",
+      "SOPHIA_BUILDER_LANGSMITH_TRACING"
+    ],
+    "global_tracing_configured": false,
+    "builder_tracing_configured": true,
+    "builder_run_name": "Sophia Builder",
+    "builder_base_tag": "sophia_builder",
+    "tracer_failure_policy": "fail open",
+    "public_runtime_info_global_langsmith": false,
+    "public_runtime_info_tracing_replicas": true,
+    "routing_anomaly": "A second malformed historical project name exists; only the unquoted project is intended.",
+    "current_ingestion_health": "UNKNOWN",
+    "retention_and_redaction_settings": "UNKNOWN",
+    "raw_trace_exported": false
+  },
+  "hard_unknowns": [
+    "Current Render deployment IDs, images, branches, auto-deploy settings, events, retention, and rollback selectability.",
+    "Current LangGraph and Voice source identities.",
+    "Current Gateway-to-Voice target.",
+    "Current Vercel provider project, production-branch, alias/promotion, preview, and rollback-selectability settings.",
+    "Actual live instantiated checkpointer class and durable backend binding.",
+    "Current LangSmith ingestion health and retention/redaction settings."
+  ]
+}

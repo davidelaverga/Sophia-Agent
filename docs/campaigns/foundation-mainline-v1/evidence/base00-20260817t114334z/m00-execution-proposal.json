@@ -1,0 +1,74 @@
+{
+  "schema_version": 1,
+  "proposal_status": "BLOCKED",
+  "campaign": "deck-design-lift-v1",
+  "target_source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+  "target_tree": "8c27bc52b2a022d4a0b7c398172195442bccf15e",
+  "target_services": [
+    {
+      "service": "render_gateway",
+      "app_reported_current_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+      "exact_active_deployment_id": "UNKNOWN",
+      "action_after_approval": "Provider-verify the exact active deploy; deploy only if it is not already the frozen target."
+    },
+    {
+      "service": "render_langgraph",
+      "app_reported_current_sha": "UNKNOWN",
+      "exact_active_deployment_id": "UNKNOWN",
+      "action_after_approval": "Provider-verify or deploy the frozen target in lockstep with Gateway, then bind immutable deployment identity."
+    }
+  ],
+  "frozen_prompt_sha256": "bdad62c0d47b8ca26c6cfc69422ceafd222a0b3851f19eb6e430895d28edacea",
+  "prompt_source": "Existing checksum-bound DQ-2 mission/evidence; prompt text is not duplicated here.",
+  "synthetic_identity": {
+    "campaign_fingerprint": "3c4bbf83d18ad5b49223c21deae30803b5169b841e872b0b54afc90bb8d7956c",
+    "fingerprint_method": "SHA-256 of campaign identifier plus the prior sanitized campaign fingerprint.",
+    "raw_identity_recorded": false
+  },
+  "provider_spend_ceiling_usd": 20.0,
+  "maintenance_window": {
+    "starts_at": "2026-08-18T16:00:00Z",
+    "ends_at": "2026-08-18T18:00:00Z"
+  },
+  "execution_sequence_after_all_gates": [
+    "Re-resolve source heads, active deployments, rollback candidates, catalog head, backup/PITR, and signed budget.",
+    "Establish exact Gateway and LangGraph target deployments at the frozen source and obtain three readiness successes at least 10 seconds apart.",
+    "Verify metadata-only LangSmith EU read access for the unquoted Sophia project without creating a probe trace.",
+    "Open one wholly fresh authenticated normal-app session for the approved synthetic canary.",
+    "Submit the existing frozen prompt exactly once; do not use the app retry action.",
+    "Allow at most one shared bounded repair and fail closed before publication on any gate failure.",
+    "Correlate only sanitized IDs/digests across browser, Gateway, LangGraph, durable rows, manifests, judgments, and supplemental traces.",
+    "Stop for coding-agent self-review and separate Davide/Luis artifact review; do not self-approve M00."
+  ],
+  "rollback_coordinates": {
+    "gateway": {
+      "historical_deploy": "dep-d9lhe9bm8hqs738o0300",
+      "historical_source": "74b4966fe2f7a2e66e3e9b343584c98cbfa2e2ea",
+      "repository_declared_rollback_source": "34217a8aa3b88e59c1ccbb2f4a187a8804adccb4",
+      "declared_rollback_source_deployment_id": "UNKNOWN",
+      "current_selectability": "UNKNOWN"
+    },
+    "langgraph": {
+      "historical_deploy": "dep-d9lhe9ajnfac73ai72tg",
+      "historical_source": "74b4966fe2f7a2e66e3e9b343584c98cbfa2e2ea",
+      "repository_declared_rollback_source": "34217a8aa3b88e59c1ccbb2f4a187a8804adccb4",
+      "declared_rollback_source_deployment_id": "UNKNOWN",
+      "current_selectability": "UNKNOWN"
+    },
+    "vercel": {
+      "historical_deploy": "dpl_CmGV84tusPxecCX7EJxB9fABEvbk",
+      "historical_source": "a8cbf8f1cc4faa470baa0e6e622c13820e1064d5",
+      "current_selectability": "UNKNOWN"
+    },
+    "voice": "UNKNOWN"
+  },
+  "abort_conditions_source": "acceptance-budget.json",
+  "required_before_execution": [
+    "Exact provider active and rollback deployment identities for every applicable surface.",
+    "Live migration/catalog checksum and backup/PITR proof.",
+    "Privacy disposition for tracked runtime/user artifacts and complete secret/history scan.",
+    "Disposition of current P1 and mission-scope P2 findings.",
+    "Davide operational approval and Luis experience/accessibility approval on the checksum-bound budget."
+  ],
+  "live_action_authorized": false
+}

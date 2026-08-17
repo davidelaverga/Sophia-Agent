@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-17T11:43:34Z",
+  "historical_rewrites": [
+    {
+      "path": "backend/migrations/2026_04_25_telegram_user_bindings.sql",
+      "main_sha256": "9fcefd267a7eaa6fadb372f7659859dbd0027c1e57e817f6faf1ad209d9221e6",
+      "campaign_sha256": "201648747e81e377b2bc305ebcf405751070a116b45f3b09ce4f663d840f5ee0",
+      "live_applied_variant": "UNKNOWN"
+    },
+    {
+      "path": "backend/migrations/2026_05_26_sophia_session_transcripts.sql",
+      "main_sha256": "3cc134ec56b8902d736be5ef72fae5227b5dcfb49ef24a128a8f85efef021a74",
+      "campaign_sha256": "a18e7c0f5bf766236bd56cb38498a36b2a16b4b6f7c337f882c5320eb4d618ce",
+      "live_applied_variant": "UNKNOWN"
+    },
+    {
+      "path": "backend/migrations/2026_06_12_artifact_registry_records.sql",
+      "main_sha256": "103ff8191a288d8b6dfa9e5e0c157bbbfaf97f998adac51cacba3ceadb162783",
+      "campaign_sha256": "cd4d8d003e20f44c4f632a22bc74f4be10a70d41d65c9e81b01f906c009b90bf",
+      "live_applied_variant": "UNKNOWN"
+    }
+  ],
+  "campaign_added_migrations": [
+    {"path":"backend/migrations/2026_07_11_sophia_build_foundation.sql","sha256":"50d226941a3d5ccedb812f17370632060730ea86a81766f7676052d20f6fcd5f"},
+    {"path":"backend/migrations/2026_07_13_sophia_auth_and_storage_convergence.sql","sha256":"b802e678df37e298e5a44ab2d1d00cf0c66d67b5911794c760b252e0d39d3dc0"},
+    {"path":"backend/migrations/2026_07_13_verify_sophia_target.sql","sha256":"6b85d81452067146caa68dca8af2152d80905fcce134be9852407564df929f19e"},
+    {"path":"backend/migrations/2026_07_15_sophia_deck_quality_shadow_runs.sql","sha256":"328f10ae75f2f1b0f39523621621abe3802ddf98d660a1c70b69c3b5b64c0dfb"},
+    {"path":"backend/migrations/2026_07_16_sophia_deck_quality_publications.sql","sha256":"52fc6d563bd85bb35ae2c92ffcd9b0a261e896ceeef3dcc8b751cf46557c1635"},
+    {"path":"backend/migrations/2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql","sha256":"f2fb0817f7d7d6d2b42a63ba135a0e46cf521c68c1a5c2b06af2b2367e611d08"},
+    {"path":"backend/migrations/2026_07_18_sophia_deck_quality_producer_failure_signals.sql","sha256":"b52191c224d803e3d7d1ceed8b48b8b7857b0c3d148178c8622ae91a6bd81e66"},
+    {"path":"backend/migrations/2026_07_19_sophia_deck_quality_dispatch_intent_fence.sql","sha256":"7be71d13814d5c9c9753286aeb840dd1d92b406e936a14a265af1bb5d8d1b761"},
+    {"path":"backend/migrations/2026_07_20_sophia_build_mutation_transactions.sql","sha256":"1766769548e00a87a8664297f20ec1d0bb2ea007b4e0efbb82caa4235f85c28e"},
+    {"path":"backend/migrations/2026_07_21_sophia_deck_quality_trace_grace_recovery.sql","sha256":"d8d4facfa2ae33e273a67a7f2e1e1585bec4d7dc0b88aa4b222f953bb42202f5"}
+  ],
+  "recorded_release_checksum_conflicts": [
+    {
+      "path": "backend/migrations/2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql",
+      "current_sha256": "f2fb0817f7d7d6d2b42a63ba135a0e46cf521c68c1a5c2b06af2b2367e611d08",
+      "recorded_terminal_sha256": "d2439af5768f5fb14f174a0e77ea4cc39ba3ed44c6c932f9de08d109debb5162"
+    },
+    {
+      "path": "backend/migrations/2026_07_18_sophia_deck_quality_producer_failure_signals.sql",
+      "current_sha256": "b52191c224d803e3d7d1ceed8b48b8b7857b0c3d148178c8622ae91a6bd81e66",
+      "recorded_terminal_sha256": "4594e48cbbc12454b1b1d50ce66d0c73aa2b5b1093f3c9e18020802c3e13c556"
+    },
+    {
+      "path": "backend/migrations/2026_07_19_sophia_deck_quality_dispatch_intent_fence.sql",
+      "current_sha256": "7be71d13814d5c9c9753286aeb840dd1d92b406e936a14a265af1bb5d8d1b761",
+      "recorded_terminal_sha256": "955a975c578d755cb655afdfd2437d8bf0eb4246fc48e34fc8bc905a5286f4b5"
+    }
+  ],
+  "deterministic_static_tests": {
+    "status": "PASS",
+    "passed": 92,
+    "failed": 0
+  },
+  "rehearsals": {
+    "clean_install_empty_database": "NOT_RUN",
+    "upgrade_from_sanitized_live_equivalent": "NOT_RUN",
+    "repeated_idempotent_application": "NOT_RUN",
+    "old_code_against_expanded_schema": "NOT_RUN",
+    "global_migration_order_proof": "UNKNOWN",
+    "reason": "No governed database credential/client and no usable local container daemon."
+  },
+  "live_catalog": {
+    "migration_ledger": "UNKNOWN",
+    "schema_equivalence": "UNKNOWN",
+    "applied_checksums": "UNKNOWN",
+    "database_identity": "NOT_COLLECTED_PRIVACY_BOUNDARY"
+  },
+  "backup_and_recovery": {
+    "backup_enabled": "UNKNOWN",
+    "pitr_enabled": "UNKNOWN",
+    "restore_point_available": "UNKNOWN",
+    "destructive_restore_attempted": false
+  },
+  "persistence_characterization": {
+    "campaign_production_checkpointer_config_block": false,
+    "configured_factory_fallback": "InMemorySaver",
+    "live_instantiated_checkpointer": "UNKNOWN",
+    "session_store_blueprint_mode": "supabase",
+    "artifact_registry_blueprint_mode": "supabase",
+    "live_store_binding": "UNKNOWN"
+  },
+  "risk": {
+    "release_gate": "BLOCKED",
+    "reason": "Historical migration bytes diverge, three July files conflict with committed terminal checksums, and governed applied checksums are unknown.",
+    "required_resolution": "Prove the live-applied variant, preserve it byte-for-byte, and place any convergence in a new forward-only idempotent migration."
+  }
+}

@@ -1,0 +1,72 @@
+{
+  "schema_version": 1,
+  "campaign_id": "foundation-mainline-v1",
+  "revision": "base00-draft-1",
+  "status": "DRAFT_UNSIGNED",
+  "source_lock": {
+    "main": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+    "campaign": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca"
+  },
+  "limits": {
+    "maximum_live_release_candidate_deployments": 2,
+    "maximum_m00_runtime_repairs_per_artifact": 1,
+    "maximum_engineering_repair_cycles_per_release_invariant": 2,
+    "maximum_concurrent_ordinary_builder_tasks": 3,
+    "consecutive_low_risk_synthetic_text_turns": 20,
+    "clean_rolling_boot_or_replacement_cycles": 2,
+    "final_observation_minutes": 30,
+    "consecutive_readiness_successes": 3,
+    "minimum_seconds_between_readiness_successes": 10,
+    "render_deploy_healthy_within_minutes": 15,
+    "unexpected_5xx": 0,
+    "process_crash_or_boot_loop": 0,
+    "uncaught_browser_exception": 0,
+    "cross_user_leak": 0,
+    "orphaned_task": 0,
+    "duplicate_terminal": 0,
+    "duplicate_publication": 0,
+    "unresolved_p0": 0,
+    "unresolved_p1": 0,
+    "mission_scope_p2": 0
+  },
+  "provider_spend": {
+    "currency": "USD",
+    "hard_ceiling": 20.0,
+    "scope": "Entire approved M00 window, including the fresh normal-app build, bounded repair, and quality judgments.",
+    "approval_status": "UNAPPROVED_PROPOSAL"
+  },
+  "maintenance_window": {
+    "starts_at": "2026-08-18T16:00:00Z",
+    "ends_at": "2026-08-18T18:00:00Z",
+    "display_timezone": "US/Pacific",
+    "display": "2026-08-18 09:00-11:00 PDT",
+    "approval_status": "UNAPPROVED_PROPOSAL"
+  },
+  "synthetic_identity": {
+    "name": "FC01 internal synthetic canary",
+    "campaign_fingerprint": "3c4bbf83d18ad5b49223c21deae30803b5169b841e872b0b54afc90bb8d7956c",
+    "fingerprint_method": "SHA-256 of campaign identifier plus the prior sanitized campaign fingerprint; raw account identity is never persisted here.",
+    "approval_status": "UNAPPROVED_PROPOSAL"
+  },
+  "severity_rubric": {
+    "P0": "Security/privacy breach, secret exposure, cross-user data, irreversible corruption, destructive migration, artifact/data loss, false publication/completion, or unavailable rollback.",
+    "P1": "Reproducible failure of auth, text, ordinary Builder, artifact retrieval, primary voice, fallback, startup/readiness, or unexpected crash/5xx in the frozen envelope.",
+    "P2": "Non-core but material UX, accessibility, control, observability, or fidelity defect inside the frozen envelope.",
+    "P3": "Cosmetic or explicitly out-of-scope debt with no effect on the frozen envelope. Only Davide and Luis may accept it with issue, owner, expiry, affected path, and proof."
+  },
+  "abort_conditions": [
+    "Any source, tree, provider deployment, migration head, or signed receipt identity moves or cannot be re-established.",
+    "Any readiness or health requirement fails, or a Render deploy exceeds 15 minutes.",
+    "Any unexpected 5xx, crash, boot loop, browser exception, auth/session/ownership anomaly, leak, orphan, duplicate terminal, or duplicate publication occurs.",
+    "Any artifact is published before required mechanical and quality approval.",
+    "Any migration/catalog ambiguity or destructive operation appears.",
+    "Observability changes product truth or user-visible completion.",
+    "A repair/deployment/cost ceiling is consumed or the maintenance window ends.",
+    "Any P0, P1, or mission-scope P2 is observed."
+  ],
+  "signatures": {
+    "davide_operational_approval": null,
+    "luis_experience_accessibility_approval": null
+  },
+  "execution_authorized": false
+}

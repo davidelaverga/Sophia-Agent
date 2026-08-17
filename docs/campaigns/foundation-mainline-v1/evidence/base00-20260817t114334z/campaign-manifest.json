@@ -1,0 +1,32 @@
+{
+  "schema_version": 1,
+  "campaign_id": "foundation-mainline-v1",
+  "experiment_id": "base00-20260817t114334z",
+  "phase": "FC-01A_BASE-00",
+  "terminal_state": "BLOCKED",
+  "created_at": "2026-08-17T11:43:34Z",
+  "source_main": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+  "source_campaign": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+  "control_branch": "campaign/fc01-control-v1",
+  "product_files_changed": false,
+  "production_mutation": false,
+  "large_external_evidence_committed": false,
+  "required_evidence": [
+    "authority-lock.json",
+    "source-lock.json",
+    "provider-baseline.json",
+    "migration-baseline.json",
+    "baseline-test-classification.json",
+    "acceptance-budget.json",
+    "m00-execution-proposal.json",
+    "browser-summary.json",
+    "conflict-review-inventory.json",
+    "privacy-scan.json",
+    "limitations.md"
+  ],
+  "hard_unknown_policy": "Any hard UNKNOWN requires BLOCKED.",
+  "approvals": {
+    "davide": null,
+    "luis": null
+  }
+}

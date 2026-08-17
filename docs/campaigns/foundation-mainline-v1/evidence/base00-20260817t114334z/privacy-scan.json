@@ -1,0 +1,59 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-17T11:52:42Z",
+  "frozen_tree_inventory": {
+    "same_on_main_and_campaign": true,
+    "tracked_runtime_user_artifacts": 165,
+    "total_bytes": 123397,
+    "root_identity_directories": 20,
+    "backend_identity_directories": 3,
+    "categories": {
+      "session_json": 15,
+      "recap_json": 66,
+      "trace_json": 31,
+      "identity_files_and_markers": 26,
+      "handoffs": 19,
+      "memory_metadata": 6,
+      "builder_task": 1,
+      "other_runtime_record": 1
+    },
+    "content_or_identifier_shaped_field_counts": {
+      "session_id": 137,
+      "thread_id": 81,
+      "user_id": 45,
+      "content_bearing_fields_present": true
+    },
+    "values_exported_to_evidence": false,
+    "real_vs_synthetic_provenance": "UNKNOWN",
+    "privacy_gate": "BLOCKED"
+  },
+  "ignore_coverage": {
+    "future_recaps_ignored": true,
+    "future_traces_ignored": true,
+    "future_backend_sessions_ignored": true,
+    "future_backend_transcripts_ignored": true,
+    "matching_files_already_tracked": 112,
+    "identity_handoff_memory_builder_task_paths_ignored": false
+  },
+  "secret_scanning": {
+    "github_secret_scanning_enabled": true,
+    "github_push_protection_enabled": true,
+    "github_open_alerts": 0,
+    "github_resolved_alerts": 0,
+    "github_non_provider_patterns_enabled": false,
+    "github_validity_checks_enabled": false,
+    "pinned_complete_local_history_scanner": "UNKNOWN",
+    "available_local_scanners": [],
+    "bounded_heuristic_result": "Only synthetic test placeholders and an invalid-domain credential fixture were found; no value was printed.",
+    "complete_history_result": "UNKNOWN"
+  },
+  "evidence_policy": {
+    "raw_user_content": false,
+    "raw_audio": false,
+    "stable_account_ids": false,
+    "credentials": false,
+    "signed_urls": false,
+    "database_coordinates": false,
+    "raw_traces": false
+  }
+}
