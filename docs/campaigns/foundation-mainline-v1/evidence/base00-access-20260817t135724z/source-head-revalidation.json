@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-17T13:57:24Z",
+  "fetch_performed": true,
+  "frozen_heads": {
+    "main": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+    "campaign": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+    "merge_base": "5d9a0b301368e5c881207231b3d16e8e09b5817c"
+  },
+  "frozen_trees": {
+    "main": "d859ff917a5f82e66423ebabaeea1be9b74cddb6",
+    "campaign": "8c27bc52b2a022d4a0b7c398172195442bccf15e"
+  },
+  "main_only_commit_count": 73,
+  "campaign_only_commit_count": 392,
+  "predecessor_control_head": "8c35833a628e7eb40d85708ff23423b245d70236",
+  "remote_control_head_before_write": "8c35833a628e7eb40d85708ff23423b245d70236",
+  "frozen_heads_unchanged": true,
+  "shared_checkout_modified_by_this_delta": false
+}

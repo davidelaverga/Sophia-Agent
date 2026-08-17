@@ -1,0 +1,141 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-17T13:57:24Z",
+  "access": {
+    "operator_completed_provider_login": true,
+    "render_authenticated": true,
+    "vercel_authenticated": true,
+    "credential_values_recorded": false,
+    "provider_payloads_recorded": false,
+    "read_only_scope": true
+  },
+  "render": {
+    "gateway": {
+      "service_name": "sophia-gateway",
+      "service_id": "srv-d7be5s9r0fns7397l4g0",
+      "current_deploy_id": "dep-d9ln9eflk1mc7392mnmg",
+      "current_source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+      "source_matches_frozen_campaign": true,
+      "provider_branch": "main",
+      "status": "deployed",
+      "trigger": "CLI",
+      "deployed_at": "2026-07-30T08:58:49-07:00",
+      "plan": "standard",
+      "region": "oregon",
+      "runtime": "docker",
+      "blueprint_managed": true,
+      "auto_deploy": false,
+      "pull_request_previews": false,
+      "health_check_path": "/health",
+      "maintenance_mode": false,
+      "image_digest": "UNKNOWN"
+    },
+    "langgraph": {
+      "service_name": "sophia-langgraph",
+      "service_id": "srv-d7be5s9r0fns7397l4fg",
+      "current_deploy_id": "dep-d9ln9e8ae00c73aoo3b0",
+      "current_source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+      "source_matches_frozen_campaign": true,
+      "provider_branch": "main",
+      "status": "deployed",
+      "plan": "standard",
+      "region": "oregon",
+      "runtime": "docker",
+      "blueprint_managed": true,
+      "auto_deploy": false,
+      "pull_request_previews": false,
+      "health_check_path": "/ok",
+      "maintenance_mode": false,
+      "image_digest": "UNKNOWN",
+      "checkpointer": {
+        "provider_environment_key_present": false,
+        "source_and_checked_in_production_config_inference": "InMemorySaver",
+        "live_instantiated_class": "UNKNOWN",
+        "durable_resume_proven": false
+      }
+    },
+    "voice": {
+      "service_name": "sophia-voice",
+      "service_id": "srv-d7be5s9r0fns7397l4f0",
+      "current_deploy_id": "dep-d8qlo51194ac73929dlg",
+      "current_source_sha": "956b6272f4d91ad0c5d806d9a037c0e1335b6392",
+      "source_matches_frozen_campaign": false,
+      "source_is_ancestor_of_frozen_campaign": true,
+      "campaign_commits_ahead_of_voice_source": 358,
+      "provider_branch": "main",
+      "status": "deployed",
+      "trigger": "Manual",
+      "plan": "standard",
+      "region": "oregon",
+      "runtime": "docker",
+      "blueprint_managed": true,
+      "auto_deploy": false,
+      "pull_request_previews": false,
+      "health_check_path": "",
+      "image_digest": "UNKNOWN"
+    },
+    "routing": {
+      "langgraph_target_origin": "https://sophia-langgraph.onrender.com",
+      "voice_target_origin": "https://sophia-voice-2uzr.onrender.com",
+      "legacy_and_current_voice_key_targets_match": true,
+      "langgraph_expected_database_project_matches_authenticated_project": true,
+      "gateway_expected_database_project_matches_authenticated_project": "UNKNOWN",
+      "credential_or_service_key_values_read": false,
+      "safe_public_values_remasked": true
+    },
+    "rollback": {
+      "declared_rollback_source_sha": "34217a8aa3b88e59c1ccbb2f4a187a8804adccb4",
+      "gateway_declared_rollback_deploy_id": "dep-d9hit4uq1p3s73a0q8b0",
+      "langgraph_declared_rollback_deploy_id": "dep-d9hit4sm0tmc73avii90",
+      "declared_rollback_selectable_in_ui": true,
+      "intermediate_source_sha": "74b4966fe2f7a2e66e3e9b343584c98cbfa2e2ea",
+      "gateway_intermediate_deploy_id": "dep-d9lhe9bm8hqs738o0300",
+      "langgraph_intermediate_deploy_id": "dep-d9lhe9ajnfac73ai72tg",
+      "intermediate_deploys_selectable_in_ui": true,
+      "voice_rollback_coordinate": "UNKNOWN"
+    }
+  },
+  "vercel": {
+    "project_name": "sophia-agent-front",
+    "current_production": {
+      "deployment_id": "dpl_Bv2yaEMssrnz6JnGhQtsxP9RgQjR",
+      "source_sha": "7092042b13f3edc40468fd614685d7ede3b21f2a",
+      "source_branch_shown_on_deployment": "codex/sophia-observability-v1",
+      "status": "ready",
+      "environment": "production",
+      "created_at": "2026-07-14T10:45:21-07:00",
+      "production_alias_includes_www_sophia_ei_com": true,
+      "frontend_tree_matches_frozen_campaign": true
+    },
+    "project_settings": {
+      "production_branch": "main",
+      "automatic_custom_production_domain_assignment": true,
+      "preview_branch_tracking": false,
+      "deployment_checks": true,
+      "root_directory": "frontend",
+      "include_files_outside_root": true,
+      "skip_deployment_when_root_and_dependencies_unchanged": false,
+      "current_deployment_differs_from_current_project_settings_warning": true
+    },
+    "prior_production": {
+      "deployment_id": "dpl_CmGV84tusPxecCX7EJxB9fABEvbk",
+      "source_sha": "a8cbf8f1cc4faa470baa0e6e622c13820e1064d5",
+      "status": "ready",
+      "created_at": "2026-06-23T23:40:28Z",
+      "instant_rollback_action_available": true,
+      "promote_action_available": true,
+      "redeploy_action_available": true
+    },
+    "deployment_retention_enabled": true,
+    "deployment_retention_duration": "UNKNOWN",
+    "current_build_image_digest": "UNKNOWN"
+  },
+  "mutations": {
+    "deploy": false,
+    "restart": false,
+    "rollback": false,
+    "alias": false,
+    "provider_setting": false,
+    "secret": false
+  }
+}

@@ -1,0 +1,101 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-17T13:57:24Z",
+  "source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+  "source_tree": "8c27bc52b2a022d4a0b7c398172195442bccf15e",
+  "backend_tests_tree": "b175ae3ca70baf0888a561d28a4d9ca2f35d092e",
+  "reported_skip_count": 161,
+  "skip_provenance_unknown_count": 0,
+  "classification": [
+    {
+      "reported_skips": 84,
+      "logical_tests_not_run": 84,
+      "category": "expected_schema_negative_space",
+      "release_critical": false
+    },
+    {
+      "reported_skips": 49,
+      "logical_tests_not_run": 49,
+      "category": "disposable_postgresql_16_integration",
+      "release_critical": true,
+      "required_capability": "DQ1_POSTGRES_CONTAINER"
+    },
+    {
+      "reported_skips": 14,
+      "logical_tests_not_run": 14,
+      "category": "root_linux_identity_process_filesystem_and_document_boundaries",
+      "release_critical": true
+    },
+    {
+      "reported_skips": 8,
+      "logical_tests_not_run": 8,
+      "category": "python_playwright_chromium_artifact_paths",
+      "release_critical": true
+    },
+    {
+      "reported_skips": 1,
+      "logical_tests_not_run": 1,
+      "category": "node_chromium_html_to_pdf_smoke",
+      "release_critical": true
+    },
+    {
+      "reported_skips": 1,
+      "logical_tests_not_run": 19,
+      "category": "governed_live_provider_module",
+      "release_critical": true,
+      "requires_signed_budget": true
+    },
+    {
+      "reported_skips": 2,
+      "logical_tests_not_run": 2,
+      "category": "retired_pandoc_xelatex_paths",
+      "release_critical": false
+    },
+    {
+      "reported_skips": 2,
+      "logical_tests_not_run": 2,
+      "category": "optional_renderer_fallbacks",
+      "release_critical": false
+    }
+  ],
+  "totals": {
+    "expected_or_optional_reported_skips": 88,
+    "release_critical_or_governed_reported_skips": 73,
+    "release_critical_or_governed_logical_tests_not_run": 91,
+    "release_critical_outcomes": "UNKNOWN"
+  },
+  "minimum_rerun_lanes": [
+    {
+      "lane": "postgresql",
+      "environment": "disposable PostgreSQL 16",
+      "tests": [
+        "tests/test_deck_quality_shadow_postgres_integration.py",
+        "tests/test_producer_failure_signal_postgres.py"
+      ]
+    },
+    {
+      "lane": "production_root_linux",
+      "environment": "pinned production-equivalent root Linux image with setpriv, Poppler, and LibreOffice",
+      "exact_test_count": 14
+    },
+    {
+      "lane": "browser_artifact",
+      "environment": "pinned image with bundled Chromium",
+      "tests": [
+        "tests/test_deck_native_service.py",
+        "tests/test_hands_on_deck_sophia_patches.py",
+        "tests/test_render_html_to_pdf.py::test_node_smoke_renders_inline_svg_pdf"
+      ]
+    },
+    {
+      "lane": "live_provider",
+      "environment": "approved provider identity and signed budget",
+      "tests": [
+        "tests/test_client_live.py"
+      ],
+      "authorized_now": false
+    }
+  ],
+  "tests_executed_by_this_static_audit": false,
+  "release_gate": "BLOCKED"
+}

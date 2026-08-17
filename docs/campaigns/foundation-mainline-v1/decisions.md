@@ -68,3 +68,56 @@ status, check, Actions, or Deployment objects for the relevant Render sources,
 so it cannot recover missing current or declared-rollback Render deployment
 IDs. Historical Render coordinates remain historical until provider retention
 and selectability are verified.
+
+## FC01-010 — Bind authenticated provider coordinates without promotion
+
+The operator authenticated Render and Vercel for read-only inspection. Gateway
+and LangGraph now have exact current deployment IDs at the frozen campaign SHA,
+and the declared rollback SHA has exact, currently selectable deployment IDs
+for both services. Vercel likewise exposes its exact current and immediately
+prior production deployments, with Instant Rollback available for the prior
+deployment. These receipts close identity/selectability unknowns only; no
+deploy, rollback, restart, alias, or setting action was taken.
+
+## FC01-011 — Block on Voice source divergence
+
+The production Voice service is deployed from
+`956b6272f4d91ad0c5d806d9a037c0e1335b6392`, an ancestor 358 campaign commits
+behind the frozen campaign source. Gateway points to that service, so Voice
+health cannot be treated as source convergence. FC-01B and M00 remain blocked
+until the authorized phase defines and proves an aligned Voice deployment and
+rollback coordinate.
+
+## FC01-012 — Separate catalog presence from migration-byte proof
+
+Authenticated metadata-only database inspection proves PostgreSQL 17.6 and six
+repository-required relation surfaces, while the provider migration dashboard
+shows no migration records. This supports a PG17-compatible catalog inference
+but cannot identify which historical migration bytes ran. Exact applied bytes,
+checksums, ACLs, and ordering remain unknown; historical files stay immutable
+and any repair remains forward-only.
+
+## FC01-013 — Treat recovery and database security as release gates
+
+Eight daily physical restore points are visible, but point-in-time recovery is
+disabled, no restore drill was run, and Storage objects are excluded. The
+provider also reports 16 security-advisor issues, including at least four
+visible critical public-RLS findings, while network restrictions allow all IP
+addresses. These facts remain blockers; FC-01A does not authorize changing
+them.
+
+## FC01-014 — Preserve source-valid review and NOT_RUN gates
+
+Thread-aware source validation reduces the current actionable PR set to two P1
+and eight P2 findings; twenty-three other current threads appear fixed and need
+verification plus administrative resolution. The 161 backend skips now have
+complete source-mapped provenance, but 73 reports represent 91 logically
+unexecuted release-critical or governed tests. Neither set may be waived by an
+aggregate pass count.
+
+## FC01-015 — Narrow, but do not clear, secret-history uncertainty
+
+Three additional scanner records are structurally test-only false positives.
+Ten records representing three strings still need named owner validation or
+rotation, and no broad scanner-rule suppression is authorized. The secret gate
+therefore remains blocked despite zero confirmed live credentials.

@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-17T13:57:24Z",
+  "pull_request": 144,
+  "source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+  "thread_counts": {
+    "total": 276,
+    "resolved": 9,
+    "unresolved_outdated": 234,
+    "unresolved_non_outdated": 33,
+    "current_p1": 3,
+    "current_p2": 30,
+    "exact_duplicate_threads": 0
+  },
+  "source_validation": {
+    "current_actionable": 10,
+    "current_actionable_p1": 2,
+    "current_actionable_p2": 8,
+    "already_fixed_but_administratively_open": 23,
+    "already_fixed_p1": 1,
+    "already_fixed_p2": 22
+  },
+  "actionable_threads": [
+    {
+      "priority": "P1",
+      "thread_id": "PRRT_kwDORrYm-c6SOmYY",
+      "finding": "Unauthenticated builder-event input reaches durable and artifact side effects.",
+      "minimum_proof": "Authenticate exact bytes before side effects and prove invalid, stale, and replayed events create zero writes."
+    },
+    {
+      "priority": "P1",
+      "thread_id": "PRRT_kwDORrYm-c6Shh6Q",
+      "finding": "Compose gateway omits the LangGraph target and can dispatch to localhost.",
+      "minimum_proof": "Bind the container target and add static plus gateway-to-LangGraph routing tests."
+    },
+    {
+      "priority": "P2",
+      "thread_id": "PRRT_kwDORrYm-c6Q4ejz",
+      "finding": "Foundation manifests use the builder thread instead of the parent session thread."
+    },
+    {
+      "priority": "P2",
+      "thread_id": "PRRT_kwDORrYm-c6RM5hC",
+      "finding": "Equal-priority registry upserts preserve stale logical and version identity."
+    },
+    {
+      "priority": "P2",
+      "thread_id": "PRRT_kwDORrYm-c6ROowY",
+      "finding": "An inner model timeout is converted into a hard builder deadline."
+    },
+    {
+      "priority": "P2",
+      "thread_id": "PRRT_kwDORrYm-c6R0ZeW",
+      "finding": "Durable runtime events ignore runtime-provided run identity."
+    },
+    {
+      "priority": "P2",
+      "thread_id": "PRRT_kwDORrYm-c6R8cmd",
+      "finding": "Unquoted inline opacity style bypasses the lossiness gate."
+    },
+    {
+      "priority": "P2",
+      "thread_id": "PRRT_kwDORrYm-c6SBTIq",
+      "finding": "Workspace output paths bypass the internal-artifact guard."
+    },
+    {
+      "priority": "P2",
+      "thread_id": "PRRT_kwDORrYm-c6STwJo",
+      "finding": "A producer worker join blocks the active event loop."
+    },
+    {
+      "priority": "P2",
+      "thread_id": "PRRT_kwDORrYm-c6VKnqK",
+      "finding": "ARIA-hidden content is incorrectly treated as visually hidden."
+    }
+  ],
+  "already_fixed_current_p1": {
+    "thread_id": "PRRT_kwDORrYm-c6O8Ra_",
+    "finding": "Docker image-generation skill packaging",
+    "source_fix_present": true,
+    "verification_and_thread_resolution_pending": true
+  },
+  "github_state_mutated": false,
+  "release_gate": "BLOCKED"
+}

@@ -1,0 +1,81 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-17T13:57:24Z",
+  "access": {
+    "authenticated": true,
+    "project_identifier_recorded": false,
+    "database_coordinate_recorded": false,
+    "credential_value_recorded": false,
+    "row_or_user_content_read": false,
+    "metadata_only": true
+  },
+  "identity": {
+    "langgraph_expected_project_matches_authenticated_project": true,
+    "gateway_expected_project_match": "UNKNOWN"
+  },
+  "engine": {
+    "postgresql_version": "17.6",
+    "provider_health": "healthy",
+    "compute_class": "micro",
+    "region": "west_us_northern_california"
+  },
+  "migration_ledger": {
+    "dashboard_display": "No migrations",
+    "provider_migration_records_visible": 0,
+    "exact_live_applied_migration_bytes": "UNKNOWN",
+    "exact_live_applied_migration_checksums": "UNKNOWN",
+    "historical_files_may_be_rewritten": false,
+    "forward_only_reconciliation_required": true
+  },
+  "catalog_probe": {
+    "queries_completed": [
+      "SHOW server_version",
+      "SELECT to_regclass for repository-known relation names"
+    ],
+    "confirmed_relations": [
+      "telegram_user_bindings",
+      "sophia_sessions",
+      "sophia_session_messages",
+      "artifact_registry_records",
+      "sophia_deck_quality_publications",
+      "sophia_deck_quality_producer_failure_signals"
+    ],
+    "sophia_deck_quality_shadow_runs": "UNKNOWN",
+    "relation_rows_read": false,
+    "acl_state": "UNKNOWN",
+    "failed_metadata_select_count": 1,
+    "failed_select_effect": "syntax_error_before_execution"
+  },
+  "migration_compatibility_inference": {
+    "postgresql_17_catalog_and_required_surfaces_exist": true,
+    "rewritten_july_migrations_are_postgresql_17_aware": true,
+    "exact_input_variant_proven": false,
+    "classification": "compatible_catalog_inference_not_execution_byte_proof"
+  },
+  "recovery": {
+    "daily_physical_backups_visible": true,
+    "restore_points_visible": 8,
+    "newest_restore_point": "2026-08-17T10:44:18Z",
+    "oldest_restore_point": "2026-08-10T10:43:53Z",
+    "point_in_time_recovery_enabled": false,
+    "restore_to_new_project_beta_visible": true,
+    "storage_objects_included_in_database_backup": false,
+    "restore_drill_performed": false
+  },
+  "security_posture": {
+    "advisor_issue_count_visible": 16,
+    "critical_rls_disabled_in_public_visible_at_least": 4,
+    "database_network_restrictions": "allow_all_ip_addresses",
+    "ssl_enforcement": "UNKNOWN",
+    "exact_sensitive_relation_names_recorded": false
+  },
+  "query_effects": {
+    "ddl_executed": false,
+    "dml_executed": false,
+    "catalog_or_data_mutation": false,
+    "migration_executed": false,
+    "provider_setting_changed": false,
+    "private_sql_editor_metadata_draft_autosave": "POSSIBLE",
+    "draft_count_or_prior_provenance": "UNKNOWN"
+  }
+}

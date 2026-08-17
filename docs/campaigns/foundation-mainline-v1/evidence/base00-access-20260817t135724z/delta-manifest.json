@@ -1,0 +1,36 @@
+{
+  "schema_version": 1,
+  "campaign_id": "foundation-mainline-v1",
+  "experiment_id": "base00-access-20260817t135724z",
+  "phase": "FC-01A_BASE-00_AUTHENTICATED_ACCESS",
+  "predecessor_experiment_id": "base00-resume-20260817t123134z",
+  "predecessor_control_head": "8c35833a628e7eb40d85708ff23423b245d70236",
+  "predecessor_evidence_payload_commit": "95c74327b3c3afc040c9d17239b574a27caa03be",
+  "predecessor_checksum_manifest_sha256": "6c0f90bc84c55115d9ee35873bb06e37389de928b00a9ff2e8e03a4c722da141",
+  "created_at": "2026-08-17T13:57:24Z",
+  "source_main": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+  "source_campaign": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+  "control_branch": "campaign/fc01-control-v1",
+  "terminal_state": "BLOCKED",
+  "delta_scope": [
+    "source-head-revalidation.json",
+    "provider-control-plane.json",
+    "database-control-plane.json",
+    "review-disposition.json",
+    "secret-candidate-delta.json",
+    "skip-audit.json",
+    "limitations.md"
+  ],
+  "operator_completed_provider_login": true,
+  "provider_setting_mutation": false,
+  "production_mutation": false,
+  "database_catalog_or_data_mutation": false,
+  "product_files_changed": false,
+  "raw_sensitive_evidence_committed": false,
+  "private_sql_editor_metadata_draft_autosave": "POSSIBLE",
+  "hard_unknown_policy": "Any remaining hard UNKNOWN requires BLOCKED.",
+  "approvals": {
+    "davide": null,
+    "luis": null
+  }
+}
