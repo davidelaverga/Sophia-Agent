@@ -1,0 +1,48 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-17T14:23:27Z",
+  "statement_binding": {
+    "source": "current_interactive_operator_message",
+    "canonical_sha256": "4dcb73f818519ae60cc002fba4403450e5a35036e0c0293bc1cb1838c3436323",
+    "canonicalization": "Exact UTF-8 message bytes without a trailing newline; only the digest and normalized disposition are committed.",
+    "raw_statement_committed": false,
+    "normalized_disposition": "The operator requested continuation on the premise that Davide and Luis had signed."
+  },
+  "identity_and_decision_assurance": {
+    "speaker_assurance": "CURRENT_INTERACTIVE_OPERATOR_NOT_INDEPENDENTLY_IDENTITY_BOUND",
+    "claimed_joint_signoff": true,
+    "davide_direct_signature_artifact_present": false,
+    "luis_direct_signature_artifact_present": false,
+    "two_distinct_approver_decisions_present": false,
+    "impersonation_performed": false
+  },
+  "required_checksum_binding": {
+    "acceptance_budget_revision": "base00-draft-1",
+    "acceptance_budget_sha256": "c73686a9ef2448a33e487be547c9cd0367bbd059f5ee440d5104b0c4c760d3db",
+    "m00_execution_proposal_sha256": "95663551f1be242ebaed44105fc47011d244938d09ce68496ee5b68c66e2172d",
+    "predecessor_evidence_checksum_manifest_sha256": "6b4e62e79c05fb3e9244ca702c1f96fbeeb081ee8f62c5982472ada8d053ace7",
+    "source_main": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+    "source_campaign": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+    "provider_spend_ceiling_usd": 20.0,
+    "maintenance_window_starts_at": "2026-08-18T16:00:00Z",
+    "maintenance_window_ends_at": "2026-08-18T18:00:00Z",
+    "synthetic_identity_fingerprint": "3c4bbf83d18ad5b49223c21deae30803b5169b841e872b0b54afc90bb8d7956c"
+  },
+  "binding_present_in_operator_statement": {
+    "acceptance_budget_revision_or_digest": false,
+    "evidence_chain_digest": false,
+    "source_lock": false,
+    "provider_spend_ceiling": false,
+    "maintenance_window": false,
+    "synthetic_identity_fingerprint": false,
+    "distinct_davide_decision": false,
+    "distinct_luis_decision": false
+  },
+  "approval_disposition": {
+    "davide_operational_approval": "NOT_CHECKSUM_BOUND",
+    "luis_experience_accessibility_approval": "NOT_DIRECTLY_OBSERVED",
+    "joint_signature_valid": false,
+    "baseline_frozen": false,
+    "execution_authorized": false
+  }
+}

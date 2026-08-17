@@ -121,3 +121,30 @@ Three additional scanner records are structurally test-only false positives.
 Ten records representing three strings still need named owner validation or
 rotation, and no broad scanner-rule suppression is authorized. The secret gate
 therefore remains blocked despite zero confirmed live credentials.
+
+## FC01-016 — Resolve the missing strategy input by exact digest
+
+The newly supplied selective-refoundation strategy has SHA-256
+`8574f7b67834db546339df3f4e06209d4fc06125f8899ae5a1b6a316eaa9f190`,
+exactly matching the frozen authority lock. The prior evidence remains
+immutable; an additive authority-intake receipt closes the availability
+limitation without changing authority order. The strategy remains a strategic
+recommendation and does not supersede FC-01's M00-first mission contract.
+
+## FC01-017 — Do not manufacture joint signatures from an operator premise
+
+The current operator asked to continue on the premise that Davide and Luis had
+signed. The statement is not bound to the acceptance-budget checksum, evidence
+chain, source lock, spend ceiling, maintenance window, or synthetic identity,
+and no direct Luis decision is present. It is recorded only as a digest-bound
+operator claim. Both approval fields remain null, `BASELINE_FROZEN` remains
+false, and no M00 or production action is authorized.
+
+## FC01-018 — Require a governing amendment before pre-G0 repair
+
+Valid signatures cannot waive the current P1, mission-scope P2, hard UNKNOWN,
+or required NOT_RUN gates. FC-01A also prohibits product repair. The smallest
+next governing decision is therefore a jointly approved, checksum-bound
+FC-01A remediation amendment with bounded scope, followed by repair/proof, a
+recomputed BASE-00, and two direct budget decisions. Any production mutation
+still requires separate target-specific approval.

@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-17T14:23:27Z",
+  "request_status": "JOINT_CONTROLLING_DECISION_REQUIRED",
+  "smallest_truthful_next_decision": "Approve or reject a new checksum-bound FC-01A remediation amendment; continuing as if signatures existed is not an available FC-01 transition.",
+  "why_an_amendment_is_required": [
+    "FC-01A prohibits product repair while current P1, mission-scope P2, UNKNOWN, and required NOT_RUN gates prevent G0.",
+    "The existing acceptance budget cannot waive P0 through P2 or hard UNKNOWN and NOT_RUN outcomes.",
+    "The selective-refoundation strategy is a recommendation and preserves M00-first sequencing; it is not mutation authority."
+  ],
+  "minimum_amendment_scope": [
+    "Authorize a bounded pre-G0 source-remediation lane for the exact two P1 and eight mission-scope P2 findings on a new immutable candidate, with focused and release-critical proof.",
+    "Authorize preparation of an exact Voice alignment and rollback plan; any production deployment, restart, rollback, or setting change still requires a separate target-specific Davide approval.",
+    "Authorize the required PostgreSQL, production-root-Linux, browser-artifact, and governed live-provider test lanes within an explicit cost and time budget.",
+    "Require read-only migration, privacy-provenance, and secret-owner dispositions before any new BASE-00 can pass.",
+    "Require a recomputed checksum-bound BASE-00 and two direct human budget decisions before FC-01B or M00."
+  ],
+  "subsequent_signature_binding": {
+    "required_budget_revision": "base00-draft-1 or an explicitly superseding revision",
+    "current_budget_sha256": "c73686a9ef2448a33e487be547c9cd0367bbd059f5ee440d5104b0c4c760d3db",
+    "required_decisions": [
+      "Davide operational approval",
+      "Luis experience and accessibility approval"
+    ],
+    "two_direct_decisions_required": true,
+    "signature_fiction_permitted": false
+  },
+  "hard_gate_override_available_under_current_fc01": false,
+  "m00_may_begin_now": false,
+  "production_mutation_may_begin_now": false
+}

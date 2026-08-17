@@ -1,0 +1,21 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-17T14:23:27Z",
+  "authority_lock": {
+    "experiment_id": "base00-20260817t114334z",
+    "authority_lock_sha256": "ece6b521def1712bcfcec9c74fbed50281e610d312d09aef9dc2017768935",
+    "authority_order_changed": false
+  },
+  "resolved_input": {
+    "basename": "Sophia_Repository_Strategy_Selective_Refoundation_2026-08-16.md",
+    "locked_sha256": "8574f7b67834db546339df3f4e06209d4fc06125f8899ae5a1b6a316eaa9f190",
+    "observed_sha256": "8574f7b67834db546339df3f4e06209d4fc06125f8899ae5a1b6a316eaa9f190",
+    "digest_match": true,
+    "availability_disposition": "RESOLVED_NO_AUTHORITY_CHANGE"
+  },
+  "required_planning_inputs_missing_after_resolution": 0,
+  "historical_evidence_rewritten": false,
+  "strategy_contract_status": "STRATEGIC_RECOMMENDATION_REQUIRES_APPROVED_M00_OR_M01_MISSION_CONTRACT",
+  "fc01_remains_controlling_for_current_phase": true,
+  "phase_zero_m00_first_preserved": true
+}

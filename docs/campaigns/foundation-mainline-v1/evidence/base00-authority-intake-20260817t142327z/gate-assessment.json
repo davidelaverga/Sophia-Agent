@@ -1,0 +1,91 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-17T14:23:27Z",
+  "gate": "G0",
+  "checks": {
+    "source_deployment_migration_identities_and_rollback_targets_known": {
+      "status": "FAIL",
+      "reason": "Voice rollback and exact applied migration identity remain unknown."
+    },
+    "dirty_worktree_isolated": {
+      "status": "PASS"
+    },
+    "committed_evidence_sanitized": {
+      "status": "PASS"
+    },
+    "acceptance_budget_and_severity_rubric_signed": {
+      "status": "FAIL"
+    },
+    "baseline_failures_classified": {
+      "status": "PASS",
+      "reason": "Failure and skip provenance is classified; required NOT_RUN outcomes remain blocking."
+    },
+    "next_m00_action_targets_one_exact_campaign_sha_and_complete_deployment_set": {
+      "status": "FAIL",
+      "reason": "Gateway and LangGraph match the frozen source, but Voice is divergent and lacks a rollback coordinate."
+    }
+  },
+  "hard_unknown_paths": [
+    "database-control-plane.json:identity.gateway_expected_project_match",
+    "database-control-plane.json:migration_ledger.exact_live_applied_migration_bytes",
+    "database-control-plane.json:migration_ledger.exact_live_applied_migration_checksums",
+    "database-control-plane.json:catalog_probe.sophia_deck_quality_shadow_runs",
+    "database-control-plane.json:catalog_probe.acl_state",
+    "database-control-plane.json:security_posture.ssl_enforcement",
+    "database-control-plane.json:query_effects.draft_count_or_prior_provenance",
+    "provider-control-plane.json:render.gateway.image_digest",
+    "provider-control-plane.json:render.langgraph.image_digest",
+    "provider-control-plane.json:render.langgraph.checkpointer.live_instantiated_class",
+    "provider-control-plane.json:render.voice.image_digest",
+    "provider-control-plane.json:render.routing.gateway_expected_database_project_matches_authenticated_project",
+    "provider-control-plane.json:render.rollback.voice_rollback_coordinate",
+    "provider-control-plane.json:vercel.deployment_retention_duration",
+    "provider-control-plane.json:vercel.current_build_image_digest",
+    "skip-audit.json:totals.release_critical_outcomes"
+  ],
+  "hard_unknown_path_count": 16,
+  "blockers": {
+    "voice": {
+      "deployed_source_sha": "956b6272f4d91ad0c5d806d9a037c0e1335b6392",
+      "campaign_commits_behind_frozen_source": 358,
+      "rollback_coordinate_known": false
+    },
+    "review": {
+      "source_valid_actionable_p1": 2,
+      "source_valid_actionable_p2": 8,
+      "p0_to_p2_waiver_available": false
+    },
+    "tests": {
+      "release_critical_or_governed_logical_not_run": 91,
+      "clean_baseline_green": false,
+      "exact_head_ci_present": false
+    },
+    "migration_and_database": {
+      "exact_applied_bytes_and_checksums_known": false,
+      "acl_state_known": false,
+      "point_in_time_recovery_enabled": false,
+      "restore_drill_performed": false,
+      "critical_public_rls_findings_visible_at_least": 4,
+      "network_restrictions_allow_all_ip_addresses": true
+    },
+    "privacy_and_secrets": {
+      "tracked_runtime_records": 165,
+      "tracked_record_provenance_known": false,
+      "unresolved_secret_candidate_records": 10,
+      "unresolved_secret_candidate_strings": 3,
+      "confirmed_live_secret_records": 0
+    },
+    "approvals": {
+      "checksum_bound_davide_decision_present": false,
+      "checksum_bound_luis_decision_present": false
+    }
+  },
+  "result": {
+    "g0": "FAIL",
+    "terminal_state": "BLOCKED",
+    "baseline_frozen": false,
+    "fc01b_m00_authorized": false,
+    "production_action_authorized": false,
+    "hard_gate_override_available_under_fc01": false
+  }
+}

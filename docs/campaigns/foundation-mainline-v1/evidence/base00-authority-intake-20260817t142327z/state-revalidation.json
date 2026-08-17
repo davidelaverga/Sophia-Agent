@@ -1,0 +1,64 @@
+{
+  "schema_version": 1,
+  "recorded_at": "2026-08-17T14:23:27Z",
+  "git": {
+    "fetch_prune_completed_at": "2026-08-17T14:19:04Z",
+    "independent_remote_confirmation_at": "2026-08-17T14:22:48Z",
+    "main": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+    "campaign": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+    "control": "fb7ca5365bc7d1cf38e14d4f226f8aee29e8ea35",
+    "merge_base": "5d9a0b301368e5c881207231b3d16e8e09b5817c",
+    "main_tree": "d859ff917a5f82e66423ebabaeea1be9b74cddb6",
+    "campaign_tree": "8c27bc52b2a022d4a0b7c398172195442bccf15e",
+    "main_only_commits": 73,
+    "campaign_only_commits": 392,
+    "frozen_heads_unchanged": true,
+    "control_worktree_clean_and_up_to_date_before_write": true
+  },
+  "pull_request_144": {
+    "observed_at": "2026-08-17T14:23:27Z",
+    "state": "OPEN",
+    "draft": false,
+    "merge_state": "DIRTY",
+    "base_matches_frozen_main": true,
+    "head_matches_frozen_campaign": true,
+    "checks": 0,
+    "threads_total": 276,
+    "threads_resolved": 9,
+    "threads_unresolved_outdated": 234,
+    "threads_unresolved_current": 33,
+    "threads_unresolved_current_p1": 3,
+    "threads_unresolved_current_p2": 30,
+    "source_valid_actionable_p1": 2,
+    "source_valid_actionable_p2": 8,
+    "actionable_set_unchanged": true
+  },
+  "public_surfaces": {
+    "frontend": {
+      "healthy": true,
+      "source_sha": "7092042b13f3edc40468fd614685d7ede3b21f2a",
+      "deployment_id": "dpl_Bv2yaEMssrnz6JnGhQtsxP9RgQjR"
+    },
+    "gateway": {
+      "healthy": true,
+      "dq_readiness": "ready",
+      "source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca"
+    },
+    "langgraph": {
+      "healthy": true,
+      "server_version": "0.8.1",
+      "python_runtime_version": "1.2.0",
+      "public_source_identity_exposed": false
+    },
+    "voice": {
+      "health_ok": true,
+      "readiness_ok": true,
+      "public_source_identity_exposed": false
+    }
+  },
+  "authenticated_control_plane_reinspection_this_delta": false,
+  "predecessor_authenticated_provider_receipt_remains_latest": true,
+  "target_or_blocker_drift_detected": false,
+  "repository_or_github_mutation": false,
+  "provider_or_production_mutation": false
+}
