@@ -1,0 +1,30 @@
+{
+  "schema_version": 1,
+  "control_branch": "campaign/fc01-control-v1",
+  "predecessor_control_head": "8c35833a628e7eb40d85708ff23423b245d70236",
+  "predecessor_evidence_payload_commit": "95c74327b3c3afc040c9d17239b574a27caa03be",
+  "access_evidence_payload_commit": "bb2b25eff74deae165b81dd9489b5438a5c50043",
+  "access_evidence_payload_repository_tree": "d2b0e8759537f66a5590b7518778fc0c3235eb9f",
+  "campaign_subtree": "432136f715cd371232105e277daf1b77f923869a",
+  "access_evidence_subtree": "219ec6ebe7503db6da871bf61f30e2246ccf409f",
+  "checksum_manifest_sha256": "6b4e62e79c05fb3e9244ca702c1f96fbeeb081ee8f62c5982472ada8d053ace7",
+  "offline_evaluator": {
+    "structure": "PASS",
+    "checksums": "PASS",
+    "privacy": "PASS",
+    "source_lock_consistency": "PASS",
+    "provider_identity_consistency": "PASS",
+    "database_no_mutation_consistency": "PASS",
+    "terminal_consistency": "PASS",
+    "terminal_state": "BLOCKED",
+    "hard_unknown_value_count": 16
+  },
+  "path_scope": "docs/campaigns/foundation-mainline-v1/**",
+  "product_files_changed": false,
+  "production_mutation": false,
+  "provider_setting_mutation": false,
+  "database_catalog_or_data_mutation": false,
+  "private_sql_editor_metadata_draft_autosave": "POSSIBLE",
+  "current_control_branch_head": null,
+  "current_head_reason": "The receipt commit cannot contain its own object identity; the pushed remote ref and final handoff record the resulting head."
+}
