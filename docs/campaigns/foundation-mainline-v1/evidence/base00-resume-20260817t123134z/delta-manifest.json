@@ -1,0 +1,31 @@
+{
+  "schema_version": 1,
+  "campaign_id": "foundation-mainline-v1",
+  "experiment_id": "base00-resume-20260817t123134z",
+  "phase": "FC-01A_BASE-00_RESUME",
+  "predecessor_experiment_id": "base00-20260817t114334z",
+  "predecessor_evidence_payload_commit": "25ad22ca3b7e42e8510d6169591b8aa6929a1142",
+  "predecessor_checksum_manifest_sha256": "b9abb220ceebdc7ab7531f9aaadc71ea4e3710004981129cb1cf12cd654d689b",
+  "created_at": "2026-08-17T12:31:34Z",
+  "source_main": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+  "source_campaign": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+  "control_branch": "campaign/fc01-control-v1",
+  "terminal_state": "BLOCKED",
+  "delta_scope": [
+    "source-head-revalidation.json",
+    "deployment-history.json",
+    "migration-history.json",
+    "privacy-history.json",
+    "limitations.md"
+  ],
+  "product_files_changed": false,
+  "production_mutation": false,
+  "provider_login_performed": false,
+  "database_connection_performed": false,
+  "raw_sensitive_evidence_committed": false,
+  "hard_unknown_policy": "Any remaining hard UNKNOWN requires BLOCKED.",
+  "approvals": {
+    "davide": null,
+    "luis": null
+  }
+}

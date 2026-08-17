@@ -1,0 +1,109 @@
+{
+  "schema_version": 1,
+  "consolidated_at": "2026-08-17T12:31:34Z",
+  "observation_policy": "Read-only public application receipts, GitHub deployment metadata, and sanitized repository receipts; no provider login or mutation.",
+  "current": {
+    "vercel_frontend": {
+      "source": "7092042b13f3edc40468fd614685d7ede3b21f2a",
+      "provider_deployment_id": "dpl_Bv2yaEMssrnz6JnGhQtsxP9RgQjR",
+      "github_production_deployment_id": 5445256666,
+      "github_success_status_id": 15479773138,
+      "github_commit_status_id": 50462510568,
+      "github_check_run_id": 87160584183,
+      "production_success_at": "2026-07-14T17:45:22Z",
+      "related_preview_deployment_id": 5445235553,
+      "related_preview_success_status_id": 15479710646,
+      "latest_github_production_deployment": true,
+      "source_is_campaign_ancestor": true,
+      "frontend_diff_to_campaign": false,
+      "provider_source_branch": "UNKNOWN",
+      "provider_alias_and_promotion_policy": "UNKNOWN",
+      "provider_selectable_now": "UNKNOWN"
+    },
+    "render_gateway": {
+      "service_id": "srv-d7be5s9r0fns7397l4g0",
+      "source": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+      "public_health": "HEALTHY_APP_LEVEL",
+      "observed_at": "2026-08-17T12:22:07Z",
+      "deployment_id": "UNKNOWN",
+      "image_digest": "UNKNOWN",
+      "provider_source_branch": "UNKNOWN",
+      "provider_selectable_now": "UNKNOWN"
+    },
+    "render_langgraph": {
+      "service_id": "srv-d7be5s9r0fns7397l4fg",
+      "public_health": "HEALTHY_APP_LEVEL",
+      "source": "UNKNOWN",
+      "deployment_id": "UNKNOWN",
+      "image_digest": "UNKNOWN",
+      "provider_source_branch": "UNKNOWN",
+      "provider_selectable_now": "UNKNOWN"
+    },
+    "render_voice": {
+      "service_id": "srv-d7be5s9r0fns7397l4f0",
+      "public_health": "HEALTHY_APP_LEVEL",
+      "source": "UNKNOWN",
+      "deployment_id": "UNKNOWN",
+      "image_digest": "UNKNOWN",
+      "provider_source_branch": "UNKNOWN",
+      "provider_selectable_now": "UNKNOWN"
+    }
+  },
+  "rollback_history": {
+    "vercel_immediate_prior_production": {
+      "source": "a8cbf8f1cc4faa470baa0e6e622c13820e1064d5",
+      "provider_deployment_id": "dpl_CmGV84tusPxecCX7EJxB9fABEvbk",
+      "github_production_deployment_id": 5173929081,
+      "github_success_status_id": 14724395957,
+      "github_commit_status_id": 49416037204,
+      "github_check_run_id": 83086149642,
+      "success_at": "2026-06-23T23:40:28Z",
+      "provider_selectable_now": "UNKNOWN"
+    },
+    "render_historical_exact_coordinate": {
+      "source": "74b4966fe2f7a2e66e3e9b343584c98cbfa2e2ea",
+      "gateway_deployment_id": "dep-d9lhe9bm8hqs738o0300",
+      "langgraph_deployment_id": "dep-d9lhe9ajnfac73ai72tg",
+      "historically_live_after": "2026-07-30T09:24:01Z",
+      "provider_selectable_now": "UNKNOWN"
+    },
+    "repository_declared_rollback": {
+      "source": "34217a8aa3b88e59c1ccbb2f4a187a8804adccb4",
+      "historically_live_at_two_cutoffs": true,
+      "gateway_deployment_id": "UNKNOWN",
+      "langgraph_deployment_id": "UNKNOWN",
+      "provider_selectable_now": "UNKNOWN"
+    },
+    "direct_source_chain": [
+      "34217a8aa3b88e59c1ccbb2f4a187a8804adccb4",
+      "74b4966fe2f7a2e66e3e9b343584c98cbfa2e2ea",
+      "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca"
+    ]
+  },
+  "github_absence_proof_for_render_sources": {
+    "sources_checked": [
+      "34217a8aa3b88e59c1ccbb2f4a187a8804adccb4",
+      "74b4966fe2f7a2e66e3e9b343584c98cbfa2e2ea",
+      "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca"
+    ],
+    "commit_statuses": 0,
+    "check_runs": 0,
+    "actions_runs": 0,
+    "github_deployments": 0,
+    "missing_render_deployment_ids_recoverable_from_github": false
+  },
+  "historical_provider_configuration": {
+    "observed_on": "2026-07-07",
+    "all_three_render_services_branch": "main",
+    "auto_deploy": false,
+    "current_provider_truth": "UNKNOWN"
+  },
+  "conclusion": {
+    "vercel_active_coordinate_narrowed": true,
+    "vercel_prior_coordinate_narrowed": true,
+    "render_historical_coordinate_narrowed": true,
+    "exact_current_render_coordinates_complete": false,
+    "exact_declared_render_rollback_coordinate_complete": false,
+    "release_gate": "BLOCKED"
+  }
+}

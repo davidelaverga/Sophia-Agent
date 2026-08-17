@@ -44,3 +44,27 @@ Both frozen lineages contain the same tracked runtime/user artifact set with
 stable-identifier-shaped and content-bearing fields. No values are copied into
 this campaign. Real-versus-synthetic provenance remains unknown and blocks the
 privacy gate.
+
+## FC01-007 — Preserve redacted scan uncertainty
+
+A pinned Gitleaks 8.29.1 history scan found no confirmed live credential and no
+match in the runtime/user artifact trees. Thirteen records are strong
+synthetic/example false positives; thirteen documentation records remain
+unresolved. Scanner coverage limitations and the unresolved records stay
+explicit and block a green secret-history conclusion.
+
+## FC01-008 — Separate migration lineage from live-state proof
+
+Git history explains the six migration rewrites, and later receipts prove some
+downstream behavior existed historically. Neither source history nor functional
+receipts identify the exact bytes applied to the current database. Only a
+governed read-only catalog/provider receipt can narrow that state. Historical
+files remain immutable; future convergence is forward-only.
+
+## FC01-009 — Do not substitute GitHub history for Render control-plane truth
+
+GitHub binds the active and prior Vercel production coordinates. It contains no
+status, check, Actions, or Deployment objects for the relevant Render sources,
+so it cannot recover missing current or declared-rollback Render deployment
+IDs. Historical Render coordinates remain historical until provider retention
+and selectability are verified.

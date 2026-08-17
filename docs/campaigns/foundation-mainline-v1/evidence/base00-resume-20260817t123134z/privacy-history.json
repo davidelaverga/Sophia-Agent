@@ -1,0 +1,122 @@
+{
+  "schema_version": 1,
+  "consolidated_at": "2026-08-17T12:31:34Z",
+  "observation_policy": "Read-only aggregate provenance and fully redacted scanner metadata; no matched value, user namespace, user content, or provider validation.",
+  "tracked_runtime_record_scope": {
+    "files": 165,
+    "bytes": 123397,
+    "users_tree_files": 150,
+    "backend_users_tree_files": 15,
+    "opaque_users_tree_namespaces": 20,
+    "opaque_backend_tree_namespaces": 3,
+    "backend_namespaces_overlap_users_tree": 3,
+    "namespace_values_recorded": false,
+    "byte_identical_at_merge_base_main_and_campaign": true,
+    "inherited_pre_divergence": true,
+    "campaign_only_contamination": false,
+    "real_vs_synthetic_provenance": "UNKNOWN"
+  },
+  "addition_history": {
+    "first_addition_window": "2026-03-28 through 2026-04-18",
+    "scope_touching_commits": 19,
+    "first_addition_commits": [
+      {"commit":"aa63bfee36c6a4061f0d5aa4ac7761b32f3c23eb","files":4},
+      {"commit":"d6b3c0cae0bd73e1f49bfd7068ff7a71024cf4f1","files":3},
+      {"commit":"a6fb2aa39103c31811d364515758b42ffe5ea04b","files":1},
+      {"commit":"dd4175bb481436fd20f865e87c1ef8751e702074","files":2},
+      {"commit":"18511b88fcdd6300a941e66f88e366ae461a3894","files":1},
+      {"commit":"d0504d41626c90908bbdafad89ba8ba126199343","files":68},
+      {"commit":"4602ea86b50853e869c86dbf5cf630ab7c1330cf","files":13},
+      {"commit":"5c5d94d01e83c510d156193430288d344c773c3e","files":12},
+      {"commit":"87446e8f728217c9accc9d2a8e80628311265516","files":26},
+      {"commit":"a2b14115e397a3368b66e8dec5a01f0b66ad29a7","files":3},
+      {"commit":"494fdc6416b59b4cdd44ca8c06121514d341d158","files":18},
+      {"commit":"199ec17950a2201eee5b5e60108f8d87a82b81c3","files":14}
+    ],
+    "commit_subject_evidence": [
+      "generated user artifacts",
+      "generated e2e user artifacts",
+      "local files",
+      "local runtime data (sessions, recaps, traces, identity)"
+    ],
+    "subject_evidence_proves_synthetic_provenance": false,
+    "namespace_reference_classification": {
+      "not_referenced_outside_artifact_trees": 14,
+      "referenced_in_docs_or_tests_fixtures": 6,
+      "conservatively_referenced_in_non_test_product_source": 0
+    }
+  },
+  "ignore_guardrails": {
+    "introduction_commit": "d0a45b99ea22f744c8e0fd56dccad4f53aa963fc",
+    "introduced_on": "2026-05-27",
+    "introduced_after_artifacts": true,
+    "covered_files": 111,
+    "unignored_tracked_files": 54,
+    "unignored_breakdown": {
+      "nested_ignore_file": 1,
+      "identity_last_update": 13,
+      "json": 8,
+      "markdown": 32
+    },
+    "purged_preexisting_tracked_blobs": false
+  },
+  "pinned_history_scan": {
+    "scanner": "Gitleaks",
+    "version": "8.29.1",
+    "release_tag_annotated_ref": "4b720c2674b640d046dadf45c2bc5173ee3734a4",
+    "release_tag_peeled_ref": "fb5d707e08fe0d2578b155458fdd53b6782dcab2",
+    "archive_expected_sha256": "69836c841d7e648fb30ff4846f8c3587855c5754ed02b8510caaf6008f65d177",
+    "archive_measured_sha256": "69836c841d7e648fb30ff4846f8c3587855c5754ed02b8510caaf6008f65d177",
+    "binary_sha256": "6b4a0d6f46c72e3154f22223fcae893a72ae6ac951ea2d5736c5d7b001df9029",
+    "embedded_default_rules": true,
+    "full_history_all_refs_requested": true,
+    "in_repo_allow_comments_ignored": true,
+    "archive_depth": 10,
+    "decode_depth": 5,
+    "redaction_percent": 100,
+    "timeout_seconds": 1800,
+    "independent_runs": 2,
+    "independent_fingerprints_identical": true,
+    "git_fsck_full_no_dangling": "PASS",
+    "reachable_ref_snapshot_sha256_before": "8c72446fee5b1c5a9e4ea4ca3199a4ec790f3de068b87d3a8ee4b26bc9812ab6",
+    "reachable_ref_snapshot_sha256_after": "8c72446fee5b1c5a9e4ea4ca3199a4ec790f3de068b87d3a8ee4b26bc9812ab6",
+    "refs_and_commit_count_unchanged": true,
+    "records": 26,
+    "unique_candidate_strings": 7,
+    "files": 8,
+    "commits": 9,
+    "rule_counts": {
+      "curl_auth_header": 12,
+      "generic_api_key": 14
+    },
+    "records_in_runtime_user_trees": 0,
+    "records_in_test_or_fixture_contexts": 7,
+    "records_in_markdown_contexts": 19,
+    "strong_synthetic_or_example_false_positive_records": 13,
+    "unresolved_candidate_records": 13,
+    "confirmed_live_secret_records": 0,
+    "provider_specific_token_rule_records": 0,
+    "matched_values_recorded": false,
+    "matched_paths_recorded": false,
+    "private_temporary_reports_removed": true
+  },
+  "scan_limitations": {
+    "reachable_commits": 4193,
+    "scanner_reported_commits": 3924,
+    "unreconciled_commit_accounting_gap": 269,
+    "literal_per_commit_completeness_claimed": false,
+    "reflog_only_and_unreachable_objects_scanned": false,
+    "dirty_or_untracked_worktree_content_scanned": false,
+    "archives_deeper_than_ten_scanned": false,
+    "encodings_deeper_than_five_scanned": false,
+    "candidate_provider_validation_performed": false,
+    "candidate_validity_or_rotation_conclusion": "UNKNOWN"
+  },
+  "conclusion": {
+    "no_confirmed_live_secret_established": true,
+    "runtime_tree_secret_match_count": 0,
+    "runtime_record_provenance_gate": "BLOCKED",
+    "unresolved_secret_candidate_gate": "BLOCKED",
+    "required_resolution": "Obtain credential-owner/manual validation for the thirteen unresolved records and a governed provenance/disposition decision for all tracked runtime records."
+  }
+}

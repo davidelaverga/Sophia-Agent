@@ -1,0 +1,17 @@
+{
+  "schema_version": 1,
+  "observed_at": "2026-08-17T12:31:34Z",
+  "method": "git ls-remote --heads origin",
+  "frozen_heads": {
+    "main": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+    "campaign": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca"
+  },
+  "expected_heads": {
+    "main": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+    "campaign": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca"
+  },
+  "frozen_heads_unchanged": true,
+  "control_branch_remote_head_before_delta": "2496e62017825aa446c38ddf965b854d5193700e",
+  "shared_product_checkout_mutated": false,
+  "provider_mutation": false
+}

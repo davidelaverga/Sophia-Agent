@@ -1,0 +1,85 @@
+{
+  "schema_version": 1,
+  "consolidated_at": "2026-08-17T12:31:34Z",
+  "observation_policy": "Read-only Git object and sanitized receipt inspection; no database connection or mutation.",
+  "historical_main_to_campaign_rewrites": [
+    {
+      "path": "backend/migrations/2026_04_25_telegram_user_bindings.sql",
+      "authoritative_shared_introduction_commit": "52a982dfe77bf4cc75ede0c43a10f8048126a775",
+      "main_sha256": "9fcefd267a7eaa6fadb372f7659859dbd0027c1e57e817f6faf1ad209d9221e6",
+      "campaign_rewrite_commit": "6ddf6aff77ec8a74fd78bd999d9c4169046c86b9",
+      "campaign_sha256": "201648747e81e377b2bc305ebcf405751070a116b45f3b09ce4f663d840f5ee0",
+      "live_applied_variant": "UNKNOWN"
+    },
+    {
+      "path": "backend/migrations/2026_05_26_sophia_session_transcripts.sql",
+      "first_introduction_commit": "eab127ffce350dececc082cf7fe0e5a150b8f702",
+      "main_finalization_commit": "7be1f3e97cd6ad07f4a135f966ed3da4eff1be9c",
+      "main_sha256": "3cc134ec56b8902d736be5ef72fae5227b5dcfb49ef24a128a8f85efef021a74",
+      "campaign_rewrite_commit": "6ddf6aff77ec8a74fd78bd999d9c4169046c86b9",
+      "campaign_sha256": "a18e7c0f5bf766236bd56cb38498a36b2a16b4b6f7c337f882c5320eb4d618ce",
+      "live_applied_variant": "UNKNOWN"
+    },
+    {
+      "path": "backend/migrations/2026_06_12_artifact_registry_records.sql",
+      "authoritative_shared_introduction_commit": "28fb5c0c342cf0c27e4d5650d43c7bd03ac418ae",
+      "main_sha256": "103ff8191a288d8b6dfa9e5e0c157bbbfaf97f998adac51cacba3ceadb162783",
+      "campaign_rewrite_commit": "6ddf6aff77ec8a74fd78bd999d9c4169046c86b9",
+      "campaign_sha256": "cd4d8d003e20f44c4f632a22bc74f4be10a70d41d65c9e81b01f906c009b90bf",
+      "live_applied_variant": "UNKNOWN"
+    }
+  ],
+  "campaign_july_rewrites": {
+    "initial_commit": "e6e28aafa5101350057047de5235f8f6bd547a58",
+    "postgresql_17_rewrite_commit": "f54f2c617f764676c9d23dc5383933147fcc68cf",
+    "files": [
+      {
+        "path": "backend/migrations/2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql",
+        "initial_sha256": "d2439af5768f5fb14f174a0e77ea4cc39ba3ed44c6c932f9de08d109debb5162",
+        "current_sha256": "f2fb0817f7d7d6d2b42a63ba135a0e46cf521c68c1a5c2b06af2b2367e611d08",
+        "live_applied_variant": "UNKNOWN"
+      },
+      {
+        "path": "backend/migrations/2026_07_18_sophia_deck_quality_producer_failure_signals.sql",
+        "initial_sha256": "4594e48cbbc12454b1b1d50ce66d0c73aa2b5b1093f3c9e18020802c3e13c556",
+        "current_sha256": "b52191c224d803e3d7d1ceed8b48b8b7857b0c3d148178c8622ae91a6bd81e66",
+        "live_applied_variant": "UNKNOWN"
+      },
+      {
+        "path": "backend/migrations/2026_07_19_sophia_deck_quality_dispatch_intent_fence.sql",
+        "initial_sha256": "955a975c578d755cb655afdfd2437d8bf0eb4246fc48e34fc8bc905a5286f4b5",
+        "current_sha256": "7be71d13814d5c9c9753286aeb840dd1d92b406e936a14a265af1bb5d8d1b761",
+        "live_applied_variant": "UNKNOWN"
+      }
+    ]
+  },
+  "receipt_interpretation": {
+    "terminal_receipt_commit": "ae21c92abdf54d4f33654cf4cf484afe3c8a8b85",
+    "terminal_receipt_bound_initial_july_hashes": true,
+    "terminal_receipt_explicitly_says_no_production_migration": true,
+    "runner_introduction_commit": "6455b2f1752d1c3af8d2ea1f6fc92fae447dd447",
+    "runner_and_diagnostics_imply_operational_investigation": true,
+    "operational_sequence_is_execution_receipt": false,
+    "later_dq2_receipts_prove_historical_functional_downstream_surfaces": true,
+    "later_dq2_receipts_distinguish_input_file_bytes": false
+  },
+  "live_catalog": {
+    "exact_applied_variants_known": 0,
+    "exact_applied_variants_unknown": 6,
+    "database_identity": "UNKNOWN",
+    "server_major_version": "UNKNOWN",
+    "catalog_fingerprint": "UNKNOWN",
+    "provider_migration_history": "UNKNOWN",
+    "backup_status": "UNKNOWN",
+    "pitr_status": "UNKNOWN",
+    "usable_restore_point": "UNKNOWN"
+  },
+  "required_read_only_resolution": [
+    "Verify database identity without publishing coordinates.",
+    "Record server major version and table, column, constraint, index, ACL, owner, default, and routine fingerprints.",
+    "Record provider migration history or a governed execution receipt if one exists.",
+    "Record backup, PITR, and usable restore-point status."
+  ],
+  "forward_policy": "Preserve historical bytes. Any required convergence must use a new forward-only idempotent migration.",
+  "release_gate": "BLOCKED"
+}
