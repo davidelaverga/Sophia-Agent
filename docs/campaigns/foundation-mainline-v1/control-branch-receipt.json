@@ -1,0 +1,22 @@
+{
+  "schema_version": 1,
+  "control_branch": "campaign/fc01-control-v1",
+  "base_commit": "b489ac0be4a3ee3d5acd69e2fd05ba20a1d5bbd7",
+  "evidence_payload_commit": "25ad22ca3b7e42e8510d6169591b8aa6929a1142",
+  "evidence_payload_repository_tree": "83cca87887543faec1678b9ccd509e9b97f7a3e9",
+  "campaign_subtree": "9006c2fc08ae8689702a453ed972693ae82d48d4",
+  "evidence_subtree": "36d13a40ea6e261c0661b2617ae7e5ac4fb4b059",
+  "checksum_manifest_sha256": "b9abb220ceebdc7ab7531f9aaadc71ea4e3710004981129cb1cf12cd654d689b",
+  "offline_evaluator": {
+    "structure": "PASS",
+    "checksums": "PASS",
+    "privacy": "PASS",
+    "terminal_consistency": "PASS",
+    "terminal_state": "BLOCKED",
+    "hard_unknown_value_count": 55
+  },
+  "path_scope": "docs/campaigns/foundation-mainline-v1/**",
+  "product_files_changed": false,
+  "current_control_branch_head": null,
+  "current_head_reason": "The receipt commit cannot contain its own object identity; the pushed remote ref and final handoff record the resulting head."
+}

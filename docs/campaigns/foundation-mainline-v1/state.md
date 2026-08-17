@@ -17,6 +17,14 @@ has unresolved source-valid P1 findings and no exact-head CI.
 The acceptance budget is a draft with no human signatures. No FC-01B or live
 M00 action is authorized.
 
+## Evidence receipt
+
+- Evidence payload commit: `25ad22ca3b7e42e8510d6169591b8aa6929a1142`
+- Evidence checksum-manifest digest:
+  `b9abb220ceebdc7ab7531f9aaadc71ea4e3710004981129cb1cf12cd654d689b`
+- Offline evaluator: structure, checksum, privacy, and terminal consistency
+  `PASS`; campaign state remains `BLOCKED` with 55 explicit hard-unknown values.
+
 ## Safe next decision
 
 Grant read-only authenticated access to the Render, Vercel, and governed
