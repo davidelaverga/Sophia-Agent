@@ -1,0 +1,176 @@
+{
+  "schema_version": 2,
+  "amendment_id": "FC-01-v1.2-AMENDMENT-A",
+  "current_state": "NO_DECISIONS_PRESENT",
+  "execution_authorized": false,
+  "decision_directory_pattern": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-decisions-<YYYYMMDDtHHMMSSz>/",
+  "github_issue_comment_identity": {
+    "only_allowed_method": "GITHUB_ISSUE_COMMENT_V1",
+    "governance_repository": "davidelaverga/Sophia-Agent",
+    "same_governance_issue_required": true,
+    "davide_actor_login": "davidelaverga",
+    "davide_designates_luis_login_and_id": true,
+    "davide_designates_evidence_operator": true,
+    "luis_actor_and_payload_must_match_davide_designation": true,
+    "comment_created_at_must_equal_updated_at": true,
+    "github_created_at_is_authoritative_decision_time": true,
+    "identity_source": "Read-only gh api responses for the exact issue, issue comment, actor, and full issue-comment listing.",
+    "unavailable_or_unverifiable_result": "BLOCKED_IDENTITY_ASSURANCE"
+  },
+  "git_commit_protocol": {
+    "required_branch": "campaign/fc01-control-v1",
+    "clean_worktree_required": true,
+    "seal_main_evaluator_replayed_at_current_clean_descendant": true,
+    "decision_directory_must_be_governed_repo_path": true,
+    "decision_sequence_commits": 3,
+    "first_two_commits": "One additive Davide decision file and one additive Luis decision file, in either order.",
+    "last_decision_sequence_commit": "One additive joint-approval-receipt.json; it must descend from both decision commits and remain an ancestor of current control HEAD.",
+    "later_control_commits": "Permitted only as single-parent, add-only evidence commits outside the governed decision directory; they do not invalidate an otherwise-current approval.",
+    "modification_deletion_rename_merge_or_non_evidence_path_allowed": false
+  },
+  "canonicalization": {
+    "encoding": "UTF-8",
+    "json_object_keys": "lexicographically sorted",
+    "separators": "comma and colon with no surrounding whitespace",
+    "ensure_ascii": false,
+    "trailing_newline": false,
+    "body_rule": "Fetched GitHub comment body must byte-for-byte equal the canonical serialization of canonical_decision_payload."
+  },
+  "immutable_unsigned_payload_binding_keys": [
+    "payload_commit",
+    "payload_parent_commit",
+    "payload_repository_tree",
+    "payload_evidence_subtree",
+    "payload_sha256sums_sha256",
+    "amendment_document_sha256",
+    "blocker_register_sha256",
+    "authorized_scope_sha256",
+    "repair_budget_sha256",
+    "candidate_identity_budget_sha256",
+    "main_evaluator_sha256",
+    "approval_evaluator_sha256",
+    "predecessor_control_head",
+    "frozen_main_commit",
+    "frozen_main_tree",
+    "frozen_campaign_commit",
+    "frozen_campaign_tree"
+  ],
+  "decision_record_exact_fields": [
+    "schema_version",
+    "record_type",
+    "amendment_id",
+    "identity_assurance_method",
+    "github_repository",
+    "github_issue_number",
+    "github_comment_id",
+    "github_comment_node_id",
+    "github_comment_url",
+    "github_actor_login",
+    "github_actor_id",
+    "github_created_at",
+    "github_updated_at",
+    "canonical_decision_payload"
+  ],
+  "canonical_decision_payload_exact_fields": [
+    "schema_version",
+    "record_type",
+    "amendment_id",
+    "approval_scope",
+    "decision_id",
+    "nonce",
+    "approver_display_name",
+    "approver_role",
+    "decision",
+    "governance_repository",
+    "governance_issue_number",
+    "expires_at",
+    "unsigned_payload_bindings",
+    "decision_statement",
+    "designated_luis_github_login",
+    "designated_luis_github_id",
+    "evidence_operator"
+  ],
+  "evidence_operator_exact_fields": [
+    "github_login",
+    "github_id"
+  ],
+  "aggregate_receipt_exact_fields": [
+    "schema_version",
+    "record_type",
+    "amendment_id",
+    "approval_scope",
+    "identity_assurance_method",
+    "github_repository",
+    "governance_issue_number",
+    "seal_receipt_path",
+    "seal_receipt_sha256",
+    "davide_decision_path",
+    "davide_decision_sha256",
+    "luis_decision_path",
+    "luis_decision_sha256",
+    "joint_result",
+    "evaluated_at",
+    "approval_expires_at",
+    "evidence_operator",
+    "unsigned_payload_bindings",
+    "fc01a_r_execution_authorized",
+    "deployment_authorized",
+    "baseline_frozen",
+    "fc01b_started",
+    "m00_started"
+  ],
+  "canonical_revocation_payload_exact_fields": [
+    "schema_version",
+    "record_type",
+    "amendment_id",
+    "decision_id",
+    "decision_comment_id"
+  ],
+  "decision_values": {
+    "schema_version": 1,
+    "record_type": "FC01_AMENDMENT_DECISION_V1",
+    "approval_scope": "FC01A_R_ONLY",
+    "allowed_decisions": [
+      "APPROVE",
+      "REJECT"
+    ],
+    "required_roles": {
+      "Davide": "OPERATIONAL_APPROVER",
+      "Luis": "EXPERIENCE_ACCESSIBILITY_APPROVER"
+    }
+  },
+  "time_contract": {
+    "decision_time_source": "Fetched GitHub comment created_at",
+    "decision_time_must_not_be_future": true,
+    "decision_must_follow_seal": true,
+    "decision_must_be_unexpired_at_evaluation": true,
+    "decision_expires_at_must_not_exceed_repair_budget_expiry": true,
+    "aggregate_evaluated_at_must_follow_both_decisions_and_not_be_future": true,
+    "aggregate_approval_expires_at": "Minimum of both decision expirations and repair-budget expiration."
+  },
+  "revocation_contract": {
+    "scan_scope": "All later comments on the same governance issue by the same fetched GitHub actor login and ID.",
+    "canonical_record_type": "FC01_AMENDMENT_DECISION_REVOCATION_V1",
+    "canonical_payload_uses_exact_fields_above": true,
+    "matching_later_comment_result": "BLOCKED_REVOKED"
+  },
+  "aggregate_effect": {
+    "joint_result_required": "APPROVED",
+    "fc01a_r_execution_authorized": true,
+    "deployment_authorized": false,
+    "baseline_frozen": false,
+    "fc01b_started": false,
+    "m00_started": false,
+    "evidence_operator_must_equal_both_comment_payloads": true
+  },
+  "failure_state_rules": {
+    "missing_or_one_sided": "BLOCKED_AWAITING_JOINT_APPROVAL",
+    "reject": "BLOCKED_REJECTED",
+    "expired_or_budget_expired": "BLOCKED_EXPIRED",
+    "revoked": "BLOCKED_REVOKED",
+    "identity_or_github_access_failure": "BLOCKED_IDENTITY_ASSURANCE",
+    "digest_binding_schema_or_git_drift": "BLOCKED_DIGEST_DRIFT",
+    "execution_under_partial_approval": "PROHIBITED"
+  },
+  "approval_effect": "A valid aggregate changes only Amendment A to AMENDMENT_APPROVED and activates the still-immutable FC-01A-R budget. It does not authorize deployment, database/provider/credential mutation, BASELINE_FROZEN, FC-01B, or M00."
+}

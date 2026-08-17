@@ -1,0 +1,167 @@
+{
+  "schema_version": 2,
+  "amendment_id": "FC-01-v1.2-AMENDMENT-A",
+  "payload_state": "AMENDMENT_DRAFT_PENDING_SEAL",
+  "sealed_request_state": "AMENDMENT_READY_FOR_JOINT_APPROVAL",
+  "current_budget_sha256": "c73686a9ef2448a33e487be547c9cd0367bbd059f5ee440d5104b0c4c760d3db",
+  "current_budget_must_remain_unsigned": true,
+  "current_draft_window_is_authoritative": false,
+  "amendment_execution_authorized": false,
+  "immutable_payload_decision_slots": {
+    "davide_operational": null,
+    "luis_experience_accessibility": null,
+    "rule": "These payload fields remain null forever. Decisions are additive files governed by approval-receipt-schema.json."
+  },
+  "seal_contract": {
+    "two_commit_protocol": true,
+    "payload_parent": "6c2ca09280cd425d431df41040555caadcdde520",
+    "payload_commit_contains": "Only the new Amendment A evidence package and both amendment evaluators.",
+    "seal_commit_contains": "Only one additive seal-receipt.json in its new seal evidence directory; no state pointer or other path.",
+    "seal_binds": [
+      "payload commit and parent",
+      "payload repository tree",
+      "payload evidence subtree",
+      "payload SHA256SUMS SHA-256",
+      "main and approval evaluator SHA-256",
+      "repair budget and candidate-identity budget SHA-256",
+      "path-scope proof and remote branch expectation"
+    ],
+    "receipt_self_binding_prohibited": true,
+    "ready_only_after_git_object_verification": true
+  },
+  "decision_contract": {
+    "schema": "approval-receipt-schema.json",
+    "two_separate_direct_decisions_required": true,
+    "delegated_operator_reported_or_agent_decision_allowed": false,
+    "any_changed_bound_byte_invalidates_both": true,
+    "decisions_bind": "immutable unsigned payload commit/tree/subtree and seal bindings, never the later control-branch head",
+    "required_roles": [
+      {"approver": "Davide", "role": "OPERATIONAL_APPROVER", "decision": null},
+      {"approver": "Luis", "role": "EXPERIENCE_ACCESSIBILITY_APPROVER", "decision": null}
+    ],
+    "partial_reject_expired_revoked_or_drifted_effect": "BLOCKED",
+    "partial_approval_execution_allowed": false,
+    "identity_assurance_method": "GITHUB_ISSUE_COMMENT_V1 only, validated read-only through gh api under approval-receipt-schema.json",
+    "decision_files_must_be_committed_append_only_after_seal": true,
+    "davide_authenticated_payload_designates_luis_actor_and_evidence_operator": true
+  },
+  "decision_identity_and_git_protocol": {
+    "only_identity_method": "GITHUB_ISSUE_COMMENT_V1",
+    "governance_repository": "davidelaverga/Sophia-Agent",
+    "davide_actor_login": "davidelaverga",
+    "same_issue_and_exact_canonical_comment_bodies_required": true,
+    "davide_payload_designates_luis_login_id_and_evidence_operator": true,
+    "github_comment_created_at_must_equal_updated_at": true,
+    "future_decision_time_allowed": false,
+    "decision_expiry_may_exceed_repair_budget_expiry": false,
+    "read_only_gh_api_verification_required": true,
+    "github_access_or_identity_failure": "BLOCKED_IDENTITY_ASSURANCE",
+    "revocation_scan": "Every evaluation refreshes all later comments on the same issue and blocks when the same actor posts the exact canonical revocation payload.",
+    "decision_sequence": [
+      "one additive Davide decision file commit",
+      "one additive Luis decision file commit, with the first two allowed in either order",
+      "one additive joint aggregate commit"
+    ],
+    "later_control_evidence": "Only single-parent add-only evidence commits outside the immutable decision directory; the aggregate remains an ancestor of HEAD.",
+    "modification_deletion_rename_merge_or_uncommitted_decision_allowed": false
+  },
+  "approval_effect": {
+    "authorizes_only": [
+      "Create one repair branch from frozen campaign 9ee901fd.",
+      "Repair and prove all exact two P1 plus eight P2 findings.",
+      "Perform enumerated M00-prerequisite test/fixture/CI repairs.",
+      "Collect confidential read-only secret/provenance/database/provider receipts.",
+      "Run local/container/CI tests with zero billable model/provider calls."
+    ],
+    "does_not_authorize": [
+      "Sign or reuse base00-draft-1",
+      "Production deploy/promotion/restart/rollback/alias or provider setting",
+      "Database DDL/DML/migration/setting/row or object-content access",
+      "Secret rotation, credential issuance, or candidate replay",
+      "Voice participation, call, test repair, or target change",
+      "BASELINE_FROZEN, FC-01B, M00, main merge, PR #144 mutation, or history rewrite"
+    ]
+  },
+  "target_specific_davide_approval": {
+    "required_after_repair_proof_and_before_candidate_deploy": true,
+    "required_bindings": [
+      "exact candidate SHA/tree and allowlist proof",
+      "Gateway/LangGraph service IDs",
+      "conditional Vercel project/build/deployment identity and current rollback when the production-input closure differs",
+      "planned immediate rollback deployment IDs/source SHAs",
+      "frontend production-input closure and observe-only conclusion",
+      "shared HMAC presence/equality result",
+      "candidate-identity-budget.json SHA-256 and exact action/time/rollback/zero-spend ceilings",
+      "ordered forward/mixed-version/rollback plan",
+      "expected user/operational impact",
+      "new target-bound maintenance window",
+      "abort conditions"
+    ],
+    "assigned_deployment_ids": "Appended after provider assignment; mismatch in target/source/order invalidates approval and requires a new decision.",
+    "conditional_luis_target_approval": "Required before Vercel production promotion when Vercel participates; binds exact build/output, headers/layout/accessibility impact, rollback, window, and aborts.",
+    "required_for_other_actions": [
+      "Vercel target change",
+      "any restart or rollback",
+      "provider setting change",
+      "database mutation",
+      "credential rotation",
+      "Voice participation"
+    ]
+  },
+  "post_repair_governance": {
+    "ordered_sequence": [
+      "All ten review findings and every P2/P3 pre-deployment M00-prerequisite test/proof reach PASS.",
+      "Request and receive separate Davide target-specific Gateway/LangGraph deployment approval.",
+      "Activate the separately bound candidate-identity budget; perform at most one ordered LangGraph-signing then one Gateway-enforcing deploy, with conditional Vercel promoted last only after direct Luis target approval; append assigned IDs and zero-DML challenges.",
+      "Prove immediate rollback selectability by provider observation/dry-run order evaluation, every route edge, shared secret contract, Vercel compatibility matrix when applicable, and provider identity; actual rollback occurs only on an approved abort and runs Vercel, Gateway, LangGraph in reverse order.",
+      "Recompute checksum-bound BASE-00 from exact repaired candidate and deployed identities.",
+      "Create fresh M00 proposal and fresh acceptance budget with fresh target-bound window.",
+      "Obtain new direct checksum-bound Davide operational and Luis experience/accessibility decisions.",
+      "Only then may BASELINE_FROZEN be considered under FC-01."
+    ],
+    "amendment_decisions_reusable_as_m00_decisions": false,
+    "base00_draft_budget_reusable": false
+  },
+  "phase_timing_law": {
+    "source": "blocker-reachability.json#/required_before_state_phases",
+    "predeployment_subset_passes_before_target_approval": true,
+    "post_assignment_hmac_route_and_rollback_proofs_occur_after_candidate_ids_exist": true,
+    "all_m00_prerequisites_pass_before_baseline_frozen_or_m00": true,
+    "post_m00_items_remain_blocking_at_original_boundaries": true
+  },
+  "state_machine": {
+    "normal_transitions": [
+      "AMENDMENT_DRAFT_PENDING_SEAL -> AMENDMENT_READY_FOR_JOINT_APPROVAL",
+      "AMENDMENT_READY_FOR_JOINT_APPROVAL -> AMENDMENT_APPROVED",
+      "AMENDMENT_APPROVED -> FC01A_R_READY",
+      "FC01A_R_READY -> FC01A_R_REPAIRING",
+      "FC01A_R_REPAIRING -> FC01A_R_EVIDENCE_PENDING",
+      "FC01A_R_EVIDENCE_PENDING -> FC01A_R_READY_FOR_TARGET_APPROVAL",
+      "FC01A_R_READY_FOR_TARGET_APPROVAL -> TARGET_DEPLOYMENT_APPROVED",
+      "TARGET_DEPLOYMENT_APPROVED -> CANDIDATE_DEPLOYING_ORDERED",
+      "CANDIDATE_DEPLOYING_ORDERED -> CANDIDATE_IDENTITIES_ASSIGNED",
+      "CANDIDATE_IDENTITIES_ASSIGNED -> CANDIDATE_IDENTITIES_REVALIDATED",
+      "CANDIDATE_IDENTITIES_REVALIDATED -> BASE00_RECOMPUTING",
+      "BASE00_RECOMPUTING -> BASELINE_READY_FOR_JOINT_M00_APPROVAL",
+      "BASELINE_READY_FOR_JOINT_M00_APPROVAL -> BASELINE_FROZEN"
+    ],
+    "blocked_from_every_active_state": true,
+    "blocked_triggers": [
+      "rejection, one-sided decision, expiry, revocation, identity-assurance failure, or digest drift",
+      "budget/branch/path/cycle/time/selector overrun",
+      "partial incompatible deployment or rollback failure",
+      "any amendment abort condition"
+    ],
+    "resume_from_blocked_requires_new_valid_authority_and_fresh_evidence": true
+  },
+  "illegal_shortcuts": [
+    "DRAFT_PENDING_SEAL -> APPROVED",
+    "READY_FOR_JOINT_APPROVAL -> FC01A_R_READY",
+    "AMENDMENT_APPROVED -> DEPLOYMENT",
+    "AMENDMENT_APPROVED -> BASELINE_FROZEN",
+    "AMENDMENT_APPROVED -> FC-01B_OR_M00",
+    "REPAIR_PASS -> BASE00 without target approval/deploy/identity refresh",
+    "one direct decision or operator-reported joint statement -> joint approval",
+    "temporal classification or nullable metadata -> PASS"
+  ]
+}

@@ -1,0 +1,503 @@
+{
+  "schema_version": 2,
+  "amendment_id": "FC-01-v1.2-AMENDMENT-A",
+  "source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+  "source_tree": "8c27bc52b2a022d4a0b7c398172195442bccf15e",
+  "classification_values": ["M00_PREREQUISITE", "POST_M00_RELEASE_GATE"],
+  "classification_law": {
+    "no_p0_p1_p2_waiver": true,
+    "classification_changes_severity": false,
+    "classification_marks_pass": false,
+    "unknown_or_conditional_reachability_default": "M00_PREREQUISITE",
+    "post_m00_items_remain_blocking_at_original_boundary": true,
+    "all_ten_review_findings_must_pass_in_fc01a_r": true,
+    "resolved_nullable_metadata_is_not_a_blocker": true
+  },
+  "entry_contract": {
+    "required_fields": [
+      "id", "category", "severity", "class", "status", "original_boundary",
+      "causal_path", "source_anchors", "evidence_refs", "assumptions",
+      "invalidation_triggers", "required_disposition",
+      "source_repair_authorized", "authorized_repair_kind"
+    ],
+    "evidence_ref_format": "RECEIPT_ID#/json/pointer; receipt bytes and digests are bound by predecessor-evidence-index.json",
+    "post_rule": "A POST_M00_RELEASE_GATE entry names its original later boundary and escalates to M00_PREREQUISITE if an assumption or exclusion proof fails."
+  },
+  "summary": {
+    "blocker_entries": 70,
+    "m00_prerequisite_entries": 37,
+    "post_m00_release_gate_entries": 33,
+    "review_findings": 10,
+    "review_p1": 2,
+    "review_p2": 8,
+    "predecessor_hard_unknown_fields": 16,
+    "resolved_nullable_predecessor_unknowns": 5,
+    "resolved_by_decomposition_predecessor_unknowns": 1,
+    "retained_predecessor_unknown_blockers": 10,
+    "new_route_or_lifecycle_blockers": 4,
+    "release_critical_logical_tests_not_run": 91,
+    "m00_logical_tests_not_run": 71,
+    "post_m00_logical_tests_not_run": 20,
+    "tracked_records": 165,
+    "known_render_image_reachable_records": 15,
+    "vercel_outside_root_reachability_unknown_records": 150,
+    "repository_only_records_proved": 0,
+    "unresolved_secret_records": 10,
+    "unresolved_secret_strings": 3,
+    "confirmed_live_secrets": 0,
+    "waivers": 0
+  },
+  "resolved_predecessor_items": [
+    {
+      "id": "UNK-GATEWAY-IMAGE",
+      "status": "RESOLVED_NULLABLE",
+    "basis": "provider-nullability.json#/resolved_nullable_fields/0"
+    },
+    {
+      "id": "UNK-LANGGRAPH-IMAGE",
+      "status": "RESOLVED_NULLABLE",
+    "basis": "provider-nullability.json#/resolved_nullable_fields/2"
+    },
+    {
+      "id": "UNK-VOICE-IMAGE",
+      "status": "RESOLVED_NULLABLE",
+    "basis": "provider-nullability.json#/resolved_nullable_fields/5"
+    },
+    {
+      "id": "UNK-VERCEL-RETENTION-DURATION",
+      "status": "RESOLVED_NULLABLE",
+    "basis": "provider-nullability.json#/resolved_nullable_fields/11"
+    },
+    {
+      "id": "UNK-VERCEL-BUILD-IMAGE",
+      "status": "RESOLVED_NULLABLE",
+    "basis": "provider-nullability.json#/resolved_nullable_fields/8"
+    },
+    {
+      "id": "UNK-RELEASE-CRITICAL-SKIPS",
+      "status": "RESOLVED_BY_DECOMPOSITION",
+      "basis": "test-plan.json#/logical_skip_accounting",
+      "not_a_pass": true,
+      "replacement_ids": ["TEST-SKIP-POSTGRES-49", "TEST-SKIP-ROOT-LINUX-14", "TEST-SKIP-PYTHON-CHROMIUM-8", "TEST-SKIP-NODE-PDF-1", "TEST-SKIP-LIVE-CLIENT-19"]
+    }
+  ],
+  "blockers": [
+    {
+      "id": "REV-P1-BUILDER-EVENT-AUTH", "category": "REVIEW", "severity": "P1", "class": "M00_PREREQUISITE", "status": "FAIL", "original_boundary": "G0_ZERO_P1",
+      "causal_path": "Every M00 Builder terminal delivery reaches the Gateway internal receiver, which parses and persists terminal/artifact/canvas/channel/wakeup effects without request authentication.",
+      "source_anchors": ["backend/packages/harness/deerflow/sophia/builder_event_auth.py:1-10", "backend/app/gateway/routers/builder_events.py:833-902", "backend/packages/harness/deerflow/sophia/builder_events.py:1555-1658"],
+      "evidence_refs": ["ACCESS_REVIEW#/actionable_threads"], "assumptions": ["M00 uses the Builder terminal callback"], "invalidation_triggers": ["terminal delivery route changes or bypasses the receiver"],
+      "required_disposition": "Exact-body HMAC before parsing/side effects, freshness and nonce replay defense, fail-closed config, and zero-side-effect invalid/stale/replay tests.",
+      "source_repair_authorized": true, "authorized_repair_kind": "PRODUCT_REVIEW_FINDING", "fc01ar_repair_required": true
+    },
+    {
+      "id": "REV-P1-COMPOSE-LANGGRAPH-TARGET", "category": "REVIEW", "severity": "P1", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "G0_ZERO_P1_AND_PRODUCTION_EQUIVALENCE",
+      "causal_path": "The defect is reachable only in the Docker Compose topology; the frozen M00 provider topology uses separately bound Render services.",
+      "source_anchors": ["docker/docker-compose.yaml:59-86", "config.production.yaml:190-194", "backend/app/gateway/app.py:348-371", "backend/app/gateway/routers/artifacts.py:688-689"],
+      "evidence_refs": ["ACCESS_REVIEW#/actionable_threads"], "assumptions": ["M00 does not use Docker Compose"], "invalidation_triggers": ["Compose is selected for M00 or Render route closure fails"],
+      "required_disposition": "Bind LANGGRAPH_URL=http://langgraph:2024 plus dependency/health and no-localhost proof.",
+      "source_repair_authorized": true, "authorized_repair_kind": "PRODUCT_REVIEW_FINDING", "fc01ar_repair_required": true
+    },
+    {
+      "id": "REV-P2-PARENT-THREAD-MANIFEST", "category": "REVIEW", "severity": "P2", "class": "M00_PREREQUISITE", "status": "FAIL", "original_boundary": "G0_MISSION_P2",
+      "causal_path": "M00 DeckBuildService has parent and child identities, but foundation manifest/object addressing uses the Builder child thread and DQ inherits it.",
+      "source_anchors": ["backend/packages/harness/deerflow/sophia/deck_build/service.py:262-269", "backend/packages/harness/deerflow/sophia/deck_build/foundation.py:45-70", "backend/packages/harness/deerflow/sophia/deck_build/foundation.py:184-205"],
+      "evidence_refs": ["ACCESS_REVIEW#/actionable_threads"], "assumptions": ["M00 requires parent-session ownership continuity"], "invalidation_triggers": ["manifest/storage addressing changes"],
+      "required_disposition": "Use canonical parent session for manifest/storage and preserve Builder task separately with end-to-end proof.",
+      "source_repair_authorized": true, "authorized_repair_kind": "PRODUCT_REVIEW_FINDING", "fc01ar_repair_required": true
+    },
+    {
+      "id": "REV-P2-REGISTRY-IDENTITY", "category": "REVIEW", "severity": "P2", "class": "M00_PREREQUISITE", "status": "FAIL", "original_boundary": "G0_MISSION_P2",
+      "causal_path": "M00 terminal publication updates the artifact registry; equal-priority updates can preserve stale logical/version identity.",
+      "source_anchors": ["backend/app/gateway/artifact_registry.py:665-681", "backend/app/gateway/artifact_registry.py:941-949", "backend/app/gateway/artifact_registry.py:1351-1359"],
+      "evidence_refs": ["ACCESS_REVIEW#/actionable_threads"], "assumptions": ["M00 publishes through the registry"], "invalidation_triggers": ["registry writer or precedence semantics change"],
+      "required_disposition": "Validated CAS/monotonic identity semantics with replay/downgrade rejection and local/Supabase parity.",
+      "source_repair_authorized": true, "authorized_repair_kind": "PRODUCT_REVIEW_FINDING", "fc01ar_repair_required": true
+    },
+    {
+      "id": "REV-P2-INNER-TIMEOUT", "category": "REVIEW", "severity": "P2", "class": "M00_PREREQUISITE", "status": "FAIL", "original_boundary": "G0_MISSION_P2",
+      "causal_path": "A nested model/provider TimeoutError in the M00 Builder can be mislabeled as the outer hard build deadline.",
+      "source_anchors": ["backend/packages/harness/deerflow/agents/sophia_agent/middlewares/build_deadline.py:92-120"],
+      "evidence_refs": ["ACCESS_REVIEW#/actionable_threads"], "assumptions": ["M00 Builder runs under the deadline middleware"], "invalidation_triggers": ["deadline/cancel-scope implementation changes"],
+      "required_disposition": "Differentiate outer cancel-scope expiry from inner TimeoutError and prove both paths without extending the deadline.",
+      "source_repair_authorized": true, "authorized_repair_kind": "PRODUCT_REVIEW_FINDING", "fc01ar_repair_required": true
+    },
+    {
+      "id": "REV-P2-RUNTIME-RUN-ID", "category": "REVIEW", "severity": "P2", "class": "M00_PREREQUISITE", "status": "FAIL", "original_boundary": "G0_MISSION_P2",
+      "causal_path": "M00 durable events may carry stale state run identity while trusted runtime context carries the current run ID.",
+      "source_anchors": ["backend/packages/harness/deerflow/sophia/build_runtime/events.py:161-194", "backend/packages/harness/deerflow/sophia/build_runtime/events.py:215-249"],
+      "evidence_refs": ["ACCESS_REVIEW#/actionable_threads"], "assumptions": ["M00 uses durable runtime events"], "invalidation_triggers": ["runtime identity source or event schema changes"],
+      "required_disposition": "Apply one trusted runtime/state priority, detect mismatch, and prove runtime-only and stale-state cases.",
+      "source_repair_authorized": true, "authorized_repair_kind": "PRODUCT_REVIEW_FINDING", "fc01ar_repair_required": true
+    },
+    {
+      "id": "REV-P2-UNQUOTED-OPACITY", "category": "REVIEW", "severity": "P2", "class": "M00_PREREQUISITE", "status": "FAIL", "original_boundary": "G0_MISSION_P2",
+      "causal_path": "M00 native-deck repair author invokes a quoted-only opacity/lossiness check that unquoted or encoded markup can bypass.",
+      "source_anchors": ["backend/packages/harness/deerflow/sophia/deck_build/compiler_capabilities.py:141-143", "backend/packages/harness/deerflow/sophia/deck_build/compiler_capabilities.py:224-225", "backend/packages/harness/deerflow/sophia/deck_design_lift/repair_author.py:4232-4305"],
+      "evidence_refs": ["ACCESS_REVIEW#/actionable_threads"], "assumptions": ["M00 repair author consumes HTML/native patch input"], "invalidation_triggers": ["repair author or markup parser changes"],
+      "required_disposition": "Parser-based quoted/unquoted/encoded/duplicate/style-block inspection with adversarial proof.",
+      "source_repair_authorized": true, "authorized_repair_kind": "PRODUCT_REVIEW_FINDING", "fc01ar_repair_required": true
+    },
+    {
+      "id": "REV-P2-INTERNAL-ARTIFACT-PATH", "category": "REVIEW", "severity": "P2", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "G3_ARTIFACT_SECURITY",
+      "causal_path": "The bypass requires internal workspace/outputs fallback, list, or signing paths; frozen M00 reviews the published native artifact by registry identity.",
+      "source_anchors": ["backend/app/gateway/routers/artifacts.py:601-607", "backend/app/gateway/routers/artifacts.py:662-683", "backend/app/gateway/routers/artifacts.py:997-1008", "backend/app/gateway/artifact_registry.py:164-189"],
+      "evidence_refs": ["ACCESS_REVIEW#/actionable_threads"], "assumptions": ["M00 does not request internal workspace paths"], "invalidation_triggers": ["M00 artifact review uses fallback/list/signing or a registry record points internal"],
+      "required_disposition": "Canonicalize/reject internal paths before all local/fallback/storage/list/signing routes.",
+      "source_repair_authorized": true, "authorized_repair_kind": "PRODUCT_REVIEW_FINDING", "fc01ar_repair_required": true
+    },
+    {
+      "id": "REV-P2-BLOCKING-JOIN", "category": "REVIEW", "severity": "P2", "class": "M00_PREREQUISITE", "status": "FAIL", "original_boundary": "G0_MISSION_P2",
+      "causal_path": "M00 terminal delivery invokes a producer thread and synchronously joins it on the active event loop before event delivery.",
+      "source_anchors": ["backend/packages/harness/deerflow/sophia/builder_events.py:1504-1552", "backend/packages/harness/deerflow/sophia/builder_events.py:1618-1627"],
+      "evidence_refs": ["ACCESS_REVIEW#/actionable_threads"], "assumptions": ["M00 terminal path invokes producer handling"], "invalidation_triggers": ["producer/delivery boundary changes"],
+      "required_disposition": "Nonblocking async boundary, absolute deadline, terminal ordering, heartbeat, and no-write-after-close proof.",
+      "source_repair_authorized": true, "authorized_repair_kind": "PRODUCT_REVIEW_FINDING", "fc01ar_repair_required": true
+    },
+    {
+      "id": "REV-P2-ARIA-VISIBILITY", "category": "REVIEW", "severity": "P2", "class": "M00_PREREQUISITE", "status": "FAIL", "original_boundary": "G0_MISSION_P2",
+      "causal_path": "M00 native PPTX compilation and report proof treat aria-hidden as visual hiding, undercounting visible content/pixels.",
+      "source_anchors": ["backend/packages/harness/deerflow/sophia/deck_build/service.py:3710-3761", "backend/packages/harness/deerflow/sophia/report_contract.py:334-357"],
+      "evidence_refs": ["ACCESS_REVIEW#/actionable_threads"], "assumptions": ["M00 uses native-deck visual count and report contract"], "invalidation_triggers": ["visibility/report algorithms change"],
+      "required_disposition": "Visual visibility follows rendering semantics; aria-hidden is a separate accessibility result; prove native and report paths.",
+      "source_repair_authorized": true, "authorized_repair_kind": "PRODUCT_REVIEW_FINDING", "fc01ar_repair_required": true
+    },
+
+    {
+      "id": "UNK-DB-GATEWAY-PROJECT", "category": "HARD_UNKNOWN", "severity": "HARD_UNKNOWN", "class": "M00_PREREQUISITE", "status": "UNKNOWN", "original_boundary": "G0_IDENTITY",
+      "causal_path": "Gateway writes M00 session/artifact/terminal/quality state; a project mismatch splits product truth.", "source_anchors": ["render.yaml:141-146", "render.yaml:47-52", "frontend/src/server/better-auth/database.ts:11-24"],
+      "evidence_refs": ["ACCESS_DATABASE#/identity/gateway_expected_project_match", "ACCESS_PROVIDER#/render"], "assumptions": ["all M00 state is intentionally co-resident"], "invalidation_triggers": ["any target/env/project route changes"],
+      "required_disposition": "Confidential equality across Vercel Better Auth, Gateway, LangGraph, authenticated project, and private bucket.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_CONFIDENTIAL_PROOF"
+    },
+    {
+      "id": "UNK-MIGRATION-BYTES", "category": "HARD_UNKNOWN", "severity": "HARD_UNKNOWN", "class": "POST_M00_RELEASE_GATE", "status": "UNKNOWN", "original_boundary": "G2_MIGRATION_CONVERGENCE",
+      "causal_path": "Runtime calls live relations/RPCs and does not read historical migration bytes; exact live contract proof can decouple M00 from historical byte provenance.", "source_anchors": ["backend/migrations/2026_04_25_telegram_user_bindings.sql", "backend/migrations/2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql"],
+      "evidence_refs": ["BASE00_MIGRATIONS#/", "RESUME_MIGRATION_HISTORY#/"], "assumptions": ["exact live M00 catalog/routine contract passes"], "invalidation_triggers": ["live object mismatch or any migration becomes necessary"],
+      "required_disposition": "Recover historical applied-byte provenance before convergence; use only separately approved forward migrations.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "UNK-MIGRATION-CHECKSUMS", "category": "HARD_UNKNOWN", "severity": "HARD_UNKNOWN", "class": "POST_M00_RELEASE_GATE", "status": "UNKNOWN", "original_boundary": "G2_MIGRATION_CONVERGENCE",
+      "causal_path": "Same runtime/live-contract separation as migration bytes; checksum ambiguity is not accepted, only deferred after exact live equivalence.", "source_anchors": ["backend/migrations/2026_07_17_sophia_deck_quality_publication_atomic_convergence.sql", "backend/migrations/2026_07_18_sophia_deck_quality_producer_failure_signals.sql", "backend/migrations/2026_07_19_sophia_deck_quality_dispatch_intent_fence.sql"],
+      "evidence_refs": ["BASE00_MIGRATIONS#/", "RESUME_MIGRATION_HISTORY#/"], "assumptions": ["exact live M00 contract passes"], "invalidation_triggers": ["live mismatch, DDL need, or ledger becomes runtime gating"],
+      "required_disposition": "Reconcile applied checksum ledger before convergence/migration work without relabeling an unproved variant.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "UNK-DQ-SHADOW-RELATION", "category": "HARD_UNKNOWN", "severity": "HARD_UNKNOWN", "class": "M00_PREREQUISITE", "status": "UNKNOWN", "original_boundary": "G0_DATA_CONTRACT",
+      "causal_path": "M00 DQ1/DQ2 directly persists and claims sophia_deck_quality_shadow_runs and called RPCs.", "source_anchors": ["backend/migrations/2026_07_15_sophia_deck_quality_shadow_runs.sql:318", "backend/migrations/2026_07_15_sophia_deck_quality_shadow_runs.sql:722-1930"],
+      "evidence_refs": ["ACCESS_DATABASE#/catalog_probe/sophia_deck_quality_shadow_runs"], "assumptions": ["DQ remains in the M00 envelope"], "invalidation_triggers": ["DQ route/schema changes"],
+      "required_disposition": "Confidential existence/shape/constraints/indexes/exact routine fingerprint; absence or mismatch requires separate DB authority.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_CONFIDENTIAL_PROOF"
+    },
+    {
+      "id": "UNK-DB-ACL", "category": "HARD_UNKNOWN", "severity": "SECURITY", "class": "M00_PREREQUISITE", "status": "UNKNOWN", "original_boundary": "G0_SECURITY",
+      "causal_path": "Every M00 relation/routine is accessed with Better Auth or server credentials; an effective untrusted grant can expose cross-user state.", "source_anchors": ["backend/migrations/2026_07_13_sophia_auth_and_storage_convergence.sql", "backend/migrations/2026_07_15_sophia_deck_quality_shadow_runs.sql", "backend/migrations/2026_07_20_sophia_build_mutation_transactions.sql"],
+      "evidence_refs": ["ACCESS_DATABASE#/catalog_probe/acl_state", "ACCESS_DATABASE#/security_posture"], "assumptions": ["confidential metadata can be read without rows"], "invalidation_triggers": ["role/schema/object/policy/provider changes"],
+      "required_disposition": "Exact 17-relation, 51-routine, role, schema, trigger, advisor, PostgREST, and storage contract in confidential-disposition-index.json.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_CONFIDENTIAL_PROOF"
+    },
+    {
+      "id": "UNK-DB-SSL", "category": "HARD_UNKNOWN", "severity": "SECURITY", "class": "POST_M00_RELEASE_GATE", "status": "UNKNOWN", "original_boundary": "G5_RELEASE_SECURITY",
+      "causal_path": "M00 uses Supabase HTTPS APIs and no direct SQL connection in the run; provider SSL-enforcement setting is outside the causal route.", "source_anchors": ["render.yaml:47-52", "render.yaml:141-146"],
+      "evidence_refs": ["ACCESS_DATABASE#/security_posture/ssl_enforcement"], "assumptions": ["all M00 calls use verified HTTPS and no direct SQL"], "invalidation_triggers": ["direct SQL or unverifiable TLS route enters M00"],
+      "required_disposition": "Authenticated SSL-enforcement proof before broad release.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_PROOF"
+    },
+    {
+      "id": "UNK-SQL-DRAFT-PROVENANCE", "category": "HARD_UNKNOWN", "severity": "EVIDENCE", "class": "POST_M00_RELEASE_GATE", "status": "UNKNOWN", "original_boundary": "G2_DATABASE_EVIDENCE",
+      "causal_path": "Private SQL-editor draft metadata is not runtime-reachable; prior receipt observed syntax error and no DDL/DML execution.", "source_anchors": [],
+      "evidence_refs": ["ACCESS_DATABASE#/query_effects/draft_count_or_prior_provenance"], "assumptions": ["no statement executed"], "invalidation_triggers": ["execution evidence or database effect appears"],
+      "required_disposition": "Reconcile private draft provenance without deletion; this field is not nullable by schema.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_CONFIDENTIAL_PROOF"
+    },
+    {
+      "id": "UNK-LANGGRAPH-CHECKPOINTER", "category": "HARD_UNKNOWN", "severity": "RELIABILITY", "class": "POST_M00_RELEASE_GATE", "status": "UNKNOWN_STRONG_INMEMORY_INFERENCE", "original_boundary": "M01_DURABILITY",
+      "causal_path": "A single bounded M00 attempt can run without a restart; source/config infer InMemorySaver, so any disconnect/restart aborts and no durability claim is made.", "source_anchors": ["backend/langgraph.json", "backend/packages/harness/deerflow/agents/checkpointer/async_provider.py:106-115", "config.production.yaml"],
+      "evidence_refs": ["ACCESS_PROVIDER#/render/langgraph/checkpointer"], "assumptions": ["one process-continuous attempt and zero restart/disconnect"], "invalidation_triggers": ["restart, disconnect, resume requirement, or multi-attempt state reuse"],
+      "required_disposition": "M01 must prove live durable checkpointer behavior; M00 aborts on continuity loss.", "source_repair_authorized": false, "authorized_repair_kind": "NONE_M01_OWNED"
+    },
+    {
+      "id": "UNK-GATEWAY-PROJECT-ROUTING", "category": "HARD_UNKNOWN", "severity": "HARD_UNKNOWN", "class": "M00_PREREQUISITE", "status": "UNKNOWN", "original_boundary": "G0_ROUTE_IDENTITY",
+      "causal_path": "Provider route identity for Gateway-to-database duplicates the underlying project-equality fact but remains a separate predecessor field.", "source_anchors": ["render.yaml:141-146"],
+      "evidence_refs": ["ACCESS_PROVIDER#/render/routing/gateway_expected_database_project_matches_authenticated_project"], "assumptions": ["same evidence closes this and UNK-DB-GATEWAY-PROJECT"], "invalidation_triggers": ["Gateway route/env changes"],
+      "required_disposition": "One confidential equality receipt closes both predecessor paths without exposing coordinates.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_CONFIDENTIAL_PROOF", "alias_fact": "UNK-DB-GATEWAY-PROJECT"
+    },
+    {
+      "id": "UNK-VOICE-ROLLBACK", "category": "HARD_UNKNOWN", "severity": "HARD_UNKNOWN", "class": "POST_M00_RELEASE_GATE", "status": "UNKNOWN", "original_boundary": "VOICE_INCLUSIVE_RELEASE",
+      "causal_path": "Voice is not in the jointly narrowed text M00 execution set only when auth routing and browser/Gateway egress prove zero Voice-origin calls.", "source_anchors": ["backend/app/gateway/auth.py:66-90", "backend/app/gateway/routers/voice.py:1116-1130", "frontend/src/app/hooks/useStreamVoiceSession.ts:1739-1750"],
+      "evidence_refs": ["ACCESS_PROVIDER#/render/voice", "RESUME_DEPLOYMENT_HISTORY#/current/render_voice"], "assumptions": ["all Voice exclusion predicates pass"], "invalidation_triggers": ["any Voice/auth-fallback/Gemini request or Voice target mutation"],
+      "required_disposition": "Exact aligned Voice source/deploy/rollback/selectability before Voice-inclusive execution.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "ROUTE-M00-CLOSURE", "category": "NEWLY_EXPOSED_HARD_UNKNOWN", "severity": "HARD_UNKNOWN", "class": "M00_PREREQUISITE", "status": "NOT_PROVED", "original_boundary": "G0_ROUTE_IDENTITY",
+      "causal_path": "M00 depends on eight directed edges across Vercel, Gateway, LangGraph, Supabase, bucket, auth bridge, and the absence of Voice.", "source_anchors": ["frontend/src/app/api/chat/_lib/config.ts:3-5", "frontend/src/app/api/chat/_lib/backend-client.ts:300-318", "backend/app/gateway/auth.py:66-90", "render.yaml:47-64", "render.yaml:141-169"],
+      "evidence_refs": ["ACCESS_PROVIDER#/render", "ACCESS_DATABASE#/identity"], "assumptions": ["declared routes equal live routes"], "invalidation_triggers": ["any deployment/env/alias/project/route change"],
+      "required_disposition": "Prove every required_route_closure edge in m00-deployment-set.json, the conditional old/new Vercel-Gateway compatibility matrix when Vercel participates, and zero unclassified M00 edge.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_CONFIDENTIAL_PROOF"
+    },
+    {
+      "id": "SECRET-BUILDER-EVENT-HMAC-CONTRACT", "category": "NEWLY_EXPOSED_HARD_UNKNOWN", "severity": "SECURITY", "class": "M00_PREREQUISITE", "status": "NOT_PROVED", "original_boundary": "G0_SECURITY",
+      "causal_path": "The P1 repair requires the same nonempty signing secret on LangGraph producer and Gateway receiver before strict enforcement.", "source_anchors": ["render.yaml:59-64", "render.yaml:160-169"],
+      "evidence_refs": ["ACCESS_PROVIDER#/render"], "assumptions": ["declared shared key exists and matches live"], "invalidation_triggers": ["absence, mismatch, rotation, or exposure"],
+      "required_disposition": "Confidential presence/equality preflight followed, after both candidate endpoints exist, by the content-free AUTH_CHALLENGE_V1 valid/mutated/stale/replay and zero-side-effect proof. No terminal event, database/storage side effect, value/digest/header/body/nonce in Git, or credential mutation.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_CONFIDENTIAL_PROOF"
+    },
+    {
+      "id": "VERCEL-PRODUCTION-INPUT-CLOSURE", "category": "NEWLY_EXPOSED_HARD_UNKNOWN", "severity": "IDENTITY", "class": "M00_PREREQUISITE", "status": "NOT_PROVED", "original_boundary": "G0_DEPLOYMENT_IDENTITY",
+      "causal_path": "Vercel includes files outside frontend root; subtree equality alone cannot prove the repaired candidate leaves current production inputs byte-identical.", "source_anchors": ["vercel.json", "frontend/vercel.json"],
+      "evidence_refs": ["ACCESS_PROVIDER#/vercel"], "assumptions": ["complete closure can be reconstructed without a deploy"], "invalidation_triggers": ["closure/settings drift or any production input changes"],
+      "required_disposition": "Provider upload manifest plus canonical A-G production-runtime closure/settings/toolchain/trace/output digest, including exact exclusion of all 150 root users records. If changed, Vercel joins the bounded candidate set under direct Davide and Luis target approvals; unavailable proof remains BLOCKED.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_PROOF"
+    },
+    {
+      "id": "CANDIDATE-ROLLBACK-SELECTABILITY", "category": "NEWLY_EXPOSED_HARD_UNKNOWN", "severity": "ROLLBACK", "class": "M00_PREREQUISITE", "status": "NOT_APPLICABLE_UNTIL_CANDIDATE_ASSIGNED", "original_boundary": "G0_ROLLBACK",
+      "causal_path": "After candidate IDs are assigned, current Gateway/LangGraph deployments and, when Vercel participates, current Vercel dpl_Bv2... must be immediately selectable for reverse-ordered rollback before M00.", "source_anchors": [],
+      "evidence_refs": ["ACCESS_PROVIDER#/render", "ACCESS_PROVIDER#/vercel", "RESUME_DEPLOYMENT_HISTORY#/rollback_history"], "assumptions": ["candidate deploy occurs only after target approval"], "invalidation_triggers": ["provider retention, target, deploy, or source drift"],
+      "required_disposition": "Fresh post-candidate selectable_now=true receipt for every participating planned rollback ID with observation time plus a dry-run/order evaluator. This is not an actual rollback canary; rollback may execute only on a separately approved abort.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_PROVIDER_PROOF_AFTER_SEPARATE_DEPLOY_APPROVAL"
+    },
+
+    {
+      "id": "TEST-SKIP-POSTGRES-49", "category": "TEST", "severity": "RELEASE_GATE", "class": "M00_PREREQUISITE", "status": "NOT_RUN", "original_boundary": "G0_M00_DATA_PATH",
+      "causal_path": "49 disposable-Postgres tests cover M00 DQ persistence/claim/lease/publication/producer-failure behavior.", "source_anchors": ["backend/tests/test_deck_quality_shadow_postgres_integration.py", "backend/tests/test_producer_failure_signal_postgres.py"], "evidence_refs": ["ACCESS_SKIPS#/classification", "BASE00_TEST#/suites"], "assumptions": ["M00 DQ path unchanged"], "invalidation_triggers": ["migration or DQ contract changes"], "required_disposition": "Exactly 49 pass, zero skip/fail/error on disposable PG16.", "source_repair_authorized": true, "authorized_repair_kind": "TEST_INFRA_ONLY"
+    },
+    {
+      "id": "TEST-SKIP-ROOT-LINUX-14", "category": "TEST", "severity": "RELEASE_GATE", "class": "M00_PREREQUISITE", "status": "NOT_RUN", "original_boundary": "G0_PRODUCTION_BOUNDARY",
+      "causal_path": "14 tests cover root-Linux subprocess/filesystem/render boundaries used by native deck compilation.", "source_anchors": ["backend/tests/test_process_group.py", "backend/tests/test_sandbox_identity.py", "backend/tests/test_pptx_preview.py"], "evidence_refs": ["ACCESS_SKIPS#/classification", "BASE00_TEST#/suites"], "assumptions": ["Render-equivalent Linux boundaries apply"], "invalidation_triggers": ["runtime image/security model changes"], "required_disposition": "Exactly 14 pass, zero skip/fail/error in pinned ephemeral root-Linux image.", "source_repair_authorized": true, "authorized_repair_kind": "TEST_INFRA_ONLY"
+    },
+    {
+      "id": "TEST-SKIP-PYTHON-CHROMIUM-8", "category": "TEST", "severity": "RELEASE_GATE", "class": "M00_PREREQUISITE", "status": "NOT_RUN", "original_boundary": "G0_NATIVE_DECK_PATH",
+      "causal_path": "Eight Python Playwright tests cover HTML-to-native-patch visibility/semantic extraction used by M00 deck proof.", "source_anchors": ["backend/tests/test_deck_native_service.py", "backend/tests/test_hands_on_deck_sophia_patches.py"], "evidence_refs": ["ACCESS_SKIPS#/classification", "BASE00_TEST#/suites"], "assumptions": ["native patch path remains in M00"], "invalidation_triggers": ["compiler/renderer path changes"], "required_disposition": "Exactly eight pass, zero skip/fail/error with matching Chromium.", "source_repair_authorized": true, "authorized_repair_kind": "TEST_INFRA_ONLY"
+    },
+    {
+      "id": "TEST-SKIP-NODE-PDF-1", "category": "TEST", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "NOT_RUN", "original_boundary": "HTML_REPORT_PDF_RELEASE",
+      "causal_path": "The Node smoke renders HTML report to PDF; frozen M00 produces native PPTX preview/evidence through LibreOffice/Poppler.", "source_anchors": ["backend/tests/test_render_html_to_pdf.py::test_node_smoke_renders_inline_svg_pdf"], "evidence_refs": ["ACCESS_SKIPS#/classification"], "assumptions": ["M00 artifact remains native PPTX"], "invalidation_triggers": ["M00 switches to HTML report PDF"], "required_disposition": "Observe in all-capabilities image; preserve as later blocker on failure and do not repair in A-R.", "source_repair_authorized": false, "authorized_repair_kind": "NONE_READ_ONLY_OBSERVATION"
+    },
+    {
+      "id": "TEST-SKIP-LIVE-CLIENT-19", "category": "TEST", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "NOT_RUN", "original_boundary": "GENERIC_CLIENT_LIVE_RELEASE",
+      "causal_path": "Generic DeerFlowClient chat/bash/ls/write/upload/config/override tests do not exercise authenticated normal-app Companion-to-Builder M00 route.", "source_anchors": ["backend/tests/test_client_live.py:56-333"], "evidence_refs": ["ACCESS_SKIPS#/classification"], "assumptions": ["M00 uses governed normal-app route"], "invalidation_triggers": ["generic client becomes M00 entry"], "required_disposition": "Run at original live-client release boundary under a separately governed provider budget.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-BACKEND-RUFF-3", "category": "TEST", "severity": "RELEASE_GATE", "class": "M00_PREREQUISITE", "status": "FAIL", "original_boundary": "G0_EXACT_CANDIDATE_QUALITY",
+      "causal_path": "Three campaign-only lint violations keep the exact candidate gate red.", "source_anchors": ["backend/packages/harness/deerflow/sophia/deck_build/asset_policy.py:7", "backend/packages/harness/deerflow/sophia/deck_build/html_design_renderer.py:101", "backend/tests/test_deck_image_assets.py:1-8"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["ruff remains prescribed gate"], "invalidation_triggers": ["lint config or touched paths change"], "required_disposition": "Focused and full ruff pass with zero findings; mechanical changes only.", "source_repair_authorized": true, "authorized_repair_kind": "MECHANICAL_SOURCE_AND_TEST_HYGIENE"
+    },
+    {
+      "id": "TEST-BACKEND-DECK-HASH-35", "category": "TEST", "severity": "RELEASE_GATE", "class": "M00_PREREQUISITE", "status": "FAIL", "original_boundary": "G0_M00_DECK_CONTRACT",
+      "causal_path": "M00 deck quality adapter refuses the frozen committed deck-craft skill because source/excerpt hash locks are stale.", "source_anchors": ["backend/tests/test_deck_design_lift_quality_adapter.py", "backend/packages/harness/deerflow/sophia/deck_design_lift/quality_adapter.py", "skills/public/sophia/deck_craft.md"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["frozen skill bytes are authoritative"], "invalidation_triggers": ["skill semantics/bytes change"], "required_disposition": "Bind a semantically equivalent <=4096-byte excerpt and exact hashes; 41/41 pass; skill file unchanged.", "source_repair_authorized": true, "authorized_repair_kind": "TEST_CONTRACT_ONLY"
+    },
+    {
+      "id": "TEST-BACKEND-SMOKE-DIMENSION-5", "category": "TEST", "severity": "RELEASE_GATE", "class": "M00_PREREQUISITE", "status": "FAIL", "original_boundary": "G0_M00_EVIDENCE",
+      "causal_path": "Five committed evidence fixtures exceed the 2048 direct-evidence ceiling used by M00 quality proof.", "source_anchors": ["backend/tests/test_smoke_deck_quality_sol.py", "backend/packages/harness/deerflow/sophia/deck_quality/messages.py:98-184", "backend/packages/harness/deerflow/sophia/deck_quality/snapshot.py:660"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["2048 ceiling is authoritative"], "invalidation_triggers": ["evidence format/cap changes"], "required_disposition": "Regenerate bounded fixture/checksum bytes without increasing cap; 6/6 pass.", "source_repair_authorized": true, "authorized_repair_kind": "TEST_FIXTURE_ONLY"
+    },
+    {
+      "id": "TEST-BACKEND-ORDER-ISOLATION-17", "category": "TEST", "severity": "RELEASE_GATE", "class": "M00_PREREQUISITE", "status": "FAIL_FULL_SUITE_ONLY", "original_boundary": "G0_EXACT_CANDIDATE_QUALITY",
+      "causal_path": "17 shadow-persistence failures appear only after full-suite shared-state contamination; standalone 31/31 does not exonerate the gate.", "source_anchors": ["backend/tests/test_deck_quality_shadow_persistence.py", "backend/tests/conftest.py"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["failure is order-dependent"], "invalidation_triggers": ["suite order/global fixtures change"], "required_disposition": "Standalone 31 pass and two clean full-suite all-capability runs have identical zero-failure counts.", "source_repair_authorized": true, "authorized_repair_kind": "TEST_FIXTURE_ONLY"
+    },
+    {
+      "id": "TEST-FRONTEND-NULL-SAFETY-7", "category": "TEST", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "VOICE_FRONTEND_RELEASE",
+      "causal_path": "Seven failures are voice benchmark snapshot-null handling; Voice is absent from frozen text M00.", "source_anchors": ["frontend/src/app/lib/voice-runtime-metrics.ts:1273-1300", "frontend/src/__tests__/lib/voice-benchmark-analysis.test.ts"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["Voice remains excluded"], "invalidation_triggers": ["Voice metrics enter M00 UI"], "required_disposition": "Repair before Voice-inclusive release.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-FRONTEND-RUNTIME-OWNERSHIP-3", "category": "TEST", "severity": "RELEASE_GATE", "class": "M00_PREREQUISITE", "status": "FAIL", "original_boundary": "G0_NORMAL_APP_ROUTE",
+      "causal_path": "Three static ownership assertions cover the root-to-session text route used by M00.", "source_anchors": ["frontend/src/__tests__/architecture/runtime-ownership-contract.test.ts"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["production runtime topology at 9ee is authoritative"], "invalidation_triggers": ["frontend production path changes"], "required_disposition": "All five file tests pass by test-contract correction only; no production input change.", "source_repair_authorized": true, "authorized_repair_kind": "TEST_CONTRACT_ONLY"
+    },
+    {
+      "id": "TEST-FRONTEND-CSP-2", "category": "TEST", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "VOICE_CSP_RELEASE",
+      "causal_path": "Both red assertions target OpenAI Realtime/Gemini WebSocket origins and are not on the text/native-artifact M00 path.", "source_anchors": ["frontend/src/__tests__/csp-security-headers.test.ts"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["Voice and realtime sockets remain excluded"], "invalidation_triggers": ["M00 opens a realtime/Voice socket"], "required_disposition": "Repair at Voice/CSP release boundary; no A-R source/test change.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-FRONTEND-CHROME-LAYOUT-7", "category": "TEST", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "FRONTEND_UI_RELEASE", "causal_path": "Chrome-fade/layout contract is outside the frozen artifact acceptance path.", "source_anchors": ["frontend/src/__tests__/components/SessionLayoutChromeFade.test.tsx"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["M00 acceptance does not depend on chrome fade"], "invalidation_triggers": ["acceptance flow changes"], "required_disposition": "Repair before frontend release.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-FRONTEND-SETTINGS-4", "category": "TEST", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "FRONTEND_UI_RELEASE", "causal_path": "Settings drawer behavior is not used by frozen M00.", "source_anchors": ["frontend/src/__tests__/components/SettingsDrawer.test.tsx"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["M00 does not change settings"], "invalidation_triggers": ["M00 requires settings mutation"], "required_disposition": "Repair before frontend release.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-FRONTEND-CHROME-HOOK-6", "category": "TEST", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "FRONTEND_UI_RELEASE", "causal_path": "Chrome-fade hook is outside text-to-artifact product truth.", "source_anchors": ["frontend/src/__tests__/hooks/useChromeFade.test.tsx"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["M00 does not depend on fade timing"], "invalidation_triggers": ["acceptance flow changes"], "required_disposition": "Repair before frontend release.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-FRONTEND-RECAP-2", "category": "TEST", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "MEMORY_RECAP_RELEASE", "causal_path": "Recap-memory orbit is outside frozen text Builder/native-PPTX M00.", "source_anchors": ["frontend/src/__tests__/recap/recap-memory-orbit-flow.test.tsx"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["M00 does not invoke recap memory"], "invalidation_triggers": ["recap enters M00"], "required_disposition": "Repair before memory/recap release.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-FRONTEND-PRODUCTION-BUILD", "category": "TEST", "severity": "RELEASE_GATE", "class": "M00_PREREQUISITE", "status": "FAIL_NONHERMETIC_FONT_FETCH", "original_boundary": "G0_CONDITIONAL_VERCEL_CANDIDATE", "causal_path": "Mandatory frontend test-contract/fixture edits enter the authoritative A-G Vercel build-input closure; a new candidate therefore requires exact hermetic production-build proof before any conditional Vercel action.", "source_anchors": ["frontend/src/app/layout.tsx", "frontend/next.config.js", "frontend/tsconfig.json"], "evidence_refs": ["BASE00_TEST#/suites", "ACCESS_PROVIDER#/vercel"], "assumptions": ["no frontend product repair is needed to make the build pass"], "invalidation_triggers": ["build, lock, toolchain, environment-name, header, route, normalized output, or candidate closure drift"], "required_disposition": "Pinned network-denied Vercel-compatible pnpm build PASS with exact lock/toolchain/env-name/route/header/trace/output digests. Failure is BLOCKED; no frontend product repair is authorized by A-R.", "source_repair_authorized": false, "authorized_repair_kind": "PROOF_ONLY_NO_REPAIR"
+    },
+    {
+      "id": "TEST-FRONTEND-CANONICAL-E2E", "category": "TEST", "severity": "RELEASE_GATE", "class": "M00_PREREQUISITE", "status": "NOT_RUN_INFRA", "original_boundary": "G0_NORMAL_APP_CONTRACT", "causal_path": "Two offline browser tests prove authenticated UI/request/poll/terminal/artifact contract without making the later live M00/model call.", "source_anchors": ["frontend/tests/e2e/auth-real-login.spec.ts:16-71", "frontend/tests/e2e/builder-live-status.spec.ts:27-111"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["deterministic route stubs represent the frozen API contract"], "invalidation_triggers": ["API/UI contract changes or any unstubbed external request"], "required_disposition": "Exactly two pass, zero skip/retry/external/Voice request in pinned Chromium.", "source_repair_authorized": true, "authorized_repair_kind": "TEST_FIXTURE_ONLY", "test_count": 2
+    },
+    {
+      "id": "TEST-FRONTEND-SUPPLEMENTAL-MEMORY-E2E", "category": "TEST", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "MEMORY_RELEASE", "causal_path": "Memory highlights are outside M00.", "source_anchors": ["frontend/tests/e2e/memory-highlights.spec.ts"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["memory path excluded"], "invalidation_triggers": ["memory enters M00"], "required_disposition": "Canonical rerun and repair before memory release.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-FRONTEND-LINT-WARNINGS-58", "category": "TEST", "severity": "QUALITY_DEBT", "class": "POST_M00_RELEASE_GATE", "status": "FAIL_UNWAIVED_WARNINGS", "original_boundary": "FRONTEND_RELEASE", "causal_path": "Warnings do not fail current M00 prerequisite lint command, but lack owner/expiry waiver for broad release.", "source_anchors": ["frontend/eslint.config.mjs"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["no new warning in touched path"], "invalidation_triggers": ["A-R introduces warnings"], "required_disposition": "Inventory/owner/expiry or zero warnings before later release; any new touched warning blocks A-R.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-BACKEND-TYPECHECK-NOT-CONFIGURED", "category": "TEST", "severity": "QUALITY_DEBT", "class": "POST_M00_RELEASE_GATE", "status": "NOT_CONFIGURED", "original_boundary": "BACKEND_RELEASE", "causal_path": "No backend typechecker is prescribed by the frozen project; runtime tests and ruff are the M00 gates.", "source_anchors": ["backend/pyproject.toml"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["no new typecheck policy is introduced"], "invalidation_triggers": ["project adds a required typechecker"], "required_disposition": "Adopt/run a governed backend typecheck gate before broad release if required.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-VOICE-MISSING-CREDENTIAL-1", "category": "TEST", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "NOT_RUN", "original_boundary": "VOICE_RELEASE", "causal_path": "Credentialed Gemini test belongs to excluded Voice.", "source_anchors": ["voice/tests"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["Voice excluded"], "invalidation_triggers": ["Voice becomes applicable"], "required_disposition": "Run under separately approved Voice/provider budget.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-VOICE-DEPENDENCY-42", "category": "TEST", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "VOICE_RELEASE", "causal_path": "Unbounded Voice dependency resolution causes 42 failures; Voice is excluded.", "source_anchors": ["voice/requirements.txt", "voice/tests"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["Voice excluded"], "invalidation_triggers": ["Voice becomes applicable"], "required_disposition": "Pin/repair Voice dependency contract before Voice release.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-VOICE-CONTRACT-57", "category": "TEST", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "VOICE_RELEASE", "causal_path": "57 Voice timing/default/adapter contract failures are outside text M00.", "source_anchors": ["voice/tests"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["Voice excluded"], "invalidation_triggers": ["Voice becomes applicable"], "required_disposition": "Repair before Voice release.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-GVIS-62", "category": "TEST", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL_62_OF_62_RUNS", "original_boundary": "VISUAL_EVAL_RELEASE", "causal_path": "Generic provider-matrix G-VIS is not the governed M00 blind rendered judge/artifact proof and has blank provider secrets.", "source_anchors": [".github/workflows/visual-evals.yml"], "evidence_refs": ["BASE00_TEST#/suites"], "assumptions": ["M00 uses its separate signed judge budget"], "invalidation_triggers": ["G-VIS is selected as M00 evidence"], "required_disposition": "Repair and obtain successful governed history before visual-eval release; do not call PASS.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "TEST-EXACT-CANDIDATE-CI", "category": "TEST", "severity": "RELEASE_GATE", "class": "M00_PREREQUISITE", "status": "NOT_RUN", "original_boundary": "G0_EXACT_CANDIDATE", "causal_path": "PR #144 has no checks; repaired candidate needs immutable exact-head M00-prerequisite proof.", "source_anchors": [".github/workflows/fc01a-r-m00-prerequisites.yml"], "evidence_refs": ["ACCESS_REVIEW#/pull_request", "ACCESS_SOURCE#/"], "assumptions": ["one fresh draft PR/check is created after approval"], "invalidation_triggers": ["candidate SHA changes or check is skipped/retried unexpectedly"], "required_disposition": "Exact candidate SHA/tree workflow PASS, zero M00 critical skip/fail/error and scope evaluator PASS.", "source_repair_authorized": true, "authorized_repair_kind": "TEST_INFRA_ONLY"
+    },
+
+    {
+      "id": "DATA-VOICE-DIVERGENCE", "category": "DATA_SECURITY", "severity": "RELEASE_GATE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "VOICE_RELEASE", "causal_path": "Voice deploy is 358 campaign commits behind but has no edge in the frozen text M00 after zero-call proof.", "source_anchors": ["backend/app/gateway/routers/voice.py:1116-1130"], "evidence_refs": ["ACCESS_PROVIDER#/render/voice"], "assumptions": ["Voice exclusion proof passes"], "invalidation_triggers": ["any Voice-origin call"], "required_disposition": "Align source and exact rollback before Voice-inclusive release.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "DATA-DB-CRITICAL-RLS-MAPPING", "category": "DATA_SECURITY", "severity": "SECURITY", "class": "M00_PREREQUISITE", "status": "UNKNOWN_REACHABILITY", "original_boundary": "G0_SECURITY", "causal_path": "At least four critical advisor findings may affect M00 relations; exploitability depends on exact effective ACL/RLS/PostgREST posture.", "source_anchors": ["backend/migrations"], "evidence_refs": ["ACCESS_DATABASE#/security_posture"], "assumptions": ["metadata-only mapping is possible"], "invalidation_triggers": ["advisor/object/role changes"], "required_disposition": "Map every finding; PASS_NONEXPLOITABLE_ACL_ONLY only under the exact confidential contract; exploitable/unmapped blocks.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_CONFIDENTIAL_PROOF"
+    },
+    {
+      "id": "DATA-PITR-DISABLED", "category": "DATA_SECURITY", "severity": "RECOVERY", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "G5_RELEASE_RECOVERY", "causal_path": "A single M00 makes no DDL/settings/migration and uses synthetic scoped data; PITR is not part of request execution.", "source_anchors": [], "evidence_refs": ["ACCESS_DATABASE#/recovery"], "assumptions": ["no database mutation outside normal scoped app writes"], "invalidation_triggers": ["migration/settings/broad data mutation"], "required_disposition": "Separately approved PITR posture before broad release.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "DATA-RESTORE-DRILL-MISSING", "category": "DATA_SECURITY", "severity": "RECOVERY", "class": "POST_M00_RELEASE_GATE", "status": "NOT_RUN", "original_boundary": "G5_RELEASE_RECOVERY", "causal_path": "Restore drill validates recovery, not the one bounded M00 request path.", "source_anchors": [], "evidence_refs": ["ACCESS_DATABASE#/recovery"], "assumptions": ["M00 abort/revert is app-scoped"], "invalidation_triggers": ["destructive/broad data action"], "required_disposition": "Run approved non-production restore drill before release.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "DATA-STORAGE-BACKUP-EXCLUDED", "category": "DATA_SECURITY", "severity": "RECOVERY", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "G5_RELEASE_RECOVERY", "causal_path": "Storage recovery is later durability/release proof; M00 still requires private bucket and exact artifact hashes.", "source_anchors": ["render.yaml"], "evidence_refs": ["ACCESS_DATABASE#/recovery"], "assumptions": ["M00 artifact write is scoped and verified"], "invalidation_triggers": ["artifact recovery becomes required during M00"], "required_disposition": "Establish storage recovery before broad release.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "DATA-NETWORK-ALLOW-ALL", "category": "DATA_SECURITY", "severity": "SECURITY", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "G5_RELEASE_SECURITY", "causal_path": "Provider network allow-list posture is outside the HTTPS application request path when exact ACL/auth contract passes.", "source_anchors": [], "evidence_refs": ["ACCESS_DATABASE#/security_posture"], "assumptions": ["no direct database endpoint exposure is exploitable"], "invalidation_triggers": ["ACL/auth/TLS proof fails or direct SQL enters M00"], "required_disposition": "Separately approved network restriction before release.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "PRIVACY-BACKEND-USERS-15", "category": "PRIVACY", "severity": "PRIVACY", "class": "M00_PREREQUISITE", "status": "UNKNOWN_PROVENANCE", "original_boundary": "G0_PRIVACY", "causal_path": "Fifteen tracked backend/users records enter both Gateway and LangGraph build contexts via COPY backend ./backend.", "source_anchors": ["backend/Dockerfile:29", "backend/Dockerfile.langgraph:66", ".dockerignore"], "evidence_refs": ["BASE00_PRIVACY#/frozen_tree_inventory", "RESUME_PRIVACY_HISTORY#/"], "assumptions": ["declared Docker build contexts apply"], "invalidation_triggers": ["build context or provenance changes"], "required_disposition": "Confidential synthetic/non-personal provenance and no-runtime-read proof; real/unowned content requires separate privacy authority.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_CONFIDENTIAL_PROOF"
+    },
+    {
+      "id": "PRIVACY-ROOT-USERS-150", "category": "PRIVACY", "severity": "PRIVACY", "class": "M00_PREREQUISITE", "status": "UNKNOWN_BUILD_REACHABILITY_AND_PROVENANCE", "original_boundary": "G0_PRIVACY_AND_PRODUCTION_INPUT_CLOSURE", "causal_path": "The 150 root users records are outside the declared Render COPY backend boundary, but Vercel include_files_outside_root=true and the production-runtime closure is not yet proved; conditional reachability therefore defaults to M00 prerequisite.", "source_anchors": ["backend/Dockerfile:29", "backend/Dockerfile.langgraph:66", "vercel.json"], "evidence_refs": ["BASE00_PRIVACY#/frozen_tree_inventory", "RESUME_PRIVACY_HISTORY#/", "ACCESS_PROVIDER#/vercel"], "assumptions": ["a canonical Vercel production-runtime closure can prove all 150 records are excluded"], "invalidation_triggers": ["any record enters the production-runtime closure or real data is confirmed"], "required_disposition": "Prove exact exclusion of all 150 records from every M00 build/runtime closure and confidential synthetic/non-personal provenance; any inclusion or real secret/PII is an immediate P0 and requires separate authority.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_CONFIDENTIAL_PROOF"
+    },
+    {
+      "id": "SECRET-CANDIDATES-10-3", "category": "SECRET", "severity": "POTENTIAL_P0", "class": "M00_PREREQUISITE", "status": "UNRESOLVED", "original_boundary": "G0_SECRET_SAFETY", "causal_path": "Ten historical findings represent three unresolved candidate strings; possible credential issuance is security-significant independent of code path.", "source_anchors": [], "evidence_refs": ["ACCESS_SECRETS#/remaining_owner_validation", "BASE00_PRIVACY#/secret_scanning"], "assumptions": ["confidential owners/inventory can disposition without candidate replay"], "invalidation_triggers": ["confirmed issuance, exposure, or owner uncertainty"], "required_disposition": "All group refs valid, owners prove fabrication/non-issuance, then pinned full-history/all-refs rescan has zero unresolved; otherwise separate rotation/revocation authority.", "source_repair_authorized": false, "authorized_repair_kind": "READ_ONLY_CONFIDENTIAL_PROOF"
+    },
+
+    {
+      "id": "SOURCE-PR144-CONFLICTS-4", "category": "SOURCE", "severity": "CONVERGENCE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "FC01C_MAINLINE_CONVERGENCE", "causal_path": "Four merge conflicts affect later mainline integration; M00 runs an immutable repaired descendant of campaign, not a merge tree.", "source_anchors": [], "evidence_refs": ["BASE00_CONFLICTS#/explicit_conflicts", "ACCESS_SOURCE#/"], "assumptions": ["no main merge before M00"], "invalidation_triggers": ["M00 candidate rebases/merges main"], "required_disposition": "Semantic conflict resolution under FC-01C.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "SOURCE-SILENT-OVERLAPS-10", "category": "SOURCE", "severity": "CONVERGENCE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "FC01C_MAINLINE_CONVERGENCE", "causal_path": "Ten silent overlaps are integration risks, not execution dependencies of the immutable campaign descendant.", "source_anchors": [], "evidence_refs": ["BASE00_CONFLICTS#/silent_overlaps"], "assumptions": ["no integration before M00"], "invalidation_triggers": ["candidate incorporates main"], "required_disposition": "Source/test-backed overlap decisions before convergence.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "SOURCE-PR144-ADMIN-THREADS", "category": "SOURCE", "severity": "CONVERGENCE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "PR144_CONVERGENCE", "causal_path": "267 administratively unresolved threads do not change frozen source semantics; ten actionable source defects are separately mandatory in A-R.", "source_anchors": [], "evidence_refs": ["ACCESS_REVIEW#/thread_counts", "ACCESS_REVIEW#/source_validation"], "assumptions": ["thread state does not drift into new actionable source defect"], "invalidation_triggers": ["new source-valid P0/P1/M00 P2 appears"], "required_disposition": "Reverify and administratively resolve at convergence without broadening A-R.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "SOURCE-MAIN-PROTECTION", "category": "SOURCE", "severity": "GOVERNANCE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "MAIN_PROMOTION", "causal_path": "Main branch protection governs later promotion, not the no-merge M00 candidate lane.", "source_anchors": [], "evidence_refs": ["ACCESS_SOURCE#/"], "assumptions": ["no main promotion before M00"], "invalidation_triggers": ["merge/promotion proposed"], "required_disposition": "Approved merge controls before main promotion.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+    {
+      "id": "SOURCE-DIVERGENCE-73-392", "category": "SOURCE", "severity": "CONVERGENCE", "class": "POST_M00_RELEASE_GATE", "status": "FAIL", "original_boundary": "FC01C_MAINLINE_CONVERGENCE", "causal_path": "73 main-only/392 campaign-only commits describe integration distance; M00 freezes one repaired campaign descendant.", "source_anchors": [], "evidence_refs": ["ACCESS_SOURCE#/", "BASE00_SOURCE#/"], "assumptions": ["source anchors remain frozen"], "invalidation_triggers": ["main/campaign target drift"], "required_disposition": "Recompute topology and integrate only after M00.", "source_repair_authorized": false, "authorized_repair_kind": "NONE"
+    },
+
+    {
+      "id": "GOV-AMENDMENT-JOINT-APPROVAL", "category": "GOVERNANCE", "severity": "GOVERNANCE", "class": "M00_PREREQUISITE", "status": "NOT_APPROVED", "original_boundary": "PRE_FC01A_R", "causal_path": "FC-01 v1.1 gives FC-01A no product-repair authority before G0; the checksum-bound amendment must be directly approved first.", "source_anchors": [], "evidence_refs": ["AUTHORITY_GATE#/", "AUTHORITY_HUMAN#/"], "assumptions": ["seal is valid"], "invalidation_triggers": ["partial/reject/expiry/revocation/digest drift"], "required_disposition": "Two separate direct valid Davide/Luis Amendment A decisions and aggregate receipt.", "source_repair_authorized": false, "authorized_repair_kind": "HUMAN_DECISION"
+    },
+    {
+      "id": "GOV-CURRENT-BUDGET-UNSIGNED", "category": "GOVERNANCE", "severity": "GOVERNANCE", "class": "M00_PREREQUISITE", "status": "DRAFT_UNSIGNED", "original_boundary": "G0_BUDGET", "causal_path": "Existing base00-draft-1 does not bind repaired source/deployments and cannot authorize M00.", "source_anchors": [], "evidence_refs": ["BASE00_BUDGET#/"], "assumptions": ["draft remains unchanged/unsigned"], "invalidation_triggers": ["draft is signed or reused"], "required_disposition": "Keep unsigned; supersede after repaired deployment identity with a fresh checksum-bound M00 budget.", "source_repair_authorized": false, "authorized_repair_kind": "GOVERNANCE_ARTIFACT"
+    },
+    {
+      "id": "GOV-M00-PROPOSAL-STALE", "category": "GOVERNANCE", "severity": "GOVERNANCE", "class": "M00_PREREQUISITE", "status": "BLOCKED", "original_boundary": "G0_PROPOSAL", "causal_path": "Existing proposal predates repair candidate and assigned deployment/rollback identities.", "source_anchors": [], "evidence_refs": ["BASE00_M00_PROPOSAL#/"], "assumptions": ["fresh proposal follows candidate identity refresh"], "invalidation_triggers": ["source/provider/window/prompt identity drifts"], "required_disposition": "Fresh target-bound proposal after ordered deploy and BASE-00 recompute.", "source_repair_authorized": false, "authorized_repair_kind": "GOVERNANCE_ARTIFACT"
+    },
+    {
+      "id": "GOV-BASE00-RECOMPUTE", "category": "GOVERNANCE", "severity": "GOVERNANCE", "class": "M00_PREREQUISITE", "status": "NOT_RUN", "original_boundary": "G0_BASELINE", "causal_path": "Current BASE-00 describes frozen 9ee and predecessor deployments, not future repaired candidate identities.", "source_anchors": [], "evidence_refs": ["AUTHORITY_STATE#/"], "assumptions": ["all A-R repairs/proofs and candidate identity refresh complete"], "invalidation_triggers": ["any bound fact changes"], "required_disposition": "Recompute complete checksum-bound BASE-00 from exact repaired SHA/deployments/routes/rollback/test evidence.", "source_repair_authorized": false, "authorized_repair_kind": "GOVERNANCE_ARTIFACT"
+    },
+    {
+      "id": "GOV-TARGET-SPECIFIC-DEPLOY-APPROVAL", "category": "GOVERNANCE", "severity": "GOVERNANCE", "class": "M00_PREREQUISITE", "status": "NOT_REQUESTED", "original_boundary": "PRE_DEPLOY", "causal_path": "New Gateway/LangGraph provider IDs and, when the Vercel closure differs, the exact Vercel production identity cannot exist until target-specific deployment actions are approved.", "source_anchors": [], "evidence_refs": ["ACCESS_PROVIDER#/render", "ACCESS_PROVIDER#/vercel"], "assumptions": ["A-R repair and predeployment evidence pass first"], "invalidation_triggers": ["target/SHA/order/rollback/window/impact/build/closure changes"], "required_disposition": "Separate Davide approval binds candidate, all participating targets, candidate-identity budget, ordered mixed-version plan, rollback, impact, fresh window, and aborts; conditional Vercel promotion also requires direct Luis experience/accessibility target approval. Then append assigned IDs and revalidate.", "source_repair_authorized": false, "authorized_repair_kind": "TARGET_SPECIFIC_HUMAN_DECISION"
+    },
+    {
+      "id": "GOV-FRESH-M00-JOINT-DECISIONS", "category": "GOVERNANCE", "severity": "GOVERNANCE", "class": "M00_PREREQUISITE", "status": "NOT_REQUESTED", "original_boundary": "PRE_BASELINE_FROZEN", "causal_path": "Amendment approval authorizes repairs only; M00 needs new decisions over recomputed BASE-00, proposal, budget, deployment IDs, rollback, identity, and window.", "source_anchors": [], "evidence_refs": ["BASE00_BUDGET#/", "AUTHORITY_HUMAN#/"], "assumptions": ["fresh artifacts are complete and checksum-bound"], "invalidation_triggers": ["partial/reject/expiry/revocation or any bound drift"], "required_disposition": "New direct Davide operational and Luis experience/accessibility decisions; existing Aug-18 draft window is non-authoritative and must be replaced.", "source_repair_authorized": false, "authorized_repair_kind": "HUMAN_DECISION"
+    }
+  ],
+  "required_before_state_phases": [
+    {
+      "phase": "P0_AMENDMENT_AUTHORITY",
+      "required_before_state": "FC01A_R_READY",
+      "blocker_ids": ["GOV-AMENDMENT-JOINT-APPROVAL"]
+    },
+    {
+      "phase": "P1_FC01A_R_SOURCE_REPAIR",
+      "required_before_state": "FC01A_R_READY_FOR_TARGET_APPROVAL",
+      "blocker_ids": [
+        "REV-P1-BUILDER-EVENT-AUTH",
+        "REV-P1-COMPOSE-LANGGRAPH-TARGET",
+        "REV-P2-PARENT-THREAD-MANIFEST",
+        "REV-P2-REGISTRY-IDENTITY",
+        "REV-P2-INNER-TIMEOUT",
+        "REV-P2-RUNTIME-RUN-ID",
+        "REV-P2-UNQUOTED-OPACITY",
+        "REV-P2-INTERNAL-ARTIFACT-PATH",
+        "REV-P2-BLOCKING-JOIN",
+        "REV-P2-ARIA-VISIBILITY"
+      ]
+    },
+    {
+      "phase": "P2_PREDEPLOY_TEST_AND_CANDIDATE_GATE",
+      "required_before_state": "FC01A_R_READY_FOR_TARGET_APPROVAL",
+      "blocker_ids": [
+        "TEST-SKIP-POSTGRES-49",
+        "TEST-SKIP-ROOT-LINUX-14",
+        "TEST-SKIP-PYTHON-CHROMIUM-8",
+        "TEST-BACKEND-RUFF-3",
+        "TEST-BACKEND-DECK-HASH-35",
+        "TEST-BACKEND-SMOKE-DIMENSION-5",
+        "TEST-BACKEND-ORDER-ISOLATION-17",
+        "TEST-FRONTEND-RUNTIME-OWNERSHIP-3",
+        "TEST-FRONTEND-CANONICAL-E2E",
+        "TEST-FRONTEND-PRODUCTION-BUILD",
+        "TEST-EXACT-CANDIDATE-CI"
+      ]
+    },
+    {
+      "phase": "P3_PRETARGET_CONFIDENTIAL_AND_STATIC_PROOF",
+      "required_before_state": "FC01A_R_READY_FOR_TARGET_APPROVAL",
+      "blocker_ids": [
+        "UNK-DB-GATEWAY-PROJECT",
+        "UNK-DQ-SHADOW-RELATION",
+        "UNK-DB-ACL",
+        "UNK-GATEWAY-PROJECT-ROUTING",
+        "DATA-DB-CRITICAL-RLS-MAPPING",
+        "PRIVACY-BACKEND-USERS-15",
+        "PRIVACY-ROOT-USERS-150",
+        "SECRET-CANDIDATES-10-3",
+        "VERCEL-PRODUCTION-INPUT-CLOSURE"
+      ]
+    },
+    {
+      "phase": "P4_TARGET_ACTION_AUTHORITY",
+      "required_before_state": "TARGET_DEPLOYMENT_APPROVED",
+      "blocker_ids": ["GOV-TARGET-SPECIFIC-DEPLOY-APPROVAL"]
+    },
+    {
+      "phase": "P5_POST_ASSIGNMENT_REVALIDATION",
+      "required_before_state": "CANDIDATE_IDENTITIES_REVALIDATED",
+      "blocker_ids": [
+        "SECRET-BUILDER-EVENT-HMAC-CONTRACT",
+        "ROUTE-M00-CLOSURE",
+        "CANDIDATE-ROLLBACK-SELECTABILITY"
+      ]
+    },
+    {
+      "phase": "P6_BASE00",
+      "required_before_state": "BASELINE_READY_FOR_JOINT_M00_APPROVAL",
+      "blocker_ids": ["GOV-BASE00-RECOMPUTE"]
+    },
+    {
+      "phase": "P7_FRESH_M00_PROPOSAL_AND_BUDGET",
+      "required_before_state": "BASELINE_FROZEN",
+      "blocker_ids": ["GOV-CURRENT-BUDGET-UNSIGNED", "GOV-M00-PROPOSAL-STALE"]
+    },
+    {
+      "phase": "P8_FRESH_M00_AUTHORITY",
+      "required_before_state": "BASELINE_FROZEN",
+      "blocker_ids": ["GOV-FRESH-M00-JOINT-DECISIONS"]
+    }
+  ],
+  "phase_law": {
+    "all_m00_prerequisites_pass_no_later_than": "BASELINE_FROZEN",
+    "all_fc01ar_repair_required_findings_pass_before": "FC01A_R_READY_FOR_TARGET_APPROVAL",
+    "predeployment_subset_only_before_target_approval": true,
+    "post_assignment_identity_proofs_are_not_required_before_the_deploy_that_creates_them": true,
+    "post_items_not_listed_in_required_before_state_phases": "Remain blocking at original_boundary and follow their invalidation/escalation law."
+  },
+  "completeness": {
+    "predecessor_inventory_bound": true,
+    "all_predecessor_blockers_classified_or_explicitly_resolved": true,
+    "all_newly_exposed_route_and_lifecycle_unknowns_classified": true,
+    "unclassified_unknowns_allowed": 0,
+    "evaluation_rule": "The evaluator enforces exact ID sets, all required entry fields, receipt IDs, review counts/classes/required-repair flags, 71/20 skip split, exact phased gates, and resolved predecessor sets."
+  }
+}

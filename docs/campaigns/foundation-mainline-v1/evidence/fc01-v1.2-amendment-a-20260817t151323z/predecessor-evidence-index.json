@@ -1,0 +1,118 @@
+{
+  "schema_version": 1,
+  "amendment_id": "FC-01-v1.2-AMENDMENT-A",
+  "purpose": "Immutable lookup table for every predecessor receipt cited by blocker-reachability.json. JSON pointers in the blocker register are interpreted against these exact bytes.",
+  "source_snapshot": {
+    "commit": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+    "tree": "8c27bc52b2a022d4a0b7c398172195442bccf15e",
+    "path_resolution": "All source_anchors resolve against this commit unless an entry explicitly names another commit."
+  },
+  "receipts": [
+    {
+      "id": "BASE00_TEST",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-20260817t114334z/baseline-test-classification.json",
+      "sha256": "8176276af01fd09a0d5382913650b9e543efe253bb689db32b90dc2017768935"
+    },
+    {
+      "id": "BASE00_CONFLICTS",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-20260817t114334z/conflict-review-inventory.json",
+      "sha256": "a4625ed09f228804bc0a659ae8907dcc3939827451174eb3d42b3b4ff16eab40"
+    },
+    {
+      "id": "BASE00_PRIVACY",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-20260817t114334z/privacy-scan.json",
+      "sha256": "379ffd898537078ca138628d1e3757f052710f567e043557862899afba7832b5"
+    },
+    {
+      "id": "BASE00_MIGRATIONS",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-20260817t114334z/migration-baseline.json",
+      "sha256": "98870a9b014335608a7370a92817cfac7b7e2ea500fce92fe84ce28a9e8042b5"
+    },
+    {
+      "id": "BASE00_PROVIDER",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-20260817t114334z/provider-baseline.json",
+      "sha256": "f857723fea93ff4c2e40fea84c210cc73adb009d0624dfb91c15bad16941ba86"
+    },
+    {
+      "id": "BASE00_SOURCE",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-20260817t114334z/source-lock.json",
+      "sha256": "4f73db916590562d5b1ca1f5e8bca16d36c539723218e0cc772770e9a74a907a"
+    },
+    {
+      "id": "BASE00_BUDGET",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-20260817t114334z/acceptance-budget.json",
+      "sha256": "c73686a9ef2448a33e487be547c9cd0367bbd059f5ee440d5104b0c4c760d3db"
+    },
+    {
+      "id": "BASE00_M00_PROPOSAL",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-20260817t114334z/m00-execution-proposal.json",
+      "sha256": "95663551f1be242ebaed44105fc47011d244938d09ce68496ee5b68c66e2172d"
+    },
+    {
+      "id": "ACCESS_DATABASE",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-access-20260817t135724z/database-control-plane.json",
+      "sha256": "bbb6cb4d82fc773e4a198102bca6588241d5b46b3c09f69b5be3bc3c9ff2da55"
+    },
+    {
+      "id": "ACCESS_PROVIDER",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-access-20260817t135724z/provider-control-plane.json",
+      "sha256": "3a6e53a25fd4e2d54446b98bcf24116379389fae5476a0539b3bb97e9e9f7281"
+    },
+    {
+      "id": "ACCESS_REVIEW",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-access-20260817t135724z/review-disposition.json",
+      "sha256": "e8e3e24f3f9e4ed787bbce2426c3f306c43ddffd02bdb68b77ff48891693f5aa"
+    },
+    {
+      "id": "ACCESS_SECRETS",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-access-20260817t135724z/secret-candidate-delta.json",
+      "sha256": "d7c4e8c2eaecd3954b24fdc641ebfdbcc8fba9470fa6049ddff201a87993a2ba"
+    },
+    {
+      "id": "ACCESS_SKIPS",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-access-20260817t135724z/skip-audit.json",
+      "sha256": "e7adb46945daebffef56c2c06cd91ea79da6dfe3b9840c2140ba74b11c78548d"
+    },
+    {
+      "id": "ACCESS_SOURCE",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-access-20260817t135724z/source-head-revalidation.json",
+      "sha256": "0dacf283ea80ad0aac25c84aa00871c8718b47cb3444b7f341a3a36c84a49724"
+    },
+    {
+      "id": "AUTHORITY_GATE",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-authority-intake-20260817t142327z/gate-assessment.json",
+      "sha256": "8d9481471fa391cfc3b24ecbe0e98f23bd4aa97d8c19a04863267e2b2bd927c3"
+    },
+    {
+      "id": "AUTHORITY_HUMAN",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-authority-intake-20260817t142327z/human-approval-intake.json",
+      "sha256": "4634074baa04e491aea5fcffc3e23de40addff126ded7dd075876cbf3d0590f6"
+    },
+    {
+      "id": "AUTHORITY_RESOLUTION",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-authority-intake-20260817t142327z/authority-resolution.json",
+      "sha256": "d9af6d8102ab4aaa54a02e3e476579fec1fecedc164a828697dfd6df30035127"
+    },
+    {
+      "id": "AUTHORITY_STATE",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-authority-intake-20260817t142327z/state-revalidation.json",
+      "sha256": "ef8a87fa361f1b7d9ddef34301217000866a076871bed7b54077c83826ce81e5"
+    },
+    {
+      "id": "RESUME_DEPLOYMENT_HISTORY",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-resume-20260817t123134z/deployment-history.json",
+      "sha256": "f0d748c6d7d7cb68d035227b01cad012403f275071946a2c852199f3d240c5cf"
+    },
+    {
+      "id": "RESUME_MIGRATION_HISTORY",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-resume-20260817t123134z/migration-history.json",
+      "sha256": "42d63273fab2978ffda90675b4300d35dc6eae315942194a5a83f3b280c33429"
+    },
+    {
+      "id": "RESUME_PRIVACY_HISTORY",
+      "path": "docs/campaigns/foundation-mainline-v1/evidence/base00-resume-20260817t123134z/privacy-history.json",
+      "sha256": "59c24ca1635976440635bd77ec035d6de1d89c5886427d023187af9aefe32871"
+    }
+  ],
+  "completeness_rule": "Every blocker cites at least one receipt ID plus JSON pointer and at least one source anchor or a reason that no source path exists. A receipt byte change invalidates the amendment payload."
+}

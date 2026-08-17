@@ -1,0 +1,20 @@
+{
+  "schema_version": 1,
+  "record_type": "ADDITIVE_AUTHORITY_DIGEST_CORRECTION",
+  "amendment_id": "FC-01-v1.2-AMENDMENT-A",
+  "historical_evidence_mutated": false,
+  "affected_historical_record": "base00-authority-intake-20260817t142327z",
+  "malformed_inherited_value": "ece6b521def1712bcfcec9c74fbed50281e610d312d09aef9dc2017768935",
+  "malformed_value_length": 61,
+  "authoritative_file": "evidence/base00-20260817t114334z/authority-lock.json",
+  "authoritative_file_sha256": "ece6b521def1712bcfcec9c74fbed50281e610d312d09aef9dc67e099dde6c38",
+  "authoritative_digest_length": 64,
+  "verification_basis": [
+    "Direct SHA-256 of the immutable authority-lock.json bytes.",
+    "Matching entry in base00-20260817t114334z/SHA256SUMS."
+  ],
+  "effect": "Amendment A and its evaluators bind the actual 64-hex file digest. The prior self-consistent typo is preserved as historical evidence and is not authority.",
+  "fc01_source_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+  "fc01_source_version": "1.1",
+  "effective_version_after_approval": "1.2"
+}

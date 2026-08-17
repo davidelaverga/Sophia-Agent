@@ -1,0 +1,414 @@
+{
+  "schema_version": 2,
+  "amendment_id": "FC-01-v1.2-AMENDMENT-A",
+  "execution_authorized": false,
+  "database_access_mode": "CONFIDENTIAL_METADATA_ONLY_READ",
+  "database_coordinate_committed": false,
+  "database_access_contract": {
+    "catalog_acl_role_policy_routine_and_bucket_configuration_metadata_allowed": true,
+    "storage_bucket_configuration_row_allowed": true,
+    "application_row_or_user_content_allowed": false,
+    "storage_object_row_or_object_content_allowed": false,
+    "ddl_dml_migration_setting_change_allowed": false,
+    "credential_or_connection_value_in_git_allowed": false
+  },
+  "git_evidence_allowlist": [
+    "opaque confidential receipt ID and receipt SHA-256",
+    "schema/object names already present in source",
+    "canonical metadata/fingerprint digests",
+    "role-class and effective-privilege results",
+    "advisor finding IDs/types/severity and disposition codes",
+    "aggregate counts, booleans, timestamps, and PASS/BLOCKED results"
+  ],
+  "git_evidence_denylist": [
+    "database/project/host/connection coordinates",
+    "credential, secret, token, key, header, signature, or signed body",
+    "secret candidate value, unsalted candidate hash, or credential digest",
+    "row/object content, user identity, personal data, or matched path",
+    "raw provider response, query result, trace, or payload"
+  ],
+  "relation_acl_contract": [
+    {
+      "relation": "public.user",
+      "owner_class": "trusted_better_auth_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": [],
+      "better_auth_app": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "rls": "ACL_ONLY_ALLOWED_WITH_EFFECTIVE_NONEXPOSURE_PROOF"
+    },
+    {
+      "relation": "public.session",
+      "owner_class": "trusted_better_auth_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": [],
+      "better_auth_app": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "rls": "ACL_ONLY_ALLOWED_WITH_EFFECTIVE_NONEXPOSURE_PROOF"
+    },
+    {
+      "relation": "public.account",
+      "owner_class": "trusted_better_auth_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": [],
+      "better_auth_app": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "rls": "ACL_ONLY_ALLOWED_WITH_EFFECTIVE_NONEXPOSURE_PROOF"
+    },
+    {
+      "relation": "public.verification",
+      "owner_class": "trusted_better_auth_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": [],
+      "better_auth_app": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "rls": "ACL_ONLY_ALLOWED_WITH_EFFECTIVE_NONEXPOSURE_PROOF"
+    },
+    {
+      "relation": "public.sophia_sessions",
+      "owner_class": "trusted_app_owner",
+      "public": [], "anon": [], "authenticated": [],
+      "service_role": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "better_auth_app": [],
+      "rls": "ACL_ONLY_ALLOWED_WITH_EFFECTIVE_NONEXPOSURE_PROOF"
+    },
+    {
+      "relation": "public.sophia_session_messages",
+      "owner_class": "trusted_app_owner",
+      "public": [], "anon": [], "authenticated": [],
+      "service_role": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "better_auth_app": [],
+      "rls": "ACL_ONLY_ALLOWED_WITH_EFFECTIVE_NONEXPOSURE_PROOF"
+    },
+    {
+      "relation": "public.artifact_registry_records",
+      "owner_class": "trusted_app_owner",
+      "public": [], "anon": [], "authenticated": [],
+      "service_role": ["SELECT", "INSERT", "UPDATE", "DELETE"],
+      "better_auth_app": [],
+      "rls": "ACL_ONLY_ALLOWED_WITH_EFFECTIVE_NONEXPOSURE_PROOF"
+    },
+    {
+      "relation": "public.sophia_build_manifest_heads",
+      "owner_class": "trusted_app_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": [], "better_auth_app": [],
+      "rls": "OWNER_OR_RPC_ONLY"
+    },
+    {
+      "relation": "public.sophia_build_registry",
+      "owner_class": "trusted_app_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": [], "better_auth_app": [],
+      "rls": "OWNER_OR_RPC_ONLY"
+    },
+    {
+      "relation": "public.sophia_build_operation_events",
+      "owner_class": "trusted_app_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": ["SELECT"], "better_auth_app": [],
+      "rls": "OWNER_OR_RPC_WRITE_SERVICE_READ"
+    },
+    {
+      "relation": "public.sophia_build_acceptance_outbox",
+      "owner_class": "trusted_app_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": [], "better_auth_app": [],
+      "rls": "OWNER_OR_RPC_ONLY"
+    },
+    {
+      "relation": "public.sophia_build_mutation_transactions",
+      "owner_class": "trusted_app_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": [], "better_auth_app": [],
+      "rls": "ENABLED_AND_FORCED_ZERO_POLICIES_OWNER_OR_RPC_ONLY"
+    },
+    {
+      "relation": "public.sophia_deck_quality_shadow_runs",
+      "owner_class": "trusted_app_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": [], "better_auth_app": [],
+      "rls": "OWNER_OR_SCOPED_RPC_ONLY"
+    },
+    {
+      "relation": "public.sophia_deck_quality_shadow_claim_receipts",
+      "owner_class": "trusted_app_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": [], "better_auth_app": [],
+      "rls": "OWNER_OR_SCOPED_RPC_ONLY"
+    },
+    {
+      "relation": "public.sophia_deck_quality_publications",
+      "owner_class": "trusted_app_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": [], "better_auth_app": [],
+      "rls": "OWNER_OR_SCOPED_RPC_ONLY"
+    },
+    {
+      "relation": "public.sophia_deck_quality_publication_claim_receipts",
+      "owner_class": "trusted_app_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": [], "better_auth_app": [],
+      "rls": "OWNER_OR_SCOPED_RPC_ONLY"
+    },
+    {
+      "relation": "public.sophia_deck_quality_producer_failure_signals",
+      "owner_class": "trusted_app_owner",
+      "public": [], "anon": [], "authenticated": [], "service_role": [], "better_auth_app": [],
+      "rls": "ENABLED_AND_FORCED_ZERO_POLICIES_OWNER_OR_THREE_SCOPED_RPCS_ONLY"
+    }
+  ],
+  "routine_inventory": {
+    "active_service_rpc": [
+      "public.sophia_commit_build_manifest(text,text,text,bigint,text,text,text,text,text,text,text,jsonb)",
+      "public.sophia_append_build_event(text,text,text,text,timestamptz,jsonb)",
+      "public.sophia_claim_deck_quality_shadow_runs(text,text,text,integer,integer)",
+      "public.sophia_renew_deck_quality_shadow_lease(text,text,bigint,integer)",
+      "public.sophia_release_deck_quality_shadow_lease(text,text,bigint)",
+      "public.sophia_retry_deck_quality_shadow_run(text,text,bigint,text,text,integer,integer)",
+      "public.sophia_prepare_deck_quality_shadow_failure_trace(text,text,bigint,text,text,text,text,jsonb,text)",
+      "public.sophia_checkpoint_deck_quality_shadow_run(text,text,bigint,text,jsonb,jsonb,jsonb,text,text)",
+      "public.sophia_prepare_deck_quality_shadow_completion(text,text,bigint,text,text[],numeric,jsonb,jsonb,jsonb,jsonb,text)",
+      "public.sophia_complete_deck_quality_shadow_after_trace(text,text,bigint)",
+      "public.sophia_finish_deck_quality_shadow_run(text,text,bigint,text,text,text,text[],numeric,text,text,jsonb,jsonb,jsonb)",
+      "public.sophia_get_deck_quality_shadow_run(text)",
+      "public.sophia_claim_deck_quality_publications(text,text,text,integer,integer)",
+      "public.sophia_renew_deck_quality_publication_lease(text,text,bigint,text,text,integer)",
+      "public.sophia_retry_deck_quality_publication(text,text,bigint,text,text,text,text,integer)",
+      "public.sophia_fail_deck_quality_publication(text,text,bigint,text,text,text,text)",
+      "public.sophia_promote_deck_quality_publication(text,text,bigint,text,text,text,text)",
+      "public.sophia_get_deck_quality_publication(text)",
+      "public.sophia_request_ready_deck_quality_publication(text,text,text,text,text,text,jsonb,text,text,text,text,jsonb,text,text,text,text,text,text,text,text,text,bigint,text,text,integer,timestamptz,integer,timestamptz,text,text)",
+      "public.sophia_record_deck_quality_producer_failure_signal(text,text,text,text,text,text,text,text,text)",
+      "public.sophia_get_deck_quality_producer_failure_readiness()",
+      "public.sophia_resolve_deck_quality_producer_failure_signal(text,text,text,text)",
+      "public.sophia_begin_deck_quality_shadow_dispatch(text,text,bigint,text)",
+      "public.sophia_resolve_deck_quality_shadow_dispatch(text,text,text)",
+      "public.sophia_list_unresolved_deck_quality_shadow_dispatches(integer)",
+      "public.sophia_create_build_mutation_transaction(text,jsonb)",
+      "public.sophia_get_build_mutation_transaction(text,text)",
+      "public.sophia_get_build_mutation_transaction_by_operation(text,text,text)",
+      "public.sophia_acquire_build_mutation_lease(text,text,text,integer)",
+      "public.sophia_renew_build_mutation_lease(text,text,text,timestamptz,integer)",
+      "public.sophia_transition_build_mutation_transaction(text,text,text,text,text,jsonb)",
+      "public.sophia_recover_build_mutation_transactions(text,text,text,integer,integer)",
+      "public.sophia_get_build_manifest_head(text,text)",
+      "public.sophia_commit_build_mutation_manifest(text,text,text,timestamptz,text,text,text,text,text,text,text,text,jsonb)",
+      "public.sophia_recover_expired_deck_quality_shadow_runs(integer)"
+    ],
+    "retained_owner_only_legacy": [
+      "public.sophia_request_deck_quality_shadow_run(text,text,text,text,text,text,jsonb,text,text,text,text,jsonb,text,text,text,text,text,text,text,text,text,bigint,text,text,text,integer,timestamptz)",
+      "public.sophia_request_deck_quality_publication(text,text,text,text,text,text,jsonb,text,text,text,text,jsonb,text,text,text,text,text,text,text,text,text,bigint,text,text,integer,timestamptz,integer,timestamptz)",
+      "public.sophia_commit_deck_quality_publication_inputs(text,text,text)"
+    ],
+    "constraint_helper_owner_only": [
+      "public.sophia_deck_quality_safe_metrics_valid(jsonb)",
+      "public.sophia_deck_quality_hash_map_valid(jsonb)",
+      "public.sophia_deck_quality_version_map_valid(jsonb)",
+      "public.sophia_deck_quality_stage_hashes_valid(jsonb)",
+      "public.sophia_deck_quality_trace_ids_valid(jsonb)",
+      "public.sophia_deck_quality_codes_valid(text[])",
+      "public.sophia_deck_quality_safe_path_segment(text,text)",
+      "public.sophia_deck_quality_safe_trace_root_valid(jsonb,text)",
+      "public.sophia_deck_quality_claim_ids_valid(text[])",
+      "public.sophia_deck_quality_publication_manifest_path(text,text,text,text)",
+      "public.sophia_deck_quality_publication_source_path_valid(text,text,text,text,text,text)",
+      "public.sophia_deck_quality_publication_artifact_path_valid(text,text,text)",
+      "public.sophia_deck_quality_publication_claim_ids_valid(text[])"
+    ]
+  },
+  "routine_posture": {
+    "ACTIVE_SERVICE_RPC": {
+      "public_execute": false,
+      "anon_execute": false,
+      "authenticated_execute": false,
+      "service_role_execute": true,
+      "trusted_owner_required": true,
+      "security_definer_required": true,
+      "fixed_safe_search_path_required": true
+    },
+    "RETAINED_OWNER_ONLY_LEGACY": {
+      "public_execute": false,
+      "anon_execute": false,
+      "authenticated_execute": false,
+      "service_role_execute": false,
+      "code_call_allowed": false,
+      "obsolete_overload_allowed": false
+    },
+    "CONSTRAINT_HELPER_OWNER_ONLY": {
+      "public_execute": false,
+      "anon_execute": false,
+      "authenticated_execute": false,
+      "service_role_execute": false,
+      "untrusted_direct_call_allowed": false,
+      "obsolete_overload_allowed": false
+    }
+  },
+  "required_relation_receipt_fields": [
+    "existence and canonical schema/table identity",
+    "owner and owner trust class",
+    "relacl plus effective has_table_privilege for PUBLIC/anon/authenticated/service_role/better_auth_app",
+    "relrowsecurity and relforcerowsecurity",
+    "all policies and roles",
+    "PostgREST role/schema exposure",
+    "columns/types/default classes/nullability/constraints/indexes",
+    "trigger definitions or canonical absence digest",
+    "canonical metadata digest and disposition"
+  ],
+  "required_routine_receipt_fields": [
+    "exact regprocedure signature and classification",
+    "owner and trusted-owner result",
+    "pg_get_functiondef canonical digest",
+    "prosecdef, provolatile, proparallel, proisstrict, proleakproof, and proconfig",
+    "fixed safe search_path",
+    "effective EXECUTE for PUBLIC/anon/authenticated/service_role/better_auth_app",
+    "schema ACL including effective CREATE on public",
+    "obsolete-overload absence",
+    "canonical metadata digest and disposition"
+  ],
+  "role_contract": {
+    "better_auth_app": {
+      "login": true,
+      "superuser": false,
+      "bypassrls": false,
+      "createrole": false,
+      "unexpected_memberships": [],
+      "vercel_better_auth_uses_this_role": true
+    },
+    "service_role": {
+      "server_only": true,
+      "browser_exposed": false,
+      "direct_privileges_exactly_match_relation_contract": true
+    },
+    "trusted_owner_roles": {
+      "superuser_or_bypass_capability_if_any_must_be_named_confidentially": true,
+      "untrusted_membership_or_inheritance_allowed": false
+    },
+    "public_schema": {
+      "untrusted_create_allowed": false,
+      "security_definer_name_resolution_safe": true
+    }
+  },
+  "advisor_disposition_law": {
+    "every_finding_mapped_by_immutable_id_type_object_and_severity": true,
+    "finding_may_remain_visible": true,
+    "automatic_fail_merely_because_rls_disabled": false,
+    "allowed_nonfailure_status": "PASS_NONEXPLOITABLE_ACL_ONLY",
+    "allowed_nonfailure_requires": [
+      "exact relacl and effective has_table_privilege denial for PUBLIC/anon/authenticated",
+      "PostgREST role/schema non-exposure",
+      "owner/role attribute and membership proof",
+      "Better Auth connects only as better_auth_app",
+      "service_role remains server-only",
+      "no exploitable routine/schema/trigger path"
+    ],
+    "fail_when": [
+      "PUBLIC, anon, or authenticated receives effective access",
+      "finding is exploitable or elevates privilege",
+      "finding is unmapped, stale, or cannot be dispositioned",
+      "service credential is browser-visible",
+      "unexpected routine EXECUTE, schema CREATE, policy, trigger, owner, or membership exists"
+    ]
+  },
+  "storage_inventory": [
+    {
+      "bucket": "sophia-builder-artifacts",
+      "configuration_metadata_read_allowed": true,
+      "object_row_or_content_read_allowed": false,
+      "required_public": false,
+      "required_policy": "storage.objects policies are scoped to this bucket and service_role only; no PUBLIC/anon/authenticated broad policy.",
+      "required_evidence": [
+        "bucket configuration digest",
+        "public=false",
+        "policy definition digests and effective role checks",
+        "zero object-row/content access"
+      ]
+    }
+  ],
+  "secret_acceptance": {
+    "current_summary": {
+      "records": 10,
+      "strings": 3,
+      "confirmed_live": 0,
+      "state": "BLOCKED_UNRESOLVED"
+    },
+    "acceptance_threshold": {
+      "unresolved_records_max": 0,
+      "unresolved_strings_max": 0,
+      "confirmed_live_max": 0
+    },
+    "pinned_scanner": "gitleaks 8.29.1",
+    "scan_scope": "full-history all-refs with 100-percent redaction",
+    "global_rule_suppression_authorized": false,
+    "candidate_value_provider_replay_authorized": false,
+    "rotation_or_revocation_authorized_by_amendment": false,
+    "acceptance_requires": "All confidential refs present and valid, every group disposition PASS, and a pinned rescan with zero unresolved candidates.",
+    "confirmed_or_unprovable_action": "BLOCKED and request separate credential rotation/revocation authority plus history-remediation plan"
+  },
+  "git_safe_confidential_reference_schema": {
+    "required_fields": [
+      "opaque_receipt_id",
+      "receipt_sha256",
+      "evidence_system_class",
+      "created_at",
+      "expires_at",
+      "audience_roles",
+      "retention_class",
+      "owner_role",
+      "result"
+    ],
+    "forbidden_fields": [
+      "candidate_value",
+      "candidate_hash",
+      "credential_digest",
+      "provider_coordinate",
+      "raw_header",
+      "signature",
+      "payload"
+    ]
+  },
+  "secret_candidate_dispositions": [
+    {
+      "group_id": "SECRET-GROUP-TEST-NETWORK-CAPABLE",
+      "records": 2,
+      "distinct_strings": 1,
+      "current_state": "UNRESOLVED",
+      "blocking": true,
+      "required_attestor_roles": ["named_test_owner", "credential_owner"],
+      "required_proof": "Deterministic non-production origin plus authoritative issuance/inventory/rotation history proving non-issuance, without provider replay.",
+      "confidential_receipt_ref": null
+    },
+    {
+      "group_id": "SECRET-GROUP-HISTORICAL-DOCUMENT",
+      "records": 6,
+      "distinct_strings": 1,
+      "current_state": "UNRESOLVED",
+      "blocking": true,
+      "required_attestor_roles": ["named_document_author", "credential_owner"],
+      "required_proof": "Fabrication provenance plus authoritative inventory/rotation coverage from first appearance.",
+      "confidential_receipt_ref": null
+    },
+    {
+      "group_id": "SECRET-GROUP-CREDENTIAL-LABELLED-TEST",
+      "records": 2,
+      "distinct_strings": 1,
+      "current_state": "UNRESOLVED",
+      "blocking": true,
+      "required_attestor_roles": ["named_test_or_service_owner", "credential_owner"],
+      "required_proof": "Fixture issuer/seed provenance and authoritative proof that no live auth system issued or accepted it, without provider replay.",
+      "confidential_receipt_ref": null
+    }
+  ],
+  "tracked_record_dispositions": [
+    {
+      "group_id": "TRACKED-BACKEND-USERS",
+      "count": 15,
+      "class": "M00_PREREQUISITE",
+      "current_state": "UNKNOWN_PROVENANCE",
+      "runtime_reachability": "Copied into Gateway and LangGraph images by COPY backend ./backend.",
+      "required_proof": "Named owner and confidential provenance prove synthetic/non-personal content and no runtime read; Git records only aggregate result/digest.",
+      "confidential_receipt_ref": null
+    },
+  {
+    "group_id": "TRACKED-ROOT-USERS",
+    "count": 150,
+    "class": "M00_PREREQUISITE",
+    "current_state": "UNKNOWN_BUILD_REACHABILITY_AND_PROVENANCE",
+    "runtime_reachability": "Not copied by declared Gateway/LangGraph Dockerfiles, but Vercel include_files_outside_root=true and the source-bundle/production-runtime closure is not proved.",
+    "required_proof": "Provider source-bundle manifest and the canonical A-G production-runtime closure both exclude every record; a named owner confidentially proves synthetic/non-personal provenance. Any inclusion or real secret/personal record is an immediate P0 stop.",
+    "confidential_receipt_ref": null
+  }
+  ],
+  "database_abort_conditions": [
+    "Any relation/routine/signature/definition/constraint/index/trigger mismatch or missing object.",
+    "Any unexpected effective PUBLIC/anon/authenticated/service-role/better-auth privilege.",
+    "Any unsafe SECURITY DEFINER search path, untrusted schema CREATE, obsolete overload, owner, role attribute, or membership.",
+    "Any advisor finding that is exploitable, exposes/elevates an untrusted role, or cannot be mapped and dispositioned.",
+    "Any bucket public flag/policy mismatch or need to read object/application rows or content.",
+    "Any participating project mismatch or browser-visible server credential.",
+    "Any need for DDL, DML, migration, settings, or credential/provider mutation."
+  ]
+}

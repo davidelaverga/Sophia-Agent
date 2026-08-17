@@ -1,0 +1,195 @@
+{
+  "schema_version": 2,
+  "amendment_id": "FC-01-v1.2-AMENDMENT-A",
+  "base_spec_version": "1.1",
+  "effective_spec_version_after_approval": "1.2",
+  "fc01_schema_authority": "Checksum-bound FC-01 v1.1 section 7.2 permits build_or_image_digest, boot_or_connection_epoch, and durable_store_kind to be JSON null with a field-specific reason. Amendment A preserves that schema and makes the collection-state rule explicit.",
+  "availability_status_values": [
+    "OBSERVED_VALUE",
+    "PROVIDER_NOT_EXPOSED",
+    "NOT_APPLICABLE",
+    "NOT_COLLECTED",
+    "ACCESS_FAILED"
+  ],
+  "null_allowed_statuses": [
+    "PROVIDER_NOT_EXPOSED",
+    "NOT_APPLICABLE"
+  ],
+  "hard_unknown_statuses": [
+    "NOT_COLLECTED",
+    "ACCESS_FAILED"
+  ],
+  "field_law": {
+    "json_null_required_when_unavailable": true,
+    "string_unknown_prohibited": true,
+    "reason_basis_and_observed_at_required": true,
+    "provider_not_exposed_requires_authenticated_observation": true,
+    "not_applicable_requires_semantic_nonapplicability": true,
+    "nullable_metadata_is_not_a_blocker": true,
+    "nullable_metadata_may_not_replace_a_hard_identity": true
+  },
+  "allowed_null_pairs": [
+    "render_gateway.build_or_image_digest",
+    "render_gateway.boot_or_connection_epoch",
+    "render_langgraph.build_or_image_digest",
+    "render_langgraph.boot_or_connection_epoch",
+    "render_langgraph.durable_store_kind",
+    "render_voice.build_or_image_digest",
+    "render_voice.boot_or_connection_epoch",
+    "render_voice.durable_store_kind",
+    "vercel_frontend.build_or_image_digest",
+    "vercel_frontend.boot_or_connection_epoch",
+    "vercel_frontend.durable_store_kind",
+    "vercel_frontend.deployment_retention_duration"
+  ],
+  "resolved_nullable_fields": [
+    {
+      "surface": "render_gateway",
+      "field": "build_or_image_digest",
+      "value": null,
+      "availability_status": "PROVIDER_NOT_EXPOSED",
+      "reason": "Authenticated Render deployment detail exposed deployment ID, source SHA, runtime, status, and timestamps but no immutable image/build digest.",
+      "basis": "ACCESS_PROVIDER#/render/gateway",
+      "observed_at": "2026-08-17T13:57:24Z"
+    },
+    {
+      "surface": "render_gateway",
+      "field": "boot_or_connection_epoch",
+      "value": null,
+      "availability_status": "PROVIDER_NOT_EXPOSED",
+      "reason": "The authenticated Render surface did not expose a stable boot or connection epoch.",
+      "basis": "ACCESS_PROVIDER#/render/gateway",
+      "observed_at": "2026-08-17T13:57:24Z"
+    },
+    {
+      "surface": "render_langgraph",
+      "field": "build_or_image_digest",
+      "value": null,
+      "availability_status": "PROVIDER_NOT_EXPOSED",
+      "reason": "Authenticated Render deployment detail exposed deployment ID, source SHA, runtime, status, and timestamps but no immutable image/build digest.",
+      "basis": "ACCESS_PROVIDER#/render/langgraph",
+      "observed_at": "2026-08-17T13:57:24Z"
+    },
+    {
+      "surface": "render_langgraph",
+      "field": "boot_or_connection_epoch",
+      "value": null,
+      "availability_status": "PROVIDER_NOT_EXPOSED",
+      "reason": "The authenticated Render surface did not expose a stable boot or connection epoch.",
+      "basis": "ACCESS_PROVIDER#/render/langgraph",
+      "observed_at": "2026-08-17T13:57:24Z"
+    },
+    {
+      "surface": "render_langgraph",
+      "field": "durable_store_kind",
+      "value": null,
+      "availability_status": "PROVIDER_NOT_EXPOSED",
+      "reason": "The live instantiated checkpointer class is not exposed. Frozen source/config separately infer InMemorySaver; direct live durability identity remains a distinct substantive gate.",
+      "basis": "ACCESS_PROVIDER#/render/langgraph plus frozen source/config anchors",
+      "observed_at": "2026-08-17T13:57:24Z",
+      "substantive_gate_retained": "UNK-LANGGRAPH-CHECKPOINTER"
+    },
+    {
+      "surface": "render_voice",
+      "field": "build_or_image_digest",
+      "value": null,
+      "availability_status": "PROVIDER_NOT_EXPOSED",
+      "reason": "Authenticated Render deployment detail exposed deployment ID, source SHA, runtime, status, and timestamps but no immutable image/build digest.",
+      "basis": "ACCESS_PROVIDER#/render/voice",
+      "observed_at": "2026-08-17T13:57:24Z"
+    },
+    {
+      "surface": "render_voice",
+      "field": "boot_or_connection_epoch",
+      "value": null,
+      "availability_status": "PROVIDER_NOT_EXPOSED",
+      "reason": "The authenticated Render surface did not expose a stable boot or connection epoch.",
+      "basis": "ACCESS_PROVIDER#/render/voice",
+      "observed_at": "2026-08-17T13:57:24Z"
+    },
+    {
+      "surface": "render_voice",
+      "field": "durable_store_kind",
+      "value": null,
+      "availability_status": "NOT_APPLICABLE",
+      "reason": "Voice is excluded from the text-only M00 envelope and no local durable store is part of its declared runtime identity.",
+      "basis": "m00-deployment-set.json#/voice",
+      "observed_at": "2026-08-17T15:13:23Z"
+    },
+    {
+      "surface": "vercel_frontend",
+      "field": "build_or_image_digest",
+      "value": null,
+      "availability_status": "PROVIDER_NOT_EXPOSED",
+      "reason": "Vercel performs a build, but its authenticated control surface did not expose a canonical build/image digest. Deployment ID, source SHA, and production-input closure remain authoritative and non-null.",
+      "basis": "ACCESS_PROVIDER#/vercel",
+      "observed_at": "2026-08-17T13:57:24Z"
+    },
+    {
+      "surface": "vercel_frontend",
+      "field": "boot_or_connection_epoch",
+      "value": null,
+      "availability_status": "NOT_APPLICABLE",
+      "reason": "A stable process boot epoch is not meaningful for the provider-managed serverless/browser surface.",
+      "basis": "FC-01 v1.1 section 7.2 normalized identity schema",
+      "observed_at": "2026-08-17T13:57:24Z"
+    },
+    {
+      "surface": "vercel_frontend",
+      "field": "durable_store_kind",
+      "value": null,
+      "availability_status": "NOT_APPLICABLE",
+      "reason": "Durable application state is owned by the participating database and backend services, not the frontend runtime.",
+      "basis": "m00-deployment-set.json#/state_dependencies",
+      "observed_at": "2026-08-17T15:13:23Z"
+    },
+    {
+      "surface": "vercel_frontend",
+      "field": "deployment_retention_duration",
+      "value": null,
+      "availability_status": "PROVIDER_NOT_EXPOSED",
+      "reason": "The authenticated control surface exposed current/prior deployment selectability but not an exact retention duration; duration is supplemental capability metadata, not DeploymentBaseline identity.",
+      "basis": "ACCESS_PROVIDER#/vercel",
+      "observed_at": "2026-08-17T13:57:24Z"
+    }
+  ],
+  "resolved_predecessor_unknown_ids": [
+    "UNK-GATEWAY-IMAGE",
+    "UNK-LANGGRAPH-IMAGE",
+    "UNK-VOICE-IMAGE",
+    "UNK-VERCEL-RETENTION-DURATION",
+    "UNK-VERCEL-BUILD-IMAGE"
+  ],
+  "non_nullable_hard_fields": [
+    "service_or_project_identity",
+    "commit_sha_or_provider_source_identity",
+    "deployment_id",
+    "runtime_path",
+    "status",
+    "observed_at",
+    "route_or_target_identity",
+    "rollback_deployment_id",
+    "rollback_source_or_provider_identity",
+    "rollback_selectable_now",
+    "participating_database_project_equality",
+    "m00_schema_contract_fingerprint"
+  ],
+  "not_nullable_by_this_amendment": [
+    {
+      "field": "render_voice.rollback_coordinate",
+      "reason": "Voice is excluded from M00 execution, but exact rollback remains mandatory before any Voice-inclusive release."
+    },
+    {
+      "field": "render_langgraph.live_instantiated_checkpointer_class",
+      "reason": "A nullable normalized field does not satisfy the substantive durability proof owned by M01."
+    },
+    {
+      "field": "database historical migration provenance",
+      "reason": "Temporal deferral after exact live-contract proof is not schema nullability."
+    },
+    {
+      "field": "sql_editor_draft_provenance",
+      "reason": "No governing schema makes this evidence fact nullable; it remains a later evidence limitation."
+    }
+  ]
+}

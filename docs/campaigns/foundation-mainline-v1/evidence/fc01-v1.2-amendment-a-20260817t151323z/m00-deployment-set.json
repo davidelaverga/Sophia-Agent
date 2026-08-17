@@ -1,0 +1,368 @@
+{
+  "schema_version": 2,
+  "amendment_id": "FC-01-v1.2-AMENDMENT-A",
+  "deployment_set_id": "M00-TEXT-BUILDER-NATIVE-PPTX-v2",
+  "execution_authorized": false,
+  "candidate_source": {
+    "base_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+    "base_tree": "8c27bc52b2a022d4a0b7c398172195442bccf15e",
+    "repair_branch": "codex/fc01a-r-m00-prereqs-v1",
+    "future_candidate_sha": null,
+    "future_candidate_tree": null,
+    "null_reason": "No repair candidate may exist before valid joint Amendment A approval."
+  },
+  "execution_envelope": {
+    "entry": "fresh authenticated normal-app session",
+    "input_mode": "text",
+    "voice_mode": false,
+    "artifact": "native_pptx",
+    "repair_ceiling": 1,
+    "prompt_sha256": "bdad62c0d47b8ca26c6cfc69422ceafd222a0b3851f19eb6e430895d28edacea",
+    "causal_path": [
+      "Vercel normal app and Better Auth",
+      "Gateway authentication/session/ownership/progress/artifact services",
+      "LangGraph sophia_companion and Builder",
+      "DeckBuildService native PPTX build and foundation manifest",
+      "DQ1 shadow and at most one DQ2 repair",
+      "LangGraph signed terminal Builder event",
+      "Gateway durable terminal/artifact/canvas publication",
+      "Vercel authenticated native-artifact review"
+    ]
+  },
+  "runtime_identity_set": [
+    {
+      "surface": "vercel_frontend",
+      "project": "sophia-agent-front",
+      "participates": true,
+      "roles": [
+        "normal_app_ingress",
+        "better_auth",
+        "api_v1_auth_me_bridge",
+        "native_artifact_review"
+      ],
+      "current_deployment_id": "dpl_Bv2yaEMssrnz6JnGhQtsxP9RgQjR",
+      "current_source_sha": "7092042b13f3edc40468fd614685d7ede3b21f2a",
+      "runtime_path": "www production alias",
+      "runtime_path_observed_at": "2026-08-17T11:55:26Z",
+      "provider_status": "ready",
+      "status": "ready",
+      "provider_environment": "production",
+      "provider_observed_at": "2026-08-17T13:57:24Z",
+      "observed_at": "2026-08-17T13:57:24Z",
+      "application_status": "HEALTHY_APP_LEVEL",
+      "identity_evidence_refs": [
+        "BASE00_PROVIDER#/services/0",
+        "ACCESS_PROVIDER#/vercel/current_production",
+        "ACCESS_PROVIDER#/recorded_at"
+      ],
+      "current_frontend_tree": "f95a101104c85e31dcc567dc58673ba6512680cc",
+      "campaign_frontend_tree_equal": true,
+      "candidate_action": "OBSERVE_ONLY_IF_PRODUCTION_INPUT_CLOSURE_UNCHANGED",
+      "future_candidate_deployment_id": null,
+      "future_candidate_null_reason": "Vercel participates only when the authoritative repaired production-input closure differs; provider assigns the ID after a separately approved action.",
+      "prior_rollback_deployment_id": "dpl_CmGV84tusPxecCX7EJxB9fABEvbk",
+      "prior_rollback_source_sha": "a8cbf8f1cc4faa470baa0e6e622c13820e1064d5",
+      "prior_rollback_selectable_now": true,
+      "rollback_selectability_observed_at": "2026-08-17T13:57:24Z",
+      "post_candidate_rollback_selectable_now": null,
+      "post_candidate_null_reason": "If Vercel participates, fresh selectability of dpl_Bv2yaEMssrnz6JnGhQtsxP9RgQjR is mandatory after candidate assignment and before M00."
+    },
+    {
+      "surface": "render_gateway",
+      "service_id": "srv-d7be5s9r0fns7397l4g0",
+      "participates": true,
+      "roles": [
+        "auth_resolution",
+        "session_and_ownership",
+        "artifact_and_terminal_state",
+        "progress_and_canvas"
+      ],
+      "current_deployment_id": "dep-d9ln9eflk1mc7392mnmg",
+      "current_source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+      "runtime_path": "deer-flow-gateway",
+      "runtime_path_observed_at": "2026-08-17T11:55:26Z",
+      "provider_runtime": "docker",
+      "provider_status": "deployed",
+      "status": "deployed",
+      "provider_observed_at": "2026-08-17T13:57:24Z",
+      "observed_at": "2026-08-17T13:57:24Z",
+      "application_status": "HEALTHY_APP_LEVEL",
+      "identity_evidence_refs": [
+        "BASE00_PROVIDER#/services/1",
+        "ACCESS_PROVIDER#/render/gateway",
+        "ACCESS_PROVIDER#/recorded_at"
+      ],
+      "future_candidate_deployment_id": null,
+      "future_candidate_null_reason": "Provider assigns the ID only after a separately approved candidate deploy.",
+      "planned_immediate_rollback_deployment_id": "dep-d9ln9eflk1mc7392mnmg",
+      "planned_immediate_rollback_source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+      "post_candidate_rollback_selectable_now": null,
+      "post_candidate_null_reason": "Must be freshly proved after the candidate ID is assigned and before M00.",
+      "older_emergency_deployment_id": "dep-d9hit4uq1p3s73a0q8b0",
+      "older_emergency_source_sha": "34217a8aa3b88e59c1ccbb2f4a187a8804adccb4"
+    },
+    {
+      "surface": "render_langgraph",
+      "service_id": "srv-d7be5s9r0fns7397l4fg",
+      "participates": true,
+      "roles": [
+        "companion",
+        "builder",
+        "native_deck",
+        "deck_quality"
+      ],
+      "current_deployment_id": "dep-d9ln9e8ae00c73aoo3b0",
+      "current_source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+      "runtime_path": "self-hosted LangGraph server 0.8.1 / langgraph-py 1.2.0",
+      "runtime_path_observed_at": "2026-08-17T11:55:26Z",
+      "provider_runtime": "docker",
+      "provider_status": "deployed",
+      "status": "deployed",
+      "provider_observed_at": "2026-08-17T13:57:24Z",
+      "observed_at": "2026-08-17T13:57:24Z",
+      "application_status": "HEALTHY_APP_LEVEL",
+      "identity_evidence_refs": [
+        "BASE00_PROVIDER#/services/2",
+        "ACCESS_PROVIDER#/render/langgraph",
+        "ACCESS_PROVIDER#/recorded_at"
+      ],
+      "future_candidate_deployment_id": null,
+      "future_candidate_null_reason": "Provider assigns the ID only after a separately approved candidate deploy.",
+      "planned_immediate_rollback_deployment_id": "dep-d9ln9e8ae00c73aoo3b0",
+      "planned_immediate_rollback_source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+      "post_candidate_rollback_selectable_now": null,
+      "post_candidate_null_reason": "Must be freshly proved after the candidate ID is assigned and before M00.",
+      "older_emergency_deployment_id": "dep-d9hit4sm0tmc73avii90",
+      "older_emergency_source_sha": "34217a8aa3b88e59c1ccbb2f4a187a8804adccb4"
+    }
+  ],
+  "required_route_closure": [
+    {
+      "edge_id": "EDGE-VERCEL-GATEWAY",
+      "from": "vercel_frontend.SOPHIA_LANGGRAPH_BASE_URL",
+      "to": "render_gateway./api/langgraph",
+      "required_proof": "The preferred server-side SOPHIA_LANGGRAPH_BASE_URL selects the exact Gateway deployment and /api/langgraph prefix for chat/SSE; NEXT_PUBLIC_LANGGRAPH_BASE_URL, a direct LangGraph origin, and localhost:2026 fallbacks are not selected.",
+      "source_anchors": [
+        "frontend/src/app/api/chat/_lib/config.ts:3-5",
+        "frontend/src/app/api/chat/_lib/backend-client.ts:300-318"
+      ]
+    },
+    {
+      "edge_id": "EDGE-GATEWAY-LANGGRAPH",
+      "from": "render_gateway.LANGGRAPH_URL",
+      "to": "render_langgraph",
+      "required_proof": "Confidential target equality plus a sanitized Gateway-to-LangGraph route probe; no localhost fallback."
+    },
+    {
+      "edge_id": "EDGE-LANGGRAPH-GATEWAY",
+      "from": "render_langgraph.SOPHIA_GATEWAY_URL",
+      "to": "render_gateway.internal_builder_events",
+      "required_proof": "Confidential target equality plus the content-free AUTH_CHALLENGE_V1 proof using the terminal verifier/key path; no terminal event or data side effect."
+    },
+    {
+      "edge_id": "EDGE-GATEWAY-AUTH",
+      "from": "render_gateway.SOPHIA_AUTH_BACKEND_URL",
+      "to": "vercel_frontend.api_v1_auth_me",
+      "required_proof": "SOPHIA_AUTH_BACKEND_URL is present and targets the Better-Auth bridge; BACKEND_API_URL, VOICE_SERVER_URL, and localhost fallbacks are not selected."
+    },
+    {
+      "edge_id": "EDGE-VERCEL-DB",
+      "from": "vercel_frontend.BETTER_AUTH_DATABASE_URL_or_DATABASE_URL",
+      "to": "authenticated_supabase_project",
+      "required_proof": "Confidential project equality; Better Auth connects as better_auth_app rather than postgres or service_role."
+    },
+    {
+      "edge_id": "EDGE-GATEWAY-DB",
+      "from": "render_gateway.SUPABASE_URL",
+      "to": "authenticated_supabase_project_and_private_bucket",
+      "required_proof": "Confidential project/bucket equality and server-only service-role credential presence."
+    },
+    {
+      "edge_id": "EDGE-LANGGRAPH-DB",
+      "from": "render_langgraph.SUPABASE_URL",
+      "to": "authenticated_supabase_project_and_private_bucket",
+      "required_proof": "Confidential project/bucket equality and server-only service-role credential presence."
+    },
+    {
+      "edge_id": "EDGE-ZERO-VOICE",
+      "from": "m00_execution_envelope",
+      "to": "render_voice",
+      "required_proof": "No edge exists: browser and Gateway egress receipt records zero Voice-origin requests, including auth fallback."
+    }
+  ],
+  "shared_builder_event_secret_contract": {
+    "variable": "SOPHIA_BUILDER_EVENTS_HMAC_SECRET",
+    "source_anchors": [
+      "render.yaml:59-64",
+      "render.yaml:160-169"
+    ],
+    "challenge_protocol": {
+      "name": "AUTH_CHALLENGE_V1",
+      "purpose": "Prove configuration equality without sending a terminal Builder event or mutating durable state.",
+      "requirements": [
+        "Candidate LangGraph sends one content-free request to a dedicated internal Gateway challenge handler before any user or M00 event.",
+        "The request uses the same secret, exact raw-body signing function, timestamp/skew rule, nonce format, and verifier used by terminal Builder delivery.",
+        "The handler authenticates before event parsing and is structurally incapable of calling terminal parsing, persistence, artifact, canvas, channel, wakeup, Supabase, storage, queue, or provider code.",
+        "Its only state is a bounded in-process one-use challenge nonce cache.",
+        "A valid fresh request returns 204; mutated signature, stale timestamp, and replay are rejected.",
+        "Any database, storage, queue, provider, or other network side effect beyond the single LangGraph-to-Gateway challenge request is BLOCKED."
+      ]
+    },
+    "required_preflight": [
+      "nonempty presence on LangGraph and Gateway",
+      "functional equality proved by AUTH_CHALLENGE_V1 only after both candidate endpoints exist",
+      "zero secret value, digest, header, signed body, nonce, or provider payload in Git",
+      "server-only non-exposure"
+    ],
+    "git_safe_receipt_fields": [
+      "exact candidate deployment IDs",
+      "opaque confidential receipt ID and receipt SHA-256",
+      "observed_at",
+      "valid, mutated-signature, stale, replay, and zero-side-effect boolean/status outcomes"
+    ],
+    "setting_or_rotation_authorized": false,
+    "failure_action": "BLOCKED and request separate target-specific credential/provider authority"
+  },
+  "state_dependencies": [
+    {
+      "surface": "authenticated_supabase_project",
+      "deployment_target": false,
+      "participates": true,
+      "coordinate_committed": false,
+      "required_identities": [
+        "Vercel Better Auth database",
+        "Gateway session/artifact store",
+        "LangGraph session/artifact/DQ store",
+        "private sophia-builder-artifacts bucket"
+      ],
+      "requirements": [
+        "All participating project identities are confidentially equal.",
+        "Exact M00 relation/routine/schema/ACL/RLS fingerprint passes.",
+        "Bucket public=false and policies are service-only.",
+        "No DDL, DML, migration, settings change, object-row read, or user-content read occurs in FC-01A-R."
+      ]
+    }
+  ],
+  "frontend_production_input_closure": {
+    "required_before_observe_only": true,
+    "current_closure_digest": null,
+    "null_reason": "The prior receipt proves frontend subtree equality, but include_files_outside_root is enabled and the complete production-input closure has not yet been recomputed.",
+    "production_input_classes": {
+      "A": "Provider upload/source-bundle manifest.",
+      "B": "Install dependency graph and every workspace, lock, patch, or toolchain input.",
+      "C": "Next production entrypoint/module/config/public-asset dependency graph.",
+      "D": "Exact next-build TypeScript effective file list.",
+      "E": "PostCSS/Tailwind content-discovery inputs.",
+      "F": "Pre/install/post and pre/build/post hooks, globs, and symlink targets.",
+      "G": "Files actually opened, stat'ed, or read during two pinned network-denied Vercel-compatible builds."
+    },
+    "algorithm": [
+      "Seed with frontend/** and, because include_files_outside_root=true, scan the entire repository for workspace, lock, manifest, config, patch, import, glob, hook, and symlink references.",
+      "Include root vercel.json, package-manager/toolchain metadata, every outside-root dependency, and the union of production-input classes A through G.",
+      "Canonicalize sorted records as {path, mode, git_object_id, input_classes, basis}.",
+      "Separately canonicalize provider settings, toolchain, environment-variable names/public values plus opaque-secret-equality status, filesystem trace manifest, and normalized build output.",
+      "SHA-256 the ordered tuple for deployed source and repaired candidate and require byte-identical normalized build outputs."
+    ],
+    "test_only_noninput_law": "A changed test path is TEST_ONLY_NONINPUT only when it is on the exact repair allowlist, absent from every A-G set, unreachable through import/glob/config/hook/symlink, and both pinned hermetic output digests are identical. An unavailable provider manifest, build, or trace is NOT_PROVED.",
+    "current_static_risk": "frontend/tsconfig.json includes TypeScript test files and Tailwind v4 content discovery is active; test-only non-input status must be proved, never assumed.",
+    "root_users_requirement": "The provider source-bundle manifest and all A-G sets must exclude every one of the 150 root users records; otherwise the privacy prerequisite fails.",
+    "unchanged_effect": "Current Vercel deployment remains observe-only and must be freshly healthy/selectable.",
+    "changed_effect": "Vercel joins the conditional candidate target set under candidate-identity-budget.json. A hermetic build plus separate direct Davide operational and Luis experience/accessibility target approvals are mandatory; production promotion occurs last."
+  },
+  "voice": {
+    "surface": "render_voice",
+    "service_id": "srv-d7be5s9r0fns7397l4f0",
+    "current_deployment_id": "dep-d8qlo51194ac73929dlg",
+    "current_source_sha": "956b6272f4d91ad0c5d806d9a037c0e1335b6392",
+    "runtime_path": "FastAPI voice service 0.1.0 with current route families",
+    "runtime_path_observed_at": "2026-08-17T11:55:26Z",
+    "provider_runtime": "docker",
+    "status": "deployed",
+    "provider_observed_at": "2026-08-17T13:57:24Z",
+    "observed_at": "2026-08-17T13:57:24Z",
+    "application_status": "HEALTHY_APP_LEVEL",
+    "identity_evidence_refs": [
+      "BASE00_PROVIDER#/services/3",
+      "ACCESS_PROVIDER#/render/voice",
+      "ACCESS_PROVIDER#/recorded_at"
+    ],
+    "campaign_commits_behind": 358,
+    "execution_participation": "NOT_APPLICABLE_FOR_FROZEN_TEXT_M00",
+    "baseline_surface": true,
+    "deployment_or_restart_authorized": false,
+    "rollback_coordinate_known": false,
+    "blocker_class": "POST_M00_RELEASE_GATE",
+    "classification_activates_only_after_joint_amendment_approval": true,
+    "source_anchors": [
+      "frontend/src/app/companion-runtime/voice-runtime.ts:86-94",
+      "frontend/src/app/hooks/useStreamVoiceSession.ts:836-842",
+      "frontend/src/app/hooks/useStreamVoiceSession.ts:1739-1750",
+      "backend/app/gateway/auth.py:66-72",
+      "backend/app/gateway/auth.py:83-90",
+      "backend/app/gateway/routers/voice.py:1116-1130",
+      "backend/app/gateway/routers/voice.py:1208-1250",
+      "backend/app/gateway/routers/voice.py:1342-1446",
+      "backend/app/gateway/routers/voice.py:1980-2045"
+    ],
+    "required_zero_call_receipt": [
+      "input_mode=text",
+      "platform_or_focus_mode=text",
+      "voiceMode=false",
+      "no microphone or voice UI action",
+      "SOPHIA_AUTH_BACKEND_URL selects Vercel Better Auth and no Voice auth fallback",
+      "zero voice connect, warmup, event, Gemini realtime browser-session, and legacy call-session requests",
+      "zero Gateway egress to the Voice origin for auth or voice routes"
+    ],
+    "observability_gap_fixture": {
+      "m00_contract_disposition": "SOURCE_CONFIG_OR_PRIOR_SANITIZED_FIXTURE_ONLY",
+      "required_label": "no_live_gemini_or_voice_execution",
+      "new_live_gemini_or_voice_capture_allowed": false,
+      "live_trace_coverage_claim_allowed": false
+    },
+    "abort_rule": "Any Voice-origin request or live Gemini gap capture makes Voice applicable and blocks M00 until exact source, deployment, and rollback are jointly governed."
+  },
+  "candidate_deployment_protocol": {
+    "amendment_approval_is_deployment_approval": false,
+    "separate_davide_target_specific_approval_required": true,
+    "preapproval_bindings": [
+      "exact candidate SHA and tree",
+      "Gateway and LangGraph service IDs",
+      "conditional Vercel project, closure, settings, build/output identity, and current rollback when Vercel participates",
+      "planned immediate rollback IDs and source SHAs",
+      "frontend production-input closure and observe-only conclusion",
+      "shared-secret confidential presence/equality preflight and zero-DML challenge plan",
+      "candidate-identity-budget.json digest and its action/time/rollback/zero-spend ceilings",
+      "ordered compatibility plan",
+      "expected impact, maintenance window, aborts, and rollback"
+    ],
+    "conditional_vercel_approval": "When the closure differs, Davide approves the three-target operation and Luis separately approves the Vercel experience/accessibility target before promotion.",
+    "ordered_forward_steps": [
+      "Complete all predeployment gates, including the authoritative closure and hermetic frontend build; when Vercel participates, bind or build its exact candidate without changing the production alias until the final step where provider mechanics permit.",
+      "Confidentially prove both existing backend provider configurations name a nonempty shared HMAC secret and prove old-Gateway compatibility; do not change a provider setting and do not claim the old Gateway verifies signatures.",
+      "Deploy signing LangGraph while the current Gateway remains compatible; record assigned deployment ID and run health/ordinary compatibility checks only.",
+      "Deploy enforcing Gateway; record assigned deployment ID; run the content-free AUTH_CHALLENGE_V1 valid/mutated/stale/replay and zero-side-effect checks.",
+      "If Vercel participates, deploy/promote its exact production candidate last, prove auth/text/session/artifact/header/layout/accessibility compatibility and zero Voice calls, then prove every participating rollback selectable now, close every route edge, and append the refreshed identity receipt."
+    ],
+    "mixed_version_invariant": "A strict Gateway receiver may never face an unsigned producer. Any incompatible partial state aborts before user traffic.",
+    "ordered_rollback_steps": [
+      "If Vercel participated, restore the production alias/deployment first to dpl_Bv2yaEMssrnz6JnGhQtsxP9RgQjR and prove the old-Vercel/new-or-old-Gateway interstitial.",
+      "Rollback Gateway enforcement next to dep-d9ln9eflk1mc7392mnmg and verify health/event compatibility.",
+      "Rollback LangGraph producer second to dep-d9ln9e8ae00c73aoo3b0 and verify health.",
+      "Record the partial-deploy/rollback state and do not start M00."
+    ],
+    "post_assignment_requirements": [
+      "new Gateway/LangGraph deployment IDs and exact source identities",
+      "conditional Vercel deployment/build/source/settings identity when it participated",
+      "every participating former deployment selectable_now=true with observed_at",
+      "route-closure receipt and content-free shared-secret challenge",
+      "recomputed BASE-00 and fresh M00 proposal/budget",
+      "fresh direct Davide and Luis M00 decisions"
+    ],
+    "voice_target_change_permitted": false,
+    "database_mutation_permitted": false,
+    "provider_setting_change_permitted": false,
+    "candidate_identity_budget_file": "candidate-identity-budget.json",
+    "actual_rollback_before_abort_authorized": false,
+    "rollback_selectability_proof": "Provider selectable_now=true observation plus dry-run/order evaluation only; an actual rollback occurs only under the target-specific abort authority."
+  }
+}

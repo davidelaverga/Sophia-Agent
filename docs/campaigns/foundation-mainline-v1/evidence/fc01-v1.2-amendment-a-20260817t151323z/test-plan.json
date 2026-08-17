@@ -1,0 +1,383 @@
+{
+  "schema_version": 2,
+  "amendment_id": "FC-01-v1.2-AMENDMENT-A",
+  "execution_authorized": false,
+  "run_only_after_joint_approval": true,
+  "source_base": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+  "global_rules": {
+    "python": "3.12 via backend uv environment",
+    "backend_bootstrap": "cd backend && uv sync --group dev",
+    "pytest_prefix": "PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. uv run pytest -p no:cacheprovider -q -ra --strict-markers",
+    "frontend_package_manager": "pnpm install --frozen-lockfile",
+    "provider_credentials_present": false,
+    "langsmith_tracing": false,
+    "external_model_provider_calls": 0,
+    "unexpected_collect_count_action": "BLOCKED",
+    "unexpected_skip_failure_error_or_retry_action": "BLOCKED",
+    "selector_drift_action": "BLOCKED"
+  },
+  "logical_skip_accounting": {
+    "baseline_governed_logical_tests": 91,
+    "predecessor_aggregate_status": "RESOLVED_BY_DECOMPOSITION",
+    "predecessor_aggregate_is_not_a_pass": true,
+    "m00_prerequisite": {
+      "postgres": 49,
+      "root_linux": 14,
+      "python_chromium": 8,
+      "total": 71,
+      "required_passes": 71,
+      "allowed_skips": 0
+    },
+    "post_m00_release_gate": {
+      "generic_live_client": 19,
+      "node_html_to_pdf": 1,
+      "total": 20
+    },
+    "full_suite_capability_choice": "The authoritative M00 pytest commands explicitly deselect the one POST_M00 Node HTML-to-PDF nodeid. It remains an optional read-only observation and cannot gate M00; the required suite reports exactly 89 remaining expected/optional skips.",
+    "remaining_reported_skips": 89
+  },
+  "lanes": [
+    {
+      "lane_id": "AR-T01-POSTGRES-49",
+      "classification": "M00_PREREQUISITE",
+      "authorized_repair_kind": "TEST_INFRA_ONLY",
+      "environment": "Disposable postgres:16 container named fc01ar-pg16; tests create/drop unique databases and install the exact migration sequence.",
+      "command": "cd backend && DQ1_POSTGRES_CONTAINER=fc01ar-pg16 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. uv run pytest -p no:cacheprovider -q -ra --strict-markers tests/test_deck_quality_shadow_postgres_integration.py tests/test_producer_failure_signal_postgres.py",
+      "expected": {
+        "collected": 49,
+        "passed": 49,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "cleanup": "Destroy the exact disposable container after sanitized evidence extraction."
+    },
+    {
+      "lane_id": "AR-T02-ROOT-LINUX-14",
+      "classification": "M00_PREREQUISITE",
+      "authorized_repair_kind": "TEST_INFRA_ONLY",
+      "environment": "Ephemeral pinned Linux test image running uid 0 with setpriv, pdftoppm, and soffice; no repository Dockerfile change.",
+      "nodeids": [
+        "tests/test_deck_quality_shadow_snapshot.py::test_real_root_linux_pdf_rasterizer_reads_source_below_private_ancestor",
+        "tests/test_image_subprocess.py::test_detached_ordinary_shell_cannot_read_provider_environment",
+        "tests/test_local_sandbox_encoding.py::test_real_linux_sequential_sandbox_uids_can_update_same_workspace_file",
+        "tests/test_local_sandbox_encoding.py::test_real_linux_threads_are_private_and_uploads_are_read_only",
+        "tests/test_pptx_preview.py::test_real_root_linux_preview_reads_source_below_private_ancestor",
+        "tests/test_process_group.py::test_real_linux_child_cannot_read_parent_environ_and_can_write_exact_output",
+        "tests/test_process_group.py::test_real_linux_private_read_copy_is_mutable_without_source_write_access",
+        "tests/test_process_group.py::test_real_linux_concurrent_children_cannot_read_each_other_environ",
+        "tests/test_process_group.py::test_real_linux_pdftoppm_renderer_writes_only_granted_directory",
+        "tests/test_process_group.py::test_real_linux_provider_lease_is_released_after_communicate_exception",
+        "tests/test_process_group.py::test_real_linux_provider_invalid_utf8_is_replaced_and_lease_is_released",
+        "tests/test_process_group.py::test_real_linux_provider_uid_sweep_kills_setsid_survivor",
+        "tests/test_sandbox_identity.py::test_root_linux_boundary_is_non_writable_and_uploads_are_read_only",
+        "tests/test_sandbox_identity.py::test_root_linux_adoption_rejects_hardlink_and_upload_symlink_aliases"
+      ],
+      "command_template": "cd backend && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. uv run pytest -p no:cacheprovider -q -ra --strict-markers <the 14 exact nodeids above in order>",
+      "expected": {
+        "collected": 14,
+        "passed": 14,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "lane_id": "AR-T03-PYTHON-CHROMIUM-8",
+      "classification": "M00_PREREQUISITE",
+      "authorized_repair_kind": "TEST_INFRA_ONLY",
+      "environment": "Pinned image with Python Playwright and its matching preinstalled Chromium.",
+      "nodeids": [
+        "tests/test_deck_native_service.py::test_deck_native_html_to_patch_compiles_when_playwright_available",
+        "tests/test_deck_native_service.py::test_deck_native_html_to_patch_retains_transparent_required_wrapper",
+        "tests/test_deck_native_service.py::test_deck_native_html_to_patch_retains_nested_semantic_ids",
+        "tests/test_deck_native_service.py::test_deck_native_html_to_patch_still_rejects_duplicate_semantic_ids",
+        "tests/test_hands_on_deck_sophia_patches.py::test_table_extraction_maps_only_visible_represented_descendant_ids",
+        "tests/test_hands_on_deck_sophia_patches.py::test_extraction_omits_transparent_and_fully_clipped_text_but_keeps_visibility_override",
+        "tests/test_hands_on_deck_sophia_patches.py::test_browser_typography_floor_reflows_before_geometry_and_records_provenance",
+        "tests/test_hands_on_deck_sophia_patches.py::test_nested_text_without_own_required_marker_inherits_ancestor_contract"
+      ],
+      "command_template": "cd backend && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. uv run pytest -p no:cacheprovider -q -ra --strict-markers <the 8 exact nodeids above in order>",
+      "expected": {
+        "collected": 8,
+        "passed": 8,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0
+      }
+    },
+    {
+      "lane_id": "AR-T04-NODE-HTML-PDF-1-OBSERVATION",
+      "classification": "POST_M00_RELEASE_GATE",
+      "authorized_repair_kind": "NONE_READ_ONLY_OBSERVATION",
+      "source_repair_authorized": false,
+      "environment": "Optional separate observation image may include node, Chromium, CHROMIUM_PATH if required, and playwright-core adjacent to the renderer module. This capability is not required by the M00 gate.",
+      "command": "cd backend && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. uv run pytest -p no:cacheprovider -q -ra --strict-markers tests/test_render_html_to_pdf.py::test_node_smoke_renders_inline_svg_pdf",
+      "expected": {
+        "collected": 1,
+        "passed": 1,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "failure_effect": "Preserve as POST_M00_RELEASE_GATE; do not repair in FC-01A-R."
+    },
+    {
+      "lane_id": "AR-T05-DECK-SKILL-HASH-41",
+      "classification": "M00_PREREQUISITE",
+      "authorized_repair_kind": "TEST_CONTRACT_ONLY",
+      "command": "cd backend && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. uv run pytest -p no:cacheprovider -q -ra --strict-markers tests/test_deck_design_lift_quality_adapter.py",
+      "baseline": {
+        "passed": 6,
+        "failed": 35,
+        "locked_source_sha256": "030fb554",
+        "actual_frozen_source_sha256": "9a5e5508"
+      },
+      "expected": {
+        "collected": 41,
+        "passed": 41,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "authority": "Frozen committed skill bytes are authoritative. Bind a semantically equivalent excerpt of at most 4096 bytes and update exact source/excerpt hash locks; do not edit the skill or weaken validation."
+    },
+    {
+      "lane_id": "AR-T06-SMOKE-DIMENSION-6",
+      "classification": "M00_PREREQUISITE",
+      "authorized_repair_kind": "TEST_FIXTURE_ONLY",
+      "command": "cd backend && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. uv run pytest -p no:cacheprovider -q -ra --strict-markers tests/test_smoke_deck_quality_sol.py",
+      "baseline": {
+        "passed": 1,
+        "failed": 5,
+        "fixture_max_dimension": 2200,
+        "product_direct_evidence_ceiling": 2048
+      },
+      "expected": {
+        "collected": 6,
+        "passed": 6,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "invariant": "Regenerate fixture bytes/checksums within 2048; never raise the cap merely to pass."
+    },
+    {
+      "lane_id": "AR-T07-SHADOW-ORDER-AND-FULL-SUITE",
+      "classification": "M00_PREREQUISITE",
+      "authorized_repair_kind": "TEST_FIXTURE_ONLY",
+      "standalone_command": "cd backend && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. uv run pytest -p no:cacheprovider -q -ra --strict-markers tests/test_deck_quality_shadow_persistence.py",
+      "standalone_expected": {
+        "collected": 31,
+        "passed": 31,
+        "failed": 0,
+        "errors": 0,
+        "skipped": 0
+      },
+      "authoritative_command": "cd backend && DQ1_POSTGRES_CONTAINER=fc01ar-pg16 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. uv run pytest -p no:cacheprovider -q -ra --strict-markers tests/ --deselect tests/test_render_html_to_pdf.py::test_node_smoke_renders_inline_svg_pdf",
+      "authoritative_environment": "One clean process in the same M00-capabilities root-Linux image with disposable PG16 and matching Python Chromium. The POST_M00 Node smoke is explicitly deselected.",
+      "repeat_count": 2,
+      "expected": {
+        "failed": 0,
+        "errors": 0,
+        "m00_former_skips_now_passed": 71,
+        "post_m00_node_deselected": 1,
+        "remaining_reported_skips": 89,
+        "identical_counts_both_runs": true
+      }
+    },
+    {
+      "lane_id": "AR-T08-RUFF",
+      "classification": "M00_PREREQUISITE",
+      "authorized_repair_kind": "MECHANICAL_SOURCE_AND_TEST_HYGIENE",
+      "focused_command": "cd backend && uv run ruff check packages/harness/deerflow/sophia/deck_build/asset_policy.py packages/harness/deerflow/sophia/deck_build/html_design_renderer.py tests/test_deck_image_assets.py",
+      "final_command": "cd backend && uv run ruff check .",
+      "expected": {
+        "findings": 0,
+        "exit_code": 0
+      }
+    },
+    {
+      "lane_id": "AR-T09-REVIEW-AND-BUILDER-GATEWAY-REGRESSION",
+      "classification": "M00_PREREQUISITE",
+      "focused_baseline_command": "cd backend && PYTHONPATH=. uv run pytest tests/test_builder_progress_middleware.py tests/test_builder_progress_endpoint.py tests/test_builder_events_worker.py tests/test_builder_canvas_worker.py tests/test_builder_canvas_routes.py tests/test_gateway_app_mounts.py tests/test_companion_wakeup.py tests/test_gateway_sophia.py tests/test_start_builder_task.py -q",
+      "focused_baseline_minimum": {
+        "passed": 274,
+        "failed": 0,
+        "skipped": 0
+      },
+      "repair_specific_command": "cd backend && PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. uv run pytest -p no:cacheprovider -q -ra --strict-markers tests/test_builder_event_auth.py tests/test_builder_events_worker.py tests/test_langgraph_dockerfile_pdf_runtime.py tests/test_build_manifest_addressing.py tests/test_artifact_registry.py tests/test_build_capability_foundation.py tests/test_deck_design_lift_candidate_compiler.py tests/test_deck_design_lift_repair_author.py tests/test_artifacts_router.py tests/test_deck_native_service.py tests/test_pdf_report_contract_runtime.py",
+      "expected": "All collected tests pass with zero failure/error/skip; the receipt records exact nodeids and maps them to all ten review IDs."
+    },
+    {
+      "lane_id": "AR-T10-FRONTEND-RUNTIME-CONTRACT-5",
+      "classification": "M00_PREREQUISITE",
+      "authorized_repair_kind": "TEST_CONTRACT_ONLY",
+      "bootstrap": "cd frontend && pnpm install --frozen-lockfile",
+      "command": "cd frontend && pnpm exec vitest run src/__tests__/architecture/runtime-ownership-contract.test.ts --reporter=default",
+      "baseline": {
+        "total": 5,
+        "failed": 3
+      },
+      "expected": {
+        "collected": 5,
+        "passed": 5,
+        "failed": 0,
+        "skipped": 0
+      },
+      "production_input_change_allowed": false
+    },
+    {
+      "lane_id": "AR-T11-FRONTEND-OFFLINE-E2E-2",
+      "classification": "M00_PREREQUISITE",
+      "authorized_repair_kind": "TEST_FIXTURE_ONLY",
+      "setup_blocker_count": 1,
+      "test_count": 2,
+      "environment": "Pinned Chromium; test-auth fixture enabled only in the test process; all auth/session/Builder polling/terminal/artifact network routes intercepted by deterministic local Playwright stubs; text mode and Voice disabled.",
+      "install_command": "cd frontend && pnpm exec playwright install chromium",
+      "command": "cd frontend && SOPHIA_E2E_TEST_AUTH=true NEXT_PUBLIC_DEV_BYPASS_AUTH=false pnpm exec playwright test tests/e2e/auth-real-login.spec.ts tests/e2e/builder-live-status.spec.ts --project=chromium --workers=1 --retries=0",
+      "expected": {
+        "collected": 2,
+        "passed": 2,
+        "failed": 0,
+        "skipped": 0,
+        "unexpected_retries": 0,
+        "uncaught_browser_exceptions": 0,
+        "external_requests": 0,
+        "voice_requests": 0
+      },
+      "proof_scope": "Deterministic UI/request/poll/terminal/artifact contract only. It is not live Builder, model-provider, deployment, or M00 proof.",
+      "real_route_proof": "Deferred to the fresh signed M00 proposal and provider budget."
+    },
+    {
+      "lane_id": "AR-T12-EXACT-CANDIDATE-AGGREGATE",
+      "classification": "M00_PREREQUISITE",
+      "commands": [
+      "cd backend && DQ1_POSTGRES_CONTAINER=fc01ar-pg16 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH=. uv run pytest -p no:cacheprovider -q -ra --strict-markers tests/ --deselect tests/test_render_html_to_pdf.py::test_node_smoke_renders_inline_svg_pdf",
+        "cd backend && uv run ruff check .",
+        "cd frontend && pnpm typecheck",
+        "cd frontend && pnpm lint",
+        "cd frontend && pnpm exec vitest run src/__tests__/architecture/runtime-ownership-contract.test.ts --reporter=default",
+        "cd frontend && NEXT_TELEMETRY_DISABLED=1 BETTER_AUTH_SECRET=local-local-local-local-local-local BETTER_AUTH_URL=http://127.0.0.1:3000 pnpm build",
+        "offline path/scope/blocker evaluator at the exact candidate SHA/tree",
+        "exact-head GitHub check workflow .github/workflows/fc01a-r-m00-prerequisites.yml"
+      ],
+      "expected": {
+        "review_findings_passed": 10,
+        "m00_critical_failures": 0,
+        "m00_critical_errors": 0,
+        "m00_critical_skips": 0,
+        "remaining_reported_backend_skips": 89,
+        "frontend_typecheck": "PASS",
+        "frontend_lint_errors": 0,
+        "new_warnings_in_touched_paths": 0,
+        "provider_credentials_present": false,
+        "exact_head_ci": "PASS"
+      },
+      "post_m00_failure_policy": "Preserve every classified POST_M00 failure/skip; never call the full repository green."
+    },
+    {
+      "lane_id": "AR-T13-CONDITIONAL-VERCEL-BUILD",
+      "classification": "M00_PREREQUISITE",
+      "authorized_repair_kind": "PROOF_ONLY_NO_REPAIR",
+      "source_repair_authorized": false,
+      "environment": "Pinned Vercel-compatible Node/pnpm toolchain with the exact lockfile, no provider/model credentials, network denied, deterministic local Better-Auth build fixtures, and complete filesystem input tracing.",
+      "command": "cd frontend && NEXT_TELEMETRY_DISABLED=1 BETTER_AUTH_SECRET=local-local-local-local-local-local BETTER_AUTH_URL=http://127.0.0.1:3000 pnpm build",
+      "expected": {
+        "exit_code": 0,
+        "external_network_requests": 0,
+        "provider_credentials_present": false,
+        "remote_font_fetches": 0,
+        "normalized_output_digest_repeatable": true,
+        "input_trace_complete": true
+      },
+      "required_evidence": "Exact candidate SHA/tree, lock/toolchain/env-name/route/header/input-trace and two normalized output digests, plus provider source-bundle exclusion of all 150 root users records.",
+      "failure_effect": "BLOCKED. Amendment A-R authorizes no frontend product repair to make this build pass."
+    }
+  ],
+  "review_finding_proofs": [
+    {
+      "id": "REV-P1-BUILDER-EVENT-AUTH",
+      "thread_id": "PRRT_kwDORrYm-c6SOmYY",
+      "test_paths": ["tests/test_builder_event_auth.py", "tests/test_builder_events_worker.py"],
+      "required_assertions": "Valid exact-byte signature succeeds; missing/invalid/stale/future/replayed/body-tampered requests cause zero writes/fanout; required configuration fails closed."
+    },
+    {
+      "id": "REV-P1-COMPOSE-LANGGRAPH-TARGET",
+      "thread_id": "PRRT_kwDORrYm-c6Shh6Q",
+      "test_paths": ["tests/test_langgraph_dockerfile_pdf_runtime.py"],
+      "required_assertions": "Compose binds http://langgraph:2024 with dependency/health semantics and no production localhost fallback."
+    },
+    {
+      "id": "REV-P2-PARENT-THREAD-MANIFEST",
+      "thread_id": "PRRT_kwDORrYm-c6Q4ejz",
+      "test_paths": ["tests/test_build_manifest_addressing.py"],
+      "required_assertions": "Parent session and Builder task remain distinct and correctly bound through manifest/storage/DQ/terminal/registry."
+    },
+    {
+      "id": "REV-P2-REGISTRY-IDENTITY",
+      "thread_id": "PRRT_kwDORrYm-c6RM5hC",
+      "test_paths": ["tests/test_artifact_registry.py"],
+      "required_assertions": "New explicit identity wins only under validated CAS/monotonic law; replay cannot downgrade; local/Supabase adapters agree."
+    },
+    {
+      "id": "REV-P2-INNER-TIMEOUT",
+      "thread_id": "PRRT_kwDORrYm-c6ROowY",
+      "test_paths": ["tests/test_build_capability_foundation.py"],
+      "required_assertions": "Inner provider TimeoutError retains provider semantics; actual outer deadline produces one hard terminal."
+    },
+    {
+      "id": "REV-P2-RUNTIME-RUN-ID",
+      "thread_id": "PRRT_kwDORrYm-c6R0ZeW",
+      "test_paths": ["tests/test_build_capability_foundation.py"],
+      "required_assertions": "Runtime-only run ID is recorded; stale state cannot override; mismatch is deterministic."
+    },
+    {
+      "id": "REV-P2-UNQUOTED-OPACITY",
+      "thread_id": "PRRT_kwDORrYm-c6R8cmd",
+      "test_paths": ["tests/test_deck_design_lift_candidate_compiler.py", "tests/test_deck_design_lift_repair_author.py"],
+      "required_assertions": "Quoted/unquoted/encoded/duplicate/style-block zero-opacity cannot bypass lossiness."
+    },
+    {
+      "id": "REV-P2-INTERNAL-ARTIFACT-PATH",
+      "thread_id": "PRRT_kwDORrYm-c6SBTIq",
+      "test_paths": ["tests/test_artifacts_router.py"],
+      "required_assertions": "Internal .builder/ledger/source/workspace/encoded/fallback/registry/list/sign paths fail before resolution."
+    },
+    {
+      "id": "REV-P2-BLOCKING-JOIN",
+      "thread_id": "PRRT_kwDORrYm-c6STwJo",
+      "test_paths": ["tests/test_builder_events_worker.py"],
+      "required_assertions": "Event-loop heartbeat stays live; deadline remains absolute; terminal order and no-write-after-close hold."
+    },
+    {
+      "id": "REV-P2-ARIA-VISIBILITY",
+      "thread_id": "PRRT_kwDORrYm-c6VKnqK",
+      "test_paths": ["tests/test_deck_native_service.py", "tests/test_pdf_report_contract_runtime.py"],
+      "required_assertions": "Native-deck visual counts include aria-hidden content unless rendering hides it; accessibility state is reported separately."
+    }
+  ],
+  "post_m00_frontend_groups": [
+    "TEST-FRONTEND-CSP-2",
+    "TEST-FRONTEND-NULL-SAFETY-7",
+    "TEST-FRONTEND-CHROME-LAYOUT-7",
+    "TEST-FRONTEND-SETTINGS-4",
+    "TEST-FRONTEND-CHROME-HOOK-6",
+    "TEST-FRONTEND-RECAP-2"
+  ],
+  "frontend_build_rule": {
+    "current_class": "M00_PREREQUISITE",
+    "reason": "Mandatory frontend test-contract/fixture edits enter the authoritative A-G Vercel build-input closure, so the repaired candidate needs a hermetic production build even though no frontend product repair is authorized.",
+    "conditional_target_rule": "If the complete production-input closure differs, Vercel joins the candidate target set under candidate-identity-budget.json and separate Davide plus Luis target-specific approval; promotion occurs last.",
+    "failure_effect": "BLOCKED; request a new checksum-bound scope decision rather than changing frontend product source."
+  },
+  "evidence_per_lane": [
+    "candidate SHA/tree",
+    "container/local image and dependency-lock digests",
+    "exact command and non-secret capability booleans",
+    "collected nodeids/count",
+    "stdout/JUnit digests, exit, duration, skip reasons, and retries",
+    "generated artifact digests without content",
+    "finding/blocker mapping and remaining disposition"
+  ]
+}

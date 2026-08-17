@@ -1,0 +1,329 @@
+{
+  "schema_version": 2,
+  "amendment_id": "FC-01-v1.2-AMENDMENT-A",
+  "execution_authorized": false,
+  "authority_activates_only_after_joint_approval": true,
+  "control_branch": {
+    "name": "campaign/fc01-control-v1",
+    "mode": "APPEND_ONLY_EVIDENCE_ONLY",
+    "allowed_new_paths": [
+      "docs/campaigns/foundation-mainline-v1/evidence/**",
+      "docs/campaigns/foundation-mainline-v1/evaluate_fc01_v1_2_amendment_a.py",
+      "docs/campaigns/foundation-mainline-v1/evaluate_fc01_v1_2_amendment_a_approval.py"
+    ],
+    "prior_file_modify_delete_or_rename_allowed": false,
+    "product_or_shared_runtime_path_allowed": false
+  },
+  "product_branch": {
+    "name": "codex/fc01a-r-m00-prereqs-v1",
+    "create_only_after_joint_approval": true,
+    "exact_base": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+    "draft_pr_base": "codex/sophia-observability-v1",
+    "maximum_branches": 1,
+    "maximum_draft_pull_requests": 1,
+    "pr_144_mutation_authorized": false
+  },
+  "review_repair_authority": [
+    {
+      "id": "REV-P1-BUILDER-EVENT-AUTH",
+      "thread_id": "PRRT_kwDORrYm-c6SOmYY",
+      "priority": "P1",
+      "fc01ar_repair_required": true,
+      "authorized_repair_kind": "PRODUCT_REVIEW_FINDING",
+      "allowed_product_paths": [
+        "backend/app/gateway/routers/builder_events.py",
+        "backend/packages/harness/deerflow/sophia/builder_event_auth.py",
+        "backend/packages/harness/deerflow/sophia/builder_events.py",
+        "config.production.yaml",
+        "render.yaml"
+      ],
+      "required_test_paths": [
+        "backend/tests/test_builder_event_auth.py",
+        "backend/tests/test_builder_events_worker.py"
+      ],
+      "allowed_change": "Exact-body HMAC before parsing/side effects; freshness, nonce/replay rejection, transition-compatible signing/enforcement, and fail-closed configuration. No live secret or provider-setting mutation."
+    },
+    {
+      "id": "REV-P1-COMPOSE-LANGGRAPH-TARGET",
+      "thread_id": "PRRT_kwDORrYm-c6Shh6Q",
+      "priority": "P1",
+      "fc01ar_repair_required": true,
+      "authorized_repair_kind": "PRODUCT_REVIEW_FINDING",
+      "allowed_product_paths": [
+        "docker/docker-compose.yaml"
+      ],
+      "required_test_paths": [
+        "backend/tests/test_langgraph_dockerfile_pdf_runtime.py"
+      ],
+      "allowed_change": "Set the explicit Compose LangGraph service target and add a production-equivalent static/route assertion; no unrelated Compose redesign."
+    },
+    {
+      "id": "REV-P2-PARENT-THREAD-MANIFEST",
+      "thread_id": "PRRT_kwDORrYm-c6Q4ejz",
+      "priority": "P2",
+      "fc01ar_repair_required": true,
+      "authorized_repair_kind": "PRODUCT_REVIEW_FINDING",
+      "allowed_product_paths": [
+        "backend/packages/harness/deerflow/sophia/deck_build/foundation.py",
+        "backend/packages/harness/deerflow/sophia/deck_build/service.py"
+      ],
+      "required_test_paths": [
+        "backend/tests/test_build_manifest_addressing.py"
+      ],
+      "allowed_change": "Use canonical parent-session identity for manifest/storage while retaining Builder task identity separately."
+    },
+    {
+      "id": "REV-P2-REGISTRY-IDENTITY",
+      "thread_id": "PRRT_kwDORrYm-c6RM5hC",
+      "priority": "P2",
+      "fc01ar_repair_required": true,
+      "authorized_repair_kind": "PRODUCT_REVIEW_FINDING",
+      "allowed_product_paths": [
+        "backend/app/gateway/artifact_registry.py"
+      ],
+      "required_test_paths": [
+        "backend/tests/test_artifact_registry.py"
+      ],
+      "allowed_change": "Validated monotonic/CAS logical and version identity updates with replay/downgrade rejection and local/Supabase parity."
+    },
+    {
+      "id": "REV-P2-INNER-TIMEOUT",
+      "thread_id": "PRRT_kwDORrYm-c6ROowY",
+      "priority": "P2",
+      "fc01ar_repair_required": true,
+      "authorized_repair_kind": "PRODUCT_REVIEW_FINDING",
+      "allowed_product_paths": [
+        "backend/packages/harness/deerflow/agents/sophia_agent/middlewares/build_deadline.py"
+      ],
+      "required_test_paths": [
+        "backend/tests/test_build_capability_foundation.py"
+      ],
+      "allowed_change": "Distinguish outer cancel-scope expiry from an inner provider TimeoutError without extending the absolute deadline."
+    },
+    {
+      "id": "REV-P2-RUNTIME-RUN-ID",
+      "thread_id": "PRRT_kwDORrYm-c6R0ZeW",
+      "priority": "P2",
+      "fc01ar_repair_required": true,
+      "authorized_repair_kind": "PRODUCT_REVIEW_FINDING",
+      "allowed_product_paths": [
+        "backend/packages/harness/deerflow/sophia/build_runtime/events.py"
+      ],
+      "required_test_paths": [
+        "backend/tests/test_build_capability_foundation.py"
+      ],
+      "allowed_change": "Apply one trusted runtime/state run-identity priority and deterministic mismatch diagnostics."
+    },
+    {
+      "id": "REV-P2-UNQUOTED-OPACITY",
+      "thread_id": "PRRT_kwDORrYm-c6R8cmd",
+      "priority": "P2",
+      "fc01ar_repair_required": true,
+      "authorized_repair_kind": "PRODUCT_REVIEW_FINDING",
+      "allowed_product_paths": [
+        "backend/packages/harness/deerflow/sophia/deck_build/compiler_capabilities.py",
+        "backend/packages/harness/deerflow/sophia/deck_build/html_sanitizer.py",
+        "backend/packages/harness/deerflow/sophia/deck_design_lift/repair_author.py"
+      ],
+      "required_test_paths": [
+        "backend/tests/test_deck_design_lift_candidate_compiler.py",
+        "backend/tests/test_deck_design_lift_repair_author.py"
+      ],
+      "allowed_change": "Parser-based lossiness/visibility inspection for quoted, unquoted, encoded, duplicate-attribute, and style-block forms."
+    },
+    {
+      "id": "REV-P2-INTERNAL-ARTIFACT-PATH",
+      "thread_id": "PRRT_kwDORrYm-c6SBTIq",
+      "priority": "P2",
+      "fc01ar_repair_required": true,
+      "authorized_repair_kind": "PRODUCT_REVIEW_FINDING",
+      "allowed_product_paths": [
+        "backend/app/gateway/routers/artifacts.py",
+        "backend/app/gateway/artifact_registry.py"
+      ],
+      "required_test_paths": [
+        "backend/tests/test_artifacts_router.py"
+      ],
+      "allowed_change": "Canonical internal-artifact rejection before every local, fallback, storage, list, and signing path."
+    },
+    {
+      "id": "REV-P2-BLOCKING-JOIN",
+      "thread_id": "PRRT_kwDORrYm-c6STwJo",
+      "priority": "P2",
+      "fc01ar_repair_required": true,
+      "authorized_repair_kind": "PRODUCT_REVIEW_FINDING",
+      "allowed_product_paths": [
+        "backend/packages/harness/deerflow/sophia/builder_events.py"
+      ],
+      "required_test_paths": [
+        "backend/tests/test_builder_events_worker.py"
+      ],
+      "allowed_change": "Nonblocking async producer boundary preserving absolute deadlines and no-write-after-delivery semantics."
+    },
+    {
+      "id": "REV-P2-ARIA-VISIBILITY",
+      "thread_id": "PRRT_kwDORrYm-c6VKnqK",
+      "priority": "P2",
+      "fc01ar_repair_required": true,
+      "authorized_repair_kind": "PRODUCT_REVIEW_FINDING",
+      "allowed_product_paths": [
+        "backend/packages/harness/deerflow/sophia/deck_build/service.py",
+        "backend/packages/harness/deerflow/sophia/report_contract.py"
+      ],
+      "required_test_paths": [
+        "backend/tests/test_deck_native_service.py",
+        "backend/tests/test_pdf_report_contract_runtime.py"
+      ],
+      "allowed_change": "Visual visibility follows CSS/HTML rendering; aria-hidden is recorded separately as accessibility state."
+    }
+  ],
+  "review_exit_law": {
+    "required_review_repairs": 10,
+    "required_p1_passes": 2,
+    "required_p2_passes": 8,
+    "allowed_fail_unknown_not_run_or_waived": 0,
+    "all_thread_ids_must_have_checksum_bound_proof": true,
+    "otherwise": "BLOCKED"
+  },
+  "m00_critical_test_repair_authority": [
+    {
+      "blocker_id": "TEST-SKIP-POSTGRES-49",
+      "authorized_repair_kind": "TEST_INFRA_ONLY",
+      "allowed_paths": [
+        "backend/tests/test_deck_quality_shadow_postgres_integration.py",
+        "backend/tests/test_producer_failure_signal_postgres.py",
+        "backend/tests/conftest.py"
+      ],
+      "allowed_change": "Deterministic disposable-database fixture only; no historical or live migration change."
+    },
+    {
+      "blocker_id": "TEST-SKIP-ROOT-LINUX-14",
+      "authorized_repair_kind": "TEST_INFRA_ONLY",
+      "allowed_paths": [
+        "backend/tests/test_deck_quality_shadow_snapshot.py",
+        "backend/tests/test_image_subprocess.py",
+        "backend/tests/test_local_sandbox_encoding.py",
+        "backend/tests/test_pptx_preview.py",
+        "backend/tests/test_process_group.py",
+        "backend/tests/test_sandbox_identity.py"
+      ],
+      "external_ephemeral_test_image_allowed": true,
+      "production_dockerfile_change_allowed": false,
+      "allowed_change": "Pinned ephemeral root-Linux test image or test isolation only; never relax a production security boundary."
+    },
+    {
+      "blocker_id": "TEST-SKIP-PYTHON-CHROMIUM-8",
+      "authorized_repair_kind": "TEST_INFRA_ONLY",
+      "allowed_paths": [
+        "backend/tests/test_deck_native_service.py",
+        "backend/tests/test_hands_on_deck_sophia_patches.py"
+      ],
+      "allowed_change": "Pinned matching Playwright/Chromium test environment or deterministic fixture correction only."
+    },
+    {
+      "blocker_id": "TEST-BACKEND-RUFF-3",
+      "authorized_repair_kind": "MECHANICAL_SOURCE_AND_TEST_HYGIENE",
+      "allowed_paths": [
+        "backend/packages/harness/deerflow/sophia/deck_build/asset_policy.py",
+        "backend/packages/harness/deerflow/sophia/deck_build/html_design_renderer.py",
+        "backend/tests/test_deck_image_assets.py"
+      ],
+      "allowed_change": "Mechanical lint correction with no semantic behavior change."
+    },
+    {
+      "blocker_id": "TEST-BACKEND-DECK-HASH-35",
+      "authorized_repair_kind": "TEST_CONTRACT_ONLY",
+      "authority_decision": "The committed skill bytes at frozen 9ee are authoritative. Select a bounded semantically equivalent excerpt no larger than 4096 bytes and update only the excerpt/source hash locks in quality_adapter.py plus direct tests.",
+      "allowed_paths": [
+        "backend/packages/harness/deerflow/sophia/deck_design_lift/quality_adapter.py",
+        "backend/tests/test_deck_design_lift_quality_adapter.py"
+      ],
+      "skill_file_change_allowed": false,
+      "hash_validation_weakening_allowed": false
+    },
+    {
+      "blocker_id": "TEST-BACKEND-SMOKE-DIMENSION-5",
+      "authorized_repair_kind": "TEST_FIXTURE_ONLY",
+      "allowed_paths": [
+        "backend/tests/test_smoke_deck_quality_sol.py",
+        "backend/tests/fixtures/deck_quality_shadow/**"
+      ],
+      "allowed_change": "Regenerate bounded fixture bytes/checksums at the current 2048 direct-evidence ceiling; never raise the ceiling to pass."
+    },
+    {
+      "blocker_id": "TEST-BACKEND-ORDER-ISOLATION-17",
+      "authorized_repair_kind": "TEST_FIXTURE_ONLY",
+      "allowed_paths": [
+        "backend/tests/test_deck_quality_shadow_persistence.py",
+        "backend/tests/conftest.py"
+      ],
+      "allowed_change": "Reset/isolate test globals and fixtures; production-persistence semantics may change only under an enumerated review finding."
+    },
+    {
+      "blocker_id": "TEST-FRONTEND-RUNTIME-OWNERSHIP-3",
+      "authorized_repair_kind": "TEST_CONTRACT_ONLY",
+      "allowed_paths": [
+        "frontend/src/__tests__/architecture/runtime-ownership-contract.test.ts"
+      ],
+      "allowed_change": "Update the static contract to the frozen runtime topology; no production frontend input change."
+    },
+    {
+      "blocker_id": "TEST-FRONTEND-CANONICAL-E2E",
+      "authorized_repair_kind": "TEST_FIXTURE_ONLY",
+      "allowed_paths": [
+        "frontend/tests/e2e/auth-real-login.spec.ts",
+        "frontend/tests/e2e/builder-live-status.spec.ts",
+        "frontend/playwright.config.ts"
+      ],
+      "allowed_change": "Offline route-stubbed auth/text/Builder terminal/artifact UI proof; no auth bypass in product code, provider/model call, or Voice path."
+    },
+    {
+      "blocker_id": "TEST-EXACT-CANDIDATE-CI",
+      "authorized_repair_kind": "TEST_INFRA_ONLY",
+      "allowed_paths": [
+        ".github/workflows/fc01a-r-m00-prerequisites.yml"
+      ],
+      "allowed_change": "One exact-head M00-prerequisite workflow with locked dependencies and zero provider credentials; no unrelated workflow edit."
+    }
+  ],
+  "explicitly_not_authorized_test_repairs": [
+    "TEST-SKIP-NODE-PDF-1",
+    "TEST-SKIP-LIVE-CLIENT-19",
+    "TEST-FRONTEND-CSP-2",
+    "TEST-FRONTEND-NULL-SAFETY-7",
+    "TEST-FRONTEND-CHROME-LAYOUT-7",
+    "TEST-FRONTEND-SETTINGS-4",
+    "TEST-FRONTEND-CHROME-HOOK-6",
+    "TEST-FRONTEND-RECAP-2",
+    "TEST-VOICE-MISSING-CREDENTIAL-1",
+    "TEST-VOICE-DEPENDENCY-42",
+    "TEST-VOICE-CONTRACT-57",
+    "TEST-GVIS-62",
+    "TEST-FRONTEND-PRODUCTION-BUILD",
+    "TEST-FRONTEND-SUPPLEMENTAL-MEMORY-E2E",
+    "TEST-FRONTEND-LINT-WARNINGS-58",
+    "TEST-BACKEND-TYPECHECK-NOT-CONFIGURED"
+  ],
+  "directly_adjacent_test_rule": {
+    "additional_test_path_may_be_used": false,
+    "rule": "Every changed test path must already appear in an exact allowed_product_paths or allowed_paths list in this payload. A missing path is BLOCKED and requires a new checksum-bound amendment decision."
+  },
+  "read_only_proof_authority": [
+    "Confidential secret-owner disposition and redacted rescan.",
+    "Confidential tracked-record provenance review.",
+    "Metadata-only M00 relation/routine/ACL/RLS/policy/storage/project-routing fingerprint.",
+    "Read-only provider deployment/source/rollback/route revalidation.",
+    "Local/container/CI exact test execution without provider credentials."
+  ],
+  "prohibited": [
+    "FC-01B or M00",
+    "Voice source, dependency, test, deploy, restart, call, or provider setting change",
+    "Main merge or PR #144 mutation",
+    "Historical migration edit or any live DDL/DML/migration/setting/row-content access",
+    "Production deploy/promotion/restart/rollback/alias or provider-setting change before separate target approval",
+    "Secret rotation, credential issuance, billing/retention change, or paid infrastructure",
+    "History rewrite, force push, rebase, squash, reset, or destructive cleanup",
+    "Prompt, model/provider policy, rubric, synthetic identity, or one-repair ceiling change",
+    "Feature, redesign, opportunistic refactor, or any non-enumerated test-debt repair"
+  ]
+}

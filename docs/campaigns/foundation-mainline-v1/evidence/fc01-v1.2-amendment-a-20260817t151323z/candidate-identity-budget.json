@@ -1,0 +1,103 @@
+{
+  "schema_version": 1,
+  "amendment_id": "FC-01-v1.2-AMENDMENT-A",
+  "budget_id": "fc01a-r-candidate-identity-budget-proposal-1",
+  "status": "PROPOSED_INACTIVE_PENDING_TARGET_SPECIFIC_APPROVAL",
+  "execution_authorized": false,
+  "purpose": "Establish exact Gateway and LangGraph candidate deployment identities, plus a conditional Vercel candidate identity when the authoritative production-input closure changes, after FC-01A-R repair proof and before recomputing BASE-00.",
+  "activation": {
+    "amendment_joint_approval_is_sufficient": false,
+    "requires_fc01a_r_ready_for_target_approval": true,
+    "requires_separate_direct_davide_target_specific_approval": true,
+    "requires_separate_direct_luis_target_specific_approval_if_vercel_participates": true,
+    "target_approval_must_bind_this_budget_sha256": true,
+    "operator_named_by_target_approval": true,
+    "window_named_by_target_approval": true,
+    "existing_august_18_draft_window_reusable": false
+  },
+  "targets": [
+    {
+      "surface": "render_langgraph",
+      "service_id": "srv-d7be5s9r0fns7397l4fg",
+      "maximum_candidate_deployments": 1,
+      "planned_immediate_rollback_deployment_id": "dep-d9ln9e8ae00c73aoo3b0",
+      "planned_immediate_rollback_source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca"
+    },
+    {
+      "surface": "render_gateway",
+      "service_id": "srv-d7be5s9r0fns7397l4g0",
+      "maximum_candidate_deployments": 1,
+      "planned_immediate_rollback_deployment_id": "dep-d9ln9eflk1mc7392mnmg",
+      "planned_immediate_rollback_source_sha": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca"
+    },
+    {
+      "surface": "vercel_frontend",
+      "project": "sophia-agent-front",
+      "participation": "CONDITIONAL_IF_PRODUCTION_INPUT_CLOSURE_DIFFERS",
+      "maximum_candidate_deployments": 1,
+      "maximum_production_promotions_or_alias_actions": 1,
+      "planned_immediate_rollback_deployment_id": "dpl_Bv2yaEMssrnz6JnGhQtsxP9RgQjR",
+      "planned_immediate_rollback_source_sha": "7092042b13f3edc40468fd614685d7ede3b21f2a",
+      "maximum_abort_rollback_actions": 1
+    }
+  ],
+  "ordered_forward_budget": {
+    "sequence": [
+      "render_langgraph signing producer",
+      "render_gateway enforcing receiver",
+      "conditional vercel_frontend production candidate promoted last"
+    ],
+    "maximum_total_candidate_deployments": 3,
+    "maximum_total_production_promotions_or_alias_actions": 1,
+    "maximum_attempts_per_target": 1,
+    "hidden_retries": 0,
+    "maximum_elapsed_window_minutes": 180,
+    "mixed_version_invariant": "A strict Gateway receiver may never face an unsigned producer. If Vercel participates, prove old Vercel with old and new Gateway, new Vercel with new Gateway, and new Vercel with old Gateway during the rollback interstitial."
+  },
+  "ordered_abort_rollback_budget": {
+    "sequence": [
+      "conditional vercel_frontend to planned immediate rollback when it participated",
+      "render_gateway to planned immediate rollback",
+      "render_langgraph to planned immediate rollback"
+    ],
+    "maximum_total_rollback_actions": 3,
+    "rollback_is_authorized_only_on_bound_abort": true,
+    "provider_rollback_dry_run_or_canary_before_abort": false,
+    "offline_reverse_order_evaluator_required": true
+  },
+  "hard_zero_limits": {
+    "incremental_provider_spend_usd": 0.0,
+    "provider_setting_changes": 0,
+    "database_ddl_or_dml": 0,
+    "migrations": 0,
+    "credential_settings_or_rotations": 0,
+    "voice_deployments_restarts_or_calls": 0,
+    "additional_render_targets": 0,
+    "user_traffic_experiments": 0,
+    "m00_runs": 0
+  },
+  "required_per_step_evidence": [
+    "target-specific approval and exact candidate SHA/tree",
+    "conditional Vercel closure/build/settings/output identity and direct Luis experience/accessibility target decision when Vercel participates",
+    "provider-assigned deployment ID and exact source identity",
+    "health/readiness and mixed-version compatibility result",
+    "content-free no-DML HMAC challenge result",
+    "planned rollback selectable_now result and observation time",
+    "route closure without user-content, row, or object-content access",
+    "elapsed time, attempt count, operator, and abort status"
+  ],
+  "abort_conditions": [
+    "candidate source or target differs from the target-specific approval",
+    "a second attempt on any participating target is needed",
+    "the ordered mixed-version invariant cannot be proved",
+    "health, route, HMAC challenge, or provider identity is failed or unknown",
+    "any participating target's planned rollback is not immediately selectable",
+    "an unbudgeted Vercel action, any Voice, database, credential, or provider-setting mutation becomes necessary",
+    "the bound maintenance window, time, action, or zero-spend limit is exceeded"
+  ],
+  "completion": {
+    "success_state": "CANDIDATE_IDENTITIES_REVALIDATED",
+    "failure_state": "BLOCKED",
+    "automatically_authorizes_base00_frozen_or_m00": false
+  }
+}
