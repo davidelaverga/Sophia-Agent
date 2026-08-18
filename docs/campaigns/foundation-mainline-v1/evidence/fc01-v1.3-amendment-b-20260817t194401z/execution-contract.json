@@ -1,0 +1,610 @@
+{
+  "schema_version": 1,
+  "amendment_id": "FC-01-v1.3-AMENDMENT-B",
+  "activation_state": "OWNER_DIRECTIVE_ACTIVE_REMEDIATION_AUTHORIZED",
+  "current_authority_flags": {
+    "repair_authorized": false,
+    "deployment_authorized": false,
+    "m00_authorized": false,
+    "post_m00_live_client_authorized": false,
+    "main_merge_authorized": false
+  },
+  "activation_effect": {
+    "requires_valid_payload_seal_activation_receipt_and_projection": true,
+    "state": "OWNER_DIRECTIVE_ACTIVE_REMEDIATION_AUTHORIZED",
+    "repair_authorized": true,
+    "deployment_authorized": false,
+    "m00_authorized": false,
+    "post_m00_live_client_authorized": false,
+    "main_merge_authorized": false
+  },
+  "derived_authority_contract": {
+    "exact_flag_fields": [
+      "repair_authorized",
+      "deployment_authorized",
+      "m00_authorized",
+      "post_m00_live_client_authorized",
+      "main_merge_authorized"
+    ],
+    "d1_consumed_before_result": "deployment only",
+    "d2_consumed_before_m00_terminal": "single M00 with at-most-one bound repair only",
+    "m00_pass_before_live_result": "conditional post-M00 live-client lane only",
+    "d3_consumed_before_result": "exact main merge plus three canonical deployments only",
+    "waiting_expired_terminal_or_complete": "all false"
+  },
+  "owner": {
+    "name": "Davide Laverga",
+    "sole_approver": true,
+    "luis_required": false,
+    "identity_boundary": "AUTHENTICATED_INTERACTIVE_TASK_SESSION",
+    "agent_authored_approval_prohibited": true
+  },
+  "repair_branch": {
+    "name": "codex/fc01a-r-m00-prereqs-v1",
+    "exact_parent": "9ee901fd2cdcfb55df31c0377e0f1fa26b1b4cca",
+    "remote_name": "origin",
+    "remote_ref": "refs/remotes/origin/codex/fc01a-r-m00-prereqs-v1",
+    "local_and_remote_heads_must_equal_frozen_candidate_before_d1": true,
+    "exact_head_ci_must_equal_remote_head": true,
+    "draft_pr_base": "codex/sophia-observability-v1",
+    "draft_pr_count_max": 1,
+    "pr_144_mutation_authorized": false,
+    "integration_branch_name": "codex/fc01-mainline-integration-v1"
+  },
+  "mandatory_review_repairs": [
+    "REV-P1-BUILDER-EVENT-AUTH",
+    "REV-P1-COMPOSE-LANGGRAPH-TARGET",
+    "REV-P2-PARENT-THREAD-MANIFEST",
+    "REV-P2-REGISTRY-IDENTITY",
+    "REV-P2-INNER-TIMEOUT",
+    "REV-P2-RUNTIME-RUN-ID",
+    "REV-P2-UNQUOTED-OPACITY",
+    "REV-P2-INTERNAL-ARTIFACT-PATH",
+    "REV-P2-BLOCKING-JOIN",
+    "REV-P2-ARIA-VISIBILITY"
+  ],
+  "review_repair_scope_source": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/authorized-repair-scope.json",
+  "font_closure": {
+    "id": "REV-B-FRONTEND-HERMETIC-LOCAL-FONTS",
+    "allowed_product_paths": [
+      "frontend/next.config.js",
+      "frontend/src/app/fonts.ts",
+      "frontend/src/app/fonts/InterVariable.woff2",
+      "frontend/src/app/fonts/CormorantGaramondVariable.woff2",
+      "frontend/src/app/fonts/CormorantGaramondVariable-Italic.woff2",
+      "frontend/src/app/fonts/INTER-LICENSE.txt",
+      "frontend/src/app/fonts/CORMORANT-LICENSE.txt",
+      "frontend/src/app/fonts/PROVENANCE.json"
+    ],
+    "allowed_test_paths": [
+      "frontend/src/__tests__/font-hermetic-contract.test.ts",
+      "frontend/tests/e2e/fc01-font-experience-accessibility.spec.ts"
+    ],
+    "allowed_ci_path": ".github/workflows/fc01a-r-m00-prerequisites.yml",
+    "required_families": [
+      "Inter",
+      "Cormorant Garamond"
+    ],
+    "required_css_variables": [
+      "--font-inter",
+      "--font-cormorant"
+    ],
+    "inter_required_weight_range": "100 900",
+    "inter_required_styles": [
+      "normal"
+    ],
+    "cormorant_asset_weight_range": "300 700",
+    "cormorant_effective_configured_weights": [
+      "300",
+      "400"
+    ],
+    "cormorant_required_styles": [
+      "normal",
+      "italic"
+    ],
+    "official_sources": [
+      "https://nextjs.org/docs/app/getting-started/fonts#local-fonts",
+      "https://github.com/rsms/inter",
+      "https://github.com/CatharsisFonts/Cormorant"
+    ],
+    "remote_font_build_requests_max": 0,
+    "remote_font_browser_requests_max": 0,
+    "network_denied_clean_builds_required": 2,
+    "vercel_participates_in_d1": true,
+    "unrelated_visual_redesign_authorized": false,
+    "build_output_proof": {
+      "clean_network_denied_builds": 2,
+      "next_config_generate_build_id_must_return_existing_app_build_id": true,
+      "ci_next_public_app_build_id_must_equal_exact_candidate_sha": true,
+      "deterministic_next16_preview_seed_required": true,
+      "synthetic_nonproduction_server_actions_key_required": true,
+      "raw_output_manifest_digests_recorded": true,
+      "normalization_algorithm_version_required": true,
+      "excluded_nondeterministic_field_allowlist_required": true,
+      "normalized_output_digests_must_match": true,
+      "unexplained_difference_status": "FAIL"
+    }
+  },
+  "budget": {
+    "product_repair_branches_max": 1,
+    "draft_repair_prs_max": 1,
+    "complete_initial_repair_sweeps_max": 1,
+    "repair_cycles_per_failing_invariant_max": 2,
+    "aggregate_candidate_revisions_after_initial_sweep_max": 2,
+    "changed_causal_variables_per_cycle_max": 1,
+    "hidden_retries_max": 0,
+    "gate_or_threshold_relaxations_max": 0,
+    "opportunistic_refactors_max": 0,
+    "sophia_runtime_model_provider_calls_before_d2_max": 0,
+    "live_m00_attempts_after_d2_max": 1,
+    "m00_repairs_max": 1,
+    "silent_m00_reruns_max": 0,
+    "active_engineering_hours_max": 24,
+    "absolute_calendar_days_from_seal": 14,
+    "absolute_expiry_pauses": false,
+    "active_clock_pauses_only_at": [
+      "FC01-D1",
+      "FC01-D2",
+      "FC01-D3"
+    ],
+    "budget_exhaustion_state": "BLOCKED_BUDGET"
+  },
+  "pre_d1_allowed_actions": [
+    "additive Amendment B governance and evidence",
+    "one exact repair branch and one draft repair PR",
+    "allowlisted product, test, fixture, and CI edits for the eleven closures",
+    "local, container, browser, and exact-head CI tests",
+    "official package/font retrieval and license research",
+    "privacy-minimized read-only provider, database, security, GitHub, and source metadata inspection",
+    "sanitized append-only evidence generation"
+  ],
+  "pre_d1_prohibited_actions": [
+    "production deploy, restart, rollback, promotion, alias, or provider-setting mutation",
+    "credential creation, provisioning, rotation, revocation, or value disclosure",
+    "database DDL, DML, migration, restore, network-policy change, private row read, or private object read",
+    "Voice request or Voice deployment",
+    "Sophia application/runtime model-provider call",
+    "M00 execution",
+    "main merge, PR 144 mutation, branch deletion, force-push, or history rewrite",
+    "secret, private content, raw provider payload, user data, stable identifier, or database coordinate in Git",
+    "historical migration byte change",
+    "gate relaxation or scope expansion"
+  ],
+  "required_pre_d1_evidence": [
+    "all ten review repairs PASS",
+    "hermetic local-font closure PASS",
+    "all 71 M00-critical logical tests PASS",
+    "two network-denied frontend builds PASS",
+    "zero remote-font build and browser requests",
+    "frontend-experience-accessibility-proof.json PASS",
+    "exact-head CI PASS at frozen candidate SHA/tree",
+    "shared builder-event HMAC presence/equality challenge plan PASS without value disclosure",
+    "Vercel production-input closure, hermetic build identity, and upload exclusion PASS",
+    "static M00 route/config/target plan and old/new compatibility plan PASS",
+    "exact current and rollback identities for LangGraph, Gateway, and Vercel",
+    "M00 ACL/RLS/routine contract disposition PASS",
+    "three secret-history groups disposition PASS",
+    "165 tracked-record provenance and production-reachability disposition PASS",
+    "repair-budget ledger PASS with one initial sweep, no more than two cycles per invariant, no more than two aggregate revisions, one causal variable per cycle, and zero hidden retries",
+    "static zero-Voice reachability plan PASS"
+  ],
+  "required_post_d1_pre_d2_evidence": [
+    "assigned LangGraph, Gateway, and Vercel candidate identities PASS",
+    "all eight live M00 route edges PASS",
+    "zero-DML builder-event HMAC valid, mutated, stale, and replay challenge PASS",
+    "immediate rollback selectable_now for all three targets PASS",
+    "old/new mixed-version compatibility matrix PASS",
+    "fresh provider and application identity PASS",
+    "runtime zero-Voice reachability PASS"
+  ],
+  "confidential_evidence_validity_contract": {
+    "revalidation_points": [
+      "packet presentation",
+      "approval consumption",
+      "immediately before first dependent forward action"
+    ],
+    "minimum_valid_through_rule": "every gate-supporting confidential reference expires strictly after max(packet.expires_at, packet.window.ends_at) plus 3600 seconds",
+    "FC01-D2_inherited_scope": "all D1 secret, tracked-record, HMAC, ACL/data, provider, and mutation-prestate confidential references",
+    "FC01-D3_refreshed_scope": "all refreshed POST_M00 privacy, data, provider-identity, health, route, and rollback-selectability confidential references",
+    "mutation_prestate_rule": "also satisfies the stronger exact per-entry rollback_state_valid_through contract",
+    "failure_state": "BLOCKED_EVIDENCE"
+  },
+  "approval_protocol": {
+    "packet_record_type": "FC01_DAVIDE_APPROVAL_PACKET_V1",
+    "exact_response_regex": "^APPROVE (FC01-D1|FC01-D2|FC01-D3) [0-9a-f]{64}$",
+    "method": "INTERACTIVE_DAVIDE_APPROVAL_V1",
+    "generic_continue_is_approval": false,
+    "packet_bytes_may_change_after_approval": false,
+    "approval_reuse": false,
+    "packets_approvals_consumptions_and_primary_outcomes_per_gate_max": 1,
+    "d2_conditional_subordinate_live_client_outcomes_max": 1,
+    "d2_outcome_taxonomy": "exactly one primary M00 terminal; only a PASS terminal may be followed by exactly one subordinate post-M00 live-client result, which is not another packet, approval, consumption, or M00 outcome",
+    "packet_common_exact_fields": [
+      "schema_version",
+      "record_type",
+      "campaign_id",
+      "amendment_id",
+      "gate_id",
+      "packet_id",
+      "nonce",
+      "packet_path",
+      "task_or_thread_id",
+      "task_or_thread_id_null_reason",
+      "created_at",
+      "presented_at",
+      "expires_at",
+      "required_state",
+      "control_head",
+      "activation_receipt",
+      "owner_directive_sha256",
+      "source_locks",
+      "candidate_sha",
+      "candidate_tree",
+      "evidence_manifest_sha256",
+      "budget_manifest_sha256",
+      "action_manifest_sha256",
+      "active_clock_ledger_sha256",
+      "active_clock_evaluated_at",
+      "bindings",
+      "actions",
+      "exclusions",
+      "window",
+      "cost_ceiling",
+      "abort_conditions"
+    ],
+    "receipt_exact_fields": [
+      "record_type",
+      "schema_version",
+      "campaign_id",
+      "amendment_id",
+      "gate_id",
+      "packet_id",
+      "packet_path",
+      "packet_sha256",
+      "decision",
+      "exact_response",
+      "decided_at",
+      "captured_at",
+      "presentation_stop_receipt_path",
+      "presentation_stop_receipt_sha256",
+      "task_or_thread_id",
+      "task_or_thread_id_null_reason",
+      "user_message_id",
+      "user_message_id_null_reason",
+      "message_role",
+      "method",
+      "agent_authored",
+      "state_before",
+      "authorized_transition",
+      "one_use",
+      "revocation_status",
+      "expiry_status",
+      "authority_flags_after_decision_before_consumption"
+    ],
+    "consumption_receipt_exact_fields": [
+      "record_type",
+      "schema_version",
+      "campaign_id",
+      "amendment_id",
+      "gate_id",
+      "packet_id",
+      "packet_path",
+      "packet_sha256",
+      "approval_receipt_path",
+      "approval_receipt_sha256",
+      "consumed_at",
+      "active_clock_snapshot",
+      "first_action",
+      "prior_consumption_count"
+    ],
+    "presentation_stop_receipt_record_type": "FC01_GATE_PRESENTATION_STOP_V1",
+    "presentation_stop_receipt_exact_fields": [
+      "schema_version",
+      "record_type",
+      "campaign_id",
+      "amendment_id",
+      "gate_id",
+      "packet_id",
+      "packet_path",
+      "packet_sha256",
+      "candidate_sha",
+      "candidate_tree",
+      "task_or_thread_id",
+      "task_or_thread_id_null_reason",
+      "presented_at",
+      "state_before",
+      "state_after",
+      "active_clock_ledger",
+      "active_clock_evaluated_at",
+      "agent_stopped",
+      "authority_flags",
+      "status"
+    ],
+    "gate_required_binding_fields": {
+      "FC01-D1": [
+        "activation_receipt",
+        "evidence_manifest",
+        "active_clock_ledger",
+        "allowlisted_diff",
+        "evaluators",
+        "ci",
+        "targets",
+        "current_and_rollback_identities",
+        "future_provider_assigned_candidate_identities",
+        "ordered_deployment_plan",
+        "credential_presence_evidence",
+        "provider_setting_mutations",
+        "credential_mutations",
+        "user_visible_impact",
+        "security_privacy",
+        "visual_accessibility",
+        "health_and_compatibility",
+        "rollback_triggers_and_reverse_order"
+      ],
+      "FC01-D2": [
+        "activation_receipt",
+        "sealed_base00",
+        "evidence_manifest",
+        "active_clock_ledger",
+        "deployed_and_rollback_identities",
+        "post_deploy_proofs",
+        "m00_prompt_digest",
+        "model_provider_policy",
+        "rubric",
+        "synthetic_identity",
+        "one_repair_ceiling",
+        "expected_tool_model_calls",
+        "spend_ceiling",
+        "data_artifact_effects",
+        "frontend_review_path",
+        "langsmith_policy",
+        "abort_and_rollback",
+        "zero_voice_proof",
+        "conditional_post_m00_live_client_budget",
+        "prior_m00_attempt_count"
+      ],
+      "FC01-D3": [
+        "activation_receipt",
+        "evidence_manifest",
+        "active_clock_ledger",
+        "integration_sha_tree",
+        "final_pr_identity",
+        "parents_and_merge_method",
+        "current_main_head",
+        "source_and_migration_diff",
+        "ci_and_evaluators",
+        "m00_evidence",
+        "post_m00_baseline",
+        "applicable_post_m00_gate_ledger",
+        "production_health_and_identities",
+        "residual_risks",
+        "deferred_voice_release_gates",
+        "main_merge_actions",
+        "canonical_deployment_actions",
+        "rollback_actions",
+        "pr_144_disposition",
+        "control_evidence_import"
+      ]
+    },
+    "gate_required_state": {
+      "FC01-D1": "FC01A_R_EVIDENCE_SEALED",
+      "FC01-D2": "BASELINE_READY_FOR_DAVIDE_M00_APPROVAL",
+      "FC01-D3": "READY_FOR_FC01_D3"
+    },
+    "receipt_state_before_by_gate": {
+      "FC01-D1": "WAITING_FC01_D1",
+      "FC01-D2": "WAITING_FC01_D2",
+      "FC01-D3": "WAITING_FC01_D3"
+    },
+    "consumption_embeds_recomputed_active_clock_snapshot": true,
+    "gate_required_exclusions": {
+      "FC01-D1": [
+        "Voice",
+        "database mutation",
+        "M00",
+        "main merge",
+        "PR 144 mutation"
+      ],
+      "FC01-D2": [
+        "Voice",
+        "unapproved or operator database DDL/DML/migration/control-plane mutation",
+        "main merge",
+        "second M00 attempt",
+        "silent rerun"
+      ],
+      "FC01-D3": [
+        "Voice action",
+        "database DDL/DML/migration",
+        "provider-setting mutation",
+        "credential mutation",
+        "historical migration rewrite",
+        "unlisted production target"
+      ]
+    }
+  },
+  "production_order_after_d1": [
+    "LangGraph",
+    "Gateway",
+    "Vercel"
+  ],
+  "d1_transaction_budget_template": {
+    "maximum_total_candidate_deployments": 3,
+    "maximum_attempts_per_target": 1,
+    "maximum_total_production_promotions_or_alias_actions": 1,
+    "maximum_total_abort_rollback_actions": 3,
+    "maximum_total_mutation_reversal_actions": "EXACT_APPROVED_MUTATION_ENTRY_COUNT",
+    "mutation_rollback_state_valid_through_rule": "equals both confidential old-state and rollback-state reference expires_at and is later than max(packet expiry, mission absolute expiry) plus 3600 seconds; revalidate at consumption and immediately before mutation/reversal",
+    "safety_reversal_horizon_seconds": 3600,
+    "hidden_retries": 0,
+    "maximum_elapsed_window_minutes": 180,
+    "incremental_provider_spend_usd_default": 0.0,
+    "provider_setting_mutations_default": [],
+    "credential_mutations_default": [],
+    "database_ddl_or_dml": 0,
+    "migrations": 0,
+    "voice_deployments_restarts_or_calls": 0,
+    "additional_targets": 0,
+    "user_traffic_experiments": 0,
+    "m00_runs": 0,
+    "mixed_version_invariant": "A strict Gateway receiver never faces an unsigned producer; old/new Vercel and Gateway interstitial compatibility is proved.",
+    "rollback_is_authorized_only_on_bound_abort": true,
+    "provider_rollback_dry_run_or_canary_before_abort": false,
+    "offline_reverse_order_evaluator_required": true
+  },
+  "rollback_order_after_d1": [
+    "Vercel",
+    "Gateway",
+    "LangGraph"
+  ],
+  "abort_and_terminal_contract": {
+    "authoritative_schema_pointer": "approval-schema.json#/abort_condition_contract",
+    "packet_rows": "exact six ordered scope, safety, infra, evidence, budget/clock, and control-head triggers for the packet gate; no omitted, substituted, or weakened predicate",
+    "classification_precedence": [
+      "SAFETY",
+      "CONTROL_HEAD_DRIFT",
+      "BUDGET",
+      "SCOPE",
+      "INFRA",
+      "EVIDENCE"
+    ],
+    "terminal_incident_receipt": "FC01_V13_GATE_ABORT_INCIDENT_V1 binds packet, consumption, candidate, exact trigger, observed facts, source position/action, and immutable cause refs",
+    "action_failure_receipts": "typed D1/D3 action and restoration failure receipts bind exact effect/provider all-or-none tuples; a pre-response failure never invents a provider receipt",
+    "result_binding": "every D1/D3 abort and M00/live FAIL deeply validates its incident/action evidence and exact class/state; safety or restoration failure takes precedence over simultaneous budget overage",
+    "forward_effect": "no terminal failure authorizes any later forward action"
+  },
+  "m00_after_d2": {
+    "mode": "TEXT_ONLY",
+    "prompt_sha256": "bdad62c0d47b8ca26c6cfc69422ceafd222a0b3851f19eb6e430895d28edacea",
+    "frozen_input_bindings_are_committed_artifact_references": true,
+    "sequence": [
+      "create",
+      "judge",
+      "at_most_one_repair",
+      "judge_again",
+      "evidence_review"
+    ],
+    "attempts_max": 1,
+    "voice": false,
+    "silent_rerun": false,
+    "prepare_seal": "unique consumed FC01-D2 approval; no separate executor authority",
+    "execution_owner": "existing deployed product and authenticated browser lifecycle",
+    "runtime_observation_bundle_record_type": "FC01_M00_RUNTIME_OBSERVATION_BUNDLE_V1",
+    "runtime_finalization_receipt_record_type": "FC01_M00_RUNTIME_FINALIZATION_RECEIPT_V1",
+    "runtime_finalizer_cli": "--finalize-m00-runtime",
+    "runtime_finalizer_authority": "validate, privacy-minimize, mechanically inspect transient artifacts, and emit typed evidence only; no provider/browser action and no Git write",
+    "runtime_evidence_commit_order": [
+      "runtime observation bundle",
+      "gate incident if FAIL",
+      "component source observations",
+      "components",
+      "call/effect coverages",
+      "call/effect observations",
+      "call/effect ledgers",
+      "runtime finalization receipt",
+      "M00 evidence manifest",
+      "M00 terminal",
+      "final active-clock ledger"
+    ],
+    "expected_application_persistence_dml_must_equal_d2_bound_data_artifact_effects": true,
+    "unapproved_or_operator_database_ddl_dml_migration_or_control_plane_mutation": false
+  },
+  "conditional_post_m00_live_client_after_d2": {
+    "authority_source": "the exact consumed FC01-D2 packet binding conditional_post_m00_live_client_budget",
+    "precondition": "M00_RESULT_SEALED_PASS",
+    "selector_count": 19,
+    "selector_source": "the pinned backend/tests/test_client_live.py selector set in approval-schema.json",
+    "environment_class": "ISOLATED_NONPRODUCTION_SYNTHETIC",
+    "maximum_runs": 1,
+    "retries": 0,
+    "separate_m00_attempt": false,
+    "budget_requirements": "exact per-category calls, combined D2 spend ceiling, D2/live windows, network allowlist, synthetic identity, expected effects, and cleanup contract",
+    "hard_zero_authority": "no Voice, private read, operator database mutation, production user-data mount, unlisted network destination, or unlisted effect",
+    "result_rule": "seal exactly one PASS or FAIL_COMPLETE_EVIDENCE subordinate result; PASS precedes a refreshed post-M00 baseline and D3, while FAIL maps to the exact exceptional BLOCKED state and authorizes no forward work"
+  },
+  "post_m00_policy": {
+    "required_order": "M00 PASS -> one conditional 19-selector live-client result PASS -> refreshed post-M00 baseline -> integration/release evidence -> FC01-D3",
+    "all_non_voice_amendment_a_post_m00_gates_pass_at_original_boundary": true,
+    "repair_scope_does_not_expand": true,
+    "out_of_scope_remediation_result": "BLOCKED_SCOPE",
+    "voice_post_m00_gates": "DEFERRED_UNRESOLVED_NOT_PASS",
+    "d3_completion_scope": "TEXT_ONLY_MAINLINE_AND_CANONICAL_LANGGRAPH_GATEWAY_VERCEL",
+    "original_voice_inclusive_release_claimed_complete": false,
+    "voice_service_action_authorized": false
+  },
+  "ci_release_matrix_contract": {
+    "authoritative_schema_pointer": "approval-schema.json#/supporting_receipt_contracts/ci_release_matrix_manifest",
+    "d1_required_lane_count": 15,
+    "d3_required_lane_count": 20,
+    "canonical_row_rule": "every lane command, environment class, logical outcome count, required flag, command digest, and immutable authority reference exactly derives from expected_lane_rows_by_gate; the D3 exact-integration run repeats the full retained matrix including the distinct integration-candidate Node/Chromium PDF smoke, review regressions, Ruff, offline authenticated UI, two distinct clean network-denied builds, zero-remote-font, visual/accessibility, and order dependence. Parsed workflow jobs, required checks, authenticated check-run receipts, and environment receipts form a one-lane-per-check bijection; a caller-selected command, grouped lane, trivial job, retry, or inherited product-head run is forbidden",
+    "sealed_evaluator_setup_receipt": "every /tmp evaluator job has its own FC01_V13_CI_EVALUATOR_SETUP_RECEIPT_V1 proving an authenticated exact detached evidence-control worktree, git-show staging from the exact sealed payload, activation/seal binding, byte equality, distinct candidate/control roots, exact workflow run-attempt/job/check/command identity, pre-command environment identity, and zero raw-network fallback",
+    "typed_lane_input_receipt": "every --validate-ci-lane job loads its exact pre-run FC01_V13_CI_LANE_INPUT_RECEIPT_V1 and deeply validates the gate/lane-specific ordered evidence contracts against the exact candidate. D3 pre-CI inputs bind lineage/source/import/test/baseline/ledger receipts directly and never reference the post-CI d3_integration_candidate, preventing an immutable digest cycle",
+    "typed_check_and_environment_receipts": "every required lane has one provider-authenticated FC01_V13_CI_CHECK_RUN_RECEIPT_V1 at attempt 1 and one FC01_V13_CI_LANE_ENVIRONMENT_IDENTITY_V1. Candidate/workflow/run/job/check/command/head/tree and exact class profile all cross-bind; clean build slots use distinct jobs, checks, and clean-workspace digests",
+    "single_exhaustive_workflow_run_receipt": "each gate has exactly one FC01_V13_CI_WORKFLOW_RUN_RECEIPT_V1 at attempt 1 whose authenticated enumeration contains the complete required one-lane-per-job set, matching candidate/workflow run count one, prior matching run count zero, and other matching attempt count zero. Successful lanes cannot be cherry-picked across partial or fresh attempt-1 runs",
+    "inherited_live_result_rule": "the D3 post-m00-20 lane reuses the singleton nineteen-selector PASS receipt and never reruns it; only the separate Node smoke executes on the integration candidate",
+    "failure_effect": "BLOCKED_EVIDENCE"
+  },
+  "exceptional_stop_states": [
+    "BLOCKED_SCOPE",
+    "BLOCKED_INFRA",
+    "BLOCKED_EVIDENCE",
+    "BLOCKED_SAFETY",
+    "BLOCKED_BUDGET",
+    "DIVERGENT_CONTROL_HEAD"
+  ],
+  "control_projection": {
+    "activation_receipt_commit_required_before_projection": true,
+    "projection_commit_exact_changed_paths": [
+      "docs/campaigns/foundation-mainline-v1/state.md",
+      "docs/campaigns/foundation-mainline-v1/decisions.md",
+      "docs/campaigns/foundation-mainline-v1/experiments.jsonl"
+    ],
+    "state_md_may_replace": true,
+    "decisions_md_prefix_must_be_byte_identical": true,
+    "experiments_jsonl_prefix_must_be_byte_identical": true,
+    "mission_md_must_remain_unchanged": true,
+    "all_other_prior_files_must_remain_unchanged": true,
+    "projections_are_authority_sources": false
+  },
+  "clock_contract": {
+    "clock_version": "FC01_B_CLOCK_V1",
+    "absolute_duration_seconds": 1209600,
+    "absolute_expires_at_rule": "seal_created_at + 1209600 seconds",
+    "absolute_pauseable": false,
+    "engineering_limit_seconds": 86400,
+    "engineering_started_at_rule": "a typed clean frozen-base worktree plus local-and-origin branch-absence observation is committed first; the singleton engineering-start receipt binds it on activated control history; exact local and origin branch creation at the unchanged base is then sealed by a typed creation receipt before every scoped product/test/CI mutation",
+    "pause_state_allowlist": [
+      "WAITING_FC01_D1",
+      "WAITING_FC01_D2",
+      "WAITING_FC01_D3"
+    ],
+    "pause_start_rule": "committed validated packet presentation stop receipt",
+    "pause_end_rule": "earliest valid decision, rejection, withdrawal, packet expiry, or absolute mission expiry",
+    "interval_rule": "UTC half-open ordered non-overlapping non-backdated",
+    "active_elapsed_rule": "preterminal accounting uses wall(engineering_started_at,evaluated_at) minus the exact union of typed pause intervals; final accounting requires evaluated_at>=terminal_at and uses wall(engineering_started_at,terminal_at) minus that union",
+    "ledger_chain_rule": "every ledger binds the effective seal and exact latest predecessor with monotonic elapsed/remaining and pause-prefix history; only the first preterminal ledger or mission-absolute-expiry-before-engineering branch has an exact null predecessor convention",
+    "terminal_at_rule": "terminal_at, terminal_state, and terminal_outcome_ref are JSON null for every packet/preaction/consumption and preterminal ledger; nonnull only in the unique direct-child final accounting ledger when the closed canonical D1 abort, M00 fail, live fail, D3 abort/pass, or clock-exhaustion dispatch deeply validates, terminal_at equals that receipt's created_at, and terminal_state equals its exact mapped state field",
+    "clock_exhaustion_terminal_rule": "active-engineering limit, mission absolute expiry, or packet/approval-window expiry before another typed terminal outcome seals one FC01_CLOCK_EXHAUSTION_TERMINAL_V1 with recomputed first boundary and BLOCKED_BUDGET. The pre-engineering absolute-expiry branch uses the exact null start/ledger convention and active elapsed zero. After any governed action starts, its gate result—not a standalone clock terminal—retains clock overrun plus required safety closure under abort precedence. No forward action follows a standalone clock terminal and a new exact amendment is required",
+    "monotonic_elapsed_and_remaining": true,
+    "ordinary_idle_or_infra_wait_pauses": false,
+    "pre_forward_action_checks": [
+      "now < absolute_expires_at",
+      "active_elapsed_seconds < 86400"
+    ],
+    "pre_presentation_snapshot_required": true,
+    "consumption_time_snapshot_required": true,
+    "snapshot_reference_exact_fields": [
+      "path",
+      "sha256"
+    ],
+    "snapshot_evaluated_at_must_equal_manifest": true,
+    "expiry_state": "BLOCKED_BUDGET",
+    "after_expiry_allowed": [
+      "immutable read-only PASS/FAIL/abort evidence sealing",
+      "already bound safety rollback",
+      "already bound mutation reversal",
+      "already bound safety cleanup"
+    ],
+  "packet_expiry_may_exceed_absolute_expiry": false
+  ,"gate_window_rule": "window starts_at >= consumption time; ends_at > starts_at and <= packet/absolute expiry; (ends_at-consumed_at) fits strictly within active_remaining_seconds. Every forward test/provider/product action occurs inside the window and both clock ceilings. Immutable terminal evidence and only already-bound rollback, mutation reversal, or cleanup needed to restore safety may occur afterward without authorizing forward work."
+  }
+}

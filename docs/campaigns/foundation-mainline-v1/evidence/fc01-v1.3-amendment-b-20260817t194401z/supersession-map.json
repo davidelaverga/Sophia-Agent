@@ -1,0 +1,2304 @@
+{
+  "schema_version": 2,
+  "amendment_id": "FC-01-v1.3-AMENDMENT-B",
+  "rule": "Every dependency is immutable and machine-dereferenceable. Unlisted Amendment A constraints remain inherited.",
+  "replacements": [
+    {
+      "id": "B-SUP-00-CONTROL-PROJECTIONS",
+      "handling": "HISTORICAL_RETAINED",
+      "source_dependency_ids": [
+        "B-DEP-001",
+        "B-DEP-002",
+        "B-DEP-003",
+        "B-DEP-004",
+        "B-DEP-005",
+        "B-DEP-006",
+        "B-DEP-007"
+      ],
+      "old_effect": "Current projections prohibit repair or require joint approval",
+      "replacement_ref": "execution-contract.json#/control_projection",
+      "new_effect": "One exact post-activation projection commit may replace state.md and append decisions.md/experiments.jsonl; FC01-017/018 facts remain historical",
+      "activation_boundary": "ACTIVATION_PROJECTION",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-01-AMENDMENT-A-STATUS",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-008",
+        "B-DEP-009",
+        "B-DEP-011",
+        "B-DEP-012",
+        "B-DEP-016",
+        "B-DEP-054",
+        "B-DEP-055",
+        "B-DEP-058",
+        "B-DEP-059",
+        "B-DEP-067",
+        "B-DEP-074",
+        "B-DEP-078"
+      ],
+      "old_effect": "A awaits joint approval",
+      "replacement_ref": "manifest.json#/amendment_a",
+      "new_effect": "A is SUPERSEDED_UNAPPROVED with zero decisions and permanently inactive budgets",
+      "activation_boundary": "ACTIVATION_PROJECTION",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-02-ACTIVATION-QUORUM",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-010",
+        "B-DEP-011",
+        "B-DEP-024",
+        "B-DEP-027",
+        "B-DEP-033",
+        "B-DEP-036",
+        "B-DEP-044",
+        "B-DEP-048",
+        "B-DEP-052",
+        "B-DEP-058",
+        "B-DEP-059",
+        "B-DEP-062",
+        "B-DEP-066",
+        "B-DEP-067",
+        "B-DEP-074"
+      ],
+      "old_effect": "Davide plus Luis approval required",
+      "replacement_ref": "execution-contract.json#/activation_effect",
+      "new_effect": "Sealed owner directive, seal, activation receipt, and projections activate remediation; no D0",
+      "activation_boundary": "ACTIVATION_PROJECTION",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-03-APPROVAL-TRANSPORT",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-012",
+        "B-DEP-013",
+        "B-DEP-016",
+        "B-DEP-017",
+        "B-DEP-018",
+        "B-DEP-023",
+        "B-DEP-057",
+        "B-DEP-065",
+        "B-DEP-068",
+        "B-DEP-077",
+        "B-DEP-079"
+      ],
+      "old_effect": "GitHub issue-comment quorum",
+      "replacement_ref": "approval-schema.json#/",
+      "new_effect": "D1/D2/D3 use exact later interactive Davide packet-digest responses",
+      "activation_boundary": "GATE_PRESENTATION",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-04-JOINT-STATE-NAMES",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-009",
+        "B-DEP-015",
+        "B-DEP-021",
+        "B-DEP-022",
+        "B-DEP-041",
+        "B-DEP-064",
+        "B-DEP-068"
+      ],
+      "old_effect": "Joint state names and transitions",
+      "replacement_ref": "amendment.md#5-state-machine",
+      "new_effect": "Owner-directive/D1/D2/D3 state machine",
+      "activation_boundary": "ACTIVATION_PROJECTION",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-05-VERCEL-EXPERIENCE-GATE",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-019",
+        "B-DEP-031",
+        "B-DEP-032",
+        "B-DEP-042",
+        "B-DEP-045",
+        "B-DEP-046",
+        "B-DEP-047",
+        "B-DEP-050",
+        "B-DEP-053",
+        "B-DEP-060",
+        "B-DEP-068",
+        "B-DEP-075"
+      ],
+      "old_effect": "Vercel conditional and Luis experience decision required",
+      "replacement_ref": "execution-contract.json#/font_closure",
+      "new_effect": "Vercel required; automated experience/accessibility proof hard-gates Davide D1",
+      "activation_boundary": "PRE_D1",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-06-D1",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-019",
+        "B-DEP-020",
+        "B-DEP-034",
+        "B-DEP-037",
+        "B-DEP-042",
+        "B-DEP-050",
+        "B-DEP-064",
+        "B-DEP-068",
+        "B-DEP-070",
+        "B-DEP-075",
+        "B-DEP-108",
+        "B-DEP-109"
+      ],
+      "old_effect": "Joint/conditional target approval",
+      "replacement_ref": "approval-schema.json#/gates/FC01-D1",
+      "new_effect": "One globally unique Davide D1 packet binds exact remote-head repair candidate, PASS-only confidential/data/test/font evidence, active clock, structured three-target budget/actions, and future candidate IDs null only with assigned-after-action reason",
+      "activation_boundary": "WAITING_FC01_D1",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-07-D2",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-020",
+        "B-DEP-035",
+        "B-DEP-038",
+        "B-DEP-039",
+        "B-DEP-040",
+        "B-DEP-051",
+        "B-DEP-064",
+        "B-DEP-068",
+        "B-DEP-070"
+      ],
+      "old_effect": "Fresh joint M00 decisions",
+      "replacement_ref": "approval-schema.json#/gates/FC01-D2",
+      "new_effect": "One globally unique Davide D2 binds the identical D1 deployed candidate, checksum-bound refreshed BASE-00, live route/HMAC/rollback proof, active clock, and the exact frozen M00 inputs",
+      "activation_boundary": "WAITING_FC01_D2",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-08-D3-COMPOSITE",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-020",
+        "B-DEP-064",
+        "B-DEP-068",
+        "B-DEP-070",
+        "B-DEP-080",
+        "B-DEP-081",
+        "B-DEP-082",
+        "B-DEP-083",
+        "B-DEP-084",
+        "B-DEP-085",
+        "B-DEP-086",
+        "B-DEP-087",
+        "B-DEP-088",
+        "B-DEP-089",
+        "B-DEP-090",
+        "B-DEP-091",
+        "B-DEP-092",
+        "B-DEP-093",
+        "B-DEP-094"
+      ],
+      "old_effect": "Separate artifact, post-baseline, and final human gates",
+      "replacement_ref": "approval-schema.json#/gates/FC01-D3",
+      "new_effect": "One globally unique Davide D3 binds M00 PASS, refreshed post-baseline, all non-Voice POST gates/tests, exact current-main plus tested-repair no-ff lineage, campaign-only control evidence import, active clock, main/canonical/rollback actions, and exact PR 144 closure as superseded",
+      "activation_boundary": "WAITING_FC01_D3",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-09-OLD-REPAIR-BUDGET",
+      "handling": "HISTORICAL_RETAINED",
+      "source_dependency_ids": [
+        "B-DEP-043",
+        "B-DEP-063",
+        "B-DEP-069",
+        "B-DEP-076"
+      ],
+      "old_effect": "A repair budget proposed inactive",
+      "replacement_ref": "execution-contract.json#/budget",
+      "new_effect": "Permanently inactive; B copies all limits except exact overlays",
+      "activation_boundary": "ACTIVATION_PROJECTION",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-10-OLD-CANDIDATE-BUDGET",
+      "handling": "HISTORICAL_RETAINED",
+      "source_dependency_ids": [
+        "B-DEP-042",
+        "B-DEP-063",
+        "B-DEP-069",
+        "B-DEP-076"
+      ],
+      "old_effect": "A candidate budget proposed inactive",
+      "replacement_ref": "approval-schema.json#/gates/FC01-D1",
+      "new_effect": "Permanently inactive; D1 binds fresh exact transaction budget preserving action ceilings",
+      "activation_boundary": "WAITING_FC01_D1",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-11-CLOCKS",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-043",
+        "B-DEP-063",
+        "B-DEP-069"
+      ],
+      "old_effect": "Fixed Aug-24 expiry plus 24 active hours",
+      "replacement_ref": "execution-contract.json#/clock_contract",
+      "new_effect": "Absolute 14-day unpauseable expiry plus inherited strict-less-than 24 active hours, started by a committed pre-branch receipt, paused only by validated D1/D2/D3 presentation intervals, and recomputed at packet presentation and consumption",
+      "activation_boundary": "ACTIVATION_PROJECTION",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-12-HERMETIC-FONT",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-028",
+        "B-DEP-029",
+        "B-DEP-032",
+        "B-DEP-047",
+        "B-DEP-053",
+        "B-DEP-067",
+        "B-DEP-069"
+      ],
+      "old_effect": "Frontend build blocks but source repair unauthorized",
+      "replacement_ref": "execution-contract.json#/font_closure",
+      "new_effect": "One exact pinned local Inter/Cormorant closure and proof paths authorized",
+      "activation_boundary": "ACTIVATION_PROJECTION",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-13-INFERENCE-CALL-TAXONOMY",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-043",
+        "B-DEP-069"
+      ],
+      "old_effect": "Zero model/inference wording ambiguous",
+      "replacement_ref": "execution-contract.json#/budget",
+      "new_effect": "Coding-agent work excluded; Sophia application/runtime provider calls and spend remain zero before D2",
+      "activation_boundary": "ACTIVATION_PROJECTION",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-14-VOICE-ACTIVATION-WORDING",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-030",
+        "B-DEP-048",
+        "B-DEP-049",
+        "B-DEP-061",
+        "B-DEP-072",
+        "B-DEP-079"
+      ],
+      "old_effect": "Voice exclusion depends on joint activation",
+      "replacement_ref": "execution-contract.json#/m00_after_d2",
+      "new_effect": "Owner directive activates same text-only zero-Voice envelope; Voice POST gates remain unresolved",
+      "activation_boundary": "ACTIVATION_PROJECTION",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-15-EVALUATOR-DISPATCH",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-014",
+        "B-DEP-056",
+        "B-DEP-057",
+        "B-DEP-065",
+        "B-DEP-068",
+        "B-DEP-077"
+      ],
+      "old_effect": "v1.2 approval evaluator is effective",
+      "replacement_ref": "manifest.json#/canonical_dispatcher",
+      "new_effect": "v1.2 evaluators historical; canonical dispatcher invokes v1.3",
+      "activation_boundary": "ACTIVATION_PROJECTION",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-16-CONTROL-PATH-EXCEPTION",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-025",
+        "B-DEP-026",
+        "B-DEP-062",
+        "B-DEP-068"
+      ],
+      "old_effect": "No prior control file may change",
+      "replacement_ref": "execution-contract.json#/control_projection",
+      "new_effect": "One projection commit may replace state.md and append-only decisions.md/experiments.jsonl",
+      "activation_boundary": "ACTIVATION_PROJECTION",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-17-SUBORDINATE-LUIS-ROLES",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "source_dependency_ids": [
+        "B-DEP-080",
+        "B-DEP-081",
+        "B-DEP-082",
+        "B-DEP-083",
+        "B-DEP-084",
+        "B-DEP-085",
+        "B-DEP-086",
+        "B-DEP-087",
+        "B-DEP-088",
+        "B-DEP-089",
+        "B-DEP-090",
+        "B-DEP-091",
+        "B-DEP-092",
+        "B-DEP-093",
+        "B-DEP-094",
+        "B-DEP-095",
+        "B-DEP-096",
+        "B-DEP-097",
+        "B-DEP-098",
+        "B-DEP-099",
+        "B-DEP-100",
+        "B-DEP-101",
+        "B-DEP-102",
+        "B-DEP-103",
+        "B-DEP-104",
+        "B-DEP-105",
+        "B-DEP-106",
+        "B-DEP-107"
+      ],
+      "old_effect": "Subordinate FC-01 authority assigns Luis gating roles",
+      "replacement_ref": "amendment.md#1-narrow-supersession",
+      "new_effect": "Luis optional for FC-01; automated experience/accessibility/comprehension evidence remains mandatory",
+      "activation_boundary": "ACTIVATION_PROJECTION",
+      "historical_bytes_unchanged": true
+    },
+    {
+      "id": "B-SUP-18-TEXT-ONLY-COMPLETION",
+      "handling": "EFFECTIVE_REPLACED",
+      "source_dependency_ids": [
+        "B-DEP-071",
+        "B-DEP-072",
+        "B-DEP-073"
+      ],
+      "old_effect": "Original release includes Voice boundaries incompatible with this mission's no-Voice rule",
+      "replacement_ref": "execution-contract.json#/post_m00_policy",
+      "new_effect": "v1.3 may complete only text-only LangGraph/Gateway/Vercel convergence; Voice gates remain unresolved/not PASS and original Voice-inclusive release is not claimed complete",
+      "activation_boundary": "WAITING_FC01_D3",
+      "historical_bytes_unchanged": true
+    }
+  ],
+  "required_replacement_ids": [
+    "B-SUP-00-CONTROL-PROJECTIONS",
+    "B-SUP-01-AMENDMENT-A-STATUS",
+    "B-SUP-02-ACTIVATION-QUORUM",
+    "B-SUP-03-APPROVAL-TRANSPORT",
+    "B-SUP-04-JOINT-STATE-NAMES",
+    "B-SUP-05-VERCEL-EXPERIENCE-GATE",
+    "B-SUP-06-D1",
+    "B-SUP-07-D2",
+    "B-SUP-08-D3-COMPOSITE",
+    "B-SUP-09-OLD-REPAIR-BUDGET",
+    "B-SUP-10-OLD-CANDIDATE-BUDGET",
+    "B-SUP-11-CLOCKS",
+    "B-SUP-12-HERMETIC-FONT",
+    "B-SUP-13-INFERENCE-CALL-TAXONOMY",
+    "B-SUP-14-VOICE-ACTIVATION-WORDING",
+    "B-SUP-15-EVALUATOR-DISPATCH",
+    "B-SUP-16-CONTROL-PATH-EXCEPTION",
+    "B-SUP-17-SUBORDINATE-LUIS-ROLES",
+    "B-SUP-18-TEXT-ONLY-COMPLETION"
+  ],
+  "source_dependency_registry": [
+    {
+      "authority_id": "CONTROL_PROJECTION",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/mission.md",
+      "source_file_sha256": "10c662c07a7c1fcff36678fda12282326fb482cecf903df92be938a211f0791b",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 9,
+        "end_line": 12
+      },
+      "old_value_sha256": "f5d47c55363e5830aed4aac8fb6255a6c7bb3916458acaed96e3a74b7c9e2a2c",
+      "handling": "HISTORICAL_RETAINED_PROSPECTIVE_CONCLUSION_REPLACED",
+      "id": "B-DEP-001",
+      "replacement_ids": [
+        "B-SUP-00-CONTROL-PROJECTIONS"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "CONTROL_PROJECTION",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/mission.md",
+      "source_file_sha256": "10c662c07a7c1fcff36678fda12282326fb482cecf903df92be938a211f0791b",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 33,
+        "end_line": 37
+      },
+      "old_value_sha256": "660b17f61e5a2c8e605e00387e5659e622fb67eecd4fd5148d44371c54c47aa0",
+      "handling": "HISTORICAL_RETAINED_PROSPECTIVE_CONCLUSION_REPLACED",
+      "id": "B-DEP-002",
+      "replacement_ids": [
+        "B-SUP-00-CONTROL-PROJECTIONS"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "CONTROL_PROJECTION",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/state.md",
+      "source_file_sha256": "531170671068442fc6ec0ede6977ccac8b70fa1fafea3fe7448e87b27846ba71",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 9,
+        "end_line": 14
+      },
+      "old_value_sha256": "eba1de5b716458ae0c83246f40fd8000e5433f126275ae0747e581ea164212d0",
+      "handling": "HISTORICAL_RETAINED_PROSPECTIVE_CONCLUSION_REPLACED",
+      "id": "B-DEP-003",
+      "replacement_ids": [
+        "B-SUP-00-CONTROL-PROJECTIONS"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "CONTROL_PROJECTION",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/state.md",
+      "source_file_sha256": "531170671068442fc6ec0ede6977ccac8b70fa1fafea3fe7448e87b27846ba71",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 32,
+        "end_line": 33
+      },
+      "old_value_sha256": "32c7108a7b6ed43a1210ae8c75070424e6b86b82a48d90887ae9096400e48309",
+      "handling": "HISTORICAL_RETAINED_PROSPECTIVE_CONCLUSION_REPLACED",
+      "id": "B-DEP-004",
+      "replacement_ids": [
+        "B-SUP-00-CONTROL-PROJECTIONS"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "CONTROL_PROJECTION",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/state.md",
+      "source_file_sha256": "531170671068442fc6ec0ede6977ccac8b70fa1fafea3fe7448e87b27846ba71",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 61,
+        "end_line": 74
+      },
+      "old_value_sha256": "d2900e3f1c6b06ab27df075774ff9938b9897cd6e34034062f0ad54393c09083",
+      "handling": "HISTORICAL_RETAINED_PROSPECTIVE_CONCLUSION_REPLACED",
+      "id": "B-DEP-005",
+      "replacement_ids": [
+        "B-SUP-00-CONTROL-PROJECTIONS"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "CONTROL_PROJECTION",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/decisions.md",
+      "source_file_sha256": "e56fc84d1557b582d29755680c045269451b40ce770ac1577caadfbec0955622",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 134,
+        "end_line": 150
+      },
+      "old_value_sha256": "a7be6d51f4accf3d993812242fe530c860c27d4bf12926f43578c06eec15cf7b",
+      "handling": "HISTORICAL_RETAINED_PROSPECTIVE_CONCLUSION_REPLACED",
+      "id": "B-DEP-006",
+      "replacement_ids": [
+        "B-SUP-00-CONTROL-PROJECTIONS"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "CONTROL_PROJECTION",
+      "source_kind": "REPOSITORY_FILE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/experiments.jsonl",
+      "source_file_sha256": "3fa5a30a34d687e762b0dbc993082706b17f38b551522035fb1dceeb282cbfba",
+      "locator_kind": "WHOLE_FILE",
+      "selector": "",
+      "old_value_sha256": "3fa5a30a34d687e762b0dbc993082706b17f38b551522035fb1dceeb282cbfba",
+      "handling": "HISTORICAL_RETAINED_APPEND_ONLY",
+      "id": "B-DEP-007",
+      "replacement_ids": [
+        "B-SUP-00-CONTROL-PROJECTIONS"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/amendment-manifest.json",
+      "source_file_sha256": "bec57318257a8683df37b641cb6a4af06c2bbdd9452fb688ca9cacff7678da54",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/effective_spec_version_after_approval",
+      "old_value_sha256": "b83db121bd629895e9b3c8de3d5a3d21ff7ae9ee29b79466aedc2a6a72957990",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-008",
+      "replacement_ids": [
+        "B-SUP-01-AMENDMENT-A-STATUS"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/amendment-manifest.json",
+      "source_file_sha256": "bec57318257a8683df37b641cb6a4af06c2bbdd9452fb688ca9cacff7678da54",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/sealed_target_state",
+      "old_value_sha256": "0a0488beb8636595932b227c4a3328c4a7541e7b9600f081160d85161812a490",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-009",
+      "replacement_ids": [
+        "B-SUP-01-AMENDMENT-A-STATUS",
+        "B-SUP-04-JOINT-STATE-NAMES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/amendment-manifest.json",
+      "source_file_sha256": "bec57318257a8683df37b641cb6a4af06c2bbdd9452fb688ca9cacff7678da54",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/narrow_supersession",
+      "old_value_sha256": "207af92e90bc191858a46aa7132ede10728831c934c47fa95019cd18ab63396a",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-010",
+      "replacement_ids": [
+        "B-SUP-02-ACTIVATION-QUORUM"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/amendment-manifest.json",
+      "source_file_sha256": "bec57318257a8683df37b641cb6a4af06c2bbdd9452fb688ca9cacff7678da54",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/joint_amendment_approval_present",
+      "old_value_sha256": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-011",
+      "replacement_ids": [
+        "B-SUP-01-AMENDMENT-A-STATUS",
+        "B-SUP-02-ACTIVATION-QUORUM"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/amendment-manifest.json",
+      "source_file_sha256": "bec57318257a8683df37b641cb6a4af06c2bbdd9452fb688ca9cacff7678da54",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/approvals",
+      "old_value_sha256": "009720b7e4805da33727033c52faab208fd6c6605355a8d064c6b37f8d9991fb",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-012",
+      "replacement_ids": [
+        "B-SUP-01-AMENDMENT-A-STATUS",
+        "B-SUP-03-APPROVAL-TRANSPORT"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/amendment-manifest.json",
+      "source_file_sha256": "bec57318257a8683df37b641cb6a4af06c2bbdd9452fb688ca9cacff7678da54",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/decision_storage",
+      "old_value_sha256": "7f3f3715fafdb538885417994d950a839da394949d282138b7f11c1213f5597b",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-013",
+      "replacement_ids": [
+        "B-SUP-03-APPROVAL-TRANSPORT"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/amendment-manifest.json",
+      "source_file_sha256": "bec57318257a8683df37b641cb6a4af06c2bbdd9452fb688ca9cacff7678da54",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/approval_evaluator",
+      "old_value_sha256": "4d682f62e04fcb68f2be32d3ea0988442784ac667309771a94d51ba673b8717d",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-014",
+      "replacement_ids": [
+        "B-SUP-15-EVALUATOR-DISPATCH"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/approval-contract.json",
+      "source_file_sha256": "886d8b4dd45f57f8e07bd3cc3018908f304fc5f9449ea2848ebe019368ae1cf3",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/sealed_request_state",
+      "old_value_sha256": "0a0488beb8636595932b227c4a3328c4a7541e7b9600f081160d85161812a490",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-015",
+      "replacement_ids": [
+        "B-SUP-04-JOINT-STATE-NAMES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/approval-contract.json",
+      "source_file_sha256": "886d8b4dd45f57f8e07bd3cc3018908f304fc5f9449ea2848ebe019368ae1cf3",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/immutable_payload_decision_slots",
+      "old_value_sha256": "a4acb31767711abcc3d364839fd052ca79cd07150699a323bdd7223225afe66a",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-016",
+      "replacement_ids": [
+        "B-SUP-01-AMENDMENT-A-STATUS",
+        "B-SUP-03-APPROVAL-TRANSPORT"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/approval-contract.json",
+      "source_file_sha256": "886d8b4dd45f57f8e07bd3cc3018908f304fc5f9449ea2848ebe019368ae1cf3",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/decision_contract",
+      "old_value_sha256": "d172c2f2d3e6c9770f8d1b505047117ee845f5d75fb586b253a688eaf5fad0e2",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-017",
+      "replacement_ids": [
+        "B-SUP-03-APPROVAL-TRANSPORT"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/approval-contract.json",
+      "source_file_sha256": "886d8b4dd45f57f8e07bd3cc3018908f304fc5f9449ea2848ebe019368ae1cf3",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/decision_identity_and_git_protocol",
+      "old_value_sha256": "23f4ab959820925198ce8ae416bb37b7e3f1742604e12c7491f68f10017c5b57",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-018",
+      "replacement_ids": [
+        "B-SUP-03-APPROVAL-TRANSPORT"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/approval-contract.json",
+      "source_file_sha256": "886d8b4dd45f57f8e07bd3cc3018908f304fc5f9449ea2848ebe019368ae1cf3",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/target_specific_davide_approval",
+      "old_value_sha256": "79b4c74b51057c5729ea042b3671a77f81f08c9ec88afdf6ad1d41c0b01c6fef",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-019",
+      "replacement_ids": [
+        "B-SUP-05-VERCEL-EXPERIENCE-GATE",
+        "B-SUP-06-D1"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/approval-contract.json",
+      "source_file_sha256": "886d8b4dd45f57f8e07bd3cc3018908f304fc5f9449ea2848ebe019368ae1cf3",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/post_repair_governance",
+      "old_value_sha256": "bd997e53540f08becfc1140cd1c0328647137636cc6bf4a4f3ef899fd11b92ec",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-020",
+      "replacement_ids": [
+        "B-SUP-06-D1",
+        "B-SUP-07-D2",
+        "B-SUP-08-D3-COMPOSITE"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/approval-contract.json",
+      "source_file_sha256": "886d8b4dd45f57f8e07bd3cc3018908f304fc5f9449ea2848ebe019368ae1cf3",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/state_machine",
+      "old_value_sha256": "f7222347cee6c0d83ad48120d3501ea88bf341a9aecdca2d140fa7ca3063044f",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-021",
+      "replacement_ids": [
+        "B-SUP-04-JOINT-STATE-NAMES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/approval-contract.json",
+      "source_file_sha256": "886d8b4dd45f57f8e07bd3cc3018908f304fc5f9449ea2848ebe019368ae1cf3",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/illegal_shortcuts",
+      "old_value_sha256": "59557fbd0836cad1ee34c80140876208f38826e1b65143282a371185ce035880",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-022",
+      "replacement_ids": [
+        "B-SUP-04-JOINT-STATE-NAMES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_FILE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/approval-receipt-schema.json",
+      "source_file_sha256": "9978e1d77f5af78374e4749053400cf2017991e37086fcfc48b30c6820b1d5c6",
+      "locator_kind": "WHOLE_FILE",
+      "selector": "",
+      "old_value_sha256": "9978e1d77f5af78374e4749053400cf2017991e37086fcfc48b30c6820b1d5c6",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-023",
+      "replacement_ids": [
+        "B-SUP-03-APPROVAL-TRANSPORT"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/authorized-repair-scope.json",
+      "source_file_sha256": "7d6cda7a67d124b5b983894e590b775a1bd538deb2491f42c569d37ea533dcd8",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/authority_activates_only_after_joint_approval",
+      "old_value_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-024",
+      "replacement_ids": [
+        "B-SUP-02-ACTIVATION-QUORUM"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/authorized-repair-scope.json",
+      "source_file_sha256": "7d6cda7a67d124b5b983894e590b775a1bd538deb2491f42c569d37ea533dcd8",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/control_branch/allowed_new_paths",
+      "old_value_sha256": "0b2514eae88d02d46c60322964a39e00acb823df16634f9905fed5eeb86ffa27",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-025",
+      "replacement_ids": [
+        "B-SUP-16-CONTROL-PATH-EXCEPTION"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/authorized-repair-scope.json",
+      "source_file_sha256": "7d6cda7a67d124b5b983894e590b775a1bd538deb2491f42c569d37ea533dcd8",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/control_branch/prior_file_modify_delete_or_rename_allowed",
+      "old_value_sha256": "fcbcf165908dd18a9e49f7ff27810176db8e9f63b4352213741664245224f8aa",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-026",
+      "replacement_ids": [
+        "B-SUP-16-CONTROL-PATH-EXCEPTION"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/authorized-repair-scope.json",
+      "source_file_sha256": "7d6cda7a67d124b5b983894e590b775a1bd538deb2491f42c569d37ea533dcd8",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/product_branch/create_only_after_joint_approval",
+      "old_value_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-027",
+      "replacement_ids": [
+        "B-SUP-02-ACTIVATION-QUORUM"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/authorized-repair-scope.json",
+      "source_file_sha256": "7d6cda7a67d124b5b983894e590b775a1bd538deb2491f42c569d37ea533dcd8",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/explicitly_not_authorized_test_repairs",
+      "old_value_sha256": "02c4c2d76f3215e1ba4768443f8f1467477d27237613a0d5d84c726090bde526",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-028",
+      "replacement_ids": [
+        "B-SUP-12-HERMETIC-FONT"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/authorized-repair-scope.json",
+      "source_file_sha256": "7d6cda7a67d124b5b983894e590b775a1bd538deb2491f42c569d37ea533dcd8",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/directly_adjacent_test_rule",
+      "old_value_sha256": "8ced0efddcaf89e0cab5fcca45482d5af658c0c4434f760a79c60896b7219d8f",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-029",
+      "replacement_ids": [
+        "B-SUP-12-HERMETIC-FONT"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/blocker-reachability.json",
+      "source_file_sha256": "a2f1e1953e03e3722d38e46b34579fab49a6b1922837e1edb21b3217aafd7c2d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/blockers/19/causal_path",
+      "old_value_sha256": "09c4a87417db785bc66f3237ff771735b56c1d3fd7ce697418f1cc3a52b07219",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-030",
+      "replacement_ids": [
+        "B-SUP-14-VOICE-ACTIVATION-WORDING"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/blocker-reachability.json",
+      "source_file_sha256": "a2f1e1953e03e3722d38e46b34579fab49a6b1922837e1edb21b3217aafd7c2d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/blockers/22/required_disposition",
+      "old_value_sha256": "4252f025eba27a07bb09d594b5df5046580692d335aa72695f5f3d788d1e7f0f",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-031",
+      "replacement_ids": [
+        "B-SUP-05-VERCEL-EXPERIENCE-GATE"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/blocker-reachability.json",
+      "source_file_sha256": "a2f1e1953e03e3722d38e46b34579fab49a6b1922837e1edb21b3217aafd7c2d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/blockers/40",
+      "old_value_sha256": "6e4cb83878cf621a159b4e07eaa4f34096877315d4fe0df242ec951db145aaca",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-032",
+      "replacement_ids": [
+        "B-SUP-05-VERCEL-EXPERIENCE-GATE",
+        "B-SUP-12-HERMETIC-FONT"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/blocker-reachability.json",
+      "source_file_sha256": "a2f1e1953e03e3722d38e46b34579fab49a6b1922837e1edb21b3217aafd7c2d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/blockers/64",
+      "old_value_sha256": "357d2716b69b44b6733528eea70ef7f560e93382893c4b5469c2126caf392697",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-033",
+      "replacement_ids": [
+        "B-SUP-02-ACTIVATION-QUORUM"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/blocker-reachability.json",
+      "source_file_sha256": "a2f1e1953e03e3722d38e46b34579fab49a6b1922837e1edb21b3217aafd7c2d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/blockers/68",
+      "old_value_sha256": "943c4b2a3926cb83f0106884cf93acc9844dd27c0008148ea33189ffaa352b06",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-034",
+      "replacement_ids": [
+        "B-SUP-06-D1"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/blocker-reachability.json",
+      "source_file_sha256": "a2f1e1953e03e3722d38e46b34579fab49a6b1922837e1edb21b3217aafd7c2d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/blockers/69",
+      "old_value_sha256": "596d4c5c237eae4c9e7725cbc6c0141571b7645b8c1022653119a7b17396786a",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-035",
+      "replacement_ids": [
+        "B-SUP-07-D2"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/blocker-reachability.json",
+      "source_file_sha256": "a2f1e1953e03e3722d38e46b34579fab49a6b1922837e1edb21b3217aafd7c2d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/required_before_state_phases/0",
+      "old_value_sha256": "7ad4157d39f0c994948ad03073014f0c889479121120fe22d0919cc413862063",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-036",
+      "replacement_ids": [
+        "B-SUP-02-ACTIVATION-QUORUM"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/blocker-reachability.json",
+      "source_file_sha256": "a2f1e1953e03e3722d38e46b34579fab49a6b1922837e1edb21b3217aafd7c2d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/required_before_state_phases/4",
+      "old_value_sha256": "f73297b61c6ad122e5a5c24094876acb621a58891d2f96060fc9cb93a634abb7",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-037",
+      "replacement_ids": [
+        "B-SUP-06-D1"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/blocker-reachability.json",
+      "source_file_sha256": "a2f1e1953e03e3722d38e46b34579fab49a6b1922837e1edb21b3217aafd7c2d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/required_before_state_phases/6",
+      "old_value_sha256": "45a33fb659877cf246dc67ac07db917bb3b2b20c8f91990d2e5e89fdb60ddbc4",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-038",
+      "replacement_ids": [
+        "B-SUP-07-D2"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/blocker-reachability.json",
+      "source_file_sha256": "a2f1e1953e03e3722d38e46b34579fab49a6b1922837e1edb21b3217aafd7c2d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/required_before_state_phases/7",
+      "old_value_sha256": "cf9760eaf75ee0691b06b64044771399eda3d0a7fedce20fd4a76040f62c4cfb",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-039",
+      "replacement_ids": [
+        "B-SUP-07-D2"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/blocker-reachability.json",
+      "source_file_sha256": "a2f1e1953e03e3722d38e46b34579fab49a6b1922837e1edb21b3217aafd7c2d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/required_before_state_phases/8",
+      "old_value_sha256": "000d262c01b59a3e48daf91912036d7706618cf17ea782e39b98b45e427c8371",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-040",
+      "replacement_ids": [
+        "B-SUP-07-D2"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/blocker-reachability.json",
+      "source_file_sha256": "a2f1e1953e03e3722d38e46b34579fab49a6b1922837e1edb21b3217aafd7c2d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/phase_law",
+      "old_value_sha256": "1ce265a2aaea68d3ccb5bfce6f3f9479256087f2dc5d261c554cd4aaa4accbed",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-041",
+      "replacement_ids": [
+        "B-SUP-04-JOINT-STATE-NAMES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_FILE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/candidate-identity-budget.json",
+      "source_file_sha256": "38cb54101c4d684ded2590ea697549fd1476c48258783a956e9f350edd05844d",
+      "locator_kind": "WHOLE_FILE",
+      "selector": "",
+      "old_value_sha256": "38cb54101c4d684ded2590ea697549fd1476c48258783a956e9f350edd05844d",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-042",
+      "replacement_ids": [
+        "B-SUP-05-VERCEL-EXPERIENCE-GATE",
+        "B-SUP-06-D1",
+        "B-SUP-10-OLD-CANDIDATE-BUDGET"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_FILE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/repair-budget.json",
+      "source_file_sha256": "c8a7da628b612bf035195a6d5a265adfef712f4716ce01a5a52980f5856eb239",
+      "locator_kind": "WHOLE_FILE",
+      "selector": "",
+      "old_value_sha256": "c8a7da628b612bf035195a6d5a265adfef712f4716ce01a5a52980f5856eb239",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-043",
+      "replacement_ids": [
+        "B-SUP-09-OLD-REPAIR-BUDGET",
+        "B-SUP-11-CLOCKS",
+        "B-SUP-13-INFERENCE-CALL-TAXONOMY"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/m00-deployment-set.json",
+      "source_file_sha256": "40cda23edce58c6e63efcb4c8302ecf56176f9825adccd5455f5085396de135f",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/candidate_source/null_reason",
+      "old_value_sha256": "74da773150e5124ed4829b69975c1293c22fe828a759b2d1a09ed9b30be3a4b5",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-044",
+      "replacement_ids": [
+        "B-SUP-02-ACTIVATION-QUORUM"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/m00-deployment-set.json",
+      "source_file_sha256": "40cda23edce58c6e63efcb4c8302ecf56176f9825adccd5455f5085396de135f",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/runtime_identity_set/0/candidate_action",
+      "old_value_sha256": "dec9d36e874fe504594d2bdcb554cb2d70faede040d7ee5e704c1d057321c252",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-045",
+      "replacement_ids": [
+        "B-SUP-05-VERCEL-EXPERIENCE-GATE"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/m00-deployment-set.json",
+      "source_file_sha256": "40cda23edce58c6e63efcb4c8302ecf56176f9825adccd5455f5085396de135f",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/frontend_production_input_closure/unchanged_effect",
+      "old_value_sha256": "307c7eff44a1b1faacef4a7998bba0147e87c7f22e2edac4e16f0bc254593f03",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-046",
+      "replacement_ids": [
+        "B-SUP-05-VERCEL-EXPERIENCE-GATE"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/m00-deployment-set.json",
+      "source_file_sha256": "40cda23edce58c6e63efcb4c8302ecf56176f9825adccd5455f5085396de135f",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/frontend_production_input_closure/changed_effect",
+      "old_value_sha256": "55659581b8650d216ac52c008e889401c1e0c26ef91be4d19f4372c46bfc8685",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-047",
+      "replacement_ids": [
+        "B-SUP-05-VERCEL-EXPERIENCE-GATE",
+        "B-SUP-12-HERMETIC-FONT"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/m00-deployment-set.json",
+      "source_file_sha256": "40cda23edce58c6e63efcb4c8302ecf56176f9825adccd5455f5085396de135f",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/voice/classification_activates_only_after_joint_amendment_approval",
+      "old_value_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-048",
+      "replacement_ids": [
+        "B-SUP-02-ACTIVATION-QUORUM",
+        "B-SUP-14-VOICE-ACTIVATION-WORDING"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/m00-deployment-set.json",
+      "source_file_sha256": "40cda23edce58c6e63efcb4c8302ecf56176f9825adccd5455f5085396de135f",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/voice/abort_rule",
+      "old_value_sha256": "0fd66812717ece6fbbb69735d6897a2597ebf157e45aaf44ecb0bd2274f44914",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-049",
+      "replacement_ids": [
+        "B-SUP-14-VOICE-ACTIVATION-WORDING"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/m00-deployment-set.json",
+      "source_file_sha256": "40cda23edce58c6e63efcb4c8302ecf56176f9825adccd5455f5085396de135f",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/candidate_deployment_protocol/conditional_vercel_approval",
+      "old_value_sha256": "1e6764c3f60653592aac479dfaf3d4dbbeae65458414a61461edf5ca4c79b766",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-050",
+      "replacement_ids": [
+        "B-SUP-05-VERCEL-EXPERIENCE-GATE",
+        "B-SUP-06-D1"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/m00-deployment-set.json",
+      "source_file_sha256": "40cda23edce58c6e63efcb4c8302ecf56176f9825adccd5455f5085396de135f",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/candidate_deployment_protocol/post_assignment_requirements/5",
+      "old_value_sha256": "0957e199c328910d7905d5c02b413ce493299d277e06b818d5430065510969bc",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-051",
+      "replacement_ids": [
+        "B-SUP-07-D2"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/test-plan.json",
+      "source_file_sha256": "649d325882ebf391e8d809599e193f0fbf33afc4de641d3a7819dc9f7363e8c5",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/run_only_after_joint_approval",
+      "old_value_sha256": "b5bea41b6c623f7c09f1bf24dcae58ebab3c0cdd90ad966bc43a45b44867e12b",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-052",
+      "replacement_ids": [
+        "B-SUP-02-ACTIVATION-QUORUM"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/test-plan.json",
+      "source_file_sha256": "649d325882ebf391e8d809599e193f0fbf33afc4de641d3a7819dc9f7363e8c5",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/frontend_build_rule",
+      "old_value_sha256": "56d7777212cdeeb5588a8b11e4c6e656dc98bbacab8fadf59f1bdb8136e74006",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-053",
+      "replacement_ids": [
+        "B-SUP-05-VERCEL-EXPERIENCE-GATE",
+        "B-SUP-12-HERMETIC-FONT"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/authority-lock-correction.json",
+      "source_file_sha256": "896383b8bafe5767f0a0fc2ae8e29bbf29de0c19f532e300f4954ebcf2c8ee03",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/effective_version_after_approval",
+      "old_value_sha256": "b83db121bd629895e9b3c8de3d5a3d21ff7ae9ee29b79466aedc2a6a72957990",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-054",
+      "replacement_ids": [
+        "B-SUP-01-AMENDMENT-A-STATUS"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/provider-nullability.json",
+      "source_file_sha256": "f57f7df61d2c80e0eea34fefb09fa4d92429c5d1aaaf9a566c2a201920c727e9",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/effective_spec_version_after_approval",
+      "old_value_sha256": "b83db121bd629895e9b3c8de3d5a3d21ff7ae9ee29b79466aedc2a6a72957990",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-055",
+      "replacement_ids": [
+        "B-SUP-01-AMENDMENT-A-STATUS"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_FILE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evaluate_fc01_v1_2_amendment_a.py",
+      "source_file_sha256": "270df0a002643c2aed95bdb9536157c59bd87a777e09ddde096d491e33af2131",
+      "locator_kind": "WHOLE_FILE",
+      "selector": "",
+      "old_value_sha256": "270df0a002643c2aed95bdb9536157c59bd87a777e09ddde096d491e33af2131",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-056",
+      "replacement_ids": [
+        "B-SUP-15-EVALUATOR-DISPATCH"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_FILE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evaluate_fc01_v1_2_amendment_a_approval.py",
+      "source_file_sha256": "3640780bd6622f486eedfb4948d0713f9c0822edde3c1ff7af2bfcd53e05b9e9",
+      "locator_kind": "WHOLE_FILE",
+      "selector": "",
+      "old_value_sha256": "3640780bd6622f486eedfb4948d0713f9c0822edde3c1ff7af2bfcd53e05b9e9",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-057",
+      "replacement_ids": [
+        "B-SUP-03-APPROVAL-TRANSPORT",
+        "B-SUP-15-EVALUATOR-DISPATCH"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/fc01-v1.2-amendment-a.md",
+      "source_file_sha256": "d362517a1df1b25ec519ac9f45113e7a96a893b5cb65305ea62052b6bf52da10",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 3,
+        "end_line": 20
+      },
+      "old_value_sha256": "dbfe54c9d6bfe53b5bfc7d27f373b63b3feffc243039205ede8efef58044d336",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-058",
+      "replacement_ids": [
+        "B-SUP-01-AMENDMENT-A-STATUS",
+        "B-SUP-02-ACTIVATION-QUORUM"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/fc01-v1.2-amendment-a.md",
+      "source_file_sha256": "d362517a1df1b25ec519ac9f45113e7a96a893b5cb65305ea62052b6bf52da10",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 23,
+        "end_line": 46
+      },
+      "old_value_sha256": "9d05be42915e6362c27bd38f8ac0a4dc798a63a01969ae100a5b269a4cb19c2e",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-059",
+      "replacement_ids": [
+        "B-SUP-01-AMENDMENT-A-STATUS",
+        "B-SUP-02-ACTIVATION-QUORUM"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/fc01-v1.2-amendment-a.md",
+      "source_file_sha256": "d362517a1df1b25ec519ac9f45113e7a96a893b5cb65305ea62052b6bf52da10",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 121,
+        "end_line": 137
+      },
+      "old_value_sha256": "31877ec545934fd1da2727d382899d6c2cd8181e3a59e1bb5bf1a19514cd401e",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-060",
+      "replacement_ids": [
+        "B-SUP-05-VERCEL-EXPERIENCE-GATE"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/fc01-v1.2-amendment-a.md",
+      "source_file_sha256": "d362517a1df1b25ec519ac9f45113e7a96a893b5cb65305ea62052b6bf52da10",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 164,
+        "end_line": 167
+      },
+      "old_value_sha256": "160832d79f7d913a7fd182ab3dfdb22b6feaaf462cb9faf71003cb61d66a3922",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-061",
+      "replacement_ids": [
+        "B-SUP-14-VOICE-ACTIVATION-WORDING"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/fc01-v1.2-amendment-a.md",
+      "source_file_sha256": "d362517a1df1b25ec519ac9f45113e7a96a893b5cb65305ea62052b6bf52da10",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 188,
+        "end_line": 216
+      },
+      "old_value_sha256": "5807ecd0758b5097a479fa3120fb0752ef3d6147786c4b8e7717159ed3afe23b",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-062",
+      "replacement_ids": [
+        "B-SUP-02-ACTIVATION-QUORUM",
+        "B-SUP-16-CONTROL-PATH-EXCEPTION"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/fc01-v1.2-amendment-a.md",
+      "source_file_sha256": "d362517a1df1b25ec519ac9f45113e7a96a893b5cb65305ea62052b6bf52da10",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 223,
+        "end_line": 251
+      },
+      "old_value_sha256": "914d9a676792733b1d46957b709f0ec6987871969ec07c7d2c5604dc4e86e7ff",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-063",
+      "replacement_ids": [
+        "B-SUP-09-OLD-REPAIR-BUDGET",
+        "B-SUP-10-OLD-CANDIDATE-BUDGET",
+        "B-SUP-11-CLOCKS"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/fc01-v1.2-amendment-a.md",
+      "source_file_sha256": "d362517a1df1b25ec519ac9f45113e7a96a893b5cb65305ea62052b6bf52da10",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 381,
+        "end_line": 444
+      },
+      "old_value_sha256": "3487c99c33908d054ecacbda6a198082fd728eab9c630b75b77cf5e32784e328",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-064",
+      "replacement_ids": [
+        "B-SUP-04-JOINT-STATE-NAMES",
+        "B-SUP-06-D1",
+        "B-SUP-07-D2",
+        "B-SUP-08-D3-COMPOSITE"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/fc01-v1.2-amendment-a.md",
+      "source_file_sha256": "d362517a1df1b25ec519ac9f45113e7a96a893b5cb65305ea62052b6bf52da10",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 455,
+        "end_line": 465
+      },
+      "old_value_sha256": "529fb7f05d41e46efa5c7b459f49afc578c100b56e8138a58d53de3b46b118aa",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-065",
+      "replacement_ids": [
+        "B-SUP-03-APPROVAL-TRANSPORT",
+        "B-SUP-15-EVALUATOR-DISPATCH"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "DAVIDE_OWNER_DIRECTIVE",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "FC01_DAVIDE_ONLY_CONTINUATION_MISSION_AND_AGENT_PROMPT_2026-08-17.md",
+      "source_file_sha256": "5fd2c8f2a87cb3fc7731041986bbbd4dc44341ed1f38f4d7e5675acedae01268",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 11,
+        "end_line": 28
+      },
+      "old_value_sha256": "64c65979e0f49929de732737a3c40f1b86c4352850ab1914cb6e613f13dbbc8c",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-066",
+      "replacement_ids": [
+        "B-SUP-02-ACTIVATION-QUORUM"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "DAVIDE_OWNER_DIRECTIVE",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "FC01_DAVIDE_ONLY_CONTINUATION_MISSION_AND_AGENT_PROMPT_2026-08-17.md",
+      "source_file_sha256": "5fd2c8f2a87cb3fc7731041986bbbd4dc44341ed1f38f4d7e5675acedae01268",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 58,
+        "end_line": 88
+      },
+      "old_value_sha256": "6dcf46e239c5d755625033776a67b1ec1fdd1b4dbcbfa5f3d1aca73092d75667",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-067",
+      "replacement_ids": [
+        "B-SUP-01-AMENDMENT-A-STATUS",
+        "B-SUP-02-ACTIVATION-QUORUM",
+        "B-SUP-12-HERMETIC-FONT"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "DAVIDE_OWNER_DIRECTIVE",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "FC01_DAVIDE_ONLY_CONTINUATION_MISSION_AND_AGENT_PROMPT_2026-08-17.md",
+      "source_file_sha256": "5fd2c8f2a87cb3fc7731041986bbbd4dc44341ed1f38f4d7e5675acedae01268",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 90,
+        "end_line": 193
+      },
+      "old_value_sha256": "0dde46f956bc4a15feebb833bb546b65022599d5d3a46f730df5efe9ade85dc6",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-068",
+      "replacement_ids": [
+        "B-SUP-03-APPROVAL-TRANSPORT",
+        "B-SUP-04-JOINT-STATE-NAMES",
+        "B-SUP-05-VERCEL-EXPERIENCE-GATE",
+        "B-SUP-06-D1",
+        "B-SUP-07-D2",
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-15-EVALUATOR-DISPATCH",
+        "B-SUP-16-CONTROL-PATH-EXCEPTION"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "DAVIDE_OWNER_DIRECTIVE",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "FC01_DAVIDE_ONLY_CONTINUATION_MISSION_AND_AGENT_PROMPT_2026-08-17.md",
+      "source_file_sha256": "5fd2c8f2a87cb3fc7731041986bbbd4dc44341ed1f38f4d7e5675acedae01268",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 194,
+        "end_line": 268
+      },
+      "old_value_sha256": "123b32a512af2fd2c6437a510f749cb911c2c6f538c5840000c4b3585ab271a7",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-069",
+      "replacement_ids": [
+        "B-SUP-09-OLD-REPAIR-BUDGET",
+        "B-SUP-10-OLD-CANDIDATE-BUDGET",
+        "B-SUP-11-CLOCKS",
+        "B-SUP-12-HERMETIC-FONT",
+        "B-SUP-13-INFERENCE-CALL-TAXONOMY"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "DAVIDE_OWNER_DIRECTIVE",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "FC01_DAVIDE_ONLY_CONTINUATION_MISSION_AND_AGENT_PROMPT_2026-08-17.md",
+      "source_file_sha256": "5fd2c8f2a87cb3fc7731041986bbbd4dc44341ed1f38f4d7e5675acedae01268",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 329,
+        "end_line": 424
+      },
+      "old_value_sha256": "9f949fd62ad1ed1dca4ff8d2fb1ff3b8968911756ecadc418ee923fe60649ebb",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-070",
+      "replacement_ids": [
+        "B-SUP-06-D1",
+        "B-SUP-07-D2",
+        "B-SUP-08-D3-COMPOSITE"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "DAVIDE_OWNER_DIRECTIVE",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "FC01_DAVIDE_ONLY_CONTINUATION_MISSION_AND_AGENT_PROMPT_2026-08-17.md",
+      "source_file_sha256": "5fd2c8f2a87cb3fc7731041986bbbd4dc44341ed1f38f4d7e5675acedae01268",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 425,
+        "end_line": 455
+      },
+      "old_value_sha256": "42a7cadd86d8c0bd7f17d86b966c1e6bb66444e3abbebee22e2b3aede8e62a78",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-071",
+      "replacement_ids": [
+        "B-SUP-18-TEXT-ONLY-COMPLETION"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "DAVIDE_OWNER_DIRECTIVE",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "FC01_DAVIDE_ONLY_CONTINUATION_MISSION_AND_AGENT_PROMPT_2026-08-17.md",
+      "source_file_sha256": "5fd2c8f2a87cb3fc7731041986bbbd4dc44341ed1f38f4d7e5675acedae01268",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 516,
+        "end_line": 527
+      },
+      "old_value_sha256": "40934f89a01fa18f9312f960090e65a42e02011d94aa5d0fd10eed33ed66e741",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-072",
+      "replacement_ids": [
+        "B-SUP-14-VOICE-ACTIVATION-WORDING",
+        "B-SUP-18-TEXT-ONLY-COMPLETION"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "DAVIDE_OWNER_DIRECTIVE",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "FC01_DAVIDE_ONLY_CONTINUATION_MISSION_AND_AGENT_PROMPT_2026-08-17.md",
+      "source_file_sha256": "5fd2c8f2a87cb3fc7731041986bbbd4dc44341ed1f38f4d7e5675acedae01268",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 572,
+        "end_line": 579
+      },
+      "old_value_sha256": "430f3ceff2714a5d1707b4c18a3db8a2f65bce878aa8e3c3a38ef0580eeb6a4c",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-073",
+      "replacement_ids": [
+        "B-SUP-18-TEXT-ONLY-COMPLETION"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/README.md",
+      "source_file_sha256": "bff686df8db1de20e89af3e06d0b10cbc87b07dfade9ed1342d08f1cdc877e05",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 20,
+        "end_line": 28
+      },
+      "old_value_sha256": "254679ada6297dc6d6ba73e964e6fef91f0339ff3a50d1809460ec47377ca266",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-074",
+      "replacement_ids": [
+        "B-SUP-01-AMENDMENT-A-STATUS",
+        "B-SUP-02-ACTIVATION-QUORUM"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/README.md",
+      "source_file_sha256": "bff686df8db1de20e89af3e06d0b10cbc87b07dfade9ed1342d08f1cdc877e05",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 37,
+        "end_line": 42
+      },
+      "old_value_sha256": "56f1b8eff2691ad1831f376dbfab0ce8f2daf62c3ffb13049343c22889f62106",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-075",
+      "replacement_ids": [
+        "B-SUP-05-VERCEL-EXPERIENCE-GATE",
+        "B-SUP-06-D1"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/README.md",
+      "source_file_sha256": "bff686df8db1de20e89af3e06d0b10cbc87b07dfade9ed1342d08f1cdc877e05",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 60,
+        "end_line": 63
+      },
+      "old_value_sha256": "980f95bf8f5c310311c523df6b1e1b07860558f7bf54891dfb13b2359900d91c",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-076",
+      "replacement_ids": [
+        "B-SUP-09-OLD-REPAIR-BUDGET",
+        "B-SUP-10-OLD-CANDIDATE-BUDGET"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/README.md",
+      "source_file_sha256": "bff686df8db1de20e89af3e06d0b10cbc87b07dfade9ed1342d08f1cdc877e05",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 71,
+        "end_line": 84
+      },
+      "old_value_sha256": "2cbb208f02e34252c4b8aff190e9b66d6d868723676a262b81cae65777c90e5b",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-077",
+      "replacement_ids": [
+        "B-SUP-03-APPROVAL-TRANSPORT",
+        "B-SUP-15-EVALUATOR-DISPATCH"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/limitations.md",
+      "source_file_sha256": "869d8592534a5c43a38e5bde322c827fea03b89a6a6922cfd7ef573337784f80",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 3,
+        "end_line": 5
+      },
+      "old_value_sha256": "9cf0acd863955443ca23f01b64c7b5fa3344acd7f28541cd2a20680ba60d93ee",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-078",
+      "replacement_ids": [
+        "B-SUP-01-AMENDMENT-A-STATUS"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_PROSE",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/limitations.md",
+      "source_file_sha256": "869d8592534a5c43a38e5bde322c827fea03b89a6a6922cfd7ef573337784f80",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 17,
+        "end_line": 29
+      },
+      "old_value_sha256": "ee97870dd488fdbc00be5f28ef541a1992f2f84bb0bc76fe8786a7808c34f11a",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-079",
+      "replacement_ids": [
+        "B-SUP-03-APPROVAL-TRANSPORT",
+        "B-SUP-14-VOICE-ACTIVATION-WORDING"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 12,
+        "end_line": 13
+      },
+      "old_value_sha256": "4eb268e470c99843942f6af7c138e16d34d44ad47f9ae6bfc2fd9b7d7fce97f8",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-080",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 42,
+        "end_line": 52
+      },
+      "old_value_sha256": "f8de1deda44eba55d31a29d4ebdc8008efabe62973b5d9450cd942e81a1fc206",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-081",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 151,
+        "end_line": 155
+      },
+      "old_value_sha256": "29082c9886d3a2d9f7fb7586a1faf48047974d8cc670136957e4c123394163d6",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-082",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 203,
+        "end_line": 215
+      },
+      "old_value_sha256": "f7d299caaf0ab2f32eb667cdedb3177cbe774a4c1289059b72cd461b917ea27c",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-083",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 239,
+        "end_line": 269
+      },
+      "old_value_sha256": "003e06d18a22a030aa9cf003d2a2f3fb622cf63c15becb4fa60e2a40ecdbdeab",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-084",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 358,
+        "end_line": 386
+      },
+      "old_value_sha256": "6e3f54f671d9a757a9ec2ec42d1965550826d8fb8b10af421f492a49f46ec2e6",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-085",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 412,
+        "end_line": 449
+      },
+      "old_value_sha256": "dce0ce734bf23c9bda7c23748251d49a09da029f38bb06fd407beb2c67c5e016",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-086",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 719,
+        "end_line": 725
+      },
+      "old_value_sha256": "eea1308e6e1f84a67907bb4c782cdfc7473369072ad73b30b5b3936fae88d970",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-087",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 908,
+        "end_line": 917
+      },
+      "old_value_sha256": "4718ff5e57932ee53dbc10fa5765b255c85c0f06db549d055fe8ae2525f69b1c",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-088",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 1067,
+        "end_line": 1067
+      },
+      "old_value_sha256": "9bc8bf04a5ff918445c07aca7d183bdd98cb3dc3090dea6b7261186bfbf3ae1a",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-089",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 1132,
+        "end_line": 1135
+      },
+      "old_value_sha256": "894b0e9f9cad3eabe9eb36ddeacba03bcd15ead17a177f0c777f31cc4a847c00",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-090",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 1141,
+        "end_line": 1141
+      },
+      "old_value_sha256": "688767e02e13c7bd7af9e7aefceca91e114d507711b8f293c657e204474632d2",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-091",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 1147,
+        "end_line": 1147
+      },
+      "old_value_sha256": "fa8c5e97edef0c50b370a6e5890c0a301b35f451b95de2f8d8e879f1caee68cf",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-092",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 1159,
+        "end_line": 1159
+      },
+      "old_value_sha256": "e3219a5fd3b571c2bae7b0f5060ff139798a6d94587741314e0972cf55a9d350",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-093",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "FC01_V1_1",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "Sophia_FC01_Stable_Mainline_Convergence_and_Release_Proof_2026-08-17.md",
+      "source_file_sha256": "60f52624e2da08e6f116c8d1d7ae6c92bed94fc571a658a8b71b7044a3b6536c",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 1165,
+        "end_line": 1165
+      },
+      "old_value_sha256": "11fe1c4e35ea20e8bc87ad35b5d7716c5ae96b73c252b4bf7aa19f097b882bda",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-094",
+      "replacement_ids": [
+        "B-SUP-08-D3-COMPOSITE",
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "PROGRAM_CONTROL_MAP",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "00_Sophia_Final_Program_Control_Map_2026-08-10.md",
+      "source_file_sha256": "5a2d15b4f499e7832fabf3bbaa1f957e754a55f9210dcb1f11950aad871406fc",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 61,
+        "end_line": 69
+      },
+      "old_value_sha256": "fd4d15cd0c2a328ff2015ee965ccb4beab6184cf10c5e551c0655e9ed6b5aa9d",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "id": "B-DEP-095",
+      "replacement_ids": [
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "PROGRAM_CONTROL_MAP",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "00_Sophia_Final_Program_Control_Map_2026-08-10.md",
+      "source_file_sha256": "5a2d15b4f499e7832fabf3bbaa1f957e754a55f9210dcb1f11950aad871406fc",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 130,
+        "end_line": 130
+      },
+      "old_value_sha256": "ac08d5bae1f85536b765cc320ec10ed3e8cdb85504ba104fa6eef44d27ef262f",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "id": "B-DEP-096",
+      "replacement_ids": [
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "PROGRAM_CONTROL_MAP",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "00_Sophia_Final_Program_Control_Map_2026-08-10.md",
+      "source_file_sha256": "5a2d15b4f499e7832fabf3bbaa1f957e754a55f9210dcb1f11950aad871406fc",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 167,
+        "end_line": 168
+      },
+      "old_value_sha256": "e451e3a9af088282a26b9f9050043a8ad1353ae9a7e8cabad60c9274d75f7d92",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "id": "B-DEP-097",
+      "replacement_ids": [
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "SYNTHETIC_PROTOCOL",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "07_Sophia_Synthetic_Vertical_Campaign_and_Evidence_Protocol_2026-08-10.md",
+      "source_file_sha256": "c4302826b44fb95288feceb242702bc01abdd61951aba793b27b800054531362",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 4,
+        "end_line": 4
+      },
+      "old_value_sha256": "b75ac62f59b9739ef13c5026ee2f9e6c52f26ee2fc409dac7ce59cc51c5c7f21",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "id": "B-DEP-098",
+      "replacement_ids": [
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "SYNTHETIC_PROTOCOL",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "07_Sophia_Synthetic_Vertical_Campaign_and_Evidence_Protocol_2026-08-10.md",
+      "source_file_sha256": "c4302826b44fb95288feceb242702bc01abdd61951aba793b27b800054531362",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 125,
+        "end_line": 125
+      },
+      "old_value_sha256": "2ab1944d4a5cce9244685cd715c60ff34b981aa57b52e627b283cecadd113878",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "id": "B-DEP-099",
+      "replacement_ids": [
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "SYNTHETIC_PROTOCOL",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "07_Sophia_Synthetic_Vertical_Campaign_and_Evidence_Protocol_2026-08-10.md",
+      "source_file_sha256": "c4302826b44fb95288feceb242702bc01abdd61951aba793b27b800054531362",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 202,
+        "end_line": 202
+      },
+      "old_value_sha256": "00a4fe2e9cc1e3652a94c63fb6444054cf62d35c1adb1e1d74a24e2db0358216",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "id": "B-DEP-100",
+      "replacement_ids": [
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AUTHORING_CONTRACT",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "09_Sophia_Future_Spec_Authoring_Contract_2026-08-10.md",
+      "source_file_sha256": "10b922c45f7ec722a3e15ade49c5506c1072e2aece68ddc5f108dc7547eb9d7e",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 20,
+        "end_line": 20
+      },
+      "old_value_sha256": "7783f2ef4599918ce7cf3440e6b9bf01257c9a3886ef405237b6c3871d954a18",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "id": "B-DEP-101",
+      "replacement_ids": [
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AUTHORING_CONTRACT",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "09_Sophia_Future_Spec_Authoring_Contract_2026-08-10.md",
+      "source_file_sha256": "10b922c45f7ec722a3e15ade49c5506c1072e2aece68ddc5f108dc7547eb9d7e",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 44,
+        "end_line": 44
+      },
+      "old_value_sha256": "db05ff1570cc08bc8b4f05de47a98e67d17b01118ee8602f57c84a7bd6374b01",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "id": "B-DEP-102",
+      "replacement_ids": [
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AUTHORING_CONTRACT",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "09_Sophia_Future_Spec_Authoring_Contract_2026-08-10.md",
+      "source_file_sha256": "10b922c45f7ec722a3e15ade49c5506c1072e2aece68ddc5f108dc7547eb9d7e",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 60,
+        "end_line": 60
+      },
+      "old_value_sha256": "f4483914a8eb0718097a002572ad12c5992647d267577b1bb06b895480d7afc2",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "id": "B-DEP-103",
+      "replacement_ids": [
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AUTHORING_CONTRACT",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "09_Sophia_Future_Spec_Authoring_Contract_2026-08-10.md",
+      "source_file_sha256": "10b922c45f7ec722a3e15ade49c5506c1072e2aece68ddc5f108dc7547eb9d7e",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 83,
+        "end_line": 83
+      },
+      "old_value_sha256": "651d30d1f56fc4817a4ecd5433c16ec7a250eeab05da17a599cfc35d5a5a4e05",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "id": "B-DEP-104",
+      "replacement_ids": [
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "M00_CONTRACT",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "M00_CURRENT_PRODUCTION_CAMPAIGN_CLOSEOUT(1).md",
+      "source_file_sha256": "7d0eb86a079544e7f4f8d31cc6accb2bc05815d2f3617839d90f33fe49e39866",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 5,
+        "end_line": 5
+      },
+      "old_value_sha256": "d2f37de0e2bc92aa942afae46b548c42b68e0a358edad702dbbc50017983ea33",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "id": "B-DEP-105",
+      "replacement_ids": [
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "M00_CONTRACT",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "M00_CURRENT_PRODUCTION_CAMPAIGN_CLOSEOUT(1).md",
+      "source_file_sha256": "7d0eb86a079544e7f4f8d31cc6accb2bc05815d2f3617839d90f33fe49e39866",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 104,
+        "end_line": 104
+      },
+      "old_value_sha256": "59eb0cb14d179c726dc2200b2c6e7dd6f6ab87900003ee4d59dc20afc5156559",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "id": "B-DEP-106",
+      "replacement_ids": [
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "M00_CONTRACT",
+      "source_kind": "OWNER_SUPPLIED_AUTHORITY",
+      "source_path": "M00_CURRENT_PRODUCTION_CAMPAIGN_CLOSEOUT(1).md",
+      "source_file_sha256": "7d0eb86a079544e7f4f8d31cc6accb2bc05815d2f3617839d90f33fe49e39866",
+      "locator_kind": "PROSE_EXCERPT",
+      "selector": {
+        "start_line": 154,
+        "end_line": 154
+      },
+      "old_value_sha256": "cb81c109b8796b6bc27c7dfb2e5300756475fed578497a820578b555bbe804ef",
+      "handling": "OPTIONAL_ROLE_NON_GATE",
+      "id": "B-DEP-107",
+      "replacement_ids": [
+        "B-SUP-17-SUBORDINATE-LUIS-ROLES"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/candidate-identity-budget.json",
+      "source_file_sha256": "38cb54101c4d684ded2590ea697549fd1476c48258783a956e9f350edd05844d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/hard_zero_limits/provider_setting_changes",
+      "old_value_sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-108",
+      "replacement_ids": [
+        "B-SUP-06-D1"
+      ],
+      "historical_bytes_unchanged": true
+    },
+    {
+      "authority_id": "AMENDMENT_A",
+      "source_kind": "REPOSITORY_JSON",
+      "source_path": "docs/campaigns/foundation-mainline-v1/evidence/fc01-v1.2-amendment-a-20260817t151323z/candidate-identity-budget.json",
+      "source_file_sha256": "38cb54101c4d684ded2590ea697549fd1476c48258783a956e9f350edd05844d",
+      "locator_kind": "JSON_POINTER",
+      "selector": "/hard_zero_limits/credential_settings_or_rotations",
+      "old_value_sha256": "5feceb66ffc86f38d952786c6d696c79c2dbc239dd4e91b46729d73a27fb57e9",
+      "handling": "EFFECTIVE_REPLACED",
+      "id": "B-DEP-109",
+      "replacement_ids": [
+        "B-SUP-06-D1"
+      ],
+      "historical_bytes_unchanged": true
+    }
+  ],
+  "substantive_constraints_inherited": [
+    "frozen source and main identities",
+    "complete 70-blocker ID set and 37 M00/33 POST temporal classification",
+    "all 33 POST blocker IDs retain original boundaries and cannot be hidden as D3 residual work",
+    "Voice POST blockers remain unresolved/deferred with no Voice action and are never called PASS",
+    "exact two P1 and eight P2 mandatory repairs plus one separately named font closure",
+    "all P0-P2 no-waiver and PASS-only truth rules",
+    "71 M00-critical and 20 POST logical NOT_RUN classification",
+    "all Amendment A test selectors and acceptance thresholds",
+    "eight M00 route edges and zero-DML AUTH_CHALLENGE contract",
+    "M00 confidential 17-relation and 51-routine ACL/RLS contract",
+    "secret threshold 10 records/3 strings to zero and tracked records 15 backend plus 150 root",
+    "twelve nullable provider pairs and all hard identity/rollback fields",
+    "migration byte immutability and forward-only convergence",
+    "LangGraph-Gateway-required-Vercel order and Vercel-Gateway-LangGraph rollback",
+    "text-only M00 and zero Voice reachability",
+    "one M00 attempt and at most one M00 repair",
+    "evidence minimization and no private content or credentials in Git",
+    "no unapproved or operator DDL/DML/migration/control-plane mutation, no private row/object read, no history rewrite, and no gate relaxation; only exact D2-bound normal-product persistence effects are permitted during the single M00 attempt",
+    "prompt, model policy, rubric, synthetic identity, and one-repair ceiling frozen",
+    "reviewed control-branch evidence range imported into later integration candidate under exact campaign path"
+  ],
+  "conditional_provider_mutation_rule": {
+    "default_provider_setting_mutations": 0,
+    "default_credential_mutations": 0,
+    "nonzero_authority": "only an exact FC01-D1 packet and later exact Davide response",
+    "database_migration_voice_hard_zero_unchanged": true,
+    "secret_values_in_git_permitted": false
+  }
+}
