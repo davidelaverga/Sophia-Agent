@@ -87,6 +87,21 @@ def test_uuid7_has_version_and_variant_bits() -> None:
     assert value.variant == "specified in RFC 4122"
 
 
+def test_payload_compaction_excludes_audio_bytes_and_bounds_text() -> None:
+    payload = tracing._safe_payload(
+        {
+            "inlineData": {"mimeType": "audio/pcm", "data": b"\x00\x01"},
+            "text": "x" * 500,
+        }
+    )
+
+    assert payload["inlineData"]["data"] == {
+        "byte_length": 2,
+        "raw_audio_excluded": True,
+    }
+    assert len(payload["text"]) == tracing.MAX_TRACE_TEXT_CHARS + 1
+
+
 def test_one_root_contains_socket_event_and_tool_spans(monkeypatch: Any) -> None:
     _enable_fake_sdk(monkeypatch)
     client = FakeClient()

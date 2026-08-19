@@ -83,6 +83,8 @@ def _safe_payload(value: Any, *, depth: int = 0, parent_key: str | None = None) 
 
     if depth >= MAX_TRACE_DEPTH:
         return "<max_depth>"
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return {"byte_length": len(value), "raw_audio_excluded": True}
     if isinstance(value, str):
         if parent_key in {"data", "inlineData", "inline_data"}:
             return {"byte_length": len(value), "raw_audio_excluded": True}
@@ -94,7 +96,7 @@ def _safe_payload(value: Any, *, depth: int = 0, parent_key: str | None = None) 
         for key, item in list(value.items())[:MAX_TRACE_LIST_ITEMS]:
             key_text = str(key)
             if key_text in {"data", "audio", "audio_bytes", "audioBase64", "audio_base64"}:
-                if isinstance(item, str):
+                if isinstance(item, (str, bytes, bytearray, memoryview)):
                     result[key_text] = {
                         "byte_length": len(item),
                         "raw_audio_excluded": True,
