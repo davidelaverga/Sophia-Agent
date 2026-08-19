@@ -595,6 +595,32 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
 
 
 @pytest.mark.anyio
+async def test_trace_finalizer_runs_when_provider_close_raises() -> None:
+    class FailingRealtimeSessions:
+        async def close_session(self, _session_id: str) -> bool:
+            raise RuntimeError("provider close failed")
+
+    class RecordingTrace:
+        def __init__(self) -> None:
+            self.closed = False
+
+        def close(self, **_: object) -> None:
+            self.closed = True
+
+    manager = GeminiBrowserDogfoodSessionManager(  # type: ignore[arg-type]
+        FailingRealtimeSessions(),
+    )
+    trace = RecordingTrace()
+    manager._traces_by_session["browser-gemini-close-error"] = trace  # type: ignore[assignment]
+
+    with pytest.raises(RuntimeError, match="provider close failed"):
+        await manager.close_session("browser-gemini-close-error")
+
+    assert trace.closed is True
+    assert "browser-gemini-close-error" not in manager._traces_by_session
+
+
+@pytest.mark.anyio
 async def test_browser_session_uses_configured_gemini_live_voice(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
