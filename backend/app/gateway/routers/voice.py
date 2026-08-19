@@ -185,6 +185,8 @@ class GeminiVoiceConnectResponse(BaseModel):
     gemini_voice_configured: bool | None = None
     gemini_voice_configured_value_valid: bool | None = None
     gemini_voice_diagnostic: str | None = None
+    langsmith_trace_id: str | None = None
+    audio_capture_enabled: bool = False
     backendCoreviewFlagParsed: bool | None = None
     backendStillFrameFlagParsed: bool | None = None
     preconnect: bool = False
@@ -316,6 +318,15 @@ class GeminiBrowserDogfoodDisconnectRequest(BaseModel):
     """Close a protected Gemini browser Live WebSocket dogfood session."""
 
     session_id: str = Field(..., description="Dogfood session id returned by browser-session")
+    conversation_audio_base64: str | None = Field(
+        default=None,
+        max_length=28_000_000,
+        description="Optional browser-recorded combined conversation audio",
+    )
+    conversation_audio_mime_type: str = Field(
+        default="audio/webm",
+        description="MIME type for the optional combined conversation recording",
+    )
 
 
 @lru_cache(maxsize=1)
@@ -1234,6 +1245,7 @@ async def _start_gemini_production_voice_session(
         json_body={
             "user_id": user_id,
             "session_id": session_id,
+            "thread_id": body.thread_id,
             "platform": body.platform,
             "context_mode": body.context_mode,
             "ritual": body.ritual,
@@ -1827,6 +1839,7 @@ async def gemini_browser_dogfood_disconnect(
     await _proxy_voice_dogfood_json(
         "DELETE",
         f"/dogfood/realtime/gemini/browser-sessions/{encoded_session_id}",
+        json_body=body.model_dump(exclude_none=True),
     )
 
 
@@ -1964,7 +1977,10 @@ async def gemini_production_disconnect(
     user_id: str,
     body: GeminiBrowserDogfoodDisconnectRequest,
 ) -> None:
-    await _disconnect_gemini_production_session(body.session_id)
+    await _disconnect_gemini_production_session(
+        body.session_id,
+        body=body.model_dump(exclude_none=True),
+    )
 
     lock = await _get_active_voice_session_lock(user_id)
     async with lock:
@@ -2149,14 +2165,18 @@ async def _disconnect_voice_session(call_id: str, session_id: str) -> None:
         )
 
 
-async def _disconnect_gemini_production_session(session_id: str) -> None:
+async def _disconnect_gemini_production_session(
+    session_id: str,
+    *,
+    body: dict[str, object] | None = None,
+) -> None:
     voice_url = _get_voice_server_url()
     encoded_session_id = quote(session_id, safe="")
     url = f"{voice_url}/production/realtime/gemini/browser-sessions/{encoded_session_id}"
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.delete(url)
+            resp = await client.request("DELETE", url, json=body)
             if resp.status_code == 404:
                 logger.info(
                     "voice.gemini.disconnect session already gone session_id=%s",

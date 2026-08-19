@@ -213,3 +213,17 @@ services:
         value: voice
       - key: SOPHIA_CONTEXT_MODE
         value: life
+      # Gemini Live traces are manual RunTree traces; legacy cascade tracing
+      # remains unchanged. The API key/workspace are dashboard-managed.
+      - key: SOPHIA_GEMINI_LIVE_LANGSMITH_TRACING
+        value: "true"
+      - key: LANGSMITH_TRACING
+        value: "false"
+      - key: LANGSMITH_ENDPOINT
+        value: https://eu.api.smith.langchain.com
+      - key: LANGSMITH_PROJECT
+        value: Sophia
+      - key: LANGSMITH_API_KEY
+        sync: false
+      - key: LANGSMITH_WORKSPACE_ID
+        sync: false

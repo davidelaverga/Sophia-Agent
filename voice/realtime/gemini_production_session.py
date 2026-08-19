@@ -61,6 +61,7 @@ class GeminiProductionBrowserSessionManager:
         *,
         user_id: str,
         session_id: str | None = None,
+        thread_id: str | None = None,
         platform: str = "voice",
         context_mode: str = "life",
         ritual: str | None = None,
@@ -84,6 +85,7 @@ class GeminiProductionBrowserSessionManager:
             context_mode=context_mode,
             memory_retrieval_config=_dynamic_memory_retrieval_config(realtime_context),
             preconnect_ttl_seconds=preconnect_ttl_seconds,
+            thread_id=thread_id,
         )
         return GeminiProductionBrowserSession(browser_session=browser_session)
 
@@ -103,8 +105,18 @@ class GeminiProductionBrowserSessionManager:
             source_metadata=source_metadata,
         )
 
-    async def close_session(self, session_id: str) -> bool:
-        return await self._browser_sessions.close_session(session_id)
+    async def close_session(
+        self,
+        session_id: str,
+        *,
+        conversation_audio: bytes | None = None,
+        conversation_audio_mime_type: str = "audio/webm",
+    ) -> bool:
+        return await self._browser_sessions.close_session(
+            session_id,
+            conversation_audio=conversation_audio,
+            conversation_audio_mime_type=conversation_audio_mime_type,
+        )
 
 
 def validate_gemini_production_route_settings(settings: object) -> None:

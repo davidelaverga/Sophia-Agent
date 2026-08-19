@@ -2,6 +2,33 @@
 
 Sophia builder traces land in the EU LangSmith project named `Sophia`.
 
+## Gemini Live voice traces
+
+Gemini Live production uses a browser-owned provider WebSocket, so Sophia uses
+manual LangSmith `RunTree` instrumentation rather than `wrap_gemini_live` (which
+requires a Python-owned `client.aio.live.connect` session). Each conversation has
+one `gemini_live_conversation` root with `ls_modality=audio`; child spans represent
+provider socket events, tool calls, and function responses. Raw provider audio is
+excluded from span payloads. When browser capture is available, the combined
+conversation recording is attached to the root at disconnect and the SDK is
+flushed before shutdown completes.
+
+The voice service keeps this opt-in and feature-gated:
+
+```bash
+SOPHIA_GEMINI_LIVE_LANGSMITH_TRACING=true
+LANGSMITH_TRACING=false
+LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
+LANGSMITH_WORKSPACE_ID=<workspace-id>
+LANGSMITH_PROJECT=Sophia
+LANGSMITH_API_KEY=<runtime-key>
+```
+
+The browser bootstrap reports `langsmith_trace_id` and
+`audio_capture_enabled`. Use the trace ID together with the session/thread ID
+from Render logs to verify the root, socket-event children, tool spans, and root
+attachment.
+
 Required runtime configuration:
 
 ```bash

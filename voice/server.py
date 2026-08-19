@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import binascii
 import logging
 import time
 from collections.abc import AsyncIterator
@@ -226,11 +228,27 @@ class SophiaGeminiBrowserRelayRequest(BaseModel):
         )
 
 
+class SophiaGeminiBrowserDisconnectRequest(BaseModel):
+    """Close a Gemini browser session and optionally attach its combined audio."""
+
+    session_id: str = Field(..., description="Gemini browser session id")
+    conversation_audio_base64: str | None = Field(
+        default=None,
+        max_length=28_000_000,
+        description="Optional browser-recorded combined conversation audio, base64 encoded",
+    )
+    conversation_audio_mime_type: str = Field(
+        default="audio/webm",
+        description="MIME type for the optional combined conversation recording",
+    )
+
+
 class SophiaGeminiProductionStartRequest(BaseModel):
     """Production-route Gemini browser Live bootstrap request."""
 
     user_id: str = Field(..., description="Trusted authenticated user id")
     session_id: str | None = Field(default=None, description="Optional deterministic realtime session id")
+    thread_id: str | None = Field(default=None, description="Related Sophia conversation thread id")
     platform: str = Field(default="voice", description="Platform signal: voice | text | ios_voice")
     context_mode: str = Field(default="life", description="Context adaptation: work | gaming | life")
     ritual: str | None = Field(default=None, description="Active ritual: prepare | debrief | vent | reset | None")
@@ -751,6 +769,22 @@ async def start_gemini_browser_dogfood_session(
     return browser_session.as_public_payload()
 
 
+def _decode_conversation_audio(
+    request: SophiaGeminiBrowserDisconnectRequest,
+) -> tuple[bytes | None, str]:
+    if request.conversation_audio_base64 is None:
+        return None, request.conversation_audio_mime_type
+    if not request.conversation_audio_mime_type.startswith("audio/"):
+        raise ValueError("conversation_audio_mime_type must be an audio MIME type.")
+    try:
+        audio = base64.b64decode(request.conversation_audio_base64, validate=True)
+    except (binascii.Error, ValueError) as exc:
+        raise ValueError("conversation_audio_base64 must be valid base64.") from exc
+    if len(audio) > 20 * 1024 * 1024:
+        raise ValueError("conversation audio exceeds the 20 MB LangSmith attachment limit.")
+    return audio, request.conversation_audio_mime_type
+
+
 @dogfood_router.post(
     "/gemini/browser-sessions/{session_id}/provider-events",
     status_code=status.HTTP_202_ACCEPTED,
@@ -794,8 +828,20 @@ async def relay_gemini_browser_dogfood_provider_event(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Close a Gemini browser Live WebSocket dogfood session",
 )
-async def close_gemini_browser_dogfood_session(session_id: str) -> Response:
-    closed = await gemini_browser_dogfood_sessions.close_session(session_id)
+async def close_gemini_browser_dogfood_session(
+    session_id: str,
+    request: SophiaGeminiBrowserDisconnectRequest | None = None,
+) -> Response:
+    disconnect_request = request or SophiaGeminiBrowserDisconnectRequest(session_id=session_id)
+    try:
+        audio, mime_type = _decode_conversation_audio(disconnect_request)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    closed = await gemini_browser_dogfood_sessions.close_session(
+        session_id,
+        conversation_audio=audio,
+        conversation_audio_mime_type=mime_type,
+    )
     if not closed:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
@@ -823,6 +869,7 @@ async def start_gemini_production_browser_session(
             settings,
             user_id=request.user_id,
             session_id=request.session_id,
+            thread_id=request.thread_id,
             platform=request.platform,
             context_mode=request.context_mode,
             ritual=request.ritual,
@@ -933,8 +980,20 @@ async def stream_gemini_production_session_events(
     status_code=status.HTTP_202_ACCEPTED,
     summary="Close a production-candidate Gemini browser Live voice session",
 )
-async def close_gemini_production_browser_session(session_id: str) -> Response:
-    closed = await gemini_production_browser_sessions.close_session(session_id)
+async def close_gemini_production_browser_session(
+    session_id: str,
+    request: SophiaGeminiBrowserDisconnectRequest | None = None,
+) -> Response:
+    disconnect_request = request or SophiaGeminiBrowserDisconnectRequest(session_id=session_id)
+    try:
+        audio, mime_type = _decode_conversation_audio(disconnect_request)
+    except ValueError as exc:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
+    closed = await gemini_production_browser_sessions.close_session(
+        session_id,
+        conversation_audio=audio,
+        conversation_audio_mime_type=mime_type,
+    )
     if not closed:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,

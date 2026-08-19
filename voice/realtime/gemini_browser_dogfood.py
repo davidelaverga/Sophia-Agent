@@ -40,6 +40,7 @@ from voice.realtime.gemini_tool_loop import (
     extract_gemini_tool_call_cancellation_ids,
     gemini_tool_response_client_action,
 )
+from voice.realtime.gemini_langsmith_tracing import GeminiLiveTraceRecorder
 from voice.realtime.runtime_selection import VoiceRuntimeMode
 
 logger = logging.getLogger(__name__)
@@ -364,6 +365,8 @@ class GeminiBrowserDogfoodSession:
     setup: dict[str, Any]
     websocket_url: str = GEMINI_LIVE_WEBSOCKET_URL
     memory_context_diagnostics: dict[str, Any] = field(default_factory=dict)
+    langsmith_trace_id: str | None = None
+    audio_capture_enabled: bool = False
 
     def as_public_payload(self) -> dict[str, Any]:
         session_metadata = self.dogfood_session.metadata()
@@ -384,6 +387,8 @@ class GeminiBrowserDogfoodSession:
             "public_event_boundary": "SophiaEventNormalizer",
             "backendCoreviewFlagParsed": is_coreview_enabled(),
             "backendStillFrameFlagParsed": is_coreview_still_frame_enabled(),
+            "langsmith_trace_id": self.langsmith_trace_id,
+            "audio_capture_enabled": self.audio_capture_enabled,
         }
 
 
@@ -476,6 +481,7 @@ class GeminiBrowserDogfoodSessionManager:
             dict[int, tuple[dict[str, Any], GeminiRelaySourceMetadata, list[str]]],
         ] = {}
         self._preconnect_cleanup_tasks_by_session: dict[str, asyncio.Task[None]] = {}
+        self._traces_by_session: dict[str, GeminiLiveTraceRecorder] = {}
 
     async def start_browser_session(
         self,
@@ -488,6 +494,7 @@ class GeminiBrowserDogfoodSessionManager:
         context_mode: str | None = None,
         memory_retrieval_config: Mapping[str, Any] | None = None,
         preconnect_ttl_seconds: float | None = None,
+        thread_id: str | None = None,
     ) -> GeminiBrowserDogfoodSession:
         gate = validate_gemini_browser_dogfood_settings(settings)
         resolved_context_mode = context_mode or str(getattr(settings, "context_mode", "life"))
@@ -528,6 +535,13 @@ class GeminiBrowserDogfoodSessionManager:
         mapping_observer = getattr(dogfood_session.bundle.provider_session, "set_mapping_observer", None)
         if callable(mapping_observer):
             mapping_observer(lambda _raw_event, provider_events: diagnostics.record_mapping_outputs(provider_events))
+        trace = GeminiLiveTraceRecorder(
+            session_id=dogfood_session.session_id,
+            user_id=user_id,
+            model=str(getattr(settings, "gemini_live_model", DEFAULT_GEMINI_LIVE_MODEL)),
+            thread_id=thread_id,
+        )
+        self._traces_by_session[dogfood_session.session_id] = trace
         self._schedule_preconnect_cleanup(
             dogfood_session.session_id,
             preconnect_ttl_seconds,
@@ -538,6 +552,8 @@ class GeminiBrowserDogfoodSessionManager:
             ephemeral_token=ephemeral_token,
             setup=setup,
             memory_context_diagnostics=dict(memory_context_diagnostics or {}),
+            langsmith_trace_id=trace.trace_id,
+            audio_capture_enabled=trace.audio_capture_enabled,
         )
 
     def _schedule_preconnect_cleanup(
@@ -600,6 +616,24 @@ class GeminiBrowserDogfoodSessionManager:
         )
         categories = categorize_gemini_provider_event(validated_event)
         diagnostics.record_provider_event(validated_event, source_metadata)
+        trace = self._traces_by_session.get(dogfood_session.session_id)
+        if trace is not None:
+            trace.record_provider_event(
+                validated_event,
+                categories=categories,
+                provider_receive_sequence=(
+                    source_metadata.provider_receive_sequence if source_metadata else None
+                ),
+                provider_relay_sequence=(
+                    source_metadata.provider_relay_sequence if source_metadata else None
+                ),
+                provider_received_at=(
+                    source_metadata.provider_received_at if source_metadata else None
+                ),
+                relay_correlation_id=(
+                    source_metadata.relay_correlation_id if source_metadata else None
+                ),
+            )
         provider_event_for_public_boundary = _without_automatic_artifact_public_events(validated_event)
         stale_payload = await self._apply_provider_event_in_source_order(
             dogfood_session,
@@ -672,6 +706,43 @@ class GeminiBrowserDogfoodSessionManager:
                 respondable_executions,
                 diagnostics,
             )
+            if trace is not None:
+                executed_call_ids: set[str] = set()
+                for execution in executions:
+                    executed_call_ids.add(execution.call.call_id)
+                    trace.record_tool_call(
+                        tool_call_id=execution.call.call_id,
+                        tool_name=execution.call.name,
+                        arguments=execution.call.args,
+                        success=execution.success,
+                        result_summary=execution.result_summary,
+                        error=execution.error_text,
+                    )
+                    if execution.call.call_id not in cancelled_after_execution:
+                        trace.record_function_response(
+                            tool_call_id=execution.call.call_id,
+                            tool_name=execution.call.name,
+                            response=execution.response,
+                            success=execution.success,
+                        )
+                for diagnostic in tool_diagnostics:
+                    call_id = diagnostic.get("id")
+                    if not isinstance(call_id, str) or call_id in executed_call_ids:
+                        continue
+                    tool_name = diagnostic.get("name")
+                    if not isinstance(tool_name, str):
+                        tool_name = "unknown"
+                    summary = str(
+                        diagnostic.get("result_summary") or "Tool call was not executed."
+                    )
+                    trace.record_tool_call(
+                        tool_call_id=call_id,
+                        tool_name=tool_name,
+                        arguments={},
+                        success=False,
+                        result_summary=summary,
+                        error=summary,
+                    )
 
         if function_calls:
             rejected_executions = [execution for execution in executions if not execution.success]
@@ -996,7 +1067,13 @@ class GeminiBrowserDogfoodSessionManager:
                 )
             )
 
-    async def close_session(self, dogfood_session_id: str) -> bool:
+    async def close_session(
+        self,
+        dogfood_session_id: str,
+        *,
+        conversation_audio: bytes | None = None,
+        conversation_audio_mime_type: str = "audio/webm",
+    ) -> bool:
         self._cancel_preconnect_cleanup(dogfood_session_id)
         self._cancelled_tool_call_ids_by_session.pop(dogfood_session_id, None)
         self._inflight_tool_call_ids_by_session.pop(dogfood_session_id, None)
@@ -1009,7 +1086,15 @@ class GeminiBrowserDogfoodSessionManager:
         self._source_order_locks_by_session.pop(dogfood_session_id, None)
         self._last_applied_source_sequence_by_session.pop(dogfood_session_id, None)
         self._source_order_buffers_by_session.pop(dogfood_session_id, None)
-        return await self._realtime_sessions.close_session(dogfood_session_id)
+        closed = await self._realtime_sessions.close_session(dogfood_session_id)
+        trace = self._traces_by_session.pop(dogfood_session_id, None)
+        if trace is not None:
+            await asyncio.to_thread(
+                trace.close,
+                conversation_audio=conversation_audio,
+                conversation_audio_mime_type=conversation_audio_mime_type,
+            )
+        return closed
 
 
 _BUILDER_LIFECYCLE_TOOL_NAMES = {

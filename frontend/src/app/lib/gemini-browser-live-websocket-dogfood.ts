@@ -596,6 +596,7 @@ interface BrowserSessionPayload {
   disconnect_url?: unknown;
   backendCoreviewFlagParsed?: unknown;
   backendStillFrameFlagParsed?: unknown;
+  audio_capture_enabled?: unknown;
 }
 
 export type GeminiBrowserLiveSessionBootstrap = BrowserSessionPayload;
@@ -666,6 +667,17 @@ interface AudioPipeline {
   stop: () => Promise<void>;
 }
 
+interface GeminiConversationAudioRecording {
+  data: ArrayBuffer;
+  mimeType: string;
+}
+
+interface GeminiConversationAudioRecorder {
+  inputNode: AudioNode;
+  outputNode: AudioNode;
+  stop: () => Promise<GeminiConversationAudioRecording | null>;
+}
+
 export interface GeminiOutputAudioPlaybackState {
   nextPlaybackTime: number;
   activeSourceCount: number;
@@ -682,6 +694,97 @@ export interface GeminiOutputAudioPlaybackController {
 interface GeminiOutputAudioPlaybackControllerOptions {
   maxDiagnostics?: number;
   onChunkDiagnostic?: (diagnostic: GeminiOutputAudioChunkDiagnostic) => void;
+  outputNode?: AudioNode;
+}
+
+function createGeminiConversationAudioRecorder(
+  audioContext: AudioContext,
+): GeminiConversationAudioRecorder | null {
+  if (
+    typeof MediaRecorder === 'undefined'
+    || typeof audioContext.createMediaStreamDestination !== 'function'
+    || typeof audioContext.createChannelMerger !== 'function'
+    || typeof audioContext.createGain !== 'function'
+  ) {
+    return null;
+  }
+
+  const mimeType = [
+    'audio/webm;codecs=opus',
+    'audio/webm',
+    'audio/mp4',
+  ].find((candidate) => (
+    typeof MediaRecorder.isTypeSupported !== 'function'
+      || MediaRecorder.isTypeSupported(candidate)
+  )) ?? '';
+
+  const destination = audioContext.createMediaStreamDestination();
+  const merger = audioContext.createChannelMerger(2);
+  const inputGain = audioContext.createGain();
+  const outputGain = audioContext.createGain();
+  inputGain.connect(merger, 0, 0);
+  outputGain.connect(merger, 0, 1);
+  merger.connect(destination);
+
+  let recorder: MediaRecorder;
+  try {
+    recorder = mimeType
+      ? new MediaRecorder(destination.stream, { mimeType })
+      : new MediaRecorder(destination.stream);
+  } catch {
+    return null;
+  }
+
+  const chunks: Blob[] = [];
+  let stopPromise: Promise<GeminiConversationAudioRecording | null> | null = null;
+  recorder.ondataavailable = (event) => {
+    if (event.data.size > 0) {
+      chunks.push(event.data);
+    }
+  };
+  try {
+    recorder.start(1000);
+  } catch {
+    return null;
+  }
+
+  return {
+    inputNode: inputGain,
+    outputNode: outputGain,
+    stop: () => {
+      if (stopPromise) {
+        return stopPromise;
+      }
+      stopPromise = new Promise((resolve) => {
+        recorder.onstop = () => {
+          if (!chunks.length) {
+            resolve(null);
+            return;
+          }
+          const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || 'audio/webm' });
+          void blob.arrayBuffer().then((data) => resolve({
+            data,
+            mimeType: blob.type || mimeType || 'audio/webm',
+          })).catch(() => resolve(null));
+        };
+        recorder.onerror = () => resolve(null);
+        if (recorder.state === 'inactive') {
+          if (!chunks.length) {
+            resolve(null);
+            return;
+          }
+          const blob = new Blob(chunks, { type: recorder.mimeType || mimeType || 'audio/webm' });
+          void blob.arrayBuffer().then((data) => resolve({
+            data,
+            mimeType: blob.type || mimeType || 'audio/webm',
+          })).catch(() => resolve(null));
+        } else {
+          recorder.stop();
+        }
+      });
+      return stopPromise;
+    },
+  };
 }
 
 interface GeminiOutputAudioChunkMetadata {
@@ -838,6 +941,7 @@ export async function connectGeminiBrowserLiveDogfood(
   let audioContext: AudioContext | null = null;
   let audioPipeline: AudioPipeline | null = null;
   let outputAudioPlayer: GeminiOutputAudioPlaybackController | null = null;
+  let conversationAudioRecorder: GeminiConversationAudioRecorder | null = null;
   let dogfoodSessionId: string | null = null;
   let disconnectTargetPath = DISCONNECT_TARGET_PATH;
   let closed = false;
@@ -1730,6 +1834,8 @@ export async function connectGeminiBrowserLiveDogfood(
     notifyStage('closing');
     outputAudioPlayer?.stop();
     outputAudioPlayer = null;
+    const conversationAudio = await conversationAudioRecorder?.stop().catch(() => null);
+    conversationAudioRecorder = null;
     await audioPipeline?.stop().catch(() => undefined);
     if (!audioPipeline && audioContext) {
       await audioContext.close().catch(() => undefined);
@@ -1739,10 +1845,15 @@ export async function connectGeminiBrowserLiveDogfood(
       websocket.close(1000, 'Gemini browser dogfood session closed.');
     }
     if (dogfoodSessionId) {
+      const disconnectBody: Record<string, unknown> = { session_id: dogfoodSessionId };
+      if (conversationAudio) {
+        disconnectBody.conversation_audio_base64 = bytesToBase64(new Uint8Array(conversationAudio.data));
+        disconnectBody.conversation_audio_mime_type = conversationAudio.mimeType;
+      }
       await fetchFn(disconnectTargetPath, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ session_id: dogfoodSessionId }),
+        body: JSON.stringify(disconnectBody),
         keepalive: true,
       }).catch(() => undefined);
     }
@@ -1765,9 +1876,13 @@ export async function connectGeminiBrowserLiveDogfood(
     notifyStage('requesting_microphone');
     localStream = await getUserMedia({ audio: true });
     audioContext = audioContextFactory();
+    if (browserSession.audioCaptureEnabled) {
+      conversationAudioRecorder = createGeminiConversationAudioRecorder(audioContext);
+    }
     outputAudioPlayer = createGeminiOutputAudioPlaybackController(audioContext, {
       maxDiagnostics: MAX_OUTPUT_AUDIO_CHUNK_DIAGNOSTICS,
       onChunkDiagnostic: options.onOutputAudioChunk,
+      outputNode: conversationAudioRecorder?.outputNode,
     });
 
     notifyStage('opening_websocket');
@@ -2122,6 +2237,7 @@ export async function connectGeminiBrowserLiveDogfood(
       localStream,
       audioContext,
       websocket,
+      recordingInputNode: conversationAudioRecorder?.inputNode,
       onInputAudioActivity: handleInputAudioActivity,
     });
     notifyStage('streaming_audio');
@@ -2827,6 +2943,7 @@ async function startBrowserDogfoodSession(
   publicEventBoundary: string | null;
   transport: string | null;
   setup: Record<string, unknown>;
+  audioCaptureEnabled: boolean;
 }> {
   const response = await fetchFn('/api/sophia/voice/dogfood/gemini/browser-session', {
     method: 'POST',
@@ -2855,6 +2972,7 @@ function readBrowserSessionPayload(
   publicEventBoundary: string | null;
   transport: string | null;
   setup: Record<string, unknown>;
+  audioCaptureEnabled: boolean;
 } {
   const sessionId = typeof payload.session_id === 'string' ? payload.session_id : null;
   const token = readEphemeralToken(payload.ephemeral_token);
@@ -2874,6 +2992,7 @@ function readBrowserSessionPayload(
     : null;
   const publicEventBoundary = typeof payload.public_event_boundary === 'string' ? payload.public_event_boundary : null;
   const transport = typeof payload.transport === 'string' ? payload.transport : null;
+  const audioCaptureEnabled = payload.audio_capture_enabled === true;
 
   if (!sessionId) {
     throw new Error(`${label} omitted session_id.`);
@@ -2898,6 +3017,7 @@ function readBrowserSessionPayload(
     publicEventBoundary,
     transport,
     setup,
+    audioCaptureEnabled,
   };
 }
 
@@ -4293,6 +4413,7 @@ function startMicrophoneAudioPipeline(options: {
   localStream: MediaStream;
   audioContext: AudioContext;
   websocket: WebSocketLike;
+  recordingInputNode?: AudioNode;
   onInputAudioActivity?: (diagnostic: GeminiInputAudioActivityDiagnostic) => void;
 }): AudioPipeline {
   const source = options.audioContext.createMediaStreamSource(options.localStream);
@@ -4387,6 +4508,9 @@ function startMicrophoneAudioPipeline(options: {
 
   source.connect(processor);
   processor.connect(options.audioContext.destination);
+  if (options.recordingInputNode) {
+    source.connect(options.recordingInputNode);
+  }
 
   return {
     setMuted: (nextMuted: boolean) => {
@@ -4496,7 +4620,7 @@ export function createGeminiOutputAudioPlaybackController(
 
     const source = audioContext.createBufferSource();
     source.buffer = buffer;
-    source.connect(audioContext.destination);
+    source.connect(options.outputNode ?? audioContext.destination);
 
     const startAt = Math.max(currentTime, nextPlaybackTime);
     const duration = Number.isFinite(buffer.duration) && buffer.duration > 0
