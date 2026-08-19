@@ -1086,14 +1086,19 @@ class GeminiBrowserDogfoodSessionManager:
         self._source_order_locks_by_session.pop(dogfood_session_id, None)
         self._last_applied_source_sequence_by_session.pop(dogfood_session_id, None)
         self._source_order_buffers_by_session.pop(dogfood_session_id, None)
-        closed = await self._realtime_sessions.close_session(dogfood_session_id)
         trace = self._traces_by_session.pop(dogfood_session_id, None)
-        if trace is not None:
-            await asyncio.to_thread(
-                trace.close,
-                conversation_audio=conversation_audio,
-                conversation_audio_mime_type=conversation_audio_mime_type,
-            )
+        try:
+            closed = await self._realtime_sessions.close_session(dogfood_session_id)
+        finally:
+            # Trace finalization is best-effort but must run even when the provider
+            # WebSocket close path raises, otherwise the root remains open and the
+            # async LangSmith queue may never flush.
+            if trace is not None:
+                await asyncio.to_thread(
+                    trace.close,
+                    conversation_audio=conversation_audio,
+                    conversation_audio_mime_type=conversation_audio_mime_type,
+                )
         return closed
 
 

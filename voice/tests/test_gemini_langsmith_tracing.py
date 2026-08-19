@@ -169,3 +169,23 @@ def test_close_patches_root_with_inline_audio_and_flushes(monkeypatch: Any) -> N
     assert client.flush_calls == [10.0]
     recorder.close(conversation_audio=b"ignored")
     assert client.flush_calls == [10.0]
+
+
+def test_close_reports_audio_skipped_when_attachment_is_too_large(monkeypatch: Any) -> None:
+    _enable_fake_sdk(monkeypatch)
+    client = FakeClient()
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id="gemini-prod-test",
+        user_id="user-1",
+        model="gemini-live-test",
+        client=client,
+    )
+
+    recorder.close(
+        conversation_audio=b"x" * (tracing.MAX_AUDIO_ATTACHMENT_BYTES + 1),
+    )
+
+    assert recorder.root is not None
+    assert "conversation_audio" not in recorder.root.attachments
+    assert recorder.root.outputs["conversation_audio_attached"] is False
+    assert client.flush_calls == [10.0]

@@ -158,7 +158,12 @@ class GeminiLiveTraceRecorder:
         enabled: bool | None = None,
     ) -> None:
         requested = langsmith_gemini_live_enabled() if enabled is None else enabled
-        self.enabled = bool(requested and RunTree is not None and Attachment is not None)
+        self.enabled = bool(
+            requested
+            and Client is not None
+            and RunTree is not None
+            and Attachment is not None
+        )
         self.audio_capture_enabled = self.enabled
         self.session_id = session_id
         self.user_id = user_id
@@ -343,12 +348,14 @@ class GeminiLiveTraceRecorder:
         if not self.enabled or self.root is None or self._closed:
             return
         self._closed = True
+        audio_attached = False
         if conversation_audio:
             if len(conversation_audio) <= MAX_AUDIO_ATTACHMENT_BYTES:
                 self.root.attachments["conversation_audio"] = Attachment(
                     mime_type=conversation_audio_mime_type,
                     data=conversation_audio,
                 )
+                audio_attached = True
             else:
                 logger.warning(
                     "gemini.langsmith.audio_skipped session_id=%s byte_length=%s reason=attachment_limit",
@@ -361,7 +368,7 @@ class GeminiLiveTraceRecorder:
                 "event_count": self._event_count,
                 "tool_count": self._tool_count,
                 "last_provider_sequence": self._last_provider_sequence,
-                "conversation_audio_attached": bool(conversation_audio),
+                "conversation_audio_attached": audio_attached,
             },
             error=error,
             metadata={"trace_status": "completed" if error is None else "error"},
@@ -384,7 +391,7 @@ class GeminiLiveTraceRecorder:
             self.trace_id,
             self._event_count,
             self._tool_count,
-            bool(conversation_audio),
+            audio_attached,
         )
 
     def _safe_post(self, run: Any, label: str) -> None:
