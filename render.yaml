@@ -169,6 +169,16 @@ services:
         sync: false
       - key: SOPHIA_VOICE_SERVER_URL
         sync: false
+      # Keep gateway route selection aligned with the voice service. The
+      # production promotion flag is the fast rollback switch to legacy voice.
+      - key: SOPHIA_VOICE_RUNTIME_MODE
+        value: gemini_live
+      - key: SOPHIA_VOICE_EXPERIMENTAL_RUNTIME_ENABLED
+        value: "true"
+      - key: SOPHIA_VOICE_GEMINI_LIVE_ADAPTER_ENABLED
+        value: "true"
+      - key: SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED
+        value: "true"
       - key: TELEGRAM_BOT_TOKEN
         sync: false
       # Bot username (no '@') used to build webapp -> Telegram deep links.
@@ -213,8 +223,20 @@ services:
         value: voice
       - key: SOPHIA_CONTEXT_MODE
         value: life
-      # Gemini Live traces are manual RunTree traces; legacy cascade tracing
-      # remains unchanged. The API key/workspace are dashboard-managed.
+      # Explicit Gemini Live production promotion. Set the route flag to false
+      # to roll back the gateway to legacy_cascade without rebuilding the image.
+      - key: SOPHIA_VOICE_RUNTIME_MODE
+        value: gemini_live
+      - key: SOPHIA_VOICE_EXPERIMENTAL_RUNTIME_ENABLED
+        value: "true"
+      - key: SOPHIA_VOICE_GEMINI_LIVE_ADAPTER_ENABLED
+        value: "true"
+      - key: SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED
+        value: "true"
+      - key: GOOGLE_API_KEY
+        sync: false
+      # Gemini Live traces are manual RunTree traces; the legacy route remains
+      # available as the flag-controlled rollback. API key/workspace are dashboard-managed.
       - key: SOPHIA_GEMINI_LIVE_LANGSMITH_TRACING
         value: "true"
       - key: LANGSMITH_TRACING

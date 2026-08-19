@@ -16,6 +16,11 @@ flushed before shutdown completes.
 The voice service keeps this opt-in and feature-gated:
 
 ```bash
+SOPHIA_VOICE_RUNTIME_MODE=gemini_live
+SOPHIA_VOICE_EXPERIMENTAL_RUNTIME_ENABLED=true
+SOPHIA_VOICE_GEMINI_LIVE_ADAPTER_ENABLED=true
+SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED=true
+GOOGLE_API_KEY=<runtime-key>
 SOPHIA_GEMINI_LIVE_LANGSMITH_TRACING=true
 LANGSMITH_TRACING=false
 LANGSMITH_ENDPOINT=https://eu.api.smith.langchain.com
