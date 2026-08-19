@@ -2777,6 +2777,28 @@ def test_creative_plan_validation_reports_indexed_nested_path(tmp_path: Path) ->
     assert result.failure_summary == "creative_plan.slide_compositions[0].headline_intent is required"
 
 
+def test_deck_build_failure_logs_bounded_failure_snapshot(tmp_path: Path, caplog) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    plan = _creative_plan(include_asset=False)
+    plan["slide_compositions"][0].pop("headline_intent")
+    caplog.set_level("WARNING", logger="deerflow.sophia.deck_build.service")
+
+    result = DeckBuildService(native_service=_FakeNativeService()).prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_slides(include_asset=False),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        creative_plan=plan,
+    )
+
+    assert result.success is False
+    record = next(record for record in caplog.records if record.message.startswith("[DeckBuildFailure]"))
+    assert "code=deck_creative_plan_invalid" in record.message
+    assert "retryable=True" in record.message
+    assert "deck_build_path=" in record.message
+    assert len(record.message) < 1800
+
+
 def test_presentation_toolset_uses_prepare_deck_build_by_default(monkeypatch) -> None:
     monkeypatch.delenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", raising=False)
 

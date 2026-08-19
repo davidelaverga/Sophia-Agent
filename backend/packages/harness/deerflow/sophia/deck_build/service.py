@@ -483,6 +483,28 @@ class DeckBuildService:
             _finalize_image_generation_status(deck, success=False)
             deck.updated_at = _now()
             deck_path = save_deck_build(deck, runtime)
+            source_report = deck.source_quality_report if isinstance(deck.source_quality_report, dict) else {}
+            mechanical_report = deck.mechanical_gate_results if isinstance(deck.mechanical_gate_results, dict) else {}
+            native_report = deck.native_mechanical_report if isinstance(deck.native_mechanical_report, dict) else {}
+            logger.warning(
+                "[DeckBuildFailure] build_id=%s code=%s retryable=%s slides=%d "
+                "source_passed=%s source_hard_failures=%d source_issues=%d "
+                "mechanical_passed=%s mechanical_issues=%d native_passed=%s "
+                "deck_build_path=%s elapsed_ms=%d summary=%s",
+                deck.build_id,
+                exc.code,
+                exc.retryable,
+                len(deck.slides),
+                source_report.get("passed"),
+                _report_count(source_report, "hard_failures", "hard_issues"),
+                _report_count(source_report, "issues", "findings"),
+                mechanical_report.get("passed"),
+                _report_count(mechanical_report, "issues", "failures"),
+                native_report.get("passed"),
+                deck_path,
+                int((time.perf_counter() - service_started) * 1000),
+                safe_excerpt(exc.summary, limit=800),
+            )
             self._trace_terminal(deck, runtime, success=False, deck_path=deck_path, retryable=exc.retryable)
             return self._failure_result(
                 deck,
@@ -2110,6 +2132,14 @@ class DeckBuildFailure(Exception):
         self.code = code
         self.summary = summary
         self.retryable = retryable
+
+
+def _report_count(report: dict[str, Any], *keys: str) -> int:
+    for key in keys:
+        value = report.get(key)
+        if isinstance(value, (list, tuple, set, dict)):
+            return len(value)
+    return 0
 
 
 def _quality_failure_summary(evaluation: DeckEvaluation) -> str:
