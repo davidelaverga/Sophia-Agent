@@ -9,6 +9,8 @@ services:
   - type: web
     name: sophia-langgraph
     runtime: docker
+    # Keep the observability promotion reproducible when the Blueprint is synced.
+    branch: codex/sophia-observability-v1
     dockerfilePath: ./backend/Dockerfile.langgraph
     dockerContext: .
     plan: standard
@@ -124,6 +126,7 @@ services:
   - type: web
     name: sophia-gateway
     runtime: docker
+    branch: codex/sophia-observability-v1
     dockerfilePath: ./backend/Dockerfile.gateway
     dockerContext: .
     plan: starter
@@ -196,6 +199,7 @@ services:
   - type: web
     name: sophia-voice
     runtime: docker
+    branch: codex/sophia-observability-v1
     dockerfilePath: ./voice/Dockerfile
     dockerContext: .
     plan: standard
