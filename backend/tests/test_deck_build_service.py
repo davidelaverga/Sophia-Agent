@@ -1541,6 +1541,60 @@ def test_compact_v2_redundant_wrapper_normalization_fails_closed_on_ambiguity(
     assert report["normalization_applied"] is False
 
 
+def test_compact_v2_completes_split_anchor_geometry_invariants() -> None:
+    stylesheet = (
+        "main{font-family:Calibri,Arial,sans-serif;background:#101828}"
+        "#hero{display:flex;padding:24px;background:#0C1D2E}"
+        "#proof{display:flex;padding:24px;background:#0C1D2E}"
+        "#hero{position:absolute;left:80px;top:80px;width:720px;height:320px}"
+        "#proof{position:absolute;left:920px;top:560px;width:720px;height:320px}"
+    )
+    slides = [
+        {
+            "html_body": _source_pair_body(),
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+
+    normalized, report = deck_service._normalize_compact_v2_split_anchor_invariants(
+        stylesheet,
+        slides,
+    )
+
+    assert report["normalization_applied"] is True
+    assert report["normalized_anchor_rule_count"] == 2
+    assert report["injected_declaration_count"] == 4
+    assert normalized.count("box-sizing:border-box") == 2
+    assert normalized.count("margin:0") == 2
+    deck_service._validate_compact_source_addressability(normalized, slides)
+
+
+def test_compact_v2_split_anchor_invariants_reject_style_geometry_ambiguity() -> None:
+    stylesheet = (
+        "main{font-family:Calibri,Arial,sans-serif;background:#101828}"
+        "#hero{display:flex;margin-top:12px}"
+        "#proof{display:flex}"
+        "#hero{position:absolute;left:80px;top:80px;width:720px;height:320px}"
+        "#proof{position:absolute;left:920px;top:560px;width:720px;height:320px}"
+    )
+    slides = [
+        {
+            "html_body": _source_pair_body(),
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+
+    normalized, report = deck_service._normalize_compact_v2_split_anchor_invariants(
+        stylesheet,
+        slides,
+    )
+
+    assert normalized == stylesheet
+    assert report["normalization_applied"] is False
+
+
 def test_compact_v2_normalizes_image_only_repair_anchor_with_visible_caption() -> None:
     body = (
         '<section id="hero" data-deck-id="hero" data-deck-role="subject" '

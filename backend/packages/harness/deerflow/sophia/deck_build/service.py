@@ -361,6 +361,37 @@ class DeckBuildService:
                         },
                     ) as run:
                         finish_span(run, wrapper_normalization)
+                normalized_stylesheet, split_rule_normalization = (
+                    _normalize_compact_v2_split_anchor_invariants(
+                        deck.deck_stylesheet or "",
+                        slides,
+                    )
+                )
+                if split_rule_normalization["normalized_anchor_rule_count"] > 0:
+                    deck.deck_stylesheet = normalized_stylesheet
+                    deck.deck_stylesheet_hash = hashlib.sha256(
+                        normalized_stylesheet.encode("utf-8")
+                    ).hexdigest()
+                    logger.info(
+                        "[DeckIRNormalization] compact-v2 split anchor invariants completed "
+                        "normalized_rules=%d injected_declarations=%d rawContentExcluded=true",
+                        split_rule_normalization["normalized_anchor_rule_count"],
+                        split_rule_normalization["injected_declaration_count"],
+                    )
+                    with deck_span(
+                        "deck.ir.normalize",
+                        runtime=runtime,
+                        build_id=build_id,
+                        visual_policy=deck.visual_policy,
+                        status=deck.status,
+                        slide_count=len(slides),
+                        run_type="tool",
+                        inputs={
+                            "authoring_contract": deck.deck_authoring_contract,
+                            "normalization_kind": "split_anchor_invariants",
+                        },
+                    ) as run:
+                        finish_span(run, split_rule_normalization)
                 slides, caption_normalization = (
                     _normalize_compact_v2_image_only_repair_anchors(
                         deck.deck_stylesheet or "",
@@ -3076,6 +3107,185 @@ def _normalize_compact_v2_redundant_slide_wrappers(
         raw["html_body"] = body
     return normalized_stylesheet, normalized_slides, report(
         normalized_slide_count=len(normalized_slides)
+    )
+
+
+def _normalize_compact_v2_split_anchor_invariants(
+    stylesheet: str,
+    slides: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Complete invariants in an unambiguous split style/geometry ID pair."""
+
+    def report(
+        *,
+        normalized_rule_count: int = 0,
+        injected_declaration_count: int = 0,
+        stylesheet_after: str = stylesheet,
+    ) -> dict[str, Any]:
+        return {
+            "normalization_applied": normalized_rule_count > 0,
+            "normalized_anchor_rule_count": normalized_rule_count,
+            "injected_declaration_count": injected_declaration_count,
+            "stylesheet_bytes_before": len(stylesheet.encode("utf-8")),
+            "stylesheet_bytes_after": len(stylesheet_after.encode("utf-8")),
+            "html_body_changed": False,
+            "strict_validator_bypassed": False,
+            "candidate_compile_changed": normalized_rule_count > 0,
+            "raw_content_excluded": True,
+        }
+
+    declared_ids: list[str] = []
+    for raw in slides:
+        declared = raw.get("repair_anchor_ids")
+        if (
+            not isinstance(declared, list)
+            or len(declared) != 2
+            or any(
+                not isinstance(identifier, str)
+                or _COMPACT_SOURCE_ID_RE.fullmatch(identifier) is None
+                for identifier in declared
+            )
+            or len(set(declared)) != 2
+        ):
+            return stylesheet, report()
+        declared_ids.extend(declared)
+    unique_ids = tuple(dict.fromkeys(declared_ids))
+    if not unique_ids:
+        return stylesheet, report()
+
+    try:
+        rules = tinycss2.parse_stylesheet(
+            stylesheet,
+            skip_comments=False,
+            skip_whitespace=False,
+        )
+    except Exception:  # noqa: BLE001 - strict validation reports malformed source.
+        return stylesheet, report()
+    if any(getattr(rule, "type", "") in {"at-rule", "error"} for rule in rules):
+        return stylesheet, report()
+    qualified_rules = [
+        rule for rule in rules if getattr(rule, "type", "") == "qualified-rule"
+    ]
+    forbidden_style_properties = {
+        "position",
+        "box-sizing",
+        "margin",
+        "right",
+        "bottom",
+        "inset",
+        "transform",
+        "translate",
+        "float",
+        *_COMPACT_SOURCE_GEOMETRY_PROPERTIES,
+    }
+    geometry_names = {
+        "position",
+        "box-sizing",
+        "margin",
+        *_COMPACT_SOURCE_GEOMETRY_PROPERTIES,
+    }
+    geometry_rules: list[tuple[Any, bool, bool]] = []
+    for identifier in unique_ids:
+        matches = [
+            rule
+            for rule in qualified_rules
+            if tinycss2.serialize(rule.prelude).strip() == f"#{identifier}"
+        ]
+        if len(matches) != 2:
+            return stylesheet, report()
+        parsed: list[tuple[Any, dict[str, Any]]] = []
+        for rule in matches:
+            declarations = tinycss2.parse_declaration_list(
+                rule.content,
+                skip_comments=True,
+                skip_whitespace=True,
+            )
+            if (
+                any(getattr(item, "type", "") != "declaration" for item in declarations)
+                or any(bool(getattr(item, "important", False)) for item in declarations)
+            ):
+                return stylesheet, report()
+            final = {item.lower_name: item for item in declarations}
+            if len(final) != len(declarations):
+                return stylesheet, report()
+            parsed.append((rule, final))
+        geometry_candidates = [
+            (rule, final)
+            for rule, final in parsed
+            if set(_COMPACT_SOURCE_GEOMETRY_PROPERTIES) <= set(final)
+        ]
+        if len(geometry_candidates) != 1:
+            return stylesheet, report()
+        geometry_rule, geometry = geometry_candidates[0]
+        style = next(final for rule, final in parsed if rule is not geometry_rule)
+        if (
+            not set(geometry) <= geometry_names
+            or _css_single_identifier(geometry.get("position")) != "absolute"
+            or (
+                "box-sizing" in geometry
+                and _css_single_identifier(geometry.get("box-sizing")) != "border-box"
+            )
+            or (
+                "margin" in geometry
+                and _css_zero_value(geometry.get("margin")) is not True
+            )
+            or any(
+                name in forbidden_style_properties
+                or name.startswith("margin-")
+                or name.startswith("inset-")
+                for name in style
+            )
+        ):
+            return stylesheet, report()
+        values = tuple(
+            _css_absolute_px_value(geometry.get(property_name))
+            for property_name in _COMPACT_SOURCE_GEOMETRY_PROPERTIES
+        )
+        if any(value is None for value in values):
+            return stylesheet, report()
+        left, top, width, height = (
+            float(value) for value in values if value is not None
+        )
+        if (
+            left < 0
+            or top < 0
+            or width < 48
+            or height < 24
+            or left + width > 1920
+            or top + height > 1080
+        ):
+            return stylesheet, report()
+        geometry_rules.append(
+            (
+                geometry_rule,
+                "box-sizing" not in geometry,
+                "margin" not in geometry,
+            )
+        )
+
+    normalized_rule_count = 0
+    injected_declaration_count = 0
+    for rule, needs_box_sizing, needs_margin in geometry_rules:
+        additions: list[str] = []
+        if needs_box_sizing:
+            additions.append("box-sizing:border-box")
+        if needs_margin:
+            additions.append("margin:0")
+        if not additions:
+            continue
+        existing = tinycss2.serialize(rule.content).rstrip().rstrip(";")
+        rule.content = tinycss2.parse_component_value_list(
+            f"{existing};{';'.join(additions)}"
+        )
+        normalized_rule_count += 1
+        injected_declaration_count += len(additions)
+    if normalized_rule_count == 0:
+        return stylesheet, report()
+    normalized_stylesheet = tinycss2.serialize(rules)
+    return normalized_stylesheet, report(
+        normalized_rule_count=normalized_rule_count,
+        injected_declaration_count=injected_declaration_count,
+        stylesheet_after=normalized_stylesheet,
     )
 
 
