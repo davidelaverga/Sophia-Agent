@@ -9,6 +9,7 @@ from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from hashlib import sha256
+from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
 
@@ -171,7 +172,13 @@ class GeminiBuilderLifecycleHttpBackend:
     """
 
     def __init__(self, *, langgraph_url: str | None = None, timeout_seconds: float = 15.0) -> None:
-        self._langgraph_url = (langgraph_url or os.getenv("LANGGRAPH_URL") or DEFAULT_LANGGRAPH_URL).rstrip("/")
+        configured_url = (
+            langgraph_url
+            or os.getenv("LANGGRAPH_URL")
+            or os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
+            or DEFAULT_LANGGRAPH_URL
+        )
+        self._langgraph_url = configured_url.rstrip("/")
         self._timeout_seconds = timeout_seconds
 
     async def execute(
@@ -255,11 +262,16 @@ class GeminiBuilderLifecycleHttpBackend:
         allow_web_research = _should_allow_builder_web_research(task_type, description)
         builder_web_budget = _make_builder_web_budget(task_type)
         builder_budget = _voice_builder_budget(task_type)
+        artifact_target_path = _voice_builder_artifact_target_path(description, task_type)
         contract = builder_lifecycle_contract()
 
         thread = await self._request_json("POST", "/threads", json_body={})
         thread_id = _required_string(thread.get("thread_id"), "LangGraph thread response omitted thread_id.")
         now = _utcnow_iso()
+        build_id = f"build_gemini_{thread_id}"
+        operation_id = f"op_gemini_{thread_id}"
+        kickoff_ms = int(time.time() * 1000)
+        timeout_seconds = int((builder_budget or {}).get("max_wall_clock_seconds", 0) or 0)
         delegation_context = {
             "task": description,
             "task_brief": description,
@@ -278,6 +290,9 @@ class GeminiBuilderLifecycleHttpBackend:
             "explicit_user_urls": explicit_urls,
             "builder_web_budget": builder_web_budget,
             "builder_budget": builder_budget,
+            "artifact_target_path": artifact_target_path,
+            "build_id": build_id,
+            "operation_id": operation_id,
             "handoff_resolution": {
                 "user_id_source": "trusted_gemini_dogfood_session_user_id",
                 "tool_arg_user_id_present": bool(args.get("user_id")),
@@ -290,19 +305,39 @@ class GeminiBuilderLifecycleHttpBackend:
             "allow_web_research": allow_web_research,
             "explicit_user_urls": explicit_urls,
             "builder_web_budget": builder_web_budget,
-            "builder_budget": builder_budget,
+            "builder_task_kickoff_ms": kickoff_ms,
+            "builder_timeout_seconds": timeout_seconds,
+            "builder_deadline_epoch_ms": kickoff_ms + (timeout_seconds * 1000) if timeout_seconds else 0,
+            "builder_build_id": build_id,
+            "builder_operation_id": operation_id,
+            "builder_artifact_target_path": artifact_target_path,
         }
+        if builder_budget is not None:
+            run_input["builder_budget"] = builder_budget
         run = await self._request_json(
             "POST",
             f"/threads/{thread_id}/runs",
             json_body={
                 "assistant_id": contract.ASYNC_BUILDER_AGENT_NAME,
                 "input": run_input,
+                "stream_resumable": True,
                 "config": {
+                    "metadata": {
+                        "build_id": build_id,
+                        "operation_id": operation_id,
+                        "builder_thread_id": thread_id,
+                        "parent_thread_id": session_id,
+                        "task_type": task_type,
+                    },
                     "configurable": {
                         "thread_id": thread_id,
                         "user_id": user_id,
                         "parent_thread_id": session_id,
+                        "graph_id": contract.ASYNC_BUILDER_AGENT_NAME,
+                        "task_type": task_type,
+                        "artifact_target_ext": PurePosixPath(artifact_target_path).suffix.lower(),
+                        "build_id": build_id,
+                        "operation_id": operation_id,
                     }
                 },
             },
@@ -419,6 +454,10 @@ class GeminiBuilderLifecycleHttpBackend:
         thread = await self._request_json("POST", "/threads", json_body={})
         thread_id = _required_string(thread.get("thread_id"), "LangGraph thread response omitted thread_id.")
         now = _utcnow_iso()
+        build_id = f"build_gemini_{thread_id}"
+        operation_id = f"op_gemini_{thread_id}"
+        kickoff_ms = int(time.time() * 1000)
+        timeout_seconds = int((builder_budget or {}).get("max_wall_clock_seconds", 0) or 0)
         edit_context = {
             "mode": "edit_existing_artifact",
             "source_artifact_path": source_path,
@@ -448,6 +487,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "builder_web_budget": builder_web_budget,
             "builder_budget": builder_budget,
             "artifact_target_path": revision_path,
+            "build_id": build_id,
+            "operation_id": operation_id,
             "edit_context": edit_context,
             "handoff_resolution": {
                 "user_id_source": "trusted_gemini_dogfood_session_user_id",
@@ -461,21 +502,40 @@ class GeminiBuilderLifecycleHttpBackend:
             "allow_web_research": allow_web_research,
             "explicit_user_urls": explicit_urls,
             "builder_web_budget": builder_web_budget,
-            "builder_budget": builder_budget,
             "builder_artifact_target_path": revision_path,
             "builder_edit_context": edit_context,
+            "builder_task_kickoff_ms": kickoff_ms,
+            "builder_timeout_seconds": timeout_seconds,
+            "builder_deadline_epoch_ms": kickoff_ms + (timeout_seconds * 1000) if timeout_seconds else 0,
+            "builder_build_id": build_id,
+            "builder_operation_id": operation_id,
         }
+        if builder_budget is not None:
+            run_input["builder_budget"] = builder_budget
         run = await self._request_json(
             "POST",
             f"/threads/{thread_id}/runs",
             json_body={
                 "assistant_id": contract.ASYNC_BUILDER_AGENT_NAME,
                 "input": run_input,
+                "stream_resumable": True,
                 "config": {
+                    "metadata": {
+                        "build_id": build_id,
+                        "operation_id": operation_id,
+                        "builder_thread_id": thread_id,
+                        "parent_thread_id": session_id,
+                        "task_type": task_type,
+                    },
                     "configurable": {
                         "thread_id": thread_id,
                         "user_id": user_id,
                         "parent_thread_id": session_id,
+                        "graph_id": contract.ASYNC_BUILDER_AGENT_NAME,
+                        "task_type": task_type,
+                        "artifact_target_ext": PurePosixPath(revision_path).suffix.lower(),
+                        "build_id": build_id,
+                        "operation_id": operation_id,
                     }
                 },
             },
@@ -1419,6 +1479,13 @@ def _voice_builder_budget(task_type: str) -> dict[str, Any] | None:
         "authoring_timeout_seconds": 360,
         "terminal_reserve_seconds": 30,
     }
+
+
+def _voice_builder_artifact_target_path(description: str, task_type: str) -> str:
+    """Choose the canonical output target used by the companion builder."""
+
+    extension = ".pptx" if (task_type or "").strip().lower() == "presentation" else ".pdf"
+    return f"/mnt/user-data/outputs/{_slugify_for_filename(description)}{extension}"
 
 
 def _canonical_output_artifact_path(path: Any) -> str | None:
