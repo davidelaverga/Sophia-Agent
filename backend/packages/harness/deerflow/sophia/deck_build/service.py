@@ -2463,7 +2463,7 @@ def _repair_instruction_for_failure(
             "Repair the D2.1 deck input and call prepare_deck_build exactly once more. "
             "Include authoring_contract=compact_model_html_v2, creative_plan with design_plan, image_assets, "
             "slide_compositions, one concise shared deck_stylesheet, and one html_body per slide. Put all authored CSS "
-            "in deck_stylesheet and keep slide_css empty. Keep the slide canvas 1920x1080 and keep every shape inside it. If an intentional decorative bleed is unavoidable, mark its owning HTML element with data-deck-role="decorative", "background", or "bleed" so the native gate can identify it. Use an opaque background, no scripts/external URLs, "
+            "in deck_stylesheet and keep slide_css empty. Keep the slide canvas 1920x1080 and keep every shape inside it. If an intentional decorative bleed is unavoidable, mark its owning HTML element with data-deck-role=\"decorative\", \"background\", or "bleed" so the native gate can identify it. Use an opaque background, no scripts/external URLs, "
             "and reference only planned assets as ../assets/slide-XX.png. "
             f"Previous failure: {exc.code}: {safe_excerpt(exc.summary, limit=400)}"
         ),
