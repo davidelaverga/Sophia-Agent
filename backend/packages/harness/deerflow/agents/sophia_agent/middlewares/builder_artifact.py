@@ -161,7 +161,7 @@ _PRESENTATION_AUTHORING_SYSTEM_PROMPT = (
     "height so PowerPoint metrics cannot clip the last line. Align peer shapes and connector bars to "
     "exact shared edges or centerlines. Offset connector bars by half their thickness: for a vertical "
     "bar of width W centered at x=C use left=C-W/2; for a horizontal bar of height H centered at y=C "
-    "use top=C-H/2. Keep every non-bleed shape inside the 1920x1080 canvas. If an intentional decorative bleed must extend beyond the canvas, mark its owning element with data-deck-role=\"decorative\", \"background\", or "bleed" so the native gate can identify it; never leave an off-canvas shape untagged. Absolutely positioned "
+    "use top=C-H/2. Keep every non-bleed shape inside the 1920x1080 canvas. If an intentional decorative bleed must extend beyond the canvas, mark its owning element with data-deck-role=\"decorative\", \"background\", or \"bleed\" so the native gate can identify it; never leave an off-canvas shape untagged. Absolutely positioned "
     "descendants inside a positioned parent use parent-local left/top coordinates; never repeat the "
     "parent's slide-global offset on a nested child. Every authored element using left, top, right, bottom, "
     "or inset must declare position:absolute or position:relative in that same inline style or the same simple "
