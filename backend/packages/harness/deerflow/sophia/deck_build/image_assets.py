@@ -7,6 +7,17 @@ from deerflow.sophia.deck_build.models import DeckAssetPlan, DeckBuild, DeckCrea
 
 _FULL_BLEED_INTEGRATIONS = {"full_bleed_background"}
 _COVER_ROLES = {"hero_background", "section_texture"}
+_MATERIALIZABLE_BACKGROUND_INTEGRATIONS = {
+    "full_bleed_background",
+    "texture_layer",
+}
+_MATERIALIZABLE_BACKGROUND_ROLES = {
+    "background",
+    "background_texture",
+    "hero_background",
+    "section_texture",
+    "texture_layer",
+}
 
 
 def apply_creative_asset_plan(deck: DeckBuild, plan: DeckCreativePlan) -> None:
@@ -102,6 +113,56 @@ def normalize_planned_asset_references(deck: DeckBuild, plan: DeckCreativePlan) 
             slide.gate_results["planned_asset_reference_normalized"] = True
             slide.gate_results["planned_asset_reference_replacement_count"] = slide_replacements
     return replacement_count
+
+
+def materialize_missing_background_asset_references(
+    deck: DeckBuild,
+    plan: DeckCreativePlan,
+) -> int:
+    """Add the canonical image element for an unreferenced background asset.
+
+    The creative plan already fixes the owning slide and compiler path. A
+    full-canvas background or texture therefore has one safe, deterministic
+    placement that does not require the service to invent semantic layout.
+    Panel, subject, and other content-bearing integrations remain strict and
+    must still be positioned explicitly by the authoring model.
+    """
+
+    if deck.deck_authoring_contract != "compact_model_html_v2":
+        return 0
+    assets_by_slide = {asset.slide_selector: asset for asset in plan.image_assets}
+    materialized_count = 0
+    for slide in deck.slides:
+        asset = assets_by_slide.get(slide.selector)
+        if asset is None:
+            continue
+        if (
+            asset.integration not in _MATERIALIZABLE_BACKGROUND_INTEGRATIONS
+            and asset.role not in _MATERIALIZABLE_BACKGROUND_ROLES
+        ):
+            continue
+        canonical_ref = f"../assets/slide-{slide.index:02d}.png"
+        authored_sources = (slide.html_body, slide.slide_css, slide.html_source)
+        if any(
+            isinstance(source, str)
+            and (canonical_ref in source or asset.asset_id in source)
+            for source in authored_sources
+        ):
+            continue
+        if not isinstance(slide.html_body, str) or not slide.html_body.strip():
+            continue
+        background = (
+            f'<img src="{canonical_ref}" alt="" aria-hidden="true" '
+            f'data-deck-id="generated-background-{slide.index:02d}" '
+            'data-deck-role="background" '
+            'style="position:absolute;left:0px;top:0px;width:1920px;height:1080px;'
+            'object-fit:cover;" />'
+        )
+        slide.html_body = background + slide.html_body
+        slide.gate_results["planned_background_reference_materialized"] = True
+        slide.gate_results["planned_background_reference_path"] = canonical_ref
+        materialized_count += 1
+    return materialized_count
 
 
 def _fit_for_asset(integration: str, role: str) -> str:

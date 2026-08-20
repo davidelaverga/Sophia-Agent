@@ -5,6 +5,7 @@ import pytest
 from deerflow.sophia.deck_build.creative_plan import CreativePlanValidationError, normalize_creative_plan
 from deerflow.sophia.deck_build.image_assets import (
     apply_creative_asset_plan,
+    materialize_missing_background_asset_references,
     normalize_planned_asset_references,
     planned_asset_ref_basenames,
 )
@@ -82,3 +83,39 @@ def test_declared_asset_ids_are_normalized_to_compiler_slide_paths(tmp_path) -> 
     assert count == 1
     assert deck.slides[0].html_body == '<img src="../assets/slide-01.png" alt="">'
     assert deck.slides[0].gate_results["planned_asset_reference_normalized"] is True
+
+
+def test_missing_compact_background_reference_is_materialized(tmp_path) -> None:
+    deck = _deck(tmp_path, include_asset=False)
+    deck.deck_authoring_contract = "compact_model_html_v2"
+    deck.slides[0].html_source = None
+    deck.slides[0].html_body = '<section id="hero">Abyssal robotics</section>'
+    plan = normalize_creative_plan(_creative_plan(), deck=deck, request_context="")
+
+    apply_creative_asset_plan(deck, plan)
+    count = materialize_missing_background_asset_references(deck, plan)
+
+    assert count == 1
+    assert deck.slides[0].html_body.startswith(
+        '<img src="../assets/slide-01.png" alt="" aria-hidden="true" '
+    )
+    assert 'data-deck-role="background"' in deck.slides[0].html_body
+    assert 'style="position:absolute;left:0px;top:0px;width:1920px;height:1080px;' in deck.slides[0].html_body
+    assert deck.slides[0].gate_results["planned_background_reference_materialized"] is True
+
+
+def test_missing_compact_panel_reference_remains_strict(tmp_path) -> None:
+    deck = _deck(tmp_path, include_asset=False)
+    deck.deck_authoring_contract = "compact_model_html_v2"
+    deck.slides[0].html_source = None
+    deck.slides[0].html_body = '<section id="hero">Abyssal robotics</section>'
+    raw = _creative_plan()
+    raw["image_assets"][0]["role"] = "subject_photo"
+    raw["image_assets"][0]["integration"] = "inset_illustration"
+    plan = normalize_creative_plan(raw, deck=deck, request_context="")
+
+    apply_creative_asset_plan(deck, plan)
+    count = materialize_missing_background_asset_references(deck, plan)
+
+    assert count == 0
+    assert "../assets/slide-01.png" not in deck.slides[0].html_body

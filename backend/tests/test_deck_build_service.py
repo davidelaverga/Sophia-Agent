@@ -846,6 +846,35 @@ def test_deck_build_service_ignores_hidden_unused_eyebrow_selector(tmp_path: Pat
     assert result.success is True
 
 
+def test_deck_build_service_materializes_declared_compact_background_asset(
+    tmp_path: Path,
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    service = DeckBuildService(
+        image_batch_runner=_fake_batch(runtime),
+        native_service=_FakeNativeService(),
+    )
+
+    result = service.prepare_and_build(
+        runtime=runtime,
+        deck_title="Technical Deck",
+        slides=_compact_slides(),
+        output_path=f"{_OUTPUTS}deck.pptx",
+        deck_stylesheet=_compact_stylesheet(
+            "h1{font-size:64px}.diagram{width:1200px;height:500px}.narrative{font-size:30px}"
+        ),
+        authoring_contract="compact_model_html_v2",
+        creative_plan=_creative_plan(include_asset=True),
+    )
+
+    assert result.success is True
+    assert result.expected_visual_count == 1
+    assert result.referenced_visual_count == 1
+    html = (tmp_path / "outputs" / "slides" / "01-cover.html").read_text(encoding="utf-8")
+    assert '<img src="../assets/slide-01.png"' in html
+    assert 'data-deck-role="background"' in html
+
+
 def test_deck_build_service_allows_emitted_20px_label_and_ignores_unused_tiny_rule(tmp_path: Path) -> None:
     runtime = _runtime(tmp_path / "outputs")
     native_service = _FakeNativeService(

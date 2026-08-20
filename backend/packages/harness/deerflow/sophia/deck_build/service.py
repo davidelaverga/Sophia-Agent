@@ -42,6 +42,7 @@ from deerflow.sophia.deck_build.html_sanitizer import (
 )
 from deerflow.sophia.deck_build.image_assets import (
     apply_creative_asset_plan,
+    materialize_missing_background_asset_references,
     normalize_planned_asset_references,
     planned_asset_ref_basenames,
 )
@@ -765,6 +766,23 @@ class DeckBuildService:
                     deck,
                     deck.creative_plan,
                 )
+                materialized_background_ref_count = 0
+                if (
+                    deck.deck_authoring_contract == "compact_model_html_v2"
+                    and _state_value(runtime, "deck_candidate_compile") is not True
+                ):
+                    materialized_background_ref_count = (
+                        materialize_missing_background_asset_references(
+                            deck,
+                            deck.creative_plan,
+                        )
+                    )
+                    if materialized_background_ref_count:
+                        logger.info(
+                            "[DeckIRNormalization] compact-v2 planned background references materialized "
+                            "normalized_slides=%d rawContentExcluded=true",
+                            materialized_background_ref_count,
+                        )
             except CreativePlanValidationError as exc:
                 finish_span(
                     run,
@@ -790,6 +808,7 @@ class DeckBuildService:
                     "hybrid_slide_count": deck.hybrid_slide_count,
                     "text_only_slide_count": deck.text_only_slide_count,
                     "normalized_planned_asset_reference_count": normalized_asset_ref_count,
+                    "materialized_planned_background_reference_count": materialized_background_ref_count,
                     "asset_policy_file": basename(deck.asset_policy_path),
                     "visual_modes": [slide.asset_plan.visual_mode if slide.asset_plan else None for slide in deck.slides],
                     "layout_families": [getattr(slide.composition_plan, "layout_name", None) for slide in deck.slides],
