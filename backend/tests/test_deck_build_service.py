@@ -1541,6 +1541,94 @@ def test_compact_v2_preserves_anchor_with_existing_translation_clearance() -> No
     assert report["normalization_applied"] is False
 
 
+def test_compact_v2_materializes_simple_offset_position_witness() -> None:
+    stylesheet = (
+        "main{font-family:Calibri,Arial,sans-serif;background:#101828}"
+        ".node{position:absolute;width:360px}"
+        ".node .dot{position:absolute;left:169px;width:22px;height:22px}"
+    )
+    slides = [
+        {
+            "html_body": (
+                '<div class="node"><h2>Prototype</h2>'
+                '<div class="dot" style="top:190px">Marker</div></div>'
+            ),
+            "slide_css": "",
+        }
+    ]
+    original_html = slides[0]["html_body"]
+    assembled = deck_service.assemble_compact_slide_html(
+        deck_stylesheet=stylesheet,
+        html_body=str(original_html),
+    )
+    _sanitized, before = deck_service.validate_and_sanitize_slide_html(
+        {"html_source": assembled},
+        allowed_asset_refs=set(),
+    )
+    assert any("ineffective_position_offset: class dot uses top" in error for error in before.errors)
+
+    normalized, report = deck_service._normalize_compact_v2_offset_position_witnesses(
+        stylesheet,
+        slides,
+    )
+
+    assert normalized.endswith("\n.dot{position:absolute}\n")
+    assert slides[0]["html_body"] == original_html
+    assert report["normalization_applied"] is True
+    assert report["normalized_class_count"] == 1
+    assert report["injected_rule_count"] == 1
+    assert len(report["target_class_sha256"]) == 1
+    assert report["html_body_changed"] is False
+    assert report["strict_validator_bypassed"] is False
+    assembled = deck_service.assemble_compact_slide_html(
+        deck_stylesheet=normalized,
+        html_body=str(original_html),
+    )
+    _sanitized, after = deck_service.validate_and_sanitize_slide_html(
+        {"html_source": assembled},
+        allowed_asset_refs=set(),
+    )
+    assert after.valid is True
+
+
+@pytest.mark.parametrize(
+    ("stylesheet_suffix", "html_body"),
+    (
+        (
+            ".node .dot{position:absolute}",
+            '<div class="dot" style="top:190px">Outside</div>',
+        ),
+        (
+            ".node .dot{position:absolute}",
+            '<div class="node"><div class="dot extra" style="top:190px">Marker</div></div>',
+        ),
+        (
+            ".node .dot{position:absolute}.other .dot{position:relative}",
+            '<div class="node"><div class="dot" style="top:190px">Marker</div></div>',
+        ),
+        (
+            ".dot{position:static}.node .dot{position:absolute}",
+            '<div class="node"><div class="dot" style="top:190px">Marker</div></div>',
+        ),
+    ),
+    ids=("outside-parent", "multiple-classes", "ambiguous-witness", "exact-position-rule"),
+)
+def test_compact_v2_offset_position_witness_fails_closed_on_ambiguity(
+    stylesheet_suffix: str,
+    html_body: str,
+) -> None:
+    stylesheet = "main{font-family:Calibri,Arial,sans-serif}" + stylesheet_suffix
+    slides = [{"html_body": html_body, "slide_css": ""}]
+
+    normalized, report = deck_service._normalize_compact_v2_offset_position_witnesses(
+        stylesheet,
+        slides,
+    )
+
+    assert normalized == stylesheet
+    assert report["normalization_applied"] is False
+
+
 def test_compact_v2_normalizes_only_redundant_inline_anchor_geometry() -> None:
     body = _source_pair_body().replace(
         'data-deck-required="true">',

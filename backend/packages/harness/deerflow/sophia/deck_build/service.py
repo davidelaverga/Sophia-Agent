@@ -412,6 +412,37 @@ class DeckBuildService:
                         },
                     ) as run:
                         finish_span(run, invariant_normalization)
+                normalized_stylesheet, position_normalization = (
+                    _normalize_compact_v2_offset_position_witnesses(
+                        deck.deck_stylesheet or "",
+                        slides,
+                    )
+                )
+                if position_normalization["normalized_class_count"] > 0:
+                    deck.deck_stylesheet = normalized_stylesheet
+                    deck.deck_stylesheet_hash = hashlib.sha256(
+                        normalized_stylesheet.encode("utf-8")
+                    ).hexdigest()
+                    logger.info(
+                        "[DeckIRNormalization] compact-v2 offset position witnesses completed "
+                        "normalized_classes=%d injected_rules=%d rawContentExcluded=true",
+                        position_normalization["normalized_class_count"],
+                        position_normalization["injected_rule_count"],
+                    )
+                    with deck_span(
+                        "deck.ir.normalize",
+                        runtime=runtime,
+                        build_id=build_id,
+                        visual_policy=deck.visual_policy,
+                        status=deck.status,
+                        slide_count=len(slides),
+                        run_type="tool",
+                        inputs={
+                            "authoring_contract": deck.deck_authoring_contract,
+                            "normalization_kind": "offset_position_witness",
+                        },
+                    ) as run:
+                        finish_span(run, position_normalization)
                 slides, normalization = _normalize_compact_v2_anchor_inline_geometry(
                     deck.deck_stylesheet or "",
                     slides,
@@ -3142,6 +3173,176 @@ def _normalize_compact_v2_anchor_invariant_contract(
             len(target_rules) * len(_COMPACT_SOURCE_ANCHOR_INVARIANT_PROPERTIES)
         ),
         carrier_selector_hash=selector_hash,
+        stylesheet_after=normalized_stylesheet,
+    )
+
+
+def _normalize_compact_v2_offset_position_witnesses(
+    stylesheet: str,
+    slides: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Materialize one already-authored descendant position as a simple witness.
+
+    The strict HTML sanitizer deliberately does not use descendant selectors as
+    proof that an inline physical offset is effective. For fresh compact-v2
+    source, a model can nevertheless author ``.parent .child`` with a
+    non-static position and then put the offset inline on ``.child``. When every
+    occurrence of that exact, single-token child class is beneath the declared
+    parent, copying the same position into a lower-specificity ``.child`` rule
+    does not change the computed layout. It only gives the sanitizer the simple
+    selector witness it can authenticate. Ambiguous selectors, values, class
+    lists, inline position declarations, and malformed CSS remain unchanged.
+    """
+
+    def report(
+        *,
+        normalized_classes: tuple[str, ...] = (),
+        stylesheet_after: str = stylesheet,
+    ) -> dict[str, Any]:
+        return {
+            "normalization_applied": bool(normalized_classes),
+            "normalized_class_count": len(normalized_classes),
+            "injected_rule_count": len(normalized_classes),
+            "target_class_sha256": [
+                hashlib.sha256(name.encode("utf-8")).hexdigest()
+                for name in normalized_classes
+            ],
+            "stylesheet_bytes_before": len(stylesheet.encode("utf-8")),
+            "stylesheet_bytes_after": len(stylesheet_after.encode("utf-8")),
+            "html_body_changed": False,
+            "strict_validator_bypassed": False,
+            "candidate_compile_changed": False,
+            "raw_content_excluded": True,
+        }
+
+    try:
+        rules = tinycss2.parse_stylesheet(
+            stylesheet,
+            skip_comments=False,
+            skip_whitespace=False,
+        )
+    except Exception:  # noqa: BLE001 - strict validation reports source errors.
+        return stylesheet, report()
+    if any(getattr(rule, "type", "") in {"at-rule", "error"} for rule in rules):
+        return stylesheet, report()
+
+    descendant_positions: dict[str, list[tuple[str, str]]] = {}
+    exact_position_classes: set[str] = set()
+    for rule in rules:
+        if getattr(rule, "type", "") != "qualified-rule":
+            continue
+        selector = tinycss2.serialize(rule.prelude).strip()
+        declarations = tinycss2.parse_declaration_list(
+            rule.content,
+            skip_comments=True,
+            skip_whitespace=True,
+        )
+        if any(getattr(item, "type", "") != "declaration" for item in declarations):
+            continue
+        position_declarations = [
+            item for item in declarations if item.lower_name == "position"
+        ]
+        if not position_declarations:
+            continue
+        exact_match = re.fullmatch(r"\.([a-z][a-z0-9_-]{0,31})", selector)
+        if exact_match is not None:
+            exact_position_classes.add(exact_match.group(1))
+            continue
+        descendant_match = re.fullmatch(
+            r"\.([a-z][a-z0-9_-]{0,31})\s+\.([a-z][a-z0-9_-]{0,31})",
+            selector,
+        )
+        if descendant_match is None or len(position_declarations) != 1:
+            continue
+        declaration = position_declarations[0]
+        if bool(getattr(declaration, "important", False)):
+            continue
+        value = _css_single_identifier(declaration)
+        if value not in {"absolute", "relative"}:
+            continue
+        parent_class, child_class = descendant_match.groups()
+        descendant_positions.setdefault(child_class, []).append(
+            (parent_class, value)
+        )
+
+    candidates: dict[str, tuple[str, str]] = {}
+    for child_class, witnesses in descendant_positions.items():
+        if child_class in exact_position_classes or len(witnesses) != 1:
+            continue
+        candidates[child_class] = witnesses[0]
+    if not candidates:
+        return stylesheet, report()
+
+    witnessed_offset_classes: set[str] = set()
+    invalid_classes: set[str] = set()
+    occurrence_counts = {child_class: 0 for child_class in candidates}
+    for raw in slides:
+        body = raw.get("html_body")
+        if not isinstance(body, str) or not body.strip():
+            return stylesheet, report()
+        try:
+            soup = BeautifulSoup(body, "html.parser")
+        except Exception:  # noqa: BLE001 - strict validation reports source errors.
+            return stylesheet, report()
+        for child_class, (parent_class, _position) in candidates.items():
+            for element in soup.find_all(class_=child_class):
+                if not isinstance(element, Tag):
+                    invalid_classes.add(child_class)
+                    continue
+                classes = element.attrs.get("class")
+                if not isinstance(classes, list) or classes != [child_class]:
+                    invalid_classes.add(child_class)
+                    continue
+                occurrence_counts[child_class] += 1
+                if not any(
+                    isinstance(parent, Tag)
+                    and parent_class in (parent.attrs.get("class") or [])
+                    for parent in element.parents
+                ):
+                    invalid_classes.add(child_class)
+                    continue
+                inline_style = element.attrs.get("style")
+                if not isinstance(inline_style, str) or not inline_style.strip():
+                    continue
+                declarations = tinycss2.parse_declaration_list(
+                    inline_style,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+                if (
+                    any(getattr(item, "type", "") != "declaration" for item in declarations)
+                    or any(item.lower_name in {"all", "position"} for item in declarations)
+                ):
+                    invalid_classes.add(child_class)
+                    continue
+                if any(
+                    item.lower_name in {"bottom", "left", "right", "top"}
+                    and tinycss2.serialize(item.value).strip().casefold() not in {"", "auto"}
+                    for item in declarations
+                ):
+                    witnessed_offset_classes.add(child_class)
+
+    normalized_classes = tuple(
+        sorted(
+            child_class
+            for child_class in candidates
+            if child_class not in invalid_classes
+            and occurrence_counts[child_class] > 0
+            and child_class in witnessed_offset_classes
+        )
+    )
+    if not normalized_classes:
+        return stylesheet, report()
+
+    witness_rules = "".join(
+        f"\n.{child_class}{{position:{candidates[child_class][1]}}}"
+        for child_class in normalized_classes
+    )
+    normalized_stylesheet = stylesheet.rstrip() + witness_rules + "\n"
+    if len(normalized_stylesheet.encode("utf-8")) > 8 * 1024:
+        return stylesheet, report()
+    return normalized_stylesheet, report(
+        normalized_classes=normalized_classes,
         stylesheet_after=normalized_stylesheet,
     )
 
