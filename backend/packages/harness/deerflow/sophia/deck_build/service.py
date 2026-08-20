@@ -329,6 +329,38 @@ class DeckBuildService:
                         },
                     ) as run:
                         finish_span(run, font_normalization)
+                (
+                    normalized_stylesheet,
+                    slides,
+                    wrapper_normalization,
+                ) = _normalize_compact_v2_redundant_slide_wrappers(
+                    deck.deck_stylesheet or "",
+                    slides,
+                )
+                if wrapper_normalization["normalized_slide_count"] > 0:
+                    deck.deck_stylesheet = normalized_stylesheet
+                    deck.deck_stylesheet_hash = hashlib.sha256(
+                        normalized_stylesheet.encode("utf-8")
+                    ).hexdigest()
+                    logger.info(
+                        "[DeckIRNormalization] compact-v2 redundant slide wrappers unwrapped "
+                        "normalized_slides=%d rawContentExcluded=true",
+                        wrapper_normalization["normalized_slide_count"],
+                    )
+                    with deck_span(
+                        "deck.ir.normalize",
+                        runtime=runtime,
+                        build_id=build_id,
+                        visual_policy=deck.visual_policy,
+                        status=deck.status,
+                        slide_count=len(slides),
+                        run_type="tool",
+                        inputs={
+                            "authoring_contract": deck.deck_authoring_contract,
+                            "normalization_kind": "redundant_slide_wrapper",
+                        },
+                    ) as run:
+                        finish_span(run, wrapper_normalization)
                 slides, caption_normalization = (
                     _normalize_compact_v2_image_only_repair_anchors(
                         deck.deck_stylesheet or "",
@@ -2939,6 +2971,112 @@ def _timeout_stream_text(value: object) -> str:
 
 def _authoring_failure(summary: str) -> DeckBuildFailure:
     return DeckBuildFailure("invalid_deck_ir", summary, retryable=True)
+
+
+def _normalize_compact_v2_redundant_slide_wrappers(
+    stylesheet: str,
+    slides: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    """Promote content from one provably redundant full-canvas wrapper.
+
+    The compiler already supplies ``main.slide-root`` as the immutable slide
+    canvas. Fresh model output sometimes adds exactly one ``div.slide`` around
+    every slide and places otherwise-valid repair anchors directly inside it.
+    When ``.slide`` is one standalone selector and no descendant/alternate
+    selector depends on that class, retargeting its declarations to the owned
+    canvas and unwrapping every slide preserves layout while restoring global
+    source addressability.
+    """
+
+    def report(*, normalized_slide_count: int = 0) -> dict[str, Any]:
+        return {
+            "normalization_applied": normalized_slide_count > 0,
+            "normalized_slide_count": normalized_slide_count,
+            "retargeted_rule_count": 1 if normalized_slide_count > 0 else 0,
+            "source_selector": ".slide" if normalized_slide_count > 0 else None,
+            "target_selector": ".slide-root" if normalized_slide_count > 0 else None,
+            "strict_validator_bypassed": False,
+            "candidate_compile_changed": normalized_slide_count > 0,
+            "raw_content_excluded": True,
+        }
+
+    if not slides:
+        return stylesheet, slides, report()
+    try:
+        rules = tinycss2.parse_stylesheet(
+            stylesheet,
+            skip_comments=False,
+            skip_whitespace=False,
+        )
+    except Exception:  # noqa: BLE001 - strict validation reports malformed source.
+        return stylesheet, slides, report()
+    if any(getattr(rule, "type", "") in {"at-rule", "error"} for rule in rules):
+        return stylesheet, slides, report()
+    qualified_rules = [
+        rule for rule in rules if getattr(rule, "type", "") == "qualified-rule"
+    ]
+    selectors = [tinycss2.serialize(rule.prelude).strip() for rule in qualified_rules]
+    source_rules = [
+        rule
+        for rule, selector in zip(qualified_rules, selectors, strict=True)
+        if selector == ".slide"
+    ]
+    if len(source_rules) != 1 or any(
+        re.search(r"(?<![a-zA-Z0-9_-])\.slide(?:-root)?(?![a-zA-Z0-9_-])", selector)
+        and selector != ".slide"
+        for selector in selectors
+    ):
+        return stylesheet, slides, report()
+
+    normalized_bodies: list[str] = []
+    for raw in slides:
+        body = raw.get("html_body")
+        declared = raw.get("repair_anchor_ids")
+        if (
+            not isinstance(body, str)
+            or not body.strip()
+            or not isinstance(declared, list)
+            or len(declared) != 2
+            or any(not isinstance(identifier, str) for identifier in declared)
+        ):
+            return stylesheet, slides, report()
+        try:
+            soup = BeautifulSoup(body, "html.parser")
+        except Exception:  # noqa: BLE001 - strict validation reports malformed source.
+            return stylesheet, slides, report()
+        if any(
+            not isinstance(node, Tag) and str(node).strip()
+            for node in soup.contents
+        ):
+            return stylesheet, slides, report()
+        top_level = [node for node in soup.contents if isinstance(node, Tag)]
+        if len(top_level) != 1:
+            return stylesheet, slides, report()
+        wrapper = top_level[0]
+        if (
+            str(wrapper.name).casefold() not in {"div", "section"}
+            or set(wrapper.attrs) != {"class"}
+            or wrapper.attrs.get("class") != ["slide"]
+        ):
+            return stylesheet, slides, report()
+        for identifier in declared:
+            matches = wrapper.find_all(id=identifier)
+            if (
+                len(matches) != 1
+                or not isinstance(matches[0], Tag)
+                or matches[0].parent is not wrapper
+            ):
+                return stylesheet, slides, report()
+        normalized_bodies.append("".join(str(child) for child in wrapper.contents))
+
+    source_rules[0].prelude = tinycss2.parse_component_value_list(".slide-root")
+    normalized_stylesheet = tinycss2.serialize(rules)
+    normalized_slides = [dict(slide) for slide in slides]
+    for raw, body in zip(normalized_slides, normalized_bodies, strict=True):
+        raw["html_body"] = body
+    return normalized_stylesheet, normalized_slides, report(
+        normalized_slide_count=len(normalized_slides)
+    )
 
 
 def _normalize_compact_v2_anchor_invariant_contract(

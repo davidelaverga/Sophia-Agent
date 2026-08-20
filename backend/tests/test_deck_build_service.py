@@ -1471,6 +1471,76 @@ def test_compact_v2_source_addressability_accepts_strict_dq2_pair_with_interior_
     ) is not None
 
 
+def test_compact_v2_unwraps_redundant_full_canvas_slide_wrapper() -> None:
+    stylesheet = (
+        ".slide{position:absolute;left:0;top:0;width:1920px;height:1080px;"
+        "box-sizing:border-box;margin:0;background:#101828}"
+        + _source_pair_stylesheet()
+    )
+    slides = [
+        {
+            "html_body": f'<div class="slide">{_source_pair_body()}</div>',
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+
+    normalized_css, normalized_slides, report = (
+        deck_service._normalize_compact_v2_redundant_slide_wrappers(
+            stylesheet,
+            slides,
+        )
+    )
+
+    assert report["normalization_applied"] is True
+    assert report["normalized_slide_count"] == 1
+    assert ".slide-root{" in normalized_css
+    assert ".slide{" not in normalized_css
+    assert 'class="slide"' not in normalized_slides[0]["html_body"]
+    deck_service._validate_compact_source_addressability(
+        normalized_css,
+        normalized_slides,
+    )
+
+
+@pytest.mark.parametrize(
+    ("stylesheet_suffix", "wrapper_class"),
+    [
+        (".slide .label{color:#FFFFFF}", "slide"),
+        ("", "slide alternate"),
+    ],
+)
+def test_compact_v2_redundant_wrapper_normalization_fails_closed_on_ambiguity(
+    stylesheet_suffix: str,
+    wrapper_class: str,
+) -> None:
+    stylesheet = (
+        ".slide{position:absolute;left:0;top:0;width:1920px;height:1080px}"
+        + _source_pair_stylesheet()
+        + stylesheet_suffix
+    )
+    slides = [
+        {
+            "html_body": (
+                f'<div class="{wrapper_class}">{_source_pair_body()}</div>'
+            ),
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+
+    normalized_css, normalized_slides, report = (
+        deck_service._normalize_compact_v2_redundant_slide_wrappers(
+            stylesheet,
+            slides,
+        )
+    )
+
+    assert normalized_css == stylesheet
+    assert normalized_slides is slides
+    assert report["normalization_applied"] is False
+
+
 def test_compact_v2_normalizes_image_only_repair_anchor_with_visible_caption() -> None:
     body = (
         '<section id="hero" data-deck-id="hero" data-deck-role="subject" '
