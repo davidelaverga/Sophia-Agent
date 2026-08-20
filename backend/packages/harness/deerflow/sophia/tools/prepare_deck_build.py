@@ -69,7 +69,10 @@ def _prepare_deck_build_impl(
         build_deck_from_slides, prepare_pptx_image_manifest, image generation
         scripts, python-pptx, or pptxgenjs directly. Generated images must be
         declared in creative_plan.image_assets and used only as assets, not as
-        complete slides. If this returns retryable=true, repair the exact
+        complete slides. In slide HTML, reference each declared asset by its
+        compiler path ../assets/slide-XX.png, never by its creative asset_id.
+        The shared stylesheet must set a base Office-safe font on main, body,
+        html, .slide-root, or *. If this returns retryable=true, repair the exact
         creative/html/mechanical failure and call prepare_deck_build exactly
         once more. Terminal failures must be emitted with artifact_path=null.
     """

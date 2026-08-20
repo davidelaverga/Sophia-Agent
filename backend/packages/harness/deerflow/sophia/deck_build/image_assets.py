@@ -79,6 +79,31 @@ def planned_asset_ref_basenames(deck: DeckBuild) -> set[str]:
     }
 
 
+def normalize_planned_asset_references(deck: DeckBuild, plan: DeckCreativePlan) -> int:
+    """Translate declared model-facing asset IDs to compiler-owned slide paths."""
+
+    assets_by_slide = {asset.slide_selector: asset for asset in plan.image_assets}
+    replacement_count = 0
+    for slide in deck.slides:
+        asset = assets_by_slide.get(slide.selector)
+        if asset is None:
+            continue
+        canonical_ref = f"../assets/slide-{slide.index:02d}.png"
+        slide_replacements = 0
+        for field_name in ("html_body", "slide_css", "html_source"):
+            value = getattr(slide, field_name)
+            if not isinstance(value, str) or asset.asset_id not in value:
+                continue
+            count = value.count(asset.asset_id)
+            setattr(slide, field_name, value.replace(asset.asset_id, canonical_ref))
+            replacement_count += count
+            slide_replacements += count
+        if slide_replacements:
+            slide.gate_results["planned_asset_reference_normalized"] = True
+            slide.gate_results["planned_asset_reference_replacement_count"] = slide_replacements
+    return replacement_count
+
+
 def _fit_for_asset(integration: str, role: str) -> str:
     if integration in _FULL_BLEED_INTEGRATIONS or role in _COVER_ROLES:
         return "full_bleed"

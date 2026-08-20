@@ -2092,6 +2092,103 @@ async def test_http_lifecycle_backend_update_list_and_cancel_request_shapes() ->
 
 
 @pytest.mark.anyio
+async def test_http_lifecycle_backend_does_not_promote_failed_builder_graph_success() -> None:
+    tracked_task = {
+        "task_id": "builder-thread-1",
+        "agent_name": "sophia_builder",
+        "thread_id": "builder-thread-1",
+        "run_id": "run-1",
+        "status": "running",
+        "task_type": "presentation",
+    }
+    failed_builder_result = {
+        "status": "failed",
+        "terminal_status": "failed",
+        "terminal_reason": "deck_prepare_retry_exhausted",
+        "failure_code": "deck_prepare_retry_exhausted",
+        "root_failure_code": "invalid_deck_ir",
+        "root_failure_summary": "The deck input failed validation.",
+        "artifact_path": None,
+    }
+    backend = CapturingBuilderLifecycleHttpBackend(
+        [
+            {"status": "success"},
+            {"values": {"builder_result": failed_builder_result, "messages": []}},
+        ]
+    )
+
+    result = await backend.execute(
+        "list_async_tasks",
+        {"status_filter": "all"},
+        session_id="browser-gemini-builder-lifecycle",
+        user_id="trusted-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        async_tasks={"builder-thread-1": tracked_task},
+    )
+
+    assert result.response["tasks"] == [
+        {
+            "task_id": "builder-thread-1",
+            "agent_name": "sophia_builder",
+            "status": "error",
+            "task_type": "presentation",
+            "terminal_status": "failed",
+            "terminal_reason": "deck_prepare_retry_exhausted",
+            "failure_code": "deck_prepare_retry_exhausted",
+            "root_failure_code": "invalid_deck_ir",
+            "root_failure_summary": "The deck input failed validation.",
+        }
+    ]
+    assert result.updated_async_tasks is not None
+    updated = result.updated_async_tasks["builder-thread-1"]
+    assert updated["status"] == "error"
+    assert updated["artifact_path"] is None
+    assert updated["builder_result"] == failed_builder_result
+
+
+@pytest.mark.anyio
+async def test_http_lifecycle_backend_only_reports_success_with_accepted_artifact() -> None:
+    tracked_task = {
+        "task_id": "builder-thread-1",
+        "agent_name": "sophia_builder",
+        "thread_id": "builder-thread-1",
+        "run_id": "run-1",
+        "status": "running",
+        "task_type": "presentation",
+    }
+    completed_builder_result = {
+        "status": "completed",
+        "terminal_status": "completed",
+        "terminal_reason": "deck_build_succeeded",
+        "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+        "artifact_type": "presentation",
+    }
+    backend = CapturingBuilderLifecycleHttpBackend(
+        [
+            {"status": "success"},
+            {"values": {"builder_result": completed_builder_result, "messages": []}},
+        ]
+    )
+
+    result = await backend.execute(
+        "check_async_task",
+        {"task_id": "builder-thread-1"},
+        session_id="browser-gemini-builder-lifecycle",
+        user_id="trusted-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        async_tasks={"builder-thread-1": tracked_task},
+    )
+
+    assert result.response["status"] == "success"
+    assert result.response["result"]["artifact_path"] == "/mnt/user-data/outputs/deck.pptx"
+    assert result.response["result"]["builder_result"] == completed_builder_result
+    assert result.updated_async_tasks is not None
+    assert result.updated_async_tasks["builder-thread-1"]["status"] == "success"
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("tool_name", "args"),
     [

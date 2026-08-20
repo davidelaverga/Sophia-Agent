@@ -179,7 +179,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
         "Check the status of an existing async builder task. Use ONLY with a real task_id "
         "previously returned by start_builder_task or list_async_tasks in the current trusted session. "
         "Never invent a task id and never call this before a task exists. Returns current status "
-        "and, if complete, the result."
+        "and, if complete, the result. Treat status=success as ready only when an accepted artifact_path "
+        "is present. If status=error, report the build failure and never tell the user the artifact is ready."
     ),
     UPDATE_ASYNC_TASK_TOOL_NAME: (
         "Send updated instructions to a tracked running builder task. Use ONLY with a real task_id "
@@ -193,6 +194,8 @@ TOOL_DESCRIPTIONS: dict[str, str] = {
     LIST_ASYNC_TASKS_TOOL_NAME: (
         "List tracked async builder tasks for the current runtime/session scope. Use when recalling "
         "active/completed tasks or recovering identifiers, not as a substitute for starting a new build. "
+        "The returned status is artifact-authoritative: success means an accepted artifact exists, while "
+        "error means the build failed and must never be announced as ready. "
         "For an explicit fresh document/file/report/build request, call start_builder_task first. "
         "For a short reflection or companion/session artifact request, use emit_artifact instead."
     ),

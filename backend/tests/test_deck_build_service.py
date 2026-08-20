@@ -1073,6 +1073,28 @@ def test_compact_v2_normalizes_nonportable_secondary_font_fallbacks() -> None:
     assert deck.deck_stylesheet_hash == hashlib.sha256(deck.deck_stylesheet.encode("utf-8")).hexdigest()
 
 
+def test_compact_v2_injects_safe_canvas_base_font_when_missing() -> None:
+    stylesheet = (
+        "main{background:#071626}"
+        "h1,h2,h3,p,li,td,th{font-family:Calibri,Arial,sans-serif}"
+        + "".join(
+            f"#t{index}{{position:absolute;left:120px;top:80px;width:1200px;height:120px;box-sizing:border-box;margin:0}}"
+            f"#n{index}{{position:absolute;left:120px;top:820px;width:1320px;height:120px;box-sizing:border-box;margin:0}}"
+            for index in range(1, 4)
+        )
+    )
+    deck = SimpleNamespace(
+        deck_stylesheet=stylesheet,
+        deck_stylesheet_hash=hashlib.sha256(stylesheet.encode("utf-8")).hexdigest(),
+        deck_authoring_contract="compact_model_html_v2",
+    )
+
+    deck_service._validate_authoring_inputs(deck, _compact_slides())
+
+    assert "html,body,main,.slide-root{font-family:Calibri,Arial,sans-serif}" in deck.deck_stylesheet
+    assert deck.deck_stylesheet_hash == hashlib.sha256(deck.deck_stylesheet.encode("utf-8")).hexdigest()
+
+
 def test_compact_v2_malformed_stylesheet_is_a_controlled_authoring_failure() -> None:
     stylesheet = _compact_stylesheet(font_family="Calibri,Helvetica,sans-serif") + "}"
     deck = SimpleNamespace(

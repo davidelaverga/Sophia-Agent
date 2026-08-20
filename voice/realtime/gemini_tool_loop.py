@@ -599,9 +599,8 @@ class GeminiBuilderLifecycleHttpBackend:
     ) -> GeminiBuilderLifecycleResult:
         task = _tracked_task(str(args["task_id"]), async_tasks)
         run = await self._request_json("GET", f"/threads/{task['thread_id']}/runs/{task['run_id']}")
-        status = _required_string(run.get("status"), "LangGraph run response omitted status.")
-        result = await self._check_result_for_status(run, task)
-        updated_task = _updated_task(task, status=status, checked=True)
+        updated_task, result = await self._reconcile_task_for_run(run, task)
+        status = str(result.get("status") or updated_task.get("status") or "unknown")
         response = {
             "ok": True,
             "tool": GEMINI_CHECK_ASYNC_TASK_TOOL_NAME,
@@ -698,22 +697,38 @@ class GeminiBuilderLifecycleHttpBackend:
         summaries: list[dict[str, Any]] = []
         for task in tasks:
             status = str(task.get("status") or "unknown")
-            if status not in builder_lifecycle_contract().TERMINAL_TASK_STATUSES:
-                try:
-                    run = await self._request_json("GET", f"/threads/{task['thread_id']}/runs/{task['run_id']}")
-                    status = _required_string(run.get("status"), "LangGraph run response omitted status.")
-                    task = _updated_task(task, status=status, checked=True)
-                except GeminiDogfoodToolError:
-                    pass
+            status_result: dict[str, Any] = {"status": status}
+            try:
+                run = await self._request_json("GET", f"/threads/{task['thread_id']}/runs/{task['run_id']}")
+                task, status_result = await self._reconcile_task_for_run(run, task)
+                status = str(status_result.get("status") or task.get("status") or "unknown")
+            except GeminiDogfoodToolError:
+                # A cached graph-level success without an accepted builder
+                # result must never be presented as an artifact success.
+                task, status_result = builder_lifecycle_contract().reconcile_builder_task(
+                    task,
+                    native_status=status,
+                )
+                status = str(status_result.get("status") or task.get("status") or "unknown")
             updated_tasks[str(task["task_id"])] = task
-            summaries.append(
-                {
-                    "task_id": task.get("task_id"),
-                    "agent_name": task.get("agent_name"),
-                    "status": status,
-                    "task_type": task.get("task_type"),
-                }
-            )
+            summary = {
+                "task_id": task.get("task_id"),
+                "agent_name": task.get("agent_name"),
+                "status": status,
+                "task_type": task.get("task_type"),
+            }
+            for key in (
+                "artifact_path",
+                "terminal_status",
+                "terminal_reason",
+                "failure_code",
+                "root_failure_code",
+                "root_failure_summary",
+            ):
+                value = status_result.get(key)
+                if value is not None:
+                    summary[key] = value
+            summaries.append(summary)
         response = {
             "ok": True,
             "tool": GEMINI_LIST_ASYNC_TASKS_TOOL_NAME,
@@ -728,25 +743,36 @@ class GeminiBuilderLifecycleHttpBackend:
             updated_async_tasks=updated_tasks or None,
         )
 
-    async def _check_result_for_status(self, run: Mapping[str, Any], task: Mapping[str, Any]) -> dict[str, Any]:
-        status = str(run.get("status") or "unknown")
-        result: dict[str, Any] = {"status": status, "thread_id": task["thread_id"]}
-        if status == "success":
+    async def _reconcile_task_for_run(
+        self,
+        run: Mapping[str, Any],
+        task: Mapping[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        native_status = _required_string(run.get("status"), "LangGraph run response omitted status.")
+        values: Mapping[str, Any] = {}
+        if native_status in {"success", "error", "failed"}:
             state = await self._request_json("GET", f"/threads/{task['thread_id']}/state", params={"subgraphs": False})
             values = _record_value(state.get("values")) or {}
-            messages = values.get("messages") if isinstance(values, Mapping) else None
-            if isinstance(messages, list) and messages:
-                last = messages[-1]
-                result["result"] = last.get("content", "") if isinstance(last, Mapping) else str(last)
-            else:
-                result["result"] = "(completed with no output messages)"
-            builder_result = values.get("builder_result") if isinstance(values, Mapping) else None
-            if isinstance(builder_result, Mapping):
-                result["builder_result"] = dict(builder_result)
-        elif status == "error":
+        updated_task, result = builder_lifecycle_contract().reconcile_builder_task(
+            task,
+            native_status=native_status,
+            thread_values=values,
+            native_error=run.get("error"),
+        )
+        builder_result = values.get("builder_result") if isinstance(values, Mapping) else None
+        if isinstance(builder_result, Mapping):
+            result["builder_result"] = dict(builder_result)
+        messages = values.get("messages") if isinstance(values, Mapping) else None
+        if isinstance(messages, list) and messages:
+            last = messages[-1]
+            result["result"] = last.get("content", "") if isinstance(last, Mapping) else str(last)
+        elif result.get("status") == "success":
+            result["result"] = "(completed with an accepted artifact and no output messages)"
+        if native_status in {"error", "failed"} and not result.get("root_failure_summary"):
             error_detail = run.get("error")
             result["error"] = str(error_detail) if error_detail else "The async builder encountered an error."
-        return result
+        result["native_run_status"] = native_status
+        return updated_task, result
 
     async def _request_json(
         self,
@@ -1857,8 +1883,16 @@ def _status_summary(task_id: str, status: str, result: Mapping[str, Any]) -> str
     if status == "success":
         return f"Builder task {task_id} completed successfully."
     if status in {"error", "failed", "timeout", "timed_out"}:
-        error = result.get("error") if isinstance(result, Mapping) else None
-        return f"Builder task {task_id} ended with {status}: {error or 'no detail provided'}."
+        detail = None
+        if isinstance(result, Mapping):
+            detail = (
+                result.get("root_failure_summary")
+                or result.get("failure_summary")
+                or result.get("summary")
+                or result.get("error")
+                or result.get("terminal_reason")
+            )
+        return f"Builder task {task_id} ended with {status}: {detail or 'no detail provided'}."
     if status == "cancelled":
         return f"Builder task {task_id} is cancelled."
     return f"Builder task {task_id} is {status}."

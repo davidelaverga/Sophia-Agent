@@ -3,7 +3,11 @@ from __future__ import annotations
 import pytest
 
 from deerflow.sophia.deck_build.creative_plan import CreativePlanValidationError, normalize_creative_plan
-from deerflow.sophia.deck_build.image_assets import apply_creative_asset_plan, planned_asset_ref_basenames
+from deerflow.sophia.deck_build.image_assets import (
+    apply_creative_asset_plan,
+    normalize_planned_asset_references,
+    planned_asset_ref_basenames,
+)
 from deerflow.sophia.deck_build.models import DeckBuild
 from test_deck_build_service import _creative_plan, _runtime, _slides
 
@@ -65,3 +69,16 @@ def test_multiple_generated_assets_on_one_slide_are_retryable_invalid_plan(tmp_p
         apply_creative_asset_plan(deck, plan)
 
     assert exc.value.code == "deck_image_asset_plan_invalid"
+
+
+def test_declared_asset_ids_are_normalized_to_compiler_slide_paths(tmp_path) -> None:
+    deck = _deck(tmp_path)
+    deck.slides[0].html_body = '<img src="cover-texture" alt="">'
+    plan = normalize_creative_plan(_creative_plan(), deck=deck, request_context="")
+
+    apply_creative_asset_plan(deck, plan)
+    count = normalize_planned_asset_references(deck, plan)
+
+    assert count == 1
+    assert deck.slides[0].html_body == '<img src="../assets/slide-01.png" alt="">'
+    assert deck.slides[0].gate_results["planned_asset_reference_normalized"] is True

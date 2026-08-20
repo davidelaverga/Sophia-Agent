@@ -42,6 +42,7 @@ from deerflow.sophia.deck_build.html_sanitizer import (
 )
 from deerflow.sophia.deck_build.image_assets import (
     apply_creative_asset_plan,
+    normalize_planned_asset_references,
     planned_asset_ref_basenames,
 )
 from deerflow.sophia.deck_build.image_prompting import deck_asset_prompt_payload
@@ -672,6 +673,10 @@ class DeckBuildService:
         ) as run:
             try:
                 apply_creative_asset_plan(deck, deck.creative_plan)
+                normalized_asset_ref_count = normalize_planned_asset_references(
+                    deck,
+                    deck.creative_plan,
+                )
             except CreativePlanValidationError as exc:
                 finish_span(
                     run,
@@ -696,6 +701,7 @@ class DeckBuildService:
                     "native_html_slide_count": deck.native_html_slide_count,
                     "hybrid_slide_count": deck.hybrid_slide_count,
                     "text_only_slide_count": deck.text_only_slide_count,
+                    "normalized_planned_asset_reference_count": normalized_asset_ref_count,
                     "asset_policy_file": basename(deck.asset_policy_path),
                     "visual_modes": [slide.asset_plan.visual_mode if slide.asset_plan else None for slide in deck.slides],
                     "layout_families": [getattr(slide.composition_plan, "layout_name", None) for slide in deck.slides],
@@ -3400,6 +3406,18 @@ def _validate_authoring_inputs(
         if len(stylesheet.encode("utf-8")) > 8 * 1024:
             raise _authoring_failure("deck_stylesheet exceeds the compact-v2 8192-byte limit.")
         normalized_stylesheet = _normalize_compact_pptx_stylesheet_font_fallbacks(stylesheet)
+        if normalized_stylesheet and not _validate_css_font_declarations(
+            normalized_stylesheet,
+            label="deck_stylesheet",
+            require_base=True,
+        ):
+            normalized_stylesheet += (
+                "\nhtml,body,main,.slide-root{font-family:Calibri,Arial,sans-serif}"
+            )
+            if len(normalized_stylesheet.encode("utf-8")) > 8 * 1024:
+                raise _authoring_failure(
+                    "deck_stylesheet exceeds the compact-v2 8192-byte limit after base-font normalization."
+                )
         if normalized_stylesheet != stylesheet:
             deck.deck_stylesheet = normalized_stylesheet
         stylesheet = normalized_stylesheet
