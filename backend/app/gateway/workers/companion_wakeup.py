@@ -62,6 +62,7 @@ import logging
 import os
 from collections import OrderedDict
 from typing import Any
+from uuid import UUID
 
 logger = logging.getLogger(__name__)
 
@@ -82,6 +83,15 @@ _DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
 # this worker is companion-specific; a generalization would belong in a
 # different module.
 _COMPANION_ASSISTANT_ID = "sophia_companion"
+
+
+def _is_langgraph_thread_id(value: str) -> bool:
+    """LangGraph's thread endpoints accept UUIDs, not provider session IDs."""
+    try:
+        UUID(value)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return True
 
 
 class CompanionWakeup:
@@ -170,6 +180,13 @@ class CompanionWakeup:
         thread_id = event["thread_id"]
         task_id = event.get("task_id")
         run_id = event.get("run_id")
+        if not _is_langgraph_thread_id(thread_id):
+            logger.info(
+                "Companion wakeup: skipping non-LangGraph parent thread_id=%s task_id=%s reason=provider_session_id",
+                thread_id,
+                task_id,
+            )
+            return False
         try:
             client = self._get_client()
             # Empty input.messages — the existing companion middlewares
