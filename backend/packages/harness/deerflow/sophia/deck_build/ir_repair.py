@@ -147,7 +147,8 @@ def _targeted_deck_ir_repair_guidance(failure_summary: str) -> str:
             "or duplicate visible text. Each anchor needs one standalone #id rule with position:absolute, "
             "box-sizing:border-box, margin:0, and literal px left/top/width/height. The complete literal geometry "
             "must live in the standalone #id rules themselves; do not rely only on selectors such as .s1 #hero or "
-            ".slide-2 #proof. Keep the two anchor rectangles "
+            ".slide-2 #proof. Remove any inline style attribute from the declared anchors entirely; move flex, padding, "
+            "color, and other styling to classes or descendants. Keep the two anchor rectangles "
             "and unrelated visible text-bearing rectangles disjoint in canvas-global coordinates with at least a "
             "16px gutter. Preserve all other source. "
         )
