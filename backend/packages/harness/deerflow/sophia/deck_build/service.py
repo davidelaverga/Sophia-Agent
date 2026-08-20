@@ -324,6 +324,33 @@ class DeckBuildService:
                         },
                     ) as run:
                         finish_span(run, font_normalization)
+                slides, caption_normalization = (
+                    _normalize_compact_v2_image_only_repair_anchors(
+                        deck.deck_stylesheet or "",
+                        slides,
+                    )
+                )
+                if caption_normalization["normalized_anchor_count"] > 0:
+                    logger.info(
+                        "[DeckIRNormalization] compact-v2 image-only repair anchors captioned "
+                        "normalized_slides=%d normalized_anchors=%d rawContentExcluded=true",
+                        caption_normalization["normalized_slide_count"],
+                        caption_normalization["normalized_anchor_count"],
+                    )
+                    with deck_span(
+                        "deck.ir.normalize",
+                        runtime=runtime,
+                        build_id=build_id,
+                        visual_policy=deck.visual_policy,
+                        status=deck.status,
+                        slide_count=len(slides),
+                        run_type="tool",
+                        inputs={
+                            "authoring_contract": deck.deck_authoring_contract,
+                            "normalization_kind": "image_only_repair_anchor_caption",
+                        },
+                    ) as run:
+                        finish_span(run, caption_normalization)
                 normalized_stylesheet, invariant_normalization = (
                     _normalize_compact_v2_anchor_invariant_contract(
                         deck.deck_stylesheet or "",
@@ -3170,6 +3197,130 @@ def _normalize_compact_v2_anchor_inline_geometry(
         "removed_property_names": sorted(removed_properties),
         "strict_validator_bypassed": False,
         "candidate_compile_changed": False,
+        "raw_content_excluded": True,
+    }
+
+
+def _normalize_compact_v2_image_only_repair_anchors(
+    stylesheet: str,
+    slides: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Give an otherwise-valid image repair anchor a native text witness.
+
+    Models commonly choose a hero image panel as one of the two declared
+    repair anchors. An ``img`` alt attribute is useful accessibility metadata,
+    but it is not visible slide text and therefore cannot participate in the
+    authenticated text-geometry repair contract. When the declared top-level
+    anchor is otherwise strict and has a non-empty image alt, materialize that
+    alt as a concise, opaque caption. All ambiguous or unsafe sources remain
+    unchanged for the fail-closed validator.
+    """
+
+    shared_geometry = _compact_shared_id_geometry(stylesheet)
+    normalized_slides = slides
+    normalized_slide_indexes: list[int] = []
+    normalized_anchor_count = 0
+
+    for index, raw in enumerate(slides):
+        declared = raw.get("repair_anchor_ids")
+        if (
+            not isinstance(declared, list)
+            or len(declared) != 2
+            or any(
+                not isinstance(identifier, str)
+                or _COMPACT_SOURCE_ID_RE.fullmatch(identifier) is None
+                for identifier in declared
+            )
+            or len(set(declared)) != 2
+        ):
+            continue
+        body = raw.get("html_body")
+        if not isinstance(body, str) or not body.strip():
+            continue
+        try:
+            soup = BeautifulSoup(body, "html.parser")
+        except Exception:  # noqa: BLE001 - strict validation reports malformed source.
+            continue
+
+        slide_changed = False
+        for identifier in declared:
+            matches = soup.find_all(id=identifier)
+            if len(matches) != 1 or not isinstance(matches[0], Tag):
+                continue
+            anchor = matches[0]
+            if (
+                not any(anchor is element for element in soup.contents)
+                or str(anchor.name).casefold() not in {"div", "section"}
+                or identifier not in shared_geometry
+                or not str(anchor.attrs.get("data-deck-id") or "").strip()
+                or not str(anchor.attrs.get("data-deck-role") or "").strip()
+                or str(anchor.attrs.get("data-deck-required") or "").strip().casefold()
+                != "true"
+                or anchor.get_text(" ", strip=True)
+            ):
+                continue
+            inline_style = anchor.attrs.get("style")
+            if isinstance(inline_style, str) and inline_style.strip():
+                declarations = tinycss2.parse_declaration_list(
+                    inline_style,
+                    skip_comments=True,
+                    skip_whitespace=True,
+                )
+                if any(
+                    getattr(item, "type", "") != "declaration"
+                    or item.lower_name
+                    in {
+                        "position",
+                        "box-sizing",
+                        "margin",
+                        *_COMPACT_SOURCE_GEOMETRY_PROPERTIES,
+                    }
+                    for item in declarations
+                ):
+                    continue
+            image = anchor.find("img")
+            if not isinstance(image, Tag):
+                continue
+            caption_text = safe_excerpt(image.attrs.get("alt"), limit=96)
+            if not caption_text or not caption_text.strip():
+                continue
+            caption_text = caption_text.strip()
+            caption_data_id = f"{identifier}-caption"
+            if soup.find(attrs={"data-deck-id": caption_data_id}) is not None:
+                continue
+            caption = soup.new_tag("span")
+            caption.attrs.update(
+                {
+                    "data-deck-id": caption_data_id,
+                    "data-deck-role": "caption",
+                    "data-deck-required": "true",
+                    "style": (
+                        "display:block;position:absolute;left:24px;bottom:24px;"
+                        "box-sizing:border-box;padding:8px 12px;"
+                        "font-family:Calibri,Arial,sans-serif;font-size:24px;line-height:1.2;"
+                        "background:#050B14;color:#FFFFFF"
+                    ),
+                }
+            )
+            caption.string = caption_text
+            anchor.append(caption)
+            slide_changed = True
+            normalized_anchor_count += 1
+
+        if not slide_changed:
+            continue
+        if normalized_slides is slides:
+            normalized_slides = [dict(slide) for slide in slides]
+        normalized_slides[index]["html_body"] = str(soup)
+        normalized_slide_indexes.append(index)
+
+    return normalized_slides, {
+        "normalization_applied": normalized_anchor_count > 0,
+        "normalized_slide_count": len(normalized_slide_indexes),
+        "normalized_anchor_count": normalized_anchor_count,
+        "caption_source": "image_alt",
+        "strict_validator_bypassed": False,
+        "candidate_compile_changed": normalized_anchor_count > 0,
         "raw_content_excluded": True,
     }
 

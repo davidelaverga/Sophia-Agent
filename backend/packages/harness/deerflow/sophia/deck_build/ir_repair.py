@@ -144,7 +144,9 @@ def _targeted_deck_ir_repair_guidance(failure_summary: str) -> str:
         return (
             "Add or repair the complete declared pair together. Prefer promoting two existing top-level visible "
             "content containers by assigning the required safe ids and deck attributes; do not add overlay wrappers "
-            "or duplicate visible text. Each anchor needs one standalone #id rule with position:absolute, "
+            "or duplicate visible text. An img alt attribute is not visible text: if an image panel is a declared "
+            "anchor, add one concise visible caption/label inside it or choose a different text-bearing top-level "
+            "container. Each anchor needs one standalone #id rule with position:absolute, "
             "box-sizing:border-box, margin:0, and literal px left/top/width/height. The complete literal geometry "
             "must live in the standalone #id rules themselves; do not rely only on selectors such as .s1 #hero or "
             ".slide-2 #proof. Remove any inline style attribute from the declared anchors entirely; move flex, padding, "

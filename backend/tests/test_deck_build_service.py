@@ -1442,6 +1442,55 @@ def test_compact_v2_source_addressability_accepts_strict_dq2_pair_with_interior_
     ) is not None
 
 
+def test_compact_v2_normalizes_image_only_repair_anchor_with_visible_caption() -> None:
+    body = (
+        '<section id="hero" data-deck-id="hero" data-deck-role="subject" '
+        'data-deck-required="true"><h1>Current PSI</h1></section>'
+        '<div id="proof" data-deck-id="proof" data-deck-role="image_panel" '
+        'data-deck-required="true"><img src="../assets/slide-01.png" '
+        'alt="Hadal vehicle descending"/></div>'
+    )
+    slides = [{"html_body": body, "slide_css": "", "repair_anchor_ids": ["hero", "proof"]}]
+
+    normalized, report = deck_service._normalize_compact_v2_image_only_repair_anchors(
+        _source_pair_stylesheet(),
+        slides,
+    )
+
+    assert report["normalization_applied"] is True
+    assert report["normalized_anchor_count"] == 1
+    assert report["candidate_compile_changed"] is True
+    assert "Hadal vehicle descending" in normalized[0]["html_body"]
+    assert 'data-deck-id="proof-caption"' in normalized[0]["html_body"]
+    deck_service._validate_compact_source_addressability(
+        _source_pair_stylesheet(),
+        normalized,
+    )
+
+
+def test_compact_v2_does_not_normalize_ambiguous_textless_repair_anchor() -> None:
+    body = (
+        '<section id="hero" data-deck-id="hero" data-deck-role="subject" '
+        'data-deck-required="true"><h1>Current PSI</h1></section>'
+        '<div id="proof" data-deck-id="proof" data-deck-role="decorative" '
+        'data-deck-required="true"><svg></svg></div>'
+    )
+    slides = [{"html_body": body, "slide_css": "", "repair_anchor_ids": ["hero", "proof"]}]
+
+    normalized, report = deck_service._normalize_compact_v2_image_only_repair_anchors(
+        _source_pair_stylesheet(),
+        slides,
+    )
+
+    assert normalized is slides
+    assert report["normalization_applied"] is False
+    with pytest.raises(deck_service.DeckBuildFailure, match="both repair anchors declared"):
+        deck_service._validate_compact_source_addressability(
+            _source_pair_stylesheet(),
+            normalized,
+        )
+
+
 def test_compact_v2_normalizes_only_redundant_inline_anchor_geometry() -> None:
     body = _source_pair_body().replace(
         'data-deck-required="true">',
