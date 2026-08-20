@@ -351,6 +351,36 @@ class DeckBuildService:
                         },
                     ) as run:
                         finish_span(run, caption_normalization)
+                normalized_stylesheet, clearance_normalization = (
+                    _normalize_compact_v2_anchor_translation_clearance(
+                        deck.deck_stylesheet or "",
+                        slides,
+                    )
+                )
+                if clearance_normalization["normalized_anchor_count"] > 0:
+                    deck.deck_stylesheet = normalized_stylesheet
+                    deck.deck_stylesheet_hash = hashlib.sha256(
+                        normalized_stylesheet.encode("utf-8")
+                    ).hexdigest()
+                    logger.info(
+                        "[DeckIRNormalization] compact-v2 anchor translation clearance completed "
+                        "normalized_anchors=%d rawContentExcluded=true",
+                        clearance_normalization["normalized_anchor_count"],
+                    )
+                    with deck_span(
+                        "deck.ir.normalize",
+                        runtime=runtime,
+                        build_id=build_id,
+                        visual_policy=deck.visual_policy,
+                        status=deck.status,
+                        slide_count=len(slides),
+                        run_type="tool",
+                        inputs={
+                            "authoring_contract": deck.deck_authoring_contract,
+                            "normalization_kind": "anchor_translation_clearance",
+                        },
+                    ) as run:
+                        finish_span(run, clearance_normalization)
                 normalized_stylesheet, invariant_normalization = (
                     _normalize_compact_v2_anchor_invariant_contract(
                         deck.deck_stylesheet or "",
@@ -3319,6 +3349,147 @@ def _normalize_compact_v2_image_only_repair_anchors(
         "normalized_slide_count": len(normalized_slide_indexes),
         "normalized_anchor_count": normalized_anchor_count,
         "caption_source": "image_alt",
+        "strict_validator_bypassed": False,
+        "candidate_compile_changed": normalized_anchor_count > 0,
+        "raw_content_excluded": True,
+    }
+
+
+def _normalize_compact_v2_anchor_translation_clearance(
+    stylesheet: str,
+    slides: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Create the required 8px repair movement lane without moving an anchor.
+
+    A model sometimes declares a full-canvas background/image panel as one of
+    the two repair anchors. The box is safely in bounds but has no legal
+    translation origin. If an otherwise-strict standalone ``#id`` rule leaves
+    less than 8px on every canvas side, trim only its right or bottom edge by
+    the exact missing clearance. Ambiguous rules continue to fail closed.
+    """
+
+    declared_ids: set[str] = set()
+    for raw in slides:
+        declared = raw.get("repair_anchor_ids")
+        if (
+            not isinstance(declared, list)
+            or len(declared) != 2
+            or any(
+                not isinstance(identifier, str)
+                or _COMPACT_SOURCE_ID_RE.fullmatch(identifier) is None
+                for identifier in declared
+            )
+            or len(set(declared)) != 2
+        ):
+            return stylesheet, _anchor_translation_clearance_report()
+        declared_ids.update(declared)
+
+    geometry = _compact_shared_id_geometry(stylesheet)
+    adjustments: dict[str, tuple[str, float]] = {}
+    for identifier in declared_ids:
+        box = geometry.get(identifier)
+        if box is None:
+            continue
+        left, top, width, height = box
+        side_clearance = (
+            left,
+            1920.0 - (left + width),
+            top,
+            1080.0 - (top + height),
+        )
+        if max(side_clearance) >= 8.0:
+            continue
+        right_gap = side_clearance[1]
+        width_reduction = 8.0 - right_gap
+        if width - width_reduction >= 48.0:
+            adjustments[identifier] = ("width", width - width_reduction)
+            continue
+        bottom_gap = side_clearance[3]
+        height_reduction = 8.0 - bottom_gap
+        if height - height_reduction >= 24.0:
+            adjustments[identifier] = ("height", height - height_reduction)
+
+    if not adjustments:
+        return stylesheet, _anchor_translation_clearance_report()
+    try:
+        rules = tinycss2.parse_stylesheet(
+            stylesheet,
+            skip_comments=False,
+            skip_whitespace=False,
+        )
+    except Exception:  # noqa: BLE001 - strict validation reports malformed source.
+        return stylesheet, _anchor_translation_clearance_report()
+    if any(getattr(rule, "type", "") in {"at-rule", "error"} for rule in rules):
+        return stylesheet, _anchor_translation_clearance_report()
+
+    changed_dimensions: set[str] = set()
+    for identifier, (dimension, value) in adjustments.items():
+        matches = [
+            rule
+            for rule in rules
+            if getattr(rule, "type", "") == "qualified-rule"
+            and tinycss2.serialize(rule.prelude).strip() == f"#{identifier}"
+        ]
+        if len(matches) != 1:
+            return stylesheet, _anchor_translation_clearance_report()
+        rule = matches[0]
+        declarations = tinycss2.parse_declaration_list(
+            rule.content,
+            skip_comments=False,
+            skip_whitespace=False,
+        )
+        if any(
+            getattr(item, "type", "") in {"at-rule", "error", "qualified-rule"}
+            for item in declarations
+        ):
+            return stylesheet, _anchor_translation_clearance_report()
+        candidates = [
+            item
+            for item in declarations
+            if getattr(item, "type", "") == "declaration"
+            and item.lower_name == dimension
+        ]
+        if not candidates:
+            return stylesheet, _anchor_translation_clearance_report()
+        literal = f"{value:g}px"
+        candidates[-1].value = tinycss2.parse_component_value_list(literal)
+        rule.content = tinycss2.parse_component_value_list(
+            tinycss2.serialize(declarations)
+        )
+        changed_dimensions.add(dimension)
+
+    normalized = tinycss2.serialize(rules)
+    if len(normalized.encode("utf-8")) > 8 * 1024:
+        return stylesheet, _anchor_translation_clearance_report()
+    normalized_geometry = _compact_shared_id_geometry(normalized)
+    for identifier in adjustments:
+        box = normalized_geometry.get(identifier)
+        if box is None:
+            return stylesheet, _anchor_translation_clearance_report()
+        left, top, width, height = box
+        if max(
+            left,
+            1920.0 - (left + width),
+            top,
+            1080.0 - (top + height),
+        ) < 8.0:
+            return stylesheet, _anchor_translation_clearance_report()
+    return normalized, _anchor_translation_clearance_report(
+        normalized_anchor_count=len(adjustments),
+        adjusted_dimensions=changed_dimensions,
+    )
+
+
+def _anchor_translation_clearance_report(
+    *,
+    normalized_anchor_count: int = 0,
+    adjusted_dimensions: set[str] | None = None,
+) -> dict[str, Any]:
+    return {
+        "normalization_applied": normalized_anchor_count > 0,
+        "normalized_anchor_count": normalized_anchor_count,
+        "adjusted_dimension_names": sorted(adjusted_dimensions or set()),
+        "minimum_clearance_px": 8 if normalized_anchor_count else None,
         "strict_validator_bypassed": False,
         "candidate_compile_changed": normalized_anchor_count > 0,
         "raw_content_excluded": True,

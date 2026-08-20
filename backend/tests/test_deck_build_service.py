@@ -1491,6 +1491,56 @@ def test_compact_v2_does_not_normalize_ambiguous_textless_repair_anchor() -> Non
         )
 
 
+def test_compact_v2_normalizes_full_canvas_anchor_translation_clearance() -> None:
+    stylesheet = _source_pair_stylesheet().replace(
+        "#hero{position:absolute;left:80px;top:80px;width:720px;height:320px;",
+        "#hero{position:absolute;left:0;top:0;width:1920px;height:1080px;",
+    )
+    slides = [
+        {
+            "html_body": _source_pair_body(),
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+
+    normalized, report = deck_service._normalize_compact_v2_anchor_translation_clearance(
+        stylesheet,
+        slides,
+    )
+
+    assert report == {
+        "normalization_applied": True,
+        "normalized_anchor_count": 1,
+        "adjusted_dimension_names": ["width"],
+        "minimum_clearance_px": 8,
+        "strict_validator_bypassed": False,
+        "candidate_compile_changed": True,
+        "raw_content_excluded": True,
+    }
+    assert "width:1912px" in normalized
+    deck_service._validate_compact_source_addressability(normalized, slides)
+
+
+def test_compact_v2_preserves_anchor_with_existing_translation_clearance() -> None:
+    stylesheet = _source_pair_stylesheet()
+    slides = [
+        {
+            "html_body": _source_pair_body(),
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+
+    normalized, report = deck_service._normalize_compact_v2_anchor_translation_clearance(
+        stylesheet,
+        slides,
+    )
+
+    assert normalized == stylesheet
+    assert report["normalization_applied"] is False
+
+
 def test_compact_v2_normalizes_only_redundant_inline_anchor_geometry() -> None:
     body = _source_pair_body().replace(
         'data-deck-required="true">',
