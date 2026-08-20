@@ -117,16 +117,30 @@ class _OutputTarget:
 
 
 def _validate_fixed_runtime(request: TrustedImageRequest) -> tuple[str, Path]:
-    python = Path(request.python_executable).resolve(strict=True)
+    # Preserve the virtualenv entrypoint for execution. Resolving
+    # ``.venv/bin/python`` to the base interpreter disables virtualenv path
+    # discovery under ``-I`` and drops provider dependencies such as openai.
+    python_entry = Path(os.path.abspath(os.fspath(request.python_executable)))
+    python = python_entry.resolve(strict=True)
     script = request.script.resolve(strict=True)
-    if not python.is_file() or not script.is_file():
+    if not python_entry.is_file() or not python.is_file() or not script.is_file():
         raise RuntimeError("trusted image runtime is missing")
     if os.name == "posix" and hasattr(os, "geteuid") and os.geteuid() == 0:
+        entry_info = python_entry.lstat()
+        if not (stat.S_ISREG(entry_info.st_mode) or stat.S_ISLNK(entry_info.st_mode)):
+            raise RuntimeError(f"trusted image runtime is not a file: {python_entry}")
+        if entry_info.st_uid != 0 or (
+            stat.S_ISREG(entry_info.st_mode)
+            and stat.S_IMODE(entry_info.st_mode) & 0o022
+        ):
+            raise RuntimeError(
+                f"trusted image runtime is writable or not root-owned: {python_entry}"
+            )
         for path in (python, script):
             info = path.stat()
             if info.st_uid != 0 or stat.S_IMODE(info.st_mode) & 0o022:
                 raise RuntimeError(f"trusted image runtime is writable or not root-owned: {path}")
-    return str(python), script
+    return str(python_entry), script
 
 
 def _relative_parts(root: Path, candidate: Path) -> tuple[str, ...]:

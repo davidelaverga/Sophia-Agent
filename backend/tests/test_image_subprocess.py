@@ -72,6 +72,39 @@ def test_actual_image_script_preflight_runs_through_broker_without_provider_key(
     }
 
 
+def test_broker_preserves_virtualenv_python_symlink_for_execution(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    roots = _roots(tmp_path)
+    script = _script(tmp_path)
+    python_entry = tmp_path / "venv" / "bin" / "python"
+    python_entry.parent.mkdir(parents=True)
+    python_entry.symlink_to(Path(sys.executable).resolve())
+    captured: dict[str, object] = {}
+
+    def fake_run(command: list[str], **kwargs) -> subprocess.CompletedProcess[str]:
+        captured.update(command=command, **kwargs)
+        return subprocess.CompletedProcess(command, 0, stdout="", stderr="")
+
+    monkeypatch.setattr(image_subprocess, "run_process_group", fake_run)
+    run_trusted_image_request(
+        TrustedImageRequest(
+            python_executable=str(python_entry),
+            script=script,
+            roots=roots,
+            mode="preflight",
+        ),
+        env={},
+        timeout=10,
+    )
+
+    command = captured["command"]
+    assert isinstance(command, list)
+    assert Path(command[0]) == python_entry
+    assert Path(command[0]).resolve() == Path(sys.executable).resolve()
+
+
 def test_manifest_inputs_are_snapshotted_and_import_paths_are_hardened(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

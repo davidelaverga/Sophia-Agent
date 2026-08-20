@@ -83,7 +83,8 @@ RUN mkdir -p "$PLAYWRIGHT_BROWSERS_PATH" \
 
 RUN cd /app/backend \
     && uv run python ../skills/public/image-generation/scripts/generate.py --help >/dev/null \
-    && uv run python -c "import PIL, openai, langsmith"
+    && uv run python -c "import PIL, openai, langsmith" \
+    && uv run python -c "import sys; from pathlib import Path; from types import SimpleNamespace; from deerflow.sophia.image_subprocess import _validate_fixed_runtime; executable, _ = _validate_fixed_runtime(SimpleNamespace(python_executable=sys.executable, script=Path('../skills/public/image-generation/scripts/generate.py'))); assert executable == sys.executable, (executable, sys.executable)"
 
 RUN cd /app/backend \
     && test -f ../third_party/hands_on_deck/skills/hands-on-deck/scripts/deck.py \
