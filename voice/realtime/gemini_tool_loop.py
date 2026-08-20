@@ -254,6 +254,7 @@ class GeminiBuilderLifecycleHttpBackend:
         explicit_urls = _extract_explicit_user_urls(description)
         allow_web_research = _should_allow_builder_web_research(task_type, description)
         builder_web_budget = _make_builder_web_budget(task_type)
+        builder_budget = _voice_builder_budget(task_type)
         contract = builder_lifecycle_contract()
 
         thread = await self._request_json("POST", "/threads", json_body={})
@@ -276,6 +277,7 @@ class GeminiBuilderLifecycleHttpBackend:
             "search_mode": "autonomous",
             "explicit_user_urls": explicit_urls,
             "builder_web_budget": builder_web_budget,
+            "builder_budget": builder_budget,
             "handoff_resolution": {
                 "user_id_source": "trusted_gemini_dogfood_session_user_id",
                 "tool_arg_user_id_present": bool(args.get("user_id")),
@@ -288,6 +290,7 @@ class GeminiBuilderLifecycleHttpBackend:
             "allow_web_research": allow_web_research,
             "explicit_user_urls": explicit_urls,
             "builder_web_budget": builder_web_budget,
+            "builder_budget": builder_budget,
         }
         run = await self._request_json(
             "POST",
@@ -410,6 +413,7 @@ class GeminiBuilderLifecycleHttpBackend:
         explicit_urls = _extract_explicit_user_urls(description)
         allow_web_research = _should_allow_builder_web_research(task_type, description)
         builder_web_budget = _make_builder_web_budget(task_type)
+        builder_budget = _voice_builder_budget(task_type)
         contract = builder_lifecycle_contract()
 
         thread = await self._request_json("POST", "/threads", json_body={})
@@ -442,6 +446,7 @@ class GeminiBuilderLifecycleHttpBackend:
             "search_mode": "autonomous",
             "explicit_user_urls": explicit_urls,
             "builder_web_budget": builder_web_budget,
+            "builder_budget": builder_budget,
             "artifact_target_path": revision_path,
             "edit_context": edit_context,
             "handoff_resolution": {
@@ -456,6 +461,7 @@ class GeminiBuilderLifecycleHttpBackend:
             "allow_web_research": allow_web_research,
             "explicit_user_urls": explicit_urls,
             "builder_web_budget": builder_web_budget,
+            "builder_budget": builder_budget,
             "builder_artifact_target_path": revision_path,
             "builder_edit_context": edit_context,
         }
@@ -1378,6 +1384,41 @@ def _make_builder_web_budget(task_type: str) -> dict[str, int]:
     if (task_type or "").strip().lower() == "research":
         return {"search_limit": 5, "fetch_limit": 8, "search_calls": 0, "fetch_calls": 0}
     return {"search_limit": 3, "fetch_limit": 5, "search_calls": 0, "fetch_calls": 0}
+
+
+def _voice_builder_budget(task_type: str) -> dict[str, Any] | None:
+    """Seed the bounded presentation budget for the direct Gemini bridge."""
+
+    if (task_type or "").strip().lower() not in {"presentation", "visual_report"}:
+        return None
+    raw_max_tokens = os.getenv("SOPHIA_BUILDER_PRESENTATION_BUDGET_AUTHORING_MAX_TOKENS", "32768")
+    try:
+        authoring_max_tokens = max(1_024, int(raw_max_tokens))
+    except ValueError:
+        logger.warning(
+            "gemini.builder_lifecycle invalid presentation authoring budget=%r; using 32768",
+            raw_max_tokens,
+        )
+        authoring_max_tokens = 32_768
+    return {
+        "tier": "presentation",
+        "max_cost_usd": 12.0,
+        "max_total_tokens": 5_000_000,
+        "max_non_artifact_turns": 12,
+        "force_emit_remaining_turns": 2,
+        "soft_warn_at_turn": 6,
+        "force_emit_wall_clock_fraction": 0.7,
+        "repair_reserve_usd": 0.25,
+        "cost_model_key": "claude-sonnet-5",
+        "max_wall_clock_seconds": 1_200,
+        "prepare_force_at_turn": 2,
+        "prepare_force_after_seconds": 15,
+        "authoring_deadline_seconds": 720,
+        "preflight_timeout_seconds": 15,
+        "authoring_max_tokens": authoring_max_tokens,
+        "authoring_timeout_seconds": 360,
+        "terminal_reserve_seconds": 30,
+    }
 
 
 def _canonical_output_artifact_path(path: Any) -> str | None:
