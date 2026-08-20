@@ -20,7 +20,11 @@ import tinycss2
 from bs4 import BeautifulSoup, Tag
 from langchain.tools import ToolRuntime
 
-from deerflow.sandbox.tools import get_thread_data, replace_virtual_path
+from deerflow.sandbox.tools import (
+    get_thread_data,
+    mask_local_paths_in_output,
+    replace_virtual_path,
+)
 from deerflow.sophia.build_runtime.identity import new_build_id
 from deerflow.sophia.deck_build.asset_policy import (
     generated_asset_slides,
@@ -2167,7 +2171,10 @@ class DeckBuildService:
                 "complete": False,
                 "exit_code": 124,
                 "error_class": "deck_deadline_exceeded" if deadline_near else "timeout",
-                "items": _parse_batch_item_progress(stdout),
+                "items": _normalize_batch_item_output_paths(
+                    _parse_batch_item_progress(stdout),
+                    runtime,
+                ),
                 "raw_error_excerpt": safe_excerpt(f"image batch subprocess timed out after {timeout}s; stdout_chars={len(stdout)} stderr_chars={len(stderr)} {(stderr or stdout).strip()}"),
             }
         summary = _parse_batch_summary(completed.stdout)
@@ -2177,9 +2184,16 @@ class DeckBuildService:
                 "complete": False,
                 "exit_code": completed.returncode,
                 "error_class": "batch_summary_missing",
-                "items": _parse_batch_item_progress(completed.stdout),
+                "items": _normalize_batch_item_output_paths(
+                    _parse_batch_item_progress(completed.stdout),
+                    runtime,
+                ),
                 "raw_error_excerpt": safe_excerpt((completed.stderr or completed.stdout or "").strip()),
             }
+        summary["items"] = _normalize_batch_item_output_paths(
+            summary.get("items"),
+            runtime,
+        )
         summary["summary_present"] = True
         summary["exit_code"] = completed.returncode
         return summary
@@ -4883,6 +4897,33 @@ def _parse_batch_item_progress(stdout: str) -> list[dict[str, Any]]:
             if "raw_error_excerpt" in payload:
                 payload["raw_error_excerpt"] = safe_excerpt(payload["raw_error_excerpt"])
             items.append(payload)
+    return items
+
+
+def _normalize_batch_item_output_paths(
+    value: object,
+    runtime: ToolRuntime,
+) -> list[dict[str, Any]]:
+    """Restore broker host paths to the deck's canonical virtual namespace."""
+
+    if not isinstance(value, list):
+        return []
+    thread_data = get_thread_data(runtime)
+    items: list[dict[str, Any]] = []
+    for raw_item in value:
+        if not isinstance(raw_item, dict):
+            continue
+        item = dict(raw_item)
+        for key in ("output_file", "output_path"):
+            path = item.get(key)
+            if not isinstance(path, str):
+                continue
+            normalized = mask_local_paths_in_output(path, thread_data)
+            if normalized == "/mnt/user-data/outputs" or normalized.startswith(
+                "/mnt/user-data/outputs/"
+            ):
+                item[key] = normalized
+        items.append(item)
     return items
 
 

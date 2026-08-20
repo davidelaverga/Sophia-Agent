@@ -2706,6 +2706,59 @@ def test_deck_image_batch_subprocess_timeout_is_structured(tmp_path: Path, monke
     assert "timed out" in result["raw_error_excerpt"]
 
 
+def test_deck_image_batch_subprocess_restores_virtual_output_paths(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    runtime = _runtime(tmp_path / "outputs")
+    script = tmp_path / "generate.py"
+    script.write_text("raise SystemExit(0)\n", encoding="utf-8")
+    manifest_path = f"{_OUTPUTS}assets/slide-visuals.manifest.json"
+    manifest_host = Path(replace_virtual_path(manifest_path, runtime.state["thread_data"]))
+    manifest_host.parent.mkdir(parents=True)
+    manifest_host.write_text(
+        json.dumps({"items": [{"output_file": f"{_OUTPUTS}assets/slide-01.png"}]}),
+        encoding="utf-8",
+    )
+    output_host = Path(
+        replace_virtual_path(
+            f"{_OUTPUTS}assets/slide-01.png",
+            runtime.state["thread_data"],
+        )
+    )
+    summary = {
+        "complete": True,
+        "requested": 1,
+        "images_generated": 1,
+        "failed": 0,
+        "items": [
+            {
+                "output_file": str(output_host),
+                "success": True,
+                "bytes": 1024,
+            }
+        ],
+    }
+    monkeypatch.setattr(deck_service, "_image_script_path", lambda: script)
+    monkeypatch.setattr(
+        deck_service,
+        "run_trusted_image_request",
+        lambda *_args, **_kwargs: subprocess.CompletedProcess(
+            [sys.executable],
+            0,
+            stdout=f"IMAGEGEN_BATCH {json.dumps(summary)}\n",
+            stderr="",
+        ),
+    )
+
+    result = DeckBuildService()._run_image_batch_subprocess(manifest_path, runtime)
+
+    assert result["complete"] is True
+    assert result["items"][0]["output_file"] == (
+        f"{_OUTPUTS}assets/slide-01.png"
+    )
+
+
 def test_deck_image_batch_timeout_is_capped_by_shared_deadline(
     tmp_path: Path,
     monkeypatch,
