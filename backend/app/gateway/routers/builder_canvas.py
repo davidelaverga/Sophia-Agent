@@ -8,6 +8,7 @@ import logging
 import os
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
@@ -59,6 +60,15 @@ def _short_id(value: str | None) -> str | None:
     return value[:12] if value else None
 
 
+def _is_langgraph_thread_id(value: str) -> bool:
+    """LangGraph state APIs accept UUID threads, not voice provider IDs."""
+    try:
+        UUID(value)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return True
+
+
 def _langgraph_url() -> str:
     return (
         os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
@@ -98,6 +108,45 @@ async def _parent_builder_tasks(parent_thread_id: str) -> list[dict[str, Any]]:
         task for task in tasks.values()
         if isinstance(task, dict) and task.get("agent_name") == "sophia_builder"
     ]
+
+
+def _builder_task_from_recent_events(
+    parent_thread_id: str,
+    recent_events: list[dict[str, Any]],
+) -> dict[str, Any] | None:
+    """Project a provider-session canvas event into a snapshot task.
+
+    Gemini voice sessions deliberately use a provider-facing parent ID rather
+    than a LangGraph UUID. The gateway worker still retains the public canvas
+    events, so those events are the authoritative snapshot source for this
+    route.
+    """
+    for event in reversed(recent_events):
+        if not isinstance(event, dict) or event.get("parent_thread_id") != parent_thread_id:
+            continue
+        task_id = event.get("task_id")
+        run_id = event.get("run_id")
+        if not isinstance(task_id, str) or not task_id or not isinstance(run_id, str) or not run_id:
+            continue
+        task: dict[str, Any] = {
+            "agent_name": "sophia_builder",
+            "task_id": task_id,
+            "run_id": run_id,
+            "status": event.get("status") or "running",
+            "last_updated_at": event.get("occurred_at") or "",
+        }
+        completion = event.get("completion")
+        if isinstance(completion, dict):
+            task["builder_result"] = completion
+            task.update(
+                {
+                    key: value
+                    for key, value in completion.items()
+                    if key in {"task_type", "task_brief", "trace_id", "error_message", "builder_failure_diagnostics"}
+                }
+            )
+        return task
+    return None
 
 
 def _task_updated_at(task: dict[str, Any]) -> str:
@@ -886,8 +935,13 @@ async def builder_canvas_snapshot(
 ) -> BuilderCanvasSnapshot:
     _require_thread_owner(authenticated_user_id, parent_thread_id)
     worker = get_builder_canvas_worker(request.app)
-    task = _latest_builder_task(await _parent_builder_tasks(parent_thread_id))
     recent_events = await worker.recent_events(parent_thread_id)
+    task_from_events = not _is_langgraph_thread_id(parent_thread_id)
+    task = (
+        _builder_task_from_recent_events(parent_thread_id, recent_events)
+        if task_from_events
+        else _latest_builder_task(await _parent_builder_tasks(parent_thread_id))
+    )
     worker_summary = await worker.active_summary(parent_thread_id)
     if task is None:
         logger.info(
@@ -912,7 +966,11 @@ async def builder_canvas_snapshot(
             worker_summary.get("subscriber_count"),
         )
         return BuilderCanvasSnapshot(recent_events=recent_events)
-    native_status = await _native_run_status(task_id, run_id, task.get("status"))
+    native_status = (
+        _map_native_status(task.get("status"))
+        if task_from_events
+        else await _native_run_status(task_id, run_id, task.get("status"))
+    )
     if _should_hide_stale_terminal_snapshot(
         task,
         native_status=native_status,
