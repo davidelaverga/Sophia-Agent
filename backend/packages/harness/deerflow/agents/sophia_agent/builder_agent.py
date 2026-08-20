@@ -88,10 +88,19 @@ async def make_sophia_builder_with_distributed_tracing(config: RunnableConfig):
     if not parent_trace:
         yield make_sophia_builder(config)
         return
-    parent_headers = {"langsmith-trace": str(parent_trace)}
-    baggage = cfg.get("baggage")
-    if isinstance(baggage, str) and baggage.strip():
-        parent_headers["baggage"] = baggage
+    parent_project = cfg.get("langsmith-project")
+    inherited_metadata = cfg.get("langsmith-metadata")
+    inherited_tags = cfg.get("langsmith-tags")
+    if not isinstance(parent_project, str) or not parent_project.strip():
+        parent_project = None
+    if not isinstance(inherited_metadata, dict):
+        inherited_metadata = None
+    if isinstance(inherited_tags, str):
+        inherited_tags = [inherited_tags]
+    elif isinstance(inherited_tags, (list, tuple)):
+        inherited_tags = [tag for tag in inherited_tags if isinstance(tag, str)]
+    else:
+        inherited_tags = None
 
     raw_user_id = cfg.get("user_id")
     user_id = validate_user_id(
@@ -110,7 +119,10 @@ async def make_sophia_builder_with_distributed_tracing(config: RunnableConfig):
     )
     with builder_distributed_trace_context(
         config=config,
-        parent=parent_headers,
+        parent=str(parent_trace),
+        project_name=parent_project,
+        inherited_metadata=inherited_metadata,
+        inherited_tags=inherited_tags,
         model_name=resolved_model_info[0],
         model_source=resolved_model_info[1],
     ):

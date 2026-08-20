@@ -472,6 +472,7 @@ class GeminiBrowserDogfoodSessionManager:
         self._completed_tool_call_ids_by_session: dict[str, set[str]] = {}
         self._public_artifact_tool_call_ids_by_session: dict[str, set[str]] = {}
         self._async_tasks_by_session: dict[str, dict[str, dict[str, Any]]] = {}
+        self._parent_thread_id_by_session: dict[str, str] = {}
         self._diagnostics_by_session: dict[str, GeminiReliabilityDiagnostics] = {}
         self._context_mode_by_session: dict[str, str | None] = {}
         self._memory_retrieval_config_by_session: dict[str, dict[str, Any]] = {}
@@ -530,6 +531,11 @@ class GeminiBrowserDogfoodSessionManager:
         )
         self._diagnostics_by_session[dogfood_session.session_id] = diagnostics
         self._context_mode_by_session[dogfood_session.session_id] = resolved_context_mode
+        resolved_parent_thread_id = _string_value(thread_id)
+        if resolved_parent_thread_id:
+            self._parent_thread_id_by_session[dogfood_session.session_id] = resolved_parent_thread_id
+        else:
+            self._parent_thread_id_by_session.pop(dogfood_session.session_id, None)
         if isinstance(memory_retrieval_config, Mapping):
             self._memory_retrieval_config_by_session[dogfood_session.session_id] = dict(memory_retrieval_config)
         dogfood_session.add_public_payload_observer(diagnostics.record_public_payload)
@@ -981,6 +987,9 @@ class GeminiBrowserDogfoodSessionManager:
                     "voice_session_id": dogfood_session.session_id,
                     "voice_trace_id": trace.trace_id,
                     "voice_tool_call_id": function_call.call_id,
+                    "voice_tool_run_id": (
+                        str(getattr(tool_span, "id", "") or "") or None
+                    ),
                     "relay_correlation_id": (
                         source_metadata.relay_correlation_id if source_metadata else None
                     ),
@@ -997,6 +1006,10 @@ class GeminiBrowserDogfoodSessionManager:
                     runtime_mode=dogfood_session.runtime_mode,
                     provider=dogfood_session.provider_name,
                     async_tasks=async_tasks,
+                    parent_thread_id=(
+                        self._parent_thread_id_by_session.get(dogfood_session.session_id)
+                        or dogfood_session.session_id
+                    ),
                     context_mode=self._context_mode_by_session.get(dogfood_session.session_id),
                     memory_retrieval_config=self._memory_retrieval_config_by_session.get(
                         dogfood_session.session_id
@@ -1135,6 +1148,7 @@ class GeminiBrowserDogfoodSessionManager:
         self._completed_tool_call_ids_by_session.pop(dogfood_session_id, None)
         self._public_artifact_tool_call_ids_by_session.pop(dogfood_session_id, None)
         self._async_tasks_by_session.pop(dogfood_session_id, None)
+        self._parent_thread_id_by_session.pop(dogfood_session_id, None)
         self._diagnostics_by_session.pop(dogfood_session_id, None)
         self._context_mode_by_session.pop(dogfood_session_id, None)
         self._memory_retrieval_config_by_session.pop(dogfood_session_id, None)

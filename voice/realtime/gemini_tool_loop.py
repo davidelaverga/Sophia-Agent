@@ -188,6 +188,7 @@ class GeminiBuilderLifecycleHttpBackend:
         args: Mapping[str, Any],
         *,
         session_id: str,
+        parent_thread_id: str | None = None,
         user_id: str,
         runtime_mode: VoiceRuntimeMode,
         provider: str,
@@ -196,10 +197,12 @@ class GeminiBuilderLifecycleHttpBackend:
         trace_context: Mapping[str, Any] | None = None,
     ) -> GeminiBuilderLifecycleResult:
         validated = validate_builder_lifecycle_tool_args(tool_name, args)
+        resolved_parent_thread_id = _string_value(parent_thread_id) or session_id
         if tool_name == GEMINI_START_BUILDER_TASK_TOOL_NAME:
             return await self._start_builder_task(
                 validated,
                 session_id=session_id,
+                parent_thread_id=resolved_parent_thread_id,
                 user_id=user_id,
                 runtime_mode=runtime_mode,
                 provider=provider,
@@ -211,6 +214,7 @@ class GeminiBuilderLifecycleHttpBackend:
             return await self._edit_builder_artifact(
                 validated,
                 session_id=session_id,
+                parent_thread_id=resolved_parent_thread_id,
                 user_id=user_id,
                 runtime_mode=runtime_mode,
                 provider=provider,
@@ -228,6 +232,7 @@ class GeminiBuilderLifecycleHttpBackend:
             return await self._update_async_task(
                 validated,
                 session_id=session_id,
+                parent_thread_id=resolved_parent_thread_id,
                 user_id=user_id,
                 async_tasks=async_tasks,
                 trace_headers=trace_headers,
@@ -252,6 +257,7 @@ class GeminiBuilderLifecycleHttpBackend:
         args: Mapping[str, Any],
         *,
         session_id: str,
+        parent_thread_id: str,
         user_id: str,
         runtime_mode: VoiceRuntimeMode,
         provider: str,
@@ -305,6 +311,7 @@ class GeminiBuilderLifecycleHttpBackend:
         operation_id = f"op_gemini_{thread_id}"
         voice_trace_id = _string_value((trace_context or {}).get("voice_trace_id"))
         voice_tool_call_id = _string_value((trace_context or {}).get("voice_tool_call_id"))
+        voice_tool_run_id = _string_value((trace_context or {}).get("voice_tool_run_id"))
         relay_correlation_id = _string_value((trace_context or {}).get("relay_correlation_id"))
         provider_receive_sequence = (trace_context or {}).get("provider_receive_sequence")
         kickoff_ms = int(time.time() * 1000)
@@ -315,7 +322,7 @@ class GeminiBuilderLifecycleHttpBackend:
             "normalized_brief": description,
             "task_type": task_type,
             "source": "gemini_live_dogfood_start_builder_task",
-            "parent_thread_id": session_id,
+            "parent_thread_id": parent_thread_id,
             "parent_user_id": user_id,
             "companion_artifact": None,
             "active_ritual": None,
@@ -363,19 +370,20 @@ class GeminiBuilderLifecycleHttpBackend:
                         "build_id": build_id,
                         "operation_id": operation_id,
                         "builder_thread_id": thread_id,
-                        "parent_thread_id": session_id,
+                        "parent_thread_id": parent_thread_id,
                         "task_type": task_type,
                         "channel": "voice",
                         "voice_session_id": session_id,
                         "voice_trace_id": voice_trace_id,
                         "voice_tool_call_id": voice_tool_call_id,
+                        "voice_tool_run_id": voice_tool_run_id,
                         "relay_correlation_id": relay_correlation_id,
                         "provider_receive_sequence": provider_receive_sequence,
                     },
                     "configurable": {
                         "thread_id": thread_id,
                         "user_id": user_id,
-                        "parent_thread_id": session_id,
+                        "parent_thread_id": parent_thread_id,
                         "graph_id": contract.ASYNC_BUILDER_AGENT_NAME,
                         "task_type": task_type,
                         "artifact_target_ext": PurePosixPath(artifact_target_path).suffix.lower(),
@@ -384,6 +392,7 @@ class GeminiBuilderLifecycleHttpBackend:
                         "voice_session_id": session_id,
                         "voice_trace_id": voice_trace_id,
                         "voice_tool_call_id": voice_tool_call_id,
+                        "voice_tool_run_id": voice_tool_run_id,
                         "relay_correlation_id": relay_correlation_id,
                     }
                 },
@@ -402,12 +411,13 @@ class GeminiBuilderLifecycleHttpBackend:
             "last_updated_at": now,
             "task_type": task_type,
             "demo_mode": False,
-            "parent_thread_id": session_id,
+            "parent_thread_id": parent_thread_id,
             "artifact_target_path": artifact_target_path,
             "build_id": build_id,
             "operation_id": operation_id,
             "voice_trace_id": voice_trace_id,
             "voice_tool_call_id": voice_tool_call_id,
+            "voice_tool_run_id": voice_tool_run_id,
             "relay_correlation_id": relay_correlation_id,
             "provider_receive_sequence": provider_receive_sequence,
         }
@@ -423,6 +433,7 @@ class GeminiBuilderLifecycleHttpBackend:
             "build_id": build_id,
             "operation_id": operation_id,
             "voice_trace_id": voice_trace_id,
+            "voice_tool_run_id": voice_tool_run_id,
             "async_task": async_task,
             "trusted_user_id": user_id,
             "tool_arg_user_id_ignored": bool(args.get("user_id") and args.get("user_id") != user_id),
@@ -449,6 +460,7 @@ class GeminiBuilderLifecycleHttpBackend:
         args: Mapping[str, Any],
         *,
         session_id: str,
+        parent_thread_id: str,
         user_id: str,
         runtime_mode: VoiceRuntimeMode,
         provider: str,
@@ -523,6 +535,7 @@ class GeminiBuilderLifecycleHttpBackend:
         operation_id = f"op_gemini_{thread_id}"
         voice_trace_id = _string_value((trace_context or {}).get("voice_trace_id"))
         voice_tool_call_id = _string_value((trace_context or {}).get("voice_tool_call_id"))
+        voice_tool_run_id = _string_value((trace_context or {}).get("voice_tool_run_id"))
         relay_correlation_id = _string_value((trace_context or {}).get("relay_correlation_id"))
         provider_receive_sequence = (trace_context or {}).get("provider_receive_sequence")
         kickoff_ms = int(time.time() * 1000)
@@ -543,7 +556,7 @@ class GeminiBuilderLifecycleHttpBackend:
             "normalized_brief": description,
             "task_type": task_type,
             "source": "gemini_live_dogfood_edit_builder_artifact",
-            "parent_thread_id": session_id,
+            "parent_thread_id": parent_thread_id,
             "parent_user_id": user_id,
             "companion_artifact": None,
             "active_ritual": None,
@@ -593,19 +606,20 @@ class GeminiBuilderLifecycleHttpBackend:
                         "build_id": build_id,
                         "operation_id": operation_id,
                         "builder_thread_id": thread_id,
-                        "parent_thread_id": session_id,
+                        "parent_thread_id": parent_thread_id,
                         "task_type": task_type,
                         "channel": "voice",
                         "voice_session_id": session_id,
                         "voice_trace_id": voice_trace_id,
                         "voice_tool_call_id": voice_tool_call_id,
+                        "voice_tool_run_id": voice_tool_run_id,
                         "relay_correlation_id": relay_correlation_id,
                         "provider_receive_sequence": provider_receive_sequence,
                     },
                     "configurable": {
                         "thread_id": thread_id,
                         "user_id": user_id,
-                        "parent_thread_id": session_id,
+                        "parent_thread_id": parent_thread_id,
                         "graph_id": contract.ASYNC_BUILDER_AGENT_NAME,
                         "task_type": task_type,
                         "artifact_target_ext": PurePosixPath(revision_path).suffix.lower(),
@@ -614,6 +628,7 @@ class GeminiBuilderLifecycleHttpBackend:
                         "voice_session_id": session_id,
                         "voice_trace_id": voice_trace_id,
                         "voice_tool_call_id": voice_tool_call_id,
+                        "voice_tool_run_id": voice_tool_run_id,
                         "relay_correlation_id": relay_correlation_id,
                     }
                 },
@@ -633,12 +648,13 @@ class GeminiBuilderLifecycleHttpBackend:
             "task_type": task_type,
             "demo_mode": False,
             "edit_mode": "edit_existing_artifact",
-            "parent_thread_id": session_id,
+            "parent_thread_id": parent_thread_id,
             "artifact_target_path": revision_path,
             "build_id": build_id,
             "operation_id": operation_id,
             "voice_trace_id": voice_trace_id,
             "voice_tool_call_id": voice_tool_call_id,
+            "voice_tool_run_id": voice_tool_run_id,
             "relay_correlation_id": relay_correlation_id,
             "provider_receive_sequence": provider_receive_sequence,
             "source_artifact_path": source_path,
@@ -721,12 +737,47 @@ class GeminiBuilderLifecycleHttpBackend:
         args: Mapping[str, Any],
         *,
         session_id: str,
+        parent_thread_id: str,
         user_id: str,
         async_tasks: Mapping[str, dict[str, Any]],
         trace_headers: Mapping[str, str] | None,
         trace_context: Mapping[str, Any] | None,
     ) -> GeminiBuilderLifecycleResult:
         task = _tracked_task(str(args["task_id"]), async_tasks)
+        task_parent_thread_id = _string_value(task.get("parent_thread_id"))
+        if task_parent_thread_id and task_parent_thread_id != parent_thread_id:
+            logger.warning(
+                "gemini.builder_lifecycle.update parent_thread_mismatch task_id=%s "
+                "task_parent_thread_id=%s session_parent_thread_id=%s",
+                task.get("task_id"),
+                task_parent_thread_id,
+                parent_thread_id,
+            )
+            response = {
+                "ok": False,
+                "tool": GEMINI_UPDATE_ASYNC_TASK_TOOL_NAME,
+                "rejected": True,
+                "error_type": "builder_parent_thread_mismatch",
+                "task_id": task["task_id"],
+                "thread_id": task["thread_id"],
+                "run_id": task["run_id"],
+                "status": task.get("status", "unknown"),
+                "async_task": dict(task),
+                "recovery_guidance": (
+                    "Return to the companion conversation that started this build, "
+                    "or start a fresh builder task in the current conversation."
+                ),
+                "result_summary": (
+                    f"Builder task {task['task_id']} belongs to a different companion "
+                    "conversation; no update was dispatched."
+                ),
+            }
+            return GeminiBuilderLifecycleResult(
+                response=response,
+                result_summary=str(response["result_summary"]),
+                updated_async_tasks={task["task_id"]: dict(task)},
+            )
+        resolved_parent_thread_id = task_parent_thread_id or parent_thread_id
         try:
             current_run = await self._request_json(
                 "GET",
@@ -795,6 +846,7 @@ class GeminiBuilderLifecycleHttpBackend:
             _string_value((trace_context or {}).get("voice_trace_id"))
             or _string_value(task.get("voice_trace_id"))
         )
+        voice_tool_run_id = _string_value((trace_context or {}).get("voice_tool_run_id"))
         run = await self._request_json(
             "POST",
             f"/threads/{task['thread_id']}/runs",
@@ -808,12 +860,13 @@ class GeminiBuilderLifecycleHttpBackend:
                         "build_id": build_id,
                         "operation_id": operation_id,
                         "builder_thread_id": task["thread_id"],
-                        "parent_thread_id": session_id,
+                        "parent_thread_id": resolved_parent_thread_id,
                         "task_type": task_type,
                         "channel": "voice",
                         "voice_session_id": session_id,
                         "voice_trace_id": voice_trace_id,
                         "voice_tool_call_id": _string_value((trace_context or {}).get("voice_tool_call_id")),
+                        "voice_tool_run_id": voice_tool_run_id,
                         "relay_correlation_id": _string_value((trace_context or {}).get("relay_correlation_id")),
                         "provider_receive_sequence": (trace_context or {}).get("provider_receive_sequence"),
                         "update_operation": True,
@@ -821,7 +874,7 @@ class GeminiBuilderLifecycleHttpBackend:
                     "configurable": {
                         "thread_id": task["thread_id"],
                         "user_id": user_id,
-                        "parent_thread_id": session_id,
+                        "parent_thread_id": resolved_parent_thread_id,
                         "graph_id": task.get("agent_name") or builder_lifecycle_contract().ASYNC_BUILDER_AGENT_NAME,
                         "task_type": task_type,
                         "artifact_target_ext": PurePosixPath(artifact_target_path).suffix.lower() if artifact_target_path else "",
@@ -830,6 +883,7 @@ class GeminiBuilderLifecycleHttpBackend:
                         "voice_session_id": session_id,
                         "voice_trace_id": voice_trace_id,
                         "voice_tool_call_id": _string_value((trace_context or {}).get("voice_tool_call_id")),
+                        "voice_tool_run_id": voice_tool_run_id,
                         "relay_correlation_id": _string_value((trace_context or {}).get("relay_correlation_id")),
                     },
                 },
@@ -838,6 +892,9 @@ class GeminiBuilderLifecycleHttpBackend:
         )
         run_id = _required_string(run.get("run_id"), "LangGraph update run response omitted run_id.")
         updated_task = _updated_task(task, status="running", run_id=run_id, updated=True)
+        updated_task["parent_thread_id"] = resolved_parent_thread_id
+        if voice_tool_run_id:
+            updated_task["voice_tool_run_id"] = voice_tool_run_id
         response = {
             "ok": True,
             "tool": GEMINI_UPDATE_ASYNC_TASK_TOOL_NAME,
@@ -1309,6 +1366,7 @@ class GeminiDogfoodToolExecutor:
         call: GeminiLiveFunctionCall,
         *,
         session_id: str,
+        parent_thread_id: str | None = None,
         user_id: str,
         runtime_mode: VoiceRuntimeMode,
         provider: str,
@@ -1453,6 +1511,7 @@ class GeminiDogfoodToolExecutor:
                 call.name,
                 validated_args,
                 session_id=session_id,
+                parent_thread_id=parent_thread_id,
                 user_id=user_id,
                 runtime_mode=runtime_mode,
                 provider=provider,

@@ -134,6 +134,7 @@ class FakeBuilderLifecycleBackend:
         args: Mapping[str, Any],
         *,
         session_id: str,
+        parent_thread_id: str | None = None,
         user_id: str,
         runtime_mode: VoiceRuntimeMode,
         provider: str,
@@ -146,6 +147,7 @@ class FakeBuilderLifecycleBackend:
                 "tool_name": tool_name,
                 "args": dict(args),
                 "session_id": session_id,
+                "parent_thread_id": parent_thread_id,
                 "user_id": user_id,
                 "runtime_mode": runtime_mode.value,
                 "provider": provider,
@@ -260,7 +262,7 @@ class FakeBuilderLifecycleBackend:
                     "result_summary": "Cancelled builder task. task_id: builder-thread-1.",
                 },
                 result_summary="Cancelled builder task. task_id: builder-thread-1.",
-                updated_async_tasks={"builder-thread-1": task},
+                updated_async_tasks={str(args["task_id"]): task},
             )
         if tool_name == "list_async_tasks":
             return gemini_tool_loop.GeminiBuilderLifecycleResult(
@@ -422,6 +424,7 @@ async def test_voice_presentation_builder_seeds_authoring_budget(
         trace_context={
             "voice_trace_id": "voice-trace-1",
             "voice_tool_call_id": "voice-tool-1",
+            "voice_tool_run_id": "voice-tool-run-1",
             "relay_correlation_id": "relay-1",
         },
     )
@@ -445,8 +448,10 @@ async def test_voice_presentation_builder_seeds_authoring_budget(
     run_metadata = backend.requests[1]["json_body"]["config"]["metadata"]
     assert run_metadata["voice_trace_id"] == "voice-trace-1"
     assert run_metadata["voice_tool_call_id"] == "voice-tool-1"
+    assert run_metadata["voice_tool_run_id"] == "voice-tool-run-1"
     assert run_metadata["relay_correlation_id"] == "relay-1"
     assert result.response["async_task"]["voice_trace_id"] == "voice-trace-1"
+    assert result.response["async_task"]["voice_tool_run_id"] == "voice-tool-run-1"
     assert result.response["async_task"]["build_id"].startswith("build_gemini_")
 
 
@@ -1946,6 +1951,132 @@ async def test_browser_relay_start_builder_task_dispatches_existing_builder_boun
 
 
 @pytest.mark.anyio
+async def test_browser_relay_builder_lifecycle_uses_companion_parent_thread_and_cleans_mapping(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    provider_session_id = "gemini-provider-session-identity"
+    companion_thread_id = "companion-thread-identity"
+    fake_builder = FakeBuilderLifecycleBackend()
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+        tool_executor=gemini_tool_loop.GeminiDogfoodToolExecutor(
+            builder_lifecycle_backend=fake_builder,  # type: ignore[arg-type]
+        ),
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="trusted-user-1",
+        session_id=provider_session_id,
+        thread_id=companion_thread_id,
+    )
+
+    lifecycle_calls = [
+        (
+            "start-call",
+            "start_builder_task",
+            {"description": "Make a document.", "task_type": "document"},
+        ),
+        (
+            "update-call",
+            "update_async_task",
+            {"task_id": "builder-thread-1", "message": "Make it warmer."},
+        ),
+        (
+            "cancel-call",
+            "cancel_async_task",
+            {"task_id": "builder-thread-1"},
+        ),
+        (
+            "edit-call",
+            "edit_builder_artifact",
+            {
+                "artifact_path": "/mnt/user-data/outputs/report.md",
+                "message": "Tighten the conclusion.",
+            },
+        ),
+        (
+            "cancel-edit-call",
+            "cancel_async_task",
+            {"task_id": "builder-edit-thread-1"},
+        ),
+    ]
+    for call_id, tool_name, args in lifecycle_calls:
+        response = await manager.ingest_browser_provider_event(
+            _gemini_settings(),
+            dogfood_session_id=browser_session.dogfood_session.session_id,
+            event={
+                "toolCall": {
+                    "functionCalls": [
+                        {"id": call_id, "name": tool_name, "args": args}
+                    ]
+                }
+            },
+        )
+        assert response["accepted"] is True
+
+    assert manager._parent_thread_id_by_session[provider_session_id] == companion_thread_id
+    assert [call["tool_name"] for call in fake_builder.calls] == [
+        tool_name for _, tool_name, _ in lifecycle_calls
+    ]
+    assert {call["session_id"] for call in fake_builder.calls} == {provider_session_id}
+    assert {call["parent_thread_id"] for call in fake_builder.calls} == {
+        companion_thread_id
+    }
+
+    await manager.close_session(provider_session_id)
+    assert provider_session_id not in manager._parent_thread_id_by_session
+
+
+@pytest.mark.anyio
+async def test_browser_relay_builder_lifecycle_falls_back_to_provider_session_id(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    provider_session_id = "gemini-provider-session-fallback"
+    fake_builder = FakeBuilderLifecycleBackend()
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+        tool_executor=gemini_tool_loop.GeminiDogfoodToolExecutor(
+            builder_lifecycle_backend=fake_builder,  # type: ignore[arg-type]
+        ),
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="trusted-user-1",
+        session_id=provider_session_id,
+    )
+
+    response = await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        event={
+            "toolCall": {
+                "functionCalls": [
+                    {
+                        "id": "fallback-start-call",
+                        "name": "start_builder_task",
+                        "args": {
+                            "description": "Make a document.",
+                            "task_type": "document",
+                        },
+                    }
+                ]
+            }
+        },
+    )
+
+    assert response["accepted"] is True
+    assert fake_builder.calls[0]["session_id"] == provider_session_id
+    assert fake_builder.calls[0]["parent_thread_id"] == provider_session_id
+    assert provider_session_id not in manager._parent_thread_id_by_session
+
+    await manager.close_session(provider_session_id)
+
+
+@pytest.mark.anyio
 async def test_browser_relay_lifecycle_tools_dispatch_against_trusted_session_tasks(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2014,6 +2145,54 @@ async def test_browser_relay_lifecycle_tools_dispatch_against_trusted_session_ta
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        (
+            "start_builder_task",
+            {"description": "Make a document.", "task_type": "document"},
+        ),
+        (
+            "edit_builder_artifact",
+            {
+                "artifact_path": "/mnt/user-data/outputs/report.md",
+                "message": "Tighten the conclusion.",
+            },
+        ),
+    ],
+)
+async def test_http_lifecycle_new_runs_separate_companion_parent_from_voice_session(
+    tool_name: str,
+    args: dict[str, str],
+) -> None:
+    provider_session_id = "gemini-provider-session-identity"
+    companion_thread_id = "companion-thread-identity"
+    backend = CapturingBuilderLifecycleHttpBackend(
+        [{"thread_id": "builder-thread-new"}, {"run_id": "run-new"}]
+    )
+
+    result = await backend.execute(
+        tool_name,
+        args,
+        session_id=provider_session_id,
+        parent_thread_id=companion_thread_id,
+        user_id="trusted-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        async_tasks={},
+    )
+
+    run_body = backend.requests[1]["json_body"]
+    assert run_body["input"]["delegation_context"]["parent_thread_id"] == companion_thread_id
+    assert run_body["config"]["metadata"]["parent_thread_id"] == companion_thread_id
+    assert run_body["config"]["metadata"]["voice_session_id"] == provider_session_id
+    assert run_body["config"]["configurable"]["parent_thread_id"] == companion_thread_id
+    assert run_body["config"]["configurable"]["voice_session_id"] == provider_session_id
+    assert result.updated_async_tasks is not None
+    assert result.updated_async_tasks["builder-thread-new"]["parent_thread_id"] == companion_thread_id
+
+
+@pytest.mark.anyio
 async def test_http_lifecycle_backend_update_list_and_cancel_request_shapes() -> None:
     tracked_task = {
         "task_id": "builder-thread-1",
@@ -2025,6 +2204,7 @@ async def test_http_lifecycle_backend_update_list_and_cancel_request_shapes() ->
         "artifact_target_path": "/mnt/user-data/outputs/brief.md",
         "build_id": "build-1",
         "operation_id": "operation-1",
+        "parent_thread_id": "companion-thread-identity",
         "voice_trace_id": "voice-trace-1",
     }
 
@@ -2035,6 +2215,7 @@ async def test_http_lifecycle_backend_update_list_and_cancel_request_shapes() ->
         "update_async_task",
         {"task_id": "builder-thread-1", "message": "Make it warmer."},
         session_id="browser-gemini-builder-lifecycle",
+        parent_thread_id="companion-thread-identity",
         user_id="trusted-user-1",
         runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
         provider="google-gemini-live",
@@ -2063,10 +2244,12 @@ async def test_http_lifecycle_backend_update_list_and_cancel_request_shapes() ->
     assert update_body["input"]["builder_artifact_target_path"] == "/mnt/user-data/outputs/brief.md"
     assert update_body["config"]["metadata"]["build_id"] == "build-1"
     assert update_body["config"]["metadata"]["channel"] == "voice"
+    assert update_body["config"]["metadata"]["parent_thread_id"] == "companion-thread-identity"
+    assert update_body["config"]["metadata"]["voice_session_id"] == "browser-gemini-builder-lifecycle"
     assert update_body["config"]["configurable"] == {
         "thread_id": "builder-thread-1",
         "user_id": "trusted-user-1",
-        "parent_thread_id": "browser-gemini-builder-lifecycle",
+        "parent_thread_id": "companion-thread-identity",
         "graph_id": "sophia_builder",
         "task_type": "document",
         "artifact_target_ext": ".md",
@@ -2075,6 +2258,7 @@ async def test_http_lifecycle_backend_update_list_and_cancel_request_shapes() ->
         "voice_session_id": "browser-gemini-builder-lifecycle",
         "voice_trace_id": "voice-trace-1",
         "voice_tool_call_id": None,
+        "voice_tool_run_id": None,
         "relay_correlation_id": None,
     }
     assert update_result.response["task_id"] == "builder-thread-1"
@@ -2149,6 +2333,37 @@ async def test_http_lifecycle_backend_update_list_and_cancel_request_shapes() ->
     assert cancel_result.response["status"] == "cancelled"
     assert cancel_result.updated_async_tasks is not None
     assert cancel_result.updated_async_tasks["builder-thread-1"]["status"] == "cancelled"
+
+
+@pytest.mark.anyio
+async def test_http_lifecycle_update_rejects_companion_parent_mismatch() -> None:
+    tracked_task = {
+        "task_id": "builder-thread-1",
+        "agent_name": "sophia_builder",
+        "thread_id": "builder-thread-1",
+        "run_id": "run-1",
+        "status": "running",
+        "task_type": "document",
+        "parent_thread_id": "original-companion-thread",
+    }
+    backend = CapturingBuilderLifecycleHttpBackend([])
+
+    result = await backend.execute(
+        "update_async_task",
+        {"task_id": "builder-thread-1", "message": "Change the title."},
+        session_id="gemini-provider-session",
+        parent_thread_id="different-companion-thread",
+        user_id="trusted-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        async_tasks={"builder-thread-1": tracked_task},
+    )
+
+    assert backend.requests == []
+    assert result.response["ok"] is False
+    assert result.response["rejected"] is True
+    assert result.response["error_type"] == "builder_parent_thread_mismatch"
+    assert result.updated_async_tasks == {"builder-thread-1": tracked_task}
 
 
 @pytest.mark.anyio

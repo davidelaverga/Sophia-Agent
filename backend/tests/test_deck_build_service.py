@@ -1845,6 +1845,231 @@ def test_compact_v2_normalizes_only_redundant_inline_anchor_geometry() -> None:
     )
 
 
+def test_compact_v2_normalizes_production_inline_anchor_gradient_paint() -> None:
+    stylesheet = (
+        "main{font-family:Calibri,Arial,sans-serif;background:#04121E}"
+        ".card{background:#123247;border-radius:10px;box-sizing:border-box}"
+        ".panelinner{position:absolute;left:0;top:0;box-sizing:border-box}"
+        "#surfacepanel{position:absolute;box-sizing:border-box;margin:0;"
+        "left:120px;top:220px;width:820px;height:760px}"
+        "#surfacetraits{position:absolute;box-sizing:border-box;margin:0;"
+        "left:1000px;top:260px;width:800px;height:680px}"
+    )
+    gradient = "linear-gradient(180deg,#12586B 0%,#0B2A3D 100%)"
+    body = (
+        '<section id="surfacepanel" data-deck-id="surface-panel" '
+        'data-deck-role="body" data-deck-required="true">'
+        '<div class="card panelinner" style="width:820px;height:760px;'
+        f'background:{gradient};padding:48px"><span>0-200m</span>'
+        '<h1>Companion Layer</h1><p>Where light reaches.</p></div></section>'
+        '<div id="surfacetraits" data-deck-id="surface-traits" '
+        'data-deck-role="list" data-deck-required="true">'
+        '<div class="card panelinner" style="width:800px;height:200px;padding:30px">'
+        '<h2>Reads state</h2><p>Senses mood.</p></div>'
+        '<div class="card panelinner" style="top:240px;width:800px;height:200px;'
+        'padding:30px"><h2>Builds trust</h2><p>Consistency.</p></div></div>'
+    )
+    slides = [
+        {
+            "html_body": body,
+            "slide_css": "",
+            "repair_anchor_ids": ["surfacepanel", "surfacetraits"],
+        }
+    ]
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="cannot prove"):
+        deck_service._validate_compact_source_addressability(stylesheet, slides)
+
+    normalized, report = (
+        deck_service._normalize_compact_v2_anchor_descendant_inline_gradient_paint(
+            slides,
+        )
+    )
+
+    assert normalized is not slides
+    assert slides[0]["html_body"] == body
+    assert normalized[0]["html_body"] == body.replace(gradient, "#12586B")
+    assert report["normalization_applied"] is True
+    assert report["normalized_slide_count"] == 1
+    assert report["normalized_element_count"] == 1
+    assert report["normalized_declaration_count"] == 1
+    assert report["strict_validator_bypassed"] is False
+    deck_service._validate_compact_source_addressability(stylesheet, normalized)
+
+    second, second_report = (
+        deck_service._normalize_compact_v2_anchor_descendant_inline_gradient_paint(
+            normalized,
+        )
+    )
+    assert second is normalized
+    assert second_report["normalization_applied"] is False
+
+
+def test_compact_v2_inline_anchor_gradient_normalization_fails_closed_on_mixed_scope() -> None:
+    gradient = "linear-gradient(180deg,#12586B 0%,#0B2A3D 100%)"
+    shared_style = f"background:{gradient};padding:24px"
+    body = _source_pair_body().replace(
+        "<strong>Stable hierarchy</strong>",
+        f'<strong style="{shared_style}">Stable hierarchy</strong>',
+    ) + f'<p style="{shared_style}">Outside the declared anchors</p>'
+    slides = [
+        {
+            "html_body": body,
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+
+    normalized, report = (
+        deck_service._normalize_compact_v2_anchor_descendant_inline_gradient_paint(
+            slides,
+        )
+    )
+
+    assert normalized is slides
+    assert normalized[0]["html_body"] == body
+    assert report["normalization_applied"] is False
+
+
+@pytest.mark.parametrize(
+    "gradient",
+    [
+        "linear-gradient(#fff,,#000)",
+        "linear-gradient(#fff,#000,)",
+        "linear-gradient(180deg,,#fff,#000)",
+        "linear-gradient(#fff 0% #000 100%)",
+    ],
+)
+def test_compact_v2_inline_anchor_gradient_normalization_rejects_malformed_grammar(
+    gradient: str,
+) -> None:
+    body = _source_pair_body().replace(
+        "<strong>Stable hierarchy</strong>",
+        f'<strong style="background:{gradient}">Stable hierarchy</strong>',
+    )
+    slides = [
+        {
+            "html_body": body,
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+
+    normalized, report = (
+        deck_service._normalize_compact_v2_anchor_descendant_inline_gradient_paint(
+            slides,
+        )
+    )
+
+    assert normalized is slides
+    assert normalized[0]["html_body"] == body
+    assert report["normalization_applied"] is False
+
+
+def test_compact_v2_normalizes_production_translucent_anchor_text_paint() -> None:
+    stylesheet = (
+        "main{font-family:Calibri,Arial,sans-serif;background:#04121E;"
+        "width:1920px;height:1080px;position:relative;overflow:hidden}"
+        ".readout{font-family:Calibri,Arial,sans-serif;font-size:24px;"
+        "color:#5FE0C7;padding:14px 22px;border:2px solid #5FE0C7;"
+        "border-radius:6px;background:#04121Ecc;margin:0}"
+        ".bigtitle{font-size:66px;line-height:1.16;color:#F4FBFA;margin:0}"
+        ".subtext{font-size:28px;line-height:1.42;color:#CFEAE4;margin:18px 0 0 0}"
+        "#hero1{position:absolute;box-sizing:border-box;margin:0;"
+        "left:120px;top:660px;width:900px;height:300px}"
+        "#readout1{position:absolute;box-sizing:border-box;margin:0;"
+        "left:1560px;top:80px;width:240px;height:70px}"
+        "#hero6{position:absolute;box-sizing:border-box;margin:0;"
+        "left:900px;top:660px;width:900px;height:300px}"
+        "#readout6{position:absolute;box-sizing:border-box;margin:0;"
+        "left:120px;top:80px;width:240px;height:70px}"
+        "#readout1,#readout6{display:flex;align-items:center;justify-content:center}"
+    )
+    slides = [
+        {
+            "html_body": (
+                '<section id="hero1" data-deck-id="cover-hero" data-deck-role="title" '
+                'data-deck-required="true"><h1 class="bigtitle">The Deep Sea Harness</h1>'
+                '<p class="subtext">Carrying creative work safely from sunlit intent to '
+                'abyssal execution.</p></section><div id="readout1" '
+                'data-deck-id="cover-readout" data-deck-role="metric" '
+                'data-deck-required="true"><span class="readout">DEPTH 0m</span></div>'
+            ),
+            "slide_css": "",
+            "repair_anchor_ids": ["hero1", "readout1"],
+        },
+        {
+            "html_body": (
+                '<div id="readout6" data-deck-id="close-readout" '
+                'data-deck-role="metric" data-deck-required="true">'
+                '<span class="readout">DEPTH 4000m</span></div>'
+                '<section id="hero6" data-deck-id="close-hero" '
+                'data-deck-role="closing" data-deck-required="true">'
+                '<h1 class="bigtitle">Everything comes back up.</h1>'
+                '<p class="subtext">Three layers, one tether.</p></section>'
+            ),
+            "slide_css": "",
+            "repair_anchor_ids": ["readout6", "hero6"],
+        },
+    ]
+
+    with pytest.raises(deck_service.DeckBuildFailure, match="cannot prove"):
+        deck_service._validate_compact_source_addressability(stylesheet, slides)
+
+    normalized, report = (
+        deck_service._normalize_compact_v2_anchor_descendant_translucent_paint(
+            stylesheet,
+            slides,
+        )
+    )
+
+    assert normalized != stylesheet
+    assert "background:#04121E;" in normalized
+    assert "#04121Ecc" not in normalized
+    assert report["normalization_applied"] is True
+    assert report["normalized_rule_count"] == 1
+    assert report["normalized_declaration_count"] == 1
+    assert report["matched_element_count"] == 2
+    assert report["strict_validator_bypassed"] is False
+    assert report["candidate_compile_changed"] is True
+    deck_service._validate_compact_source_addressability(normalized, slides)
+
+    second, second_report = (
+        deck_service._normalize_compact_v2_anchor_descendant_translucent_paint(
+            normalized,
+            slides,
+        )
+    )
+    assert second == normalized
+    assert second_report["normalization_applied"] is False
+
+
+def test_compact_v2_translucent_anchor_paint_normalization_fails_closed_on_mixed_scope() -> None:
+    stylesheet = _source_pair_stylesheet() + ".readout{background:#04121Ecc}"
+    body = _source_pair_body().replace(
+        "<strong>Stable hierarchy</strong>",
+        '<strong class="readout">Stable hierarchy</strong>',
+    ) + '<p class="readout">Outside the declared anchors</p>'
+    slides = [
+        {
+            "html_body": body,
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+
+    normalized, report = (
+        deck_service._normalize_compact_v2_anchor_descendant_translucent_paint(
+            stylesheet,
+            slides,
+        )
+    )
+
+    assert normalized == stylesheet
+    assert report["normalization_applied"] is False
+    assert report["normalized_declaration_count"] == 0
+
+
 def test_compact_v2_completes_v51_anchor_invariant_contract_before_strict_validation() -> None:
     stylesheet, slides = _v51_incomplete_anchor_contract()
     original_bodies = [slide["html_body"] for slide in slides]

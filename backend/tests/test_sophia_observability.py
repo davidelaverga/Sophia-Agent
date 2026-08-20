@@ -623,19 +623,69 @@ def test_builder_trace_context_restores_distributed_parent(monkeypatch) -> None:
         metadata={"voice_trace_id": "voice-trace-1"},
         tags=["voice"],
         parent="traceparent-from-langsmith-header",
+        project_name="Sophia Voice",
     ):
         pass
 
     assert context_kwargs == [
         {
             "enabled": True,
-            "project_name": "Sophia",
+            "project_name": "Sophia Voice",
             "client": "client",
             "tags": ["sophia_builder", "voice"],
             "metadata": {"voice_trace_id": "voice-trace-1"},
             "parent": "traceparent-from-langsmith-header",
         }
     ]
+
+
+def test_builder_trace_metadata_prefers_agent_server_project(monkeypatch) -> None:
+    monkeypatch.setenv("LANGSMITH_PROJECT", "Sophia Builder Default")
+    _reset_tracing_cache()
+
+    metadata = observability.builder_trace_metadata(
+        config={
+            "configurable": {
+                "langsmith-project": "Sophia Voice",
+                "thread_id": "builder-thread",
+            }
+        }
+    )
+
+    assert metadata["LANGSMITH_PROJECT"] == "Sophia Voice"
+    assert metadata["langsmith_project"] == "Sophia Voice"
+
+
+def test_pinned_langsmith_context_restores_voice_tool_structural_parent() -> None:
+    from langsmith.run_helpers import get_current_run_tree, tracing_context
+    from langsmith.run_trees import RunTree
+
+    voice_root = RunTree(name="gemini_live_conversation", inputs={})
+    voice_tool = voice_root.create_child(
+        name="function_call:start_builder_task",
+        run_type="tool",
+        inputs={},
+    )
+    parent_trace = voice_tool.to_headers()["langsmith-trace"]
+
+    with tracing_context(
+        parent=parent_trace,
+        enabled=True,
+        project_name="Sophia",
+    ):
+        restored_parent = get_current_run_tree()
+        assert restored_parent is not None
+        builder_run = restored_parent.create_child(
+            name="Sophia Builder",
+            inputs={},
+        )
+
+    assert restored_parent.id == voice_tool.id
+    assert restored_parent.trace_id == voice_root.id
+    assert restored_parent.parent_run_id == voice_root.id
+    assert builder_run.trace_id == voice_root.id
+    assert builder_run.parent_run_id == voice_tool.id
+    assert builder_run.dotted_order.startswith(f"{voice_tool.dotted_order}.")
 
 
 def test_builder_trace_runnable_inherits_global_tracing_when_builder_flag_missing(monkeypatch) -> None:
@@ -832,6 +882,95 @@ def test_builder_completion_overwrites_untrusted_trace_identity(monkeypatch) -> 
 
     assert artifact["builder_trace_run_id"] == "authoritative-builder-root"
     assert artifact["builder_trace_root_run_id"] == "authoritative-builder-root"
+
+
+def test_builder_completion_records_distributed_trace_identity_without_remote_parent_object(
+    monkeypatch,
+) -> None:
+    run = _FakeRunTree()
+    run.id = "builder-local-run"
+    run.trace_id = "voice-trace-root"
+    run.parent_run_id = "voice-tool-span"
+    run.parent_run = None
+    run.metadata = {
+        "thread_id": "builder-thread",
+        "run_id": "builder-run",
+        "voice_trace_id": "voice-trace-root",
+        "voice_tool_run_id": "voice-tool-span",
+        "langsmith_project": "Sophia Voice",
+    }
+    feedback_client = _FakeFeedbackClient()
+    artifact = {
+        "artifact_path": "deck.pptx",
+        "run_id": "builder-run",
+        "terminal_status": "completed",
+        "terminal_reason": "artifact_emitted",
+        "builder_trace_id": "stale-trace",
+        "builder_parent_run_id": "stale-parent",
+        "builder_local_root_run_id": "stale-local-root",
+        "voice_trace_id": "stale-voice-trace",
+        "voice_tool_run_id": "stale-voice-tool-span",
+    }
+    monkeypatch.setattr(observability, "_current_run_tree", lambda: run)
+    monkeypatch.setattr(observability, "_feedback_client", lambda: feedback_client)
+
+    assert observability.annotate_builder_completion(
+        {"thread_id": "builder-thread", "run_id": "builder-run"},
+        artifact,
+    ) is True
+
+    assert artifact["builder_trace_run_id"] == "builder-local-run"
+    assert artifact["builder_trace_id"] == "voice-trace-root"
+    assert artifact["builder_parent_run_id"] == "voice-tool-span"
+    assert artifact["builder_local_root_run_id"] == "builder-local-run"
+    assert artifact["builder_trace_root_run_id"] == "builder-local-run"
+    assert artifact["builder_distributed_parent_applied"] is True
+    assert artifact["builder_langsmith_project"] == "Sophia Voice"
+    assert run.metadata["builder_trace_id"] == "voice-trace-root"
+    assert run.metadata["builder_parent_run_id"] == "voice-tool-span"
+    assert run.metadata["builder_local_root_run_id"] == "builder-local-run"
+    assert run.metadata["builder_distributed_parent_applied"] is True
+    assert run.metadata["voice_trace_id"] == "voice-trace-root"
+    assert run.metadata["voice_tool_run_id"] == "voice-tool-span"
+    assert run.metadata["langsmith_project"] == "Sophia Voice"
+    assert run.patch_calls == 1
+    assert feedback_client.feedback[-1]["run_id"] == "builder-local-run"
+
+
+def test_builder_completion_does_not_overclaim_wrong_parent_in_same_trace(
+    monkeypatch,
+) -> None:
+    run = _FakeRunTree()
+    run.id = "builder-local-run"
+    run.trace_id = "voice-trace-root"
+    run.parent_run_id = "different-voice-span"
+    run.metadata = {
+        "thread_id": "builder-thread",
+        "run_id": "builder-run",
+        "voice_trace_id": "voice-trace-root",
+        "voice_tool_run_id": "expected-voice-tool-span",
+    }
+    artifact = {
+        "artifact_path": "deck.pptx",
+        "run_id": "builder-run",
+        "terminal_status": "completed",
+        "terminal_reason": "artifact_emitted",
+    }
+    monkeypatch.setattr(observability, "_current_run_tree", lambda: run)
+    monkeypatch.setattr(
+        observability,
+        "_feedback_client",
+        lambda: _FakeFeedbackClient(),
+    )
+
+    assert observability.annotate_builder_completion(
+        {"thread_id": "builder-thread", "run_id": "builder-run"},
+        artifact,
+    ) is True
+    assert artifact["builder_trace_id"] == "voice-trace-root"
+    assert artifact["builder_parent_run_id"] == "different-voice-span"
+    assert artifact["builder_distributed_parent_applied"] is False
+    assert run.metadata["builder_distributed_parent_applied"] is False
 
 
 def test_builder_completion_matches_build_identity_and_closes_canceled_model_span(monkeypatch) -> None:

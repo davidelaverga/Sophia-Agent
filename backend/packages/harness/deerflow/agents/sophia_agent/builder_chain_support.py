@@ -72,20 +72,32 @@ def builder_distributed_trace_context(
     parent: object,
     model_name: str | None,
     model_source: str | None,
+    project_name: str | None = None,
+    inherited_metadata: dict | None = None,
+    inherited_tags: list[str] | tuple[str, ...] | None = None,
 ):
     """Restore the caller's LangSmith parent around one builder graph run."""
 
-    return langsmith_builder_tracing_context(
-        parent=parent,
-        metadata=builder_trace_metadata(
+    metadata = dict(inherited_metadata or {})
+    metadata.update(
+        builder_trace_metadata(
             model_name=model_name,
             model_source=model_source,
             config=config,
-        ),
-        tags=builder_trace_tags(
+        )
+    )
+    tags = [
+        *(str(tag) for tag in (inherited_tags or ()) if isinstance(tag, str)),
+        *builder_trace_tags(
             model_name=model_name,
             model_source=model_source,
         ),
+    ]
+    return langsmith_builder_tracing_context(
+        parent=parent,
+        project_name=project_name,
+        metadata=metadata,
+        tags=tags,
     )
 
 

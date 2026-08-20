@@ -190,6 +190,15 @@ def builder_trace_metadata(
     runtime_config = config if isinstance(config, dict) else {}
     configurable = _as_dict(runtime_config.get("configurable"))
     config_metadata = _as_dict(runtime_config.get("metadata"))
+    propagated_project = (
+        configurable.get("langsmith-project")
+        or configurable.get("langsmith_project")
+        or config_metadata.get("langsmith-project")
+        or config_metadata.get("langsmith_project")
+    )
+    if _safe_metadata_value(propagated_project) is not None:
+        _merge_safe_metadata(metadata, "LANGSMITH_PROJECT", propagated_project)
+        _merge_safe_metadata(metadata, "langsmith_project", propagated_project)
     for source in (configurable, config_metadata):
         for key in (
             "thread_id",
@@ -201,6 +210,7 @@ def builder_trace_metadata(
             "voice_session_id",
             "voice_trace_id",
             "voice_tool_call_id",
+            "voice_tool_run_id",
             "relay_correlation_id",
             "channel",
         ):
@@ -260,6 +270,7 @@ def langsmith_builder_tracing_context(
     metadata: dict[str, Any] | None = None,
     tags: list[str] | None = None,
     parent: Any | None = None,
+    project_name: str | None = None,
 ) -> Any:
     """Context manager that enables tracing only for builder graph execution."""
 
@@ -270,9 +281,14 @@ def langsmith_builder_tracing_context(
         return nullcontext()
     try:
         tracing_config = get_tracing_config()
+        propagated_project = _safe_metadata_value(project_name)
         return tracing_context(
             enabled=True,
-            project_name=tracing_config.project,
+            project_name=(
+                propagated_project
+                if isinstance(propagated_project, str)
+                else tracing_config.project
+            ),
             client=_langsmith_client(tracing_config),
             tags=_safe_tags(tags),
             metadata=metadata or {},
@@ -634,7 +650,18 @@ def _add_identity_metadata(
     builder_task: dict[str, Any],
     delegation_context: dict[str, Any],
 ) -> None:
-    for key in ("thread_id", "task_id", "run_id", "builder_run_id", "parent_thread_id", "build_id", "operation_id"):
+    for key in (
+        "thread_id",
+        "task_id",
+        "run_id",
+        "builder_run_id",
+        "parent_thread_id",
+        "build_id",
+        "operation_id",
+        "voice_trace_id",
+        "voice_tool_call_id",
+        "voice_tool_run_id",
+    ):
         for source in (artifact, builder_task, delegation_context):
             if key not in metadata:
                 _merge_safe_metadata(metadata, key, source.get(key))
@@ -1302,7 +1329,15 @@ def _add_run_tags(run_tree: Any, tags: list[str]) -> None:
         logger.debug("LangSmith tag attachment failed", exc_info=True)
 
 
-def _root_run_tree(run_tree: Any) -> Any:
+def _local_root_run_tree(run_tree: Any) -> Any:
+    """Return the root reachable through in-process ``parent_run`` objects.
+
+    A distributed LangSmith parent is commonly represented only by
+    ``trace_id``, ``parent_run_id``, and ``dotted_order``. It is not guaranteed
+    to exist as a Python ``parent_run`` object in this worker, so this helper
+    must never be treated as the authoritative distributed trace root.
+    """
+
     current = run_tree
     seen: set[int] = set()
     while current is not None and id(current) not in seen:
@@ -1471,7 +1506,7 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
     if builder_run_id:
         artifact.setdefault("builder_run_id", builder_run_id)
     metadata, tags, qc_results = builder_observability_payload(state, artifact)
-    root_run = _root_run_tree(run_tree)
+    local_root_run = _local_root_run_tree(run_tree)
     _merge_safe_metadata(metadata, "builder_run_id", builder_run_id)
     _merge_safe_metadata(metadata, "build_id", identity.get("build_id"))
     _merge_safe_metadata(metadata, "operation_id", identity.get("operation_id"))
@@ -1480,24 +1515,95 @@ def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any])
     # pre-existing artifact fields with the concrete run tree selected above;
     # otherwise a stale/model-supplied value could be carried into DQ-1 as the
     # purported parent builder trace.
-    artifact["builder_trace_run_id"] = str(getattr(run_tree, "id", "") or "") or None
-    artifact["builder_trace_root_run_id"] = str(getattr(root_run, "id", "") or "") or None
+    trace_run_id = str(getattr(run_tree, "id", "") or "") or None
+    trace_id = str(getattr(run_tree, "trace_id", "") or "") or None
+    parent_run_id = str(getattr(run_tree, "parent_run_id", "") or "") or None
+    local_root_run_id = str(getattr(local_root_run, "id", "") or "") or None
+    selected_run_metadata = _run_metadata(run_tree)
+    propagated_voice_trace_id = str(
+        selected_run_metadata.get("voice_trace_id") or ""
+    ) or None
+    expected_voice_trace_id = str(
+        propagated_voice_trace_id
+        or metadata.get("voice_trace_id")
+        or artifact.get("voice_trace_id")
+        or state.get("voice_trace_id")
+        or ""
+    ) or None
+    _merge_safe_metadata(metadata, "voice_trace_id", expected_voice_trace_id)
+    propagated_voice_tool_run_id = str(
+        selected_run_metadata.get("voice_tool_run_id") or ""
+    ) or None
+    expected_voice_tool_run_id = str(
+        propagated_voice_tool_run_id
+        or metadata.get("voice_tool_run_id")
+        or artifact.get("voice_tool_run_id")
+        or state.get("voice_tool_run_id")
+        or ""
+    ) or None
+    _merge_safe_metadata(metadata, "voice_tool_run_id", expected_voice_tool_run_id)
+    if (
+        trace_id is not None
+        and propagated_voice_trace_id is not None
+        and parent_run_id is not None
+        and propagated_voice_tool_run_id is not None
+    ):
+        distributed_parent_applied = (
+            trace_id == propagated_voice_trace_id
+            and parent_run_id == propagated_voice_tool_run_id
+        )
+    else:
+        distributed_parent_applied = None
+    effective_project = str(
+        selected_run_metadata.get("langsmith_project")
+        or selected_run_metadata.get("LANGSMITH_PROJECT")
+        or metadata.get("langsmith_project")
+        or metadata.get("LANGSMITH_PROJECT")
+        or get_tracing_config().project
+        or ""
+    ) or None
+    artifact["builder_trace_run_id"] = trace_run_id
+    artifact["builder_trace_id"] = trace_id
+    artifact["builder_parent_run_id"] = parent_run_id
+    artifact["builder_local_root_run_id"] = local_root_run_id
+    # Backward-compatible DQ provenance field. This remains the root object
+    # reachable inside the builder worker, not the distributed LangSmith trace
+    # root. New diagnostics must use builder_trace_id for that identity.
+    artifact["builder_trace_root_run_id"] = local_root_run_id
+    artifact["builder_distributed_parent_applied"] = distributed_parent_applied
+    artifact["builder_langsmith_project"] = effective_project
     _merge_safe_metadata(metadata, "builder_trace_run_id", artifact.get("builder_trace_run_id"))
+    _merge_safe_metadata(metadata, "builder_trace_id", artifact.get("builder_trace_id"))
+    _merge_safe_metadata(metadata, "builder_parent_run_id", artifact.get("builder_parent_run_id"))
+    _merge_safe_metadata(metadata, "builder_local_root_run_id", artifact.get("builder_local_root_run_id"))
     _merge_safe_metadata(metadata, "builder_trace_root_run_id", artifact.get("builder_trace_root_run_id"))
+    _merge_safe_metadata(
+        metadata,
+        "builder_distributed_parent_applied",
+        artifact.get("builder_distributed_parent_applied"),
+    )
+    _merge_safe_metadata(metadata, "builder_langsmith_project", effective_project)
+    _merge_safe_metadata(metadata, "LANGSMITH_PROJECT", effective_project)
+    _merge_safe_metadata(metadata, "langsmith_project", effective_project)
     _add_run_metadata(run_tree, metadata)
     _add_run_tags(run_tree, tags)
-    if root_run is not run_tree:
-        _add_run_metadata(root_run, metadata)
-        _add_run_tags(root_run, tags)
-    _close_open_builder_model_runs(root_run, artifact)
-    _patch_run_tree(root_run)
-    _create_qc_feedback(root_run, qc_results)
-    _create_terminal_feedback(root_run, artifact)
+    if local_root_run is not run_tree:
+        _add_run_metadata(local_root_run, metadata)
+        _add_run_tags(local_root_run, tags)
+    _close_open_builder_model_runs(local_root_run, artifact)
+    _patch_run_tree(local_root_run)
+    _create_qc_feedback(local_root_run, qc_results)
+    _create_terminal_feedback(local_root_run, artifact)
     logger.info(
-        "Sophia builder LangSmith completion annotation attached: run_id=%s root_run_id=%s builder_run_id=%s project=%s",
-        getattr(run_tree, "id", None),
-        getattr(root_run, "id", None),
+        "Sophia builder LangSmith completion annotation attached: run_id=%s trace_id=%s "
+        "parent_run_id=%s local_root_run_id=%s distributed_parent_applied=%s "
+        "builder_run_id=%s project=%s",
+        trace_run_id,
+        trace_id,
+        parent_run_id,
+        local_root_run_id,
+        distributed_parent_applied,
         builder_run_id,
-        _safe_metadata_value(get_tracing_config().project),
+        _safe_metadata_value(effective_project),
     )
     return True

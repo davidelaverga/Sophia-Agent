@@ -421,7 +421,9 @@ def test_distributed_builder_factory_keeps_parent_context_open_for_graph_lifetim
     config = {
         "configurable": {
             "langsmith-trace": "langsmith-parent-header",
-            "baggage": "langsmith-project=Sophia,langsmith-tag=channel%3Avoice",
+            "langsmith-project": "Sophia Voice",
+            "langsmith-metadata": {"caller": "gemini_live", "channel": "voice"},
+            "langsmith-tags": ["voice", "gemini_live"],
             "user_id": "voice-user",
             "model_name": "claude-sonnet-5",
             "task_type": "presentation",
@@ -440,15 +442,80 @@ def test_distributed_builder_factory_keeps_parent_context_open_for_graph_lifetim
 
     assert events[-1] == "exit"
     context_kwargs = events[0][1]
-    assert context_kwargs["parent"] == {
-        "langsmith-trace": "langsmith-parent-header",
-        "baggage": "langsmith-project=Sophia,langsmith-tag=channel%3Avoice",
+    assert context_kwargs["parent"] == "langsmith-parent-header"
+    assert context_kwargs["project_name"] == "Sophia Voice"
+    assert context_kwargs["inherited_metadata"] == {
+        "caller": "gemini_live",
+        "channel": "voice",
     }
+    assert context_kwargs["inherited_tags"] == ["voice", "gemini_live"]
     create_kwargs = events[1][1]
     assert create_kwargs["external_trace_context"] is True
     assert create_kwargs["resolved_model_info"] == ("claude-sonnet-5", "config-sonnet")
     assert create_kwargs["task_type"] == "presentation"
     assert create_kwargs["artifact_target_ext"] == ".pptx"
+
+
+def test_distributed_builder_context_merges_decoded_agent_server_baggage(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.agents.sophia_agent import builder_chain_support
+
+    captured: dict[str, object] = {}
+    marker = object()
+
+    def fake_tracing_context(**kwargs):
+        captured.update(kwargs)
+        return marker
+
+    monkeypatch.setattr(
+        builder_chain_support,
+        "langsmith_builder_tracing_context",
+        fake_tracing_context,
+    )
+    monkeypatch.setattr(
+        builder_chain_support,
+        "builder_trace_metadata",
+        lambda **_kwargs: {
+            "sophia_component": "builder",
+            "voice_trace_id": "trusted-voice-trace",
+        },
+    )
+    monkeypatch.setattr(
+        builder_chain_support,
+        "builder_trace_tags",
+        lambda **_kwargs: ["sophia_builder", "builder_model:claude-sonnet-5"],
+    )
+
+    result = builder_chain_support.builder_distributed_trace_context(
+        config={"configurable": {"thread_id": "builder-thread"}},
+        parent="langsmith-parent-header",
+        project_name="Sophia Voice",
+        inherited_metadata={
+            "caller": "gemini_live",
+            "voice_trace_id": "caller-voice-trace",
+        },
+        inherited_tags=["voice", "gemini_live"],
+        model_name="claude-sonnet-5",
+        model_source="default",
+    )
+
+    assert result is marker
+    assert captured == {
+        "parent": "langsmith-parent-header",
+        "project_name": "Sophia Voice",
+        "metadata": {
+            "caller": "gemini_live",
+            "voice_trace_id": "trusted-voice-trace",
+            "sophia_component": "builder",
+        },
+        "tags": [
+            "voice",
+            "gemini_live",
+            "sophia_builder",
+            "builder_model:claude-sonnet-5",
+        ],
+    }
 
 
 def test_enabled_deck_quality_instrument_is_compiled_at_service_startup(

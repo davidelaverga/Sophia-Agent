@@ -19,6 +19,7 @@ from typing import Any
 import tinycss2
 from bs4 import BeautifulSoup, Tag
 from langchain.tools import ToolRuntime
+from tinycss2.color3 import parse_color
 
 from deerflow.sandbox.tools import (
     get_thread_data,
@@ -538,6 +539,67 @@ class DeckBuildService:
                         },
                     ) as run:
                         finish_span(run, normalization)
+                slides, inline_paint_normalization = (
+                    _normalize_compact_v2_anchor_descendant_inline_gradient_paint(
+                        slides,
+                    )
+                )
+                if inline_paint_normalization["normalized_declaration_count"] > 0:
+                    logger.info(
+                        "[DeckIRNormalization] compact-v2 inline anchor gradient paint made opaque "
+                        "normalized_slides=%d normalized_elements=%d normalized_declarations=%d "
+                        "rawContentExcluded=true",
+                        inline_paint_normalization["normalized_slide_count"],
+                        inline_paint_normalization["normalized_element_count"],
+                        inline_paint_normalization["normalized_declaration_count"],
+                    )
+                    with deck_span(
+                        "deck.ir.normalize",
+                        runtime=runtime,
+                        build_id=build_id,
+                        visual_policy=deck.visual_policy,
+                        status=deck.status,
+                        slide_count=len(slides),
+                        run_type="tool",
+                        inputs={
+                            "authoring_contract": deck.deck_authoring_contract,
+                            "normalization_kind": "anchor_descendant_inline_gradient_paint",
+                        },
+                    ) as run:
+                        finish_span(run, inline_paint_normalization)
+                normalized_stylesheet, paint_normalization = (
+                    _normalize_compact_v2_anchor_descendant_translucent_paint(
+                        deck.deck_stylesheet or "",
+                        slides,
+                    )
+                )
+                if paint_normalization["normalized_declaration_count"] > 0:
+                    deck.deck_stylesheet = normalized_stylesheet
+                    deck.deck_stylesheet_hash = hashlib.sha256(
+                        normalized_stylesheet.encode("utf-8")
+                    ).hexdigest()
+                    logger.info(
+                        "[DeckIRNormalization] compact-v2 anchor descendant paint made opaque "
+                        "normalized_rules=%d normalized_declarations=%d matched_elements=%d "
+                        "rawContentExcluded=true",
+                        paint_normalization["normalized_rule_count"],
+                        paint_normalization["normalized_declaration_count"],
+                        paint_normalization["matched_element_count"],
+                    )
+                    with deck_span(
+                        "deck.ir.normalize",
+                        runtime=runtime,
+                        build_id=build_id,
+                        visual_policy=deck.visual_policy,
+                        status=deck.status,
+                        slide_count=len(slides),
+                        run_type="tool",
+                        inputs={
+                            "authoring_contract": deck.deck_authoring_contract,
+                            "normalization_kind": "anchor_descendant_translucent_paint",
+                        },
+                    ) as run:
+                        finish_span(run, paint_normalization)
             deadline_setter = getattr(self._native_service, "set_deadline_epoch_ms", None)
             if callable(deadline_setter):
                 deadline_setter(_service_deadline_epoch_ms(runtime))
@@ -2653,7 +2715,11 @@ def _repair_instruction_for_failure(
             "Repair the D2.1 deck input and call prepare_deck_build exactly once more. "
             "Include authoring_contract=compact_model_html_v2, creative_plan with design_plan, image_assets, "
             "slide_compositions, one concise shared deck_stylesheet, and one html_body per slide. Put all authored CSS "
-            "in deck_stylesheet and keep slide_css empty. Keep the slide canvas 1920x1080 and keep every shape inside it. If an intentional decorative bleed is unavoidable, mark its owning HTML element with data-deck-role=\"decorative\", \"background\", or \"bleed\" so the native gate can identify it. Use an opaque background, no scripts/external URLs, "
+            "in deck_stylesheet and keep slide_css empty. Keep the slide canvas 1920x1080 and keep every shape "
+            "inside it. If an intentional decorative bleed is unavoidable, mark its owning HTML element with "
+            "data-deck-role=\"decorative\", \"background\", or \"bleed\" so the native gate can identify it. "
+            "Use opaque backgrounds for the canvas and text-bearing descendants inside repair anchors, no "
+            "scripts/external URLs, "
             "and reference only planned assets as ../assets/slide-XX.png. "
             f"Previous failure: {exc.code}: {safe_excerpt(exc.summary, limit=400)}"
         ),
@@ -4099,6 +4165,499 @@ def _anchor_translation_clearance_report(
     }
 
 
+def _opaque_hex_from_simple_linear_gradient(
+    declaration: Any,
+) -> str | None:
+    """Collapse one simple all-opaque linear gradient to its first stop."""
+
+    if declaration.lower_name not in {"background", "background-image"}:
+        return None
+    tokens = [
+        token
+        for token in declaration.value
+        if getattr(token, "type", "") not in {"comment", "whitespace"}
+    ]
+    if (
+        len(tokens) != 1
+        or getattr(tokens[0], "type", "") != "function"
+        or str(getattr(tokens[0], "name", "")).casefold() != "linear-gradient"
+    ):
+        return None
+    arguments = [
+        token
+        for token in getattr(tokens[0], "arguments", ())
+        if getattr(token, "type", "") not in {"comment", "whitespace"}
+    ]
+    segments: list[list[Any]] = []
+    current_segment: list[Any] = []
+    for token in arguments:
+        if (
+            getattr(token, "type", "") == "literal"
+            and str(getattr(token, "value", "")) == ","
+        ):
+            if not current_segment:
+                return None
+            segments.append(current_segment)
+            current_segment = []
+            continue
+        current_segment.append(token)
+    if not current_segment:
+        return None
+    segments.append(current_segment)
+
+    if segments and not any(
+        getattr(token, "type", "") == "hash" for token in segments[0]
+    ):
+        direction = segments.pop(0)
+        if (
+            len(direction) != 1
+            or getattr(direction[0], "type", "") != "dimension"
+            or str(getattr(direction[0], "lower_unit", "")).casefold()
+            not in {"deg", "grad", "rad", "turn"}
+        ):
+            return None
+    if len(segments) < 2:
+        return None
+
+    color_tokens: list[Any] = []
+    for segment in segments:
+        if not segment or getattr(segment[0], "type", "") != "hash":
+            return None
+        if len(segment) > 3 or any(
+            getattr(token, "type", "") == "hash" for token in segment[1:]
+        ):
+            return None
+        for position in segment[1:]:
+            position_type = getattr(position, "type", "")
+            if position_type == "percentage":
+                continue
+            if position_type == "number" and float(
+                getattr(position, "value", math.nan)
+            ) == 0:
+                continue
+            return None
+        color_tokens.append(segment[0])
+
+    normalized_colors: list[str] = []
+    for token in color_tokens:
+        value = str(getattr(token, "value", ""))
+        if len(value) not in {3, 4, 6, 8} or not re.fullmatch(
+            r"[0-9a-fA-F]+",
+            value,
+        ):
+            return None
+        try:
+            color = parse_color(token)
+        except Exception:  # noqa: BLE001 - malformed colors remain validator-owned.
+            return None
+        alpha = getattr(color, "alpha", None)
+        if (
+            not isinstance(alpha, (int, float))
+            or isinstance(alpha, bool)
+            or not math.isfinite(alpha)
+            or alpha != 1
+        ):
+            return None
+        normalized_colors.append(
+            f"#{value[:-1] if len(value) == 4 else value[:-2] if len(value) == 8 else value}"
+        )
+    return normalized_colors[0]
+
+
+def _normalize_inline_gradient_style_value(value: str) -> tuple[str, int]:
+    try:
+        declarations = tinycss2.parse_declaration_list(
+            value,
+            skip_comments=False,
+            skip_whitespace=False,
+        )
+    except (RecursionError, TypeError, ValueError):
+        return value, 0
+    if any(
+        getattr(item, "type", "") in {"at-rule", "error", "qualified-rule"}
+        for item in declarations
+    ):
+        return value, 0
+    background_declarations = [
+        item
+        for item in declarations
+        if getattr(item, "type", "") == "declaration"
+        and item.lower_name.startswith("background")
+    ]
+    if len(background_declarations) != 1:
+        return value, 0
+    declaration = background_declarations[0]
+    opaque_hex = _opaque_hex_from_simple_linear_gradient(declaration)
+    if opaque_hex is None:
+        return value, 0
+    declaration.name = "background"
+    declaration.lower_name = "background"
+    declaration.value = tinycss2.parse_component_value_list(opaque_hex)
+    normalized = tinycss2.serialize(declarations)
+    if not value.rstrip().endswith(";") and normalized.rstrip().endswith(";"):
+        trailing = normalized[len(normalized.rstrip()) :]
+        normalized = normalized.rstrip()[:-1] + trailing
+    return normalized, 1
+
+
+class _InlineStyleValueMapNormalizer(HTMLParser):
+    """Apply approved style-value rewrites without serializing slide HTML."""
+
+    def __init__(self, source: str, replacements: dict[str, str]) -> None:
+        super().__init__(convert_charrefs=False)
+        self._source = source
+        self._replacements = replacements
+        self._line_offsets = [0, *(match.end() for match in re.finditer(r"\n", source))]
+        self.replacements: list[tuple[int, int, str]] = []
+        self.replacement_counts = {value: 0 for value in replacements}
+
+    def handle_starttag(
+        self,
+        _tag: str,
+        _attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self._collect_start_tag()
+
+    def handle_startendtag(
+        self,
+        _tag: str,
+        _attrs: list[tuple[str, str | None]],
+    ) -> None:
+        self._collect_start_tag()
+
+    def _collect_start_tag(self) -> None:
+        raw_tag = self.get_starttag_text()
+        if not isinstance(raw_tag, str) or not raw_tag:
+            return
+        value_replacements: list[tuple[int, int, str, str]] = []
+        for value_start, value_end in _quoted_style_attribute_value_spans(raw_tag):
+            value = raw_tag[value_start:value_end]
+            normalized = self._replacements.get(value)
+            if normalized is None:
+                continue
+            value_replacements.append((value_start, value_end, normalized, value))
+        if not value_replacements:
+            return
+        normalized_tag = raw_tag
+        for start, end, normalized, value in reversed(value_replacements):
+            normalized_tag = normalized_tag[:start] + normalized + normalized_tag[end:]
+            self.replacement_counts[value] += 1
+        line, column = self.getpos()
+        if line < 1 or line > len(self._line_offsets):
+            return
+        start = self._line_offsets[line - 1] + column
+        end = start + len(raw_tag)
+        if self._source[start:end] != raw_tag:
+            return
+        self.replacements.append((start, end, normalized_tag))
+
+
+def _normalize_compact_v2_anchor_descendant_inline_gradient_paint(
+    slides: list[dict[str, Any]],
+) -> tuple[list[dict[str, Any]], dict[str, Any]]:
+    """Collapse simple opaque inline gradients only inside declared anchors."""
+
+    normalized_slides = slides
+    normalized_slide_count = 0
+    normalized_element_count = 0
+    normalized_declaration_count = 0
+    for index, raw in enumerate(slides):
+        declared = raw.get("repair_anchor_ids")
+        body = raw.get("html_body")
+        if (
+            not isinstance(declared, list)
+            or len(declared) != 2
+            or any(
+                not isinstance(identifier, str)
+                or _COMPACT_SOURCE_ID_RE.fullmatch(identifier) is None
+                for identifier in declared
+            )
+            or len(set(declared)) != 2
+            or not isinstance(body, str)
+            or not body.strip()
+        ):
+            continue
+        try:
+            soup = BeautifulSoup(body, "html.parser")
+        except Exception:  # noqa: BLE001 - strict validation reports malformed source.
+            continue
+        anchor_matches = tuple(soup.find_all(id=identifier) for identifier in declared)
+        if any(
+            len(matches) != 1 or not isinstance(matches[0], Tag)
+            for matches in anchor_matches
+        ):
+            continue
+        anchors = (anchor_matches[0][0], anchor_matches[1][0])
+        style_replacements: dict[str, str] = {}
+        expected_counts: dict[str, int] = {}
+        for element in soup.find_all(True):
+            if not isinstance(element, Tag) or not element.get_text(" ", strip=True):
+                continue
+            if not any(
+                element is anchor
+                or any(parent is anchor for parent in element.parents)
+                for anchor in anchors
+            ):
+                continue
+            style = element.attrs.get("style")
+            if not isinstance(style, str) or not style.strip():
+                continue
+            normalized_style, declaration_count = (
+                _normalize_inline_gradient_style_value(style)
+            )
+            if not declaration_count:
+                continue
+            existing = style_replacements.get(style)
+            if existing is not None and existing != normalized_style:
+                style_replacements = {}
+                expected_counts = {}
+                break
+            style_replacements[style] = normalized_style
+            expected_counts[style] = expected_counts.get(style, 0) + 1
+        if not style_replacements:
+            continue
+        for element in soup.find_all(True):
+            if not isinstance(element, Tag):
+                continue
+            style = element.attrs.get("style")
+            if style not in style_replacements:
+                continue
+            if (
+                not element.get_text(" ", strip=True)
+                or not any(
+                    element is anchor
+                    or any(parent is anchor for parent in element.parents)
+                    for anchor in anchors
+                )
+            ):
+                style_replacements = {}
+                expected_counts = {}
+                break
+        if not style_replacements:
+            continue
+
+        normalizer = _InlineStyleValueMapNormalizer(body, style_replacements)
+        try:
+            normalizer.feed(body)
+            normalizer.close()
+        except (RecursionError, TypeError, ValueError):
+            continue
+        if normalizer.replacement_counts != expected_counts:
+            continue
+        normalized_body = body
+        for start, end, replacement in reversed(normalizer.replacements):
+            normalized_body = normalized_body[:start] + replacement + normalized_body[end:]
+        if normalized_body == body:
+            continue
+        if normalized_slides is slides:
+            normalized_slides = [dict(slide) for slide in slides]
+        normalized_slides[index]["html_body"] = normalized_body
+        normalized_slide_count += 1
+        normalized_element_count += sum(expected_counts.values())
+        normalized_declaration_count += sum(expected_counts.values())
+
+    return normalized_slides, {
+        "normalization_applied": normalized_declaration_count > 0,
+        "normalized_slide_count": normalized_slide_count,
+        "normalized_element_count": normalized_element_count,
+        "normalized_declaration_count": normalized_declaration_count,
+        "replacement_kind": "simple_opaque_linear_gradient_to_first_stop",
+        "strict_validator_bypassed": False,
+        "candidate_compile_changed": normalized_declaration_count > 0,
+        "raw_content_excluded": True,
+    }
+
+
+def _opaque_hex_for_translucent_background(
+    declaration: Any,
+) -> str | None:
+    """Return the same literal hex color with its alpha channel removed."""
+
+    if declaration.lower_name not in {"background", "background-color"}:
+        return None
+    tokens = [
+        token
+        for token in declaration.value
+        if getattr(token, "type", "") not in {"comment", "whitespace"}
+    ]
+    if len(tokens) != 1 or getattr(tokens[0], "type", "") != "hash":
+        return None
+    value = str(getattr(tokens[0], "value", ""))
+    if len(value) not in {4, 8} or not re.fullmatch(r"[0-9a-fA-F]+", value):
+        return None
+    try:
+        color = parse_color(tokens[0])
+    except Exception:  # noqa: BLE001 - malformed colors remain validator-owned.
+        return None
+    alpha = getattr(color, "alpha", None)
+    if (
+        not isinstance(alpha, (int, float))
+        or isinstance(alpha, bool)
+        or not math.isfinite(alpha)
+        or not 0 < alpha < 1
+    ):
+        return None
+    return f"#{value[:-1] if len(value) == 4 else value[:-2]}"
+
+
+def _normalize_compact_v2_anchor_descendant_translucent_paint(
+    stylesheet: str,
+    slides: list[dict[str, Any]],
+) -> tuple[str, dict[str, Any]]:
+    """Make literal translucent paint on declared anchor text descendants opaque.
+
+    The sealed repair witness must be able to move both declared anchors while
+    preserving readable text paint. A model can otherwise author valid anchor
+    geometry but put a translucent literal background on a nested text owner,
+    making the safe repair overlay impossible to prove. This normalization is
+    deliberately narrow: it edits one literal 4/8-digit hex background only
+    when every element matched by that rule is text-bearing and lives inside a
+    declared repair anchor. Mixed or ambiguous selector scopes remain unchanged.
+    """
+
+    def report(
+        *,
+        normalized_rule_count: int = 0,
+        normalized_declaration_count: int = 0,
+        matched_element_count: int = 0,
+        stylesheet_after: str = stylesheet,
+    ) -> dict[str, Any]:
+        return {
+            "normalization_applied": normalized_declaration_count > 0,
+            "normalized_rule_count": normalized_rule_count,
+            "normalized_declaration_count": normalized_declaration_count,
+            "matched_element_count": matched_element_count,
+            "stylesheet_bytes_before": len(stylesheet.encode("utf-8")),
+            "stylesheet_bytes_after": len(stylesheet_after.encode("utf-8")),
+            "strict_validator_bypassed": False,
+            "candidate_compile_changed": normalized_declaration_count > 0,
+            "raw_content_excluded": True,
+        }
+
+    slide_scopes: list[tuple[BeautifulSoup, tuple[Tag, Tag]]] = []
+    for raw in slides:
+        declared = raw.get("repair_anchor_ids")
+        body = raw.get("html_body")
+        if (
+            not isinstance(declared, list)
+            or len(declared) != 2
+            or any(
+                not isinstance(identifier, str)
+                or _COMPACT_SOURCE_ID_RE.fullmatch(identifier) is None
+                for identifier in declared
+            )
+            or len(set(declared)) != 2
+            or not isinstance(body, str)
+            or not body.strip()
+        ):
+            return stylesheet, report()
+        try:
+            soup = BeautifulSoup(
+                assemble_compact_slide_html(
+                    deck_stylesheet="",
+                    html_body=body,
+                    slide_css="",
+                ),
+                "html.parser",
+            )
+        except Exception:  # noqa: BLE001 - strict validation reports malformed source.
+            return stylesheet, report()
+        anchors = tuple(soup.find_all(id=identifier) for identifier in declared)
+        if any(len(matches) != 1 or not isinstance(matches[0], Tag) for matches in anchors):
+            return stylesheet, report()
+        slide_scopes.append((soup, (anchors[0][0], anchors[1][0])))
+
+    try:
+        rules = tinycss2.parse_stylesheet(
+            stylesheet,
+            skip_comments=False,
+            skip_whitespace=False,
+        )
+    except Exception:  # noqa: BLE001 - strict validation reports malformed source.
+        return stylesheet, report()
+    if any(getattr(rule, "type", "") in {"at-rule", "error"} for rule in rules):
+        return stylesheet, report()
+
+    normalized_rule_count = 0
+    normalized_declaration_count = 0
+    matched_element_count = 0
+    for rule in rules:
+        if getattr(rule, "type", "") != "qualified-rule":
+            continue
+        declarations = tinycss2.parse_declaration_list(
+            rule.content,
+            skip_comments=False,
+            skip_whitespace=False,
+        )
+        if any(
+            getattr(item, "type", "") in {"at-rule", "error", "qualified-rule"}
+            for item in declarations
+        ):
+            return stylesheet, report()
+        background_declarations = [
+            item
+            for item in declarations
+            if getattr(item, "type", "") == "declaration"
+            and item.lower_name.startswith("background")
+        ]
+        if len(background_declarations) != 1:
+            continue
+        declaration = background_declarations[0]
+        opaque_hex = _opaque_hex_for_translucent_background(declaration)
+        if opaque_hex is None:
+            continue
+
+        selector = tinycss2.serialize(rule.prelude).strip()
+        selector_matches: list[Tag] = []
+        selector_is_anchor_scoped = True
+        for soup, anchors in slide_scopes:
+            try:
+                matches = tuple(
+                    element
+                    for element in soup.select(selector)
+                    if isinstance(element, Tag)
+                )
+            except Exception:  # noqa: BLE001 - unsupported selectors remain unchanged.
+                selector_is_anchor_scoped = False
+                break
+            for element in matches:
+                if (
+                    not element.get_text(" ", strip=True)
+                    or not any(
+                        element is anchor
+                        or any(parent is anchor for parent in element.parents)
+                        for anchor in anchors
+                    )
+                ):
+                    selector_is_anchor_scoped = False
+                    break
+                selector_matches.append(element)
+            if not selector_is_anchor_scoped:
+                break
+        if not selector_is_anchor_scoped or not selector_matches:
+            continue
+
+        declaration.value = tinycss2.parse_component_value_list(opaque_hex)
+        rule.content = tinycss2.parse_component_value_list(
+            tinycss2.serialize(declarations)
+        )
+        normalized_rule_count += 1
+        normalized_declaration_count += 1
+        matched_element_count += len(selector_matches)
+
+    if not normalized_declaration_count:
+        return stylesheet, report()
+    normalized = tinycss2.serialize(rules)
+    if len(normalized.encode("utf-8")) > 8 * 1024:
+        return stylesheet, report()
+    return normalized, report(
+        normalized_rule_count=normalized_rule_count,
+        normalized_declaration_count=normalized_declaration_count,
+        matched_element_count=matched_element_count,
+        stylesheet_after=normalized,
+    )
+
+
 class _InlineFontFallbackNormalizer(HTMLParser):
     """Collect byte-local start-tag rewrites without serializing the DOM."""
 
@@ -4660,7 +5219,8 @@ def _validate_compact_source_addressability(
             raise _authoring_failure(
                 f"slides[{index}] cannot prove two compact-v2 source geometry anchors; "
                 "keep their complete baseline geometry in deck_stylesheet and any authenticated repair overlay safe. "
-                "Avoid any other matching nonzero, logical, or vendor margin rule."
+                "Keep text-descendant backgrounds opaque and avoid any other matching nonzero, logical, or "
+                "vendor margin rule."
             )
 
 
