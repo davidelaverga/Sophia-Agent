@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import asyncio
 import json
 import time
+from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -384,6 +386,69 @@ def test_ordinary_builder_construction_has_zero_dq_startup_validation(
     assert isinstance(agent, _Agent)
     # The pre-campaign foundation audit remains on the factory path.
     assert baseline_audits == [config]
+
+
+def test_distributed_builder_factory_keeps_parent_context_open_for_graph_lifetime(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.agents.sophia_agent import builder_agent
+
+    events: list[object] = []
+    created_agent = object()
+
+    @contextmanager
+    def fake_distributed_context(**kwargs):
+        events.append(("enter", kwargs))
+        yield
+        events.append("exit")
+
+    def fake_create_builder_agent(**kwargs):
+        events.append(("create", kwargs))
+        return created_agent
+
+    monkeypatch.setattr(
+        builder_agent,
+        "builder_distributed_trace_context",
+        fake_distributed_context,
+    )
+    monkeypatch.setattr(
+        builder_agent,
+        "_resolve_builder_model_name",
+        lambda _model_name: ("claude-sonnet-5", "config-sonnet"),
+    )
+    monkeypatch.setattr(builder_agent, "_create_builder_agent", fake_create_builder_agent)
+
+    config = {
+        "configurable": {
+            "langsmith-trace": "langsmith-parent-header",
+            "baggage": "langsmith-project=Sophia,langsmith-tag=channel%3Avoice",
+            "user_id": "voice-user",
+            "model_name": "claude-sonnet-5",
+            "task_type": "presentation",
+            "artifact_target_ext": ".pptx",
+            "voice_trace_id": "voice-trace-1",
+            "voice_tool_call_id": "voice-tool-1",
+        }
+    }
+    async def exercise_factory() -> None:
+        async with builder_agent.make_sophia_builder_with_distributed_tracing(config) as agent:
+            assert agent is created_agent
+            assert events[0][0] == "enter"
+            assert events[1][0] == "create"
+
+    asyncio.run(exercise_factory())
+
+    assert events[-1] == "exit"
+    context_kwargs = events[0][1]
+    assert context_kwargs["parent"] == {
+        "langsmith-trace": "langsmith-parent-header",
+        "baggage": "langsmith-project=Sophia,langsmith-tag=channel%3Avoice",
+    }
+    create_kwargs = events[1][1]
+    assert create_kwargs["external_trace_context"] is True
+    assert create_kwargs["resolved_model_info"] == ("claude-sonnet-5", "config-sonnet")
+    assert create_kwargs["task_type"] == "presentation"
+    assert create_kwargs["artifact_target_ext"] == ".pptx"
 
 
 def test_enabled_deck_quality_instrument_is_compiled_at_service_startup(

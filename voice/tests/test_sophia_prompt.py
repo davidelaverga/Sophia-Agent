@@ -111,6 +111,15 @@ def test_gemini_live_prompt_includes_spoken_turn_policy_overlay() -> None:
     assert "# Skill: ritual_prepare" in prompt
 
 
+def test_gemini_live_spoken_policy_requires_artifact_evidence_before_ready_claim() -> None:
+    overlay = build_gemini_live_spoken_turn_policy_overlay()
+
+    assert "A builder launch or update only means the work was accepted" in overlay
+    assert "check_async_task for that exact task returns status=success" in overlay
+    assert "non-empty accepted artifact_path" in overlay
+    assert "then verify that task with check_async_task before announcing readiness" in overlay
+
+
 def test_base_sophia_realtime_prompt_does_not_include_gemini_overlay() -> None:
     prompt = build_sophia_realtime_instructions()
 

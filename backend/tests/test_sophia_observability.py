@@ -603,6 +603,41 @@ def test_builder_trace_runnable_allows_global_langsmith_false(monkeypatch) -> No
     assert context_kwargs[0]["project_name"] == "Sophia"
 
 
+def test_builder_trace_context_restores_distributed_parent(monkeypatch) -> None:
+    context_kwargs: list[dict[str, Any]] = []
+
+    @contextmanager
+    def fake_tracing_context(*, enabled: bool | None = None, **kwargs: Any):
+        context_kwargs.append({"enabled": enabled, **kwargs})
+        yield
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "false")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "Sophia")
+    monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+    _reset_tracing_cache()
+    monkeypatch.setattr(observability, "_tracing_context_factory", lambda: fake_tracing_context)
+    monkeypatch.setattr(observability, "_langsmith_client", lambda *_args, **_kwargs: "client")
+
+    with observability.langsmith_builder_tracing_context(
+        metadata={"voice_trace_id": "voice-trace-1"},
+        tags=["voice"],
+        parent="traceparent-from-langsmith-header",
+    ):
+        pass
+
+    assert context_kwargs == [
+        {
+            "enabled": True,
+            "project_name": "Sophia",
+            "client": "client",
+            "tags": ["sophia_builder", "voice"],
+            "metadata": {"voice_trace_id": "voice-trace-1"},
+            "parent": "traceparent-from-langsmith-header",
+        }
+    ]
+
+
 def test_builder_trace_runnable_inherits_global_tracing_when_builder_flag_missing(monkeypatch) -> None:
     monkeypatch.setenv("LANGSMITH_TRACING", "true")
     monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")

@@ -6476,6 +6476,7 @@ class BuilderArtifactState(AgentState):
     builder_deck_prepare_repair_prompt_injected: NotRequired[bool]
     builder_deck_prepare_expected_tool_call_id: NotRequired[str | None]
     builder_deck_prepare_latch_active: NotRequired[bool]
+    builder_deck_authoring_no_tool_retries: NotRequired[int]
     builder_presentation_phase: NotRequired[str]
     builder_presentation_preflight_started_at_ms: NotRequired[int]
     builder_presentation_authoring_started_at_ms: NotRequired[int]
@@ -9179,6 +9180,115 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             )
         return result
 
+    @staticmethod
+    def _ai_message_from_model_result(result: Any) -> AIMessage | None:
+        if isinstance(result, AIMessage):
+            return result
+        response = result.model_response if isinstance(result, ExtendedModelResponse) else result
+        if not isinstance(response, ModelResponse):
+            return None
+        for message in reversed(response.result):
+            if isinstance(message, AIMessage):
+                return message
+        return None
+
+    def _deck_authoring_no_tool_retry_plan(
+        self,
+        request: ModelRequest,
+        choice: Any,
+        result: Any,
+    ) -> tuple[ModelRequest, dict[str, Any]] | None:
+        """Prepare one in-wrapper retry for a forced prepare prose response.
+
+        Retrying inside the model-call wrapper avoids adding a global
+        ``after_model -> model`` graph edge, which can accidentally honor a
+        stale tool-interruption jump and skip successful tool execution.
+        """
+
+        if self._tool_choice_name(choice) != _PREPARE_DECK_BUILD_TOOL_NAME:
+            return None
+        state = request.state
+        if int(state.get("builder_deck_authoring_no_tool_retries", 0) or 0) >= 1:
+            return None
+        message = self._ai_message_from_model_result(result)
+        if message is None or (getattr(message, "tool_calls", None) or []):
+            return None
+        additional_kwargs = getattr(message, "additional_kwargs", None)
+        if isinstance(additional_kwargs, dict) and additional_kwargs.get("deerflow_error_fallback"):
+            return None
+        response_metadata = getattr(message, "response_metadata", None)
+        response_metadata = response_metadata if isinstance(response_metadata, dict) else {}
+        stop_reason = str(
+            response_metadata.get("stop_reason")
+            or response_metadata.get("finish_reason")
+            or "unknown"
+        )
+        if stop_reason.lower() in {"max_tokens", "length", "model_context_window_exceeded"}:
+            return None
+        usage_metadata = getattr(message, "usage_metadata", None)
+        usage_metadata = usage_metadata if isinstance(usage_metadata, dict) else {}
+        elapsed_ms = _elapsed_since_presentation_authoring_start_ms(state) or 0
+        diagnostics = {
+            "deck_authoring_no_tool_retry_count": 1,
+            "deck_authoring_no_tool_stop_reason": stop_reason,
+            "deck_authoring_no_tool_input_tokens": usage_metadata.get("input_tokens"),
+            "deck_authoring_no_tool_output_tokens": usage_metadata.get("output_tokens"),
+            "deck_authoring_no_tool_elapsed_ms": elapsed_ms,
+            "deck_authoring_no_tool_failure_code": "deck_authoring_tool_call_missing",
+        }
+        history = self._append_turn_summary(
+            state,
+            {
+                "turn": int(state.get("builder_non_artifact_turns", 0) or 0) + 1,
+                "tool_names": [],
+                "has_emit_builder_artifact": False,
+                "ended_with_plain_text": True,
+                "deck_authoring_tool_call_missing": True,
+                "deck_authoring_no_tool_retry_count": 1,
+            },
+        )
+        update = {
+            "builder_deck_authoring_no_tool_retries": 1,
+            "builder_deck_prepare_latch_active": True,
+            "builder_presentation_phase": "authoring_pending",
+            "builder_pptx_diagnostics": diagnostics,
+            "builder_tool_turn_summaries": history,
+        }
+        retry_state = {
+            **state,
+            **update,
+            "builder_pptx_diagnostics": _merge_builder_pptx_diagnostics(
+                _pptx_diagnostics(state),
+                diagnostics,
+            ),
+        }
+        retry_prompt = (
+            "[Sophia/PPTX authoring recovery]\n"
+            "The previous forced response ended in prose without a tool call. "
+            "Call prepare_deck_build exactly once now. Do not narrate the plan, "
+            "claim generation has started, or return plain text."
+        )
+        settings = dict(request.model_settings)
+        try:
+            settings["max_tokens"] = min(int(settings.get("max_tokens") or 16_384), 16_384)
+        except (TypeError, ValueError):
+            settings["max_tokens"] = 16_384
+        settings["thinking"] = {"type": "disabled"}
+        logger.warning(
+            "BuilderArtifact: forced prepare authoring ended without a tool call; retrying once stop_reason=%s output_tokens=%s elapsed_ms=%s",
+            stop_reason,
+            diagnostics["deck_authoring_no_tool_output_tokens"],
+            elapsed_ms,
+        )
+        return (
+            request.override(
+                state=retry_state,
+                messages=[*request.messages, HumanMessage(content=retry_prompt)],
+                model_settings=settings,
+            ),
+            update,
+        )
+
     def _simple_pdf_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
         if not _requested_simple_pdf_artifact(state):
             return None
@@ -10166,6 +10276,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             failure_summary = "The presentation authoring model failed before a valid deck build call was available."
             root_summary = failure_summary
             force_reason = "model_error"
+        elif failure_code == "deck_authoring_tool_call_missing":
+            failure_summary = "The presentation authoring model twice ended without the required prepare_deck_build tool call."
+            root_summary = failure_summary
+            force_reason = "required_tool_call_missing"
         else:
             failure_summary = "The presentation authoring step exceeded its configured cumulative deadline."
             root_summary = failure_summary
@@ -10290,6 +10404,49 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 failure_code="deck_authoring_output_truncated",
                 tool_calls=getattr(latest_ai, "tool_calls", []) or [],
             )
+        tool_calls = getattr(latest_ai, "tool_calls", []) or []
+        if (
+            state.get("builder_presentation_phase") == "authoring_pending"
+            and state.get("builder_deck_prepare_latch_active") is True
+            and not tool_calls
+        ):
+            retry_count = int(state.get("builder_deck_authoring_no_tool_retries", 0) or 0)
+            response_metadata = getattr(latest_ai, "response_metadata", None)
+            response_metadata = response_metadata if isinstance(response_metadata, dict) else {}
+            usage_metadata = getattr(latest_ai, "usage_metadata", None)
+            usage_metadata = usage_metadata if isinstance(usage_metadata, dict) else {}
+            no_tool_diagnostics = {
+                "deck_authoring_no_tool_retry_count": retry_count + 1,
+                "deck_authoring_no_tool_stop_reason": (
+                    response_metadata.get("stop_reason")
+                    or response_metadata.get("finish_reason")
+                    or "unknown"
+                ),
+                "deck_authoring_no_tool_input_tokens": usage_metadata.get("input_tokens"),
+                "deck_authoring_no_tool_output_tokens": usage_metadata.get("output_tokens"),
+                "deck_authoring_no_tool_elapsed_ms": elapsed_ms,
+                "deck_authoring_no_tool_failure_code": "deck_authoring_tool_call_missing",
+            }
+            logger.error(
+                "BuilderArtifact: forced prepare authoring missed the required tool call after bounded recovery stop_reason=%s output_tokens=%s retry_count=%s",
+                no_tool_diagnostics["deck_authoring_no_tool_stop_reason"],
+                no_tool_diagnostics["deck_authoring_no_tool_output_tokens"],
+                retry_count,
+            )
+            terminal = self._deck_authoring_terminal_update(
+                state,
+                runtime,
+                failure_code="deck_authoring_tool_call_missing",
+            )
+            if terminal is not None:
+                terminal["builder_deck_authoring_no_tool_retries"] = retry_count
+                terminal["builder_pptx_diagnostics"] = _merge_builder_pptx_diagnostics(
+                    no_tool_diagnostics,
+                    terminal.get("builder_pptx_diagnostics")
+                    if isinstance(terminal.get("builder_pptx_diagnostics"), dict)
+                    else {},
+                )
+            return terminal
         return None
 
     @classmethod
@@ -10399,7 +10556,13 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             request = request.override(tool_choice=choice)
         request, request_update = self._presentation_request_for_choice(request, choice)
         state_update = self._merged_presentation_state_update(state_update, request_update)
-        return self._model_result_with_state_update(handler(request), state_update)
+        result = handler(request)
+        retry_plan = self._deck_authoring_no_tool_retry_plan(request, choice, result)
+        if retry_plan is not None:
+            retry_request, retry_update = retry_plan
+            state_update = self._merged_presentation_state_update(state_update, retry_update)
+            result = handler(retry_request)
+        return self._model_result_with_state_update(result, state_update)
 
     @override
     async def awrap_model_call(
@@ -10424,8 +10587,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         preflight = tool_name in _PRESENTATION_PREFLIGHT_TOOLS
         remaining = self._presentation_preflight_seconds_remaining(request.state) if preflight else self._presentation_authoring_seconds_remaining(request.state)
         if remaining is None:
-            return self._model_result_with_state_update(await handler(request), state_update)
-        if remaining <= 0:
+            result = await handler(request)
+        elif remaining <= 0:
             if preflight:
                 state_update = self._merged_presentation_state_update(
                     state_update,
@@ -10435,23 +10598,45 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                 self._presentation_preflight_timeout_message() if preflight else self._authoring_timeout_message(),
                 state_update,
             )
-        try:
-            async with asyncio.timeout_at(asyncio.get_running_loop().time() + remaining):
-                result = await handler(request)
-        except TimeoutError:
-            if preflight:
-                logger.warning("BuilderArtifact: bounded presentation preflight model call timed out; continuing to authoring")
-                result = self._presentation_preflight_timeout_message()
-                state_update = self._merged_presentation_state_update(
-                    state_update,
-                    self._presentation_preflight_terminal_update(request.state, "timed_out"),
-                )
-            else:
-                logger.error(
-                    "BuilderArtifact: presentation authoring model stream cancelled at absolute deadline elapsed_ms=%s",
-                    _elapsed_since_presentation_authoring_start_ms(request.state),
-                )
+        else:
+            try:
+                async with asyncio.timeout_at(asyncio.get_running_loop().time() + remaining):
+                    result = await handler(request)
+            except TimeoutError:
+                if preflight:
+                    logger.warning("BuilderArtifact: bounded presentation preflight model call timed out; continuing to authoring")
+                    result = self._presentation_preflight_timeout_message()
+                    state_update = self._merged_presentation_state_update(
+                        state_update,
+                        self._presentation_preflight_terminal_update(request.state, "timed_out"),
+                    )
+                else:
+                    logger.error(
+                        "BuilderArtifact: presentation authoring model stream cancelled at absolute deadline elapsed_ms=%s",
+                        _elapsed_since_presentation_authoring_start_ms(request.state),
+                    )
+                    result = self._authoring_timeout_message()
+        retry_plan = self._deck_authoring_no_tool_retry_plan(request, choice, result)
+        if retry_plan is not None:
+            retry_request, retry_update = retry_plan
+            state_update = self._merged_presentation_state_update(state_update, retry_update)
+            retry_remaining = self._presentation_authoring_seconds_remaining(retry_request.state)
+            if retry_remaining is not None and retry_remaining <= 0:
                 result = self._authoring_timeout_message()
+            elif retry_remaining is None:
+                result = await handler(retry_request)
+            else:
+                try:
+                    async with asyncio.timeout_at(
+                        asyncio.get_running_loop().time() + retry_remaining
+                    ):
+                        result = await handler(retry_request)
+                except TimeoutError:
+                    logger.error(
+                        "BuilderArtifact: presentation authoring recovery timed out at absolute deadline elapsed_ms=%s",
+                        _elapsed_since_presentation_authoring_start_ms(retry_request.state),
+                    )
+                    result = self._authoring_timeout_message()
         return self._model_result_with_state_update(result, state_update)
 
     @staticmethod
@@ -10817,6 +11002,10 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             **request.model_settings,
             "max_tokens": presentation_authoring_max_tokens(state),
             "timeout": float(timeout_seconds),
+            # Deck authoring is a constrained single-tool serialization task.
+            # Adaptive/extended thinking can consume the entire output budget
+            # and still end in prose, so disable it only for this compact lane.
+            "thinking": {"type": "disabled"},
         }
         return request.override(model_settings=settings)
 

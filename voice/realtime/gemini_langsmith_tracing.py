@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 import time
 import uuid
 from collections.abc import Mapping
@@ -38,6 +39,51 @@ MAX_TRACE_TEXT_CHARS = 400
 MAX_TRACE_LIST_ITEMS = 24
 MAX_TRACE_DEPTH = 8
 MAX_AUDIO_ATTACHMENT_BYTES = 20 * 1024 * 1024
+_LANGSMITH_HANDOFF_HEADER_NAMES = frozenset({"langsmith-trace", "baggage"})
+_BUILDER_LIFECYCLE_TOOLS = frozenset(
+    {
+        "start_builder_task",
+        "edit_builder_artifact",
+        "check_async_task",
+        "update_async_task",
+        "cancel_async_task",
+        "list_async_tasks",
+    }
+)
+_TERMINAL_BUILDER_STATUSES = frozenset(
+    {"success", "completed", "error", "failed", "cancelled", "timeout", "timed_out"}
+)
+_SPOKEN_READY_CLAIM_PATTERNS = (
+    re.compile(
+        r"\b(?:the|your|this|that|my)?\s*"
+        r"(?:slide\s+deck|deck|presentation|slides?|artifact|document|file)\s+"
+        r"(?:is|are|'s|'re|has\s+been|have\s+been)\s+"
+        r"(?:now\s+|all\s+)?(?:ready|complete|completed|done|finished)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:it\s+is|it's|that\s+is|that's)\s+"
+        r"(?:now\s+|all\s+)?(?:ready|complete|completed|done|finished)\b",
+        re.IGNORECASE,
+    ),
+    re.compile(
+        r"\b(?:i(?:'ve|\s+have)|we(?:'ve|\s+have))\s+"
+        r"(?:completed|finished)\s+(?:the|your|this)\s+"
+        r"(?:slide\s+deck|deck|presentation|slides?|artifact|document|file)\b",
+        re.IGNORECASE,
+    ),
+)
+_SPOKEN_READY_NEGATION_PATTERN = re.compile(
+    r"\b(?:not|isn't|isnt|isn’t|aren't|arent|aren’t|wasn't|wasnt|wasn’t|"
+    r"won't|wont|won’t|will\s+not|not\s+yet|still\s+(?:building|running|working))\b"
+    r".{0,48}\b(?:ready|complete|completed|done|finished)\b",
+    re.IGNORECASE,
+)
+_SPOKEN_READY_FUTURE_PATTERN = re.compile(
+    r"\b(?:when|once|until|before)\b.{0,72}\b(?:ready|complete|completed|done|finished)\b"
+    r"|\b(?:will|should)\s+be\s+(?:ready|complete|completed|done|finished)\b",
+    re.IGNORECASE,
+)
 
 
 def _env_bool(name: str, default: bool = False) -> bool:
@@ -144,6 +190,144 @@ def _event_name(categories: list[str], event: Mapping[str, Any]) -> str:
     return categories[0] if categories else "gemini_socket_event"
 
 
+def _string_value(value: Any) -> str | None:
+    return value.strip() if isinstance(value, str) and value.strip() else None
+
+
+def _mapping_value(value: Mapping[str, Any], *keys: str) -> Mapping[str, Any] | None:
+    for key in keys:
+        candidate = value.get(key)
+        if isinstance(candidate, Mapping):
+            return candidate
+    return None
+
+
+def _output_transcription_text(event: Mapping[str, Any]) -> str | None:
+    server_content = _mapping_value(event, "serverContent", "server_content")
+    if server_content is None:
+        return None
+    transcription = _mapping_value(
+        server_content,
+        "outputTranscription",
+        "output_transcription",
+    )
+    return _string_value(transcription.get("text")) if transcription is not None else None
+
+
+def _provider_turn_complete(event: Mapping[str, Any]) -> bool:
+    server_content = _mapping_value(event, "serverContent", "server_content")
+    if server_content is None:
+        return False
+    return server_content.get("turnComplete", server_content.get("turn_complete")) is True
+
+
+def _is_spoken_ready_claim(text: str | None) -> bool:
+    if not text:
+        return False
+    if _SPOKEN_READY_NEGATION_PATTERN.search(text) or _SPOKEN_READY_FUTURE_PATTERN.search(text):
+        return False
+    return any(pattern.search(text) is not None for pattern in _SPOKEN_READY_CLAIM_PATTERNS)
+
+
+def _builder_trace_summary(response: Mapping[str, Any] | None) -> dict[str, Any]:
+    response = response or {}
+    result = response.get("result") if isinstance(response.get("result"), Mapping) else {}
+    task = response.get("async_task") if isinstance(response.get("async_task"), Mapping) else {}
+    builder_result = result.get("builder_result") if isinstance(result.get("builder_result"), Mapping) else {}
+    summary: dict[str, Any] = {}
+    for key in (
+        "task_id",
+        "thread_id",
+        "run_id",
+        "build_id",
+        "operation_id",
+        "voice_trace_id",
+        "task_type",
+        "status",
+        "terminal_status",
+        "terminal_reason",
+        "failure_code",
+        "root_failure_code",
+    ):
+        value = next(
+            (
+                source.get(key)
+                for source in (response, result, task, builder_result)
+                if source.get(key) is not None
+            ),
+            None,
+        )
+        if value is not None:
+            summary[key] = _safe_payload(value)
+    artifact_path = next(
+        (
+            source.get("artifact_path") or source.get("artifact_url")
+            for source in (result, task, builder_result, response)
+            if source.get("artifact_path") or source.get("artifact_url")
+        ),
+        None,
+    )
+    summary["artifact_present"] = bool(_string_value(artifact_path))
+    return summary
+
+
+def _builder_gate_records(
+    tool_name: str,
+    response: Mapping[str, Any] | None,
+) -> list[dict[str, Any]]:
+    if tool_name not in {"check_async_task", "list_async_tasks"} or not isinstance(response, Mapping):
+        return []
+    if tool_name == "list_async_tasks":
+        raw_records = response.get("tasks")
+        records = [dict(item) for item in raw_records or [] if isinstance(item, Mapping)]
+    else:
+        merged = dict(response)
+        if isinstance(response.get("async_task"), Mapping):
+            merged.update(response["async_task"])
+        if isinstance(response.get("result"), Mapping):
+            merged.update(response["result"])
+        records = [merged]
+
+    gates: list[dict[str, Any]] = []
+    for record in records:
+        status = str(record.get("status") or "unknown").strip().lower()
+        builder_result = record.get("builder_result") if isinstance(record.get("builder_result"), Mapping) else {}
+        artifact_path = (
+            _string_value(record.get("artifact_path"))
+            or _string_value(record.get("artifact_url"))
+            or _string_value(builder_result.get("artifact_path"))
+            or _string_value(builder_result.get("artifact_url"))
+        )
+        ready_status = status in {"success", "completed"}
+        artifact_valid = bool(ready_status and artifact_path)
+        evidence_failure_code = (
+            "ARTIFACT_EVIDENCE_MISSING" if ready_status and not artifact_valid else None
+        )
+        gates.append(
+            {
+                "tool_name": tool_name,
+                "task_id": _string_value(record.get("task_id")),
+                "thread_id": _string_value(record.get("thread_id")),
+                "run_id": _string_value(record.get("run_id")),
+                "build_id": _string_value(record.get("build_id")),
+                "operation_id": _string_value(record.get("operation_id")),
+                "voice_trace_id": _string_value(record.get("voice_trace_id")),
+                "artifact_status": status,
+                "terminal_status_observed": status in _TERMINAL_BUILDER_STATUSES,
+                "ready_status_observed": ready_status,
+                "artifact_present": bool(artifact_path),
+                "artifact_valid": artifact_valid,
+                "announced_ready": False,
+                "announcement_allowed": artifact_valid,
+                "decision": "allow" if artifact_valid else "suppress",
+                "failure_code": _string_value(record.get("failure_code"))
+                or evidence_failure_code,
+                "false_ready": False,
+            }
+        )
+    return gates
+
+
 class GeminiLiveTraceRecorder:
     """Own a single LangSmith root and its manual Gemini Live child spans."""
 
@@ -175,6 +359,11 @@ class GeminiLiveTraceRecorder:
         self._event_count = 0
         self._tool_count = 0
         self._last_provider_sequence: int | None = None
+        self._latest_artifact_gate_batch: list[dict[str, Any]] = []
+        self._latest_artifact_gate_recorded_at: float | None = None
+        self._last_ready_claim_text: str | None = None
+        self._ready_claim_count = 0
+        self._false_ready_claim_count = 0
 
         if not self.enabled:
             return
@@ -268,6 +457,14 @@ class GeminiLiveTraceRecorder:
                 }
             )
         self._safe_post(child, name)
+        if "outputTranscription" in categories:
+            self._record_spoken_ready_claim(
+                event,
+                provider_receive_sequence=provider_receive_sequence,
+                relay_correlation_id=relay_correlation_id,
+            )
+        if _provider_turn_complete(event):
+            self._last_ready_claim_text = None
 
     def record_tool_call(
         self,
@@ -278,9 +475,35 @@ class GeminiLiveTraceRecorder:
         success: bool,
         result_summary: str | None = None,
         error: str | None = None,
+        response: Mapping[str, Any] | None = None,
     ) -> None:
+        child = self.start_tool_call(
+            tool_call_id=tool_call_id,
+            tool_name=tool_name,
+            arguments=arguments,
+        )
+        self.finish_tool_call(
+            child,
+            tool_name=tool_name,
+            success=success,
+            result_summary=result_summary,
+            error=error,
+            response=response,
+        )
+
+    def start_tool_call(
+        self,
+        *,
+        tool_call_id: str,
+        tool_name: str,
+        arguments: Mapping[str, Any] | None,
+        provider_receive_sequence: int | None = None,
+        relay_correlation_id: str | None = None,
+    ) -> Any | None:
+        """Post an open tool span before awaiting its backend side effect."""
+
         if not self.enabled or self.root is None or self._closed:
-            return
+            return None
         self._tool_count += 1
         child = self.root.create_child(
             name=f"function_call:{tool_name}",
@@ -296,18 +519,62 @@ class GeminiLiveTraceRecorder:
                     "runtime": "gemini_live",
                     "socket_event": False,
                     "tool_call_id": tool_call_id,
+                    "provider_receive_sequence": provider_receive_sequence,
+                    "relay_correlation_id": relay_correlation_id,
                 }
             },
             tags=["gemini_live", "tool", tool_name],
         )
+        self._safe_post(child, f"tool_open:{tool_name}")
+        return child
+
+    def finish_tool_call(
+        self,
+        child: Any | None,
+        *,
+        tool_name: str,
+        success: bool,
+        result_summary: str | None = None,
+        error: str | None = None,
+        response: Mapping[str, Any] | None = None,
+    ) -> None:
+        if child is None:
+            return
+        outputs: dict[str, Any] = {
+            "success": success,
+            "result_summary": _safe_text(result_summary or ""),
+        }
+        if tool_name in _BUILDER_LIFECYCLE_TOOLS:
+            outputs["builder_lifecycle"] = _builder_trace_summary(response)
         child.end(
-            outputs={
-                "success": success,
-                "result_summary": _safe_text(result_summary or ""),
-            },
+            outputs=outputs,
             error=error,
         )
-        self._safe_post(child, f"tool:{tool_name}")
+        self._safe_patch(child, f"tool:{tool_name}")
+
+    def handoff_headers(self, run: Any | None = None) -> dict[str, str]:
+        """Return only LangSmith's distributed-trace headers for HTTP handoff."""
+
+        source = run or self.root
+        if not self.enabled or source is None or self._closed:
+            return {}
+        try:
+            raw = source.to_headers()
+        except Exception:
+            logger.warning(
+                "gemini.langsmith.trace_headers_failed session_id=%s trace_id=%s",
+                self.session_id,
+                self.trace_id,
+                exc_info=True,
+            )
+            return {}
+        if not isinstance(raw, Mapping):
+            return {}
+        return {
+            str(key): str(value)
+            for key, value in raw.items()
+            if str(key).lower() in _LANGSMITH_HANDOFF_HEADER_NAMES and isinstance(value, str)
+        }
 
     def record_function_response(
         self,
@@ -337,6 +604,141 @@ class GeminiLiveTraceRecorder:
         )
         child.end()
         self._safe_post(child, f"function_response:{tool_name}")
+        self._record_artifact_announcement_gates(tool_name, response)
+
+    def _record_artifact_announcement_gates(
+        self,
+        tool_name: str,
+        response: Mapping[str, Any] | None,
+    ) -> None:
+        if not self.enabled or self.root is None or self._closed:
+            return
+        if tool_name not in {"check_async_task", "list_async_tasks"}:
+            return
+        gates = _builder_gate_records(tool_name, response)
+        gate_batch: list[dict[str, Any]] = []
+        for gate in gates:
+            child = self.root.create_child(
+                name="artifact.announcement_gate",
+                run_type="chain",
+                run_id=uuid7(),
+                inputs={
+                    "task_id": gate.get("task_id"),
+                    "build_id": gate.get("build_id"),
+                    "observed_status": gate.get("artifact_status"),
+                },
+                extra={
+                    "metadata": {
+                        "runtime": "gemini_live",
+                        "voice_trace_id": self.trace_id,
+                        "task_id": gate.get("task_id"),
+                        "build_id": gate.get("build_id"),
+                        "operation_id": gate.get("operation_id"),
+                    }
+                },
+                tags=["sophia", "voice", "artifact", "announcement_gate"],
+            )
+            child.end(
+                outputs=_safe_payload(gate),
+                error=(
+                    "ARTIFACT_EVIDENCE_MISSING"
+                    if gate.get("ready_status_observed") and not gate.get("artifact_valid")
+                    else None
+                ),
+            )
+            self._safe_post(child, "artifact.announcement_gate")
+            enriched_gate = dict(gate)
+            enriched_gate["gate_run_id"] = str(child.id)
+            gate_batch.append(enriched_gate)
+        self._latest_artifact_gate_batch = gate_batch
+        self._latest_artifact_gate_recorded_at = time.monotonic() if gate_batch else None
+        self._last_ready_claim_text = None
+
+    def _record_spoken_ready_claim(
+        self,
+        event: Mapping[str, Any],
+        *,
+        provider_receive_sequence: int | None,
+        relay_correlation_id: str | None,
+    ) -> None:
+        if not self.enabled or self.root is None or self._closed:
+            return
+        transcript = _output_transcription_text(event)
+        if not _is_spoken_ready_claim(transcript):
+            return
+        normalized = " ".join((transcript or "").lower().split())
+        previous = self._last_ready_claim_text
+        if previous and (normalized.startswith(previous) or previous.startswith(normalized)):
+            return
+        self._last_ready_claim_text = normalized
+
+        gates = self._latest_artifact_gate_batch
+        gate = gates[0] if len(gates) == 1 else {}
+        evidence_unambiguous = len(gates) == 1
+        announcement_allowed = bool(evidence_unambiguous and gate.get("announcement_allowed"))
+        if not gates:
+            failure_code = "ARTIFACT_GATE_MISSING"
+        elif not evidence_unambiguous:
+            failure_code = "ARTIFACT_GATE_AMBIGUOUS"
+        elif gate.get("failure_code"):
+            failure_code = str(gate["failure_code"])
+        elif not gate.get("artifact_valid"):
+            failure_code = "ARTIFACT_NOT_READY"
+        else:
+            failure_code = None
+        evidence_age_ms = (
+            max(int((time.monotonic() - self._latest_artifact_gate_recorded_at) * 1000), 0)
+            if self._latest_artifact_gate_recorded_at is not None
+            else None
+        )
+        outputs = {
+            "announced_ready": True,
+            "announcement_allowed": announcement_allowed,
+            "decision": "allow" if announcement_allowed else "violation",
+            "false_ready": not announcement_allowed,
+            "failure_code": failure_code,
+            "evidence_record_count": len(gates),
+            "evidence_age_ms": evidence_age_ms,
+            "evidence_tool_name": gate.get("tool_name"),
+            "evidence_status": gate.get("artifact_status"),
+            "artifact_valid": bool(gate.get("artifact_valid")),
+            "task_id": gate.get("task_id"),
+            "thread_id": gate.get("thread_id"),
+            "run_id": gate.get("run_id"),
+            "build_id": gate.get("build_id"),
+            "operation_id": gate.get("operation_id"),
+            "gate_run_id": gate.get("gate_run_id"),
+        }
+        child = self.root.create_child(
+            name="voice.ready_spoken",
+            run_type="chain",
+            run_id=uuid7(),
+            inputs={
+                "transcript": _safe_text(transcript or ""),
+                "provider_receive_sequence": provider_receive_sequence,
+                "relay_correlation_id": relay_correlation_id,
+            },
+            extra={
+                "metadata": {
+                    "runtime": "gemini_live",
+                    "voice_trace_id": self.trace_id,
+                    "provider_receive_sequence": provider_receive_sequence,
+                    "relay_correlation_id": relay_correlation_id,
+                    "task_id": gate.get("task_id"),
+                    "build_id": gate.get("build_id"),
+                    "gate_run_id": gate.get("gate_run_id"),
+                }
+            },
+            tags=["sophia", "voice", "artifact", "ready_spoken"],
+        )
+        child.end(
+            outputs=_safe_payload(outputs),
+            error="FALSE_READY" if not announcement_allowed else None,
+        )
+        self._safe_post(child, "voice.ready_spoken")
+        self._ready_claim_count += 1
+        if not announcement_allowed:
+            self._false_ready_claim_count += 1
 
     def close(
         self,
@@ -367,6 +769,8 @@ class GeminiLiveTraceRecorder:
                 "session_id": self.session_id,
                 "event_count": self._event_count,
                 "tool_count": self._tool_count,
+                "ready_claim_count": self._ready_claim_count,
+                "false_ready_claim_count": self._false_ready_claim_count,
                 "last_provider_sequence": self._last_provider_sequence,
                 "conversation_audio_attached": audio_attached,
             },
@@ -400,6 +804,17 @@ class GeminiLiveTraceRecorder:
         except Exception:
             logger.warning(
                 "gemini.langsmith.span_post_failed session_id=%s span=%s",
+                self.session_id,
+                label,
+                exc_info=True,
+            )
+
+    def _safe_patch(self, run: Any, label: str) -> None:
+        try:
+            run.patch()
+        except Exception:
+            logger.warning(
+                "gemini.langsmith.span_patch_failed session_id=%s span=%s",
                 self.session_id,
                 label,
                 exc_info=True,

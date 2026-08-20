@@ -86,6 +86,7 @@ REALTIME_MEMORY_GATEWAY_REQUIRED_FIELDS = frozenset(
 )
 _EXPLICIT_URL_RE = re.compile(r"https?://[^\s<>\]\)\"']+")
 _TRAILING_URL_PUNCTUATION = ".,;:!?)]}\"'"
+_POST_INTERRUPT_BUILD_MARKER = "[Sophia/post-interrupt build directive]"
 
 logger = logging.getLogger(__name__)
 
@@ -191,6 +192,8 @@ class GeminiBuilderLifecycleHttpBackend:
         runtime_mode: VoiceRuntimeMode,
         provider: str,
         async_tasks: Mapping[str, dict[str, Any]],
+        trace_headers: Mapping[str, str] | None = None,
+        trace_context: Mapping[str, Any] | None = None,
     ) -> GeminiBuilderLifecycleResult:
         validated = validate_builder_lifecycle_tool_args(tool_name, args)
         if tool_name == GEMINI_START_BUILDER_TASK_TOOL_NAME:
@@ -201,6 +204,8 @@ class GeminiBuilderLifecycleHttpBackend:
                 runtime_mode=runtime_mode,
                 provider=provider,
                 async_tasks=async_tasks,
+                trace_headers=trace_headers,
+                trace_context=trace_context,
             )
         if tool_name == GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME:
             return await self._edit_builder_artifact(
@@ -210,15 +215,36 @@ class GeminiBuilderLifecycleHttpBackend:
                 runtime_mode=runtime_mode,
                 provider=provider,
                 async_tasks=async_tasks,
+                trace_headers=trace_headers,
+                trace_context=trace_context,
             )
         if tool_name == GEMINI_CHECK_ASYNC_TASK_TOOL_NAME:
-            return await self._check_async_task(validated, async_tasks=async_tasks)
+            return await self._check_async_task(
+                validated,
+                async_tasks=async_tasks,
+                trace_headers=trace_headers,
+            )
         if tool_name == GEMINI_UPDATE_ASYNC_TASK_TOOL_NAME:
-            return await self._update_async_task(validated, async_tasks=async_tasks)
+            return await self._update_async_task(
+                validated,
+                session_id=session_id,
+                user_id=user_id,
+                async_tasks=async_tasks,
+                trace_headers=trace_headers,
+                trace_context=trace_context,
+            )
         if tool_name == GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME:
-            return await self._cancel_async_task(validated, async_tasks=async_tasks)
+            return await self._cancel_async_task(
+                validated,
+                async_tasks=async_tasks,
+                trace_headers=trace_headers,
+            )
         if tool_name == GEMINI_LIST_ASYNC_TASKS_TOOL_NAME:
-            return await self._list_async_tasks(validated, async_tasks=async_tasks)
+            return await self._list_async_tasks(
+                validated,
+                async_tasks=async_tasks,
+                trace_headers=trace_headers,
+            )
         raise GeminiDogfoodToolError(f"Unsupported builder lifecycle tool {tool_name!r}.")
 
     async def _start_builder_task(
@@ -230,6 +256,8 @@ class GeminiBuilderLifecycleHttpBackend:
         runtime_mode: VoiceRuntimeMode,
         provider: str,
         async_tasks: Mapping[str, dict[str, Any]],
+        trace_headers: Mapping[str, str] | None,
+        trace_context: Mapping[str, Any] | None,
     ) -> GeminiBuilderLifecycleResult:
         existing_task_id = _active_builder_task_id(async_tasks)
         if existing_task_id:
@@ -265,11 +293,20 @@ class GeminiBuilderLifecycleHttpBackend:
         artifact_target_path = _voice_builder_artifact_target_path(description, task_type)
         contract = builder_lifecycle_contract()
 
-        thread = await self._request_json("POST", "/threads", json_body={})
+        thread = await self._request_json(
+            "POST",
+            "/threads",
+            json_body={},
+            headers=trace_headers,
+        )
         thread_id = _required_string(thread.get("thread_id"), "LangGraph thread response omitted thread_id.")
         now = _utcnow_iso()
         build_id = f"build_gemini_{thread_id}"
         operation_id = f"op_gemini_{thread_id}"
+        voice_trace_id = _string_value((trace_context or {}).get("voice_trace_id"))
+        voice_tool_call_id = _string_value((trace_context or {}).get("voice_tool_call_id"))
+        relay_correlation_id = _string_value((trace_context or {}).get("relay_correlation_id"))
+        provider_receive_sequence = (trace_context or {}).get("provider_receive_sequence")
         kickoff_ms = int(time.time() * 1000)
         timeout_seconds = int((builder_budget or {}).get("max_wall_clock_seconds", 0) or 0)
         delegation_context = {
@@ -328,6 +365,12 @@ class GeminiBuilderLifecycleHttpBackend:
                         "builder_thread_id": thread_id,
                         "parent_thread_id": session_id,
                         "task_type": task_type,
+                        "channel": "voice",
+                        "voice_session_id": session_id,
+                        "voice_trace_id": voice_trace_id,
+                        "voice_tool_call_id": voice_tool_call_id,
+                        "relay_correlation_id": relay_correlation_id,
+                        "provider_receive_sequence": provider_receive_sequence,
                     },
                     "configurable": {
                         "thread_id": thread_id,
@@ -338,9 +381,14 @@ class GeminiBuilderLifecycleHttpBackend:
                         "artifact_target_ext": PurePosixPath(artifact_target_path).suffix.lower(),
                         "build_id": build_id,
                         "operation_id": operation_id,
+                        "voice_session_id": session_id,
+                        "voice_trace_id": voice_trace_id,
+                        "voice_tool_call_id": voice_tool_call_id,
+                        "relay_correlation_id": relay_correlation_id,
                     }
                 },
             },
+            headers=trace_headers,
         )
         run_id = _required_string(run.get("run_id"), "LangGraph run response omitted run_id.")
         async_task = {
@@ -354,7 +402,14 @@ class GeminiBuilderLifecycleHttpBackend:
             "last_updated_at": now,
             "task_type": task_type,
             "demo_mode": False,
-            "trace_id": f"gemini-{thread_id[:8]}",
+            "parent_thread_id": session_id,
+            "artifact_target_path": artifact_target_path,
+            "build_id": build_id,
+            "operation_id": operation_id,
+            "voice_trace_id": voice_trace_id,
+            "voice_tool_call_id": voice_tool_call_id,
+            "relay_correlation_id": relay_correlation_id,
+            "provider_receive_sequence": provider_receive_sequence,
         }
         response = {
             "ok": True,
@@ -365,6 +420,9 @@ class GeminiBuilderLifecycleHttpBackend:
             "run_id": run_id,
             "status": "running",
             "task_type": task_type,
+            "build_id": build_id,
+            "operation_id": operation_id,
+            "voice_trace_id": voice_trace_id,
             "async_task": async_task,
             "trusted_user_id": user_id,
             "tool_arg_user_id_ignored": bool(args.get("user_id") and args.get("user_id") != user_id),
@@ -395,6 +453,8 @@ class GeminiBuilderLifecycleHttpBackend:
         runtime_mode: VoiceRuntimeMode,
         provider: str,
         async_tasks: Mapping[str, dict[str, Any]],
+        trace_headers: Mapping[str, str] | None,
+        trace_context: Mapping[str, Any] | None,
     ) -> GeminiBuilderLifecycleResult:
         existing_task_id = _active_builder_task_id(async_tasks)
         if existing_task_id:
@@ -451,11 +511,20 @@ class GeminiBuilderLifecycleHttpBackend:
         builder_budget = _voice_builder_budget(task_type)
         contract = builder_lifecycle_contract()
 
-        thread = await self._request_json("POST", "/threads", json_body={})
+        thread = await self._request_json(
+            "POST",
+            "/threads",
+            json_body={},
+            headers=trace_headers,
+        )
         thread_id = _required_string(thread.get("thread_id"), "LangGraph thread response omitted thread_id.")
         now = _utcnow_iso()
         build_id = f"build_gemini_{thread_id}"
         operation_id = f"op_gemini_{thread_id}"
+        voice_trace_id = _string_value((trace_context or {}).get("voice_trace_id"))
+        voice_tool_call_id = _string_value((trace_context or {}).get("voice_tool_call_id"))
+        relay_correlation_id = _string_value((trace_context or {}).get("relay_correlation_id"))
+        provider_receive_sequence = (trace_context or {}).get("provider_receive_sequence")
         kickoff_ms = int(time.time() * 1000)
         timeout_seconds = int((builder_budget or {}).get("max_wall_clock_seconds", 0) or 0)
         edit_context = {
@@ -526,6 +595,12 @@ class GeminiBuilderLifecycleHttpBackend:
                         "builder_thread_id": thread_id,
                         "parent_thread_id": session_id,
                         "task_type": task_type,
+                        "channel": "voice",
+                        "voice_session_id": session_id,
+                        "voice_trace_id": voice_trace_id,
+                        "voice_tool_call_id": voice_tool_call_id,
+                        "relay_correlation_id": relay_correlation_id,
+                        "provider_receive_sequence": provider_receive_sequence,
                     },
                     "configurable": {
                         "thread_id": thread_id,
@@ -536,9 +611,14 @@ class GeminiBuilderLifecycleHttpBackend:
                         "artifact_target_ext": PurePosixPath(revision_path).suffix.lower(),
                         "build_id": build_id,
                         "operation_id": operation_id,
+                        "voice_session_id": session_id,
+                        "voice_trace_id": voice_trace_id,
+                        "voice_tool_call_id": voice_tool_call_id,
+                        "relay_correlation_id": relay_correlation_id,
                     }
                 },
             },
+            headers=trace_headers,
         )
         run_id = _required_string(run.get("run_id"), "LangGraph run response omitted run_id.")
         async_task = {
@@ -552,9 +632,15 @@ class GeminiBuilderLifecycleHttpBackend:
             "last_updated_at": now,
             "task_type": task_type,
             "demo_mode": False,
-            "trace_id": f"gemini-edit-{thread_id[:8]}",
             "edit_mode": "edit_existing_artifact",
+            "parent_thread_id": session_id,
             "artifact_target_path": revision_path,
+            "build_id": build_id,
+            "operation_id": operation_id,
+            "voice_trace_id": voice_trace_id,
+            "voice_tool_call_id": voice_tool_call_id,
+            "relay_correlation_id": relay_correlation_id,
+            "provider_receive_sequence": provider_receive_sequence,
             "source_artifact_path": source_path,
             "revision_of_artifact_path": source_path,
         }
@@ -571,6 +657,9 @@ class GeminiBuilderLifecycleHttpBackend:
             "source_artifact_path": source_path,
             "revision_of_artifact_path": source_path,
             "artifact_target_path": revision_path,
+            "build_id": build_id,
+            "operation_id": operation_id,
+            "voice_trace_id": voice_trace_id,
             "trusted_user_id": user_id,
             "tool_arg_user_id_ignored": bool(args.get("user_id") and args.get("user_id") != user_id),
             "runtime": runtime_mode.value,
@@ -596,10 +685,19 @@ class GeminiBuilderLifecycleHttpBackend:
         args: Mapping[str, Any],
         *,
         async_tasks: Mapping[str, dict[str, Any]],
+        trace_headers: Mapping[str, str] | None,
     ) -> GeminiBuilderLifecycleResult:
         task = _tracked_task(str(args["task_id"]), async_tasks)
-        run = await self._request_json("GET", f"/threads/{task['thread_id']}/runs/{task['run_id']}")
-        updated_task, result = await self._reconcile_task_for_run(run, task)
+        run = await self._request_json(
+            "GET",
+            f"/threads/{task['thread_id']}/runs/{task['run_id']}",
+            headers=trace_headers,
+        )
+        updated_task, result = await self._reconcile_task_for_run(
+            run,
+            task,
+            trace_headers=trace_headers,
+        )
         status = str(result.get("status") or updated_task.get("status") or "unknown")
         response = {
             "ok": True,
@@ -622,17 +720,121 @@ class GeminiBuilderLifecycleHttpBackend:
         self,
         args: Mapping[str, Any],
         *,
+        session_id: str,
+        user_id: str,
         async_tasks: Mapping[str, dict[str, Any]],
+        trace_headers: Mapping[str, str] | None,
+        trace_context: Mapping[str, Any] | None,
     ) -> GeminiBuilderLifecycleResult:
         task = _tracked_task(str(args["task_id"]), async_tasks)
+        try:
+            current_run = await self._request_json(
+                "GET",
+                f"/threads/{task['thread_id']}/runs/{task['run_id']}",
+                headers=trace_headers,
+            )
+        except GeminiDogfoodToolError:
+            logger.warning(
+                "gemini.builder_lifecycle.update live_status_unavailable task_id=%s cached_status=%s",
+                task.get("task_id"),
+                task.get("status"),
+            )
+        else:
+            current_status = str(current_run.get("status") or "unknown").strip().lower()
+            if current_status in builder_lifecycle_contract().TERMINAL_TASK_STATUSES:
+                updated_task, terminal_result = await self._reconcile_task_for_run(
+                    current_run,
+                    task,
+                    trace_headers=trace_headers,
+                )
+                terminal_status = str(terminal_result.get("status") or updated_task.get("status") or current_status)
+                response = {
+                    "ok": False,
+                    "tool": GEMINI_UPDATE_ASYNC_TASK_TOOL_NAME,
+                    "rejected": True,
+                    "error_type": "builder_task_terminal",
+                    "task_id": task["task_id"],
+                    "thread_id": task["thread_id"],
+                    "run_id": task["run_id"],
+                    "status": terminal_status,
+                    "result": terminal_result,
+                    "async_task": updated_task,
+                    "recovery_guidance": (
+                        "This build is already terminal. Use edit_builder_artifact for a successful artifact, "
+                        "or start_builder_task for a fresh retry after a failed build."
+                    ),
+                    "result_summary": f"Builder task {task['task_id']} is already {terminal_status}; no update was dispatched.",
+                }
+                return GeminiBuilderLifecycleResult(
+                    response=response,
+                    result_summary=str(response["result_summary"]),
+                    updated_async_tasks={task["task_id"]: updated_task},
+                )
+
+        message = str(args["message"]).strip()
+        explicit_urls = _extract_explicit_user_urls(message)
+        augmented_message = _voice_post_interrupt_update_message(message, task)
+        run_input: dict[str, Any] = {
+            "messages": [{"role": "user", "content": augmented_message}],
+        }
+        if explicit_urls:
+            run_input.update(
+                {
+                    "explicit_user_urls": explicit_urls,
+                    "builder_allowed_urls": explicit_urls,
+                    "builder_update_required_urls": explicit_urls,
+                }
+            )
+        artifact_target_path = _string_value(task.get("artifact_target_path"))
+        if artifact_target_path:
+            run_input["builder_artifact_target_path"] = artifact_target_path
+        build_id = _string_value(task.get("build_id")) or f"build_gemini_{task['thread_id']}"
+        operation_id = _string_value(task.get("operation_id")) or f"op_gemini_{task['thread_id']}"
+        task_type = _string_value(task.get("task_type")) or "document"
+        voice_trace_id = (
+            _string_value((trace_context or {}).get("voice_trace_id"))
+            or _string_value(task.get("voice_trace_id"))
+        )
         run = await self._request_json(
             "POST",
             f"/threads/{task['thread_id']}/runs",
             json_body={
                 "assistant_id": task.get("agent_name") or builder_lifecycle_contract().ASYNC_BUILDER_AGENT_NAME,
-                "input": {"messages": [{"role": "user", "content": str(args["message"])}]},
+                "input": run_input,
+                "stream_resumable": True,
                 "multitask_strategy": "interrupt",
+                "config": {
+                    "metadata": {
+                        "build_id": build_id,
+                        "operation_id": operation_id,
+                        "builder_thread_id": task["thread_id"],
+                        "parent_thread_id": session_id,
+                        "task_type": task_type,
+                        "channel": "voice",
+                        "voice_session_id": session_id,
+                        "voice_trace_id": voice_trace_id,
+                        "voice_tool_call_id": _string_value((trace_context or {}).get("voice_tool_call_id")),
+                        "relay_correlation_id": _string_value((trace_context or {}).get("relay_correlation_id")),
+                        "provider_receive_sequence": (trace_context or {}).get("provider_receive_sequence"),
+                        "update_operation": True,
+                    },
+                    "configurable": {
+                        "thread_id": task["thread_id"],
+                        "user_id": user_id,
+                        "parent_thread_id": session_id,
+                        "graph_id": task.get("agent_name") or builder_lifecycle_contract().ASYNC_BUILDER_AGENT_NAME,
+                        "task_type": task_type,
+                        "artifact_target_ext": PurePosixPath(artifact_target_path).suffix.lower() if artifact_target_path else "",
+                        "build_id": build_id,
+                        "operation_id": operation_id,
+                        "voice_session_id": session_id,
+                        "voice_trace_id": voice_trace_id,
+                        "voice_tool_call_id": _string_value((trace_context or {}).get("voice_tool_call_id")),
+                        "relay_correlation_id": _string_value((trace_context or {}).get("relay_correlation_id")),
+                    },
+                },
             },
+            headers=trace_headers,
         )
         run_id = _required_string(run.get("run_id"), "LangGraph update run response omitted run_id.")
         updated_task = _updated_task(task, status="running", run_id=run_id, updated=True)
@@ -657,6 +859,7 @@ class GeminiBuilderLifecycleHttpBackend:
         args: Mapping[str, Any],
         *,
         async_tasks: Mapping[str, dict[str, Any]],
+        trace_headers: Mapping[str, str] | None,
     ) -> GeminiBuilderLifecycleResult:
         task = _tracked_task(str(args["task_id"]), async_tasks)
         await self._request_json(
@@ -665,6 +868,7 @@ class GeminiBuilderLifecycleHttpBackend:
             json_body=None,
             params={"wait": 0, "action": "interrupt"},
             allow_empty=True,
+            headers=trace_headers,
         )
         updated_task = _updated_task(task, status="cancelled", checked=True, updated=True)
         response = {
@@ -688,6 +892,7 @@ class GeminiBuilderLifecycleHttpBackend:
         args: Mapping[str, Any],
         *,
         async_tasks: Mapping[str, dict[str, Any]],
+        trace_headers: Mapping[str, str] | None,
     ) -> GeminiBuilderLifecycleResult:
         status_filter = args.get("status_filter") or "all"
         tasks = [dict(task) for task in async_tasks.values() if isinstance(task, Mapping)]
@@ -699,8 +904,16 @@ class GeminiBuilderLifecycleHttpBackend:
             status = str(task.get("status") or "unknown")
             status_result: dict[str, Any] = {"status": status}
             try:
-                run = await self._request_json("GET", f"/threads/{task['thread_id']}/runs/{task['run_id']}")
-                task, status_result = await self._reconcile_task_for_run(run, task)
+                run = await self._request_json(
+                    "GET",
+                    f"/threads/{task['thread_id']}/runs/{task['run_id']}",
+                    headers=trace_headers,
+                )
+                task, status_result = await self._reconcile_task_for_run(
+                    run,
+                    task,
+                    trace_headers=trace_headers,
+                )
                 status = str(status_result.get("status") or task.get("status") or "unknown")
             except GeminiDogfoodToolError:
                 # A cached graph-level success without an accepted builder
@@ -724,8 +937,11 @@ class GeminiBuilderLifecycleHttpBackend:
                 "failure_code",
                 "root_failure_code",
                 "root_failure_summary",
+                "build_id",
+                "operation_id",
+                "voice_trace_id",
             ):
-                value = status_result.get(key)
+                value = status_result.get(key, task.get(key))
                 if value is not None:
                     summary[key] = value
             summaries.append(summary)
@@ -747,11 +963,18 @@ class GeminiBuilderLifecycleHttpBackend:
         self,
         run: Mapping[str, Any],
         task: Mapping[str, Any],
+        *,
+        trace_headers: Mapping[str, str] | None,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
         native_status = _required_string(run.get("status"), "LangGraph run response omitted status.")
         values: Mapping[str, Any] = {}
         if native_status in {"success", "error", "failed"}:
-            state = await self._request_json("GET", f"/threads/{task['thread_id']}/state", params={"subgraphs": False})
+            state = await self._request_json(
+                "GET",
+                f"/threads/{task['thread_id']}/state",
+                params={"subgraphs": False},
+                headers=trace_headers,
+            )
             values = _record_value(state.get("values")) or {}
         updated_task, result = builder_lifecycle_contract().reconcile_builder_task(
             task,
@@ -772,6 +995,10 @@ class GeminiBuilderLifecycleHttpBackend:
             error_detail = run.get("error")
             result["error"] = str(error_detail) if error_detail else "The async builder encountered an error."
         result["native_run_status"] = native_status
+        for key in ("task_id", "thread_id", "run_id", "build_id", "operation_id", "voice_trace_id"):
+            value = task.get(key)
+            if value is not None:
+                result[key] = value
         return updated_task, result
 
     async def _request_json(
@@ -782,6 +1009,7 @@ class GeminiBuilderLifecycleHttpBackend:
         json_body: Any = None,
         params: Mapping[str, Any] | None = None,
         allow_empty: bool = False,
+        headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
         try:
             async with httpx.AsyncClient(timeout=self._timeout_seconds) as client:
@@ -790,6 +1018,7 @@ class GeminiBuilderLifecycleHttpBackend:
                     f"{self._langgraph_url}{path}",
                     json=json_body,
                     params=params,
+                    headers=dict(headers or {}),
                 )
         except httpx.RequestError as exc:
             raise GeminiDogfoodToolError(
@@ -1086,6 +1315,8 @@ class GeminiDogfoodToolExecutor:
         async_tasks: Mapping[str, dict[str, Any]] | None = None,
         context_mode: str | None = None,
         memory_retrieval_config: Mapping[str, Any] | None = None,
+        trace_headers: Mapping[str, str] | None = None,
+        trace_context: Mapping[str, Any] | None = None,
     ) -> GeminiDogfoodToolExecution:
         if call.name not in GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES:
             allowed = ", ".join(sorted(GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES))
@@ -1226,6 +1457,8 @@ class GeminiDogfoodToolExecutor:
                 runtime_mode=runtime_mode,
                 provider=provider,
                 async_tasks=dict(async_tasks or {}),
+                trace_headers=trace_headers,
+                trace_context=trace_context,
             )
         except GeminiBuilderTaskNotTrackedError as exc:
             return _recoverable_unknown_task_execution(
@@ -1241,10 +1474,21 @@ class GeminiDogfoodToolExecutor:
                 f"Existing Sophia builder/lifecycle tool {call.name!r} rejected the Gemini Live arguments or execution failed: {exc}"
             ) from exc
 
+        lifecycle_ok = bool(lifecycle_result.response.get("ok", True))
         return GeminiDogfoodToolExecution(
             call=call,
             response=lifecycle_result.response,
             result_summary=lifecycle_result.result_summary,
+            success=lifecycle_ok,
+            error_text=(
+                None
+                if lifecycle_ok
+                else str(
+                    lifecycle_result.response.get("result_summary")
+                    or lifecycle_result.response.get("error_message")
+                    or "builder_lifecycle_rejected"
+                )
+            ),
             updated_async_tasks=lifecycle_result.updated_async_tasks,
         )
 
@@ -1435,6 +1679,48 @@ def _extract_explicit_user_urls(text: str) -> list[str]:
     return urls
 
 
+def _voice_post_interrupt_update_message(
+    message: str,
+    task: Mapping[str, Any],
+) -> str:
+    """Give the direct voice bridge the same resume contract as Companion.
+
+    Voice updates use LangGraph's interrupt strategy so the user can refine a
+    build while continuing the conversation. The replacement run must receive
+    an explicit resume instruction and the original target; otherwise it sees
+    only the addendum and can restart or terminate without a deliverable.
+    """
+
+    if _POST_INTERRUPT_BUILD_MARKER in message:
+        return message
+    target_path = _string_value(task.get("artifact_target_path"))
+    task_type = (_string_value(task.get("task_type")) or "document").lower()
+    target_line = (
+        f"Keep the concrete deliverable target `{target_path}`."
+        if target_path
+        else "Keep the original concrete deliverable target from the existing build state."
+    )
+    deck_line = ""
+    if task_type == "presentation" or (target_path and target_path.lower().endswith(".pptx")):
+        deck_line = (
+            " Resume the service-owned presentation lane and call `prepare_deck_build` "
+            "exactly once with the complete updated deck intent. Do not substitute "
+            "plain text, write_file, python-pptx, or a partial source artifact."
+        )
+    research_line = (
+        "The update contains approved URL targets; fetch the exact new URLs before authoring."
+        if _extract_explicit_user_urls(message)
+        else "Preserve prior research and completed work from the existing thread history."
+    )
+    return (
+        f"{_POST_INTERRUPT_BUILD_MARKER}\n"
+        "You are RESUMING, not restarting, a build interrupted by this update. "
+        f"{research_line} {target_line}{deck_line}\n\n"
+        "User's update message:\n"
+        f"{message}"
+    )
+
+
 def _should_allow_builder_web_research(task_type: str, description: str) -> bool:
     normalized_type = (task_type or "").strip().lower()
     if normalized_type == "research":
@@ -1477,15 +1763,15 @@ def _voice_builder_budget(task_type: str) -> dict[str, Any] | None:
 
     if (task_type or "").strip().lower() not in {"presentation", "visual_report"}:
         return None
-    raw_max_tokens = os.getenv("SOPHIA_BUILDER_PRESENTATION_BUDGET_AUTHORING_MAX_TOKENS", "32768")
+    raw_max_tokens = os.getenv("SOPHIA_BUILDER_PRESENTATION_BUDGET_AUTHORING_MAX_TOKENS", "16384")
     try:
         authoring_max_tokens = max(1_024, int(raw_max_tokens))
     except ValueError:
         logger.warning(
-            "gemini.builder_lifecycle invalid presentation authoring budget=%r; using 32768",
+            "gemini.builder_lifecycle invalid presentation authoring budget=%r; using 16384",
             raw_max_tokens,
         )
-        authoring_max_tokens = 32_768
+        authoring_max_tokens = 16_384
     return {
         "tier": "presentation",
         "max_cost_usd": 12.0,

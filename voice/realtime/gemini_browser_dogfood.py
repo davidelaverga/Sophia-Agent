@@ -26,6 +26,7 @@ from voice.realtime.gemini_memory_context import (
 )
 from voice.realtime.gemini_tool_loop import (
     GEMINI_EMIT_ARTIFACT_TOOL_NAME,
+    GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
     GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME,
     GEMINI_CHECK_ASYNC_TASK_TOOL_NAME,
     GEMINI_LIST_ASYNC_TASKS_TOOL_NAME,
@@ -684,6 +685,8 @@ class GeminiBrowserDogfoodSessionManager:
                 dogfood_session,
                 function_calls,
                 diagnostics,
+                trace=trace,
+                source_metadata=source_metadata,
             )
             execution_elapsed_ms = max(int((time.perf_counter() - started_at) * 1000), 0)
             cancelled_after_execution = self._cancelled_tool_call_ids_by_session.get(
@@ -710,14 +713,6 @@ class GeminiBrowserDogfoodSessionManager:
                 executed_call_ids: set[str] = set()
                 for execution in executions:
                     executed_call_ids.add(execution.call.call_id)
-                    trace.record_tool_call(
-                        tool_call_id=execution.call.call_id,
-                        tool_name=execution.call.name,
-                        arguments=execution.call.args,
-                        success=execution.success,
-                        result_summary=execution.result_summary,
-                        error=execution.error_text,
-                    )
                     if execution.call.call_id not in cancelled_after_execution:
                         trace.record_function_response(
                             tool_call_id=execution.call.call_id,
@@ -904,6 +899,9 @@ class GeminiBrowserDogfoodSessionManager:
         dogfood_session: RealtimeDogfoodSession,
         function_calls: list[GeminiLiveFunctionCall],
         reliability_diagnostics: GeminiReliabilityDiagnostics | None = None,
+        *,
+        trace: GeminiLiveTraceRecorder | None = None,
+        source_metadata: GeminiRelaySourceMetadata | None = None,
     ) -> tuple[list[GeminiDogfoodToolExecution], list[dict[str, Any]]]:
         cancelled_ids = self._cancelled_tool_call_ids_by_session.setdefault(
             dogfood_session.session_id,
@@ -963,6 +961,33 @@ class GeminiBrowserDogfoodSessionManager:
                     function_call.name,
                     function_call.call_id,
                 )
+            tool_span = None
+            trace_headers: Mapping[str, str] | None = None
+            trace_context: dict[str, Any] | None = None
+            if trace is not None:
+                tool_span = trace.start_tool_call(
+                    tool_call_id=function_call.call_id,
+                    tool_name=function_call.name,
+                    arguments=function_call.args,
+                    provider_receive_sequence=(
+                        source_metadata.provider_receive_sequence if source_metadata else None
+                    ),
+                    relay_correlation_id=(
+                        source_metadata.relay_correlation_id if source_metadata else None
+                    ),
+                )
+                trace_headers = trace.handoff_headers(tool_span)
+                trace_context = {
+                    "voice_session_id": dogfood_session.session_id,
+                    "voice_trace_id": trace.trace_id,
+                    "voice_tool_call_id": function_call.call_id,
+                    "relay_correlation_id": (
+                        source_metadata.relay_correlation_id if source_metadata else None
+                    ),
+                    "provider_receive_sequence": (
+                        source_metadata.provider_receive_sequence if source_metadata else None
+                    ),
+                }
             inflight_ids.add(function_call.call_id)
             try:
                 execution = await self._tool_executor.execute(
@@ -976,8 +1001,18 @@ class GeminiBrowserDogfoodSessionManager:
                     memory_retrieval_config=self._memory_retrieval_config_by_session.get(
                         dogfood_session.session_id
                     ),
+                    trace_headers=trace_headers,
+                    trace_context=trace_context,
                 )
             except GeminiDogfoodToolError as exc:
+                if trace is not None:
+                    trace.finish_tool_call(
+                        tool_span,
+                        tool_name=function_call.name,
+                        success=False,
+                        result_summary="Tool execution rejected before a response was available.",
+                        error=str(exc),
+                    )
                 if function_call.name in _BUILDER_LIFECYCLE_TOOL_NAMES:
                     logger.warning(
                         "gemini.relay.builder_tool.rejected session_id=%s tool_name=%s tool_call_id=%s error_type=%s",
@@ -987,8 +1022,28 @@ class GeminiBrowserDogfoodSessionManager:
                         exc.__class__.__name__,
                     )
                 raise GeminiBrowserRelayError(str(exc)) from exc
+            except Exception as exc:
+                if trace is not None:
+                    trace.finish_tool_call(
+                        tool_span,
+                        tool_name=function_call.name,
+                        success=False,
+                        result_summary="Tool execution failed before a response was available.",
+                        error=f"{exc.__class__.__name__}: {exc}",
+                    )
+                raise
             finally:
                 inflight_ids.discard(function_call.call_id)
+
+            if trace is not None:
+                trace.finish_tool_call(
+                    tool_span,
+                    tool_name=function_call.name,
+                    success=execution.success,
+                    result_summary=execution.result_summary,
+                    error=execution.error_text,
+                    response=execution.response,
+                )
 
             if execution.updated_async_tasks:
                 async_tasks.update(execution.updated_async_tasks)
@@ -1104,6 +1159,7 @@ class GeminiBrowserDogfoodSessionManager:
 
 _BUILDER_LIFECYCLE_TOOL_NAMES = {
     GEMINI_START_BUILDER_TASK_TOOL_NAME,
+    GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
     GEMINI_CHECK_ASYNC_TASK_TOOL_NAME,
     GEMINI_UPDATE_ASYNC_TASK_TOOL_NAME,
     GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME,
@@ -1154,6 +1210,34 @@ def _builder_task_payloads_from_executions(
                 payload["started_at"] = started_at
             if last_update_at:
                 payload["last_update_at"] = last_update_at
+            for key in (
+                "thread_id",
+                "run_id",
+                "build_id",
+                "operation_id",
+                "voice_trace_id",
+                "failure_code",
+                "root_failure_code",
+                "terminal_reason",
+            ):
+                value = record.get(key, execution.response.get(key))
+                if isinstance(value, str) and value.strip():
+                    payload[key] = value.strip()
+            artifact_path = _string_value(record.get("artifact_path"))
+            if artifact_path:
+                payload["artifact_path"] = artifact_path
+            if status and status.strip().lower() in {
+                "success",
+                "completed",
+                "error",
+                "failed",
+                "cancelled",
+                "timeout",
+                "timed_out",
+            }:
+                payload["artifact_valid"] = bool(
+                    status.strip().lower() in {"success", "completed"} and artifact_path
+                )
             if task_event_type in {"task_completed", "task_failed", "task_timed_out", "task_cancelled"}:
                 payload["completed_at"] = last_update_at or started_at
             payloads.append(payload)

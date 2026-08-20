@@ -42,6 +42,13 @@ class FakeRun:
     def patch(self, **_: Any) -> None:
         self.patched = True
 
+    def to_headers(self) -> dict[str, str]:
+        return {
+            "langsmith-trace": f"trace={self.id}",
+            "baggage": "langsmith-project=Sophia",
+            "authorization": "must-not-propagate",
+        }
+
     def end(self, *, outputs: dict[str, Any] | None = None, error: str | None = None, **_: Any) -> None:
         self.ended = True
         self.outputs = outputs or self.outputs
@@ -145,8 +152,156 @@ def test_one_root_contains_socket_event_and_tool_spans(monkeypatch: Any) -> None
         "function_response:retrieve_memories",
     ]
     assert recorder.root.children[1].run_type == "tool"
+    assert recorder.root.children[1].patched is True
     assert all(child.id is not None and child.id.version == 7 for child in recorder.root.children)
     assert all(child.posted for child in recorder.root.children)
+
+
+def test_open_tool_span_provides_filtered_distributed_trace_headers(monkeypatch: Any) -> None:
+    _enable_fake_sdk(monkeypatch)
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id="gemini-prod-test",
+        user_id="user-1",
+        model="gemini-live-test",
+        client=FakeClient(),
+    )
+
+    span = recorder.start_tool_call(
+        tool_call_id="builder-call-1",
+        tool_name="start_builder_task",
+        arguments={"task_type": "presentation"},
+        provider_receive_sequence=7,
+        relay_correlation_id="relay-7",
+    )
+
+    assert span is not None
+    assert span.posted is True
+    assert span.ended is False
+    assert recorder.handoff_headers(span) == {
+        "langsmith-trace": f"trace={span.id}",
+        "baggage": "langsmith-project=Sophia",
+    }
+    recorder.finish_tool_call(
+        span,
+        tool_name="start_builder_task",
+        success=True,
+        result_summary="launched",
+        response={
+            "task_id": "builder-thread-1",
+            "run_id": "run-1",
+            "build_id": "build-1",
+            "status": "running",
+        },
+    )
+    assert span.ended is True
+    assert span.patched is True
+    assert span.outputs["builder_lifecycle"]["build_id"] == "build-1"
+
+
+def test_artifact_announcement_gate_flags_false_ready(monkeypatch: Any) -> None:
+    _enable_fake_sdk(monkeypatch)
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id="gemini-prod-test",
+        user_id="user-1",
+        model="gemini-live-test",
+        client=FakeClient(),
+    )
+
+    recorder.record_function_response(
+        tool_call_id="check-1",
+        tool_name="check_async_task",
+        response={
+            "status": "success",
+            "task_id": "builder-thread-1",
+            "result": {"status": "success", "artifact_path": None},
+        },
+        success=True,
+    )
+
+    assert recorder.root is not None
+    gate = recorder.root.children[-1]
+    assert gate.name == "artifact.announcement_gate"
+    assert gate.outputs["ready_status_observed"] is True
+    assert gate.outputs["announced_ready"] is False
+    assert gate.outputs["false_ready"] is False
+    assert gate.outputs["announcement_allowed"] is False
+    assert gate.error == "ARTIFACT_EVIDENCE_MISSING"
+
+    recorder.record_provider_event(
+        {"serverContent": {"outputTranscription": {"text": "Your presentation is ready."}}},
+        categories=["serverContent", "outputTranscription"],
+        provider_receive_sequence=8,
+        relay_correlation_id="relay-8",
+    )
+
+    spoken = recorder.root.children[-1]
+    assert spoken.name == "voice.ready_spoken"
+    assert spoken.outputs["announced_ready"] is True
+    assert spoken.outputs["false_ready"] is True
+    assert spoken.outputs["failure_code"] == "ARTIFACT_EVIDENCE_MISSING"
+    assert spoken.error == "FALSE_READY"
+
+
+def test_spoken_ready_trace_is_allowed_only_with_one_valid_artifact_gate(monkeypatch: Any) -> None:
+    _enable_fake_sdk(monkeypatch)
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id="gemini-prod-test",
+        user_id="user-1",
+        model="gemini-live-test",
+        client=FakeClient(),
+    )
+
+    recorder.record_function_response(
+        tool_call_id="check-1",
+        tool_name="check_async_task",
+        response={
+            "status": "success",
+            "task_id": "builder-thread-1",
+            "build_id": "build-1",
+            "result": {
+                "status": "success",
+                "task_id": "builder-thread-1",
+                "build_id": "build-1",
+                "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+            },
+        },
+        success=True,
+    )
+    recorder.record_provider_event(
+        {"serverContent": {"outputTranscription": {"text": "The deck is complete."}}},
+        categories=["serverContent", "outputTranscription"],
+        provider_receive_sequence=9,
+        relay_correlation_id="relay-9",
+    )
+
+    assert recorder.root is not None
+    spoken = recorder.root.children[-1]
+    assert spoken.name == "voice.ready_spoken"
+    assert spoken.outputs["announcement_allowed"] is True
+    assert spoken.outputs["artifact_valid"] is True
+    assert spoken.outputs["task_id"] == "builder-thread-1"
+    assert spoken.outputs["build_id"] == "build-1"
+    assert spoken.outputs["gate_run_id"]
+    assert spoken.error is None
+
+
+def test_spoken_non_ready_update_does_not_create_ready_trace(monkeypatch: Any) -> None:
+    _enable_fake_sdk(monkeypatch)
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id="gemini-prod-test",
+        user_id="user-1",
+        model="gemini-live-test",
+        client=FakeClient(),
+    )
+
+    recorder.record_provider_event(
+        {"serverContent": {"outputTranscription": {"text": "It is not ready yet; it is still building."}}},
+        categories=["serverContent", "outputTranscription"],
+        provider_receive_sequence=10,
+    )
+
+    assert recorder.root is not None
+    assert [child.name for child in recorder.root.children] == ["output_transcription"]
 
 
 def test_close_patches_root_with_inline_audio_and_flushes(monkeypatch: Any) -> None:

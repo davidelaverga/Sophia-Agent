@@ -191,7 +191,19 @@ def builder_trace_metadata(
     configurable = _as_dict(runtime_config.get("configurable"))
     config_metadata = _as_dict(runtime_config.get("metadata"))
     for source in (configurable, config_metadata):
-        for key in ("thread_id", "task_id", "run_id", "parent_thread_id"):
+        for key in (
+            "thread_id",
+            "task_id",
+            "run_id",
+            "parent_thread_id",
+            "build_id",
+            "operation_id",
+            "voice_session_id",
+            "voice_trace_id",
+            "voice_tool_call_id",
+            "relay_correlation_id",
+            "channel",
+        ):
             if key not in metadata:
                 _merge_safe_metadata(metadata, key, source.get(key))
     if "parent_trace_id" not in metadata:
@@ -247,6 +259,7 @@ def langsmith_builder_tracing_context(
     *,
     metadata: dict[str, Any] | None = None,
     tags: list[str] | None = None,
+    parent: Any | None = None,
 ) -> Any:
     """Context manager that enables tracing only for builder graph execution."""
 
@@ -263,6 +276,7 @@ def langsmith_builder_tracing_context(
             client=_langsmith_client(tracing_config),
             tags=_safe_tags(tags),
             metadata=metadata or {},
+            parent=parent,
         )
     except Exception:  # noqa: BLE001 - tracing must not break builder execution.
         logger.warning(

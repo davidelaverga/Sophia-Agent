@@ -801,6 +801,7 @@ def test_forced_presentation_authoring_uses_only_compact_prepare_context() -> No
     assert "Do not use lossy CSS properties: box-shadow, letter-spacing, opacity, text-shadow" in bounded.system_prompt
     assert "creative_plan as a JSON object" in bounded.system_prompt
     assert bounded.model_settings["max_tokens"] == 16_384
+    assert bounded.model_settings["thinking"] == {"type": "disabled"}
     assert update is not None
     diagnostics = update["builder_pptx_diagnostics"]
     assert diagnostics["deck_authoring_context_bytes"] <= 40 * 1024
@@ -1774,6 +1775,89 @@ def test_authoring_deadline_takes_precedence_over_output_truncation(monkeypatch)
     assert captured["failure_code"] == "deck_authoring_deadline_exceeded"
 
 
+def test_forced_presentation_authoring_retries_one_plain_text_miss_then_fails_typed(
+    monkeypatch,
+) -> None:
+    latest = AIMessage(
+        content="Generating the deck via prepare_deck_build.",
+        response_metadata={"stop_reason": "end_turn"},
+        usage_metadata={"input_tokens": 18_610, "output_tokens": 28_362, "total_tokens": 46_972},
+    )
+    state = {
+        "messages": [latest],
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "delegation_context": {"task_type": "presentation"},
+        "builder_presentation_phase": "authoring_pending",
+        "builder_deck_prepare_latch_active": True,
+        "builder_presentation_authoring_started_at_ms": int(time.time() * 1000) - 1_000,
+        "builder_budget": {
+            "tier": "presentation",
+            "authoring_deadline_seconds": 720,
+        },
+    }
+    middleware = BuilderArtifactMiddleware()
+    monkeypatch.setattr(middleware, "_provider_normalized_tool_choice", lambda _model, choice: choice)
+    recovered = AIMessage(
+        content="",
+        tool_calls=[
+            {
+                "id": "prepare-recovered",
+                "name": "prepare_deck_build",
+                "args": {"output_path": "/mnt/user-data/outputs/deck.pptx"},
+            }
+        ],
+    )
+    responses = [latest, recovered]
+    requests: list[_ModelRequest] = []
+
+    def handler(request):
+        requests.append(request)
+        return responses.pop(0)
+
+    result = middleware.wrap_model_call(
+        _ModelRequest(state, tools=[prepare_deck_build]),
+        handler,
+    )
+
+    assert isinstance(result, ExtendedModelResponse)
+    assert len(requests) == 2
+    assert requests[1].messages[:-1] == requests[0].messages
+    assert "Call prepare_deck_build exactly once now" in requests[1].messages[-1].content
+    assert requests[1].model_settings["max_tokens"] == 16_384
+    assert requests[1].model_settings["thinking"] == {"type": "disabled"}
+    assert result.command is not None
+    assert isinstance(result.command.update, dict)
+    assert result.command.update["builder_deck_authoring_no_tool_retries"] == 1
+    diagnostics = result.command.update["builder_pptx_diagnostics"]
+    assert diagnostics["deck_authoring_no_tool_retry_count"] == 1
+    assert diagnostics["deck_authoring_no_tool_stop_reason"] == "end_turn"
+    assert diagnostics["deck_authoring_no_tool_output_tokens"] == 28_362
+
+    captured: dict[str, str] = {}
+
+    def terminal(_state, _runtime, *, failure_code, tool_calls=None):
+        captured["failure_code"] = failure_code
+        return {"failure_code": failure_code, "builder_pptx_diagnostics": {}}
+
+    monkeypatch.setattr(middleware, "_deck_authoring_terminal_update", terminal)
+    second_state = {
+        **state,
+        "builder_deck_authoring_no_tool_retries": 1,
+        "builder_tool_turn_summaries": result.command.update["builder_tool_turn_summaries"],
+    }
+
+    terminal_update = middleware._deck_authoring_message_failure_update(
+        second_state,
+        object(),
+        latest,
+    )
+
+    assert terminal_update is not None
+    assert captured["failure_code"] == "deck_authoring_tool_call_missing"
+    assert terminal_update["failure_code"] == "deck_authoring_tool_call_missing"
+    assert terminal_update["builder_pptx_diagnostics"]["deck_authoring_no_tool_retry_count"] == 2
+
+
 def test_presentation_model_settings_are_valid_anthropic_message_parameters() -> None:
     state = {
         "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
@@ -1802,6 +1886,7 @@ def test_presentation_model_settings_are_valid_anthropic_message_parameters() ->
 
     assert set(payload).issubset(provider_parameters)
     assert "max_retries" not in payload
+    assert payload["thinking"] == {"type": "disabled"}
 
 
 def test_presentation_authoring_disables_provider_fallback() -> None:

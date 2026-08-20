@@ -43,6 +43,7 @@ from deerflow.agents.sophia_agent.builder_chain_support import (
     BuildDeadlineMiddleware,
     BuilderBudgetMiddleware,
     BuilderProgressMiddleware,
+    builder_distributed_trace_context,
     BuildSafeBoundaryMiddleware,
     LoopDetectionMiddleware,
     create_builder_todo_middleware,
@@ -64,6 +65,7 @@ from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 
 __all__ = [
     "build_builder_middleware_chain",
+    "builder_distributed_trace_context",
     "log_builder_tracing_startup_status",
     "wrap_builder_agent_for_observability",
 ]

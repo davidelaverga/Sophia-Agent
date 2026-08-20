@@ -18,6 +18,7 @@ from deerflow.sophia.observability import (
     builder_trace_metadata,
     builder_trace_tags,
     enable_langsmith_tracing_for_builder_runnable,
+    langsmith_builder_tracing_context,
     log_builder_tracing_startup_status,
 )
 
@@ -28,6 +29,7 @@ __all__ = [
     "BuilderProgressMiddleware",
     "LoopDetectionMiddleware",
     "create_builder_todo_middleware",
+    "builder_distributed_trace_context",
     "log_builder_tracing_startup_status",
     "wrap_builder_agent_for_observability",
 ]
@@ -61,6 +63,29 @@ def create_builder_todo_middleware() -> TodoMiddleware:
         system_prompt=_BUILDER_TODO_SYSTEM_PROMPT,
         tool_description=_BUILDER_TODO_TOOL_DESCRIPTION,
         reminder_instruction=_BUILDER_TODO_REMINDER,
+    )
+
+
+def builder_distributed_trace_context(
+    *,
+    config: dict,
+    parent: object,
+    model_name: str | None,
+    model_source: str | None,
+):
+    """Restore the caller's LangSmith parent around one builder graph run."""
+
+    return langsmith_builder_tracing_context(
+        parent=parent,
+        metadata=builder_trace_metadata(
+            model_name=model_name,
+            model_source=model_source,
+            config=config,
+        ),
+        tags=builder_trace_tags(
+            model_name=model_name,
+            model_source=model_source,
+        ),
     )
 
 

@@ -18,6 +18,7 @@ This file owns:
 
 import logging
 import os
+from contextlib import asynccontextmanager
 
 from langchain.agents import create_agent
 from langchain_anthropic import ChatAnthropic
@@ -25,6 +26,7 @@ from langchain_core.runnables import RunnableConfig
 
 from deerflow.agents.sophia_agent.builder_middlewares import (
     build_builder_middleware_chain,
+    builder_distributed_trace_context,
     log_builder_tracing_startup_status,
     wrap_builder_agent_for_observability,
 )
@@ -71,6 +73,60 @@ def make_sophia_builder(config: RunnableConfig):
     )
 
 
+@asynccontextmanager
+async def make_sophia_builder_with_distributed_tracing(config: RunnableConfig):
+    """LangGraph entry point that restores a voice caller's trace parent.
+
+    Agent Server maps the incoming ``langsmith-trace`` HTTP header into
+    ``configurable``. Keeping this context manager open while the graph runs
+    makes the builder, model, prepare, and deck spans descendants of the
+    pre-dispatch voice lifecycle span instead of an unrelated trace root.
+    """
+
+    cfg = config.get("configurable", {})
+    parent_trace = cfg.get("langsmith-trace")
+    if not parent_trace:
+        yield make_sophia_builder(config)
+        return
+    parent_headers = {"langsmith-trace": str(parent_trace)}
+    baggage = cfg.get("baggage")
+    if isinstance(baggage, str) and baggage.strip():
+        parent_headers["baggage"] = baggage
+
+    raw_user_id = cfg.get("user_id")
+    user_id = validate_user_id(
+        raw_user_id if isinstance(raw_user_id, str) and raw_user_id.strip() else "default_user"
+    )
+    model_name = cfg.get("model_name")
+    task_type = cfg.get("task_type")
+    artifact_target_ext = cfg.get("artifact_target_ext")
+    resolved_model_info = _resolve_builder_model_name(
+        model_name if isinstance(model_name, str) else None
+    )
+    logger.info(
+        "Creating distributed-trace Sophia builder: voice_trace_id=%s voice_tool_call_id=%s",
+        cfg.get("voice_trace_id"),
+        cfg.get("voice_tool_call_id"),
+    )
+    with builder_distributed_trace_context(
+        config=config,
+        parent=parent_headers,
+        model_name=resolved_model_info[0],
+        model_source=resolved_model_info[1],
+    ):
+        yield _create_builder_agent(
+            user_id=user_id,
+            model_name=model_name if isinstance(model_name, str) else None,
+            trace_config=config,
+            task_type=task_type if isinstance(task_type, str) else None,
+            artifact_target_ext=(
+                artifact_target_ext if isinstance(artifact_target_ext, str) else None
+            ),
+            resolved_model_info=resolved_model_info,
+            external_trace_context=True,
+        )
+
+
 def _resolve_builder_model_name(model_name: str | None) -> tuple[str, str]:
     """Resolve model name and source for builder creation logging."""
     if model_name:
@@ -98,6 +154,8 @@ def _create_builder_agent(
     trace_config: RunnableConfig | None = None,
     task_type: str | None = None,
     artifact_target_ext: str | None = None,
+    resolved_model_info: tuple[str, str] | None = None,
+    external_trace_context: bool = False,
 ):
     """Create the Sophia builder agent with its dedicated middleware chain.
 
@@ -108,7 +166,7 @@ def _create_builder_agent(
         user_id: User identifier for identity loading.
         model_name: Model name inherited from companion if present.
     """
-    resolved_model, model_source = _resolve_builder_model_name(model_name)
+    resolved_model, model_source = resolved_model_info or _resolve_builder_model_name(model_name)
     logger.info(
         "Creating Sophia builder agent: user_id=%s, model=%s, model_source=%s",
         user_id,
@@ -242,6 +300,8 @@ def _create_builder_agent(
     # The delegated Builder path still enforces its runtime budget through
     # switch_to_builder -> SubagentExecutor.config.max_turns.
     agent.recursion_limit = 80
+    if external_trace_context:
+        return agent
     return wrap_builder_agent_for_observability(
         agent,
         model_name=resolved_model,

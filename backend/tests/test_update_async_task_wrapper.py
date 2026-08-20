@@ -92,6 +92,42 @@ def test_builder_native_success_without_terminal_result_is_never_success():
     assert payload["terminal_reason"] == "builder_terminal_result_missing"
 
 
+def test_required_storage_failure_overrides_completed_local_artifact() -> None:
+    completed_result = {
+        "status": "completed",
+        "terminal_status": "completed",
+        "terminal_reason": "artifact_emitted",
+        "artifact_acceptance_status": "passed",
+        "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+        "builder_failure_diagnostics": {
+            "failure_stage": "storage_mirror",
+            "failure_code": "durable_storage_unavailable",
+            "failure_reason": "Required production upload could not be verified.",
+            "supabase_mirror_result": "required_verify_failed",
+        },
+    }
+
+    reconciled, payload = reconcile_builder_task(
+        {
+            "task_id": "task-1",
+            "agent_name": "sophia_builder",
+            "thread_id": "thread-1",
+            "run_id": "run-1",
+            "status": "running",
+        },
+        native_status="success",
+        thread_values={"builder_result": completed_result},
+    )
+
+    assert reconciled["status"] == "error"
+    assert reconciled["artifact_path"] is None
+    assert reconciled["builder_result"]["artifact_acceptance_status"] == "failed"
+    assert reconciled["builder_result"]["unverified_artifact_path"].endswith("deck.pptx")
+    assert payload["status"] == "error"
+    assert payload["failure_code"] == "durable_storage_unavailable"
+    assert payload.get("artifact_path") is None
+
+
 def _make_native_tool(
     name: str = "update_async_task",
     description: str = "native desc",

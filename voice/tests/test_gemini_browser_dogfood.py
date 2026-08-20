@@ -138,6 +138,8 @@ class FakeBuilderLifecycleBackend:
         runtime_mode: VoiceRuntimeMode,
         provider: str,
         async_tasks: Mapping[str, dict[str, Any]],
+        trace_headers: Mapping[str, str] | None = None,
+        trace_context: Mapping[str, Any] | None = None,
     ) -> gemini_tool_loop.GeminiBuilderLifecycleResult:
         self.calls.append(
             {
@@ -148,6 +150,8 @@ class FakeBuilderLifecycleBackend:
                 "runtime_mode": runtime_mode.value,
                 "provider": provider,
                 "async_tasks": dict(async_tasks),
+                "trace_headers": dict(trace_headers or {}),
+                "trace_context": dict(trace_context or {}),
             }
         )
         if tool_name in {"check_async_task", "update_async_task", "cancel_async_task"}:
@@ -363,16 +367,18 @@ class CapturingBuilderLifecycleHttpBackend(gemini_tool_loop.GeminiBuilderLifecyc
         json_body: Any = None,
         params: Mapping[str, Any] | None = None,
         allow_empty: bool = False,
+        headers: Mapping[str, str] | None = None,
     ) -> dict[str, Any]:
-        self.requests.append(
-            {
-                "method": method,
-                "path": path,
-                "json_body": json_body,
-                "params": dict(params or {}),
-                "allow_empty": allow_empty,
-            }
-        )
+        request = {
+            "method": method,
+            "path": path,
+            "json_body": json_body,
+            "params": dict(params or {}),
+            "allow_empty": allow_empty,
+        }
+        if headers:
+            request["headers"] = dict(headers)
+        self.requests.append(request)
         if not self.responses:
             raise AssertionError(f"No fake LangGraph response queued for {method} {path}")
         return self.responses.pop(0)
@@ -409,6 +415,15 @@ async def test_voice_presentation_builder_seeds_authoring_budget(
         runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
         provider="gemini",
         async_tasks={},
+        trace_headers={
+            "langsmith-trace": "trace-parent",
+            "baggage": "langsmith-project=Sophia",
+        },
+        trace_context={
+            "voice_trace_id": "voice-trace-1",
+            "voice_tool_call_id": "voice-tool-1",
+            "relay_correlation_id": "relay-1",
+        },
     )
 
     assert result.response["status"] == "running"
@@ -422,6 +437,17 @@ async def test_voice_presentation_builder_seeds_authoring_budget(
     assert run_config["task_type"] == "presentation"
     assert run_config["artifact_target_ext"] == ".pptx"
     assert run_config["graph_id"] == "sophia_builder"
+    assert backend.requests[0]["headers"] == {
+        "langsmith-trace": "trace-parent",
+        "baggage": "langsmith-project=Sophia",
+    }
+    assert backend.requests[1]["headers"] == backend.requests[0]["headers"]
+    run_metadata = backend.requests[1]["json_body"]["config"]["metadata"]
+    assert run_metadata["voice_trace_id"] == "voice-trace-1"
+    assert run_metadata["voice_tool_call_id"] == "voice-tool-1"
+    assert run_metadata["relay_correlation_id"] == "relay-1"
+    assert result.response["async_task"]["voice_trace_id"] == "voice-trace-1"
+    assert result.response["async_task"]["build_id"].startswith("build_gemini_")
 
 
 def _make_backend_emit_artifact_import_fail(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1898,8 +1924,10 @@ async def test_browser_relay_start_builder_task_dispatches_existing_builder_boun
     builder_events = [payload for payload in payloads if payload["type"] == "sophia.builder_task"]
     assert builder_events
     assert builder_events[0]["data"] == {
-        "type": "task_started",
-        "task_id": "builder-thread-1",
+            "type": "task_started",
+            "task_id": "builder-thread-1",
+            "thread_id": "builder-thread-1",
+            "run_id": "run-1",
         "description": "Make a short one-page reflection document about staying grounded today.",
         "detail": "Launched builder task. task_id: builder-thread-1.",
         "status": "running",
@@ -1994,9 +2022,15 @@ async def test_http_lifecycle_backend_update_list_and_cancel_request_shapes() ->
         "run_id": "run-1",
         "status": "running",
         "task_type": "document",
+        "artifact_target_path": "/mnt/user-data/outputs/brief.md",
+        "build_id": "build-1",
+        "operation_id": "operation-1",
+        "voice_trace_id": "voice-trace-1",
     }
 
-    update_backend = CapturingBuilderLifecycleHttpBackend([{"run_id": "run-2"}])
+    update_backend = CapturingBuilderLifecycleHttpBackend(
+        [{"status": "running"}, {"run_id": "run-2"}]
+    )
     update_result = await update_backend.execute(
         "update_async_task",
         {"task_id": "builder-thread-1", "message": "Make it warmer."},
@@ -2007,19 +2041,42 @@ async def test_http_lifecycle_backend_update_list_and_cancel_request_shapes() ->
         async_tasks={"builder-thread-1": tracked_task},
     )
 
-    assert update_backend.requests == [
-        {
-            "method": "POST",
-            "path": "/threads/builder-thread-1/runs",
-            "json_body": {
-                "assistant_id": "sophia_builder",
-                "input": {"messages": [{"role": "user", "content": "Make it warmer."}]},
-                "multitask_strategy": "interrupt",
-            },
-            "params": {},
-            "allow_empty": False,
-        }
-    ]
+    assert update_backend.requests[0] == {
+        "method": "GET",
+        "path": "/threads/builder-thread-1/runs/run-1",
+        "json_body": None,
+        "params": {},
+        "allow_empty": False,
+    }
+    update_request = update_backend.requests[1]
+    assert update_request["method"] == "POST"
+    assert update_request["path"] == "/threads/builder-thread-1/runs"
+    update_body = update_request["json_body"]
+    assert update_body["assistant_id"] == "sophia_builder"
+    assert update_body["multitask_strategy"] == "interrupt"
+    assert update_body["stream_resumable"] is True
+    update_message = update_body["input"]["messages"][0]["content"]
+    assert update_message.startswith("[Sophia/post-interrupt build directive]")
+    assert "RESUMING, not restarting" in update_message
+    assert "`/mnt/user-data/outputs/brief.md`" in update_message
+    assert update_message.endswith("Make it warmer.")
+    assert update_body["input"]["builder_artifact_target_path"] == "/mnt/user-data/outputs/brief.md"
+    assert update_body["config"]["metadata"]["build_id"] == "build-1"
+    assert update_body["config"]["metadata"]["channel"] == "voice"
+    assert update_body["config"]["configurable"] == {
+        "thread_id": "builder-thread-1",
+        "user_id": "trusted-user-1",
+        "parent_thread_id": "browser-gemini-builder-lifecycle",
+        "graph_id": "sophia_builder",
+        "task_type": "document",
+        "artifact_target_ext": ".md",
+        "build_id": "build-1",
+        "operation_id": "operation-1",
+        "voice_session_id": "browser-gemini-builder-lifecycle",
+        "voice_trace_id": "voice-trace-1",
+        "voice_tool_call_id": None,
+        "relay_correlation_id": None,
+    }
     assert update_result.response["task_id"] == "builder-thread-1"
     assert update_result.response["run_id"] == "run-2"
     assert update_result.response["status"] == "running"
@@ -2059,6 +2116,9 @@ async def test_http_lifecycle_backend_update_list_and_cancel_request_shapes() ->
             "agent_name": "sophia_builder",
             "status": "running",
             "task_type": "document",
+            "build_id": "build-1",
+            "operation_id": "operation-1",
+            "voice_trace_id": "voice-trace-1",
         }
     ]
     assert list_result.updated_async_tasks is not None
@@ -2145,6 +2205,54 @@ async def test_http_lifecycle_backend_does_not_promote_failed_builder_graph_succ
     assert updated["status"] == "error"
     assert updated["artifact_path"] is None
     assert updated["builder_result"] == failed_builder_result
+
+
+@pytest.mark.anyio
+async def test_http_lifecycle_backend_rejects_update_after_builder_is_terminal() -> None:
+    tracked_task = {
+        "task_id": "builder-thread-1",
+        "agent_name": "sophia_builder",
+        "thread_id": "builder-thread-1",
+        "run_id": "run-1",
+        "status": "running",
+        "task_type": "presentation",
+        "artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "build_id": "build-1",
+        "operation_id": "operation-1",
+    }
+    backend = CapturingBuilderLifecycleHttpBackend(
+        [
+            {"status": "success"},
+            {
+                "values": {
+                    "builder_result": {
+                        "status": "completed",
+                        "terminal_status": "completed",
+                        "terminal_reason": "deck_build_succeeded",
+                        "artifact_path": "/mnt/user-data/outputs/deck.pptx",
+                    }
+                }
+            },
+        ]
+    )
+
+    result = await backend.execute(
+        "update_async_task",
+        {"task_id": "builder-thread-1", "message": "Add one more slide."},
+        session_id="voice-session-1",
+        user_id="trusted-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        async_tasks={"builder-thread-1": tracked_task},
+    )
+
+    assert [request["method"] for request in backend.requests] == ["GET", "GET"]
+    assert result.response["ok"] is False
+    assert result.response["error_type"] == "builder_task_terminal"
+    assert result.response["status"] == "success"
+    assert result.response["result"]["artifact_path"] == "/mnt/user-data/outputs/deck.pptx"
+    assert result.updated_async_tasks is not None
+    assert result.updated_async_tasks["builder-thread-1"]["status"] == "success"
 
 
 @pytest.mark.anyio

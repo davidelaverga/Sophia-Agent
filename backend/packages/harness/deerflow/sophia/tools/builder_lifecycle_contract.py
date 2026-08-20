@@ -263,6 +263,23 @@ def _resolved_terminal_status(
     result: dict[str, Any] | None,
 ) -> _BuilderResolution | None:
     terminal_status = str(current.get("terminal_status") or current.get("status") or "").strip().lower()
+    delivery_failure = _required_delivery_failure(current)
+    if terminal_status == "completed" and delivery_failure is not None:
+        failure_code, failure_summary = delivery_failure
+        failed_result = {
+            **current,
+            "status": "failed",
+            "terminal_status": "failed",
+            "terminal_reason": failure_code,
+            "failure_code": failure_code,
+            "root_failure_code": current.get("root_failure_code") or failure_code,
+            "root_failure_summary": current.get("root_failure_summary") or failure_summary,
+            "summary": failure_summary,
+            "artifact_acceptance_status": "failed",
+            "unverified_artifact_path": current.get("artifact_path"),
+            "artifact_path": None,
+        }
+        return _BuilderResolution("error", "failed", failure_code, failed_result)
     if terminal_status == "completed" and _builder_result_has_artifact(current):
         reason = str(current.get("terminal_reason") or "artifact_emitted")
         return _BuilderResolution("success", "completed", reason, result)
@@ -273,6 +290,20 @@ def _resolved_terminal_status(
         reason = str(current.get("terminal_reason") or "builder_timed_out")
         return _BuilderResolution("timeout", "timed_out", reason, result)
     return None
+
+
+def _required_delivery_failure(result: dict[str, Any]) -> tuple[str, str] | None:
+    diagnostics = result.get("builder_failure_diagnostics")
+    diagnostics = diagnostics if isinstance(diagnostics, dict) else {}
+    failure_code = str(diagnostics.get("failure_code") or "").strip()
+    mirror_result = str(diagnostics.get("supabase_mirror_result") or "").strip()
+    if failure_code != "durable_storage_unavailable" and not mirror_result.startswith("required_"):
+        return None
+    summary = str(
+        diagnostics.get("failure_reason")
+        or "Builder artifact storage could not be verified for durable production delivery."
+    ).strip()
+    return failure_code or "durable_storage_unavailable", summary
 
 
 def _builder_result_has_artifact(result: dict[str, Any]) -> bool:
@@ -353,7 +384,12 @@ def _apply_builder_result_metadata(merged: dict[str, Any], result: dict[str, Any
         "root_failure_code",
         "root_failure_summary",
     ):
-        if result.get(key) is not None:
+        # Preserve an explicit null artifact path on terminal failures. Its
+        # presence is authoritative evidence for voice/UI readiness gates and
+        # prevents stale paths from surviving a failed reconciliation.
+        if key == "artifact_path" and key in result:
+            merged[key] = result.get(key)
+        elif result.get(key) is not None:
             merged[key] = result.get(key)
 
 
