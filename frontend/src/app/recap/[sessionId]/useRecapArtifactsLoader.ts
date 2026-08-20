@@ -632,18 +632,19 @@ export function useRecapArtifactsLoader({
             if (hasRecentEndHint) {
               clearRecentSessionEndHint();
             }
-            if (hydratedStoredArtifacts) {
-              setArtifacts(sessionId, hydratedStoredArtifacts);
-            }
+            // The store already contains this recap. Replacing it with an
+            // equivalent empty hydration changes the `artifacts` dependency
+            // and starts this effect again, producing an unbounded request
+            // loop while the page appears stuck in its loading state.
             setObservedStatus('unavailable');
             return;
           } else if (isTerminalEmptyMemoryRecent(hydratedStored.memoryRecent)) {
             if (hasRecentEndHint) {
               clearRecentSessionEndHint();
             }
-            if (hydratedStoredArtifacts) {
-              setArtifacts(sessionId, hydratedStoredArtifacts);
-            }
+            // A terminal-empty response adds no data to the stored recap.
+            // Keep the existing object identity so this effect can settle in
+            // `ready` instead of continuously rehydrating the same payload.
             useSessionHistoryStore.getState().markRecapViewed(sessionId);
             setObservedStatus('ready');
             return;

@@ -300,13 +300,10 @@ describe('useRecapArtifactsLoader', () => {
       expect.objectContaining({ method: 'GET' }),
     );
     expect(result.current.status).toBe('ready');
-    expect(setArtifacts).toHaveBeenCalledWith(
-      'sess-terminal-empty',
-      expect.objectContaining({
-        takeaway: 'You named the thing clearly.',
-        memoryCandidates: [],
-      }),
-    );
+    // The response adds no information. Replacing the stored object here
+    // retriggers the loader effect in the real page and causes an infinite
+    // `/memories/recent` request loop behind "Composing recap...".
+    expect(setArtifacts).not.toHaveBeenCalled();
     expect(result.current.telemetry.memoryRecent).toMatchObject({
       requested: true,
       terminal: true,
