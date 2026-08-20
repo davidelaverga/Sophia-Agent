@@ -26,6 +26,9 @@ from test_deck_build_service import _creative_plan
 from deerflow.agents.middlewares.dangling_tool_call_middleware import (
     DanglingToolCallMiddleware,
 )
+from deerflow.agents.middlewares.tool_error_handling_middleware import (
+    ToolErrorHandlingMiddleware,
+)
 from deerflow.agents.sophia_agent.middlewares import builder_artifact as artifact_module
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import (
     BuilderArtifactMiddleware,
@@ -245,6 +248,165 @@ def test_parallel_prepare_calls_terminalize_before_tool_node(
     results = [message for message in result["messages"] if isinstance(message, ToolMessage)]
     assert {message.tool_call_id for message in results} == {"parallel-1", "parallel-2"}
     assert all(message.status == "error" for message in results)
+
+
+def test_parallel_prepare_latch_rejections_route_to_one_model_branch(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    deck_path = outputs / "deck.pptx"
+    deck_path.write_bytes(b"pptx")
+    executions: list[str] = []
+
+    @tool("read_file")
+    def fake_read_file(path: str) -> str:
+        """Represent a tool that must be rejected by the prepare latch."""
+        executions.append(f"read:{path}")
+        return "unreachable"
+
+    @tool("prepare_deck_build")
+    def fake_prepare_deck_build() -> str:
+        """Return a deterministic successful deck after one latch correction."""
+        executions.append("prepare")
+        return json.dumps(
+            {
+                "success": True,
+                "build_id": "deck-latch-1",
+                "deck_build_path": "/mnt/user-data/outputs/deck_build/build.json",
+                "creative_plan_path": "/mnt/user-data/outputs/deck_build/creative_plan.json",
+                "pptx_path": "/mnt/user-data/outputs/deck.pptx",
+                "deck_route": "deck_creative_html_native",
+                "deck_compile_mode": "native_html2patch",
+                "slide_count": 1,
+                "expected_visual_count": 0,
+                "successful_visual_count": 0,
+                "referenced_visual_count": 0,
+                "missing_visual_count": 0,
+                "quality_status": "passed",
+                "native_editability_score": 1.0,
+                "native_text_shape_count": 3,
+                "picture_shape_count": 0,
+                "full_slide_picture_count": 0,
+            }
+        )
+
+    model = _PrepareSequenceModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "blocked-read", "name": "read_file", "args": {"path": "/tmp/result"}},
+                    {"id": "blocked-bash", "name": "bash", "args": {"command": "true"}},
+                ],
+            ),
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "prepare-after-latch", "name": "prepare_deck_build", "args": {}}
+                ],
+            ),
+        ]
+    )
+    monkeypatch.setattr(BuilderArtifactMiddleware, "_upload_fallback_and_fire", lambda *args, **kwargs: None)
+    monkeypatch.setattr(
+        BuilderArtifactMiddleware,
+        "_attach_pptx_canvas_preview",
+        staticmethod(lambda artifact, _state: artifact),
+    )
+    monkeypatch.setattr(
+        artifact_module,
+        "_apply_visual_missing_quality_metadata",
+        lambda artifact, _state: artifact,
+    )
+    agent = create_agent(
+        model=model,
+        tools=[fake_read_file, _bash, fake_prepare_deck_build],
+        middleware=[BuilderArtifactMiddleware(), DanglingToolCallMiddleware()],
+        state_schema=_DeckRuntimeState,
+    )
+
+    result = agent.invoke(
+        {
+            "messages": [HumanMessage(content="Build a PPTX")],
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "delegation_context": {"task_type": "presentation", "task": "Build a PPTX"},
+            "allow_web_research": False,
+            "builder_deck_prepare_latch_active": True,
+            "thread_data": {
+                "outputs_path": str(outputs),
+                "workspace_path": str(tmp_path / "workspace"),
+            },
+        },
+        context={"thread_id": "builder-thread"},
+    )
+
+    assert executions == ["prepare"]
+    assert model._responses == []
+    assert result["builder_result"]["status"] == "completed"
+    rejected = [
+        message
+        for message in result["messages"]
+        if isinstance(message, ToolMessage)
+        and message.tool_call_id in {"blocked-read", "blocked-bash"}
+    ]
+    assert {message.tool_call_id for message in rejected} == {"blocked-read", "blocked-bash"}
+
+
+def test_prepare_execution_exception_terminalizes_inside_artifact_boundary(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    executions: list[str] = []
+
+    @tool("prepare_deck_build")
+    def exploding_prepare_deck_build() -> str:
+        """Raise the same class of runtime error observed in production."""
+        executions.append("prepare")
+        raise RuntimeError("provider identity lease root is not root-private")
+
+    model = _PrepareSequenceModel(
+        [
+            AIMessage(
+                content="",
+                tool_calls=[
+                    {"id": "prepare-runtime-error", "name": "prepare_deck_build", "args": {}}
+                ],
+            )
+        ]
+    )
+    monkeypatch.setattr(BuilderArtifactMiddleware, "_upload_fallback_and_fire", lambda *args, **kwargs: None)
+    agent = create_agent(
+        model=model,
+        tools=[exploding_prepare_deck_build],
+        middleware=[
+            ToolErrorHandlingMiddleware(),
+            BuilderArtifactMiddleware(),
+            DanglingToolCallMiddleware(),
+        ],
+        state_schema=_DeckRuntimeState,
+    )
+
+    result = agent.invoke(
+        {
+            "messages": [HumanMessage(content="Build a PPTX")],
+            "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+            "delegation_context": {"task_type": "presentation", "task": "Build a PPTX"},
+            "allow_web_research": False,
+            "thread_data": {
+                "outputs_path": str(tmp_path / "outputs"),
+                "workspace_path": str(tmp_path / "workspace"),
+            },
+        },
+        context={"thread_id": "builder-thread"},
+    )
+
+    assert executions == ["prepare"]
+    assert model._responses == []
+    assert result["builder_result"]["failure_code"] == "deck_prepare_execution_error"
+    assert result["builder_result"]["terminal_status"] == "failed"
+    assert result["builder_deck_prepare_phase"] == "terminal"
 
 
 @pytest.mark.parametrize(

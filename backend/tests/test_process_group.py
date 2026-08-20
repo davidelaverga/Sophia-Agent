@@ -204,9 +204,35 @@ def test_provider_identity_lease_rejects_non_private_root(
     lease_root = tmp_path / "leases"
     lease_root.mkdir(mode=0o755)
     monkeypatch.setattr(process_group, "_PROVIDER_LEASE_ROOT", lease_root)
+    monkeypatch.setattr(process_group, "_running_as_linux_root", lambda: False)
 
     with pytest.raises(RuntimeError, match="not root-private"):
         process_group._claim_fresh_provider_identity()
+
+
+def test_provider_identity_lease_tightens_trusted_root_owned_directory(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    lease_root = tmp_path / "leases"
+    lease_root.mkdir(mode=0o755)
+    real_lstat = Path.lstat
+
+    def root_owned_lstat(path: Path) -> os.stat_result:
+        result = real_lstat(path)
+        if path != lease_root:
+            return result
+        values = list(result)
+        values[4] = 0
+        return os.stat_result(values)
+
+    monkeypatch.setattr(process_group, "_PROVIDER_LEASE_ROOT", lease_root)
+    monkeypatch.setattr(process_group, "_running_as_linux_root", lambda: True)
+    monkeypatch.setattr(Path, "lstat", root_owned_lstat)
+
+    process_group._ensure_provider_lease_root()
+
+    assert stat.S_IMODE(lease_root.stat().st_mode) == 0o700
 
 
 def test_write_grant_rejects_symlinked_parent(tmp_path: Path) -> None:

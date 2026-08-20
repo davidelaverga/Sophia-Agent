@@ -28,6 +28,7 @@ from langchain.agents import AgentState
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import ExtendedModelResponse, ModelRequest, ModelResponse, hook_config
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+from langgraph.errors import GraphBubbleUp
 from langgraph.prebuilt.tool_node import ToolCallRequest
 from langgraph.runtime import Runtime
 from langgraph.types import Command
@@ -12156,6 +12157,27 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             goto="end",
         )
 
+    @staticmethod
+    def _prepare_execution_error_message(
+        request: ToolCallRequest,
+        exc: Exception,
+    ) -> ToolMessage:
+        """Return the sanitized error shape consumed by the terminal boundary."""
+
+        return ToolMessage(
+            content="The authoritative deck build tool failed during execution.",
+            tool_call_id=str(request.tool_call.get("id") or "missing_tool_call_id"),
+            name=_PREPARE_DECK_BUILD_TOOL_NAME,
+            status="error",
+            additional_kwargs={
+                "tool_error": {
+                    "error_class": exc.__class__.__name__,
+                    "retryable": False,
+                    "stage": "tool_execution",
+                }
+            },
+        )
+
     def _prepare_schema_error_command(
         self,
         request: ToolCallRequest,
@@ -13320,6 +13342,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     event_type="prepare.execution_started",
                     tool_call_id=str(request.tool_call.get("id") or "") or None,
                 )
+                try:
+                    result = handler(request)
+                except GraphBubbleUp:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - terminalized below.
+                    logger.exception(
+                        "prepare_deck_build failed inside its authoritative boundary (sync): id=%s",
+                        request.tool_call.get("id"),
+                    )
+                    result = self._prepare_execution_error_message(request, exc)
+                return self._tool_result_command(request, result)
             return self._tool_result_command(request, handler(request))
 
         args = request.tool_call.get("args", {})
@@ -13600,7 +13633,9 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         )
 
     @staticmethod
-    def _deck_prepare_latch_rejection(request: ToolCallRequest) -> Command | None:
+    def _deck_prepare_latch_rejection(
+        request: ToolCallRequest,
+    ) -> ToolMessage | Command | None:
         """Reject unrelated work once fresh-deck preparation is authoritative."""
         state = request.state or {}
         if not state.get("builder_deck_prepare_latch_active"):
@@ -13610,15 +13645,39 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         name = str(request.tool_call.get("name") or "")
         if name in {_PREPARE_DECK_BUILD_TOOL_NAME, "emit_builder_artifact"}:
             return None
+        result = _error_tool_message(
+            content=("[Sophia/deck-build] The prepare latch is active. Call prepare_deck_build now. Todo, write, replace, shell, research, image-generation, and lower-level deck tools are no longer allowed."),
+            tool_call_id=request.tool_call.get("id", ""),
+            name=name or "unknown",
+        )
+        # LangGraph executes sibling tool calls concurrently. Returning one
+        # ``Command(goto='model')`` per rejected call fans out into duplicate
+        # model branches, which can then write the same LastValue state key in
+        # one super-step. Elect the first rejected call as the only routing
+        # leader; sibling calls return ordinary ToolMessages and are merged by
+        # the tool node before that single model continuation.
+        current_id = str(request.tool_call.get("id") or "")
+        latest_ai = next(
+            (
+                message
+                for message in reversed(state.get("messages", []) or [])
+                if getattr(message, "type", None) == "ai"
+            ),
+            None,
+        )
+        blocked_calls = [
+            call
+            for call in (getattr(latest_ai, "tool_calls", []) or [])
+            if str(call.get("name") or "")
+            not in {_PREPARE_DECK_BUILD_TOOL_NAME, "emit_builder_artifact"}
+        ]
+        if len(blocked_calls) > 1:
+            leader_id = str(blocked_calls[0].get("id") or "")
+            if current_id and leader_id and current_id != leader_id:
+                return result
         return Command(
             update={
-                "messages": [
-                    _error_tool_message(
-                        content=("[Sophia/deck-build] The prepare latch is active. Call prepare_deck_build now. Todo, write, replace, shell, research, image-generation, and lower-level deck tools are no longer allowed."),
-                        tool_call_id=request.tool_call.get("id", ""),
-                        name=name or "unknown",
-                    )
-                ],
+                "messages": [result],
             },
             goto="model",
         )
@@ -14209,6 +14268,17 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
                     event_type="prepare.execution_started",
                     tool_call_id=str(request.tool_call.get("id") or "") or None,
                 )
+                try:
+                    result = await handler(request)
+                except GraphBubbleUp:
+                    raise
+                except Exception as exc:  # noqa: BLE001 - terminalized below.
+                    logger.exception(
+                        "prepare_deck_build failed inside its authoritative boundary (async): id=%s",
+                        request.tool_call.get("id"),
+                    )
+                    result = self._prepare_execution_error_message(request, exc)
+                return self._tool_result_command(request, result)
             return self._tool_result_command(request, await handler(request))
 
         args = request.tool_call.get("args", {})

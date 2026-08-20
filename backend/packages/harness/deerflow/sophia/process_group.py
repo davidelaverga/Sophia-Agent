@@ -74,15 +74,7 @@ def allocate_unprivileged_identity() -> tuple[int, int]:
 def _claim_fresh_provider_identity() -> tuple[int, int, Path]:
     """Lease a provider-only UID/GID from a range disjoint from shell UIDs."""
 
-    _PROVIDER_LEASE_ROOT.mkdir(mode=0o700, exist_ok=True)
-    info = _PROVIDER_LEASE_ROOT.lstat()
-    if (
-        not stat.S_ISDIR(info.st_mode)
-        or _PROVIDER_LEASE_ROOT.is_symlink()
-        or (_running_as_linux_root() and info.st_uid != 0)
-        or stat.S_IMODE(info.st_mode) != 0o700
-    ):
-        raise RuntimeError("provider identity lease root is not root-private")
+    _ensure_provider_lease_root()
     for _attempt in range(128):
         identifier = _PROVIDER_ID_MIN + secrets.randbelow(_PROVIDER_ID_SPAN)
         if pwd is not None:
@@ -110,6 +102,37 @@ def _claim_fresh_provider_identity() -> tuple[int, int, Path]:
             continue
         return identifier, identifier, lease
     raise RuntimeError("unable to lease a fresh provider process identity")
+
+
+def _ensure_provider_lease_root() -> None:
+    """Materialize the root-owned provider lease directory fail-closed.
+
+    Render can preserve an existing root-owned ``/tmp`` directory with the
+    process umask's broader mode. Tightening that directory from 0755 to 0700
+    is safe and removes access; every untrusted owner, symlink, or non-directory
+    still fails without mutation.
+    """
+
+    _PROVIDER_LEASE_ROOT.mkdir(mode=0o700, exist_ok=True)
+    info = _PROVIDER_LEASE_ROOT.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or _PROVIDER_LEASE_ROOT.is_symlink()
+        or (_running_as_linux_root() and info.st_uid != 0)
+    ):
+        raise RuntimeError("provider identity lease root is not root-private")
+    if stat.S_IMODE(info.st_mode) != 0o700:
+        if not _running_as_linux_root() or info.st_uid != 0:
+            raise RuntimeError("provider identity lease root is not root-private")
+        os.chmod(_PROVIDER_LEASE_ROOT, 0o700, follow_symlinks=False)
+        info = _PROVIDER_LEASE_ROOT.lstat()
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or _PROVIDER_LEASE_ROOT.is_symlink()
+        or (_running_as_linux_root() and info.st_uid != 0)
+        or stat.S_IMODE(info.st_mode) != 0o700
+    ):
+        raise RuntimeError("provider identity lease root is not root-private")
 
 
 def _active_processes_for_uid(uid: int) -> tuple[int, ...]:
