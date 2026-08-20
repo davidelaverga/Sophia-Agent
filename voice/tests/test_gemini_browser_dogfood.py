@@ -378,6 +378,17 @@ class CapturingBuilderLifecycleHttpBackend(gemini_tool_loop.GeminiBuilderLifecyc
         return self.responses.pop(0)
 
 
+def test_builder_backend_uses_production_sophia_langgraph_url_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("LANGGRAPH_URL", raising=False)
+    monkeypatch.setenv("SOPHIA_LANGGRAPH_BASE_URL", "https://sophia-langgraph.render.internal/")
+
+    backend = gemini_tool_loop.GeminiBuilderLifecycleHttpBackend()
+
+    assert backend._langgraph_url == "https://sophia-langgraph.render.internal"
+
+
 @pytest.mark.anyio
 async def test_voice_presentation_builder_seeds_authoring_budget(
     monkeypatch: pytest.MonkeyPatch,
@@ -404,6 +415,13 @@ async def test_voice_presentation_builder_seeds_authoring_budget(
     run_input = backend.requests[1]["json_body"]["input"]
     assert run_input["builder_budget"]["tier"] == "presentation"
     assert run_input["builder_budget"]["authoring_max_tokens"] == 32768
+    assert run_input["builder_artifact_target_path"].endswith(".pptx")
+    assert run_input["builder_build_id"].startswith("build_gemini_")
+    assert run_input["builder_operation_id"].startswith("op_gemini_")
+    run_config = backend.requests[1]["json_body"]["config"]["configurable"]
+    assert run_config["task_type"] == "presentation"
+    assert run_config["artifact_target_ext"] == ".pptx"
+    assert run_config["graph_id"] == "sophia_builder"
 
 
 def _make_backend_emit_artifact_import_fail(monkeypatch: pytest.MonkeyPatch) -> None:
