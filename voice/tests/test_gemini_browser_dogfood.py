@@ -378,6 +378,34 @@ class CapturingBuilderLifecycleHttpBackend(gemini_tool_loop.GeminiBuilderLifecyc
         return self.responses.pop(0)
 
 
+@pytest.mark.anyio
+async def test_voice_presentation_builder_seeds_authoring_budget(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("SOPHIA_BUILDER_PRESENTATION_BUDGET_AUTHORING_MAX_TOKENS", "32768")
+    backend = CapturingBuilderLifecycleHttpBackend(
+        [{"thread_id": "builder-thread-voice"}, {"run_id": "run-voice"}]
+    )
+
+    result = await backend.execute(
+        "start_builder_task",
+        {
+            "description": "Make a short presentation about reliable background agents.",
+            "task_type": "presentation",
+        },
+        session_id="gemini-prod-voice-session",
+        user_id="trusted-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="gemini",
+        async_tasks={},
+    )
+
+    assert result.response["status"] == "running"
+    run_input = backend.requests[1]["json_body"]["input"]
+    assert run_input["builder_budget"]["tier"] == "presentation"
+    assert run_input["builder_budget"]["authoring_max_tokens"] == 32768
+
+
 def _make_backend_emit_artifact_import_fail(monkeypatch: pytest.MonkeyPatch) -> None:
     sophia_backend_tools._emit_artifact_contract_module.cache_clear()
     sophia_backend_tools._builder_lifecycle_contract_module.cache_clear()
