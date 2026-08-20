@@ -110,7 +110,7 @@ services:
       - key: SOPHIA_BUILDER_PRESENTATION_AUTHORING_TIMEOUT_SECONDS
         value: "360"
       - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_AUTHORING_MAX_TOKENS
-        value: "16384"
+        value: "32768"
       - key: SOPHIA_BUILDER_PRESENTATION_BUDGET_TERMINAL_RESERVE_SECONDS
         value: "30"
       # Uncomment only if the write key spans multiple LangSmith workspaces.
