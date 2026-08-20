@@ -31,6 +31,7 @@ import logging
 import os
 from datetime import UTC, datetime
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Request, Response, status
 from fastapi.responses import StreamingResponse
@@ -521,7 +522,28 @@ def _terminal_identity(payload: dict[str, Any]) -> tuple[str, str] | None:
     return parent_thread_id, task_id
 
 
+def _is_langgraph_thread_id(value: str) -> bool:
+    """Return whether a value can be sent to LangGraph's thread APIs.
+
+    Voice sessions use stable provider-facing identifiers such as
+    gemini-prod-<hex>. They are valid Sophia session IDs, but the
+    LangGraph SDK only accepts UUID thread IDs.
+    """
+    try:
+        UUID(value)
+    except (AttributeError, TypeError, ValueError):
+        return False
+    return True
+
+
 async def _resolve_existing_builder_run_id(parent_thread_id: str, task_id: str) -> str | None:
+    if not _is_langgraph_thread_id(parent_thread_id):
+        logger.info(
+            "Builder terminal run_id lookup skipped for non-LangGraph parent_thread_id=%s task_id=%s",
+            str(parent_thread_id)[:12],
+            str(task_id)[:12],
+        )
+        return None
     try:
         from langgraph_sdk import get_client
 
@@ -576,6 +598,14 @@ async def _persist_builder_terminal_state(payload: dict[str, Any]) -> None:
     if identity is None:
         return
     parent_thread_id, task_id = identity
+
+    if not _is_langgraph_thread_id(parent_thread_id):
+        logger.info(
+            "Builder terminal LangGraph state persistence skipped for non-LangGraph parent_thread_id=%s task_id=%s",
+            str(parent_thread_id)[:12],
+            str(task_id)[:12],
+        )
+        return
 
     task_update = _terminal_async_task_update(payload)
     values: dict[str, Any] = {"async_tasks": {task_id: task_update}}
