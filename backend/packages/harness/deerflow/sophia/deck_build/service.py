@@ -2817,6 +2817,27 @@ def _image_thread_roots(runtime: ToolRuntime) -> ImageThreadRoots:
         if not isinstance(value, str) or not value.strip():
             raise ValueError(f"image subprocess requires thread {key}")
         values[name] = value
+    roots = {
+        name: Path(os.path.abspath(os.fspath(value)))
+        for name, value in values.items()
+    }
+    user_data_roots = {path.parent for path in roots.values()}
+    if len(user_data_roots) != 1:
+        raise RuntimeError("image subprocess roots cross thread boundaries")
+    user_data = next(iter(user_data_roots))
+    if (
+        user_data.name != "user-data"
+        or user_data.parent.parent.name != "threads"
+        or not user_data.is_dir()
+        or user_data.is_symlink()
+        or user_data.resolve(strict=True) != user_data
+    ):
+        raise RuntimeError(f"invalid image subprocess user-data root: {user_data}")
+    for name, path in roots.items():
+        if path.name != name or path.parent != user_data:
+            raise RuntimeError(f"invalid image subprocess {name} root: {path}")
+        if not path.exists():
+            path.mkdir(mode=0o700, exist_ok=True)
     return ImageThreadRoots.create(**values)
 
 

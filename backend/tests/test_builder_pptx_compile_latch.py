@@ -96,6 +96,24 @@ def test_compile_ready_forces_build_deck_from_slides_tool_choice(tmp_path: Path)
     assert choice == {"type": "tool", "name": "build_deck_from_slides"}
 
 
+def test_compile_ready_never_forces_legacy_tool_on_deck_service_route(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    monkeypatch.setenv("SOPHIA_DECK_BUILD_SERVICE_ENABLED", "true")
+    outputs_dir = tmp_path / "outputs"
+    _write_slide_html(outputs_dir, 3, with_visuals=True)
+    state = {
+        "thread_data": {"outputs_path": str(outputs_dir)},
+        "builder_artifact_target_path": "/mnt/user-data/outputs/deck.pptx",
+        "builder_pptx_requested_slide_count": 3,
+        "delegation_context": {"task_type": "presentation"},
+        "builder_pptx_diagnostics": {"image_generation_success_count": 3},
+    }
+
+    assert BuilderArtifactMiddleware()._pptx_compile_tool_choice_for_state(state) is None
+
+
 def test_compile_ready_force_suppressed_during_repair(tmp_path: Path) -> None:
     outputs_dir = tmp_path / "outputs"
     _write_slide_html(outputs_dir, 3)

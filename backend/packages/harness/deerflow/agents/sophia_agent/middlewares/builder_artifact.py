@@ -9190,6 +9190,8 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
         return self._forced_simple_pdf_tool_choice()
 
     def _pptx_compile_tool_choice_for_state(self, state: BuilderArtifactState) -> dict[str, Any] | None:
+        if _deck_build_service_route_active(state):
+            return None
         if state.get("builder_pptx_compile_repair_pending"):
             return None
         if state.get("builder_pptx_terminal_quality_failed"):

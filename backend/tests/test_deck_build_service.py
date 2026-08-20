@@ -2529,6 +2529,34 @@ def test_deck_image_batch_timeout_scales_by_manifest_count_and_concurrency(tmp_p
     assert timeout == 7260
 
 
+def test_image_thread_roots_materializes_missing_canonical_workspace(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    user_data = (tmp_path / "threads" / "builder-thread" / "user-data").resolve()
+    user_data.mkdir(parents=True)
+    runtime = SimpleNamespace(
+        state={
+            "thread_data": {
+                "workspace_path": str(user_data / "workspace"),
+                "outputs_path": str(user_data / "outputs"),
+                "uploads_path": str(user_data / "uploads"),
+            }
+        }
+    )
+    monkeypatch.setattr(
+        "deerflow.sophia.image_subprocess.running_as_linux_root",
+        lambda: False,
+    )
+
+    roots = deck_service._image_thread_roots(runtime)
+
+    assert roots.user_data == user_data
+    assert roots.workspace.is_dir()
+    assert roots.outputs.is_dir()
+    assert roots.uploads.is_dir()
+
+
 def test_deck_image_batch_timeout_override_wins(tmp_path: Path, monkeypatch) -> None:
     runtime = _runtime(tmp_path / "outputs")
     monkeypatch.setenv("SOPHIA_DECK_IMAGE_BATCH_TIMEOUT", "999")
