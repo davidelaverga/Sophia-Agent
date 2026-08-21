@@ -22,6 +22,7 @@ import {
   classifyGeminiProviderEventForRelay,
   connectGeminiBrowserLiveDogfood,
   connectGeminiBrowserLiveFromBootstrap,
+  createGeminiConversationAudioRecorder,
   createGeminiOutputAudioPlaybackController,
   isGeminiServerInterruptedEvent,
   isGeminiSetupCompleteMessage,
@@ -131,8 +132,12 @@ class FakeAudioBufferSource {
 class FakeAudioContext {
   sampleRate = 48000;
   currentTime = 10;
+  state: AudioContextState = 'suspended';
   destination = {} as AudioDestinationNode;
   readonly createdSources: FakeAudioBufferSource[] = [];
+  readonly createdGains: Array<{ connect: ReturnType<typeof vi.fn> }> = [];
+  readonly merger = { connect: vi.fn() };
+  readonly mediaStreamDestination = { stream: {} as MediaStream };
   readonly processor = {
     onaudioprocess: null as ((event: AudioProcessingEvent) => void) | null,
     connect: vi.fn(),
@@ -143,8 +148,18 @@ class FakeAudioContext {
     disconnect: vi.fn(),
   };
   close = vi.fn(async () => undefined);
+  resume = vi.fn(async () => {
+    this.state = 'running';
+  });
   createMediaStreamSource = vi.fn(() => this.source as unknown as MediaStreamAudioSourceNode);
   createScriptProcessor = vi.fn(() => this.processor as unknown as ScriptProcessorNode);
+  createMediaStreamDestination = vi.fn(() => this.mediaStreamDestination as unknown as MediaStreamAudioDestinationNode);
+  createChannelMerger = vi.fn(() => this.merger as unknown as ChannelMergerNode);
+  createGain = vi.fn(() => {
+    const gain = { connect: vi.fn() };
+    this.createdGains.push(gain);
+    return gain as unknown as GainNode;
+  });
   createBuffer = vi.fn((channels: number, length: number, sampleRate: number) => ({
     copyToChannel: vi.fn(),
     duration: length / sampleRate,
@@ -156,7 +171,7 @@ class FakeAudioContext {
   });
 }
 
-function makeGeminiBrowserSessionFetch(sessionId = 'browser-gemini-1') {
+function makeGeminiBrowserSessionFetch(sessionId = 'browser-gemini-1', audioCaptureEnabled = false) {
   return vi
     .fn()
     .mockResolvedValueOnce(
@@ -171,6 +186,7 @@ function makeGeminiBrowserSessionFetch(sessionId = 'browser-gemini-1') {
             tools: [{ functionDeclarations: [{ name: 'emit_artifact' }] }],
           },
           stream_url: `/api/sophia/voice/dogfood/gemini/events?session_id=${sessionId}`,
+          audio_capture_enabled: audioCaptureEnabled,
         }),
         { status: 201, headers: { 'Content-Type': 'application/json' } },
       ),
@@ -260,6 +276,45 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(samples[1]).toBeCloseTo(32767 / 32768, 5);
     expect(samples[2]).toBe(-1);
     expect(samples[3]).toBeCloseTo(0.5, 5);
+  });
+
+  it('tees captured assistant audio to the speakers and resumes a suspended context', async () => {
+    const fakeAudioContext = new FakeAudioContext();
+    const recorder = createGeminiConversationAudioRecorder(
+      fakeAudioContext as unknown as AudioContext,
+    );
+
+    expect(recorder).not.toBeNull();
+    expect(fakeAudioContext.createdGains[1]?.connect).toHaveBeenCalledWith(fakeAudioContext.destination);
+
+    const diagnostics: unknown[] = [];
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: makeGeminiBrowserSessionFetch('browser-gemini-audio', true) as typeof fetch,
+      webSocketFactory: (url) => new FakeWebSocket(url),
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      onAudioContextDiagnostics: (diagnostic) => diagnostics.push(diagnostic),
+    });
+
+    expect(fakeAudioContext.resume).toHaveBeenCalledTimes(1);
+    expect(diagnostics).toEqual([
+      expect.objectContaining({
+        stateBefore: 'suspended',
+        stateAfter: 'running',
+        resumeAttempted: true,
+        resumeSucceeded: true,
+      }),
+      expect.objectContaining({
+        stateBefore: 'running',
+        stateAfter: 'running',
+        resumeAttempted: false,
+        resumeSucceeded: null,
+      }),
+    ]);
+    expect(fakeAudioContext.createdGains[1]?.connect).toHaveBeenCalledWith(fakeAudioContext.destination);
+
+    await connection.close();
   });
 
   it('schedules successive Gemini output audio chunks sequentially and clears playback state', () => {
