@@ -18,6 +18,6 @@
 
 ## Operator gates
 
-- `LANGGRAPH_POSTGRES_DSN` must be configured on the LangGraph Render service.
+- `LANGGRAPH_POSTGRES_DSN` must be configured on both the LangGraph and gateway Render services because both load the production configuration.
 - `SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET` must be configured on the voice Render service for production LangSmith tracing to activate.
 - Apply the additive session-message revision migration before relying on revision receipts in Supabase.

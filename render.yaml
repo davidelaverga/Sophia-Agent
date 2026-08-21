@@ -162,6 +162,11 @@ services:
         sync: false
       - key: LANGGRAPH_URL
         sync: false
+      # The gateway loads config.production.yaml for route/runtime validation;
+      # keep the production checkpointer DSN available there as well as on the
+      # LangGraph service. The value remains dashboard-managed.
+      - key: LANGGRAPH_POSTGRES_DSN
+        sync: false
       # Gateway performs durable request reconciliation, bounded provenance
       # materialization, and lease dispatch. It never receives the DQ-only
       # OpenAI credential, rendered judge evidence, or model-facing payloads;
