@@ -566,6 +566,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(JSON.stringify(readArtifactToolCalls)).not.toContain('What exact number is in the table?');
     expect(readGeminiConfiguredToolNames({
       tools: [
+        { googleSearch: {} },
         {
           functionDeclarations: [
             { name: 'emit_artifact' },
@@ -574,7 +575,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           ],
         },
       ],
-    })).toEqual(['check_async_task', 'emit_artifact', 'start_builder_task']);
+    })).toEqual(['check_async_task', 'emit_artifact', 'google_search', 'start_builder_task']);
   });
 
   it('classifies Gemini provider events by backend continuity importance', () => {
@@ -2324,6 +2325,121 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     ))).toBe(true));
     expect(JSON.stringify(toolDiagnostics)).not.toContain('change the font');
 
+    await connection.close();
+  });
+
+  it('resumes an established voice socket after an unexpected provider close', async () => {
+    const stages: GeminiBrowserLiveDogfoodStage[] = [];
+    const sockets: FakeWebSocket[] = [];
+    const continuationUrl = '/api/sophia/voice/gemini/continue';
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
+      if (String(input) === continuationUrl) {
+        return new Response(JSON.stringify({
+          session_id: 'gemini-prod-reconnect',
+          websocket_url: 'wss://gemini.example/live-reconnected',
+          ephemeral_token: { value: 'auth_tokens/reconnected' },
+          setup: {
+            model: 'models/gemini-live',
+            sessionResumption: {},
+          },
+          stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-reconnect',
+          continuation_bootstrap_url: continuationUrl,
+          provider_connection_epoch: 2,
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return new Response(JSON.stringify({ accepted: true }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: 'user-1',
+      bootstrap: {
+        runtime: 'gemini_live',
+        voice_runtime: 'gemini_live',
+        production_route: true,
+        session_id: 'gemini-prod-reconnect',
+        websocket_url: 'wss://gemini.example/live-initial',
+        ephemeral_token: { value: 'auth_tokens/initial' },
+        setup: { model: 'models/gemini-live', sessionResumption: {} },
+        stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-reconnect',
+        continuation_bootstrap_url: continuationUrl,
+        provider_connection_epoch: 1,
+      },
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onStage: (stage) => stages.push(stage),
+    });
+
+    sockets[0]?.emitMessage({
+      sessionResumptionUpdate: {
+        resumable: true,
+        newHandle: 'safe-handle-1',
+      },
+    });
+    await vi.waitFor(() => {
+      expect(fetchMock).toHaveBeenCalled();
+    });
+    sockets[0]?.emitClose(1011, 'provider transport reset', false);
+
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    await vi.waitFor(() => {
+      expect(stages.filter((stage) => stage === 'streaming_audio').length).toBeGreaterThanOrEqual(2);
+    });
+    expect(stages).toContain('reconnecting');
+    const reconnectSetup = JSON.parse(sockets[1]?.sent[0] ?? '{}') as {
+      setup?: { sessionResumption?: { handle?: string } };
+    };
+    expect(reconnectSetup.setup?.sessionResumption?.handle).toBe('safe-handle-1');
+    const continuationCall = fetchMock.mock.calls.find(([input]) => String(input) === continuationUrl);
+    expect(JSON.parse(String((continuationCall?.[1] as RequestInit | undefined)?.body))).toEqual({
+      expected_epoch: 1,
+      handle_present: true,
+      secret_generation: 1,
+    });
+
+    await connection.close();
+  });
+
+  it('surfaces terminal connection loss instead of leaving the UI speaking forever', async () => {
+    const stages: GeminiBrowserLiveDogfoodStage[] = [];
+    const relayStatuses: GeminiBrowserLiveDogfoodRelayStatus[] = [];
+    let websocket: FakeWebSocket | null = null;
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: 'user-1',
+      bootstrap: {
+        runtime: 'gemini_live',
+        voice_runtime: 'gemini_live',
+        production_route: true,
+        session_id: 'gemini-prod-no-resume',
+        websocket_url: 'wss://gemini.example/live',
+        ephemeral_token: { value: 'auth_tokens/initial' },
+        setup: { model: 'models/gemini-live' },
+        stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-no-resume',
+      },
+      fetchFn: vi.fn(async () => new Response(JSON.stringify({ accepted: true }), { status: 202 })) as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onStage: (stage) => stages.push(stage),
+      onRelayStatus: (status) => relayStatuses.push(status),
+    });
+
+    websocket?.emitClose(1006, 'abnormal provider close', false);
+
+    await vi.waitFor(() => expect(stages).toContain('connection_lost'));
+    expect(stages).toContain('reconnecting');
+    expect(relayStatuses).toContain('terminal_error');
     await connection.close();
   });
 

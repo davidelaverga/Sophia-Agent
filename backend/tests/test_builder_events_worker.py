@@ -44,6 +44,17 @@ def client(app: FastAPI) -> httpx.AsyncClient:
     return httpx.AsyncClient(transport=transport, base_url="http://test")
 
 
+@pytest.fixture(autouse=True)
+def allow_fixture_parent_thread_id(monkeypatch):
+    """Endpoint fixtures use a readable stand-in for a production UUID."""
+    original = routes._is_langgraph_thread_id
+    monkeypatch.setattr(
+        routes,
+        "_is_langgraph_thread_id",
+        lambda value: value == "parent-thread" or original(value),
+    )
+
+
 # ---- Worker unit tests -----------------------------------------------------
 
 
@@ -246,6 +257,40 @@ async def test_internal_post_persists_terminal_builder_state(
     assert "artifact_url" not in task_update["builder_result"]
     assert values["last_builder_artifact"]["artifact_path"] == "mnt/user-data/outputs/brief.md"
     assert "artifact_url" not in values["last_builder_artifact"]
+
+
+@pytest.mark.anyio
+async def test_terminal_state_repairs_graphless_legacy_parent(monkeypatch):
+    parent_thread_id = "01a025a6-1f12-7173-bfd1-1812a40afd22"
+    payload = {
+        "thread_id": parent_thread_id,
+        "task_id": "builder-task",
+        "run_id": "run-1",
+        "status": "success",
+        "artifact_path": "mnt/user-data/outputs/brief.md",
+    }
+    fake_threads = MagicMock()
+    fake_threads.update_state = AsyncMock(
+        side_effect=[
+            RuntimeError(
+                f"Thread '{parent_thread_id}' has no assigned graph ID. "
+                "This operation requires a graph ID."
+            ),
+            None,
+        ]
+    )
+    fake_threads.update = AsyncMock()
+    fake_client = MagicMock()
+    fake_client.threads = fake_threads
+    monkeypatch.setattr("langgraph_sdk.get_client", lambda url=None: fake_client)
+
+    await routes._persist_builder_terminal_state(payload)
+
+    fake_threads.update.assert_awaited_once_with(
+        parent_thread_id,
+        metadata={"graph_id": "sophia_companion"},
+    )
+    assert fake_threads.update_state.await_count == 2
 
 
 @pytest.mark.anyio

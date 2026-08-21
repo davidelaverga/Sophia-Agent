@@ -30,6 +30,8 @@ export type GeminiBrowserLiveDogfoodStage =
   | 'waiting_setup_complete'
   | 'connected'
   | 'streaming_audio'
+  | 'reconnecting'
+  | 'connection_lost'
   | 'closing'
   | 'closed';
 
@@ -1933,6 +1935,57 @@ export async function connectGeminiBrowserLiveDogfood(
     const sessionSetup = withCoreviewGeminiToolDeclarations(browserSession.setup, coreviewToolsEnabled, {
       allowArtifactCreation: false,
     });
+    const bootstrapProviderContinuation = async (): Promise<{
+      websocket: WebSocketLike;
+      setup: Record<string, unknown>;
+    } | null> => {
+      const continuationUrl = browserSession.continuationBootstrapUrl;
+      if (!continuationUrl || !dogfoodSessionId) {
+        continuityState = 'degraded';
+        notifyRelayStatus('degraded');
+        return null;
+      }
+      if (!safeResumptionHandle) {
+        // A fresh token cannot preserve native Gemini continuity. Never turn
+        // a transport failure into a silent new conversation.
+        continuityState = 'degraded';
+        notifyRelayStatus('degraded');
+        return null;
+      }
+      continuityState = 'rotation_pending';
+      const expectedEpoch = providerConnectionEpoch;
+      const response = await fetchFn(continuationUrl, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          expected_epoch: expectedEpoch,
+          handle_present: true,
+          secret_generation: safeResumptionGeneration,
+        }),
+      }).catch(() => null);
+      if (!response || !response.ok) {
+        continuityState = 'degraded';
+        notifyRelayStatus('degraded');
+        return null;
+      }
+      const payload = (await response.json()) as BrowserSessionPayload;
+      const nextSession = readBrowserSessionPayload(payload, 'Gemini continuation bootstrap');
+      const nextSetup = withCoreviewGeminiToolDeclarations(nextSession.setup, coreviewToolsEnabled, {
+        allowArtifactCreation: false,
+      });
+      const currentResumption = isRecord(nextSetup.sessionResumption)
+        ? nextSetup.sessionResumption
+        : {};
+      nextSetup.sessionResumption = {
+        ...currentResumption,
+        handle: safeResumptionHandle,
+      };
+      providerConnectionEpoch = nextSession.providerConnectionEpoch;
+      return {
+        websocket: webSocketFactory(nextSession.websocketUrl),
+        setup: nextSetup,
+      };
+    };
 
     audioContext = audioContextFactory();
     // Construct and resume the context while the connect gesture is still
@@ -2306,58 +2359,37 @@ export async function connectGeminiBrowserLiveDogfood(
         // degrade honestly when no continuation endpoint is available.
         continuityState = 'rotation_pending';
       },
-      onGoAway: async () => {
-        const continuationUrl = browserSession.continuationBootstrapUrl;
-        if (!continuationUrl || !dogfoodSessionId) {
-          continuityState = 'degraded';
+      onGoAway: bootstrapProviderContinuation,
+      onUnexpectedClose: async () => {
+        if (closed) {
           return null;
         }
-        if (!safeResumptionHandle) {
-          // A fresh token cannot preserve native Gemini continuity. Do not
-          // silently turn a provider rotation into a new conversation.
-          continuityState = 'degraded';
-          notifyRelayStatus('degraded');
-          return null;
-        }
-        continuityState = 'rotation_pending';
-        const expectedEpoch = providerConnectionEpoch;
-        const response = await fetchFn(continuationUrl, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            expected_epoch: expectedEpoch,
-            handle_present: Boolean(safeResumptionHandle),
-            secret_generation: safeResumptionGeneration,
-          }),
-        }).catch(() => null);
-        if (!response || !response.ok) {
-          continuityState = 'degraded';
-          notifyRelayStatus('degraded');
-          return null;
-        }
-        const payload = (await response.json()) as BrowserSessionPayload;
-        const nextSession = readBrowserSessionPayload(payload, 'Gemini continuation bootstrap');
-        const nextSetup = withCoreviewGeminiToolDeclarations(nextSession.setup, coreviewToolsEnabled, {
-          allowArtifactCreation: false,
-        });
-        if (safeResumptionHandle) {
-          const currentResumption = isRecord(nextSetup.sessionResumption)
-            ? nextSetup.sessionResumption
-            : {};
-          nextSetup.sessionResumption = {
-            ...currentResumption,
-            handle: safeResumptionHandle,
-          };
-        }
-        providerConnectionEpoch = nextSession.providerConnectionEpoch;
-        const nextSocket = webSocketFactory(nextSession.websocketUrl);
-        return { websocket: nextSocket, setup: nextSetup };
+        notifyStage('reconnecting');
+        outputAudioPlayer?.stop();
+        clearAssistantOutputState();
+        clearStaleOutputFence();
+        return bootstrapProviderContinuation();
       },
       onProviderConnectionChanged: (nextSocket) => {
         websocket = nextSocket;
         websocketRef.current = nextSocket;
+      },
+      onProviderConnectionRestored: () => {
         continuityState = 'active';
         notifyRelayStatus('active');
+        notifyStage('connected');
+        notifyStage('streaming_audio');
+      },
+      onProviderConnectionTerminated: () => {
+        if (closed) {
+          return;
+        }
+        continuityState = 'degraded';
+        websocketRef.current = null;
+        outputAudioPlayer?.stop();
+        clearAssistantOutputState();
+        notifyRelayStatus('terminal_error');
+        notifyStage('connection_lost');
       },
     });
 
@@ -2446,6 +2478,7 @@ export async function connectGeminiBrowserLiveDogfood(
       },
     };
   } catch (error) {
+    closed = true;
     await cleanup();
     throw error;
   }
@@ -2744,6 +2777,9 @@ export function readGeminiConfiguredToolNames(setup: Record<string, unknown>): s
   for (const tool of tools) {
     if (!isRecord(tool)) {
       continue;
+    }
+    if ('googleSearch' in tool || 'google_search' in tool) {
+      names.add('google_search');
     }
     const declarations = arrayFromAnyKey(tool, 'functionDeclarations', 'function_declarations') ?? [];
     for (const declaration of declarations) {
@@ -4507,13 +4543,56 @@ function waitForGeminiSetupComplete(
       event: Record<string, unknown>,
       receiveMetadata: GeminiProviderReceiveMetadata,
     ) => Promise<{ websocket: WebSocketLike; setup: Record<string, unknown> } | null>;
+    onUnexpectedClose?: (
+      event: CloseEvent,
+    ) => Promise<{ websocket: WebSocketLike; setup: Record<string, unknown> } | null>;
     onProviderConnectionChanged?: (websocket: WebSocketLike) => void;
+    onProviderConnectionRestored?: () => void;
+    onProviderConnectionTerminated?: (event: CloseEvent) => void;
   },
 ): Promise<void> {
   return new Promise((resolve, reject) => {
     let activeSocket = websocket;
     let initialSetupResolved = false;
     let rotationInFlight = false;
+
+    const activateContinuation = async (
+      continuation: { websocket: WebSocketLike; setup: Record<string, unknown> },
+      previousSocket: WebSocketLike,
+    ) => {
+      if (previousSocket === activeSocket && previousSocket.readyState === WEBSOCKET_OPEN) {
+        previousSocket.close(1000, 'Gemini Live continuation rotation.');
+      }
+      activeSocket = continuation.websocket;
+      handlers.onProviderConnectionChanged?.(activeSocket);
+      await waitForWebSocketOpen(activeSocket);
+      attach(activeSocket);
+      activeSocket.send(JSON.stringify({ setup: continuation.setup }));
+    };
+
+    const recoverUnexpectedClose = async (socket: WebSocketLike, event: CloseEvent) => {
+      if (
+        socket !== activeSocket
+        || !initialSetupResolved
+        || rotationInFlight
+        || !handlers.onUnexpectedClose
+      ) {
+        return;
+      }
+      rotationInFlight = true;
+      try {
+        const continuation = await handlers.onUnexpectedClose(event);
+        if (!continuation) {
+          handlers.onProviderConnectionTerminated?.(event);
+          return;
+        }
+        await activateContinuation(continuation, socket);
+      } catch {
+        handlers.onProviderConnectionTerminated?.(event);
+      } finally {
+        rotationInFlight = false;
+      }
+    };
 
     const attach = (socket: WebSocketLike) => {
       const handleMessage = async (messageEvent: MessageEvent) => {
@@ -4555,14 +4634,7 @@ function waitForGeminiSetupComplete(
           try {
             const continuation = await handlers.onGoAway(parsed, receiveMetadata);
             if (continuation) {
-              if (socket === activeSocket && socket.readyState === WEBSOCKET_OPEN) {
-                socket.close(1000, 'Gemini Live continuation rotation.');
-              }
-              activeSocket = continuation.websocket;
-              handlers.onProviderConnectionChanged?.(activeSocket);
-              await waitForWebSocketOpen(activeSocket);
-              attach(activeSocket);
-              activeSocket.send(JSON.stringify({ setup: continuation.setup }));
+              await activateContinuation(continuation, socket);
             }
           } finally {
             rotationInFlight = false;
@@ -4572,6 +4644,8 @@ function waitForGeminiSetupComplete(
         if (isGeminiSetupCompleteMessage(parsed) && !initialSetupResolved) {
           initialSetupResolved = true;
           resolve();
+        } else if (isGeminiSetupCompleteMessage(parsed) && socket === activeSocket) {
+          handlers.onProviderConnectionRestored?.();
         }
       };
 
@@ -4607,7 +4681,9 @@ function waitForGeminiSetupComplete(
         });
         if (!initialSetupResolved) {
           reject(new Error('Gemini Live WebSocket closed before setupComplete.'));
+          return;
         }
+        void recoverUnexpectedClose(socket, event);
       };
     };
 

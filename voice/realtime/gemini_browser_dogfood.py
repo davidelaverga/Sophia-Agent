@@ -40,6 +40,7 @@ from voice.realtime.gemini_tool_loop import (
     extract_gemini_live_function_calls,
     extract_gemini_tool_call_cancellation_ids,
     gemini_tool_response_client_action,
+    is_explicit_builder_request,
 )
 from voice.realtime.gemini_langsmith_tracing import GeminiLiveTraceRecorder
 from voice.realtime.runtime_selection import VoiceRuntimeMode
@@ -543,6 +544,8 @@ class GeminiBrowserDogfoodSessionManager:
         self._completed_tool_call_ids_by_session: dict[str, set[str]] = {}
         self._public_artifact_tool_call_ids_by_session: dict[str, set[str]] = {}
         self._async_tasks_by_session: dict[str, dict[str, dict[str, Any]]] = {}
+        self._latest_user_transcript_by_session: dict[str, str] = {}
+        self._user_transcript_turn_open_by_session: dict[str, bool] = {}
         self._parent_thread_id_by_session: dict[str, str] = {}
         self._diagnostics_by_session: dict[str, GeminiReliabilityDiagnostics] = {}
         self._context_mode_by_session: dict[str, str | None] = {}
@@ -806,6 +809,10 @@ class GeminiBrowserDogfoodSessionManager:
         )
         if stale_payload is not None:
             return stale_payload
+        self._record_latest_user_transcript(
+            dogfood_session.session_id,
+            validated_event,
+        )
         try:
             function_calls = extract_gemini_live_function_calls(validated_event)
         except GeminiDogfoodToolError as exc:
@@ -1171,6 +1178,11 @@ class GeminiBrowserDogfoodSessionManager:
                     ),
                     trace_headers=trace_headers,
                     trace_context=trace_context,
+                    builder_start_authorized=is_explicit_builder_request(
+                        self._latest_user_transcript_by_session.get(
+                            dogfood_session.session_id
+                        )
+                    ),
                 )
             except GeminiDogfoodToolError as exc:
                 if trace is not None:
@@ -1255,6 +1267,51 @@ class GeminiBrowserDogfoodSessionManager:
 
         return executions, tool_diagnostics
 
+    def _record_latest_user_transcript(
+        self,
+        dogfood_session_id: str,
+        event: Mapping[str, Any],
+    ) -> None:
+        server_content = _record_value(
+            _value_from_any_key(event, "serverContent", "server_content")
+        )
+        if server_content is None:
+            return
+        text = _transcription_text_value(
+            server_content,
+            "inputTranscription",
+            "input_transcription",
+        )
+        if text:
+            turn_open = self._user_transcript_turn_open_by_session.get(
+                dogfood_session_id,
+                False,
+            )
+            existing = self._latest_user_transcript_by_session.get(
+                dogfood_session_id,
+                "",
+            )
+            if not turn_open:
+                merged = text
+            elif text.startswith(existing):
+                merged = text
+            elif existing.startswith(text):
+                merged = existing
+            else:
+                # Input transcription events are normally cumulative or final.
+                # If the provider sends unrelated text without a turn boundary,
+                # prefer the newest utterance for side-effect authorization so a
+                # prior explicit build request cannot authorize a later turn.
+                merged = text
+            self._latest_user_transcript_by_session[dogfood_session_id] = merged
+            self._user_transcript_turn_open_by_session[dogfood_session_id] = True
+
+        if server_content.get(
+            "turnComplete",
+            server_content.get("turn_complete"),
+        ) is True:
+            self._user_transcript_turn_open_by_session[dogfood_session_id] = False
+
     async def _publish_public_artifacts_from_executions(
         self,
         dogfood_session: RealtimeDogfoodSession,
@@ -1303,6 +1360,8 @@ class GeminiBrowserDogfoodSessionManager:
         self._completed_tool_call_ids_by_session.pop(dogfood_session_id, None)
         self._public_artifact_tool_call_ids_by_session.pop(dogfood_session_id, None)
         self._async_tasks_by_session.pop(dogfood_session_id, None)
+        self._latest_user_transcript_by_session.pop(dogfood_session_id, None)
+        self._user_transcript_turn_open_by_session.pop(dogfood_session_id, None)
         self._continuation_epoch_by_session.pop(dogfood_session_id, None)
         self._continuation_locks_by_session.pop(dogfood_session_id, None)
         self._logical_session_id_by_session.pop(dogfood_session_id, None)
@@ -1356,7 +1415,14 @@ def _builder_task_payloads_from_executions(
             status = _string_value(record.get("status")) or _string_value(execution.response.get("status"))
             task_type = _string_value(record.get("task_type")) or _string_value(execution.response.get("task_type"))
             result_summary = _string_value(execution.response.get("result_summary")) or execution.result_summary
-            description = _string_value(execution.call.args.get("description")) or result_summary
+            description = (
+                _string_value(record.get("task_brief"))
+                or _string_value(record.get("description"))
+                or _string_value(execution.response.get("task_brief"))
+                or _string_value(execution.response.get("description"))
+                or _string_value(execution.call.args.get("description"))
+                or result_summary
+            )
             started_at = _string_value(record.get("created_at"))
             last_update_at = (
                 _string_value(record.get("last_updated_at"))

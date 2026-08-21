@@ -30,6 +30,7 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 
 LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS = 5.0
 MAX_OPEN_SESSIONS_PER_USER = 15
+SOPHIA_COMPANION_GRAPH_ID = "sophia_companion"
 
 # Singleton store — base path resolved relative to cwd (repo root).
 _store = SessionStore()
@@ -222,7 +223,10 @@ async def _create_langgraph_thread() -> str:
         ) as client:
             response = await client.post(
                 f"{_get_langgraph_base_url()}/threads",
-                json={},
+                # Voice sessions can launch builders before the companion graph
+                # has produced a turn. Assign the graph eagerly so terminal
+                # builder state can always be checkpointed on this thread.
+                json={"metadata": {"graph_id": SOPHIA_COMPANION_GRAPH_ID}},
             )
             response.raise_for_status()
     except httpx.TimeoutException as exc:

@@ -1,11 +1,16 @@
 from __future__ import annotations
 
 import importlib
+import ipaddress
+import os
 import sys
 from collections.abc import Mapping
 from functools import lru_cache
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
+
+import httpx
 
 from voice.realtime.coreview import (
     gemini_coreview_action_function_declarations,
@@ -19,6 +24,11 @@ EMIT_ARTIFACT_TOOL_NAME = "emit_artifact"
 EMIT_ARTIFACT_CONTRACT_MODULE = "deerflow.sophia.tools.emit_artifact_contract"
 BUILDER_LIFECYCLE_CONTRACT_MODULE = "deerflow.sophia.tools.builder_lifecycle_contract"
 RETRIEVE_MEMORIES_CONTRACT_MODULE = "deerflow.sophia.tools.retrieve_memories_contract"
+WEB_FETCH_TOOL_NAME = "web_fetch"
+JINA_READER_URL = "https://r.jina.ai/"
+WEB_FETCH_MAX_URL_LENGTH = 2048
+WEB_FETCH_MAX_CONTENT_CHARS = 12_000
+WEB_FETCH_TIMEOUT_SECONDS = 15.0
 
 _JSON_SCHEMA_TO_GEMINI_TYPE = {
     "object": "OBJECT",
@@ -91,6 +101,33 @@ def gemini_retrieve_memories_function_declaration() -> dict[str, object]:
         ) from exc
 
 
+def gemini_web_fetch_function_declaration() -> dict[str, object]:
+    """Declare exact-page retrieval for Gemini Live.
+
+    Gemini Live has native Google Search, but it does not currently expose URL
+    context. This small backend tool gives Sophia a bounded, text-only fetch for
+    public URLs returned by Search or explicitly supplied by the user.
+    """
+    return {
+        "name": WEB_FETCH_TOOL_NAME,
+        "description": (
+            "Fetch the readable text of one public HTTP or HTTPS URL. Use this after "
+            "Google Search when you need the contents of a specific result, or when "
+            "the user gives an exact URL."
+        ),
+        "parameters": {
+            "type": "OBJECT",
+            "properties": {
+                "url": {
+                    "type": "STRING",
+                    "description": "The absolute public HTTP or HTTPS URL to read.",
+                },
+            },
+            "required": ["url"],
+        },
+    }
+
+
 def gemini_sophia_function_declarations(
     *,
     include_coreview: bool | None = None,
@@ -99,6 +136,7 @@ def gemini_sophia_function_declarations(
         gemini_emit_artifact_function_declaration(),
         *gemini_builder_lifecycle_function_declarations(),
         gemini_retrieve_memories_function_declaration(),
+        gemini_web_fetch_function_declaration(),
     ]
     if include_coreview is None:
         include_coreview = is_coreview_enabled()
@@ -130,6 +168,109 @@ def execute_existing_emit_artifact(args: Mapping[str, Any]) -> tuple[str, dict[s
     artifact = contract.validate_emit_artifact_args(args)
     result = contract.record_emit_artifact(**artifact)
     return str(result), artifact
+
+
+async def execute_realtime_web_fetch(args: Mapping[str, Any]) -> dict[str, Any]:
+    """Fetch one public page through Jina Reader with strict, bounded output."""
+    raw_url = args.get("url") if isinstance(args, Mapping) else None
+    try:
+        url = _validated_public_web_url(raw_url)
+    except ValueError as exc:
+        return {
+            "ok": False,
+            "status": "invalid_url",
+            "error_type": "invalid_public_url",
+            "result_summary": str(exc),
+        }
+
+    headers = {
+        "Accept": "text/plain, text/markdown;q=0.9",
+        "Content-Type": "application/json",
+        "X-Return-Format": "markdown",
+        "X-Timeout": "10",
+    }
+    api_key = os.getenv("JINA_API_KEY", "").strip()
+    if api_key:
+        headers["Authorization"] = f"Bearer {api_key}"
+
+    try:
+        async with httpx.AsyncClient(timeout=WEB_FETCH_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                JINA_READER_URL,
+                headers=headers,
+                json={"url": url},
+            )
+    except httpx.RequestError as exc:
+        return {
+            "ok": False,
+            "status": "unavailable",
+            "error_type": exc.__class__.__name__,
+            "url": url,
+            "result_summary": "The page fetch service is temporarily unavailable.",
+        }
+
+    if response.status_code >= 400:
+        return {
+            "ok": False,
+            "status": "error",
+            "http_status": response.status_code,
+            "url": url,
+            "result_summary": f"The page fetch failed with HTTP {response.status_code}.",
+        }
+
+    content = response.text.strip()
+    truncated = len(content) > WEB_FETCH_MAX_CONTENT_CHARS
+    if truncated:
+        content = content[:WEB_FETCH_MAX_CONTENT_CHARS].rstrip()
+    return {
+        "ok": True,
+        "status": "success",
+        "url": url,
+        "content": content,
+        "content_chars": len(content),
+        "truncated": truncated,
+        "result_summary": (
+            "Fetched readable page text."
+            if content
+            else "The page was reachable but contained no readable text."
+        ),
+    }
+
+
+def _validated_public_web_url(value: object) -> str:
+    if not isinstance(value, str) or not value.strip():
+        raise ValueError("Provide one absolute public HTTP or HTTPS URL.")
+    url = value.strip()
+    if len(url) > WEB_FETCH_MAX_URL_LENGTH:
+        raise ValueError("The URL is too long to fetch safely.")
+    parsed = urlsplit(url)
+    if parsed.scheme.lower() not in {"http", "https"} or not parsed.hostname:
+        raise ValueError("Only absolute public HTTP or HTTPS URLs can be fetched.")
+    if parsed.username or parsed.password:
+        raise ValueError("URLs containing embedded credentials cannot be fetched.")
+    hostname = parsed.hostname.rstrip(".").lower()
+    if hostname == "localhost" or hostname.endswith(".localhost") or hostname.endswith(".local"):
+        raise ValueError("Local or private network URLs cannot be fetched.")
+    try:
+        address = ipaddress.ip_address(hostname)
+    except ValueError:
+        address = None
+    if address is not None and (
+        address.is_private
+        or address.is_loopback
+        or address.is_link_local
+        or address.is_multicast
+        or address.is_reserved
+        or address.is_unspecified
+    ):
+        raise ValueError("Local or private network URLs cannot be fetched.")
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise ValueError("The URL contains an invalid port.") from exc
+    if port not in {None, 80, 443}:
+        raise ValueError("Only standard HTTP and HTTPS ports can be fetched.")
+    return url
 
 
 def execute_realtime_retrieve_memories(

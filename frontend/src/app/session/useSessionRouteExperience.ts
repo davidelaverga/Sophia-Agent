@@ -66,6 +66,18 @@ function builderRunKey(taskId?: string | null, runId?: string | null): string | 
   return `${taskId}:${runId ?? ''}`;
 }
 
+function builderCanvasStatusFromCompletion(
+  completion: BuilderCompletionEventV1,
+): BuilderCanvasTaskSnapshotV1['status'] {
+  return completion.status === 'success'
+    ? 'completed'
+    : completion.status === 'timeout'
+      ? 'timed_out'
+      : completion.status === 'cancelled'
+        ? 'cancelled'
+        : 'failed';
+}
+
 const BUILDER_CANCEL_INTENT_RE = /\b(?:stop|cancel|abort|terminate|end|kill|delete|delate)\b(?:\s+(?:the|this|that|my|current))?\s+(?:build|builder|task|artifact|job|run)\b|\b(?:stop|cancel|abort|terminate|kill)\s+(?:it|this|that|everything)\b/i;
 
 function isBuilderCancelIntent(text: string): boolean {
@@ -296,17 +308,23 @@ export function useSessionRouteExperience({
         parent_thread_id: builderCanvas.completion.thread_id,
         task_id: builderCanvas.completion.task_id,
         run_id: builderCanvas.completion.run_id,
-        status: builderCanvas.completion.status === 'success'
-          ? 'completed' as const
-          : builderCanvas.completion.status === 'timeout'
-            ? 'timed_out' as const
-            : builderCanvas.completion.status === 'cancelled'
-              ? 'cancelled' as const
-              : 'failed' as const,
+        status: builderCanvasStatusFromCompletion(builderCanvas.completion),
         completion: builderCanvas.completion,
       }
       : null;
-    const active = builderCanvas.activeTask ?? recoveredTerminal;
+    const activeSnapshot = builderCanvas.activeTask ?? recoveredTerminal;
+    const matchingCompletion = activeSnapshot
+      && builderCanvas.completion?.task_id === activeSnapshot.task_id
+      && builderCanvas.completion.run_id === activeSnapshot.run_id
+      ? builderCanvas.completion
+      : null;
+    const active = activeSnapshot && matchingCompletion
+      ? {
+        ...activeSnapshot,
+        status: builderCanvasStatusFromCompletion(matchingCompletion),
+        completion: matchingCompletion,
+      }
+      : activeSnapshot;
     const activeKey = builderRunKey(active?.task_id, active?.run_id);
     if (!active || (activeKey && dismissedBuilderRunsRef.current.has(activeKey))) {
       return;
@@ -351,7 +369,7 @@ export function useSessionRouteExperience({
         ...failureTelemetry,
       };
     });
-  }, [builderCanvas.activeTask, builderCanvas.recentEvents]);
+  }, [builderCanvas.activeTask, builderCanvas.completion, builderCanvas.recentEvents]);
 
   useEffect(() => {
     if (!builderTask) {

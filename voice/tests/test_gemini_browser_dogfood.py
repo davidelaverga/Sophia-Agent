@@ -59,6 +59,7 @@ EXPECTED_GEMINI_TOOL_NAMES = [
     "cancel_async_task",
     "list_async_tasks",
     "retrieve_memories",
+    "web_fetch",
 ]
 
 
@@ -91,6 +92,18 @@ def _set_gemini_env(monkeypatch: pytest.MonkeyPatch) -> None:
 def _set_gemini_continuity_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("SOPHIA_GEMINI_LIVE_CONTINUITY_ENABLED", "true")
     monkeypatch.setenv("SOPHIA_GEMINI_LIVE_COMPRESSION_ENABLED", "true")
+
+
+async def _record_user_request(
+    manager: GeminiBrowserDogfoodSessionManager,
+    dogfood_session_id: str,
+    text: str,
+) -> None:
+    await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=dogfood_session_id,
+        event={"serverContent": {"inputTranscription": {"text": text}}},
+    )
 
 
 def _artifact_payload(**overrides: object) -> dict[str, object]:
@@ -189,6 +202,8 @@ class FakeBuilderLifecycleBackend:
                 "last_checked_at": "2026-05-19T00:00:00Z",
                 "last_updated_at": "2026-05-19T00:00:00Z",
                 "task_type": args.get("task_type", "document"),
+                "description": args.get("description"),
+                "task_brief": args.get("description"),
             }
             return gemini_tool_loop.GeminiBuilderLifecycleResult(
                 response={
@@ -507,6 +522,40 @@ async def test_voice_presentation_builder_seeds_authoring_budget(
     assert result.response["async_task"]["build_id"].startswith("build_gemini_")
 
 
+@pytest.mark.anyio
+async def test_voice_builder_persists_running_task_brief_on_uuid_parent() -> None:
+    parent_thread_id = "01a025a6-1f12-7173-bfd1-1812a40afd22"
+    backend = CapturingBuilderLifecycleHttpBackend(
+        [
+            {"thread_id": "builder-thread-voice"},
+            {"run_id": "run-voice"},
+            {},
+        ]
+    )
+
+    result = await backend.execute(
+        "start_builder_task",
+        {
+            "description": "Build a six-slide presentation about DeepSeek harnesses.",
+            "task_type": "presentation",
+        },
+        session_id="gemini-prod-voice-session",
+        parent_thread_id=parent_thread_id,
+        user_id="trusted-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="gemini",
+        async_tasks={},
+    )
+
+    state_request = backend.requests[2]
+    persisted_task = state_request["json_body"]["values"]["async_tasks"]["builder-thread-voice"]
+    assert state_request["method"] == "POST"
+    assert state_request["path"] == f"/threads/{parent_thread_id}/state"
+    assert persisted_task["description"] == "Build a six-slide presentation about DeepSeek harnesses."
+    assert persisted_task["task_brief"] == persisted_task["description"]
+    assert result.response["parent_state_persisted"] is True
+
+
 def _make_backend_emit_artifact_import_fail(monkeypatch: pytest.MonkeyPatch) -> None:
     sophia_backend_tools._emit_artifact_contract_module.cache_clear()
     sophia_backend_tools._builder_lifecycle_contract_module.cache_clear()
@@ -531,6 +580,7 @@ def test_gemini_tool_declarations_align_with_prompt_and_use_dependency_safe_cont
     declarations = gemini_dogfood_tool_declarations()
 
     tool_declarations = declarations[0]["functionDeclarations"]
+    assert declarations[1] == {"googleSearch": {}}
     assert [tool["name"] for tool in tool_declarations] == EXPECTED_GEMINI_TOOL_NAMES
     assert "consult_skill" not in [tool["name"] for tool in tool_declarations]
     assert "consult_skill" not in json.dumps(declarations)
@@ -568,6 +618,7 @@ def test_gemini_tool_declarations_align_with_prompt_and_use_dependency_safe_cont
     cancel_declaration = tool_declarations[5]
     list_declaration = tool_declarations[6]
     retrieve_declaration = tool_declarations[7]
+    web_fetch_declaration = tool_declarations[8]
     assert edit_declaration["name"] == "edit_builder_artifact"
     assert set(edit_declaration["parameters"]["required"]) == {"message"}
     assert "completed Sophia builder artifact" in edit_declaration["description"]
@@ -596,6 +647,9 @@ def test_gemini_tool_declarations_align_with_prompt_and_use_dependency_safe_cont
     assert "simple greetings" in retrieve_declaration["description"]
     assert "what is my name" in retrieve_declaration["description"]
     assert "every turn" in retrieve_declaration["description"]
+    assert web_fetch_declaration["name"] == "web_fetch"
+    assert web_fetch_declaration["parameters"]["required"] == ["url"]
+    assert "Google Search" in web_fetch_declaration["description"]
     assert "never invent task ids" in check_declaration["parameters"]["properties"]["task_id"]["description"]
     assert "langchain" not in json.dumps(tool_declarations).lower()
     assert "deepagents" not in json.dumps(tool_declarations).lower()
@@ -640,6 +694,7 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
     assert fake_minter.requests[0]["setup"]["model"] == "models/gemini-3.1-flash-live-preview"
     assert fake_minter.requests[0]["setup"]["inputAudioTranscription"] == {}
     assert fake_minter.requests[0]["setup"]["outputAudioTranscription"] == {}
+    assert fake_minter.requests[0]["setup"]["tools"][1] == {"googleSearch": {}}
     assert set(fake_minter.requests[0]["field_mask"].split(",")) == (
         set(fake_minter.requests[0]["setup"]) - {"sessionResumption"}
     )
@@ -1661,6 +1716,7 @@ def test_execute_realtime_retrieve_memories_ignores_model_identity_args(
 async def test_retrieve_memories_uses_gateway_backend_when_configured(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    _set_gemini_env(monkeypatch)
     monkeypatch.setattr(
         gemini_tool_loop,
         "execute_realtime_retrieve_memories",
@@ -2033,6 +2089,11 @@ async def test_browser_relay_start_builder_task_dispatches_existing_builder_boun
         user_id="trusted-user-1",
         session_id="browser-gemini-builder-start",
     )
+    await _record_user_request(
+        manager,
+        browser_session.dogfood_session.session_id,
+        "Please make a short one-page reflection document about staying grounded today.",
+    )
 
     response = await manager.ingest_browser_provider_event(
         _gemini_settings(),
@@ -2093,6 +2154,56 @@ async def test_browser_relay_start_builder_task_dispatches_existing_builder_boun
 
 
 @pytest.mark.anyio
+async def test_browser_relay_rejects_builder_launch_for_conceptual_build_language(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    fake_builder = FakeBuilderLifecycleBackend()
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+        tool_executor=gemini_tool_loop.GeminiDogfoodToolExecutor(
+            builder_lifecycle_backend=fake_builder,  # type: ignore[arg-type]
+        ),
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="trusted-user-1",
+        session_id="browser-gemini-builder-intent-gate",
+    )
+    await _record_user_request(
+        manager,
+        browser_session.dogfood_session.session_id,
+        "I'm studying PSI because I'm trying to build a harness.",
+    )
+
+    response = await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        event={
+            "toolCall": {
+                "functionCalls": [
+                    {
+                        "id": "unsolicited-builder-call",
+                        "name": "start_builder_task",
+                        "args": {
+                            "description": "Research PSI and build a report.",
+                            "task_type": "research",
+                        },
+                    }
+                ]
+            }
+        },
+    )
+
+    assert fake_builder.calls == []
+    function_response = response["client_actions"][0]["payload"]["toolResponse"]["functionResponses"][0]
+    assert function_response["response"]["ok"] is False
+    assert function_response["response"]["error_type"] == "explicit_builder_request_required"
+    await manager.close_session(browser_session.dogfood_session.session_id)
+
+
+@pytest.mark.anyio
 async def test_browser_relay_builder_lifecycle_uses_companion_parent_thread_and_cleans_mapping(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -2112,6 +2223,11 @@ async def test_browser_relay_builder_lifecycle_uses_companion_parent_thread_and_
         user_id="trusted-user-1",
         session_id=provider_session_id,
         thread_id=companion_thread_id,
+    )
+    await _record_user_request(
+        manager,
+        browser_session.dogfood_session.session_id,
+        "Please make a document.",
     )
 
     lifecycle_calls = [
@@ -2190,6 +2306,11 @@ async def test_browser_relay_builder_lifecycle_falls_back_to_provider_session_id
         user_id="trusted-user-1",
         session_id=provider_session_id,
     )
+    await _record_user_request(
+        manager,
+        browser_session.dogfood_session.session_id,
+        "Please make a document.",
+    )
 
     response = await manager.ingest_browser_provider_event(
         _gemini_settings(),
@@ -2235,6 +2356,11 @@ async def test_browser_relay_lifecycle_tools_dispatch_against_trusted_session_ta
         _gemini_settings(),
         user_id="trusted-user-1",
         session_id="browser-gemini-builder-lifecycle",
+    )
+    await _record_user_request(
+        manager,
+        browser_session.dogfood_session.session_id,
+        "Please make a document.",
     )
     await manager.ingest_browser_provider_event(
         _gemini_settings(),
@@ -2343,6 +2469,8 @@ async def test_http_lifecycle_backend_update_list_and_cancel_request_shapes() ->
         "run_id": "run-1",
         "status": "running",
         "task_type": "document",
+        "description": "Create a concise launch brief.",
+        "task_brief": "Create a concise launch brief.",
         "artifact_target_path": "/mnt/user-data/outputs/brief.md",
         "build_id": "build-1",
         "operation_id": "operation-1",
@@ -2442,6 +2570,8 @@ async def test_http_lifecycle_backend_update_list_and_cancel_request_shapes() ->
             "agent_name": "sophia_builder",
             "status": "running",
             "task_type": "document",
+            "description": "Create a concise launch brief.",
+            "task_brief": "Create a concise launch brief.",
             "build_id": "build-1",
             "operation_id": "operation-1",
             "voice_trace_id": "voice-trace-1",
@@ -2776,6 +2906,11 @@ async def test_browser_relay_builder_tool_rejects_invalid_args(
         _gemini_settings(),
         user_id="user-1",
         session_id="browser-gemini-builder-invalid",
+    )
+    await _record_user_request(
+        manager,
+        browser_session.dogfood_session.session_id,
+        "Please make a document.",
     )
 
     with pytest.raises(GeminiBrowserRelayError, match="rejected the Gemini Live arguments"):

@@ -12,6 +12,7 @@ from hashlib import sha256
 from pathlib import PurePosixPath
 from typing import Any
 from urllib.parse import urlsplit
+from uuid import UUID
 
 import httpx
 
@@ -33,6 +34,7 @@ from voice.realtime.sophia_backend_tools import (
     execute_existing_emit_artifact,
     execute_realtime_retrieve_memories,
     execute_realtime_retrieve_memories_unavailable,
+    execute_realtime_web_fetch,
     gemini_sophia_function_declarations,
     redacted_retrieve_memories_diagnostic,
     realtime_memory_query_from_args,
@@ -47,6 +49,7 @@ GEMINI_UPDATE_ASYNC_TASK_TOOL_NAME = "update_async_task"
 GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME = "cancel_async_task"
 GEMINI_LIST_ASYNC_TASKS_TOOL_NAME = "list_async_tasks"
 GEMINI_RETRIEVE_MEMORIES_TOOL_NAME = "retrieve_memories"
+GEMINI_WEB_FETCH_TOOL_NAME = "web_fetch"
 GEMINI_DOGFOOD_TOOL_RESPONSE_ACTION = "gemini_tool_response"
 GEMINI_INVALID_EMIT_ARTIFACT_ARGUMENTS = (
     "Invalid emit_artifact arguments. Provide required string fields and retry."
@@ -61,6 +64,7 @@ GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES = frozenset(
         GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME,
         GEMINI_LIST_ASYNC_TASKS_TOOL_NAME,
         GEMINI_RETRIEVE_MEMORIES_TOOL_NAME,
+        GEMINI_WEB_FETCH_TOOL_NAME,
         GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
         *GEMINI_COREVIEW_ACTION_TOOL_NAMES,
     }
@@ -87,12 +91,61 @@ REALTIME_MEMORY_GATEWAY_REQUIRED_FIELDS = frozenset(
 _EXPLICIT_URL_RE = re.compile(r"https?://[^\s<>\]\)\"']+")
 _TRAILING_URL_PUNCTUATION = ".,;:!?)]}\"'"
 _POST_INTERRUPT_BUILD_MARKER = "[Sophia/post-interrupt build directive]"
+_BUILDER_DIRECT_REQUEST_RE = re.compile(
+    r"(?:\bplease\b|\b(?:can|could|would|will)\s+you\b|"
+    r"\bi\s+(?:want|need|would\s+like)\s+you\s+to\b|"
+    r"\blet(?:'|’)s\b|"
+    r"^\s*(?:build|create|make|prepare|generate|draft|write|design|produce|assemble|"
+    r"research|investigate|look\s+up|find\s+out|search|verify|fact[- ]check)\b)",
+    re.IGNORECASE,
+)
+_BUILDER_CREATION_ACTION_RE = re.compile(
+    r"\b(?:build|create|make|prepare|generate|draft|write|design|produce|assemble|"
+    r"update|revise|edit|rework)\b",
+    re.IGNORECASE,
+)
+_BUILDER_DELIVERABLE_RE = re.compile(
+    r"\b(?:deck|presentation|slides?|document|report|file|pdf|pptx?|spreadsheet|"
+    r"workbook|website|webpage|web\s+page|frontend|visual\s+report|artifact|brief|memo|"
+    r"one[- ]pager|plan|proposal)\b",
+    re.IGNORECASE,
+)
+_BUILDER_RESEARCH_ACTION_RE = re.compile(
+    r"\b(?:research|investigate|look\s+up|find\s+out|search(?:\s+the)?\s+web|"
+    r"verify|fact[- ]check)\b",
+    re.IGNORECASE,
+)
+_BUILDER_DIRECT_DELIVERABLE_RE = re.compile(
+    r"\bi\s+(?:want|need|would\s+like)\s+(?:a|an|the|some|\d+)?\s*"
+    r"(?:deck|presentation|slides?|document|report|pdf|pptx?|spreadsheet|workbook|"
+    r"website|webpage|artifact|brief|memo|one[- ]pager|proposal)\b",
+    re.IGNORECASE,
+)
 
 logger = logging.getLogger(__name__)
 
 
 class GeminiDogfoodToolError(ValueError):
     """Raised when a Gemini dogfood tool call cannot be executed safely."""
+
+
+def is_explicit_builder_request(latest_user_utterance: str | None) -> bool:
+    """Return whether the latest complete utterance authorizes builder work."""
+    if not isinstance(latest_user_utterance, str):
+        return False
+    utterance = " ".join(latest_user_utterance.split()).strip()
+    if not utterance:
+        return False
+    if _BUILDER_DIRECT_DELIVERABLE_RE.search(utterance):
+        return True
+    if not _BUILDER_DIRECT_REQUEST_RE.search(utterance):
+        return False
+    if _BUILDER_RESEARCH_ACTION_RE.search(utterance):
+        return True
+    return bool(
+        _BUILDER_CREATION_ACTION_RE.search(utterance)
+        and _BUILDER_DELIVERABLE_RE.search(utterance)
+    )
 
 
 class GeminiBuilderTaskNotTrackedError(GeminiDogfoodToolError):
@@ -130,6 +183,18 @@ class GeminiDogfoodToolExecution:
             return _retrieve_memories_execution_diagnostic(self)
         if self.call.name == GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME:
             return _read_artifact_text_execution_diagnostic(self)
+        if self.call.name == GEMINI_WEB_FETCH_TOOL_NAME:
+            return {
+                "id": self.call.call_id,
+                "name": self.call.name,
+                "success": self.success,
+                "status": self.response.get("status"),
+                "http_status": self.response.get("http_status"),
+                "content_chars": self.response.get("content_chars", 0),
+                "truncated": bool(self.response.get("truncated")),
+                "raw_content_excluded": True,
+                "result_summary": self.result_summary,
+            }
         if self.call.name in GEMINI_COREVIEW_ACTION_TOOL_NAMES:
             return _coreview_action_execution_diagnostic(self)
 
@@ -410,6 +475,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "last_checked_at": now,
             "last_updated_at": now,
             "task_type": task_type,
+            "description": description,
+            "task_brief": description,
             "demo_mode": False,
             "parent_thread_id": parent_thread_id,
             "artifact_target_path": artifact_target_path,
@@ -421,6 +488,11 @@ class GeminiBuilderLifecycleHttpBackend:
             "relay_correlation_id": relay_correlation_id,
             "provider_receive_sequence": provider_receive_sequence,
         }
+        parent_state_persisted = await self._persist_parent_async_task(
+            parent_thread_id,
+            async_task,
+            trace_headers=trace_headers,
+        )
         response = {
             "ok": True,
             "tool": GEMINI_START_BUILDER_TASK_TOOL_NAME,
@@ -430,6 +502,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "run_id": run_id,
             "status": "running",
             "task_type": task_type,
+            "description": description,
+            "task_brief": description,
             "build_id": build_id,
             "operation_id": operation_id,
             "voice_trace_id": voice_trace_id,
@@ -439,6 +513,7 @@ class GeminiBuilderLifecycleHttpBackend:
             "tool_arg_user_id_ignored": bool(args.get("user_id") and args.get("user_id") != user_id),
             "runtime": runtime_mode.value,
             "provider": provider,
+            "parent_state_persisted": parent_state_persisted,
             "result_summary": f"Launched builder task. task_id: {thread_id}.",
         }
         logger.info(
@@ -646,6 +721,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "last_checked_at": now,
             "last_updated_at": now,
             "task_type": task_type,
+            "description": description,
+            "task_brief": description,
             "demo_mode": False,
             "edit_mode": "edit_existing_artifact",
             "parent_thread_id": parent_thread_id,
@@ -660,6 +737,11 @@ class GeminiBuilderLifecycleHttpBackend:
             "source_artifact_path": source_path,
             "revision_of_artifact_path": source_path,
         }
+        parent_state_persisted = await self._persist_parent_async_task(
+            parent_thread_id,
+            async_task,
+            trace_headers=trace_headers,
+        )
         response = {
             "ok": True,
             "tool": GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
@@ -669,6 +751,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "run_id": run_id,
             "status": "running",
             "task_type": task_type,
+            "description": description,
+            "task_brief": description,
             "async_task": async_task,
             "source_artifact_path": source_path,
             "revision_of_artifact_path": source_path,
@@ -680,6 +764,7 @@ class GeminiBuilderLifecycleHttpBackend:
             "tool_arg_user_id_ignored": bool(args.get("user_id") and args.get("user_id") != user_id),
             "runtime": runtime_mode.value,
             "provider": provider,
+            "parent_state_persisted": parent_state_persisted,
             "result_summary": f"Launched builder artifact edit. task_id: {thread_id}.",
         }
         logger.info(
@@ -722,6 +807,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "thread_id": task["thread_id"],
             "run_id": task["run_id"],
             "status": status,
+            "description": updated_task.get("description"),
+            "task_brief": updated_task.get("task_brief") or updated_task.get("description"),
             "result": result,
             "async_task": updated_task,
             "result_summary": _status_summary(task["task_id"], status, result),
@@ -987,6 +1074,10 @@ class GeminiBuilderLifecycleHttpBackend:
                 "status": status,
                 "task_type": task.get("task_type"),
             }
+            task_brief = task.get("task_brief") or task.get("description")
+            if task_brief is not None:
+                summary["description"] = task.get("description") or task_brief
+                summary["task_brief"] = task_brief
             for key in (
                 "artifact_path",
                 "terminal_status",
@@ -1057,6 +1148,40 @@ class GeminiBuilderLifecycleHttpBackend:
             if value is not None:
                 result[key] = value
         return updated_task, result
+
+    async def _persist_parent_async_task(
+        self,
+        parent_thread_id: str,
+        async_task: Mapping[str, Any],
+        *,
+        trace_headers: Mapping[str, str] | None,
+    ) -> bool:
+        """Best-effort early durability for voice-launched builder identity.
+
+        Terminal events update this same state later. Persisting the running
+        record now lets artifact authorization and a resumed Sophia session
+        identify what the task is about even before completion.
+        """
+        task_id = _string_value(async_task.get("task_id"))
+        if not parent_thread_id or not task_id or not _is_uuid_string(parent_thread_id):
+            return False
+        try:
+            await self._request_json(
+                "POST",
+                f"/threads/{parent_thread_id}/state",
+                json_body={"values": {"async_tasks": {task_id: dict(async_task)}}},
+                allow_empty=True,
+                headers=trace_headers,
+            )
+        except GeminiDogfoodToolError:
+            logger.warning(
+                "gemini.builder_lifecycle.parent_state_persist_failed parent_thread_id=%s task_id=%s",
+                parent_thread_id[:12],
+                task_id[:12],
+                exc_info=True,
+            )
+            return False
+        return True
 
     async def _request_json(
         self,
@@ -1375,11 +1500,40 @@ class GeminiDogfoodToolExecutor:
         memory_retrieval_config: Mapping[str, Any] | None = None,
         trace_headers: Mapping[str, str] | None = None,
         trace_context: Mapping[str, Any] | None = None,
+        builder_start_authorized: bool | None = None,
     ) -> GeminiDogfoodToolExecution:
         if call.name not in GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES:
             allowed = ", ".join(sorted(GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES))
             raise GeminiDogfoodToolError(
                 f"Gemini Live requested unsupported Sophia tool {call.name!r}. Approved existing tools: {allowed}."
+            )
+
+        if call.name == GEMINI_START_BUILDER_TASK_TOOL_NAME and builder_start_authorized is False:
+            result_summary = (
+                "No builder was started because the latest user utterance did not contain "
+                "a direct request to create a deliverable or conduct research."
+            )
+            response = {
+                "ok": False,
+                "tool": call.name,
+                "started": False,
+                "rejected": True,
+                "error_type": "explicit_builder_request_required",
+                "result_summary": result_summary,
+                "recovery_guidance": (
+                    "Continue the conversation normally. If the user may want an artifact, "
+                    "ask one concise clarifying question before trying again."
+                ),
+                "session_id": session_id,
+                "runtime": runtime_mode.value,
+                "provider": provider,
+            }
+            return GeminiDogfoodToolExecution(
+                call=call,
+                response=response,
+                result_summary=result_summary,
+                success=False,
+                error_text=result_summary,
             )
 
         if call.name == GEMINI_EMIT_ARTIFACT_TOOL_NAME:
@@ -1473,6 +1627,25 @@ class GeminiDogfoodToolExecutor:
                 result_summary=f"retrieve_memories returned {status} with {count} snippet(s).",
             )
 
+        if call.name == GEMINI_WEB_FETCH_TOOL_NAME:
+            response = await execute_realtime_web_fetch(call.args)
+            result_summary = str(
+                response.get("result_summary") or "The page fetch did not return a result."
+            )
+            return GeminiDogfoodToolExecution(
+                call=call,
+                response={
+                    **response,
+                    "tool": call.name,
+                    "session_id": session_id,
+                    "runtime": runtime_mode.value,
+                    "provider": provider,
+                },
+                result_summary=result_summary,
+                success=bool(response.get("ok")),
+                error_text=None if response.get("ok") else result_summary,
+            )
+
         if call.name == GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME:
             started_at = time.perf_counter()
             response = execute_read_artifact_text_feature_gated(
@@ -1563,7 +1736,10 @@ def gemini_dogfood_tool_declarations() -> list[dict[str, object]]:
     return [
         {
             "functionDeclarations": declarations,
-        }
+        },
+        # Gemini Live's provider-native Search grounding. This works alongside
+        # our custom function declarations and needs no additional API secret.
+        {"googleSearch": {}},
     ]
 
 
@@ -1704,6 +1880,14 @@ def _string_value(value: Any) -> str | None:
     if isinstance(value, str) and value.strip():
         return value.strip()
     return None
+
+
+def _is_uuid_string(value: str) -> bool:
+    try:
+        UUID(value)
+    except (TypeError, ValueError):
+        return False
+    return True
 
 
 def _utcnow_iso() -> str:

@@ -1844,6 +1844,54 @@ describe('buildVoiceDeveloperMetrics', () => {
     expect(metrics.health.title).toBe('Builder appears stalled');
   });
 
+  it('does not infer a fake stall after the same builder run completed', () => {
+    const events: VoiceCaptureEvent[] = [
+      buildEvent({
+        seq: 1,
+        at: '2026-04-15T04:44:00.000Z',
+        category: 'voice-sse',
+        name: 'sophia.builder_task',
+        payload: {
+          data: {
+            type: 'task_completed',
+            task_id: 'builder-ready-1',
+            run_id: 'run-ready-1',
+            status: 'completed',
+            artifact_path: 'mnt/user-data/outputs/deck.pptx',
+            completed_at: '2026-04-15T04:44:00.000Z',
+          },
+        },
+      }),
+      buildEvent({
+        seq: 2,
+        at: '2026-04-15T04:44:05.000Z',
+        category: 'voice-sse',
+        name: 'sophia.builder_task',
+        payload: {
+          data: {
+            type: 'task_running',
+            task_id: 'builder-ready-1',
+            run_id: 'run-ready-1',
+            status: 'running',
+            last_progress_at: '2026-04-15T04:43:00.000Z',
+          },
+        },
+      }),
+    ];
+
+    const metrics = buildVoiceDeveloperMetrics({
+      stage: 'listening',
+      events,
+      snapshot: buildSnapshot(),
+      nowMs: Date.parse('2026-04-15T04:48:00.000Z'),
+    });
+
+    expect(metrics.builder.phase).toBe('completed');
+    expect(metrics.builder.stuck).toBe(false);
+    expect(metrics.builder.stuckReason).toBeNull();
+    expect(metrics.timeline.some((item) => item.label === 'Builder stalled')).toBe(false);
+  });
+
   it('uses builder debug blocker detail when the payload omits detail text', () => {
     const events: VoiceCaptureEvent[] = [
       buildEvent({

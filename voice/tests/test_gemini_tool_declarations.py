@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import importlib
+from typing import Any
 
 from voice.realtime import sophia_backend_tools
 
@@ -87,4 +88,57 @@ def test_gemini_sophia_declarations_include_emit_artifact_from_contract() -> Non
         "cancel_async_task",
         "list_async_tasks",
         "retrieve_memories",
+        "web_fetch",
     ]
+
+
+def test_realtime_web_fetch_rejects_private_network_urls() -> None:
+    import asyncio
+
+    result = asyncio.run(
+        sophia_backend_tools.execute_realtime_web_fetch(
+            {"url": "http://127.0.0.1:2024/threads"}
+        )
+    )
+
+    assert result["ok"] is False
+    assert result["status"] == "invalid_url"
+    assert result["error_type"] == "invalid_public_url"
+
+
+def test_realtime_web_fetch_returns_bounded_reader_text(monkeypatch) -> None:
+    import asyncio
+
+    captured: dict[str, Any] = {}
+
+    class FakeResponse:
+        status_code = 200
+        text = "# Example\n\nReadable source text."
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            captured["timeout"] = timeout
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(self, url: str, *, headers: dict[str, str], json: dict[str, str]):
+            captured.update({"url": url, "headers": headers, "json": json})
+            return FakeResponse()
+
+    monkeypatch.setattr(sophia_backend_tools.httpx, "AsyncClient", FakeAsyncClient)
+
+    result = asyncio.run(
+        sophia_backend_tools.execute_realtime_web_fetch(
+            {"url": "https://example.com/reference"}
+        )
+    )
+
+    assert result["ok"] is True
+    assert result["content"] == "# Example\n\nReadable source text."
+    assert result["truncated"] is False
+    assert captured["url"] == "https://r.jina.ai/"
+    assert captured["json"] == {"url": "https://example.com/reference"}

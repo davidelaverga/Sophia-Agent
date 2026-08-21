@@ -51,7 +51,7 @@ def test_start_session_creates_a_real_langgraph_thread(monkeypatch):
     mock_register_activity.assert_called_once()
     mock_client.post.assert_awaited_once_with(
         "http://127.0.0.1:2024/threads",
-        json={},
+        json={"metadata": {"graph_id": "sophia_companion"}},
     )
 
 

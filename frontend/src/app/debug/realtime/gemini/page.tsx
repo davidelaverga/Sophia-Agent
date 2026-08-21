@@ -70,6 +70,8 @@ const STAGE_LABELS: Record<GeminiBrowserLiveDogfoodStage, string> = {
   waiting_setup_complete: 'Waiting for setupComplete',
   connected: 'Connected',
   streaming_audio: 'Streaming microphone audio',
+  reconnecting: 'Reconnecting with session continuity',
+  connection_lost: 'Connection lost',
   closing: 'Disconnecting',
   closed: 'Closed',
 }

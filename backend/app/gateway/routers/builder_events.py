@@ -64,6 +64,7 @@ from deerflow.sophia.session_store import SessionStore
 logger = logging.getLogger(__name__)
 
 _SUCCESSFUL_BUILDER_STATUSES = {"success", "completed"}
+_SOPHIA_COMPANION_GRAPH_ID = "sophia_companion"
 _TERMINAL_TASK_OPTIONAL_FIELDS = (
     "artifact_path",
     "artifact_ext",
@@ -616,7 +617,24 @@ async def _persist_builder_terminal_state(payload: dict[str, Any]) -> None:
         from langgraph_sdk import get_client
 
         client = get_client(url=_langgraph_url())
-        await client.threads.update_state(parent_thread_id, values)
+        try:
+            await client.threads.update_state(parent_thread_id, values)
+        except Exception as exc:
+            # Threads created before the voice-continuity rollout may not have
+            # a graph assignment because Gemini Live bypasses a companion run.
+            # Repair only that known legacy condition, then retry once.
+            if not _is_missing_thread_graph_error(exc):
+                raise
+            await client.threads.update(
+                parent_thread_id,
+                metadata={"graph_id": _SOPHIA_COMPANION_GRAPH_ID},
+            )
+            await client.threads.update_state(parent_thread_id, values)
+            logger.info(
+                "Builder terminal state persistence repaired graphless parent thread parent_thread_id=%s task_id=%s",
+                str(parent_thread_id)[:12],
+                str(task_id)[:12],
+            )
     except Exception:
         logger.warning(
             "Builder terminal state persistence failed parent_thread_id=%s task_id=%s run_id=%s",
@@ -625,6 +643,13 @@ async def _persist_builder_terminal_state(payload: dict[str, Any]) -> None:
             str(payload.get("run_id") or "")[:12],
             exc_info=True,
         )
+
+
+def _is_missing_thread_graph_error(exc: Exception) -> bool:
+    message = str(exc).lower()
+    return "no assigned graph id" in message or (
+        "graph id" in message and "requires" in message
+    )
 
 
 def _upsert_builder_terminal_artifact(payload: dict[str, Any]) -> None:

@@ -789,6 +789,57 @@ describe('useSessionRouteExperience', () => {
     expect(JSON.stringify(result.current.builderTask)).not.toContain('signed-url');
   });
 
+  it('treats a matching terminal completion as authoritative over a stale running snapshot', () => {
+    useBuilderCanvasMock.mockReturnValue({
+      activeTask: {
+        parent_thread_id: 'thread-1',
+        task_id: 'task-builder-1',
+        run_id: 'run-builder-1',
+        status: 'running',
+        latest_activity: { kind: 'phase', phase: 'finalizing', label: 'Finalizing' },
+      },
+      recentEvents: [],
+      completion: {
+        thread_id: 'thread-1',
+        task_id: 'task-builder-1',
+        run_id: 'run-builder-1',
+        status: 'success',
+        artifact_path: 'mnt/user-data/outputs/deck.pptx',
+      },
+      reconnecting: false,
+    });
+
+    const { result } = renderHook(() =>
+      useSessionRouteExperience({
+        sessionId: 'session-1',
+        activeSessionId: 'session-1',
+        activeThreadId: 'thread-1',
+        chatRequestBody: { session_id: 'session-1' },
+        hasValidBackendSessionId: true,
+        backendSessionId: 'session-1',
+        userId: 'user-1',
+        artifacts: null,
+        storedBuilderArtifact: null,
+        storeArtifacts: vi.fn(),
+        storeBuilderArtifact: vi.fn(),
+        updateSession: vi.fn(),
+        showUsageLimitModal: vi.fn(),
+        recordConnectivityFailure: vi.fn(),
+        showToast: vi.fn(),
+        setCurrentContext: vi.fn(),
+        setMessageMetadata: vi.fn(),
+        greetingAnchorId: 'greeting-1',
+        markOffline: vi.fn(),
+      })
+    );
+
+    expect(result.current.builderTask).toMatchObject({
+      phase: 'completed',
+      taskId: 'task-builder-1',
+      runId: 'run-builder-1',
+    });
+  });
+
   it('does not let a dismissed run hide a later run for the same builder task', () => {
     let builderCanvasState: {
       activeTask: Record<string, unknown>;

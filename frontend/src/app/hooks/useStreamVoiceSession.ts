@@ -585,6 +585,10 @@ function geminiStageTelemetry(stage: string): {
       return { connectionState: "connected", websocketState: "connected", microphoneState: "connected", remoteAudioState: "expected" }
     case "streaming_audio":
       return { connectionState: "connected", websocketState: "connected", microphoneState: "connected", remoteAudioState: "expected" }
+    case "reconnecting":
+      return { connectionState: "connecting", websocketState: "connecting", microphoneState: "connected", remoteAudioState: "idle" }
+    case "connection_lost":
+      return { connectionState: "error", websocketState: "error", microphoneState: "idle", remoteAudioState: "idle" }
     case "closing":
       return { connectionState: "closing" }
     case "closed":
@@ -2852,8 +2856,27 @@ export function useStreamVoiceSession(
             if (geminiStage === "requesting_microphone" || geminiStage === "opening_websocket") {
               setStage("connecting")
             }
+            if (geminiStage === "reconnecting") {
+              setStage("connecting")
+              setPartialReply("")
+              setListeningPresence(false)
+              setSpeakingPresence(false)
+              setMetaPresence("connecting")
+            }
             if (geminiStage === "connected" || geminiStage === "streaming_audio") {
+              setError(undefined)
               setStage(userMicMutedRef.current ? "idle" : "listening")
+              setSpeakingPresence(false)
+              setListeningPresence(!userMicMutedRef.current)
+              setMetaPresence(userMicMutedRef.current ? "resting" : "listening")
+            }
+            if (geminiStage === "connection_lost") {
+              setStage("error")
+              setError("Voice connection was interrupted. Tap to reconnect.")
+              setPartialReply("")
+              setListeningPresence(false)
+              setSpeakingPresence(false)
+              setMetaPresence("resting")
             }
           },
           onOutputAudio: () => {

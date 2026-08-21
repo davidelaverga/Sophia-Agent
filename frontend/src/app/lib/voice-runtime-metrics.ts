@@ -4779,7 +4779,32 @@ function buildBuilderSurfaceMetrics(events: NormalizedVoiceCaptureEvent[]): Pick
 
 function buildBuilderMetrics(events: NormalizedVoiceCaptureEvent[], nowMs: number): VoiceDeveloperMetrics["builder"] {
   const isBuilderSignalEvent = (event: NormalizedVoiceCaptureEvent) => event.category === "builder" || event.name === "sophia.builder_task"
-  const latestBuilderEvent = findLast(events, isBuilderSignalEvent)
+  const builderPhase = (event: NormalizedVoiceCaptureEvent): string | null => {
+    const eventPayload = event.category === "builder" ? event.payloadRecord : eventData(event)
+    return asString(eventPayload?.phase) ?? asString(eventPayload?.type)?.replace(/^task_/, "") ?? null
+  }
+  const eventTaskId = (event: NormalizedVoiceCaptureEvent): string | null => {
+    const eventPayload = event.category === "builder" ? event.payloadRecord : eventData(event)
+    return asString(eventPayload?.taskId) ?? asString(eventPayload?.task_id)
+  }
+  const eventRunId = (event: NormalizedVoiceCaptureEvent): string | null => {
+    const eventPayload = event.category === "builder" ? event.payloadRecord : eventData(event)
+    return asString(eventPayload?.runId) ?? asString(eventPayload?.run_id)
+  }
+  const observedLatestBuilderEvent = findLast(events, isBuilderSignalEvent)
+  const observedTaskId = observedLatestBuilderEvent ? eventTaskId(observedLatestBuilderEvent) : null
+  const observedRunId = observedLatestBuilderEvent ? eventRunId(observedLatestBuilderEvent) : null
+  const authoritativeTerminalEvent = observedLatestBuilderEvent && observedTaskId
+    ? findLast(events, (event) => {
+      if (!isBuilderSignalEvent(event) || eventTaskId(event) !== observedTaskId) return false
+      const candidateRunId = eventRunId(event)
+      if (observedRunId && candidateRunId && candidateRunId !== observedRunId) return false
+      return ["completed", "failed", "timed_out", "cancelled"].includes(builderPhase(event) ?? "")
+    })
+    : null
+  // A terminal event for the same immutable task/run is authoritative even
+  // if a delayed running snapshot is captured later by another UI surface.
+  const latestBuilderEvent = authoritativeTerminalEvent ?? observedLatestBuilderEvent
   const surfaceMetrics = buildBuilderSurfaceMetrics(events)
   const payload = latestBuilderEvent
     ? latestBuilderEvent.category === "builder"
