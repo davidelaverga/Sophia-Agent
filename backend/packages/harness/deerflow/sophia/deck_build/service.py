@@ -362,6 +362,38 @@ class DeckBuildService:
                         },
                     ) as run:
                         finish_span(run, wrapper_normalization)
+                (
+                    normalized_stylesheet,
+                    slides,
+                    main_wrapper_normalization,
+                ) = _normalize_compact_v2_redundant_main_wrappers(
+                    deck.deck_stylesheet or "",
+                    slides,
+                )
+                if main_wrapper_normalization["normalized_slide_count"] > 0:
+                    deck.deck_stylesheet = normalized_stylesheet
+                    deck.deck_stylesheet_hash = hashlib.sha256(
+                        normalized_stylesheet.encode("utf-8")
+                    ).hexdigest()
+                    logger.info(
+                        "[DeckIRNormalization] compact-v2 redundant main wrappers unwrapped "
+                        "normalized_slides=%d rawContentExcluded=true",
+                        main_wrapper_normalization["normalized_slide_count"],
+                    )
+                    with deck_span(
+                        "deck.ir.normalize",
+                        runtime=runtime,
+                        build_id=build_id,
+                        visual_policy=deck.visual_policy,
+                        status=deck.status,
+                        slide_count=len(slides),
+                        run_type="tool",
+                        inputs={
+                            "authoring_contract": deck.deck_authoring_contract,
+                            "normalization_kind": "redundant_main_wrapper",
+                        },
+                    ) as run:
+                        finish_span(run, main_wrapper_normalization)
                 normalized_stylesheet, split_rule_normalization = (
                     _normalize_compact_v2_split_anchor_invariants(
                         deck.deck_stylesheet or "",
@@ -3151,7 +3183,7 @@ def _normalize_compact_v2_redundant_slide_wrappers(
             return stylesheet, slides, report()
         wrapper = top_level[0]
         if (
-            str(wrapper.name).casefold() not in {"div", "section"}
+            str(wrapper.name).casefold() not in {"div", "section", "main"}
             or set(wrapper.attrs) != {"class"}
             or wrapper.attrs.get("class") != ["slide"]
         ):
@@ -3173,6 +3205,79 @@ def _normalize_compact_v2_redundant_slide_wrappers(
         raw["html_body"] = body
     return normalized_stylesheet, normalized_slides, report(
         normalized_slide_count=len(normalized_slides)
+    )
+
+
+def _normalize_compact_v2_redundant_main_wrappers(
+    stylesheet: str,
+    slides: list[dict[str, Any]],
+) -> tuple[str, list[dict[str, Any]], dict[str, Any]]:
+    """Unwrap a bare model ``main`` that duplicates the compiler-owned canvas.
+
+    The compact contract already supplies the only authoritative ``main``.
+    A model occasionally emits a second attribute-free ``main`` around the
+    slide content, which makes valid anchors grandchildren of the owned main.
+    Only that exact transparent shape is normalized; attributed or ambiguous
+    wrappers remain subject to the strict validator and one bounded repair.
+    """
+
+    def report(*, normalized_slide_count: int = 0) -> dict[str, Any]:
+        return {
+            "normalization_applied": normalized_slide_count > 0,
+            "normalized_slide_count": normalized_slide_count,
+            "retargeted_rule_count": 0,
+            "source_selector": "main" if normalized_slide_count > 0 else None,
+            "target_selector": "main.slide-root" if normalized_slide_count > 0 else None,
+            "strict_validator_bypassed": False,
+            "candidate_compile_changed": normalized_slide_count > 0,
+            "raw_content_excluded": True,
+        }
+
+    if not slides:
+        return stylesheet, slides, report()
+
+    normalized_bodies: list[str] = []
+    for raw in slides:
+        body = raw.get("html_body")
+        declared = raw.get("repair_anchor_ids")
+        if (
+            not isinstance(body, str)
+            or not body.strip()
+            or not isinstance(declared, list)
+            or len(declared) != 2
+            or any(not isinstance(identifier, str) for identifier in declared)
+        ):
+            return stylesheet, slides, report()
+        try:
+            soup = BeautifulSoup(body, "html.parser")
+        except Exception:  # noqa: BLE001 - strict validation reports malformed source.
+            return stylesheet, slides, report()
+        if any(
+            not isinstance(node, Tag) and str(node).strip()
+            for node in soup.contents
+        ):
+            return stylesheet, slides, report()
+        top_level = [node for node in soup.contents if isinstance(node, Tag)]
+        if len(top_level) != 1:
+            return stylesheet, slides, report()
+        wrapper = top_level[0]
+        if str(wrapper.name).casefold() != "main" or wrapper.attrs:
+            return stylesheet, slides, report()
+        for identifier in declared:
+            matches = wrapper.find_all(id=identifier)
+            if (
+                len(matches) != 1
+                or not isinstance(matches[0], Tag)
+                or matches[0].parent is not wrapper
+            ):
+                return stylesheet, slides, report()
+        normalized_bodies.append("".join(str(child) for child in wrapper.contents))
+
+    normalized_slides = [dict(slide) for slide in slides]
+    for raw, body in zip(normalized_slides, normalized_bodies, strict=True):
+        raw["html_body"] = body
+    return stylesheet, normalized_slides, report(
+        normalized_slide_count=len(normalized_slides),
     )
 
 
