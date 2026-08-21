@@ -330,8 +330,18 @@ export interface GeminiOutputAudioChunkDiagnostic {
   activeSourceCountBefore: number;
   activeSourceCountAfter: number;
   playbackGeneration: number;
+  audioContextState: AudioContextState | null;
   dropReason: GeminiStaleOutputSuppressionReason | null;
   scheduled: boolean;
+}
+
+export interface GeminiAudioContextDiagnostic {
+  timestamp: string;
+  stateBefore: AudioContextState | null;
+  stateAfter: AudioContextState | null;
+  resumeAttempted: boolean;
+  resumeSucceeded: boolean | null;
+  resumeError: string | null;
 }
 
 export type GeminiRelayClassificationCounts = Record<GeminiRelayClassification, {
@@ -458,6 +468,7 @@ export interface GeminiBrowserLiveDogfoodConnectOptions {
   onProviderEvent?: (event: unknown) => void;
   onOutputAudio?: () => void;
   onOutputAudioChunk?: (diagnostic: GeminiOutputAudioChunkDiagnostic) => void;
+  onAudioContextDiagnostics?: (diagnostic: GeminiAudioContextDiagnostic) => void;
   onRelayStatus?: (status: GeminiBrowserLiveDogfoodRelayStatus) => void;
   onRelayError?: (error: unknown) => void;
   onRelayDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodRelayDiagnostic) => void;
@@ -697,7 +708,7 @@ interface GeminiOutputAudioPlaybackControllerOptions {
   outputNode?: AudioNode;
 }
 
-function createGeminiConversationAudioRecorder(
+export function createGeminiConversationAudioRecorder(
   audioContext: AudioContext,
 ): GeminiConversationAudioRecorder | null {
   if (
@@ -724,6 +735,11 @@ function createGeminiConversationAudioRecorder(
   const outputGain = audioContext.createGain();
   inputGain.connect(merger, 0, 0);
   outputGain.connect(merger, 0, 1);
+  // The recorder is a tee: LangSmith needs the mixed conversation stream,
+  // while the user still needs the assistant leg at the speakers. Connecting
+  // only to the MediaStreamDestination makes all provider audio measurable
+  // but inaudible whenever audio capture is enabled.
+  outputGain.connect(audioContext.destination);
   merger.connect(destination);
 
   let recorder: MediaRecorder;
@@ -784,6 +800,35 @@ function createGeminiConversationAudioRecorder(
       });
       return stopPromise;
     },
+  };
+}
+
+async function resumeGeminiAudioContext(
+  audioContext: AudioContext,
+): Promise<GeminiAudioContextDiagnostic> {
+  const stateBefore = typeof audioContext.state === 'string' ? audioContext.state : null;
+  let resumeAttempted = false;
+  let resumeSucceeded: boolean | null = null;
+  let resumeError: string | null = null;
+
+  if (stateBefore === 'suspended' && typeof audioContext.resume === 'function') {
+    resumeAttempted = true;
+    try {
+      await audioContext.resume();
+      resumeSucceeded = true;
+    } catch (error) {
+      resumeSucceeded = false;
+      resumeError = error instanceof Error ? error.message : String(error);
+    }
+  }
+
+  return {
+    timestamp: new Date().toISOString(),
+    stateBefore,
+    stateAfter: typeof audioContext.state === 'string' ? audioContext.state : null,
+    resumeAttempted,
+    resumeSucceeded,
+    resumeError,
   };
 }
 
@@ -935,6 +980,9 @@ export async function connectGeminiBrowserLiveDogfood(
   const audioContextFactory = options.audioContextFactory ?? (() => new AudioContext());
   const notifyStage = (stage: GeminiBrowserLiveDogfoodStage) => options.onStage?.(stage);
   const notifyRelayStatus = (status: GeminiBrowserLiveDogfoodRelayStatus) => options.onRelayStatus?.(status);
+  const notifyAudioContextDiagnostics = (diagnostic: GeminiAudioContextDiagnostic) => {
+    options.onAudioContextDiagnostics?.(diagnostic);
+  };
 
   let websocket: WebSocketLike | null = null;
   let localStream: MediaStream | null = null;
@@ -1873,9 +1921,14 @@ export async function connectGeminiBrowserLiveDogfood(
       allowArtifactCreation: false,
     });
 
+    audioContext = audioContextFactory();
+    // Construct and resume the context while the connect gesture is still
+    // active. Waiting until getUserMedia resolves can lose the browser's user
+    // activation and leave a perfectly healthy provider stream inaudible.
+    notifyAudioContextDiagnostics(await resumeGeminiAudioContext(audioContext));
     notifyStage('requesting_microphone');
     localStream = await getUserMedia({ audio: true });
-    audioContext = audioContextFactory();
+    notifyAudioContextDiagnostics(await resumeGeminiAudioContext(audioContext));
     if (browserSession.audioCaptureEnabled) {
       conversationAudioRecorder = createGeminiConversationAudioRecorder(audioContext);
     }
@@ -4609,6 +4662,7 @@ export function createGeminiOutputAudioPlaybackController(
         activeSourceCountBefore,
         activeSourceCountAfter: activeSources.size,
         playbackGeneration,
+        audioContextState: typeof audioContext.state === 'string' ? audioContext.state : null,
         dropReason: null,
         scheduled: false,
       });
@@ -4658,6 +4712,7 @@ export function createGeminiOutputAudioPlaybackController(
       activeSourceCountBefore,
       activeSourceCountAfter: activeSources.size,
       playbackGeneration,
+      audioContextState: typeof audioContext.state === 'string' ? audioContext.state : null,
       dropReason: null,
       scheduled: true,
     });
