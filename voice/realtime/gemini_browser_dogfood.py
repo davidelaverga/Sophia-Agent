@@ -73,6 +73,8 @@ _GEMINI_LIVE_SERVER_EVENT_KEYS = frozenset(
     }
 )
 
+_GEMINI_LIVE_BROWSER_OWNED_SETUP_FIELDS = frozenset({"sessionResumption"})
+
 _RETRIEVE_MEMORIES_SAFE_DIAGNOSTIC_KEYS = frozenset(
     {
         "any_result_exact_query_terms_present",
@@ -453,11 +455,23 @@ class GeminiLiveEphemeralTokenMinter:
         api_key: str,
         setup: Mapping[str, Any],
         uses: int = 1,
-        field_mask: str | None = "model,generationConfig",
+        field_mask: str | None = None,
     ) -> GeminiLiveEphemeralToken:
+        token_setup = dict(setup)
+        if field_mask:
+            masked_fields = {
+                field_name.strip()
+                for field_name in field_mask.split(",")
+                if field_name.strip()
+            }
+            token_setup = {
+                field_name: value
+                for field_name, value in token_setup.items()
+                if field_name in masked_fields
+            }
         body = {
             "uses": uses,
-            "bidiGenerateContentSetup": dict(setup),
+            "bidiGenerateContentSetup": token_setup,
         }
         if field_mask:
             body["fieldMask"] = field_mask
@@ -501,6 +515,16 @@ class GeminiLiveEphemeralTokenMinter:
             )
 
         return GeminiLiveEphemeralToken(value=value, response=dict(payload))
+
+
+def _server_owned_token_field_mask(setup: Mapping[str, Any]) -> str:
+    """Lock stable setup fields while leaving the resume handle browser-owned."""
+
+    return ",".join(
+        field_name
+        for field_name in setup
+        if field_name not in _GEMINI_LIVE_BROWSER_OWNED_SETUP_FIELDS
+    )
 
 
 class GeminiBrowserDogfoodSessionManager:
@@ -572,6 +596,7 @@ class GeminiBrowserDogfoodSessionManager:
             ephemeral_token = await self._token_minter.mint_ephemeral_token(
                 api_key=gate.api_key,
                 setup=setup,
+                field_mask=_server_owned_token_field_mask(setup),
             )
         except Exception:
             await self._realtime_sessions.close_session(dogfood_session.session_id)
@@ -665,7 +690,7 @@ class GeminiBrowserDogfoodSessionManager:
             token = await self._token_minter.mint_ephemeral_token(
                 api_key=gate.api_key,
                 setup=setup,
-                field_mask="model,generationConfig",
+                field_mask=_server_owned_token_field_mask(setup),
             )
             next_epoch = current_epoch + 1
             self._continuation_epoch_by_session[dogfood_session_id] = next_epoch

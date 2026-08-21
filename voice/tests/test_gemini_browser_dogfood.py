@@ -7,6 +7,7 @@ from typing import Any
 
 import httpx
 import pytest
+import voice.realtime.gemini_browser_dogfood as gemini_browser_dogfood
 import voice.realtime.gemini_tool_loop as gemini_tool_loop
 import voice.realtime.sophia_backend_tools as sophia_backend_tools
 from fastapi import FastAPI
@@ -16,6 +17,7 @@ from voice.realtime import (
     GeminiBrowserDogfoodSessionManager,
     GeminiBrowserRelayError,
     GeminiLiveEphemeralToken,
+    GeminiLiveEphemeralTokenMinter,
     GeminiProductionBrowserSessionManager,
     RealtimeDogfoodSessionManager,
     VoiceRuntimeMode,
@@ -84,6 +86,11 @@ def _set_gemini_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STREAM_API_SECRET", "stream-secret")
     monkeypatch.setenv("GOOGLE_API_KEY", "standard-google-key")
     monkeypatch.setenv("SOPHIA_VOICE_GEMINI_LIVE_ADAPTER_ENABLED", "true")
+
+
+def _set_gemini_continuity_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("SOPHIA_GEMINI_LIVE_CONTINUITY_ENABLED", "true")
+    monkeypatch.setenv("SOPHIA_GEMINI_LIVE_COMPRESSION_ENABLED", "true")
 
 
 def _artifact_payload(**overrides: object) -> dict[str, object]:
@@ -330,6 +337,43 @@ def _patch_gateway_memory_response(
     return requests
 
 
+def _patch_gemini_token_response(
+    monkeypatch: pytest.MonkeyPatch,
+    response: httpx.Response,
+) -> list[dict[str, Any]]:
+    requests: list[dict[str, Any]] = []
+
+    class FakeAsyncClient:
+        def __init__(self, *, timeout: float) -> None:
+            self.timeout = timeout
+
+        async def __aenter__(self) -> "FakeAsyncClient":
+            return self
+
+        async def __aexit__(self, *_args: object) -> None:
+            return None
+
+        async def post(
+            self,
+            url: str,
+            *,
+            json: Mapping[str, Any],
+            headers: Mapping[str, str],
+        ) -> httpx.Response:
+            requests.append(
+                {
+                    "url": url,
+                    "json": dict(json),
+                    "headers": dict(headers),
+                    "timeout": self.timeout,
+                }
+            )
+            return response
+
+    monkeypatch.setattr(gemini_browser_dogfood.httpx, "AsyncClient", FakeAsyncClient)
+    return requests
+
+
 class BlockingGeminiToolExecutor:
     def __init__(self) -> None:
         self.started = asyncio.Event()
@@ -562,6 +606,7 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_gemini_env(monkeypatch)
+    _set_gemini_continuity_env(monkeypatch)
     _make_backend_emit_artifact_import_fail(monkeypatch)
     realtime_sessions = RealtimeDogfoodSessionManager()
     fake_minter = FakeGeminiTokenMinter()
@@ -595,6 +640,10 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
     assert fake_minter.requests[0]["setup"]["model"] == "models/gemini-3.1-flash-live-preview"
     assert fake_minter.requests[0]["setup"]["inputAudioTranscription"] == {}
     assert fake_minter.requests[0]["setup"]["outputAudioTranscription"] == {}
+    assert set(fake_minter.requests[0]["field_mask"].split(",")) == (
+        set(fake_minter.requests[0]["setup"]) - {"sessionResumption"}
+    )
+    assert "sessionResumption" in payload["setup"]
     assert (
         fake_minter.requests[0]["setup"]["generationConfig"]["speechConfig"]["voiceConfig"][
             "prebuiltVoiceConfig"
@@ -680,10 +729,48 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
 
 
 @pytest.mark.anyio
+async def test_ephemeral_token_request_only_embeds_fields_named_by_field_mask(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    requests = _patch_gemini_token_response(
+        monkeypatch,
+        httpx.Response(200, json={"name": "auth_tokens/masked-token"}),
+    )
+    setup = {
+        "model": "models/gemini-3.1-flash-live-preview",
+        "generationConfig": {"responseModalities": ["AUDIO"]},
+        "systemInstruction": {"parts": [{"text": "Be Sophia."}]},
+        "tools": [{"functionDeclarations": []}],
+        "sessionResumption": {"handle": "browser-only-secret"},
+        "contextWindowCompression": {"slidingWindow": {}},
+    }
+    field_mask = (
+        "model,generationConfig,systemInstruction,tools,contextWindowCompression"
+    )
+
+    token = await GeminiLiveEphemeralTokenMinter(
+        url="https://example.test/v1alpha/auth_tokens",
+    ).mint_ephemeral_token(
+        api_key="standard-google-key",
+        setup=setup,
+        field_mask=field_mask,
+    )
+
+    assert token.value == "auth_tokens/masked-token"
+    assert len(requests) == 1
+    body = requests[0]["json"]
+    assert body["fieldMask"] == field_mask
+    assert set(body["bidiGenerateContentSetup"]) == set(field_mask.split(","))
+    assert "sessionResumption" not in body["bidiGenerateContentSetup"]
+    assert setup["sessionResumption"] == {"handle": "browser-only-secret"}
+
+
+@pytest.mark.anyio
 async def test_browser_continuation_bootstrap_is_epoch_guarded_and_field_masked(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _set_gemini_env(monkeypatch)
+    _set_gemini_continuity_env(monkeypatch)
     _make_backend_emit_artifact_import_fail(monkeypatch)
     realtime_sessions = RealtimeDogfoodSessionManager()
     fake_minter = FakeGeminiTokenMinter()
@@ -706,7 +793,11 @@ async def test_browser_continuation_bootstrap_is_epoch_guarded_and_field_masked(
     )
 
     assert next_session.provider_connection_epoch == 2
-    assert fake_minter.requests[-1]["field_mask"] == "model,generationConfig"
+    continuation_request = fake_minter.requests[-1]
+    assert set(continuation_request["field_mask"].split(",")) == (
+        set(continuation_request["setup"]) - {"sessionResumption"}
+    )
+    assert "sessionResumption" in next_session.setup
     with pytest.raises(GeminiBrowserRelayError, match="Continuation epoch conflict"):
         await manager.continue_browser_session(
             _gemini_settings(),
