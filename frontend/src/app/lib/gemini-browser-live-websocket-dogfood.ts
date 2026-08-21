@@ -509,6 +509,8 @@ export interface GeminiBrowserLiveDogfoodConnection {
   setMicrophoneMuted: (muted: boolean) => void;
   flushOutputAudio: () => GeminiOutputAudioPlaybackState;
   close: () => Promise<void>;
+  providerConnectionEpoch: number;
+  continuityState: 'active' | 'rotation_pending' | 'degraded' | 'ended';
 }
 
 export interface GeminiArtifactFrameDimensions {
@@ -608,6 +610,10 @@ interface BrowserSessionPayload {
   backendCoreviewFlagParsed?: unknown;
   backendStillFrameFlagParsed?: unknown;
   audio_capture_enabled?: unknown;
+  continuation_bootstrap_url?: unknown;
+  provider_connection_epoch?: unknown;
+  logical_session_id?: unknown;
+  voice_runtime_session_id?: unknown;
 }
 
 export type GeminiBrowserLiveSessionBootstrap = BrowserSessionPayload;
@@ -985,6 +991,7 @@ export async function connectGeminiBrowserLiveDogfood(
   };
 
   let websocket: WebSocketLike | null = null;
+  const websocketRef: { current: WebSocketLike | null } = { current: null };
   let localStream: MediaStream | null = null;
   let audioContext: AudioContext | null = null;
   let audioPipeline: AudioPipeline | null = null;
@@ -998,6 +1005,10 @@ export async function connectGeminiBrowserLiveDogfood(
   let relayAttemptCount = 0;
   let relaySuccessCount = 0;
   let relayFailureCount = 0;
+  let providerConnectionEpoch = 1;
+  let continuityState: GeminiBrowserLiveDogfoodConnection['continuityState'] = 'active';
+  let safeResumptionHandle: string | null = null;
+  let safeResumptionGeneration = 0;
   let providerReceiveSequence = 0;
   let providerRelaySequence = 0;
   let lastProviderEventType: string | null = null;
@@ -1915,6 +1926,8 @@ export async function connectGeminiBrowserLiveDogfood(
       ? readBrowserSessionPayload(options.bootstrapPayload, 'Gemini browser Live session bootstrap')
       : await startBrowserDogfoodSession(fetchFn, options);
     dogfoodSessionId = browserSession.sessionId;
+    providerConnectionEpoch = browserSession.providerConnectionEpoch;
+    websocketRef.current = null;
     disconnectTargetPath = browserSession.disconnectUrl ?? DISCONNECT_TARGET_PATH;
     const coreviewToolsEnabled = options.coreviewStillFrameEnabled ?? isCoReviewStillFrameEnabled();
     const sessionSetup = withCoreviewGeminiToolDeclarations(browserSession.setup, coreviewToolsEnabled, {
@@ -1940,6 +1953,7 @@ export async function connectGeminiBrowserLiveDogfood(
 
     notifyStage('opening_websocket');
     websocket = webSocketFactory(browserSession.websocketUrl);
+    websocketRef.current = websocket;
     await waitForWebSocketOpen(websocket);
 
     const setupComplete = waitForGeminiSetupComplete(websocket, {
@@ -2277,6 +2291,74 @@ export async function connectGeminiBrowserLiveDogfood(
       },
       onToolLoopDiagnostic: options.onToolLoopDiagnostic,
       onWebSocketDiagnostic: recordWebSocketDiagnostic,
+      onSessionResumptionUpdate: (event) => {
+        const update = readGeminiSessionResumptionUpdate(event);
+        if (!update) {
+          return;
+        }
+        if (update.resumable && update.handle) {
+          safeResumptionHandle = update.handle;
+          safeResumptionGeneration += 1;
+          return;
+        }
+        // A false/empty update is not permission to erase the last safe handle.
+        // The next rotation will either use the last mechanically safe point or
+        // degrade honestly when no continuation endpoint is available.
+        continuityState = 'rotation_pending';
+      },
+      onGoAway: async () => {
+        const continuationUrl = browserSession.continuationBootstrapUrl;
+        if (!continuationUrl || !dogfoodSessionId) {
+          continuityState = 'degraded';
+          return null;
+        }
+        if (!safeResumptionHandle) {
+          // A fresh token cannot preserve native Gemini continuity. Do not
+          // silently turn a provider rotation into a new conversation.
+          continuityState = 'degraded';
+          notifyRelayStatus('degraded');
+          return null;
+        }
+        continuityState = 'rotation_pending';
+        const expectedEpoch = providerConnectionEpoch;
+        const response = await fetchFn(continuationUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            expected_epoch: expectedEpoch,
+            handle_present: Boolean(safeResumptionHandle),
+            secret_generation: safeResumptionGeneration,
+          }),
+        }).catch(() => null);
+        if (!response || !response.ok) {
+          continuityState = 'degraded';
+          notifyRelayStatus('degraded');
+          return null;
+        }
+        const payload = (await response.json()) as BrowserSessionPayload;
+        const nextSession = readBrowserSessionPayload(payload, 'Gemini continuation bootstrap');
+        const nextSetup = withCoreviewGeminiToolDeclarations(nextSession.setup, coreviewToolsEnabled, {
+          allowArtifactCreation: false,
+        });
+        if (safeResumptionHandle) {
+          const currentResumption = isRecord(nextSetup.sessionResumption)
+            ? nextSetup.sessionResumption
+            : {};
+          nextSetup.sessionResumption = {
+            ...currentResumption,
+            handle: safeResumptionHandle,
+          };
+        }
+        providerConnectionEpoch = nextSession.providerConnectionEpoch;
+        const nextSocket = webSocketFactory(nextSession.websocketUrl);
+        return { websocket: nextSocket, setup: nextSetup };
+      },
+      onProviderConnectionChanged: (nextSocket) => {
+        websocket = nextSocket;
+        websocketRef.current = nextSocket;
+        continuityState = 'active';
+        notifyRelayStatus('active');
+      },
     });
 
     notifyStage('sending_setup');
@@ -2289,7 +2371,7 @@ export async function connectGeminiBrowserLiveDogfood(
     audioPipeline = startMicrophoneAudioPipeline({
       localStream,
       audioContext,
-      websocket,
+      websocketRef,
       recordingInputNode: conversationAudioRecorder?.inputNode,
       onInputAudioActivity: handleInputAudioActivity,
     });
@@ -2307,6 +2389,8 @@ export async function connectGeminiBrowserLiveDogfood(
       setupComplete: true,
       websocket,
       localStream,
+      providerConnectionEpoch,
+      continuityState,
       sendText: (text: string) => {
         if (websocket?.readyState !== WEBSOCKET_OPEN) {
           throw new Error('Gemini Live WebSocket is not open.');
@@ -2751,6 +2835,21 @@ export function categorizeGeminiProviderEvent(event: unknown): GeminiProviderEve
   return [...categories];
 }
 
+function readGeminiSessionResumptionUpdate(event: unknown): {
+  resumable: boolean;
+  handle: string | null;
+} | null {
+  const update = recordFromAnyKey(event, 'sessionResumptionUpdate', 'session_resumption_update');
+  if (!update) {
+    return null;
+  }
+  const rawHandle = stringFromAnyKey(update, 'newHandle', 'new_handle');
+  return {
+    resumable: update.resumable === true,
+    handle: rawHandle && rawHandle.trim() ? rawHandle : null,
+  };
+}
+
 export function classifyGeminiProviderEventForRelay(event: unknown): GeminiProviderEventRelayClassification {
   const categories = categorizeGeminiProviderEvent(event);
   const result = (
@@ -2997,6 +3096,8 @@ async function startBrowserDogfoodSession(
   transport: string | null;
   setup: Record<string, unknown>;
   audioCaptureEnabled: boolean;
+  continuationBootstrapUrl: string | null;
+  providerConnectionEpoch: number;
 }> {
   const response = await fetchFn('/api/sophia/voice/dogfood/gemini/browser-session', {
     method: 'POST',
@@ -3026,6 +3127,8 @@ function readBrowserSessionPayload(
   transport: string | null;
   setup: Record<string, unknown>;
   audioCaptureEnabled: boolean;
+  continuationBootstrapUrl: string | null;
+  providerConnectionEpoch: number;
 } {
   const sessionId = typeof payload.session_id === 'string' ? payload.session_id : null;
   const token = readEphemeralToken(payload.ephemeral_token);
@@ -3046,6 +3149,15 @@ function readBrowserSessionPayload(
   const publicEventBoundary = typeof payload.public_event_boundary === 'string' ? payload.public_event_boundary : null;
   const transport = typeof payload.transport === 'string' ? payload.transport : null;
   const audioCaptureEnabled = payload.audio_capture_enabled === true;
+  const continuationBootstrapUrl = (
+    typeof payload.continuation_bootstrap_url === 'string'
+    && isBrowserApiPath(payload.continuation_bootstrap_url)
+  ) ? payload.continuation_bootstrap_url : null;
+  const providerConnectionEpoch = (
+    typeof payload.provider_connection_epoch === 'number'
+    && Number.isInteger(payload.provider_connection_epoch)
+    && payload.provider_connection_epoch > 0
+  ) ? payload.provider_connection_epoch : 1;
 
   if (!sessionId) {
     throw new Error(`${label} omitted session_id.`);
@@ -3071,6 +3183,8 @@ function readBrowserSessionPayload(
     transport,
     setup,
     audioCaptureEnabled,
+    continuationBootstrapUrl,
+    providerConnectionEpoch,
   };
 }
 
@@ -4388,84 +4502,123 @@ function waitForGeminiSetupComplete(
     onInterruption: (event: Record<string, unknown>) => void;
     onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
     onWebSocketDiagnostic?: (diagnostic: Omit<GeminiBrowserLiveDogfoodWebSocketDiagnostic, 'relayFailureAlreadyObserved'>) => void;
+    onSessionResumptionUpdate?: (event: Record<string, unknown>) => void;
+    onGoAway?: (
+      event: Record<string, unknown>,
+      receiveMetadata: GeminiProviderReceiveMetadata,
+    ) => Promise<{ websocket: WebSocketLike; setup: Record<string, unknown> } | null>;
+    onProviderConnectionChanged?: (websocket: WebSocketLike) => void;
   },
 ): Promise<void> {
-  let resolved = false;
-
   return new Promise((resolve, reject) => {
-    const handleMessage = async (messageEvent: MessageEvent) => {
-      const parsed = await parseWebSocketMessage(messageEvent.data);
-      handlers.onProviderEvent?.(parsed);
-      const receiveMetadata = handlers.onProviderEventReceived(parsed);
-      handlers.onProviderEventTelemetry?.(parsed, receiveMetadata);
+    let activeSocket = websocket;
+    let initialSetupResolved = false;
+    let rotationInFlight = false;
 
-      if (!isRelayableGeminiProviderEvent(parsed)) {
-        return;
-      }
-
-      handlers.onProviderToolEvent?.(parsed);
-      notifyToolCallReceived(parsed, handlers.onToolLoopDiagnostic);
-      const interrupted = isGeminiServerInterruptedEvent(parsed);
-      if (interrupted) {
-        handlers.onInterruption(parsed);
-      }
-      const relayEvent = handlers.onFrontendToolEvent
-        ? await handlers.onFrontendToolEvent(parsed)
-        : parsed;
-      if (relayEvent) {
-        handlers.onRelayEvent(relayEvent, receiveMetadata);
-      }
-      if (!interrupted) {
-        handlers.onOutputAudio(parsed, receiveMetadata);
-      }
-
-      if (isGeminiSetupCompleteMessage(parsed)) {
-        resolved = true;
-        resolve();
-      }
-    };
-
-    websocket.onmessage = (messageEvent) => {
-      void handleMessage(messageEvent).catch((error: unknown) => {
-        if (!resolved) {
-          reject(error instanceof Error ? error : new Error('Gemini Live WebSocket message handling failed.'));
+    const attach = (socket: WebSocketLike) => {
+      const handleMessage = async (messageEvent: MessageEvent) => {
+        const parsed = await parseWebSocketMessage(messageEvent.data);
+        if (socket !== activeSocket) {
+          return;
         }
-      });
+        handlers.onProviderEvent?.(parsed);
+        const receiveMetadata = handlers.onProviderEventReceived(parsed);
+        handlers.onProviderEventTelemetry?.(parsed, receiveMetadata);
+
+        const categories = categorizeGeminiProviderEvent(parsed);
+        if (categories.includes('sessionResumptionUpdate') && isRecord(parsed)) {
+          handlers.onSessionResumptionUpdate?.(parsed);
+        }
+
+        if (!isRelayableGeminiProviderEvent(parsed)) {
+          return;
+        }
+
+        handlers.onProviderToolEvent?.(parsed);
+        notifyToolCallReceived(parsed, handlers.onToolLoopDiagnostic);
+        const interrupted = isGeminiServerInterruptedEvent(parsed);
+        if (interrupted) {
+          handlers.onInterruption(parsed);
+        }
+        const relayEvent = handlers.onFrontendToolEvent
+          ? await handlers.onFrontendToolEvent(parsed)
+          : parsed;
+        if (relayEvent) {
+          handlers.onRelayEvent(relayEvent, receiveMetadata);
+        }
+        if (!interrupted) {
+          handlers.onOutputAudio(parsed, receiveMetadata);
+        }
+
+        if (categories.includes('goAway') && handlers.onGoAway && !rotationInFlight) {
+          rotationInFlight = true;
+          try {
+            const continuation = await handlers.onGoAway(parsed, receiveMetadata);
+            if (continuation) {
+              if (socket === activeSocket && socket.readyState === WEBSOCKET_OPEN) {
+                socket.close(1000, 'Gemini Live continuation rotation.');
+              }
+              activeSocket = continuation.websocket;
+              handlers.onProviderConnectionChanged?.(activeSocket);
+              await waitForWebSocketOpen(activeSocket);
+              attach(activeSocket);
+              activeSocket.send(JSON.stringify({ setup: continuation.setup }));
+            }
+          } finally {
+            rotationInFlight = false;
+          }
+        }
+
+        if (isGeminiSetupCompleteMessage(parsed) && !initialSetupResolved) {
+          initialSetupResolved = true;
+          resolve();
+        }
+      };
+
+      socket.onmessage = (messageEvent) => {
+        void handleMessage(messageEvent).catch((error: unknown) => {
+          if (!initialSetupResolved) {
+            reject(error instanceof Error ? error : new Error('Gemini Live WebSocket message handling failed.'));
+          }
+        });
+      };
+
+      socket.onerror = () => {
+        handlers.onWebSocketDiagnostic?.({
+          timestamp: new Date().toISOString(),
+          kind: 'error',
+          message: 'Gemini Live WebSocket error event fired.',
+          closeCode: null,
+          closeReason: null,
+          wasClean: null,
+        });
+        if (!initialSetupResolved) {
+          reject(new Error('Gemini Live WebSocket failed before setupComplete.'));
+        }
+      };
+      socket.onclose = (event) => {
+        handlers.onWebSocketDiagnostic?.({
+          timestamp: new Date().toISOString(),
+          kind: 'close',
+          message: 'Gemini Live WebSocket closed.',
+          closeCode: typeof event.code === 'number' ? event.code : null,
+          closeReason: typeof event.reason === 'string' && event.reason ? event.reason : null,
+          wasClean: typeof event.wasClean === 'boolean' ? event.wasClean : null,
+        });
+        if (!initialSetupResolved) {
+          reject(new Error('Gemini Live WebSocket closed before setupComplete.'));
+        }
+      };
     };
 
-    websocket.onerror = () => {
-      handlers.onWebSocketDiagnostic?.({
-        timestamp: new Date().toISOString(),
-        kind: 'error',
-        message: 'Gemini Live WebSocket error event fired.',
-        closeCode: null,
-        closeReason: null,
-        wasClean: null,
-      });
-      if (!resolved) {
-        reject(new Error('Gemini Live WebSocket failed before setupComplete.'));
-      }
-    };
-    websocket.onclose = (event) => {
-      handlers.onWebSocketDiagnostic?.({
-        timestamp: new Date().toISOString(),
-        kind: 'close',
-        message: 'Gemini Live WebSocket closed.',
-        closeCode: typeof event.code === 'number' ? event.code : null,
-        closeReason: typeof event.reason === 'string' && event.reason ? event.reason : null,
-        wasClean: typeof event.wasClean === 'boolean' ? event.wasClean : null,
-      });
-      if (!resolved) {
-        reject(new Error('Gemini Live WebSocket closed before setupComplete.'));
-      }
-    };
+    attach(activeSocket);
   });
 }
 
 function startMicrophoneAudioPipeline(options: {
   localStream: MediaStream;
   audioContext: AudioContext;
-  websocket: WebSocketLike;
+  websocketRef: { current: WebSocketLike | null };
   recordingInputNode?: AudioNode;
   onInputAudioActivity?: (diagnostic: GeminiInputAudioActivityDiagnostic) => void;
 }): AudioPipeline {
@@ -4501,10 +4654,11 @@ function startMicrophoneAudioPipeline(options: {
   };
 
   const sendAudioStreamEnd = (trigger: string) => {
-    if (options.websocket.readyState !== WEBSOCKET_OPEN || audioStreamEndSent) {
+    const websocket = options.websocketRef.current;
+    if (!websocket || websocket.readyState !== WEBSOCKET_OPEN || audioStreamEndSent) {
       return;
     }
-    options.websocket.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
+    websocket.send(JSON.stringify({ realtimeInput: { audioStreamEnd: true } }));
     audioStreamEndSent = true;
     emitInputAudioActivity('input_audio_stream_end_sent', {
       audioFrameSequence,
@@ -4520,7 +4674,8 @@ function startMicrophoneAudioPipeline(options: {
       outputBuffer.getChannelData(channel).fill(0);
     }
 
-    if (options.websocket.readyState !== WEBSOCKET_OPEN) {
+    const websocket = options.websocketRef.current;
+    if (!websocket || websocket.readyState !== WEBSOCKET_OPEN) {
       return;
     }
     if (muted) {
@@ -4537,7 +4692,7 @@ function startMicrophoneAudioPipeline(options: {
     audioFrameSequence += 1;
     framesSinceLastDiagnostic += 1;
 
-    options.websocket.send(JSON.stringify({
+    websocket.send(JSON.stringify({
       realtimeInput: {
         audio: {
           data,

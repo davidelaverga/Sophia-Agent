@@ -608,6 +608,12 @@ class SessionMessagesResponse(BaseModel):
     session_id: str
     thread_id: str
     messages: list[SessionMessageResponse]
+    message_revision: int = 0
+    previous_revision: int | None = None
+    accepted: bool = True
+    duplicate: bool = False
+    conflict: bool = False
+    deleted_count: int = 0
 
 
 class SessionMessagePersistInput(BaseModel):
@@ -629,13 +635,40 @@ class SessionMessagesPersistRequest(BaseModel):
     user_id: str = "dev-user"
     thread_id: str | None = None
     messages: list[SessionMessagePersistInput]
+    base_revision: int | None = None
 
 
-@router.get("/{session_id}/messages", response_model=SessionMessagesResponse)
+def _session_messages_payload(
+    *,
+    session_id: str,
+    thread_id: str,
+    messages: list[SessionMessageResponse],
+    snapshot: object | None = None,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        "session_id": session_id,
+        "thread_id": thread_id,
+        "messages": [message.model_dump() for message in messages],
+    }
+    if snapshot is not None:
+        payload.update(
+            {
+                "message_revision": int(getattr(snapshot, "current_revision", 0)),
+                "previous_revision": int(getattr(snapshot, "previous_revision", 0)),
+                "accepted": bool(getattr(snapshot, "accepted", True)),
+                "duplicate": bool(getattr(snapshot, "duplicate", False)),
+                "conflict": bool(getattr(snapshot, "conflict", False)),
+                "deleted_count": int(getattr(snapshot, "deleted_count", 0)),
+            }
+        )
+    return payload
+
+
+@router.get("/{session_id}/messages")
 async def get_session_messages(
     session_id: str,
     user_id: str = Query(default="dev-user"),
-) -> SessionMessagesResponse:
+) -> dict[str, object]:
     """Retrieve durable conversation history, falling back to LangGraph state."""
     owner_user_id, record = _resolve_session_record(_normalize_user_id(user_id), session_id)
     if record is None:
@@ -650,9 +683,9 @@ async def get_session_messages(
     ]
     durable_has_assistant = any(message.role == "sophia" for message in durable_messages)
 
-    def _durable_response() -> SessionMessagesResponse:
+    def _durable_response() -> dict[str, object]:
         _update_session_from_visible_records(owner_user_id, session_id, durable_records, record)
-        return SessionMessagesResponse(
+        return _session_messages_payload(
             session_id=session_id,
             thread_id=thread_id,
             messages=durable_messages,
@@ -691,7 +724,7 @@ async def get_session_messages(
             if durable_messages:
                 return _durable_response()
             # Thread exists but has no checkpoint yet (no messages sent)
-            return SessionMessagesResponse(
+            return _session_messages_payload(
                 session_id=session_id,
                 thread_id=thread_id,
                 messages=[],
@@ -769,19 +802,19 @@ async def get_session_messages(
             record,
         )
 
-    return SessionMessagesResponse(
+    return _session_messages_payload(
         session_id=session_id,
         thread_id=thread_id,
         messages=messages,
     )
 
 
-@router.put("/{session_id}/messages", response_model=SessionMessagesResponse)
+@router.put("/{session_id}/messages")
 async def persist_session_messages(
     session_id: str,
     body: SessionMessagesPersistRequest,
     user_id: str = Query(default="dev-user"),
-) -> SessionMessagesResponse:
+) -> dict[str, object]:
     """Persist an ordered transcript snapshot for a session.
 
     The client calls this with finalized visible transcript updates. Streaming
@@ -810,27 +843,39 @@ async def persist_session_messages(
         )
         if message is not None:
             records.append(message)
-    stored_records = _store.replace_messages(owner_user_id, session_id, records)
-    visible_records = canonical_visible_messages(stored_records)
+    expected_revision = (
+        body.base_revision
+        if body.base_revision is not None
+        else int(record.message_revision)
+    )
+    snapshot = _store.replace_messages_revisioned(
+        owner_user_id,
+        session_id,
+        records,
+        expected_revision=expected_revision,
+    )
+    visible_records = canonical_visible_messages(snapshot.messages)
     _update_session_from_visible_records(owner_user_id, session_id, visible_records, record)
 
-    return SessionMessagesResponse(
-        session_id=session_id,
-        thread_id=thread_id,
-        messages=[
+    visible_responses = [
             response
             for response in (_message_record_to_response(message) for message in visible_records)
             if response is not None
-        ],
+        ]
+    return _session_messages_payload(
+        session_id=session_id,
+        thread_id=thread_id,
+        messages=visible_responses,
+        snapshot=snapshot if body.base_revision is not None else None,
     )
 
 
-@router.post("/{session_id}/messages", response_model=SessionMessagesResponse)
+@router.post("/{session_id}/messages")
 async def persist_session_messages_beacon(
     session_id: str,
     body: SessionMessagesPersistRequest,
     user_id: str = Query(default="dev-user"),
-) -> SessionMessagesResponse:
+) -> dict[str, object]:
     """POST alias for browser sendBeacon/keepalive transcript flushes."""
     return await persist_session_messages(session_id, body, user_id)
 

@@ -45,6 +45,9 @@ class GeminiProductionBrowserSession:
                     f"{session_id}/provider-events"
                 ),
                 "disconnect_url": f"/production/realtime/gemini/browser-sessions/{session_id}",
+                "continuation_bootstrap_url": (
+                    f"/production/realtime/gemini/browser-sessions/{session_id}/continuation-bootstrap"
+                ),
                 "public_event_boundary": "SophiaEventNormalizer",
             }
         )
@@ -67,6 +70,7 @@ class GeminiProductionBrowserSessionManager:
         ritual: str | None = None,
         realtime_context: Mapping[str, Any] | None = None,
         preconnect_ttl_seconds: float | None = None,
+        logical_session_id: str | None = None,
     ) -> GeminiProductionBrowserSession:
         validate_gemini_production_route_settings(settings)
         instructions, memory_context = build_gemini_live_realtime_instructions_with_memory_context(
@@ -86,6 +90,8 @@ class GeminiProductionBrowserSessionManager:
             memory_retrieval_config=_dynamic_memory_retrieval_config(realtime_context),
             preconnect_ttl_seconds=preconnect_ttl_seconds,
             thread_id=thread_id,
+            logical_session_id=logical_session_id,
+            continuation_bootstrap_url=None,
         )
         return GeminiProductionBrowserSession(browser_session=browser_session)
 
@@ -104,6 +110,28 @@ class GeminiProductionBrowserSessionManager:
             event=event,
             source_metadata=source_metadata,
         )
+
+    async def continue_browser_session(
+        self,
+        settings: object,
+        *,
+        session_id: str,
+        expected_epoch: int,
+        handle_present: bool,
+        secret_generation: int,
+    ) -> GeminiProductionBrowserSession:
+        validate_gemini_production_route_settings(settings)
+        browser_session = await self._browser_sessions.continue_browser_session(
+            settings,
+            dogfood_session_id=session_id,
+            expected_epoch=expected_epoch,
+            handle_present=handle_present,
+            secret_generation=secret_generation,
+            continuation_bootstrap_url=(
+                f"/production/realtime/gemini/browser-sessions/{session_id}/continuation-bootstrap"
+            ),
+        )
+        return GeminiProductionBrowserSession(browser_session=browser_session)
 
     async def close_session(
         self,

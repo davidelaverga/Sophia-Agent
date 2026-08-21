@@ -322,6 +322,12 @@ export interface SessionMessagesResponse {
   session_id: string;
   thread_id: string;
   messages: SessionMessageItem[];
+  message_revision?: number;
+  previous_revision?: number | null;
+  accepted?: boolean;
+  duplicate?: boolean;
+  conflict?: boolean;
+  deleted_count?: number;
 }
 
 /**
@@ -349,6 +355,7 @@ export interface SessionMessagesPersistRequest {
   user_id?: string;
   thread_id?: string | null;
   messages: SessionMessagePersistItem[];
+  base_revision?: number;
 }
 
 /**

@@ -79,6 +79,7 @@ class SessionRecord(BaseModel):
     active_segment_started_at: str | None = None
     segment_count: int = 1
     continuation_count: int = 0
+    message_revision: int = 0
     intention: str | None = None
     focus_cue: str | None = None
     metadata: dict[str, Any] = Field(default_factory=dict)
@@ -101,6 +102,19 @@ class SessionMessageRecord(BaseModel):
     sequence: int = 0
     redaction_level: str = "none"
     metadata: dict[str, Any] = Field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class SessionMessageSnapshotResult:
+    """Revision receipt for a browser snapshot admission."""
+
+    messages: list[SessionMessageRecord]
+    previous_revision: int
+    current_revision: int
+    accepted: bool
+    duplicate: bool = False
+    conflict: bool = False
+    deleted_count: int = 0
 
 
 class SessionTranscriptStore(Protocol):
@@ -131,6 +145,15 @@ class SessionTranscriptStore(Protocol):
         session_id: str,
         messages: list[SessionMessageRecord],
     ) -> list[SessionMessageRecord]: ...
+
+    def replace_messages_revisioned(
+        self,
+        user_id: str,
+        session_id: str,
+        messages: list[SessionMessageRecord],
+        *,
+        expected_revision: int,
+    ) -> SessionMessageSnapshotResult: ...
 
     def list_messages(self, user_id: str, session_id: str) -> list[SessionMessageRecord]: ...
 
@@ -571,6 +594,70 @@ class FilesystemSessionTranscriptStore:
         self._write_messages(user_id, session_id, filtered)
         return sorted(filtered, key=_message_sort_key)
 
+    def replace_messages_revisioned(
+        self,
+        user_id: str,
+        session_id: str,
+        messages: list[SessionMessageRecord],
+        *,
+        expected_revision: int,
+    ) -> SessionMessageSnapshotResult:
+        record = self.get(user_id, session_id)
+        if record is None:
+            raise SessionStoreError("Session not found while admitting message snapshot.")
+        existing = self._read_messages(user_id, session_id)
+        current_revision = max(0, int(record.message_revision))
+        filtered = [message for message in messages if message.session_id == session_id]
+
+        def merge_without_deletion(
+            left: list[SessionMessageRecord],
+            right: list[SessionMessageRecord],
+        ) -> list[SessionMessageRecord]:
+            merged: dict[tuple[str, str], SessionMessageRecord] = {}
+            for message in [*left, *right]:
+                key = _message_dedupe_key(message)
+                previous = merged.get(key)
+                merged[key] = message if previous is None else _prefer_message(previous, message)
+            return sorted(merged.values(), key=_message_sort_key)
+
+        if expected_revision != current_revision:
+            merged = merge_without_deletion(existing, filtered)
+            changed = merged != existing
+            next_revision = current_revision + (1 if changed else 0)
+            if changed:
+                self._write_messages(user_id, session_id, merged)
+                self.update(user_id, session_id, message_revision=next_revision)
+            return SessionMessageSnapshotResult(
+                messages=merged,
+                previous_revision=current_revision,
+                current_revision=next_revision,
+                accepted=False,
+                duplicate=not changed,
+                conflict=True,
+                deleted_count=0,
+            )
+
+        canonical_incoming = merge_without_deletion([], filtered)
+        if canonical_incoming == existing:
+            return SessionMessageSnapshotResult(
+                messages=existing,
+                previous_revision=current_revision,
+                current_revision=current_revision,
+                accepted=True,
+                duplicate=True,
+            )
+        deleted_count = max(0, len(existing) - len(canonical_incoming))
+        next_revision = current_revision + 1
+        self._write_messages(user_id, session_id, canonical_incoming)
+        self.update(user_id, session_id, message_revision=next_revision)
+        return SessionMessageSnapshotResult(
+            messages=canonical_incoming,
+            previous_revision=current_revision,
+            current_revision=next_revision,
+            accepted=True,
+            deleted_count=deleted_count,
+        )
+
     def append_message(
         self,
         user_id: str,
@@ -747,6 +834,7 @@ class SupabaseSessionTranscriptStore:
             "active_segment_started_at": record.active_segment_started_at,
             "segment_count": record.segment_count,
             "continuation_count": record.continuation_count,
+            "message_revision": record.message_revision,
             "metadata": metadata,
         }
 
@@ -827,6 +915,7 @@ class SupabaseSessionTranscriptStore:
             ),
             segment_count=int(row.get("segment_count") or 1),
             continuation_count=int(row.get("continuation_count") or 0),
+            message_revision=int(row.get("message_revision") or 0),
             intention=metadata.get("intention") if isinstance(metadata.get("intention"), str) else None,
             focus_cue=metadata.get("focus_cue") if isinstance(metadata.get("focus_cue"), str) else None,
             metadata=dict(metadata),
@@ -1050,6 +1139,41 @@ class SupabaseSessionTranscriptStore:
             prefer="return=minimal",
         )
         return self.list_messages(user_id, session_id)
+
+    def replace_messages_revisioned(
+        self,
+        user_id: str,
+        session_id: str,
+        messages: list[SessionMessageRecord],
+        *,
+        expected_revision: int,
+    ) -> SessionMessageSnapshotResult:
+        records = [message for message in messages if message.session_id == session_id]
+        result = self._request(
+            "POST",
+            "rpc/sophia_replace_session_messages",
+            json_body={
+                "p_user_id": user_id,
+                "p_session_id": session_id,
+                "p_expected_revision": expected_revision,
+                "p_messages": [self._message_row_from_record(user_id, message) for message in records],
+            },
+            prefer="return=representation",
+        )
+        receipt = result[0] if isinstance(result, list) and result and isinstance(result[0], dict) else result
+        if not isinstance(receipt, dict):
+            raise SessionStoreError("Supabase revisioned message RPC returned an invalid receipt.")
+        current_revision = int(receipt.get("current_revision") or expected_revision)
+        previous_revision = int(receipt.get("previous_revision") or expected_revision)
+        return SessionMessageSnapshotResult(
+            messages=self.list_messages(user_id, session_id),
+            previous_revision=previous_revision,
+            current_revision=current_revision,
+            accepted=bool(receipt.get("accepted")),
+            duplicate=bool(receipt.get("duplicate")),
+            conflict=bool(receipt.get("conflict")),
+            deleted_count=int(receipt.get("deleted_count") or 0),
+        )
 
     def list_messages(self, user_id: str, session_id: str) -> list[SessionMessageRecord]:
         result = self._request(

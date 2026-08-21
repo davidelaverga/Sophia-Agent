@@ -77,6 +77,8 @@ services:
         value: Sophia
       - key: LANGSMITH_API_KEY
         sync: false
+      - key: LANGGRAPH_POSTGRES_DSN
+        sync: false
       # Preserve the pre-DQ-1 builder provider resilience behavior exactly.
       # DQ-1 does not select, migrate, or otherwise alter this path.
       - key: SOPHIA_BUILDER_OPENAI_FALLBACK_ENABLED
@@ -243,6 +245,20 @@ services:
       # available as the flag-controlled rollback. API key/workspace are dashboard-managed.
       - key: SOPHIA_GEMINI_LIVE_LANGSMITH_TRACING
         value: "true"
+      - key: SOPHIA_GEMINI_LIVE_CONTINUITY_ENABLED
+        value: "true"
+      - key: SOPHIA_GEMINI_LIVE_COMPRESSION_ENABLED
+        value: "true"
+      - key: SOPHIA_GEMINI_LIVE_LANGSMITH_PROJECT
+        value: Sophia-Gemini-Live-Voice
+      - key: SOPHIA_GEMINI_LIVE_TRACE_SCHEMA
+        value: sophia_gemini_live_trace_v2
+      - key: SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE
+        value: structural
+      - key: SOPHIA_GEMINI_LIVE_AUDIO_CAPTURE_ENABLED
+        value: "false"
+      - key: SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET
+        sync: false
       - key: LANGSMITH_TRACING
         value: "false"
       - key: LANGSMITH_ENDPOINT

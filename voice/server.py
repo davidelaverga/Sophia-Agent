@@ -248,6 +248,7 @@ class SophiaGeminiProductionStartRequest(BaseModel):
 
     user_id: str = Field(..., description="Trusted authenticated user id")
     session_id: str | None = Field(default=None, description="Optional deterministic realtime session id")
+    logical_session_id: str | None = Field(default=None, description="Authenticated Sophia session id")
     thread_id: str | None = Field(default=None, description="Related Sophia conversation thread id")
     platform: str = Field(default="voice", description="Platform signal: voice | text | ios_voice")
     context_mode: str = Field(default="life", description="Context adaptation: work | gaming | life")
@@ -264,6 +265,12 @@ class SophiaGeminiProductionStartRequest(BaseModel):
         default=None,
         description="Best-effort cleanup TTL for an unused preconnect bootstrap",
     )
+
+
+class SophiaGeminiContinuationBootstrapRequest(BaseModel):
+    expected_epoch: int = Field(..., gt=0)
+    handle_present: bool = False
+    secret_generation: int = Field(default=0, ge=0)
 
 
 session_router = APIRouter()
@@ -877,6 +884,7 @@ async def start_gemini_production_browser_session(
             preconnect_ttl_seconds=(
                 request.preconnect_ttl_seconds if request.preconnect else None
             ),
+            logical_session_id=request.logical_session_id,
         )
     except RealtimeDogfoodConfigurationError as exc:
         raise HTTPException(
@@ -893,6 +901,40 @@ async def start_gemini_production_browser_session(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=str(exc),
         ) from exc
+
+    return browser_session.as_public_payload()
+
+
+@production_realtime_router.post(
+    "/gemini/browser-sessions/{session_id}/continuation-bootstrap",
+    status_code=status.HTTP_200_OK,
+    summary="Mint the next native Gemini Live continuation credential",
+)
+async def continue_gemini_production_browser_session(
+    session_id: str,
+    request: SophiaGeminiContinuationBootstrapRequest,
+) -> dict[str, object]:
+    try:
+        settings = get_settings()
+        validate_live_voice_server_runtime(settings)
+        browser_session = await gemini_production_browser_sessions.continue_browser_session(
+            settings,
+            session_id=session_id,
+            expected_epoch=request.expected_epoch,
+            handle_present=request.handle_present,
+            secret_generation=request.secret_generation,
+        )
+    except RealtimeDogfoodConfigurationError as exc:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
+    except GeminiBrowserRelayError as exc:
+        status_code = (
+            status.HTTP_404_NOT_FOUND
+            if "was not found" in str(exc)
+            else status.HTTP_409_CONFLICT
+        )
+        raise HTTPException(status_code=status_code, detail=str(exc)) from exc
+    except GeminiEphemeralTokenMintError as exc:
+        raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
     return browser_session.as_public_payload()
 

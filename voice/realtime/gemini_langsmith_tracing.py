@@ -16,6 +16,8 @@ root after the browser closes the session.
 from __future__ import annotations
 
 import logging
+import hashlib
+import hmac
 import os
 import re
 import time
@@ -93,12 +95,33 @@ def _env_bool(name: str, default: bool = False) -> bool:
     return value.strip().lower() in {"1", "true", "yes", "on"}
 
 
+def _pseudonym(secret: bytes, namespace: str, value: str) -> str:
+    if not secret:
+        return "hmac_unavailable"
+    digest = hmac.new(secret, f"{namespace}:{value}".encode(), hashlib.sha256).hexdigest()
+    return f"hmac_{digest[:24]}"
+
+
+_TRACE_IDENTITY_KEYS = frozenset(
+    {"task_id", "thread_id", "run_id", "build_id", "operation_id", "voice_trace_id"}
+)
+
+
+def _trace_identifier(value: Any, namespace: str) -> str | None:
+    text = _string_value(value)
+    if text is None:
+        return None
+    secret = os.getenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "").encode()
+    return _pseudonym(secret, namespace, text) if secret else text
+
+
 def langsmith_gemini_live_enabled() -> bool:
     """Return whether manual Gemini Live tracing is configured and usable."""
 
     return bool(
         _env_bool("SOPHIA_GEMINI_LIVE_LANGSMITH_TRACING", False)
         and os.getenv("LANGSMITH_API_KEY", "").strip()
+        and os.getenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "").strip()
         and Client is not None
         and RunTree is not None
         and Attachment is not None
@@ -164,6 +187,49 @@ def _safe_payload(value: Any, *, depth: int = 0, parent_key: str | None = None) 
             result.append({"truncated_items": len(items) - MAX_TRACE_LIST_ITEMS})
         return result
     return _safe_text(repr(value))
+
+
+def _structural_payload(value: Any, *, depth: int = 0) -> Any:
+    """Describe shape and size without exporting conversation/tool content."""
+
+    if depth >= MAX_TRACE_DEPTH:
+        return {"kind": "max_depth"}
+    if isinstance(value, (bytes, bytearray, memoryview)):
+        return {"kind": "bytes", "byte_length": len(value)}
+    if isinstance(value, str):
+        return {"kind": "string", "char_length": len(value)}
+    if value is None:
+        return {"kind": "null"}
+    if isinstance(value, bool):
+        return {"kind": "boolean", "value": value}
+    if isinstance(value, (int, float)):
+        return {"kind": "number"}
+    if isinstance(value, Mapping):
+        items = list(value.items())
+        fields = {
+            str(key): _structural_payload(item, depth=depth + 1)
+            for key, item in items[:MAX_TRACE_LIST_ITEMS]
+        }
+        result: dict[str, Any] = {
+            "kind": "object",
+            "keys": [str(key) for key, _ in items[:MAX_TRACE_LIST_ITEMS]],
+            "field_count": len(items),
+            "fields": fields,
+        }
+        if len(items) > MAX_TRACE_LIST_ITEMS:
+            result["truncated_fields"] = len(items) - MAX_TRACE_LIST_ITEMS
+        return result
+    if isinstance(value, (list, tuple, set)):
+        items = list(value)
+        return {
+            "kind": "array",
+            "item_count": len(items),
+            "item_shapes": [
+                _structural_payload(item, depth=depth + 1)
+                for item in items[:MAX_TRACE_LIST_ITEMS]
+            ],
+        }
+    return {"kind": type(value).__name__}
 
 
 def _event_name(categories: list[str], event: Mapping[str, Any]) -> str:
@@ -258,7 +324,11 @@ def _builder_trace_summary(response: Mapping[str, Any] | None) -> dict[str, Any]
             None,
         )
         if value is not None:
-            summary[key] = _safe_payload(value)
+            summary[key] = (
+                _trace_identifier(value, key)
+                if key in _TRACE_IDENTITY_KEYS
+                else _safe_payload(value)
+            )
     artifact_path = next(
         (
             source.get("artifact_path") or source.get("artifact_url")
@@ -306,12 +376,12 @@ def _builder_gate_records(
         gates.append(
             {
                 "tool_name": tool_name,
-                "task_id": _string_value(record.get("task_id")),
-                "thread_id": _string_value(record.get("thread_id")),
-                "run_id": _string_value(record.get("run_id")),
-                "build_id": _string_value(record.get("build_id")),
-                "operation_id": _string_value(record.get("operation_id")),
-                "voice_trace_id": _string_value(record.get("voice_trace_id")),
+                "task_id": _trace_identifier(record.get("task_id"), "task_id"),
+                "thread_id": _trace_identifier(record.get("thread_id"), "thread_id"),
+                "run_id": _trace_identifier(record.get("run_id"), "run_id"),
+                "build_id": _trace_identifier(record.get("build_id"), "build_id"),
+                "operation_id": _trace_identifier(record.get("operation_id"), "operation_id"),
+                "voice_trace_id": _trace_identifier(record.get("voice_trace_id"), "voice_trace_id"),
                 "artifact_status": status,
                 "terminal_status_observed": status in _TERMINAL_BUILDER_STATUSES,
                 "ready_status_observed": ready_status,
@@ -348,7 +418,6 @@ class GeminiLiveTraceRecorder:
             and RunTree is not None
             and Attachment is not None
         )
-        self.audio_capture_enabled = self.enabled
         self.session_id = session_id
         self.user_id = user_id
         self.thread_id = thread_id or session_id
@@ -364,6 +433,22 @@ class GeminiLiveTraceRecorder:
         self._last_ready_claim_text: str | None = None
         self._ready_claim_count = 0
         self._false_ready_claim_count = 0
+        self.trace_schema = os.getenv(
+            "SOPHIA_GEMINI_LIVE_TRACE_SCHEMA",
+            "sophia_gemini_live_trace_v2",
+        )
+        self.content_mode = os.getenv(
+            "SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE",
+            "structural",
+        ).strip().lower() or "structural"
+        hmac_secret = os.getenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "").encode()
+        self.audio_capture_enabled = bool(
+            self.enabled
+            and (
+                _env_bool("SOPHIA_GEMINI_LIVE_AUDIO_CAPTURE_ENABLED", False)
+                or not hmac_secret
+            )
+        )
 
         if not self.enabled:
             return
@@ -375,25 +460,39 @@ class GeminiLiveTraceRecorder:
                 workspace_id=os.getenv("LANGSMITH_WORKSPACE_ID") or None,
             )
 
+        logical_session_ref = _pseudonym(hmac_secret, "logical_session", session_id)
+        thread_ref = _pseudonym(hmac_secret, "thread", self.thread_id)
+        runtime_ref = _pseudonym(hmac_secret, "voice_runtime", session_id)
         metadata = {
             "ls_modality": "audio",
+            "trace_schema_version": self.trace_schema,
             "runtime": "gemini_live",
-            "provider": "google-gemini-live",
-            "architecture": "browser_owned_s2s_relay",
-            "session_id": session_id,
-            "thread_id": self.thread_id,
+            "transport": "browser_websocket_ephemeral_token_with_backend_relay",
+            "logical_session_ref": logical_session_ref,
+            "thread_ref": thread_ref,
+            "voice_runtime_ref": runtime_ref,
             "model": model,
+            "continuity_feature_enabled": _env_bool("SOPHIA_GEMINI_LIVE_CONTINUITY_ENABLED", False),
+            "compression_enabled": _env_bool("SOPHIA_GEMINI_LIVE_COMPRESSION_ENABLED", False),
+            "trace_content_mode": self.content_mode,
+            "audio_capture_enabled": self.audio_capture_enabled,
             "input_transcription_enabled": True,
             "output_transcription_enabled": True,
         }
+        if not hmac_secret:
+            metadata["thread_id"] = self.thread_id
         self.root = RunTree(
             name="gemini_live_conversation",
             id=uuid7(),
             run_type="chain",
             project_name=os.getenv("SOPHIA_GEMINI_LIVE_LANGSMITH_PROJECT")
-            or os.getenv("LANGSMITH_PROJECT")
-            or "Sophia",
-            inputs={"session_id": session_id, "user_id": user_id},
+            or "Sophia-Gemini-Live-Voice",
+            inputs={
+                "trace_schema_version": self.trace_schema,
+                "logical_session_ref": logical_session_ref,
+                "thread_ref": thread_ref,
+                "voice_runtime_ref": runtime_ref,
+            },
             extra={"metadata": metadata},
             tags=["sophia", "voice", "gemini_live", "s2s"],
             ls_client=self.client,
@@ -440,7 +539,13 @@ class GeminiLiveTraceRecorder:
             name=name,
             run_type="chain",
             run_id=uuid7(),
-            inputs={"provider_event": _safe_payload(event)},
+            inputs={
+                "provider_event": (
+                    _structural_payload(event)
+                    if self.content_mode == "structural"
+                    else _safe_payload(event)
+                )
+            },
             extra={"metadata": metadata},
             tags=["gemini_live", "socket_event", name],
         )
@@ -510,9 +615,13 @@ class GeminiLiveTraceRecorder:
             run_type="tool",
             run_id=uuid7(),
             inputs={
-                "tool_call_id": tool_call_id,
+                "tool_call_id": _trace_identifier(tool_call_id, "tool_call_id"),
                 "tool_name": tool_name,
-                "arguments": _safe_payload(arguments or {}),
+                "arguments": (
+                    _structural_payload(arguments or {})
+                    if self.content_mode == "structural"
+                    else _safe_payload(arguments or {})
+                ),
             },
             extra={
                 "metadata": {
@@ -542,7 +651,11 @@ class GeminiLiveTraceRecorder:
             return
         outputs: dict[str, Any] = {
             "success": success,
-            "result_summary": _safe_text(result_summary or ""),
+            "result_summary": (
+                _structural_payload(result_summary or "")
+                if self.content_mode == "structural"
+                else _safe_text(result_summary or "")
+            ),
         }
         if tool_name in _BUILDER_LIFECYCLE_TOOLS:
             outputs["builder_lifecycle"] = _builder_trace_summary(response)
@@ -590,8 +703,18 @@ class GeminiLiveTraceRecorder:
             name=f"function_response:{tool_name}",
             run_type="chain",
             run_id=uuid7(),
-            inputs={"tool_call_id": tool_call_id, "tool_name": tool_name},
-            outputs={"success": success, "response": _safe_payload(response or {})},
+            inputs={
+                "tool_call_id": _trace_identifier(tool_call_id, "tool_call_id"),
+                "tool_name": tool_name,
+            },
+            outputs={
+                "success": success,
+                "response": (
+                    _structural_payload(response or {})
+                    if self.content_mode == "structural"
+                    else _safe_payload(response or {})
+                ),
+            },
             extra={
                 "metadata": {
                     "runtime": "gemini_live",
@@ -714,7 +837,11 @@ class GeminiLiveTraceRecorder:
             run_type="chain",
             run_id=uuid7(),
             inputs={
-                "transcript": _safe_text(transcript or ""),
+                "transcript": (
+                    _structural_payload(transcript or "")
+                    if self.content_mode == "structural"
+                    else _safe_text(transcript or "")
+                ),
                 "provider_receive_sequence": provider_receive_sequence,
                 "relay_correlation_id": relay_correlation_id,
             },
@@ -751,7 +878,7 @@ class GeminiLiveTraceRecorder:
             return
         self._closed = True
         audio_attached = False
-        if conversation_audio:
+        if conversation_audio and self.audio_capture_enabled:
             if len(conversation_audio) <= MAX_AUDIO_ATTACHMENT_BYTES:
                 self.root.attachments["conversation_audio"] = Attachment(
                     mime_type=conversation_audio_mime_type,
@@ -766,7 +893,11 @@ class GeminiLiveTraceRecorder:
                 )
         self.root.end(
             outputs={
-                "session_id": self.session_id,
+                "voice_runtime_ref": _pseudonym(
+                    os.getenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "").encode(),
+                    "voice_runtime",
+                    self.session_id,
+                ),
                 "event_count": self._event_count,
                 "tool_count": self._tool_count,
                 "ready_claim_count": self._ready_claim_count,

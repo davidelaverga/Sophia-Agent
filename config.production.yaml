@@ -4,6 +4,13 @@
 
 config_version: 4
 
+# M01-C1: production LangGraph state must survive a service restart. The
+# deployment environment supplies the DSN; local/test configs keep their
+# explicit memory or sqlite choices.
+checkpointer:
+  type: postgres
+  connection_string: $LANGGRAPH_POSTGRES_DSN
+
 models:
   - name: claude-haiku-4-5-20251001
     display_name: Claude Haiku 4.5

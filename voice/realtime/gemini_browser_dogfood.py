@@ -203,6 +203,15 @@ class GeminiReliabilityDiagnostics:
     artifact_cancelled_after_backend_execution: int = 0
     artifact_public_event_emitted_count: int = 0
     artifact_tool_response_prepared_count: int = 0
+    provider_connection_epoch: int = 1
+    provider_connection_max_epoch: int = 1
+    continuation_bootstrap_attempts: int = 0
+    continuation_bootstrap_successes: int = 0
+    continuation_bootstrap_conflicts: int = 0
+    safe_handle_updates: int = 0
+    unsafe_handle_updates: int = 0
+    go_away_count: int = 0
+    trace_export_failures: int = 0
 
     def as_public_payload(self) -> dict[str, Any]:
         recent_function_calls = dict(list(self.function_calls_extracted.items())[-10:])
@@ -238,7 +247,32 @@ class GeminiReliabilityDiagnostics:
             "artifact_cancelled_after_backend_execution": self.artifact_cancelled_after_backend_execution,
             "artifact_public_event_emitted_count": self.artifact_public_event_emitted_count,
             "artifact_tool_response_prepared_count": self.artifact_tool_response_prepared_count,
+            "provider_connection_epoch": self.provider_connection_epoch,
+            "provider_connection_max_epoch": self.provider_connection_max_epoch,
+            "continuation_bootstrap_attempts": self.continuation_bootstrap_attempts,
+            "continuation_bootstrap_successes": self.continuation_bootstrap_successes,
+            "continuation_bootstrap_conflicts": self.continuation_bootstrap_conflicts,
+            "safe_handle_updates": self.safe_handle_updates,
+            "unsafe_handle_updates": self.unsafe_handle_updates,
+            "go_away_count": self.go_away_count,
+            "trace_export_failures": self.trace_export_failures,
         }
+
+    def record_provider_metric(self, name: str, **values: Any) -> None:
+        if name == "continuation_bootstrap":
+            self.continuation_bootstrap_attempts += 1
+            self.continuation_bootstrap_successes += 1
+            epoch = values.get("provider_connection_epoch")
+            if isinstance(epoch, int) and epoch > 0:
+                self.provider_connection_epoch = epoch
+                self.provider_connection_max_epoch = max(self.provider_connection_max_epoch, epoch)
+            if values.get("handle_present") is True:
+                self.safe_handle_updates += 1
+            else:
+                self.unsafe_handle_updates += 1
+        elif name == "continuation_bootstrap_conflict":
+            self.continuation_bootstrap_attempts += 1
+            self.continuation_bootstrap_conflicts += 1
 
     def record_provider_event(
         self,
@@ -252,6 +286,8 @@ class GeminiReliabilityDiagnostics:
         for category in categorize_gemini_provider_event(event):
             self.provider_category_counts[category] = self.provider_category_counts.get(category, 0) + 1
             self.provider_category_last_at[category] = observed_at
+            if category == "goAway":
+                self.go_away_count += 1
 
     def record_function_calls(self, function_calls: list[GeminiLiveFunctionCall]) -> None:
         for function_call in function_calls:
@@ -368,6 +404,10 @@ class GeminiBrowserDogfoodSession:
     memory_context_diagnostics: dict[str, Any] = field(default_factory=dict)
     langsmith_trace_id: str | None = None
     audio_capture_enabled: bool = False
+    provider_connection_epoch: int = 1
+    continuation_bootstrap_url: str | None = None
+    logical_session_id: str | None = None
+    voice_runtime_session_id: str | None = None
 
     def as_public_payload(self) -> dict[str, Any]:
         session_metadata = self.dogfood_session.metadata()
@@ -390,6 +430,10 @@ class GeminiBrowserDogfoodSession:
             "backendStillFrameFlagParsed": is_coreview_still_frame_enabled(),
             "langsmith_trace_id": self.langsmith_trace_id,
             "audio_capture_enabled": self.audio_capture_enabled,
+            "provider_connection_epoch": self.provider_connection_epoch,
+            "continuation_bootstrap_url": self.continuation_bootstrap_url,
+            "logical_session_id": self.logical_session_id,
+            "voice_runtime_session_id": self.voice_runtime_session_id or self.dogfood_session.session_id,
         }
 
 
@@ -409,11 +453,14 @@ class GeminiLiveEphemeralTokenMinter:
         api_key: str,
         setup: Mapping[str, Any],
         uses: int = 1,
+        field_mask: str | None = "model,generationConfig",
     ) -> GeminiLiveEphemeralToken:
         body = {
             "uses": uses,
             "bidiGenerateContentSetup": dict(setup),
         }
+        if field_mask:
+            body["fieldMask"] = field_mask
         headers = {
             "Content-Type": "application/json",
             "x-goog-api-key": api_key,
@@ -484,6 +531,9 @@ class GeminiBrowserDogfoodSessionManager:
         ] = {}
         self._preconnect_cleanup_tasks_by_session: dict[str, asyncio.Task[None]] = {}
         self._traces_by_session: dict[str, GeminiLiveTraceRecorder] = {}
+        self._continuation_epoch_by_session: dict[str, int] = {}
+        self._continuation_locks_by_session: dict[str, asyncio.Lock] = {}
+        self._logical_session_id_by_session: dict[str, str] = {}
 
     async def start_browser_session(
         self,
@@ -497,6 +547,8 @@ class GeminiBrowserDogfoodSessionManager:
         memory_retrieval_config: Mapping[str, Any] | None = None,
         preconnect_ttl_seconds: float | None = None,
         thread_id: str | None = None,
+        logical_session_id: str | None = None,
+        continuation_bootstrap_url: str | None = None,
     ) -> GeminiBrowserDogfoodSession:
         gate = validate_gemini_browser_dogfood_settings(settings)
         resolved_context_mode = context_mode or str(getattr(settings, "context_mode", "life"))
@@ -530,6 +582,10 @@ class GeminiBrowserDogfoodSessionManager:
             memory_context=dict(memory_context_diagnostics or {}),
         )
         self._diagnostics_by_session[dogfood_session.session_id] = diagnostics
+        self._continuation_epoch_by_session[dogfood_session.session_id] = 1
+        self._continuation_locks_by_session[dogfood_session.session_id] = asyncio.Lock()
+        if logical_session_id:
+            self._logical_session_id_by_session[dogfood_session.session_id] = logical_session_id
         self._context_mode_by_session[dogfood_session.session_id] = resolved_context_mode
         resolved_parent_thread_id = _string_value(thread_id)
         if resolved_parent_thread_id:
@@ -561,7 +617,81 @@ class GeminiBrowserDogfoodSessionManager:
             memory_context_diagnostics=dict(memory_context_diagnostics or {}),
             langsmith_trace_id=trace.trace_id,
             audio_capture_enabled=trace.audio_capture_enabled,
+            provider_connection_epoch=1,
+            continuation_bootstrap_url=continuation_bootstrap_url,
+            logical_session_id=logical_session_id,
+            voice_runtime_session_id=dogfood_session.session_id,
         )
+
+    async def continue_browser_session(
+        self,
+        settings: object,
+        *,
+        dogfood_session_id: str,
+        expected_epoch: int,
+        handle_present: bool,
+        secret_generation: int,
+        continuation_bootstrap_url: str | None = None,
+    ) -> GeminiBrowserDogfoodSession:
+        """Mint a next-segment credential while keeping the handle browser-local."""
+
+        validate_gemini_browser_dogfood_settings(settings)
+        dogfood_session = self._realtime_sessions.get_session(dogfood_session_id)
+        if dogfood_session is None:
+            raise GeminiBrowserRelayError(
+                f"Dogfood session with id {dogfood_session_id!r} was not found."
+            )
+        if not isinstance(expected_epoch, int) or expected_epoch <= 0:
+            raise GeminiBrowserRelayError("expected_epoch must be a positive integer.")
+        if not isinstance(secret_generation, int) or secret_generation < 0:
+            raise GeminiBrowserRelayError("secret_generation must be a non-negative integer.")
+
+        lock = self._continuation_locks_by_session.setdefault(
+            dogfood_session_id,
+            asyncio.Lock(),
+        )
+        async with lock:
+            current_epoch = self._continuation_epoch_by_session.get(dogfood_session_id, 1)
+            if current_epoch != expected_epoch:
+                diagnostics = self._diagnostics_by_session.get(dogfood_session_id)
+                if diagnostics is not None:
+                    diagnostics.record_provider_metric("continuation_bootstrap_conflict")
+                raise GeminiBrowserRelayError(
+                    f"Continuation epoch conflict: expected {expected_epoch}, current {current_epoch}."
+                )
+
+            gate = validate_gemini_browser_dogfood_settings(settings)
+            setup = _setup_from_dogfood_session(dogfood_session)
+            token = await self._token_minter.mint_ephemeral_token(
+                api_key=gate.api_key,
+                setup=setup,
+                field_mask="model,generationConfig",
+            )
+            next_epoch = current_epoch + 1
+            self._continuation_epoch_by_session[dogfood_session_id] = next_epoch
+            diagnostics = self._diagnostics_by_session.setdefault(
+                dogfood_session_id,
+                GeminiReliabilityDiagnostics(session_id=dogfood_session_id),
+            )
+            diagnostics.record_provider_metric(
+                "continuation_bootstrap",
+                provider_connection_epoch=next_epoch,
+                handle_present=bool(handle_present),
+                resume_secret_generation=int(secret_generation),
+            )
+            trace = self._traces_by_session.get(dogfood_session_id)
+            return GeminiBrowserDogfoodSession(
+                dogfood_session=dogfood_session,
+                ephemeral_token=token,
+                setup=setup,
+                memory_context_diagnostics={},
+                langsmith_trace_id=trace.trace_id if trace is not None else None,
+                audio_capture_enabled=trace.audio_capture_enabled if trace is not None else False,
+                provider_connection_epoch=next_epoch,
+                continuation_bootstrap_url=continuation_bootstrap_url,
+                logical_session_id=self._logical_session_id_by_session.get(dogfood_session_id),
+                voice_runtime_session_id=dogfood_session_id,
+            )
 
     def _schedule_preconnect_cleanup(
         self,
@@ -1148,6 +1278,9 @@ class GeminiBrowserDogfoodSessionManager:
         self._completed_tool_call_ids_by_session.pop(dogfood_session_id, None)
         self._public_artifact_tool_call_ids_by_session.pop(dogfood_session_id, None)
         self._async_tasks_by_session.pop(dogfood_session_id, None)
+        self._continuation_epoch_by_session.pop(dogfood_session_id, None)
+        self._continuation_locks_by_session.pop(dogfood_session_id, None)
+        self._logical_session_id_by_session.pop(dogfood_session_id, None)
         self._parent_thread_id_by_session.pop(dogfood_session_id, None)
         self._diagnostics_by_session.pop(dogfood_session_id, None)
         self._context_mode_by_session.pop(dogfood_session_id, None)

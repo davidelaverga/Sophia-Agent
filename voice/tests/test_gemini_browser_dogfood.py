@@ -116,8 +116,16 @@ class FakeGeminiTokenMinter:
         api_key: str,
         setup: Mapping[str, Any],
         uses: int = 1,
+        field_mask: str | None = None,
     ) -> GeminiLiveEphemeralToken:
-        self.requests.append({"api_key": api_key, "setup": dict(setup), "uses": uses})
+        self.requests.append(
+            {
+                "api_key": api_key,
+                "setup": dict(setup),
+                "uses": uses,
+                "field_mask": field_mask,
+            }
+        )
         return GeminiLiveEphemeralToken(
             value="auth_tokens/gemini-browser-test",
             response={"name": "auth_tokens/gemini-browser-test"},
@@ -669,6 +677,49 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
         await legacy_manager.start_browser_session(make_settings(), user_id="user-1")
 
     await manager.close_session("browser-gemini-1")
+
+
+@pytest.mark.anyio
+async def test_browser_continuation_bootstrap_is_epoch_guarded_and_field_masked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    _make_backend_emit_artifact_import_fail(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    fake_minter = FakeGeminiTokenMinter()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=fake_minter,  # type: ignore[arg-type]
+    )
+
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-continuation",
+    )
+    next_session = await manager.continue_browser_session(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        expected_epoch=1,
+        handle_present=True,
+        secret_generation=4,
+    )
+
+    assert next_session.provider_connection_epoch == 2
+    assert fake_minter.requests[-1]["field_mask"] == "model,generationConfig"
+    with pytest.raises(GeminiBrowserRelayError, match="Continuation epoch conflict"):
+        await manager.continue_browser_session(
+            _gemini_settings(),
+            dogfood_session_id=browser_session.dogfood_session.session_id,
+            expected_epoch=1,
+            handle_present=True,
+            secret_generation=4,
+        )
+
+    diagnostics = manager._diagnostics_by_session[browser_session.dogfood_session.session_id]
+    assert diagnostics.continuation_bootstrap_successes == 1
+    assert diagnostics.continuation_bootstrap_conflicts == 1
+    await manager.close_session(browser_session.dogfood_session.session_id)
 
 
 @pytest.mark.anyio

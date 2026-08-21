@@ -72,6 +72,28 @@ def test_resolve_gemini_live_voice_name_falls_back_without_raw_invalid_value() -
     assert "not-a-real-voice-secret" not in json.dumps(public_payload)
 
 
+def test_gemini_live_setup_can_enable_native_continuity_and_compression() -> None:
+    setup = build_gemini_live_setup_config(
+        continuity_enabled=True,
+        compression_enabled=True,
+        session_resumption_handle="resume-handle",
+    )
+
+    assert setup["sessionResumption"] == {"handle": "resume-handle"}
+    assert setup["contextWindowCompression"] == {"slidingWindow": {}}
+
+
+def test_gemini_live_setup_omits_native_continuity_when_disabled() -> None:
+    setup = build_gemini_live_setup_config(
+        continuity_enabled=False,
+        compression_enabled=False,
+        session_resumption_handle="resume-handle",
+    )
+
+    assert "sessionResumption" not in setup
+    assert "contextWindowCompression" not in setup
+
+
 def _payloads(provider_events: list[Any]) -> list[dict[str, Any]]:
     return [
         event.as_payload()

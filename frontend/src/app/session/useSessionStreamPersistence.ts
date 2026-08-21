@@ -51,6 +51,7 @@ export function useSessionStreamPersistence({
   const isUnloadingRef = useRef(false);
   const wasStreamingRef = useRef(false);
   const persistTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const messageRevisionRef = useRef(0);
   const latestPersistPayloadRef = useRef<{
     sessionId: string;
     userId: string;
@@ -210,6 +211,7 @@ export function useSessionStreamPersistence({
             user_id: session.userId,
             thread_id: session.threadId,
             messages: transcript,
+            base_revision: messageRevisionRef.current,
           },
           session.userId,
         );
@@ -218,6 +220,14 @@ export function useSessionStreamPersistence({
             status: result.status,
             code: result.code,
           });
+        } else {
+          messageRevisionRef.current = result.data.message_revision ?? messageRevisionRef.current;
+          if (result.data.conflict) {
+            debugLog('SessionStreamPersistence', 'snapshot conflict merged without deletion', {
+              messageRevision: messageRevisionRef.current,
+              deletedCount: result.data.deleted_count ?? 0,
+            });
+          }
         }
       })();
     }, isStreaming ? 700 : 150);

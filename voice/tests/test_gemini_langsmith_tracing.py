@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+import json
 from typing import Any
 from uuid import UUID
 
@@ -107,6 +108,42 @@ def test_payload_compaction_excludes_audio_bytes_and_bounds_text() -> None:
         "raw_audio_excluded": True,
     }
     assert len(payload["text"]) == tracing.MAX_TRACE_TEXT_CHARS + 1
+
+
+def test_structural_trace_mode_excludes_transcript_and_tool_content(monkeypatch: Any) -> None:
+    _enable_fake_sdk(monkeypatch)
+    monkeypatch.setenv("SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE", "structural")
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id="gemini-prod-test",
+        user_id="user-1",
+        model="gemini-live-test",
+        client=FakeClient(),
+    )
+
+    recorder.record_provider_event(
+        {
+            "serverContent": {
+                "outputTranscription": {"text": "PRIVATE TRANSCRIPT"},
+            }
+        },
+        categories=["serverContent", "outputTranscription"],
+    )
+    recorder.record_tool_call(
+        tool_call_id="call-1",
+        tool_name="start_builder_task",
+        arguments={"prompt": "PRIVATE PROMPT"},
+        success=True,
+        result_summary="PRIVATE RESULT",
+    )
+
+    assert recorder.root is not None
+    serialized = json.dumps(
+        [child.inputs for child in recorder.root.children]
+        + [child.outputs for child in recorder.root.children]
+    )
+    assert "PRIVATE TRANSCRIPT" not in serialized
+    assert "PRIVATE PROMPT" not in serialized
+    assert "PRIVATE RESULT" not in serialized
 
 
 def test_one_root_contains_socket_event_and_tool_spans(monkeypatch: Any) -> None:

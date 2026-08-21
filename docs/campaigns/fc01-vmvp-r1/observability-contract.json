@@ -1,0 +1,31 @@
+{
+  "schema": "sophia_gemini_live_trace_v2",
+  "project": "Sophia-Gemini-Live-Voice",
+  "content_mode": "structural",
+  "identity_policy": "HMAC pseudonyms with a deployment-held secret",
+  "audio_capture_default": false,
+  "required_root_fields": [
+    "trace_schema_version",
+    "logical_session_ref",
+    "thread_ref",
+    "voice_runtime_ref",
+    "continuity_feature_enabled",
+    "compression_enabled"
+  ],
+  "required_provider_metrics": [
+    "provider_receive_sequence",
+    "provider_relay_sequence",
+    "provider_categories",
+    "provider_connection_epoch",
+    "continuation_bootstrap_attempts",
+    "continuation_bootstrap_conflicts",
+    "go_away_count"
+  ],
+  "forbidden_content": [
+    "raw_audio",
+    "raw_transcript",
+    "raw_tool_arguments",
+    "raw_prompt",
+    "raw_identity_fields"
+  ]
+}

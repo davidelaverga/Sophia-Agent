@@ -20,6 +20,8 @@ DEFAULT_GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview"
 DEFAULT_GEMINI_LIVE_VOICE_NAME = "Kore"
 GEMINI_LIVE_VOICE_NAME_ENV = "SOPHIA_GEMINI_LIVE_VOICE_NAME"
 GEMINI_LIVE_ADAPTER_FEATURE_FLAG = "SOPHIA_VOICE_GEMINI_LIVE_ADAPTER_ENABLED"
+GEMINI_LIVE_CONTINUITY_FEATURE_FLAG = "SOPHIA_GEMINI_LIVE_CONTINUITY_ENABLED"
+GEMINI_LIVE_COMPRESSION_FEATURE_FLAG = "SOPHIA_GEMINI_LIVE_COMPRESSION_ENABLED"
 ALLOWED_GEMINI_LIVE_VOICE_NAMES = (
     "Zephyr",
     "Puck",
@@ -1027,6 +1029,9 @@ def build_gemini_live_setup_config(
     voice_name: str | None = DEFAULT_GEMINI_LIVE_VOICE_NAME,
     input_audio_transcription: bool = True,
     output_audio_transcription: bool = True,
+    session_resumption_handle: str | None = None,
+    continuity_enabled: bool | None = None,
+    compression_enabled: bool | None = None,
 ) -> dict[str, object]:
     setup: dict[str, object] = {
         "model": _model_resource(model),
@@ -1046,11 +1051,42 @@ def build_gemini_live_setup_config(
         setup["inputAudioTranscription"] = {}
     if output_audio_transcription:
         setup["outputAudioTranscription"] = {}
+    continuity = (
+        is_gemini_live_continuity_enabled()
+        if continuity_enabled is None
+        else bool(continuity_enabled)
+    )
+    compression = (
+        continuity
+        if compression_enabled is None
+        else bool(compression_enabled)
+    )
+    if continuity:
+        resumption: dict[str, object] = {}
+        if session_resumption_handle:
+            resumption["handle"] = session_resumption_handle
+        setup["sessionResumption"] = resumption
+    if compression:
+        setup["contextWindowCompression"] = {"slidingWindow": {}}
     return setup
 
 
 def is_gemini_live_adapter_enabled(value: str | None = None) -> bool:
     raw_value = os.getenv(GEMINI_LIVE_ADAPTER_FEATURE_FLAG) if value is None else value
+    return raw_value is not None and raw_value.strip().lower() in _TRUE_VALUES
+
+
+def is_gemini_live_continuity_enabled(value: str | None = None) -> bool:
+    """Return whether native Gemini resumption/compression is enabled."""
+
+    raw_value = os.getenv(GEMINI_LIVE_CONTINUITY_FEATURE_FLAG) if value is None else value
+    return raw_value is not None and raw_value.strip().lower() in _TRUE_VALUES
+
+
+def is_gemini_live_compression_enabled(value: str | None = None) -> bool:
+    """Return whether the Live API context-window compression is enabled."""
+
+    raw_value = os.getenv(GEMINI_LIVE_COMPRESSION_FEATURE_FLAG) if value is None else value
     return raw_value is not None and raw_value.strip().lower() in _TRUE_VALUES
 
 

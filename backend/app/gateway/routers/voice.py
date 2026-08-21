@@ -168,6 +168,8 @@ class GeminiVoiceConnectResponse(BaseModel):
     voice_runtime: Literal["gemini_live"]
     production_route: Literal[True]
     session_id: str
+    logical_session_id: str | None = None
+    voice_runtime_session_id: str | None = None
     thread_id: str | None = None
     stream_url: str
     event_stream_url: str
@@ -192,6 +194,8 @@ class GeminiVoiceConnectResponse(BaseModel):
     preconnect: bool = False
     preconnect_ttl_ms: int | None = None
     preconnect_expires_at: str | None = None
+    provider_connection_epoch: int = 1
+    continuation_bootstrap_url: str | None = None
 
 
 class GeminiVoicePreconnectSkippedResponse(BaseModel):
@@ -327,6 +331,12 @@ class GeminiBrowserDogfoodDisconnectRequest(BaseModel):
         default="audio/webm",
         description="MIME type for the optional combined conversation recording",
     )
+
+
+class GeminiContinuationBootstrapRequest(BaseModel):
+    expected_epoch: int = Field(..., gt=0)
+    handle_present: bool = False
+    secret_generation: int = Field(default=0, ge=0)
 
 
 @lru_cache(maxsize=1)
@@ -1232,11 +1242,12 @@ async def _start_gemini_production_voice_session(
             ),
         )
 
+    logical_session_id = body.session_id or str(uuid.uuid4())
     session_id = f"gemini-prod-{uuid.uuid4().hex}"
     realtime_context = await _build_gemini_realtime_context_payload(
         user_id=user_id,
         body=body,
-        session_id=session_id,
+        session_id=logical_session_id,
         request_base_url=request_base_url,
     )
     payload = await _proxy_voice_runtime_json(
@@ -1245,6 +1256,7 @@ async def _start_gemini_production_voice_session(
         json_body={
             "user_id": user_id,
             "session_id": session_id,
+            "logical_session_id": logical_session_id,
             "thread_id": body.thread_id,
             "platform": body.platform,
             "context_mode": body.context_mode,
@@ -1273,10 +1285,16 @@ async def _start_gemini_production_voice_session(
     payload["voice_runtime"] = "gemini_live"
     payload["production_route"] = True
     payload["thread_id"] = body.thread_id
+    payload["logical_session_id"] = logical_session_id
+    payload["voice_runtime_session_id"] = returned_session_id
     payload["stream_url"] = stream_url
     payload["event_stream_url"] = stream_url
     payload["provider_event_relay_url"] = _build_gemini_production_relay_url()
     payload["disconnect_url"] = _build_gemini_production_disconnect_url()
+    payload["continuation_bootstrap_url"] = (
+        f"/api/sophia/{quote(user_id, safe='')}/voice/gemini/continuation-bootstrap"
+        f"?session_id={quote(returned_session_id, safe='')}"
+    )
     payload["preconnect"] = body.preconnect
     if body.preconnect:
         payload["preconnect_ttl_ms"] = GEMINI_PRECONNECT_CLIENT_TTL_MS
@@ -1893,6 +1911,35 @@ async def gemini_production_relay(
     )
     payload = _merge_artifact_review_guard_payload(payload, guard_payload)
     payload["stream_url"] = _build_gemini_production_events_stream_url(body.session_id)
+    return payload
+
+
+@router.post(
+    "/{user_id}/voice/gemini/continuation-bootstrap",
+    status_code=200,
+    summary="Mint the next native Gemini Live continuation credential",
+)
+async def gemini_production_continuation_bootstrap(
+    user_id: str,
+    body: GeminiContinuationBootstrapRequest,
+    session_id: str = Query(..., description="Gemini voice runtime session id"),
+) -> dict[str, object]:
+    encoded_session_id = quote(session_id, safe="")
+    payload = await _proxy_voice_runtime_json(
+        "POST",
+        f"/production/realtime/gemini/browser-sessions/{encoded_session_id}/continuation-bootstrap",
+        json_body=body.model_dump(),
+    )
+    returned_session_id = payload.get("session_id")
+    if not isinstance(returned_session_id, str) or returned_session_id != session_id:
+        raise HTTPException(
+            status_code=502,
+            detail="Voice runtime returned an invalid continuation session identity.",
+        )
+    payload["continuation_bootstrap_url"] = (
+        f"/api/sophia/{quote(user_id, safe='')}/voice/gemini/continuation-bootstrap"
+        f"?session_id={encoded_session_id}"
+    )
     return payload
 
 

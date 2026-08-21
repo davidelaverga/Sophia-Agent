@@ -64,6 +64,39 @@ def test_filesystem_store_appends_messages_idempotently(tmp_path):
     assert store.get_session("user-1", "session-1").transcript_available is True
 
 
+def test_filesystem_revisioned_snapshot_preserves_newer_messages_on_stale_retry(tmp_path):
+    store = SessionStore(tmp_path)
+    store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
+    first = SessionMessageRecord(
+        message_id="msg-1",
+        session_id="session-1",
+        thread_id="thread-1",
+        role="user",
+        content="first",
+        sequence=0,
+    )
+    second = first.model_copy(update={"message_id": "msg-2", "content": "second", "sequence": 1})
+
+    accepted = store.replace_messages_revisioned(
+        "user-1", "session-1", [first], expected_revision=0
+    )
+    assert accepted.accepted is True
+    assert accepted.current_revision == 1
+
+    stale = store.replace_messages_revisioned(
+        "user-1", "session-1", [first, second], expected_revision=0
+    )
+    assert stale.conflict is True
+    assert stale.current_revision == 2
+    assert [message.message_id for message in stale.messages] == ["msg-1", "msg-2"]
+
+    duplicate = store.replace_messages_revisioned(
+        "user-1", "session-1", [first, second], expected_revision=2
+    )
+    assert duplicate.duplicate is True
+    assert duplicate.current_revision == 2
+
+
 def test_filesystem_store_finds_session_by_thread_id(tmp_path):
     store = SessionStore(tmp_path)
     store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
