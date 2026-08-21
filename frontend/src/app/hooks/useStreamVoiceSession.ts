@@ -24,6 +24,7 @@ import { logger } from "../lib/error-logger"
 import {
   connectGeminiBrowserLiveFromBootstrap,
   readGeminiConfiguredToolNames,
+  type GeminiAudioContextDiagnostic,
   type GeminiBrowserLiveDogfoodConnection,
   type GeminiBargeInTranscriptHandoffDiagnostic,
   type GeminiArtifactFramePayload,
@@ -252,6 +253,10 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     publicSseState: params.publicSseState ?? "disconnected",
     microphoneState: params.microphoneState ?? "idle",
     remoteAudioState: params.remoteAudioState ?? "idle",
+    audioContextState: params.audioContextState ?? null,
+    audioContextResumeAttempted: params.audioContextResumeAttempted ?? false,
+    audioContextResumeSucceeded: params.audioContextResumeSucceeded ?? null,
+    audioContextResumeError: params.audioContextResumeError ?? null,
     setupComplete: params.setupComplete ?? false,
     providerEventCount: params.providerEventCount ?? 0,
     lastProviderEventAt: params.lastProviderEventAt ?? null,
@@ -2882,6 +2887,27 @@ export function useStreamVoiceSession(
             recordSophiaCaptureEvent({
               category: "voice-session",
               name: "gemini-output-audio-chunk",
+              payload: {
+                runtime: "gemini_live",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
+                diagnostic,
+              },
+            })
+          },
+          onAudioContextDiagnostics: (diagnostic: GeminiAudioContextDiagnostic) => {
+            setRuntimeTelemetry((current) => current.runtime === "gemini_live"
+              ? {
+                  ...current,
+                  audioContextState: diagnostic.stateAfter,
+                  audioContextResumeAttempted: diagnostic.resumeAttempted,
+                  audioContextResumeSucceeded: diagnostic.resumeSucceeded,
+                  audioContextResumeError: diagnostic.resumeError,
+                }
+              : current)
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "gemini-audio-context-diagnostics",
               payload: {
                 runtime: "gemini_live",
                 sessionId: sessionIdRef.current ?? null,
