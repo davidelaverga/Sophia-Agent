@@ -13,6 +13,8 @@ export type GeminiRuntimePublicSseState = "disconnected" | "connecting" | "conne
 export type GeminiRuntimeMicrophoneState = "idle" | "waiting" | "granted" | "connected" | "error"
 export type GeminiRuntimeRemoteAudioState = "idle" | "expected" | "active"
 
+export type GeminiAudioContextState = AudioContextState
+
 export type GeminiRuntimeCategoryCounter = {
   count: number
   lastAt: string | null
@@ -61,6 +63,10 @@ export type GeminiRuntimeTelemetry = {
   publicSseState: GeminiRuntimePublicSseState
   microphoneState: GeminiRuntimeMicrophoneState
   remoteAudioState: GeminiRuntimeRemoteAudioState
+  audioContextState?: GeminiAudioContextState | null
+  audioContextResumeAttempted?: boolean
+  audioContextResumeSucceeded?: boolean | null
+  audioContextResumeError?: string | null
   setupComplete: boolean
   providerEventCount: number
   lastProviderEventAt: string | null
