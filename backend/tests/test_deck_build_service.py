@@ -1503,6 +1503,55 @@ def test_compact_v2_unwraps_redundant_full_canvas_slide_wrapper() -> None:
     )
 
 
+def test_compact_v2_unwraps_attribute_free_main_wrapper() -> None:
+    stylesheet = _source_pair_stylesheet()
+    slides = [
+        {
+            "html_body": f"<main>{_source_pair_body()}</main>",
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+
+    normalized_css, normalized_slides, report = (
+        deck_service._normalize_compact_v2_redundant_main_wrappers(
+            stylesheet,
+            slides,
+        )
+    )
+
+    assert report["normalization_applied"] is True
+    assert report["normalized_slide_count"] == 1
+    assert normalized_css == stylesheet
+    assert "<main>" not in normalized_slides[0]["html_body"]
+    deck_service._validate_compact_source_addressability(
+        normalized_css,
+        normalized_slides,
+    )
+
+
+def test_compact_v2_main_wrapper_normalization_fails_closed_on_attributes() -> None:
+    stylesheet = _source_pair_stylesheet()
+    slides = [
+        {
+            "html_body": f'<main class="content">{_source_pair_body()}</main>',
+            "slide_css": "",
+            "repair_anchor_ids": ["hero", "proof"],
+        }
+    ]
+
+    normalized_css, normalized_slides, report = (
+        deck_service._normalize_compact_v2_redundant_main_wrappers(
+            stylesheet,
+            slides,
+        )
+    )
+
+    assert normalized_css == stylesheet
+    assert normalized_slides is slides
+    assert report["normalization_applied"] is False
+
+
 @pytest.mark.parametrize(
     ("stylesheet_suffix", "wrapper_class"),
     [
