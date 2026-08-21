@@ -94,6 +94,29 @@ function latestTerminalCompletion(
   return terminal?.completion ?? null;
 }
 
+function statusFromCompletion(completion: BuilderCompletionEventV1): BuilderCanvasTaskSnapshotV1['status'] {
+  return completion.status === 'success'
+    ? 'completed'
+    : completion.status === 'timeout'
+      ? 'timed_out'
+      : completion.status === 'cancelled'
+        ? 'cancelled'
+        : 'failed';
+}
+
+function taskFromTerminalCompletion(
+  completion: BuilderCompletionEventV1 | null,
+): BuilderCanvasTaskSnapshotV1 | null {
+  if (!completion?.task_id || !completion.run_id) return null;
+  return {
+    parent_thread_id: completion.thread_id,
+    task_id: completion.task_id,
+    run_id: completion.run_id,
+    status: statusFromCompletion(completion),
+    completion,
+  };
+}
+
 function isEmptyPassiveSnapshot(snapshot: BuilderCanvasSnapshotV1): boolean {
   return !snapshot.active_task && snapshot.recent_events.length === 0;
 }
@@ -117,18 +140,27 @@ function mergeEvents(
 }
 
 function stateFromSnapshot(snapshot: BuilderCanvasSnapshotV1): BuilderCanvasState {
-  const activeTask = snapshot.active_task;
-  const recentEvents = activeTask
-    ? snapshot.recent_events.filter((event) => eventMatchesTask(event, activeTask))
+  const snapshotTask = snapshot.active_task;
+  const recentEvents = snapshotTask
+    ? snapshot.recent_events.filter((event) => eventMatchesTask(event, snapshotTask))
     : snapshot.recent_events;
-  const activeCompletion = activeTask && completionMatchesTask(activeTask.completion, activeTask)
-    ? activeTask?.completion
+  const activeCompletion = snapshotTask && completionMatchesTask(snapshotTask.completion, snapshotTask)
+    ? snapshotTask.completion
     : null;
+  const terminalCompletion = activeCompletion ?? latestTerminalCompletion(recentEvents, snapshotTask);
+  const terminalTask = taskFromTerminalCompletion(terminalCompletion);
+  const activeTask = snapshotTask && terminalCompletion && completionMatchesTask(terminalCompletion, snapshotTask)
+    ? {
+      ...snapshotTask,
+      status: statusFromCompletion(terminalCompletion),
+      completion: terminalCompletion,
+    }
+    : snapshotTask ?? terminalTask;
 
   return {
     activeTask,
     recentEvents: sortEvents(recentEvents),
-    completion: activeCompletion ?? latestTerminalCompletion(recentEvents, activeTask),
+    completion: terminalCompletion,
     reconnecting: false,
     retiredRuns: new Set(),
     runOrder: activeTask ? new Map([[taskRunKey(activeTask), 1]]) : new Map(),

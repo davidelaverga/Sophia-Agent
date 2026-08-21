@@ -2090,6 +2090,16 @@ def _qualified_rule_selector_matches(
         return None
     matched: list[tuple[tuple[int, int, int], tuple[Tag, ...]]] = []
     for selector in selector_arms:
+        try:
+            parsed_selectors = tuple(parse_css_selectors(selector))
+        except Exception:
+            return None
+        # Pseudo-elements paint generated boxes rather than matching DOM
+        # elements. They are intentionally outside this authenticated
+        # visibility proof, but must not poison validation for ordinary
+        # selectors in the same stylesheet (for example ``li:before``).
+        if len(parsed_selectors) == 1 and parsed_selectors[0].pseudo_element is not None:
+            continue
         specificity = _selector_specificity(selector)
         if specificity is None:
             return None

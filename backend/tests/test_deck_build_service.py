@@ -2826,6 +2826,15 @@ def test_compact_v2_source_addressability_rejects_hidden_descendant_text() -> No
         )
 
 
+def test_compact_v2_source_addressability_ignores_unrelated_pseudo_element_rules() -> None:
+    stylesheet = _source_pair_stylesheet() + '.plist li:before{content:"—";position:absolute;left:0}'
+
+    deck_service._validate_compact_source_addressability(
+        stylesheet,
+        [{"html_body": _source_pair_body(), "slide_css": "", "repair_anchor_ids": ["hero", "proof"]}],
+    )
+
+
 def test_deck_build_service_allows_explicitly_requested_visual_style(tmp_path: Path) -> None:
     runtime = _runtime(
         tmp_path / "outputs",

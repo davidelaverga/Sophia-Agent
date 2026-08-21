@@ -13,7 +13,7 @@ import {
 import { debugLog } from '../lib/debug-logger';
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
 import type { BuilderArtifactV1 } from '../types/builder-artifact';
-import type { BuilderCanvasActivity } from '../types/builder-canvas';
+import type { BuilderCanvasActivity, BuilderCanvasTaskSnapshotV1 } from '../types/builder-canvas';
 import type { BuilderCompletionEventV1, BuilderFailureDiagnosticsV1 } from '../types/builder-completion';
 import type { BuilderTaskV1 } from '../types/builder-task';
 import type { InterruptPayload, RitualArtifacts } from '../types/session';
@@ -291,7 +291,22 @@ export function useSessionRouteExperience({
   // Native builder-canvas snapshot plus SSE is the single lifecycle source
   // for browser progress, reload recovery, and terminal delivery.
   useEffect(() => {
-    const active = builderCanvas.activeTask;
+    const recoveredTerminal: BuilderCanvasTaskSnapshotV1 | null = !builderCanvas.activeTask && builderCanvas.completion?.task_id && builderCanvas.completion.run_id
+      ? {
+        parent_thread_id: builderCanvas.completion.thread_id,
+        task_id: builderCanvas.completion.task_id,
+        run_id: builderCanvas.completion.run_id,
+        status: builderCanvas.completion.status === 'success'
+          ? 'completed' as const
+          : builderCanvas.completion.status === 'timeout'
+            ? 'timed_out' as const
+            : builderCanvas.completion.status === 'cancelled'
+              ? 'cancelled' as const
+              : 'failed' as const,
+        completion: builderCanvas.completion,
+      }
+      : null;
+    const active = builderCanvas.activeTask ?? recoveredTerminal;
     const activeKey = builderRunKey(active?.task_id, active?.run_id);
     if (!active || (activeKey && dismissedBuilderRunsRef.current.has(activeKey))) {
       return;

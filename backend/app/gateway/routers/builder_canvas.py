@@ -937,11 +937,45 @@ async def builder_canvas_snapshot(
     worker = get_builder_canvas_worker(request.app)
     recent_events = await worker.recent_events(parent_thread_id)
     task_from_events = not _is_langgraph_thread_id(parent_thread_id)
-    task = (
-        _builder_task_from_recent_events(parent_thread_id, recent_events)
-        if task_from_events
-        else _latest_builder_task(await _parent_builder_tasks(parent_thread_id))
-    )
+    if task_from_events:
+        task = _builder_task_from_recent_events(parent_thread_id, recent_events)
+        if task is None:
+            # Legacy/provider-facing IDs normally use the retained canvas
+            # stream, but native task state is still a useful compatibility
+            # source when the event relay missed the launch event.
+            try:
+                task = _latest_builder_task(await _parent_builder_tasks(parent_thread_id))
+            except HTTPException:
+                task = None
+            else:
+                if task is not None:
+                    task_from_events = False
+    else:
+        try:
+            task = _latest_builder_task(await _parent_builder_tasks(parent_thread_id))
+        except HTTPException:
+            task = _builder_task_from_recent_events(parent_thread_id, recent_events)
+            if task is None:
+                raise
+            task_from_events = True
+            logger.warning(
+                "Builder canvas snapshot falling back to retained terminal event after native state lookup failed "
+                "parent_thread_id=%s recent_events=%s",
+                _short_id(parent_thread_id),
+                len(recent_events),
+                exc_info=True,
+            )
+        if task is None:
+            task = _builder_task_from_recent_events(parent_thread_id, recent_events)
+            if task is not None:
+                task_from_events = True
+                logger.info(
+                    "Builder canvas snapshot recovered task from retained terminal event after native state was empty "
+                    "parent_thread_id=%s task_id=%s run_id=%s",
+                    _short_id(parent_thread_id),
+                    _short_id(str(task.get("task_id") or "")),
+                    _short_id(str(task.get("run_id") or "")),
+                )
     worker_summary = await worker.active_summary(parent_thread_id)
     if task is None:
         logger.info(

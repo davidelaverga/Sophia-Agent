@@ -597,4 +597,40 @@ describe('useBuilderCanvas', () => {
     await waitFor(() => expect(result.current.reconnecting).toBe(false));
     expect(result.current.activeTask?.run_id).toBe('run-1');
   });
+
+  it('promotes a retained terminal event when the snapshot has no active task', async () => {
+    mockFetchSnapshots(SNAPSHOT, {
+      version: 1,
+      active_task: null,
+      recent_events: [{
+        version: 1,
+        event_id: 'task-1:run-1:3',
+        sequence: 3,
+        parent_thread_id: 'thread-1',
+        task_id: 'task-1',
+        run_id: 'run-1',
+        occurred_at: '2026-05-25T10:00:01Z',
+        kind: 'terminal',
+        status: 'failed',
+        completion: {
+          thread_id: 'thread-1',
+          task_id: 'task-1',
+          run_id: 'run-1',
+          status: 'error',
+          error_message: 'Deck preparation failed.',
+        },
+      }],
+    });
+
+    const { result } = renderHook(() => useBuilderCanvas('thread-1'));
+    await waitFor(() => expect(result.current.activeTask?.status).toBe('running'));
+
+    act(() => {
+      FakeEventSource.instances[0].onerror?.();
+    });
+
+    await waitFor(() => expect(globalThis.fetch).toHaveBeenCalledTimes(2));
+    await waitFor(() => expect(result.current.activeTask?.status).toBe('failed'));
+    expect(result.current.completion?.error_message).toBe('Deck preparation failed.');
+  });
 });

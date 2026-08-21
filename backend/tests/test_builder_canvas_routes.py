@@ -188,6 +188,46 @@ async def test_snapshot_uses_native_task_identity_and_activity(app: FastAPI, mon
 
 
 @pytest.mark.anyio
+async def test_snapshot_recovers_uuid_parent_terminal_from_retained_canvas_event(
+    app: FastAPI,
+    monkeypatch,
+) -> None:
+    parent_thread_id = "0198c1e8-0f3a-7a1b-8f4c-2c2e8d5f0a11"
+    builder_canvas._session_store.create(
+        SessionRecord(session_id="session-uuid-parent", thread_id=parent_thread_id, user_id="user-1")
+    )
+
+    async def no_native_tasks(_parent: str):
+        return []
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", no_native_tasks)
+    await app.state._builder_canvas_worker.publish_completion({
+        "thread_id": parent_thread_id,
+        "task_id": "task-uuid-parent",
+        "run_id": "run-uuid-parent",
+        "status": "error",
+        "error_message": "Deck preparation failed.",
+        "builder_failure_diagnostics": {
+            "schema": "builder_failure_diagnostics_v1",
+            "failure_code": "deck_prepare_retry_exhausted",
+        },
+    })
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            f"/api/sophia/user-1/threads/{parent_thread_id}/builder-canvas/snapshot"
+        )
+
+    assert response.status_code == 200
+    active_task = response.json()["active_task"]
+    assert active_task["task_id"] == "task-uuid-parent"
+    assert active_task["run_id"] == "run-uuid-parent"
+    assert active_task["status"] == "failed"
+    assert active_task["completion"]["status"] == "error"
+    assert active_task["completion"]["error_message"] == "Deck preparation failed."
+
+
+@pytest.mark.anyio
 async def test_snapshot_selects_latest_task_by_last_updated_at(app: FastAPI, monkeypatch) -> None:
     async def tasks(_parent: str):
         return [
