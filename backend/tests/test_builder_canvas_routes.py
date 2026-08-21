@@ -4,9 +4,11 @@ from datetime import UTC, datetime
 from types import SimpleNamespace
 
 import pytest
-from fastapi import FastAPI
-from httpx import ASGITransport, AsyncClient
+from fastapi import FastAPI, HTTPException
+from httpx import ASGITransport, AsyncClient, Request as HttpxRequest, Response
+from langgraph_sdk.errors import NotFoundError
 
+from app.gateway.artifact_registry import ArtifactListResponse, ArtifactRecord
 from app.gateway.auth import require_authorized_user_scope
 from app.gateway.routers import builder_canvas
 from app.gateway.workers.builder_canvas import install_builder_canvas_worker
@@ -106,6 +108,42 @@ def _client_factory(runs, updates: list[tuple[str, dict]] | None = None):
     return lambda url: SimpleNamespace(runs=runs, threads=_FakeThreads(updates if updates is not None else []))
 
 
+class _EmptyArtifactRegistry:
+    def list(self, *, user_id: str, filters=None) -> ArtifactListResponse:
+        return ArtifactListResponse(artifacts=[], total=0)
+
+
+def _durable_builder_artifact(parent_thread_id: str) -> ArtifactRecord:
+    timestamp = _recent_timestamp()
+    return ArtifactRecord(
+        artifact_id="artifact-deck-1",
+        user_id="user-1",
+        thread_id=parent_thread_id,
+        session_id="session-legacy-parent",
+        parent_thread_id=parent_thread_id,
+        task_id="task-deck-1",
+        run_id="run-deck-1",
+        logical_artifact_id="logical-deck-1",
+        version_id="version-deck-1",
+        title="Recovered presentation",
+        filename="recovered-presentation.pptx",
+        artifact_type="presentation",
+        renderer_kind="presentation",
+        mime_type="application/vnd.openxmlformats-officedocument.presentationml.presentation",
+        safe_summary="The presentation is ready.",
+        source="builder",
+        local_path="mnt/user-data/outputs/recovered-presentation.pptx",
+        storage_provider="supabase",
+        storage_bucket="builder-artifacts",
+        storage_object_path="users/user-1/session-legacy-parent/artifact-deck-1/recovered-presentation.pptx",
+        storage_status="available",
+        created_at=timestamp,
+        updated_at=timestamp,
+        raw_content_excluded=True,
+        signed_url_excluded=True,
+    )
+
+
 async def _post_cancel(app: FastAPI):
     async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
         return await client.post(
@@ -141,11 +179,31 @@ def app(tmp_path, monkeypatch) -> FastAPI:
     store = SessionStore(tmp_path / "users")
     store.create(SessionRecord(session_id="session-1", thread_id="parent-1", user_id="user-1"))
     monkeypatch.setattr(builder_canvas, "_session_store", store)
+    monkeypatch.setattr(builder_canvas, "_artifact_registry", _EmptyArtifactRegistry())
     app = FastAPI()
     install_builder_canvas_worker(app)
     app.include_router(builder_canvas.router)
     app.dependency_overrides[require_authorized_user_scope] = lambda: "user-1"
     return app
+
+
+@pytest.mark.anyio
+async def test_parent_builder_tasks_maps_langgraph_not_found_to_404(monkeypatch) -> None:
+    class MissingThreads:
+        async def get_state(self, _thread_id: str):
+            response = Response(404, request=HttpxRequest("GET", "https://langgraph.test/threads/missing/state"))
+            raise NotFoundError("Thread not found", response=response, body=None)
+
+    monkeypatch.setattr(
+        builder_canvas,
+        "get_client",
+        lambda url: SimpleNamespace(threads=MissingThreads()),
+    )
+
+    with pytest.raises(HTTPException) as exc_info:
+        await builder_canvas._parent_builder_tasks("missing-parent")
+
+    assert exc_info.value.status_code == 404
 
 
 @pytest.mark.anyio
@@ -225,6 +283,104 @@ async def test_snapshot_recovers_uuid_parent_terminal_from_retained_canvas_event
     assert active_task["status"] == "failed"
     assert active_task["completion"]["status"] == "error"
     assert active_task["completion"]["error_message"] == "Deck preparation failed."
+
+
+@pytest.mark.anyio
+async def test_snapshot_recovers_missing_legacy_parent_from_durable_artifact(
+    app: FastAPI,
+    monkeypatch,
+) -> None:
+    parent_thread_id = "0198c1e8-0f3a-7a1b-8f4c-2c2e8d5f0a22"
+    builder_canvas._session_store.create(
+        SessionRecord(session_id="session-legacy-parent", thread_id=parent_thread_id, user_id="user-1")
+    )
+
+    async def missing_parent(_parent: str):
+        raise HTTPException(status_code=404, detail="Builder parent thread is unavailable")
+
+    record = _durable_builder_artifact(parent_thread_id)
+
+    class Registry:
+        def list(self, *, user_id: str, filters=None) -> ArtifactListResponse:
+            assert user_id == "user-1"
+            assert filters.thread_id == parent_thread_id
+            assert filters.include_hidden is False
+            return ArtifactListResponse(artifacts=[record], total=1)
+
+    async def unexpected_native_status(*_args):  # pragma: no cover - regression guard
+        raise AssertionError("registry recovery must not query a missing native run")
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", missing_parent)
+    monkeypatch.setattr(builder_canvas, "_artifact_registry", Registry())
+    monkeypatch.setattr(builder_canvas, "_native_run_status", unexpected_native_status)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            f"/api/sophia/user-1/threads/{parent_thread_id}/builder-canvas/snapshot"
+        )
+
+    assert response.status_code == 200
+    active_task = response.json()["active_task"]
+    assert active_task["task_id"] == "task-deck-1"
+    assert active_task["run_id"] == "run-deck-1"
+    assert active_task["status"] == "completed"
+    assert active_task["completion"]["status"] == "success"
+    assert active_task["completion"]["artifact_id"] == "artifact-deck-1"
+    assert active_task["completion"]["artifact_path"] == (
+        "mnt/user-data/outputs/recovered-presentation.pptx"
+    )
+
+
+@pytest.mark.anyio
+async def test_snapshot_returns_empty_when_legacy_parent_and_registry_artifact_are_missing(
+    app: FastAPI,
+    monkeypatch,
+) -> None:
+    parent_thread_id = "0198c1e8-0f3a-7a1b-8f4c-2c2e8d5f0a33"
+    builder_canvas._session_store.create(
+        SessionRecord(session_id="session-empty-parent", thread_id=parent_thread_id, user_id="user-1")
+    )
+
+    async def missing_parent(_parent: str):
+        raise HTTPException(status_code=404, detail="Builder parent thread is unavailable")
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", missing_parent)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            f"/api/sophia/user-1/threads/{parent_thread_id}/builder-canvas/snapshot"
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"version": 1, "active_task": None, "recent_events": []}
+
+
+@pytest.mark.anyio
+async def test_snapshot_does_not_mask_transient_native_state_outage(
+    app: FastAPI,
+    monkeypatch,
+) -> None:
+    parent_thread_id = "0198c1e8-0f3a-7a1b-8f4c-2c2e8d5f0a44"
+    builder_canvas._session_store.create(
+        SessionRecord(session_id="session-outage-parent", thread_id=parent_thread_id, user_id="user-1")
+    )
+
+    async def unavailable_parent(_parent: str):
+        raise HTTPException(status_code=503, detail="Builder state is unavailable")
+
+    class UnexpectedRegistry:
+        def list(self, **_kwargs):  # pragma: no cover - regression guard
+            raise AssertionError("transient outages must not use artifact reconciliation")
+
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", unavailable_parent)
+    monkeypatch.setattr(builder_canvas, "_artifact_registry", UnexpectedRegistry())
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            f"/api/sophia/user-1/threads/{parent_thread_id}/builder-canvas/snapshot"
+        )
+
+    assert response.status_code == 503
 
 
 @pytest.mark.anyio

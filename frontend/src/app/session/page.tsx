@@ -99,6 +99,7 @@ import { cn } from '../lib/utils';
 import { useUiStore } from '../stores/ui-store';
 import type { BuilderCompletionEventV1 } from '../types/builder-completion';
 
+import { findBuilderTaskArtifactRecord } from './builderArtifactRecovery';
 import { resolveBuilderSurface } from './builderSurfaceArbitration';
 import { suppressSessionLeaveGuardForCoreviewBuilderUpdate } from './session-annotation-navigation-guard';
 import { useSessionBuilderArtifactLibrary } from './useSessionBuilderArtifactLibrary';
@@ -1086,7 +1087,31 @@ function SessionPageContent() {
     () => getBuilderArtifactFiles(builderArtifact)[0] ?? null,
     [builderArtifact],
   );
-  const isBuilderActivelyRunning = builderTask?.phase === 'running';
+  const recoveredBuilderSessionArtifact = useMemo(
+    () => findBuilderTaskArtifactRecord(sessionArtifactIndex.artifacts, builderTask),
+    [builderTask, sessionArtifactIndex.artifacts],
+  );
+  const recoveredBuilderSessionFile = useMemo(() => {
+    const path = normalizeBuilderArtifactPath(recoveredBuilderSessionArtifact?.localPath);
+    if (!path || !recoveredBuilderSessionArtifact) {
+      return null;
+    }
+    const name = recoveredBuilderSessionArtifact.filename
+      ?? getBuilderArtifactFilename(path);
+    return {
+      path,
+      name,
+      label: recoveredBuilderSessionArtifact.title || name,
+      isPrimary: true,
+      ...(recoveredBuilderSessionArtifact.mimeType
+        ? { mimeType: recoveredBuilderSessionArtifact.mimeType }
+        : {}),
+    };
+  }, [recoveredBuilderSessionArtifact]);
+  const isBuilderActivelyRunning = (
+    builderTask?.phase === 'running'
+    && !recoveredBuilderSessionArtifact
+  );
   const builderLibraryPrimaryFile = useMemo(
     () => recoveredBuilderLibraryItem ?? (!isBuilderActivelyRunning ? builderArtifactLibrary[0] : null) ?? null,
     [builderArtifactLibrary, isBuilderActivelyRunning, recoveredBuilderLibraryItem],
@@ -1104,6 +1129,9 @@ function SessionPageContent() {
     };
   }, [selectedBuilderArtifactPath]);
   const builderPrimaryFile = useMemo(() => {
+    if (recoveredBuilderSessionFile) {
+      return recoveredBuilderSessionFile;
+    }
     if (builderArtifactPrimaryFile) {
       return builderArtifactPrimaryFile;
     }
@@ -1116,7 +1144,12 @@ function SessionPageContent() {
       };
     }
     return selectedBuilderPrimaryFile;
-  }, [builderArtifactPrimaryFile, builderLibraryPrimaryFile, selectedBuilderPrimaryFile]);
+  }, [
+    builderArtifactPrimaryFile,
+    builderLibraryPrimaryFile,
+    recoveredBuilderSessionFile,
+    selectedBuilderPrimaryFile,
+  ]);
   const builderCompletionRecoveryFile = recoveredBuilderLibraryItem
     ? {
         path: recoveredBuilderLibraryItem.path,
@@ -1125,9 +1158,14 @@ function SessionPageContent() {
         isPrimary: true,
       }
     : null;
-  const hasRecoveredBuilderArtifact = Boolean(recoveredBuilderLibraryItem);
+  const hasRecoveredBuilderArtifact = Boolean(
+    recoveredBuilderLibraryItem || recoveredBuilderSessionArtifact,
+  );
   const showBuilderTaskNotice = Boolean(builderTask) && !hasRecoveredBuilderArtifact;
-  const builderReadyTitle = builderArtifact?.artifactTitle ?? builderPrimaryFile?.name ?? 'Builder deliverable';
+  const builderReadyTitle = recoveredBuilderSessionArtifact?.title
+    ?? builderArtifact?.artifactTitle
+    ?? builderPrimaryFile?.name
+    ?? 'Builder deliverable';
   const builderPrimarySessionRecord = useMemo(() => {
     const normalizedPath = normalizeBuilderArtifactPath(builderPrimaryFile?.path);
     if (!normalizedPath) {
@@ -1705,12 +1743,17 @@ function SessionPageContent() {
       : null;
     for (const file of files) {
       const filePath = normalizeBuilderArtifactPath(file.path);
+      const matchesSuccessfulCompletion = Boolean(
+        builderCompletionForDisplay?.status === 'success'
+        && completionPath
+        && filePath === completionPath,
+      );
       registerSessionArtifactByPath(file.path, {
         source: 'current_builder_artifact',
         title: file.isPrimary ? builderArtifact.artifactTitle : file.label,
         artifactType: builderArtifact.artifactType,
-        taskId: builderTask?.taskId ?? builderCompletionForDisplay?.task_id ?? null,
-        runId: builderTask?.runId ?? builderCompletionForDisplay?.run_id ?? null,
+        taskId: matchesSuccessfulCompletion ? builderCompletionForDisplay?.task_id ?? null : null,
+        runId: matchesSuccessfulCompletion ? builderCompletionForDisplay?.run_id ?? null : null,
         safeSummary: completionPath && filePath === completionPath
           ? completionSummary ?? builderArtifact.companionSummary ?? builderArtifact.userNextAction ?? null
           : builderArtifact.companionSummary ?? builderArtifact.userNextAction ?? null,
@@ -1719,8 +1762,6 @@ function SessionPageContent() {
   }, [
     builderArtifact,
     builderCompletionForDisplay,
-    builderTask?.runId,
-    builderTask?.taskId,
     registerSessionArtifactByPath,
   ]);
 

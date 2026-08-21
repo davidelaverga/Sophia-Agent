@@ -13,8 +13,14 @@ from uuid import UUID
 from fastapi import APIRouter, Depends, HTTPException, Request
 from fastapi.responses import StreamingResponse
 from langgraph_sdk import get_client
+from langgraph_sdk.errors import NotFoundError
 from pydantic import BaseModel, Field
 
+from app.gateway.artifact_registry import (
+    ArtifactRecord,
+    ArtifactRegistry,
+    ArtifactRegistryFilters,
+)
 from app.gateway.auth import require_authorized_user_scope
 from app.gateway.workers.builder_canvas import DEFAULT_TERMINAL_TTL_SECONDS, get_builder_canvas_worker
 from deerflow.sophia.builder_failure_diagnostics import merge_builder_failure_diagnostics
@@ -26,6 +32,7 @@ router = APIRouter(
 )
 
 _session_store = SessionStore()
+_artifact_registry = ArtifactRegistry()
 logger = logging.getLogger(__name__)
 
 
@@ -98,6 +105,8 @@ async def _parent_builder_tasks(parent_thread_id: str) -> list[dict[str, Any]]:
     client = get_client(url=_langgraph_url())
     try:
         state = await client.threads.get_state(parent_thread_id)
+    except NotFoundError as exc:
+        raise HTTPException(status_code=404, detail="Builder parent thread is unavailable") from exc
     except Exception as exc:
         raise HTTPException(status_code=503, detail="Builder state is unavailable") from exc
     values = state.get("values", {}) if isinstance(state, dict) else {}
@@ -108,6 +117,96 @@ async def _parent_builder_tasks(parent_thread_id: str) -> list[dict[str, Any]]:
         task for task in tasks.values()
         if isinstance(task, dict) and task.get("agent_name") == "sophia_builder"
     ]
+
+
+_BUILDER_ARTIFACT_REGISTRY_SOURCES = {"builder", "file_library_backfill", "backfill"}
+
+
+def _registry_artifact_matches_parent(record: ArtifactRecord, parent_thread_id: str) -> bool:
+    return (
+        record.thread_id == parent_thread_id
+        or record.parent_thread_id == parent_thread_id
+    )
+
+
+def _registry_artifact_task(
+    authenticated_user_id: str,
+    parent_thread_id: str,
+) -> dict[str, Any] | None:
+    """Recover a terminal builder task from durable artifact metadata.
+
+    This is intentionally limited to missing legacy parent threads. A live
+    LangGraph task or retained canvas event remains authoritative whenever it
+    exists, and transient state-service failures are never masked by this
+    compatibility path.
+    """
+    try:
+        response = _artifact_registry.list(
+            user_id=authenticated_user_id,
+            filters=ArtifactRegistryFilters(
+                thread_id=parent_thread_id,
+                include_hidden=False,
+                sort="updated",
+                limit=25,
+            ),
+        )
+    except HTTPException:
+        raise
+    except Exception as exc:
+        raise HTTPException(
+            status_code=503,
+            detail="Builder recovery metadata is unavailable",
+        ) from exc
+    record = next(
+        (
+            candidate
+            for candidate in response.artifacts
+            if _registry_artifact_matches_parent(candidate, parent_thread_id)
+            and candidate.source in _BUILDER_ARTIFACT_REGISTRY_SOURCES
+            and (candidate.task_id or candidate.run_id)
+        ),
+        None,
+    )
+    if record is None:
+        return None
+
+    task_id = record.task_id or f"artifact:{record.artifact_id}"
+    run_id = record.run_id or record.version_id
+    builder_result = {
+        "artifact_path": record.local_path,
+        "artifact_title": record.title,
+        "artifact_type": record.artifact_type,
+        "artifact_filename": record.filename,
+        "artifact_id": record.artifact_id,
+        "mime_type": record.mime_type,
+        "storage_provider": record.storage_provider,
+        "storage_bucket": record.storage_bucket,
+        "storage_object_path": record.storage_object_path,
+        "storage_status": record.storage_status,
+        "logical_artifact_id": record.logical_artifact_id,
+        "current_artifact_version_id": record.version_id,
+        "companion_summary": record.safe_summary,
+        "user_next_action": "The delivered artifact is ready to review.",
+    }
+    logger.warning(
+        "Builder canvas snapshot recovered completed legacy task from durable artifact registry "
+        "parent_thread_id=%s task_id=%s run_id=%s artifact_id=%s",
+        _short_id(parent_thread_id),
+        _short_id(task_id),
+        _short_id(run_id),
+        _short_id(record.artifact_id),
+    )
+    return {
+        "agent_name": "sophia_builder",
+        "task_id": task_id,
+        "run_id": run_id,
+        "status": "success",
+        "task_type": record.artifact_type,
+        "task_brief": record.safe_summary or record.title,
+        "builder_result": builder_result,
+        "completed_at": record.updated_at,
+        "last_updated_at": record.updated_at,
+    }
 
 
 def _builder_task_from_recent_events(
@@ -937,6 +1036,7 @@ async def builder_canvas_snapshot(
     worker = get_builder_canvas_worker(request.app)
     recent_events = await worker.recent_events(parent_thread_id)
     task_from_events = not _is_langgraph_thread_id(parent_thread_id)
+    task_from_registry = False
     if task_from_events:
         task = _builder_task_from_recent_events(parent_thread_id, recent_events)
         if task is None:
@@ -945,26 +1045,34 @@ async def builder_canvas_snapshot(
             # source when the event relay missed the launch event.
             try:
                 task = _latest_builder_task(await _parent_builder_tasks(parent_thread_id))
-            except HTTPException:
+            except HTTPException as exc:
                 task = None
+                if exc.status_code == 404:
+                    task = _registry_artifact_task(authenticated_user_id, parent_thread_id)
+                    task_from_registry = task is not None
             else:
                 if task is not None:
                     task_from_events = False
     else:
         try:
             task = _latest_builder_task(await _parent_builder_tasks(parent_thread_id))
-        except HTTPException:
+        except HTTPException as exc:
             task = _builder_task_from_recent_events(parent_thread_id, recent_events)
             if task is None:
-                raise
-            task_from_events = True
-            logger.warning(
-                "Builder canvas snapshot falling back to retained terminal event after native state lookup failed "
-                "parent_thread_id=%s recent_events=%s",
-                _short_id(parent_thread_id),
-                len(recent_events),
-                exc_info=True,
-            )
+                if exc.status_code != 404:
+                    raise
+                task = _registry_artifact_task(authenticated_user_id, parent_thread_id)
+                task_from_registry = task is not None
+            if task is not None:
+                task_from_events = True
+                if not task_from_registry:
+                    logger.warning(
+                        "Builder canvas snapshot falling back to retained terminal event after native state lookup failed "
+                        "parent_thread_id=%s recent_events=%s",
+                        _short_id(parent_thread_id),
+                        len(recent_events),
+                        exc_info=True,
+                    )
         if task is None:
             task = _builder_task_from_recent_events(parent_thread_id, recent_events)
             if task is not None:
@@ -1005,7 +1113,7 @@ async def builder_canvas_snapshot(
         if task_from_events
         else await _native_run_status(task_id, run_id, task.get("status"))
     )
-    if _should_hide_stale_terminal_snapshot(
+    if not task_from_registry and _should_hide_stale_terminal_snapshot(
         task,
         native_status=native_status,
         recent_events=recent_events,

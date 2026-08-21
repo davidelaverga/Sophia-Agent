@@ -44,9 +44,20 @@ describe('session page exit UI contract', () => {
   it('allows artifact-library recovery after a builder task has reached a terminal phase', () => {
     const source = readAppFile('app/session/page.tsx');
 
-    expect(source).toContain("const isBuilderActivelyRunning = builderTask?.phase === 'running';");
+    expect(source).toContain('findBuilderTaskArtifactRecord(sessionArtifactIndex.artifacts, builderTask)');
+    expect(source).toContain("builderTask?.phase === 'running'");
+    expect(source).toContain('&& !recoveredBuilderSessionArtifact');
     expect(source).toContain('!isBuilderActivelyRunning ? builderArtifactLibrary[0] : null');
     expect(source).not.toContain('!builderTask ? builderArtifactLibrary[0] : null');
+  });
+
+  it('does not associate a persisted artifact with an unrelated running task', () => {
+    const source = readAppFile('app/session/page.tsx');
+
+    expect(source).toContain("builderCompletionForDisplay?.status === 'success'");
+    expect(source).toContain('filePath === completionPath');
+    expect(source).toContain('taskId: matchesSuccessfulCompletion');
+    expect(source).toContain('runId: matchesSuccessfulCompletion');
   });
 
   it('matches backend missing-deliverable text before artifact-library recovery', () => {
