@@ -313,6 +313,11 @@ export interface SessionMessageItem {
   role: 'user' | 'sophia';
   content: string;
   created_at: string | null;
+  source?: string;
+  final?: boolean;
+  approximate?: boolean;
+  turn_id?: string | null;
+  provider_event_id?: string | null;
 }
 
 /**
@@ -322,12 +327,14 @@ export interface SessionMessagesResponse {
   session_id: string;
   thread_id: string;
   messages: SessionMessageItem[];
-  message_revision?: number;
+  /** Authoritative revision for the returned transcript. Always present. */
+  message_revision: number;
   previous_revision?: number | null;
   accepted?: boolean;
   duplicate?: boolean;
   conflict?: boolean;
   deleted_count?: number;
+  rejection_reason?: 'base_revision_required' | 'revision_conflict' | null;
 }
 
 /**
@@ -355,7 +362,8 @@ export interface SessionMessagesPersistRequest {
   user_id?: string;
   thread_id?: string | null;
   messages: SessionMessagePersistItem[];
-  base_revision?: number;
+  /** Last authoritative revision returned by GET or a successful write. */
+  base_revision: number;
 }
 
 /**

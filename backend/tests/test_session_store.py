@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+from pathlib import Path
 from urllib.parse import parse_qs
 
 import httpx
@@ -43,9 +44,7 @@ def test_session_store_factory_defaults_to_filesystem_locally(tmp_path):
 
 def test_filesystem_store_appends_messages_idempotently(tmp_path):
     store = SessionStore(tmp_path)
-    store.upsert_session(
-        SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1")
-    )
+    store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
     first = SessionMessageRecord(
         message_id="msg-1",
         session_id="session-1",
@@ -64,7 +63,7 @@ def test_filesystem_store_appends_messages_idempotently(tmp_path):
     assert store.get_session("user-1", "session-1").transcript_available is True
 
 
-def test_filesystem_revisioned_snapshot_preserves_newer_messages_on_stale_retry(tmp_path):
+def test_filesystem_revisioned_snapshot_rejects_stale_retry_without_mutation(tmp_path):
     store = SessionStore(tmp_path)
     store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
     first = SessionMessageRecord(
@@ -77,24 +76,45 @@ def test_filesystem_revisioned_snapshot_preserves_newer_messages_on_stale_retry(
     )
     second = first.model_copy(update={"message_id": "msg-2", "content": "second", "sequence": 1})
 
-    accepted = store.replace_messages_revisioned(
-        "user-1", "session-1", [first], expected_revision=0
-    )
+    accepted = store.replace_messages_revisioned("user-1", "session-1", [first], expected_revision=0)
     assert accepted.accepted is True
     assert accepted.current_revision == 1
 
-    stale = store.replace_messages_revisioned(
-        "user-1", "session-1", [first, second], expected_revision=0
-    )
+    stale = store.replace_messages_revisioned("user-1", "session-1", [first, second], expected_revision=0)
+    assert stale.accepted is False
     assert stale.conflict is True
-    assert stale.current_revision == 2
-    assert [message.message_id for message in stale.messages] == ["msg-1", "msg-2"]
+    assert stale.rejection_reason == "revision_conflict"
+    assert stale.current_revision == 1
+    assert [message.message_id for message in stale.messages] == ["msg-1"]
 
-    duplicate = store.replace_messages_revisioned(
-        "user-1", "session-1", [first, second], expected_revision=2
+    accepted_second = store.replace_messages_revisioned("user-1", "session-1", [first, second], expected_revision=1)
+    assert accepted_second.accepted is True
+    assert accepted_second.current_revision == 2
+
+
+def test_filesystem_stale_snapshot_cannot_resurrect_deleted_message(tmp_path):
+    store = SessionStore(tmp_path)
+    store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
+    first = SessionMessageRecord(
+        message_id="msg-1",
+        session_id="session-1",
+        thread_id="thread-1",
+        role="user",
+        content="delete me",
+        sequence=0,
     )
-    assert duplicate.duplicate is True
-    assert duplicate.current_revision == 2
+
+    created = store.replace_messages_revisioned("user-1", "session-1", [first], expected_revision=0)
+    deleted = store.replace_messages_revisioned("user-1", "session-1", [], expected_revision=created.current_revision)
+    stale = store.replace_messages_revisioned("user-1", "session-1", [first], expected_revision=created.current_revision)
+
+    assert deleted.accepted is True
+    assert deleted.deleted_count == 1
+    assert stale.accepted is False
+    assert stale.conflict is True
+    assert stale.current_revision == deleted.current_revision
+    assert stale.messages == []
+    assert store.list_messages("user-1", "session-1") == []
 
 
 def test_filesystem_store_finds_session_by_thread_id(tmp_path):
@@ -115,6 +135,8 @@ class FakeSupabasePostgrest:
         self.messages: dict[str, dict] = {}
 
     def handler(self, request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/rpc/sophia_replace_session_messages"):
+            return self._handle_replace_messages_rpc(request)
         table = request.url.path.rstrip("/").split("/")[-1]
         params = {key: values[-1] for key, values in parse_qs(request.url.query.decode()).items()}
         if table == "sophia_sessions":
@@ -122,6 +144,55 @@ class FakeSupabasePostgrest:
         if table == "sophia_session_messages":
             return self._handle_messages(request, params)
         return httpx.Response(404, json={"error": "unknown table"})
+
+    def _handle_replace_messages_rpc(self, request: httpx.Request) -> httpx.Response:
+        body = self._json_body(request) or {}
+        session_id = body["p_session_id"]
+        user_id = body["p_user_id"]
+        expected_revision = int(body["p_expected_revision"])
+        session = self.sessions.get(session_id)
+        if session is None or session.get("user_id") != user_id:
+            return httpx.Response(400, json={"error": "session_not_found"})
+
+        current_revision = int(session.get("message_revision") or 0)
+        if current_revision != expected_revision:
+            return httpx.Response(
+                200,
+                json={
+                    "accepted": False,
+                    "duplicate": False,
+                    "conflict": True,
+                    "rejection_reason": "revision_conflict",
+                    "previous_revision": current_revision,
+                    "current_revision": current_revision,
+                    "deleted_count": 0,
+                },
+            )
+
+        incoming_rows = body.get("p_messages") or []
+        incoming = {row["id"]: row for row in incoming_rows}
+        existing = {message_id: row for message_id, row in self.messages.items() if row.get("session_id") == session_id and row.get("user_id") == user_id}
+        changed = incoming != existing
+        if changed:
+            for message_id in existing:
+                self.messages.pop(message_id, None)
+            self.messages.update(incoming)
+            session["message_revision"] = current_revision + 1
+            session["transcript_available"] = bool(incoming)
+
+        deleted_count = len(set(existing) - set(incoming))
+        return httpx.Response(
+            200,
+            json={
+                "accepted": True,
+                "duplicate": not changed,
+                "conflict": False,
+                "rejection_reason": None,
+                "previous_revision": current_revision,
+                "current_revision": int(session.get("message_revision") or current_revision),
+                "deleted_count": deleted_count,
+            },
+        )
 
     def _json_body(self, request: httpx.Request):
         if not request.content:
@@ -137,11 +208,7 @@ class FakeSupabasePostgrest:
                 return False
             if value.startswith("not.in."):
                 raw_values = value.removeprefix("not.in.").strip("()")
-                blocked = {
-                    item.strip().strip('"')
-                    for item in raw_values.split(",")
-                    if item.strip()
-                }
+                blocked = {item.strip().strip('"') for item in raw_values.split(",") if item.strip()}
                 if str(row.get(key)) in blocked:
                     return False
         return True
@@ -307,6 +374,41 @@ def test_supabase_store_replace_messages_upserts_then_removes_stale_rows():
     assert len(fake.messages) == 1
     assert [message.message_id for message in messages] == ["user-1"]
     assert messages[0].content == "green harbor notebook"
+
+
+def test_supabase_revision_conflict_rejects_stale_snapshot_and_preserves_deletion():
+    fake = FakeSupabasePostgrest()
+    store = _supabase_store(fake)
+    store.upsert_session(SessionRecord(session_id="session-1", thread_id="thread-1", user_id="user-1"))
+    first = SessionMessageRecord(
+        message_id="msg-1",
+        session_id="session-1",
+        thread_id="thread-1",
+        role="user",
+        content="delete me",
+        sequence=0,
+    )
+
+    created = store.replace_messages_revisioned("user-1", "session-1", [first], expected_revision=0)
+    deleted = store.replace_messages_revisioned("user-1", "session-1", [], expected_revision=created.current_revision)
+    stale = store.replace_messages_revisioned("user-1", "session-1", [first], expected_revision=created.current_revision)
+
+    assert deleted.deleted_count == 1
+    assert stale.accepted is False
+    assert stale.conflict is True
+    assert stale.rejection_reason == "revision_conflict"
+    assert stale.current_revision == deleted.current_revision
+    assert store.list_messages("user-1", "session-1") == []
+
+
+def test_forward_migration_rejects_stale_snapshots_without_upsert_branch():
+    migration = Path(__file__).resolve().parents[1] / "migrations" / "2026_08_22_fc01_m01_c2_reject_stale_session_snapshots.sql"
+    sql = migration.read_text(encoding="utf-8")
+    stale_branch = sql.split("IF current_revision <> p_expected_revision THEN", 1)[1].split("END IF;", 1)[0]
+
+    assert "INSERT INTO public.sophia_session_messages" not in stale_branch
+    assert "'revision_conflict'" in stale_branch
+    assert "'accepted', FALSE" in stale_branch
 
 
 def test_supabase_store_user_boundary_blocks_cross_user_reads():

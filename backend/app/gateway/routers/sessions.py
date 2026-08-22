@@ -18,6 +18,7 @@ from pydantic import BaseModel
 
 from deerflow.sophia.session_store import (
     SessionMessageRecord,
+    SessionMessageSnapshotResult,
     SessionRecord,
     SessionStore,
     canonical_visible_messages,
@@ -40,6 +41,7 @@ _LEGACY_USER_ID = "dev-user"
 # ---------------------------------------------------------------------------
 # Request / Response models
 # ---------------------------------------------------------------------------
+
 
 class SessionStartRequest(BaseModel):
     user_id: str = "dev-user"
@@ -208,12 +210,9 @@ _GERUND_OVERRIDES = {
 # Endpoints
 # ---------------------------------------------------------------------------
 
+
 def _get_langgraph_base_url() -> str:
-    return (
-        os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
-        or os.getenv("SOPHIA_BACKEND_BASE_URL")
-        or "http://127.0.0.1:2024"
-    ).strip().rstrip("/")
+    return (os.getenv("SOPHIA_LANGGRAPH_BASE_URL") or os.getenv("SOPHIA_BACKEND_BASE_URL") or "http://127.0.0.1:2024").strip().rstrip("/")
 
 
 async def _create_langgraph_thread() -> str:
@@ -345,6 +344,7 @@ def _activate_session_for_continuation(
     updated = _store.update(owner_user_id, record.session_id, **updates)
     return updated or record
 
+
 @router.post("/start", response_model=SessionStartResponse)
 async def start_session(body: SessionStartRequest) -> SessionStartResponse:
     """Create a new session with a real LangGraph thread and persist it."""
@@ -354,8 +354,7 @@ async def start_session(body: SessionStartRequest) -> SessionStartResponse:
     if len(open_sessions) >= MAX_OPEN_SESSIONS_PER_USER:
         raise HTTPException(
             status_code=409,
-            detail=f"Maximum of {MAX_OPEN_SESSIONS_PER_USER} open sessions reached. "
-            "Please end an existing session first.",
+            detail=f"Maximum of {MAX_OPEN_SESSIONS_PER_USER} open sessions reached. Please end an existing session first.",
         )
 
     now = datetime.now(UTC).isoformat()
@@ -513,13 +512,9 @@ def _cleanup_session_ledger(owner_user_id: str, thread_id: str | None) -> None:
 
         delegation_ledger.delete_ledger_local(owner_user_id, thread_id)
         if supabase_artifact_store.is_configured():
-            supabase_artifact_store.delete_artifact(
-                thread_id, supabase_artifact_store.ledger_object_name()
-            )
+            supabase_artifact_store.delete_artifact(thread_id, supabase_artifact_store.ledger_object_name())
     except Exception:  # noqa: BLE001 — cleanup is strictly best-effort
-        logger.warning(
-            "Delegation-ledger cleanup failed: thread_id=%s", thread_id, exc_info=True
-        )
+        logger.warning("Delegation-ledger cleanup failed: thread_id=%s", thread_id, exc_info=True)
 
 
 @router.delete("/bulk", response_model=SessionBulkDeleteResponse)
@@ -606,6 +601,11 @@ class SessionMessageResponse(BaseModel):
     role: str  # "user" | "sophia"
     content: str
     created_at: str | None = None
+    source: str = "text"
+    final: bool = True
+    approximate: bool = False
+    turn_id: str | None = None
+    provider_event_id: str | None = None
 
 
 class SessionMessagesResponse(BaseModel):
@@ -618,6 +618,7 @@ class SessionMessagesResponse(BaseModel):
     duplicate: bool = False
     conflict: bool = False
     deleted_count: int = 0
+    rejection_reason: str | None = None
 
 
 class SessionMessagePersistInput(BaseModel):
@@ -647,12 +648,14 @@ def _session_messages_payload(
     session_id: str,
     thread_id: str,
     messages: list[SessionMessageResponse],
+    message_revision: int,
     snapshot: object | None = None,
 ) -> dict[str, object]:
     payload: dict[str, object] = {
         "session_id": session_id,
         "thread_id": thread_id,
         "messages": [message.model_dump() for message in messages],
+        "message_revision": max(0, int(message_revision)),
     }
     if snapshot is not None:
         payload.update(
@@ -663,9 +666,29 @@ def _session_messages_payload(
                 "duplicate": bool(getattr(snapshot, "duplicate", False)),
                 "conflict": bool(getattr(snapshot, "conflict", False)),
                 "deleted_count": int(getattr(snapshot, "deleted_count", 0)),
+                "rejection_reason": getattr(snapshot, "rejection_reason", None),
             }
         )
     return payload
+
+
+def _read_authoritative_visible_snapshot(
+    owner_user_id: str,
+    session_id: str,
+    fallback_record: SessionRecord,
+) -> tuple[SessionRecord, list[SessionMessageRecord]]:
+    """Read messages whose revision is stable across the storage read."""
+    latest_record = fallback_record
+    latest_records: list[SessionMessageRecord] = []
+    for _attempt in range(3):
+        before = _store.get(owner_user_id, session_id) or latest_record
+        records = canonical_visible_messages(_store.list_messages(owner_user_id, session_id))
+        after = _store.get(owner_user_id, session_id) or before
+        latest_record = after
+        latest_records = records
+        if int(before.message_revision) == int(after.message_revision):
+            return after, records
+    return latest_record, latest_records
 
 
 @router.get("/{session_id}/messages")
@@ -679,20 +702,27 @@ async def get_session_messages(
         raise HTTPException(status_code=404, detail="Session not found.")
 
     thread_id = record.thread_id
-    durable_records = canonical_visible_messages(_store.list_messages(owner_user_id, session_id))
-    durable_messages = [
-        _message_record_to_response(message)
-        for message in durable_records
-        if _message_record_to_response(message) is not None
-    ]
+    record, durable_records = _read_authoritative_visible_snapshot(
+        owner_user_id,
+        session_id,
+        record,
+    )
+    durable_messages = [_message_record_to_response(message) for message in durable_records if _message_record_to_response(message) is not None]
     durable_has_assistant = any(message.role == "sophia" for message in durable_messages)
 
     def _durable_response() -> dict[str, object]:
-        _update_session_from_visible_records(owner_user_id, session_id, durable_records, record)
+        latest_record, latest_records = _read_authoritative_visible_snapshot(
+            owner_user_id,
+            session_id,
+            record,
+        )
+        latest_messages = [response for response in (_message_record_to_response(message) for message in latest_records) if response is not None]
+        _update_session_from_visible_records(owner_user_id, session_id, latest_records, latest_record)
         return _session_messages_payload(
             session_id=session_id,
-            thread_id=thread_id,
-            messages=durable_messages,
+            thread_id=latest_record.thread_id,
+            messages=latest_messages,
+            message_revision=latest_record.message_revision,
         )
 
     # An assistant-bearing durable transcript is authoritative. A transcript
@@ -728,11 +758,7 @@ async def get_session_messages(
             if durable_messages:
                 return _durable_response()
             # Thread exists but has no checkpoint yet (no messages sent)
-            return _session_messages_payload(
-                session_id=session_id,
-                thread_id=thread_id,
-                messages=[],
-            )
+            return _durable_response()
         if durable_messages:
             return _durable_response()
         raise HTTPException(
@@ -770,12 +796,15 @@ async def get_session_messages(
                 continue
             if role == "user" and not content_text:
                 continue
-            messages.append(SessionMessageResponse(
-                id=msg_id,
-                role=role,
-                content=content_text,
-                created_at=None,
-            ))
+            messages.append(
+                SessionMessageResponse(
+                    id=msg_id,
+                    role=role,
+                    content=content_text,
+                    created_at=None,
+                    source="langgraph_checkpointer",
+                )
+            )
 
     state_has_assistant = any(message.role == "sophia" for message in messages)
     if durable_messages and not state_has_assistant:
@@ -785,7 +814,7 @@ async def get_session_messages(
         return _durable_response()
 
     if messages:
-        _store.replace_messages(
+        snapshot = _store.replace_messages_revisioned(
             owner_user_id,
             session_id,
             [
@@ -798,19 +827,25 @@ async def get_session_messages(
                 )
                 for index, response in enumerate(messages)
             ],
+            expected_revision=max(0, int(record.message_revision)),
         )
+        accepted_records = canonical_visible_messages(snapshot.messages)
+        accepted_messages = [response for response in (_message_record_to_response(message) for message in accepted_records) if response is not None]
         _update_session_from_visible_records(
             owner_user_id,
             session_id,
-            canonical_visible_messages(_store.list_messages(owner_user_id, session_id)),
+            accepted_records,
             record,
         )
+        return _session_messages_payload(
+            session_id=session_id,
+            thread_id=thread_id,
+            messages=accepted_messages,
+            message_revision=snapshot.current_revision,
+            snapshot=snapshot,
+        )
 
-    return _session_messages_payload(
-        session_id=session_id,
-        thread_id=thread_id,
-        messages=messages,
-    )
+    return _durable_response()
 
 
 @router.put("/{session_id}/messages")
@@ -829,14 +864,30 @@ async def persist_session_messages(
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
 
-    thread_id = body.thread_id or record.thread_id
-    if thread_id != record.thread_id:
-        record = _store.update(
+    thread_id = record.thread_id
+    if body.base_revision is None:
+        authoritative_record, authoritative_records = _read_authoritative_visible_snapshot(
             owner_user_id,
             session_id,
-            thread_id=thread_id,
-            checkpointer_available=True,
-        ) or record
+            record,
+        )
+        snapshot = SessionMessageSnapshotResult(
+            messages=authoritative_records,
+            previous_revision=max(0, int(authoritative_record.message_revision)),
+            current_revision=max(0, int(authoritative_record.message_revision)),
+            accepted=False,
+            conflict=True,
+            rejection_reason="base_revision_required",
+        )
+        visible_responses = [response for response in (_message_record_to_response(message) for message in authoritative_records) if response is not None]
+        return _session_messages_payload(
+            session_id=session_id,
+            thread_id=authoritative_record.thread_id,
+            messages=visible_responses,
+            message_revision=snapshot.current_revision,
+            snapshot=snapshot,
+        )
+
     records: list[SessionMessageRecord] = []
     for item in body.messages:
         message = _persist_input_to_message_record(
@@ -847,30 +898,22 @@ async def persist_session_messages(
         )
         if message is not None:
             records.append(message)
-    expected_revision = (
-        body.base_revision
-        if body.base_revision is not None
-        else int(record.message_revision)
-    )
     snapshot = _store.replace_messages_revisioned(
         owner_user_id,
         session_id,
         records,
-        expected_revision=expected_revision,
+        expected_revision=body.base_revision,
     )
     visible_records = canonical_visible_messages(snapshot.messages)
     _update_session_from_visible_records(owner_user_id, session_id, visible_records, record)
 
-    visible_responses = [
-            response
-            for response in (_message_record_to_response(message) for message in visible_records)
-            if response is not None
-        ]
+    visible_responses = [response for response in (_message_record_to_response(message) for message in visible_records) if response is not None]
     return _session_messages_payload(
         session_id=session_id,
         thread_id=thread_id,
         messages=visible_responses,
-        snapshot=snapshot if body.base_revision is not None else None,
+        message_revision=snapshot.current_revision,
+        snapshot=snapshot,
     )
 
 
@@ -927,6 +970,7 @@ async def touch_session(
 # Helpers
 # ---------------------------------------------------------------------------
 
+
 def _message_record_to_response(message: SessionMessageRecord) -> SessionMessageResponse | None:
     if message.role == "user":
         role = "user"
@@ -943,6 +987,11 @@ def _message_record_to_response(message: SessionMessageRecord) -> SessionMessage
         role=role,
         content=content,
         created_at=message.created_at,
+        source=message.source,
+        final=message.final,
+        approximate=message.approximate,
+        turn_id=message.turn_id,
+        provider_event_id=message.provider_event_id,
     )
 
 
@@ -968,8 +1017,11 @@ def _response_to_message_record(
         role=role,
         content=response.content,
         created_at=response.created_at or datetime.now(UTC).isoformat(),
-        source=source,
-        final=True,
+        source=response.source or source,
+        final=response.final,
+        approximate=response.approximate,
+        turn_id=response.turn_id,
+        provider_event_id=response.provider_event_id,
         sequence=sequence,
     )
 
@@ -1108,7 +1160,7 @@ def _extract_title_candidate(message_preview: str) -> str:
     for pattern in _REQUEST_PREFIX_PATTERNS:
         match = pattern.search(candidate)
         if match and match.end() < len(candidate):
-            candidate = candidate[match.end():].strip()
+            candidate = candidate[match.end() :].strip()
             break
 
     candidate = re.sub(r"^(?:to|about)\s+", "", candidate, flags=re.IGNORECASE)

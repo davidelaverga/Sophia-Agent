@@ -241,11 +241,42 @@ FastAPI application on port 8001 with health check at `GET /health`.
 | **MCP** (`/api/mcp`) | `GET /config` - get config; `PUT /config` - update config (saves to extensions_config.json) |
 | **Skills** (`/api/skills`) | `GET /` - list skills; `GET /{name}` - details; `PUT /{name}` - update enabled; `POST /install` - install from .skill archive (accepts standard optional frontmatter like `version`, `author`, `compatibility`) |
 | **Memory** (`/api/memory`) | `GET /` - memory data; `POST /reload` - force reload; `GET /config` - config; `GET /status` - config + data |
+| **Sessions** (`/api/sessions`) | `GET /{id}/messages` - authoritative transcript + revision; `PUT/POST /{id}/messages` - revision-checked visible snapshot persistence (POST supports lifecycle beacons) |
 | **Uploads** (`/api/threads/{id}/uploads`) | `POST /` - upload files (auto-converts PDF/PPT/Excel/Word); `GET /list` - list; `DELETE /{filename}` - delete |
 | **Artifacts** (`/api/threads/{id}/artifacts`) | `GET /{path}` - serve artifacts; `?download=true` for file download |
 | **Suggestions** (`/api/threads/{id}/suggestions`) | `POST /` - generate follow-up questions; rich list/block model content is normalized before JSON parsing |
 
 Proxied through nginx: `/api/langgraph/*` → LangGraph, all other `/api/*` → Gateway.
+
+#### Revision-safe session transcript persistence
+
+The durable transcript in `sophia_session_messages` is authoritative for
+resume context. Every successful `GET /api/sessions/{id}/messages` includes the
+revision corresponding to the returned canonical visible rows. Frontend
+session persistence must reset and seed that revision whenever the active or
+restored session changes, serialize writes through one in-flight queue, and
+coalesce overlap to the newest pending snapshot.
+
+`PUT` and the sendBeacon-compatible `POST` require `base_revision`. An exact
+revision may replace rows (including intentional deletion) and increments the
+revision only when data changes. A stale revision or omitted revision is a
+read-only conflict: the gateway returns the current canonical transcript,
+`accepted=false`, and `rejection_reason`; it must never upsert or delete rows.
+The browser may rebase only IDs proven to be additions relative to its last
+accepted baseline. If that baseline was never seeded, it rejects the local
+snapshot and adopts the server transcript, preventing stale reload/page-hide
+state from resurrecting deletions.
+
+Storage implementations live in
+`packages/harness/deerflow/sophia/session_store.py`; the API admission and
+LangGraph fallback live in `app/gateway/routers/sessions.py`. Production needs
+the forward migration
+`migrations/2026_08_22_fc01_m01_c2_reject_stale_session_snapshots.sql` applied
+through the deployment database gate. Regression coverage is in
+`tests/test_session_store.py`, `tests/test_sessions_gateway.py`, and frontend
+`src/__tests__/session/useSessionStreamPersistence.test.ts` (reload,
+multi-tab/overlap, conflict rebase, stale lifecycle beacon, and deletion
+non-resurrection).
 
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 

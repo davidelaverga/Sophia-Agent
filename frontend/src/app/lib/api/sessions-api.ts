@@ -448,8 +448,8 @@ export async function touchSession(
 }
 
 /**
- * Get conversation messages from a session's LangGraph thread.
- * Used when switching back to an open session to restore history.
+ * Get the authoritative durable transcript and its message_revision.
+ * Used to seed/reseed optimistic concurrency when restoring a session.
  */
 export async function getSessionMessages(
   sessionId: string,
@@ -467,8 +467,9 @@ export async function getSessionMessages(
 }
 
 /**
- * Persist an ordered visible transcript snapshot for a session.
- * Called as messages finalize so history survives refresh/back/close.
+ * Persist an ordered visible transcript snapshot against base_revision.
+ * A conflict response carries the unchanged authoritative transcript and
+ * revision so callers can explicitly refetch/rebase or reject the snapshot.
  */
 export async function persistSessionMessages(
   sessionId: string,

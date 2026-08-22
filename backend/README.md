@@ -181,10 +181,21 @@ FastAPI application providing REST endpoints for frontend integration:
 | `POST /api/memory/reload` | Force memory reload |
 | `GET /api/memory/config` | Memory configuration |
 | `GET /api/memory/status` | Combined config + data |
+| `GET /api/sessions/{id}/messages` | Read the authoritative ordered transcript and `message_revision` used for safe resume/write concurrency |
+| `PUT/POST /api/sessions/{id}/messages` | Replace a finalized visible transcript snapshot when `base_revision` matches; stale or revisionless snapshots are returned as read-only conflicts |
 | `POST /api/threads/{id}/uploads` | Upload files (auto-converts PDF/PPT/Excel/Word to Markdown, rejects directory paths) |
 | `GET /api/threads/{id}/uploads/list` | List uploaded files (also proxied by frontend at `/api/threads/{id}/uploads/list` to seed the AttachmentBar uniquifier against on-disk state — Codex P2 PR #132) |
 | `DELETE /api/threads/{id}/uploads/{filename}` | Remove an uploaded file from disk (proxied by frontend so chip × actually clears bytes — Codex P2 PR #132) |
 | `GET /api/threads/{id}/artifacts/{path}` | Serve generated artifacts |
+
+Session transcript snapshots use optimistic concurrency. Clients first seed
+`message_revision` from `GET /api/sessions/{id}/messages`, include it as
+`base_revision` on every regular or lifecycle-beacon write, and adopt the new
+revision only after the server accepts the snapshot. Concurrent stale writes
+never mutate rows, so an old tab or delayed page-hide beacon cannot overwrite a
+newer transcript or resurrect a deleted message. Apply
+`backend/migrations/2026_08_22_fc01_m01_c2_reject_stale_session_snapshots.sql`
+through the deployment database gate before deploying this contract.
 
 ### IM Channels
 

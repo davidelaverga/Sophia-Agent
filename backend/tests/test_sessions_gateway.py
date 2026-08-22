@@ -60,9 +60,7 @@ def test_start_session_returns_503_when_langgraph_is_unavailable():
 
     with patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
-        mock_client.post = AsyncMock(
-            side_effect=httpx.RequestError("connection refused", request=request)
-        )
+        mock_client.post = AsyncMock(side_effect=httpx.RequestError("connection refused", request=request))
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client_cls.return_value = mock_client
@@ -255,8 +253,7 @@ def test_touch_session_updates_preview_and_generates_title(isolated_session_stor
 
     with patch("app.gateway.inactivity_watcher.register_activity") as mock_register_activity:
         response = client.post(
-            "/api/v1/sessions/session-to-touch/touch?user_id=dev-user&message_preview="
-            "i%20need%20to%20prepare%20for%20my%20investor%20meeting%20tomorrow",
+            "/api/v1/sessions/session-to-touch/touch?user_id=dev-user&message_preview=i%20need%20to%20prepare%20for%20my%20investor%20meeting%20tomorrow",
         )
 
     assert response.status_code == 200
@@ -383,8 +380,7 @@ def test_touch_session_resumes_paused_session(isolated_session_store):
 
     with patch("app.gateway.inactivity_watcher.register_activity") as mock_register_activity:
         response = client.post(
-            "/api/v1/sessions/paused-session/touch?user_id=dev-user&message_preview="
-            "back%20to%20the%20pitch%20deck",
+            "/api/v1/sessions/paused-session/touch?user_id=dev-user&message_preview=back%20to%20the%20pitch%20deck",
         )
 
     assert response.status_code == 200
@@ -408,8 +404,7 @@ def test_touch_session_reopens_ended_session_and_keeps_ids(isolated_session_stor
 
     with patch("app.gateway.inactivity_watcher.register_activity") as mock_register_activity:
         response = client.post(
-            "/api/v1/sessions/ended-session/touch?user_id=dev-user&message_preview="
-            "continuing%20from%20where%20we%20left%20off",
+            "/api/v1/sessions/ended-session/touch?user_id=dev-user&message_preview=continuing%20from%20where%20we%20left%20off",
         )
 
     assert response.status_code == 200
@@ -442,8 +437,7 @@ def test_touch_session_falls_back_to_legacy_dev_user_records(isolated_session_st
     )
 
     response = client.post(
-        "/api/v1/sessions/legacy-touch-session/touch?user_id=real-user-123&message_preview="
-        "can%20you%20help%20me%20debug%20this%20websocket%20reconnect%20issue",
+        "/api/v1/sessions/legacy-touch-session/touch?user_id=real-user-123&message_preview=can%20you%20help%20me%20debug%20this%20websocket%20reconnect%20issue",
     )
 
     assert response.status_code == 200
@@ -520,24 +514,16 @@ def test_get_session_messages_strips_tool_use_metadata_from_ai_content(isolated_
         response = client.get("/api/v1/sessions/session-with-tool-blocks/messages?user_id=dev-user")
 
     assert response.status_code == 200
-    assert response.json() == {
-        "session_id": "session-with-tool-blocks",
-        "thread_id": "thread-with-tool-blocks",
-        "messages": [
-            {
-                "id": "human-1",
-                "role": "user",
-                "content": "I still miss him.",
-                "created_at": None,
-            },
-            {
-                "id": "ai-1",
-                "role": "sophia",
-                "content": "Two years in, and you're still asking about it.",
-                "created_at": None,
-            },
-        ],
-    }
+    payload = response.json()
+    assert payload["session_id"] == "session-with-tool-blocks"
+    assert payload["thread_id"] == "thread-with-tool-blocks"
+    assert payload["message_revision"] == 1
+    assert payload["accepted"] is True
+    assert [(message["id"], message["role"], message["content"]) for message in payload["messages"]] == [
+        ("human-1", "user", "I still miss him."),
+        ("ai-1", "sophia", "Two years in, and you're still asking about it."),
+    ]
+    assert all(message["source"] == "langgraph_checkpointer" for message in payload["messages"])
     stored_messages = isolated_session_store.list_messages("dev-user", "session-with-tool-blocks")
     assert [message.content for message in stored_messages] == [
         "I still miss him.",
@@ -559,6 +545,7 @@ def test_persist_session_messages_writes_durable_transcript(isolated_session_sto
         "/api/v1/sessions/session-with-transcript/messages?user_id=dev-user",
         json={
             "thread_id": "thread-with-transcript",
+            "base_revision": 0,
             "messages": [
                 {
                     "id": "user-1",
@@ -580,24 +567,17 @@ def test_persist_session_messages_writes_durable_transcript(isolated_session_sto
     )
 
     assert response.status_code == 200
-    assert response.json() == {
-        "session_id": "session-with-transcript",
-        "thread_id": "thread-with-transcript",
-        "messages": [
-            {
-                "id": "user-1",
-                "role": "user",
-                "content": "This is a session persistence test.",
-                "created_at": "2026-04-15T00:01:00+00:00",
-            },
-            {
-                "id": "assistant-1",
-                "role": "sophia",
-                "content": "I am tracking the thread with you.",
-                "created_at": "2026-04-15T00:01:05+00:00",
-            },
-        ],
-    }
+    payload = response.json()
+    assert payload["session_id"] == "session-with-transcript"
+    assert payload["thread_id"] == "thread-with-transcript"
+    assert payload["message_revision"] == 1
+    assert payload["accepted"] is True
+    assert [(message["id"], message["role"], message["content"]) for message in payload["messages"]] == [
+        ("user-1", "user", "This is a session persistence test."),
+        ("assistant-1", "sophia", "I am tracking the thread with you."),
+    ]
+    assert payload["messages"][1]["source"] == "voice"
+    assert payload["messages"][1]["approximate"] is True
 
     stored_messages = isolated_session_store.list_messages("dev-user", "session-with-transcript")
     assert len(stored_messages) == 2
@@ -623,6 +603,7 @@ def test_repeated_session_message_snapshots_are_idempotent(isolated_session_stor
     )
     payload = {
         "thread_id": "thread-idempotent",
+        "base_revision": 0,
         "messages": [
             {
                 "id": "user-stable",
@@ -642,7 +623,10 @@ def test_repeated_session_message_snapshots_are_idempotent(isolated_session_stor
     }
 
     first = client.put("/api/v1/sessions/session-idempotent/messages?user_id=dev-user", json=payload)
-    second = client.post("/api/v1/sessions/session-idempotent/messages?user_id=dev-user", json=payload)
+    second = client.post(
+        "/api/v1/sessions/session-idempotent/messages?user_id=dev-user",
+        json={**payload, "base_revision": 1},
+    )
 
     assert first.status_code == 200
     assert second.status_code == 200
@@ -654,6 +638,132 @@ def test_repeated_session_message_snapshots_are_idempotent(isolated_session_stor
     record = isolated_session_store.get("dev-user", "session-idempotent")
     assert record is not None
     assert record.message_count == 2
+
+
+def test_revisionless_snapshot_is_non_authoritative(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-revision-required",
+            thread_id="thread-revision-required",
+            user_id="dev-user",
+            status="open",
+        )
+    )
+
+    response = client.post(
+        "/api/v1/sessions/session-revision-required/messages?user_id=dev-user",
+        json={
+            "thread_id": "thread-revision-required",
+            "messages": [
+                {
+                    "id": "stale-pagehide",
+                    "role": "user",
+                    "content": "this revisionless beacon must not win",
+                }
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    assert response.json()["accepted"] is False
+    assert response.json()["conflict"] is True
+    assert response.json()["rejection_reason"] == "base_revision_required"
+    assert response.json()["message_revision"] == 0
+    assert isolated_session_store.list_messages("dev-user", "session-revision-required") == []
+
+
+def test_multi_tab_stale_pagehide_is_rejected_without_overwriting_newer_snapshot(
+    isolated_session_store,
+):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-multi-tab",
+            thread_id="thread-multi-tab",
+            user_id="dev-user",
+            status="open",
+        )
+    )
+    newer = client.put(
+        "/api/v1/sessions/session-multi-tab/messages?user_id=dev-user",
+        json={
+            "thread_id": "thread-multi-tab",
+            "base_revision": 0,
+            "messages": [
+                {
+                    "id": "newer-message",
+                    "role": "user",
+                    "content": "accepted in the active tab",
+                }
+            ],
+        },
+    )
+    stale_pagehide = client.post(
+        "/api/v1/sessions/session-multi-tab/messages?user_id=dev-user",
+        json={
+            "thread_id": "thread-multi-tab",
+            "base_revision": 0,
+            "messages": [
+                {
+                    "id": "older-message",
+                    "role": "user",
+                    "content": "older tab snapshot",
+                }
+            ],
+        },
+    )
+
+    assert newer.json()["message_revision"] == 1
+    assert stale_pagehide.json()["accepted"] is False
+    assert stale_pagehide.json()["rejection_reason"] == "revision_conflict"
+    assert stale_pagehide.json()["message_revision"] == 1
+    assert [message.message_id for message in isolated_session_store.list_messages("dev-user", "session-multi-tab")] == ["newer-message"]
+
+
+def test_stale_snapshot_cannot_resurrect_row_deleted_by_newer_revision(isolated_session_store):
+    isolated_session_store.create(
+        SessionRecord(
+            session_id="session-delete-race",
+            thread_id="thread-delete-race",
+            user_id="dev-user",
+            status="open",
+        )
+    )
+    created = client.put(
+        "/api/v1/sessions/session-delete-race/messages?user_id=dev-user",
+        json={
+            "base_revision": 0,
+            "messages": [
+                {
+                    "id": "deleted-message",
+                    "role": "user",
+                    "content": "delete me",
+                }
+            ],
+        },
+    )
+    deleted = client.put(
+        "/api/v1/sessions/session-delete-race/messages?user_id=dev-user",
+        json={"base_revision": created.json()["message_revision"], "messages": []},
+    )
+    stale = client.post(
+        "/api/v1/sessions/session-delete-race/messages?user_id=dev-user",
+        json={
+            "base_revision": created.json()["message_revision"],
+            "messages": [
+                {
+                    "id": "deleted-message",
+                    "role": "user",
+                    "content": "delete me",
+                }
+            ],
+        },
+    )
+
+    assert deleted.json()["deleted_count"] == 1
+    assert deleted.json()["messages"] == []
+    assert stale.json()["accepted"] is False
+    assert stale.json()["message_revision"] == deleted.json()["message_revision"]
+    assert stale.json()["messages"] == []
 
 
 def test_session_message_snapshot_replaces_pagehide_and_end_session_duplicates(isolated_session_store):
@@ -686,6 +796,7 @@ def test_session_message_snapshot_replaces_pagehide_and_end_session_duplicates(i
         "/api/v1/sessions/session-replace/messages?user_id=dev-user",
         json={
             "thread_id": "thread-replace",
+            "base_revision": 1,
             "messages": [
                 {
                     "id": "user-stable",
@@ -723,6 +834,7 @@ def test_persist_session_messages_filters_incomplete_assistant_and_counts_visibl
         "/api/v1/sessions/session-final-only/messages?user_id=dev-user",
         json={
             "thread_id": "thread-final-only",
+            "base_revision": 0,
             "messages": [
                 {
                     "id": "user-1",
@@ -743,14 +855,7 @@ def test_persist_session_messages_filters_incomplete_assistant_and_counts_visibl
     )
 
     assert response.status_code == 200
-    assert response.json()["messages"] == [
-        {
-            "id": "user-1",
-            "role": "user",
-            "content": "Can you repeat that?",
-            "created_at": "2026-04-15T00:01:00+00:00",
-        }
-    ]
+    assert [(message["id"], message["role"], message["content"]) for message in response.json()["messages"]] == [("user-1", "user", "Can you repeat that?")]
     record = isolated_session_store.get("dev-user", "session-final-only")
     assert record is not None
     assert record.message_count == 1
@@ -806,6 +911,7 @@ def test_get_session_messages_returns_deduped_ordered_visible_rows(isolated_sess
         "green harbor notebook",
         "I wrote that down.",
     ]
+    assert response.json()["message_revision"] == 1
     record = isolated_session_store.get("dev-user", "session-deduped-read")
     assert record is not None
     assert record.message_count == 2
@@ -900,11 +1006,80 @@ def test_get_session_messages_user_only_durable_falls_through_to_thread_state(is
         ("user", "Build me a page"),
         ("sophia", "Your page is ready — take a look!"),
     ]
-    stored_roles = [
-        message.role
-        for message in isolated_session_store.list_messages("dev-user", "session-user-only")
-    ]
+    stored_roles = [message.role for message in isolated_session_store.list_messages("dev-user", "session-user-only")]
     assert "assistant" in stored_roles
+
+
+def test_get_history_returns_only_the_transcript_accepted_during_restore_race(
+    isolated_session_store,
+    monkeypatch,
+):
+    _seed_user_only_transcript(
+        isolated_session_store,
+        "session-restore-race",
+        "thread-restore-race",
+    )
+    original_replace = isolated_session_store.replace_messages_revisioned
+    raced = False
+
+    def race_restore(user_id, session_id, messages, *, expected_revision):
+        nonlocal raced
+        if not raced:
+            raced = True
+            accepted_records = [
+                *isolated_session_store.list_messages(user_id, session_id),
+                SessionMessageRecord(
+                    message_id="accepted-assistant",
+                    session_id=session_id,
+                    thread_id="thread-restore-race",
+                    role="assistant",
+                    content="This is the accepted concurrent transcript.",
+                    sequence=2,
+                ),
+            ]
+            accepted = original_replace(
+                user_id,
+                session_id,
+                accepted_records,
+                expected_revision=expected_revision,
+            )
+            assert accepted.accepted is True
+        return original_replace(
+            user_id,
+            session_id,
+            messages,
+            expected_revision=expected_revision,
+        )
+
+    monkeypatch.setattr(
+        isolated_session_store,
+        "replace_messages_revisioned",
+        race_restore,
+    )
+    request = httpx.Request("GET", "http://127.0.0.1:2024/threads/thread-restore-race/state")
+    mock_response = httpx.Response(
+        200,
+        request=request,
+        json={
+            "values": {
+                "messages": [
+                    {"id": "human-1", "type": "human", "content": "Build me a page"},
+                    {"id": "stale-ai", "type": "ai", "content": "Stale LangGraph projection."},
+                ]
+            }
+        },
+    )
+
+    with patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls:
+        mock_client_cls.return_value = _langgraph_state_client(mock_response)
+        response = client.get("/api/v1/sessions/session-restore-race/messages?user_id=dev-user")
+
+    assert response.status_code == 200
+    assert response.json()["message_revision"] == 2
+    assert [message["content"] for message in response.json()["messages"]] == [
+        "Build me a page",
+        "This is the accepted concurrent transcript.",
+    ]
 
 
 def test_get_session_messages_user_only_durable_kept_when_state_has_no_assistant_text(isolated_session_store):
@@ -957,9 +1132,7 @@ def test_get_session_messages_user_only_durable_kept_when_langgraph_unavailable(
 
     with patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls:
         mock_client = AsyncMock()
-        mock_client.get = AsyncMock(
-            side_effect=httpx.RequestError("connection refused", request=request)
-        )
+        mock_client.get = AsyncMock(side_effect=httpx.RequestError("connection refused", request=request))
         mock_client.__aenter__ = AsyncMock(return_value=mock_client)
         mock_client.__aexit__ = AsyncMock(return_value=False)
         mock_client_cls.return_value = mock_client

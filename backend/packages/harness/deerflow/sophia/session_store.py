@@ -12,6 +12,7 @@ import hashlib
 import json
 import logging
 import os
+import threading
 import uuid
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -115,6 +116,7 @@ class SessionMessageSnapshotResult:
     duplicate: bool = False
     conflict: bool = False
     deleted_count: int = 0
+    rejection_reason: str | None = None
 
 
 class SessionTranscriptStore(Protocol):
@@ -176,6 +178,7 @@ class SessionStoreError(RuntimeError):
 
 _DEFAULT_BASE_PATH = Path("users")
 _MESSAGE_ID_NAMESPACE = uuid.UUID("6e6291e3-f564-42a1-94bb-50d1145cb184")
+_AUTHORITATIVE_WRITE_RETRIES = 4
 
 _DB_STATUS_BY_RECORD_STATUS: dict[str, str] = {
     "open": "active",
@@ -260,12 +263,7 @@ def derive_message_id(
 
 
 def _storage_message_row_id(message: SessionMessageRecord) -> str:
-    stable_basis = (
-        message.provider_event_id
-        or message.turn_id
-        or message.message_id
-        or f"{message.sequence}:{message.role}"
-    )
+    stable_basis = message.provider_event_id or message.turn_id or message.message_id or f"{message.sequence}:{message.role}"
     return str(uuid.uuid5(_MESSAGE_ID_NAMESPACE, f"{message.session_id}:{message.role}:{stable_basis}"))
 
 
@@ -303,6 +301,19 @@ def _prefer_message(left: SessionMessageRecord, right: SessionMessageRecord) -> 
         right.created_at or "",
     )
     return right if right_score >= left_score else left
+
+
+def _merge_messages_without_deletion(
+    left: list[SessionMessageRecord],
+    right: list[SessionMessageRecord],
+) -> list[SessionMessageRecord]:
+    """Merge append-style records without granting deletion authority."""
+    merged: dict[tuple[str, str], SessionMessageRecord] = {}
+    for message in [*left, *right]:
+        key = _message_dedupe_key(message)
+        previous = merged.get(key)
+        merged[key] = message if previous is None else _prefer_message(previous, message)
+    return sorted(merged.values(), key=_message_sort_key)
 
 
 def canonical_visible_messages(messages: list[SessionMessageRecord]) -> list[SessionMessageRecord]:
@@ -383,6 +394,7 @@ class FilesystemSessionTranscriptStore:
 
     def __init__(self, base_path: Path | str | None = None) -> None:
         self._base = Path(base_path) if base_path is not None else _DEFAULT_BASE_PATH
+        self._revision_lock = threading.RLock()
 
     # -- helpers -------------------------------------------------------------
 
@@ -498,14 +510,21 @@ class FilesystemSessionTranscriptStore:
         session_id: str,
         messages: list[SessionMessageRecord],
     ) -> list[SessionMessageRecord]:
-        existing = self._read_messages(user_id, session_id)
-        by_key = {_message_dedupe_key(message): message for message in existing}
-        for message in messages:
-            if message.session_id == session_id:
-                by_key[_message_dedupe_key(message)] = message
-        merged = sorted(by_key.values(), key=_message_sort_key)
-        self._write_messages(user_id, session_id, merged)
-        return merged
+        with self._revision_lock:
+            record = self.get(user_id, session_id)
+            if record is None:
+                raise SessionStoreError("Session not found while appending messages.")
+            incoming = [message for message in messages if message.session_id == session_id]
+            merged = _merge_messages_without_deletion(
+                self._read_messages(user_id, session_id),
+                incoming,
+            )
+            return self.replace_messages_revisioned(
+                user_id,
+                session_id,
+                merged,
+                expected_revision=max(0, int(record.message_revision)),
+            ).messages
 
     def mark_session_ended(self, user_id: str, session_id: str) -> SessionRecord | None:
         return self.end(user_id, session_id)
@@ -590,9 +609,16 @@ class FilesystemSessionTranscriptStore:
         session_id: str,
         messages: list[SessionMessageRecord],
     ) -> list[SessionMessageRecord]:
-        filtered = [message for message in messages if message.session_id == session_id]
-        self._write_messages(user_id, session_id, filtered)
-        return sorted(filtered, key=_message_sort_key)
+        with self._revision_lock:
+            record = self.get(user_id, session_id)
+            if record is None:
+                raise SessionStoreError("Session not found while replacing messages.")
+            return self.replace_messages_revisioned(
+                user_id,
+                session_id,
+                messages,
+                expected_revision=max(0, int(record.message_revision)),
+            ).messages
 
     def replace_messages_revisioned(
         self,
@@ -602,61 +628,51 @@ class FilesystemSessionTranscriptStore:
         *,
         expected_revision: int,
     ) -> SessionMessageSnapshotResult:
-        record = self.get(user_id, session_id)
-        if record is None:
-            raise SessionStoreError("Session not found while admitting message snapshot.")
-        existing = self._read_messages(user_id, session_id)
-        current_revision = max(0, int(record.message_revision))
-        filtered = [message for message in messages if message.session_id == session_id]
+        with self._revision_lock:
+            record = self.get(user_id, session_id)
+            if record is None:
+                raise SessionStoreError("Session not found while admitting message snapshot.")
+            existing = self._read_messages(user_id, session_id)
+            current_revision = max(0, int(record.message_revision))
+            filtered = [message for message in messages if message.session_id == session_id]
+            canonical_incoming = _merge_messages_without_deletion([], filtered)
 
-        def merge_without_deletion(
-            left: list[SessionMessageRecord],
-            right: list[SessionMessageRecord],
-        ) -> list[SessionMessageRecord]:
-            merged: dict[tuple[str, str], SessionMessageRecord] = {}
-            for message in [*left, *right]:
-                key = _message_dedupe_key(message)
-                previous = merged.get(key)
-                merged[key] = message if previous is None else _prefer_message(previous, message)
-            return sorted(merged.values(), key=_message_sort_key)
+            if expected_revision != current_revision:
+                return SessionMessageSnapshotResult(
+                    messages=existing,
+                    previous_revision=current_revision,
+                    current_revision=current_revision,
+                    accepted=False,
+                    duplicate=canonical_incoming == existing,
+                    conflict=True,
+                    deleted_count=0,
+                    rejection_reason="revision_conflict",
+                )
 
-        if expected_revision != current_revision:
-            merged = merge_without_deletion(existing, filtered)
-            changed = merged != existing
-            next_revision = current_revision + (1 if changed else 0)
-            if changed:
-                self._write_messages(user_id, session_id, merged)
-                self.update(user_id, session_id, message_revision=next_revision)
+            if canonical_incoming == existing:
+                return SessionMessageSnapshotResult(
+                    messages=existing,
+                    previous_revision=current_revision,
+                    current_revision=current_revision,
+                    accepted=True,
+                    duplicate=True,
+                )
+            deleted_count = max(0, len(existing) - len(canonical_incoming))
+            next_revision = current_revision + 1
+            self._write_messages(user_id, session_id, canonical_incoming)
+            self.update(
+                user_id,
+                session_id,
+                message_revision=next_revision,
+                transcript_available=bool(canonical_incoming),
+            )
             return SessionMessageSnapshotResult(
-                messages=merged,
+                messages=canonical_incoming,
                 previous_revision=current_revision,
                 current_revision=next_revision,
-                accepted=False,
-                duplicate=not changed,
-                conflict=True,
-                deleted_count=0,
-            )
-
-        canonical_incoming = merge_without_deletion([], filtered)
-        if canonical_incoming == existing:
-            return SessionMessageSnapshotResult(
-                messages=existing,
-                previous_revision=current_revision,
-                current_revision=current_revision,
                 accepted=True,
-                duplicate=True,
+                deleted_count=deleted_count,
             )
-        deleted_count = max(0, len(existing) - len(canonical_incoming))
-        next_revision = current_revision + 1
-        self._write_messages(user_id, session_id, canonical_incoming)
-        self.update(user_id, session_id, message_revision=next_revision)
-        return SessionMessageSnapshotResult(
-            messages=canonical_incoming,
-            previous_revision=current_revision,
-            current_revision=next_revision,
-            accepted=True,
-            deleted_count=deleted_count,
-        )
 
     def append_message(
         self,
@@ -710,18 +726,12 @@ def _load_supabase_session_config() -> SupabaseSessionStoreConfig:
         if not value
     ]
     if missing:
-        raise SessionStoreConfigurationError(
-            "SOPHIA_SESSION_STORE=supabase requires backend env vars: "
-            + ", ".join(missing)
-        )
+        raise SessionStoreConfigurationError("SOPHIA_SESSION_STORE=supabase requires backend env vars: " + ", ".join(missing))
     return SupabaseSessionStoreConfig(
         url=url,
         service_role_key=service_role_key,
         sessions_table=os.getenv("SOPHIA_SESSIONS_TABLE", "sophia_sessions").strip() or "sophia_sessions",
-        messages_table=(
-            os.getenv("SOPHIA_SESSION_MESSAGES_TABLE", "sophia_session_messages").strip()
-            or "sophia_session_messages"
-        ),
+        messages_table=(os.getenv("SOPHIA_SESSION_MESSAGES_TABLE", "sophia_session_messages").strip() or "sophia_session_messages"),
     )
 
 
@@ -780,10 +790,7 @@ class SupabaseSessionTranscriptStore:
             raise SessionStoreError(f"Supabase session store request failed: {exc}") from exc
 
         if response.status_code >= 400:
-            raise SessionStoreError(
-                "Supabase session store request failed "
-                f"status={response.status_code} body={response.text[:200]!r}"
-            )
+            raise SessionStoreError(f"Supabase session store request failed status={response.status_code} body={response.text[:200]!r}")
 
         if not response.text:
             return None
@@ -865,54 +872,18 @@ class SupabaseSessionTranscriptStore:
             last_message_at=row.get("last_message_at") if isinstance(row.get("last_message_at"), str) else None,
             ended_at=row.get("ended_at") if isinstance(row.get("ended_at"), str) else None,
             recap_status=row.get("recap_status") if isinstance(row.get("recap_status"), str) else None,
-            checkpointer_available=(
-                bool(row.get("checkpointer_available"))
-                if row.get("checkpointer_available") is not None
-                else None
-            ),
+            checkpointer_available=(bool(row.get("checkpointer_available")) if row.get("checkpointer_available") is not None else None),
             transcript_available=bool(row.get("transcript_available")),
             memory_processed_until_sequence=int(row.get("memory_processed_until_sequence") or 0),
             recap_processed_until_sequence=int(row.get("recap_processed_until_sequence") or 0),
-            last_memory_extraction_at=(
-                row.get("last_memory_extraction_at")
-                if isinstance(row.get("last_memory_extraction_at"), str)
-                else None
-            ),
-            last_recap_extraction_at=(
-                row.get("last_recap_extraction_at")
-                if isinstance(row.get("last_recap_extraction_at"), str)
-                else None
-            ),
-            last_memory_extraction_run_id=(
-                row.get("last_memory_extraction_run_id")
-                if isinstance(row.get("last_memory_extraction_run_id"), str)
-                else None
-            ),
-            memory_extraction_status=(
-                row.get("memory_extraction_status")
-                if isinstance(row.get("memory_extraction_status"), str)
-                else None
-            ),
-            memory_extraction_error_code=(
-                row.get("memory_extraction_error_code")
-                if isinstance(row.get("memory_extraction_error_code"), str)
-                else None
-            ),
-            memory_extraction_range_start=(
-                int(row.get("memory_extraction_range_start"))
-                if row.get("memory_extraction_range_start") is not None
-                else None
-            ),
-            memory_extraction_range_end=(
-                int(row.get("memory_extraction_range_end"))
-                if row.get("memory_extraction_range_end") is not None
-                else None
-            ),
-            active_segment_started_at=(
-                row.get("active_segment_started_at")
-                if isinstance(row.get("active_segment_started_at"), str)
-                else None
-            ),
+            last_memory_extraction_at=(row.get("last_memory_extraction_at") if isinstance(row.get("last_memory_extraction_at"), str) else None),
+            last_recap_extraction_at=(row.get("last_recap_extraction_at") if isinstance(row.get("last_recap_extraction_at"), str) else None),
+            last_memory_extraction_run_id=(row.get("last_memory_extraction_run_id") if isinstance(row.get("last_memory_extraction_run_id"), str) else None),
+            memory_extraction_status=(row.get("memory_extraction_status") if isinstance(row.get("memory_extraction_status"), str) else None),
+            memory_extraction_error_code=(row.get("memory_extraction_error_code") if isinstance(row.get("memory_extraction_error_code"), str) else None),
+            memory_extraction_range_start=(int(row.get("memory_extraction_range_start")) if row.get("memory_extraction_range_start") is not None else None),
+            memory_extraction_range_end=(int(row.get("memory_extraction_range_end")) if row.get("memory_extraction_range_end") is not None else None),
+            active_segment_started_at=(row.get("active_segment_started_at") if isinstance(row.get("active_segment_started_at"), str) else None),
             segment_count=int(row.get("segment_count") or 1),
             continuation_count=int(row.get("continuation_count") or 0),
             message_revision=int(row.get("message_revision") or 0),
@@ -953,13 +924,7 @@ class SupabaseSessionTranscriptStore:
         content = row.get("content")
         if role == "sophia":
             role = "assistant"
-        if (
-            not isinstance(message_id, str)
-            or not isinstance(session_id, str)
-            or not isinstance(thread_id, str)
-            or role not in {"user", "assistant", "system", "tool", "artifact"}
-            or not isinstance(content, str)
-        ):
+        if not isinstance(message_id, str) or not isinstance(session_id, str) or not isinstance(thread_id, str) or role not in {"user", "assistant", "system", "tool", "artifact"} or not isinstance(content, str):
             return None
         return SessionMessageRecord(
             message_id=message_id,
@@ -972,11 +937,7 @@ class SupabaseSessionTranscriptStore:
             final=bool(row.get("final", True)),
             approximate=bool(row.get("approximate", False)),
             turn_id=row.get("turn_id") if isinstance(row.get("turn_id"), str) else None,
-            provider_event_id=(
-                row.get("provider_event_id")
-                if isinstance(row.get("provider_event_id"), str)
-                else None
-            ),
+            provider_event_id=(row.get("provider_event_id") if isinstance(row.get("provider_event_id"), str) else None),
             sequence=int(row.get("sequence") or 0),
             redaction_level=str(metadata.get("redaction_level") or "none"),
             metadata=dict(metadata),
@@ -1067,32 +1028,24 @@ class SupabaseSessionTranscriptStore:
         session_id: str,
         messages: list[SessionMessageRecord],
     ) -> list[SessionMessageRecord]:
-        records = [message for message in messages if message.session_id == session_id]
-        if not records:
-            return self.list_messages(user_id, session_id)
-        rows = [self._message_row_from_record(user_id, message) for message in records]
-        self._request(
-            "POST",
-            self._config.messages_table,
-            params={"on_conflict": "id"},
-            json_body=rows,
-            prefer="resolution=merge-duplicates,return=minimal",
-        )
-        last_message_at = max((message.created_at for message in records if message.created_at), default=None)
-        patch: dict[str, object] = {
-            "transcript_available": True,
-            "updated_at": _now_iso(),
-        }
-        if last_message_at:
-            patch["last_message_at"] = last_message_at
-        self._request(
-            "PATCH",
-            self._config.sessions_table,
-            params={"id": f"eq.{session_id}", "user_id": f"eq.{user_id}"},
-            json_body=patch,
-            prefer="return=minimal",
-        )
-        return self.list_messages(user_id, session_id)
+        incoming = [message for message in messages if message.session_id == session_id]
+        for _attempt in range(_AUTHORITATIVE_WRITE_RETRIES):
+            record = self.get_session(user_id, session_id)
+            if record is None:
+                raise SessionStoreError("Session not found while appending messages.")
+            merged = _merge_messages_without_deletion(
+                self.list_messages(user_id, session_id),
+                incoming,
+            )
+            result = self.replace_messages_revisioned(
+                user_id,
+                session_id,
+                merged,
+                expected_revision=max(0, int(record.message_revision)),
+            )
+            if not result.conflict:
+                return result.messages
+        raise SessionStoreError("Concurrent transcript updates prevented an authoritative append.")
 
     def replace_messages(
         self,
@@ -1101,44 +1054,19 @@ class SupabaseSessionTranscriptStore:
         messages: list[SessionMessageRecord],
     ) -> list[SessionMessageRecord]:
         records = [message for message in messages if message.session_id == session_id]
-        if not records:
-            return self.list_messages(user_id, session_id)
-
-        rows = [self._message_row_from_record(user_id, message) for message in records]
-        canonical_row_ids = [str(row["id"]) for row in rows]
-        self._request(
-            "POST",
-            self._config.messages_table,
-            params={"on_conflict": "id"},
-            json_body=rows,
-            prefer="resolution=merge-duplicates,return=minimal",
-        )
-        self._request(
-            "DELETE",
-            self._config.messages_table,
-            params={
-                "session_id": f"eq.{session_id}",
-                "user_id": f"eq.{user_id}",
-                "id": f"not.in.{self._text_in_filter(canonical_row_ids)}",
-            },
-            prefer="return=minimal",
-        )
-
-        last_message_at = max((message.created_at for message in records if message.created_at), default=None)
-        patch: dict[str, object] = {
-            "transcript_available": True,
-            "updated_at": _now_iso(),
-        }
-        if last_message_at:
-            patch["last_message_at"] = last_message_at
-        self._request(
-            "PATCH",
-            self._config.sessions_table,
-            params={"id": f"eq.{session_id}", "user_id": f"eq.{user_id}"},
-            json_body=patch,
-            prefer="return=minimal",
-        )
-        return self.list_messages(user_id, session_id)
+        for _attempt in range(_AUTHORITATIVE_WRITE_RETRIES):
+            record = self.get_session(user_id, session_id)
+            if record is None:
+                raise SessionStoreError("Session not found while replacing messages.")
+            result = self.replace_messages_revisioned(
+                user_id,
+                session_id,
+                records,
+                expected_revision=max(0, int(record.message_revision)),
+            )
+            if not result.conflict:
+                return result.messages
+        raise SessionStoreError("Concurrent transcript updates prevented an authoritative replace.")
 
     def replace_messages_revisioned(
         self,
@@ -1173,6 +1101,7 @@ class SupabaseSessionTranscriptStore:
             duplicate=bool(receipt.get("duplicate")),
             conflict=bool(receipt.get("conflict")),
             deleted_count=int(receipt.get("deleted_count") or 0),
+            rejection_reason=(str(receipt["rejection_reason"]) if receipt.get("rejection_reason") else None),
         )
 
     def list_messages(self, user_id: str, session_id: str) -> list[SessionMessageRecord]:
@@ -1257,11 +1186,7 @@ class SupabaseSessionTranscriptStore:
         return self.append_or_upsert_messages(user_id, session_id, [message])
 
     def list_open(self, user_id: str) -> list[SessionRecord]:
-        return [
-            record
-            for record in self.list_sessions(user_id)
-            if record.status in {"open", "paused", "active", "resumable"}
-        ]
+        return [record for record in self.list_sessions(user_id) if record.status in {"open", "paused", "active", "resumable"}]
 
     def list_recent(self, user_id: str, limit: int = 30) -> list[SessionRecord]:
         return self.list_sessions(user_id)[:limit]
@@ -1295,15 +1220,10 @@ def SessionStore(
 
     if selected == "filesystem":
         if _is_production_runtime() and not _truthy_env(os.getenv("SOPHIA_ALLOW_FILESYSTEM_SESSION_STORE_IN_PRODUCTION")):
-            raise SessionStoreConfigurationError(
-                "Production runtime requires SOPHIA_SESSION_STORE=supabase; "
-                "filesystem session transcripts are not durable on Render."
-            )
+            raise SessionStoreConfigurationError("Production runtime requires SOPHIA_SESSION_STORE=supabase; filesystem session transcripts are not durable on Render.")
         return FilesystemSessionTranscriptStore()
 
     if selected == "supabase":
         return SupabaseSessionTranscriptStore(client=client)
 
-    raise SessionStoreConfigurationError(
-        "SOPHIA_SESSION_STORE must be one of: filesystem, supabase"
-    )
+    raise SessionStoreConfigurationError("SOPHIA_SESSION_STORE must be one of: filesystem, supabase")
