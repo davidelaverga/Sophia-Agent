@@ -3,6 +3,8 @@ from __future__ import annotations
 from pathlib import Path
 from typing import Any
 
+import pytest
+
 from voice.realtime.gemini_live import build_gemini_live_setup_config
 from voice.realtime.gemini_memory_context import (
     build_gemini_live_memory_context,
@@ -284,6 +286,35 @@ def test_gemini_live_spoken_turn_policy_contains_required_rules() -> None:
         "repair silently through the structured tool path",
     ]:
         assert expected in overlay
+
+
+@pytest.mark.parametrize(
+    ("google_search_enabled", "web_fetch_enabled"),
+    [
+        (False, False),
+        (False, True),
+        (True, False),
+        (True, True),
+    ],
+)
+def test_gemini_live_web_prompt_overlay_matches_independent_capability_switches(
+    google_search_enabled: bool,
+    web_fetch_enabled: bool,
+) -> None:
+    overlay = build_gemini_live_spoken_turn_policy_overlay(
+        google_search_enabled=google_search_enabled,
+        web_fetch_enabled=web_fetch_enabled,
+    )
+
+    assert (
+        "You can search the current public web with Google Search." in overlay
+    ) is google_search_enabled
+    assert (
+        "Use web_fetch when" in overlay or "use web_fetch to read" in overlay
+    ) is web_fetch_enabled
+    if not google_search_enabled and not web_fetch_enabled:
+        assert "Google Search" not in overlay
+        assert "web_fetch" not in overlay
 
 
 def test_realtime_memory_recall_guidance_contains_epistemic_rules() -> None:

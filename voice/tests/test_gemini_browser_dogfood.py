@@ -582,6 +582,7 @@ def test_gemini_tool_declarations_align_with_prompt_and_use_dependency_safe_cont
     tool_declarations = declarations[0]["functionDeclarations"]
     assert declarations[1] == {"googleSearch": {}}
     assert [tool["name"] for tool in tool_declarations] == EXPECTED_GEMINI_TOOL_NAMES
+    assert set(EXPECTED_GEMINI_TOOL_NAMES) <= gemini_tool_loop.GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES
     assert "consult_skill" not in [tool["name"] for tool in tool_declarations]
     assert "consult_skill" not in json.dumps(declarations)
     assert "sophia_tool_probe" not in json.dumps(declarations)
@@ -655,6 +656,37 @@ def test_gemini_tool_declarations_align_with_prompt_and_use_dependency_safe_cont
     assert "deepagents" not in json.dumps(tool_declarations).lower()
 
 
+@pytest.mark.parametrize(
+    ("google_search_enabled", "web_fetch_enabled"),
+    [
+        (False, False),
+        (False, True),
+        (True, False),
+        (True, True),
+    ],
+)
+def test_gemini_web_tool_declarations_follow_independent_switches(
+    monkeypatch: pytest.MonkeyPatch,
+    google_search_enabled: bool,
+    web_fetch_enabled: bool,
+) -> None:
+    _make_backend_emit_artifact_import_fail(monkeypatch)
+
+    declarations = gemini_dogfood_tool_declarations(
+        google_search_enabled=google_search_enabled,
+        web_fetch_enabled=web_fetch_enabled,
+        include_coreview=False,
+    )
+
+    function_names = {
+        str(declaration["name"])
+        for declaration in declarations[0]["functionDeclarations"]
+    }
+    assert ("web_fetch" in function_names) is web_fetch_enabled
+    assert ({"googleSearch": {}} in declarations) is google_search_enabled
+    assert function_names <= gemini_tool_loop.GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES
+
+
 @pytest.mark.anyio
 async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_default_runtime(
     monkeypatch: pytest.MonkeyPatch,
@@ -696,7 +728,7 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
     assert fake_minter.requests[0]["setup"]["outputAudioTranscription"] == {}
     assert fake_minter.requests[0]["setup"]["tools"][1] == {"googleSearch": {}}
     assert set(fake_minter.requests[0]["field_mask"].split(",")) == (
-        set(fake_minter.requests[0]["setup"]) - {"sessionResumption"}
+        set(fake_minter.requests[0]["setup"]) - {"sessionResumption", "tools"}
     )
     assert "sessionResumption" in payload["setup"]
     assert (
@@ -784,7 +816,112 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
 
 
 @pytest.mark.anyio
-async def test_ephemeral_token_request_only_embeds_fields_named_by_field_mask(
+@pytest.mark.parametrize(
+    ("continuity_enabled", "compression_enabled"),
+    [
+        (False, False),
+        (False, True),
+        (True, False),
+        (True, True),
+    ],
+)
+async def test_production_browser_setup_applies_continuity_and_compression_independently(
+    monkeypatch: pytest.MonkeyPatch,
+    continuity_enabled: bool,
+    compression_enabled: bool,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    monkeypatch.setenv(
+        "SOPHIA_GEMINI_LIVE_CONTINUITY_ENABLED",
+        "true" if continuity_enabled else "false",
+    )
+    monkeypatch.setenv(
+        "SOPHIA_GEMINI_LIVE_COMPRESSION_ENABLED",
+        "true" if compression_enabled else "false",
+    )
+    _make_backend_emit_artifact_import_fail(monkeypatch)
+    fake_minter = FakeGeminiTokenMinter()
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=fake_minter,  # type: ignore[arg-type]
+    )
+    session_id = f"browser-flags-{int(continuity_enabled)}-{int(compression_enabled)}"
+
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id=session_id,
+    )
+    setup = browser_session.setup
+
+    assert ("sessionResumption" in setup) is continuity_enabled
+    assert ("contextWindowCompression" in setup) is compression_enabled
+    await manager.close_session(session_id)
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("google_search_enabled", "web_fetch_enabled"),
+    [
+        (False, False),
+        (False, True),
+        (True, False),
+        (True, True),
+    ],
+)
+async def test_production_browser_setup_applies_web_capability_matrix(
+    monkeypatch: pytest.MonkeyPatch,
+    google_search_enabled: bool,
+    web_fetch_enabled: bool,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    monkeypatch.setenv(
+        "SOPHIA_GEMINI_LIVE_GOOGLE_SEARCH_ENABLED",
+        "true" if google_search_enabled else "false",
+    )
+    monkeypatch.setenv(
+        "SOPHIA_GEMINI_LIVE_WEB_FETCH_ENABLED",
+        "true" if web_fetch_enabled else "false",
+    )
+    _make_backend_emit_artifact_import_fail(monkeypatch)
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+    session_id = f"browser-web-{int(google_search_enabled)}-{int(web_fetch_enabled)}"
+
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id=session_id,
+    )
+    tools = browser_session.setup["tools"]
+    function_names = {
+        str(declaration["name"])
+        for tool in tools
+        if isinstance(tool, Mapping)
+        for declaration in tool.get("functionDeclarations", [])
+        if isinstance(declaration, Mapping)
+    }
+    prompt = browser_session.setup["systemInstruction"]["parts"][0]["text"]
+    spoken_overlay = prompt.split("<gemini_live_spoken_turn_policy>", 1)[1].split(
+        "</gemini_live_spoken_turn_policy>",
+        1,
+    )[0]
+
+    assert ({"googleSearch": {}} in tools) is google_search_enabled
+    assert ("web_fetch" in function_names) is web_fetch_enabled
+    assert (
+        "You can search the current public web with Google Search." in spoken_overlay
+    ) is google_search_enabled
+    assert (
+        "Use web_fetch when" in spoken_overlay or "use web_fetch to read" in spoken_overlay
+    ) is web_fetch_enabled
+    await manager.close_session(session_id)
+
+
+@pytest.mark.anyio
+async def test_token_locked_fields_are_byte_equivalent_to_connection_setup(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     requests = _patch_gemini_token_response(
@@ -799,9 +936,7 @@ async def test_ephemeral_token_request_only_embeds_fields_named_by_field_mask(
         "sessionResumption": {"handle": "browser-only-secret"},
         "contextWindowCompression": {"slidingWindow": {}},
     }
-    field_mask = (
-        "model,generationConfig,systemInstruction,tools,contextWindowCompression"
-    )
+    field_mask = gemini_browser_dogfood._server_owned_token_field_mask(setup)
 
     token = await GeminiLiveEphemeralTokenMinter(
         url="https://example.test/v1alpha/auth_tokens",
@@ -816,7 +951,29 @@ async def test_ephemeral_token_request_only_embeds_fields_named_by_field_mask(
     body = requests[0]["json"]
     assert body["fieldMask"] == field_mask
     assert set(body["bidiGenerateContentSetup"]) == set(field_mask.split(","))
+    connection_setup = json.loads(json.dumps(setup))
+    connection_setup["tools"] = [
+        {"functionDeclarations": [{"name": "coreview_set_view"}]},
+        {"googleSearch": {}},
+    ]
+    connection_setup["sessionResumption"] = {"handle": "browser-connection-secret"}
+    for field_name in field_mask.split(","):
+        token_bytes = json.dumps(
+            body["bidiGenerateContentSetup"][field_name],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        connection_bytes = json.dumps(
+            connection_setup[field_name],
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+        assert token_bytes == connection_bytes
     assert "sessionResumption" not in body["bidiGenerateContentSetup"]
+    assert "tools" not in body["bidiGenerateContentSetup"]
+    assert connection_setup["tools"] != setup["tools"]
     assert setup["sessionResumption"] == {"handle": "browser-only-secret"}
 
 
@@ -850,7 +1007,7 @@ async def test_browser_continuation_bootstrap_is_epoch_guarded_and_field_masked(
     assert next_session.provider_connection_epoch == 2
     continuation_request = fake_minter.requests[-1]
     assert set(continuation_request["field_mask"].split(",")) == (
-        set(continuation_request["setup"]) - {"sessionResumption"}
+        set(continuation_request["setup"]) - {"sessionResumption", "tools"}
     )
     assert "sessionResumption" in next_session.setup
     with pytest.raises(GeminiBrowserRelayError, match="Continuation epoch conflict"):
@@ -866,6 +1023,74 @@ async def test_browser_continuation_bootstrap_is_epoch_guarded_and_field_masked(
     assert diagnostics.continuation_bootstrap_successes == 1
     assert diagnostics.continuation_bootstrap_conflicts == 1
     await manager.close_session(browser_session.dogfood_session.session_id)
+
+
+@pytest.mark.anyio
+async def test_production_setup_fingerprint_tracks_ownership_flags_and_provider_epoch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    _set_gemini_continuity_env(monkeypatch)
+    monkeypatch.setenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "fingerprint-test-secret")
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a793100008f7ccb5a25e9e018f896e7ec9dc2a3d")
+    _make_backend_emit_artifact_import_fail(monkeypatch)
+    captured_traces: list[object] = []
+
+    class CapturingTraceRecorder:
+        enabled = True
+        audio_capture_enabled = False
+        trace_id = "trace-fingerprint-1"
+
+        def __init__(self, **kwargs: object) -> None:
+            self.fingerprints = [dict(kwargs["setup_fingerprint"])]  # type: ignore[arg-type]
+            self.closed = False
+            captured_traces.append(self)
+
+        def update_setup_fingerprint(self, fingerprint: Mapping[str, Any]) -> None:
+            self.fingerprints.append(dict(fingerprint))
+
+        def close(self, **_: object) -> None:
+            self.closed = True
+
+    monkeypatch.setattr(
+        gemini_browser_dogfood,
+        "GeminiLiveTraceRecorder",
+        CapturingTraceRecorder,
+    )
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-fingerprint",
+    )
+    await manager.continue_browser_session(
+        _gemini_settings(),
+        dogfood_session_id=browser_session.dogfood_session.session_id,
+        expected_epoch=1,
+        handle_present=True,
+        secret_generation=1,
+    )
+
+    trace = captured_traces[0]
+    first, second = trace.fingerprints  # type: ignore[attr-defined]
+    assert first["deployment_sha"] == "a793100008f7ccb5a25e9e018f896e7ec9dc2a3d"
+    assert first["provider_epoch"] == 1
+    assert second["provider_epoch"] == 2
+    assert first["field_ownership"]["tools"] == "browser"
+    assert first["field_ownership"]["sessionResumption"] == "browser"
+    assert "tools" not in first["token_owned_fields"]
+    assert first["effective_flags"]["continuity_enabled"] is True
+    assert first["effective_flags"]["compression_enabled"] is True
+    assert first["effective_flags"]["google_search_enabled"] is True
+    assert first["effective_flags"]["web_fetch_enabled"] is True
+    assert first["compression"]["triggered"] is None
+    assert all(first["hashes"].values())
+
+    await manager.close_session(browser_session.dogfood_session.session_id)
+    assert trace.closed is True  # type: ignore[attr-defined]
 
 
 @pytest.mark.anyio
@@ -892,6 +1117,164 @@ async def test_trace_finalizer_runs_when_provider_close_raises() -> None:
 
     assert trace.closed is True
     assert "browser-gemini-close-error" not in manager._traces_by_session
+
+
+@pytest.mark.anyio
+async def test_trace_constructor_failure_does_not_fail_voice_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+
+    class ExplodingTraceRecorder:
+        def __init__(self, **_: object) -> None:
+            raise RuntimeError("LangSmith constructor failed")
+
+    monkeypatch.setattr(
+        gemini_browser_dogfood,
+        "GeminiLiveTraceRecorder",
+        ExplodingTraceRecorder,
+    )
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-trace-constructor-failure",
+    )
+
+    assert browser_session.langsmith_trace_id is None
+    assert browser_session.audio_capture_enabled is False
+    diagnostics = manager._diagnostics_by_session[browser_session.dogfood_session.session_id]
+    assert diagnostics.trace_export_failures == 1
+    assert manager._realtime_sessions.get_session(browser_session.dogfood_session.session_id) is not None
+    await manager.close_session(browser_session.dogfood_session.session_id)
+
+
+@pytest.mark.anyio
+async def test_trace_provider_event_failure_does_not_suppress_event_application(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+
+    class EventFailingTrace:
+        enabled = True
+
+        def record_provider_event(self, *_: object, **__: object) -> None:
+            raise RuntimeError("LangSmith event failed")
+
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-trace-event-failure",
+    )
+    session_id = browser_session.dogfood_session.session_id
+    manager._traces_by_session[session_id] = EventFailingTrace()  # type: ignore[assignment]
+
+    response = await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=session_id,
+        event={"setupComplete": {}},
+    )
+
+    assert response["accepted"] is True
+    assert response["diagnostics"]["provider_events_pushed_into_mapper"] == 1
+    assert response["diagnostics"]["trace_export_failures"] == 1
+    assert session_id not in manager._traces_by_session
+    await manager.close_session(session_id)
+
+
+@pytest.mark.anyio
+async def test_trace_tool_span_failure_does_not_suppress_tool_or_public_delivery(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+
+    class ToolFailingTrace:
+        enabled = True
+
+        def record_provider_event(self, *_: object, **__: object) -> None:
+            return None
+
+        def start_tool_call(self, **_: object) -> None:
+            raise RuntimeError("LangSmith tool span failed")
+
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-trace-tool-failure",
+    )
+    session_id = browser_session.dogfood_session.session_id
+    manager._traces_by_session[session_id] = ToolFailingTrace()  # type: ignore[assignment]
+
+    response = await manager.ingest_browser_provider_event(
+        _gemini_settings(),
+        dogfood_session_id=session_id,
+        event={
+            "toolCall": {
+                "functionCalls": [
+                    {
+                        "id": "artifact-trace-failure-1",
+                        "name": GEMINI_EMIT_ARTIFACT_TOOL_NAME,
+                        "args": _artifact_payload(),
+                    }
+                ]
+            }
+        },
+    )
+
+    assert response["accepted"] is True
+    assert response["client_actions"][0]["type"] == "gemini_tool_response"
+    assert response["diagnostics"]["artifact_public_event_emitted_count"] == 1
+    assert response["diagnostics"]["trace_export_failures"] == 1
+    payloads = await browser_session.dogfood_session.wait_for_public_payloads(3)
+    assert any(payload["type"] == "sophia.artifact" for payload in payloads)
+    await manager.close_session(session_id)
+
+
+@pytest.mark.anyio
+async def test_trace_close_failure_does_not_suppress_provider_teardown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+
+    class CloseFailingTrace:
+        def close(self, **_: object) -> None:
+            raise RuntimeError("LangSmith close failed")
+
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+    browser_session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="user-1",
+        session_id="browser-gemini-trace-close-failure",
+    )
+    session_id = browser_session.dogfood_session.session_id
+    manager._traces_by_session[session_id] = CloseFailingTrace()  # type: ignore[assignment]
+    failures: list[tuple[str, str]] = []
+    original_record_failure = manager._record_trace_failure
+
+    def record_failure(failed_session_id: str, operation: str, exc: Exception) -> None:
+        failures.append((operation, exc.__class__.__name__))
+        original_record_failure(failed_session_id, operation, exc)
+
+    monkeypatch.setattr(manager, "_record_trace_failure", record_failure)
+
+    assert await manager.close_session(session_id) is True
+    assert manager._realtime_sessions.get_session(session_id) is None
+    assert failures == [("close", "RuntimeError")]
 
 
 @pytest.mark.anyio
@@ -3190,7 +3573,7 @@ def test_gemini_browser_endpoint_reports_tool_declaration_configuration_errors(
     )
     monkeypatch.setattr(voice_server, "get_settings", _gemini_settings)
 
-    def broken_declaration() -> list[dict[str, object]]:
+    def broken_declaration(**_: object) -> list[dict[str, object]]:
         raise sophia_backend_tools.SophiaBackendToolConfigurationError("contract unavailable")
 
     monkeypatch.setattr(

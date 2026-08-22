@@ -69,6 +69,7 @@ def test_normal_voice_tool_declarations_unchanged_when_flag_off(monkeypatch) -> 
         "cancel_async_task",
         "list_async_tasks",
         "retrieve_memories",
+        "web_fetch",
     ]
     assert GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME not in names
     assert GEMINI_COREVIEW_ACTION_TOOL_NAMES.isdisjoint(names)

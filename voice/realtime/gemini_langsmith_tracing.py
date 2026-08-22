@@ -18,11 +18,13 @@ from __future__ import annotations
 import logging
 import hashlib
 import hmac
+import json
 import os
 import re
 import time
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
+from functools import wraps
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -42,6 +44,12 @@ MAX_TRACE_LIST_ITEMS = 24
 MAX_TRACE_DEPTH = 8
 MAX_AUDIO_ATTACHMENT_BYTES = 20 * 1024 * 1024
 _LANGSMITH_HANDOFF_HEADER_NAMES = frozenset({"langsmith-trace", "baggage"})
+_DEPLOYMENT_SHA_ENV_NAMES = (
+    "SOPHIA_DEPLOYMENT_SHA",
+    "RENDER_GIT_COMMIT",
+    "GIT_COMMIT_SHA",
+    "COMMIT_SHA",
+)
 _BUILDER_LIFECYCLE_TOOLS = frozenset(
     {
         "start_builder_task",
@@ -398,6 +406,205 @@ def _builder_gate_records(
     return gates
 
 
+def _canonical_json_text(value: Any) -> str:
+    return json.dumps(
+        value,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        default=str,
+    )
+
+
+def _privacy_safe_hash(label: str, value: str) -> str | None:
+    secret = os.getenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "").encode()
+    if not secret:
+        return None
+    digest = hmac.new(secret, f"{label}:".encode() + value.encode(), hashlib.sha256).hexdigest()
+    return f"hmac_sha256_{digest}"
+
+
+def _deployment_sha() -> str | None:
+    for env_name in _DEPLOYMENT_SHA_ENV_NAMES:
+        value = _string_value(os.getenv(env_name))
+        if value:
+            return value[:128]
+    return None
+
+
+def _setup_prompt_text(setup: Mapping[str, Any]) -> str | None:
+    instruction = _mapping_value(setup, "systemInstruction", "system_instruction")
+    if instruction is None:
+        return None
+    parts = instruction.get("parts")
+    if not isinstance(parts, list):
+        return None
+    texts = [
+        text
+        for part in parts
+        if isinstance(part, Mapping)
+        for text in [_string_value(part.get("text"))]
+        if text is not None
+    ]
+    return "\n".join(texts) if texts else None
+
+
+def _setup_voice_name(setup: Mapping[str, Any]) -> str | None:
+    generation_config = _mapping_value(setup, "generationConfig", "generation_config")
+    if generation_config is None:
+        return None
+    speech_config = _mapping_value(generation_config, "speechConfig", "speech_config")
+    if speech_config is None:
+        return None
+    voice_config = _mapping_value(speech_config, "voiceConfig", "voice_config")
+    if voice_config is None:
+        return None
+    prebuilt = _mapping_value(voice_config, "prebuiltVoiceConfig", "prebuilt_voice_config")
+    if prebuilt is None:
+        return None
+    return _string_value(prebuilt.get("voiceName", prebuilt.get("voice_name")))
+
+
+def _setup_tool_names(setup: Mapping[str, Any]) -> list[str]:
+    tools = setup.get("tools")
+    if not isinstance(tools, list):
+        return []
+    names: list[str] = []
+    for tool in tools:
+        if not isinstance(tool, Mapping):
+            continue
+        if "googleSearch" in tool or "google_search" in tool:
+            names.append("googleSearch")
+        declarations = tool.get("functionDeclarations", tool.get("function_declarations"))
+        if not isinstance(declarations, list):
+            continue
+        for declaration in declarations:
+            if not isinstance(declaration, Mapping):
+                continue
+            name = _string_value(declaration.get("name"))
+            if name:
+                names.append(name)
+    return names
+
+
+def build_gemini_live_setup_fingerprint(
+    setup: Mapping[str, Any],
+    *,
+    token_owned_fields: list[str] | tuple[str, ...] | set[str],
+    browser_owned_fields: list[str] | tuple[str, ...] | set[str],
+    provider_epoch: int,
+    configured_flags: Mapping[str, bool] | None = None,
+    compression_triggered: bool | None = None,
+) -> dict[str, Any]:
+    """Describe an effective setup without exporting prompt or tool contents."""
+
+    setup_copy = dict(setup)
+    setup_fields = sorted(str(field_name) for field_name in setup_copy)
+    token_fields = sorted(
+        str(field_name)
+        for field_name in token_owned_fields
+        if str(field_name) in setup_copy
+    )
+    browser_fields = sorted({str(field_name) for field_name in browser_owned_fields})
+    token_setup = {field_name: setup_copy[field_name] for field_name in token_fields}
+    tools = setup_copy.get("tools") if isinstance(setup_copy.get("tools"), list) else []
+    prompt = _setup_prompt_text(setup_copy)
+    tool_names = _setup_tool_names(setup_copy)
+    canonical_setup = _canonical_json_text(setup_copy)
+    canonical_token_setup = _canonical_json_text(token_setup)
+    canonical_tools = _canonical_json_text(tools)
+    configured = {
+        str(name): bool(value)
+        for name, value in (configured_flags or {}).items()
+    }
+    effective_flags = {
+        "continuity_enabled": "sessionResumption" in setup_copy,
+        "compression_enabled": "contextWindowCompression" in setup_copy,
+        "google_search_enabled": "googleSearch" in tool_names,
+        "web_fetch_enabled": "web_fetch" in tool_names,
+    }
+    for name in ("coreview_enabled", "coreview_still_frame_enabled"):
+        if name in configured:
+            effective_flags[name] = configured[name]
+    compression_configured = configured.get(
+        "compression_enabled",
+        effective_flags["compression_enabled"],
+    )
+    return {
+        "schema": "sophia_gemini_live_effective_setup_v1",
+        "deployment_sha": _deployment_sha(),
+        "model": _string_value(setup_copy.get("model")),
+        "voice": _setup_voice_name(setup_copy),
+        "provider_epoch": max(int(provider_epoch), 1),
+        "setup_field_names": setup_fields,
+        "token_owned_fields": token_fields,
+        "browser_owned_fields": browser_fields,
+        "field_ownership": {
+            field_name: "browser" if field_name in browser_fields else "token"
+            for field_name in setup_fields
+        },
+        "effective_flags": effective_flags,
+        "configured_flags": configured,
+        "compression": {
+            "configured": compression_configured,
+            "effective_in_setup": effective_flags["compression_enabled"],
+            "triggered": compression_triggered,
+            "trigger_observation": (
+                "explicit_provider_signal"
+                if compression_triggered is not None
+                else "not_exposed_by_gemini_live_server_events"
+            ),
+        },
+        "hash_algorithm": (
+            "hmac-sha256"
+            if os.getenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "").strip()
+            else "unavailable_missing_hmac_secret"
+        ),
+        "setup_hash_scope": "server_baseline_before_browser_owned_overrides",
+        "token_setup_hash_scope": "effective_token_locked_connection_fields",
+        "tools_hash_scope": "server_baseline_browser_owned",
+        "hashes": {
+            "setup": _privacy_safe_hash("gemini_live_setup", canonical_setup),
+            "token_setup": _privacy_safe_hash("gemini_live_token_setup", canonical_token_setup),
+            "tools": _privacy_safe_hash("gemini_live_tools", canonical_tools),
+            "prompt": (
+                _privacy_safe_hash("gemini_live_prompt", prompt)
+                if prompt is not None
+                else None
+            ),
+        },
+        "character_counts": {
+            "setup": len(canonical_setup),
+            "token_setup": len(canonical_token_setup),
+            "tools": len(canonical_tools),
+            "prompt": len(prompt) if prompt is not None else None,
+        },
+        "tool_declaration_count": len(tool_names),
+        "tool_names": tool_names,
+    }
+
+
+def _fail_open_trace_operation(
+    default_factory: Callable[[], Any] | None = None,
+) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
+    fallback = default_factory or (lambda: None)
+
+    def decorator(operation: Callable[..., Any]) -> Callable[..., Any]:
+        @wraps(operation)
+        def wrapped(self: Any, *args: Any, **kwargs: Any) -> Any:
+            if not self.enabled or self.root is None or self._closed:
+                return fallback()
+            try:
+                return operation(self, *args, **kwargs)
+            except Exception as exc:
+                self._disable_tracing(operation.__name__, exc)
+                return fallback()
+
+        return wrapped
+
+    return decorator
+
+
 class GeminiLiveTraceRecorder:
     """Own a single LangSmith root and its manual Gemini Live child spans."""
 
@@ -410,21 +617,21 @@ class GeminiLiveTraceRecorder:
         thread_id: str | None = None,
         client: Any | None = None,
         enabled: bool | None = None,
+        setup_fingerprint: Mapping[str, Any] | None = None,
+        failure_callback: Callable[[str, Exception], None] | None = None,
     ) -> None:
-        requested = langsmith_gemini_live_enabled() if enabled is None else enabled
-        self.enabled = bool(
-            requested
-            and Client is not None
-            and RunTree is not None
-            and Attachment is not None
-        )
         self.session_id = session_id
         self.user_id = user_id
         self.thread_id = thread_id or session_id
         self.model = model
         self.root: Any | None = None
         self.client = client
+        self.enabled = False
+        self.audio_capture_enabled = False
         self._closed = False
+        self._failure_callback = failure_callback
+        self._failure_count = 0
+        self._disabled_operation: str | None = None
         self._event_count = 0
         self._tool_count = 0
         self._last_provider_sequence: int | None = None
@@ -433,6 +640,7 @@ class GeminiLiveTraceRecorder:
         self._last_ready_claim_text: str | None = None
         self._ready_claim_count = 0
         self._false_ready_claim_count = 0
+        self._setup_fingerprint = dict(setup_fingerprint or {})
         self.trace_schema = os.getenv(
             "SOPHIA_GEMINI_LIVE_TRACE_SCHEMA",
             "sophia_gemini_live_trace_v2",
@@ -441,75 +649,111 @@ class GeminiLiveTraceRecorder:
             "SOPHIA_GEMINI_LIVE_TRACE_CONTENT_MODE",
             "structural",
         ).strip().lower() or "structural"
-        hmac_secret = os.getenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "").encode()
-        self.audio_capture_enabled = bool(
-            self.enabled
-            and (
-                _env_bool("SOPHIA_GEMINI_LIVE_AUDIO_CAPTURE_ENABLED", False)
-                or not hmac_secret
+        try:
+            requested = langsmith_gemini_live_enabled() if enabled is None else enabled
+            self.enabled = bool(
+                requested
+                and Client is not None
+                and RunTree is not None
+                and Attachment is not None
             )
-        )
-
-        if not self.enabled:
-            return
-
-        if self.client is None:
-            self.client = Client(
-                api_url=os.getenv("LANGSMITH_ENDPOINT") or None,
-                api_key=os.getenv("LANGSMITH_API_KEY") or None,
-                workspace_id=os.getenv("LANGSMITH_WORKSPACE_ID") or None,
+            hmac_secret = os.getenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "").encode()
+            self.audio_capture_enabled = bool(
+                self.enabled
+                and (
+                    _env_bool("SOPHIA_GEMINI_LIVE_AUDIO_CAPTURE_ENABLED", False)
+                    or not hmac_secret
+                )
             )
 
-        logical_session_ref = _pseudonym(hmac_secret, "logical_session", session_id)
-        thread_ref = _pseudonym(hmac_secret, "thread", self.thread_id)
-        runtime_ref = _pseudonym(hmac_secret, "voice_runtime", session_id)
-        metadata = {
-            "ls_modality": "audio",
-            "trace_schema_version": self.trace_schema,
-            "runtime": "gemini_live",
-            "transport": "browser_websocket_ephemeral_token_with_backend_relay",
-            "logical_session_ref": logical_session_ref,
-            "thread_ref": thread_ref,
-            "voice_runtime_ref": runtime_ref,
-            "model": model,
-            "continuity_feature_enabled": _env_bool("SOPHIA_GEMINI_LIVE_CONTINUITY_ENABLED", False),
-            "compression_enabled": _env_bool("SOPHIA_GEMINI_LIVE_COMPRESSION_ENABLED", False),
-            "trace_content_mode": self.content_mode,
-            "audio_capture_enabled": self.audio_capture_enabled,
-            "input_transcription_enabled": True,
-            "output_transcription_enabled": True,
-        }
-        if not hmac_secret:
-            metadata["thread_id"] = self.thread_id
-        self.root = RunTree(
-            name="gemini_live_conversation",
-            id=uuid7(),
-            run_type="chain",
-            project_name=os.getenv("SOPHIA_GEMINI_LIVE_LANGSMITH_PROJECT")
-            or "Sophia-Gemini-Live-Voice",
-            inputs={
+            if not self.enabled:
+                return
+
+            if self.client is None:
+                self.client = Client(
+                    api_url=os.getenv("LANGSMITH_ENDPOINT") or None,
+                    api_key=os.getenv("LANGSMITH_API_KEY") or None,
+                    workspace_id=os.getenv("LANGSMITH_WORKSPACE_ID") or None,
+                )
+
+            logical_session_ref = _pseudonym(hmac_secret, "logical_session", session_id)
+            thread_ref = _pseudonym(hmac_secret, "thread", self.thread_id)
+            runtime_ref = _pseudonym(hmac_secret, "voice_runtime", session_id)
+            metadata = {
+                "ls_modality": "audio",
                 "trace_schema_version": self.trace_schema,
+                "runtime": "gemini_live",
+                "transport": "browser_websocket_ephemeral_token_with_backend_relay",
                 "logical_session_ref": logical_session_ref,
                 "thread_ref": thread_ref,
                 "voice_runtime_ref": runtime_ref,
-            },
-            extra={"metadata": metadata},
-            tags=["sophia", "voice", "gemini_live", "s2s"],
-            ls_client=self.client,
-            dangerously_allow_filesystem=False,
-        )
-        self._safe_post(self.root, "root")
-        logger.info(
-            "gemini.langsmith.trace_started session_id=%s trace_id=%s project=%s",
-            session_id,
-            self.root.id,
-            self.root.session_name,
-        )
+                "model": model,
+                "continuity_feature_enabled": _env_bool("SOPHIA_GEMINI_LIVE_CONTINUITY_ENABLED", False),
+                "compression_enabled": _env_bool("SOPHIA_GEMINI_LIVE_COMPRESSION_ENABLED", False),
+                "trace_content_mode": self.content_mode,
+                "audio_capture_enabled": self.audio_capture_enabled,
+                "input_transcription_enabled": True,
+                "output_transcription_enabled": True,
+                "effective_setup_fingerprint": dict(self._setup_fingerprint),
+            }
+            if not hmac_secret:
+                metadata["thread_id"] = self.thread_id
+            self.root = RunTree(
+                name="gemini_live_conversation",
+                id=uuid7(),
+                run_type="chain",
+                project_name=os.getenv("SOPHIA_GEMINI_LIVE_LANGSMITH_PROJECT")
+                or "Sophia-Gemini-Live-Voice",
+                inputs={
+                    "trace_schema_version": self.trace_schema,
+                    "logical_session_ref": logical_session_ref,
+                    "thread_ref": thread_ref,
+                    "voice_runtime_ref": runtime_ref,
+                    "effective_setup_fingerprint": dict(self._setup_fingerprint),
+                },
+                extra={"metadata": metadata},
+                tags=["sophia", "voice", "gemini_live", "s2s"],
+                ls_client=self.client,
+                dangerously_allow_filesystem=False,
+            )
+            if not self._safe_post(self.root, "root"):
+                return
+            logger.info(
+                "gemini.langsmith.trace_started session_id=%s trace_id=%s project=%s",
+                session_id,
+                self._trace_id_unchecked(),
+                self.root.session_name,
+            )
+        except Exception as exc:
+            self._disable_tracing("construction", exc)
 
     @property
     def trace_id(self) -> str | None:
-        return str(self.root.id) if self.root is not None else None
+        if not self.enabled:
+            return None
+        try:
+            return self._trace_id_unchecked()
+        except Exception as exc:
+            self._disable_tracing("trace_id", exc)
+            return None
 
+    @property
+    def failure_count(self) -> int:
+        return self._failure_count
+
+    @property
+    def disabled_operation(self) -> str | None:
+        return self._disabled_operation
+
+    @_fail_open_trace_operation()
+    def update_setup_fingerprint(self, setup_fingerprint: Mapping[str, Any]) -> None:
+        self._setup_fingerprint = dict(setup_fingerprint)
+        metadata = self.root.extra.setdefault("metadata", {})
+        if isinstance(metadata, dict):
+            metadata["effective_setup_fingerprint"] = dict(self._setup_fingerprint)
+        self._safe_patch(self.root, "root_setup_fingerprint")
+
+    @_fail_open_trace_operation()
     def record_provider_event(
         self,
         event: Mapping[str, Any],
@@ -571,6 +815,7 @@ class GeminiLiveTraceRecorder:
         if _provider_turn_complete(event):
             self._last_ready_claim_text = None
 
+    @_fail_open_trace_operation()
     def record_tool_call(
         self,
         *,
@@ -596,6 +841,7 @@ class GeminiLiveTraceRecorder:
             response=response,
         )
 
+    @_fail_open_trace_operation()
     def start_tool_call(
         self,
         *,
@@ -634,9 +880,11 @@ class GeminiLiveTraceRecorder:
             },
             tags=["gemini_live", "tool", tool_name],
         )
-        self._safe_post(child, f"tool_open:{tool_name}")
+        if not self._safe_post(child, f"tool_open:{tool_name}"):
+            return None
         return child
 
+    @_fail_open_trace_operation()
     def finish_tool_call(
         self,
         child: Any | None,
@@ -665,22 +913,14 @@ class GeminiLiveTraceRecorder:
         )
         self._safe_patch(child, f"tool:{tool_name}")
 
+    @_fail_open_trace_operation(dict)
     def handoff_headers(self, run: Any | None = None) -> dict[str, str]:
         """Return only LangSmith's distributed-trace headers for HTTP handoff."""
 
         source = run or self.root
         if not self.enabled or source is None or self._closed:
             return {}
-        try:
-            raw = source.to_headers()
-        except Exception:
-            logger.warning(
-                "gemini.langsmith.trace_headers_failed session_id=%s trace_id=%s",
-                self.session_id,
-                self.trace_id,
-                exc_info=True,
-            )
-            return {}
+        raw = source.to_headers()
         if not isinstance(raw, Mapping):
             return {}
         return {
@@ -689,6 +929,7 @@ class GeminiLiveTraceRecorder:
             if str(key).lower() in _LANGSMITH_HANDOFF_HEADER_NAMES and isinstance(value, str)
         }
 
+    @_fail_open_trace_operation()
     def record_function_response(
         self,
         *,
@@ -729,6 +970,7 @@ class GeminiLiveTraceRecorder:
         self._safe_post(child, f"function_response:{tool_name}")
         self._record_artifact_announcement_gates(tool_name, response)
 
+    @_fail_open_trace_operation()
     def _record_artifact_announcement_gates(
         self,
         tool_name: str,
@@ -769,7 +1011,8 @@ class GeminiLiveTraceRecorder:
                     else None
                 ),
             )
-            self._safe_post(child, "artifact.announcement_gate")
+            if not self._safe_post(child, "artifact.announcement_gate"):
+                return
             enriched_gate = dict(gate)
             enriched_gate["gate_run_id"] = str(child.id)
             gate_batch.append(enriched_gate)
@@ -777,6 +1020,7 @@ class GeminiLiveTraceRecorder:
         self._latest_artifact_gate_recorded_at = time.monotonic() if gate_batch else None
         self._last_ready_claim_text = None
 
+    @_fail_open_trace_operation()
     def _record_spoken_ready_claim(
         self,
         event: Mapping[str, Any],
@@ -874,79 +1118,99 @@ class GeminiLiveTraceRecorder:
         conversation_audio_mime_type: str = "audio/webm",
         error: str | None = None,
     ) -> None:
-        if not self.enabled or self.root is None or self._closed:
+        if self.root is None or self._closed:
             return
         self._closed = True
-        audio_attached = False
-        if conversation_audio and self.audio_capture_enabled:
-            if len(conversation_audio) <= MAX_AUDIO_ATTACHMENT_BYTES:
-                self.root.attachments["conversation_audio"] = Attachment(
-                    mime_type=conversation_audio_mime_type,
-                    data=conversation_audio,
-                )
-                audio_attached = True
-            else:
-                logger.warning(
-                    "gemini.langsmith.audio_skipped session_id=%s byte_length=%s reason=attachment_limit",
-                    self.session_id,
-                    len(conversation_audio),
-                )
-        self.root.end(
-            outputs={
-                "voice_runtime_ref": _pseudonym(
-                    os.getenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "").encode(),
-                    "voice_runtime",
-                    self.session_id,
-                ),
-                "event_count": self._event_count,
-                "tool_count": self._tool_count,
-                "ready_claim_count": self._ready_claim_count,
-                "false_ready_claim_count": self._false_ready_claim_count,
-                "last_provider_sequence": self._last_provider_sequence,
-                "conversation_audio_attached": audio_attached,
-            },
-            error=error,
-            metadata={"trace_status": "completed" if error is None else "error"},
-        )
         try:
+            if not self.enabled:
+                return
+            audio_attached = False
+            if conversation_audio and self.audio_capture_enabled:
+                if len(conversation_audio) <= MAX_AUDIO_ATTACHMENT_BYTES:
+                    self.root.attachments["conversation_audio"] = Attachment(
+                        mime_type=conversation_audio_mime_type,
+                        data=conversation_audio,
+                    )
+                    audio_attached = True
+                else:
+                    logger.warning(
+                        "gemini.langsmith.audio_skipped session_id=%s byte_length=%s reason=attachment_limit",
+                        self.session_id,
+                        len(conversation_audio),
+                    )
+            self.root.end(
+                outputs={
+                    "voice_runtime_ref": _pseudonym(
+                        os.getenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "").encode(),
+                        "voice_runtime",
+                        self.session_id,
+                    ),
+                    "event_count": self._event_count,
+                    "tool_count": self._tool_count,
+                    "ready_claim_count": self._ready_claim_count,
+                    "false_ready_claim_count": self._false_ready_claim_count,
+                    "last_provider_sequence": self._last_provider_sequence,
+                    "conversation_audio_attached": audio_attached,
+                    "effective_setup_fingerprint": dict(self._setup_fingerprint),
+                    "trace_failure_count": self._failure_count,
+                },
+                error=error,
+                metadata={"trace_status": "completed" if error is None else "error"},
+            )
             self.root.patch(exclude_inputs=False)
             flush = getattr(self.client, "flush", None)
             if callable(flush):
                 flush(timeout=10.0)
-        except Exception:
-            logger.warning(
-                "gemini.langsmith.trace_flush_failed session_id=%s trace_id=%s",
+            logger.info(
+                "gemini.langsmith.trace_completed session_id=%s trace_id=%s event_count=%s tool_count=%s audio_attached=%s",
                 self.session_id,
-                self.trace_id,
+                self._trace_id_unchecked(),
+                self._event_count,
+                self._tool_count,
+                audio_attached,
+            )
+        except Exception as exc:
+            self._disable_tracing("close", exc)
+
+    def _trace_id_unchecked(self) -> str | None:
+        return str(self.root.id) if self.root is not None else None
+
+    def _disable_tracing(self, operation: str, exc: Exception) -> None:
+        if not self.enabled and self._disabled_operation is not None:
+            return
+        self.enabled = False
+        self.audio_capture_enabled = False
+        self._failure_count += 1
+        self._disabled_operation = operation
+        try:
+            logger.warning(
+                "gemini.langsmith.trace_disabled session_id=%s trace_id=%s operation=%s error_type=%s",
+                self.session_id,
+                self._trace_id_unchecked(),
+                operation,
+                exc.__class__.__name__,
                 exc_info=True,
             )
-        logger.info(
-            "gemini.langsmith.trace_completed session_id=%s trace_id=%s event_count=%s tool_count=%s audio_attached=%s",
-            self.session_id,
-            self.trace_id,
-            self._event_count,
-            self._tool_count,
-            audio_attached,
-        )
+        except Exception:
+            pass
+        if self._failure_callback is not None:
+            try:
+                self._failure_callback(operation, exc)
+            except Exception:
+                pass
 
-    def _safe_post(self, run: Any, label: str) -> None:
+    def _safe_post(self, run: Any, label: str) -> bool:
         try:
             run.post()
-        except Exception:
-            logger.warning(
-                "gemini.langsmith.span_post_failed session_id=%s span=%s",
-                self.session_id,
-                label,
-                exc_info=True,
-            )
+            return True
+        except Exception as exc:
+            self._disable_tracing(f"post:{label}", exc)
+            return False
 
-    def _safe_patch(self, run: Any, label: str) -> None:
+    def _safe_patch(self, run: Any, label: str) -> bool:
         try:
             run.patch()
-        except Exception:
-            logger.warning(
-                "gemini.langsmith.span_patch_failed session_id=%s span=%s",
-                self.session_id,
-                label,
-                exc_info=True,
-            )
+            return True
+        except Exception as exc:
+            self._disable_tracing(f"patch:{label}", exc)
+            return False

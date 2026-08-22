@@ -131,13 +131,15 @@ def gemini_web_fetch_function_declaration() -> dict[str, object]:
 def gemini_sophia_function_declarations(
     *,
     include_coreview: bool | None = None,
+    include_web_fetch: bool = True,
 ) -> list[dict[str, object]]:
     declarations = [
         gemini_emit_artifact_function_declaration(),
         *gemini_builder_lifecycle_function_declarations(),
         gemini_retrieve_memories_function_declaration(),
-        gemini_web_fetch_function_declaration(),
     ]
+    if include_web_fetch:
+        declarations.append(gemini_web_fetch_function_declaration())
     if include_coreview is None:
         include_coreview = is_coreview_enabled()
     if include_coreview:

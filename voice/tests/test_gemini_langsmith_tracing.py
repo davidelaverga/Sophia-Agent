@@ -5,6 +5,7 @@ import json
 from typing import Any
 from uuid import UUID
 
+import pytest
 import voice.realtime.gemini_langsmith_tracing as tracing
 
 
@@ -381,3 +382,214 @@ def test_close_reports_audio_skipped_when_attachment_is_too_large(monkeypatch: A
     assert "conversation_audio" not in recorder.root.attachments
     assert recorder.root.outputs["conversation_audio_attached"] is False
     assert client.flush_calls == [10.0]
+
+
+def test_trace_constructor_failure_is_strictly_fail_open(monkeypatch: Any) -> None:
+    failures: list[tuple[str, str]] = []
+
+    class ExplodingRunTree:
+        def __init__(self, **_: Any) -> None:
+            raise RuntimeError("sdk constructor failed")
+
+    _enable_fake_sdk(monkeypatch)
+    monkeypatch.setattr(tracing, "RunTree", ExplodingRunTree)
+
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id="gemini-constructor-failure",
+        user_id="user-1",
+        model="gemini-live-test",
+        client=FakeClient(),
+        failure_callback=lambda operation, exc: failures.append(
+            (operation, exc.__class__.__name__)
+        ),
+    )
+
+    assert recorder.enabled is False
+    assert recorder.trace_id is None
+    assert recorder.failure_count == 1
+    assert recorder.disabled_operation == "construction"
+    assert failures == [("construction", "RuntimeError")]
+
+
+@pytest.mark.parametrize(
+    "operation",
+    ["provider_event", "tool_start", "function_response"],
+)
+def test_trace_span_creation_failures_disable_only_tracing(
+    monkeypatch: Any,
+    operation: str,
+) -> None:
+    failures: list[str] = []
+    _enable_fake_sdk(monkeypatch)
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id=f"gemini-span-failure-{operation}",
+        user_id="user-1",
+        model="gemini-live-test",
+        client=FakeClient(),
+        failure_callback=lambda failed_operation, _exc: failures.append(failed_operation),
+    )
+    assert recorder.root is not None
+
+    def explode(*_: Any, **__: Any) -> None:
+        raise RuntimeError("sdk span failed")
+
+    recorder.root.create_child = explode  # type: ignore[method-assign]
+    if operation == "provider_event":
+        recorder.record_provider_event(
+            {"serverContent": {"turnComplete": True}},
+            categories=["serverContent"],
+        )
+    elif operation == "tool_start":
+        assert recorder.start_tool_call(
+            tool_call_id="call-1",
+            tool_name="retrieve_memories",
+            arguments={"query": "safe"},
+        ) is None
+    else:
+        recorder.record_function_response(
+            tool_call_id="call-1",
+            tool_name="retrieve_memories",
+            response={"ok": True},
+            success=True,
+        )
+
+    assert recorder.enabled is False
+    assert recorder.failure_count == 1
+    assert failures
+
+
+@pytest.mark.parametrize("operation", ["finish_tool", "handoff_headers"])
+def test_trace_open_span_operations_are_fail_open(monkeypatch: Any, operation: str) -> None:
+    _enable_fake_sdk(monkeypatch)
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id=f"gemini-open-span-failure-{operation}",
+        user_id="user-1",
+        model="gemini-live-test",
+        client=FakeClient(),
+    )
+    span = recorder.start_tool_call(
+        tool_call_id="call-1",
+        tool_name="retrieve_memories",
+        arguments={"query": "safe"},
+    )
+    assert span is not None
+
+    def explode(*_: Any, **__: Any) -> None:
+        raise RuntimeError("sdk open span failed")
+
+    if operation == "finish_tool":
+        span.end = explode  # type: ignore[method-assign]
+        recorder.finish_tool_call(
+            span,
+            tool_name="retrieve_memories",
+            success=True,
+        )
+    else:
+        span.to_headers = explode  # type: ignore[method-assign]
+        assert recorder.handoff_headers(span) == {}
+
+    assert recorder.enabled is False
+    assert recorder.failure_count == 1
+
+
+def test_trace_close_failure_does_not_escape(monkeypatch: Any) -> None:
+    failures: list[str] = []
+    _enable_fake_sdk(monkeypatch)
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id="gemini-close-failure",
+        user_id="user-1",
+        model="gemini-live-test",
+        client=FakeClient(),
+        failure_callback=lambda operation, _exc: failures.append(operation),
+    )
+    assert recorder.root is not None
+
+    def explode(*_: Any, **__: Any) -> None:
+        raise RuntimeError("sdk close failed")
+
+    recorder.root.end = explode  # type: ignore[method-assign]
+    recorder.close()
+
+    assert recorder.enabled is False
+    assert recorder.failure_count == 1
+    assert recorder.disabled_operation == "close"
+    assert failures == ["close"]
+
+
+def test_effective_setup_fingerprint_is_privacy_safe_and_reaches_results(
+    monkeypatch: Any,
+) -> None:
+    _enable_fake_sdk(monkeypatch)
+    monkeypatch.setenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "trace-test-secret")
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a793100008f7ccb5a25e9e018f896e7ec9dc2a3d")
+    private_prompt = "PRIVATE USER CONTEXT: childhood memory"
+    setup = {
+        "model": "models/gemini-3.1-flash-live-preview",
+        "generationConfig": {
+            "responseModalities": ["AUDIO"],
+            "speechConfig": {
+                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": "Kore"}}
+            },
+        },
+        "systemInstruction": {"parts": [{"text": private_prompt}]},
+        "tools": [
+            {"functionDeclarations": [{"name": "web_fetch"}]},
+            {"googleSearch": {}},
+        ],
+        "sessionResumption": {},
+        "contextWindowCompression": {"slidingWindow": {}},
+    }
+    fingerprint = tracing.build_gemini_live_setup_fingerprint(
+        setup,
+        token_owned_fields={
+            "model",
+            "generationConfig",
+            "systemInstruction",
+            "contextWindowCompression",
+        },
+        browser_owned_fields={"sessionResumption", "tools"},
+        provider_epoch=1,
+        configured_flags={
+            "continuity_enabled": True,
+            "compression_enabled": True,
+            "google_search_enabled": True,
+            "web_fetch_enabled": True,
+            "coreview_enabled": True,
+            "coreview_still_frame_enabled": True,
+        },
+    )
+
+    serialized = json.dumps(fingerprint)
+    assert private_prompt not in serialized
+    assert fingerprint["deployment_sha"] == "a793100008f7ccb5a25e9e018f896e7ec9dc2a3d"
+    assert fingerprint["model"] == "models/gemini-3.1-flash-live-preview"
+    assert fingerprint["voice"] == "Kore"
+    assert fingerprint["provider_epoch"] == 1
+    assert fingerprint["field_ownership"]["tools"] == "browser"
+    assert fingerprint["field_ownership"]["sessionResumption"] == "browser"
+    assert "tools" not in fingerprint["token_owned_fields"]
+    assert fingerprint["effective_flags"]["google_search_enabled"] is True
+    assert fingerprint["effective_flags"]["web_fetch_enabled"] is True
+    assert fingerprint["compression"] == {
+        "configured": True,
+        "effective_in_setup": True,
+        "triggered": None,
+        "trigger_observation": "not_exposed_by_gemini_live_server_events",
+    }
+    assert all(fingerprint["hashes"].values())
+    assert fingerprint["character_counts"]["prompt"] == len(private_prompt)
+
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id="gemini-fingerprint",
+        user_id="user-1",
+        model="gemini-live-test",
+        client=FakeClient(),
+        setup_fingerprint=fingerprint,
+    )
+    assert recorder.root is not None
+    assert recorder.root.extra["metadata"]["effective_setup_fingerprint"] == fingerprint
+    next_fingerprint = {**fingerprint, "provider_epoch": 2}
+    recorder.update_setup_fingerprint(next_fingerprint)
+    recorder.close()
+
+    assert recorder.root.outputs["effective_setup_fingerprint"]["provider_epoch"] == 2

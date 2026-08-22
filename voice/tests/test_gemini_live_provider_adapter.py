@@ -94,6 +94,35 @@ def test_gemini_live_setup_omits_native_continuity_when_disabled() -> None:
     assert "contextWindowCompression" not in setup
 
 
+@pytest.mark.parametrize(
+    ("continuity_enabled", "compression_enabled"),
+    [
+        (False, False),
+        (False, True),
+        (True, False),
+        (True, True),
+    ],
+)
+def test_gemini_live_setup_reads_continuity_and_compression_flags_independently(
+    monkeypatch: pytest.MonkeyPatch,
+    continuity_enabled: bool,
+    compression_enabled: bool,
+) -> None:
+    monkeypatch.setenv(
+        "SOPHIA_GEMINI_LIVE_CONTINUITY_ENABLED",
+        "true" if continuity_enabled else "false",
+    )
+    monkeypatch.setenv(
+        "SOPHIA_GEMINI_LIVE_COMPRESSION_ENABLED",
+        "true" if compression_enabled else "false",
+    )
+
+    setup = build_gemini_live_setup_config()
+
+    assert ("sessionResumption" in setup) is continuity_enabled
+    assert ("contextWindowCompression" in setup) is compression_enabled
+
+
 def _payloads(provider_events: list[Any]) -> list[dict[str, Any]]:
     return [
         event.as_payload()

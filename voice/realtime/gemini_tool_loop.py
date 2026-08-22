@@ -16,6 +16,10 @@ from uuid import UUID
 
 import httpx
 
+from voice.realtime.gemini_live import (
+    is_gemini_live_google_search_enabled,
+    is_gemini_live_web_fetch_enabled,
+)
 from voice.realtime.runtime_selection import VoiceRuntimeMode
 from voice.realtime.coreview import (
     GEMINI_COREVIEW_ACTION_TOOL_NAMES,
@@ -1725,22 +1729,42 @@ class GeminiDogfoodToolExecutor:
         )
 
 
-def gemini_dogfood_tool_declarations() -> list[dict[str, object]]:
+def gemini_dogfood_tool_declarations(
+    *,
+    google_search_enabled: bool | None = None,
+    web_fetch_enabled: bool | None = None,
+    include_coreview: bool | None = None,
+) -> list[dict[str, object]]:
+    effective_google_search = (
+        is_gemini_live_google_search_enabled()
+        if google_search_enabled is None
+        else bool(google_search_enabled)
+    )
+    effective_web_fetch = (
+        is_gemini_live_web_fetch_enabled()
+        if web_fetch_enabled is None
+        else bool(web_fetch_enabled)
+    )
     try:
-        declarations = gemini_sophia_function_declarations()
+        declarations = gemini_sophia_function_declarations(
+            include_coreview=include_coreview,
+            include_web_fetch=effective_web_fetch,
+        )
     except SophiaBackendToolConfigurationError as exc:
         raise GeminiDogfoodToolError(
             "Gemini dogfood tool declaration configuration failed: " f"{exc}"
         ) from exc
 
-    return [
+    tools: list[dict[str, object]] = [
         {
             "functionDeclarations": declarations,
         },
+    ]
+    if effective_google_search:
         # Gemini Live's provider-native Search grounding. This works alongside
         # our custom function declarations and needs no additional API secret.
-        {"googleSearch": {}},
-    ]
+        tools.append({"googleSearch": {}})
+    return tools
 
 
 def _invalid_emit_artifact_arguments_execution(

@@ -4,7 +4,7 @@ import os
 import time
 import asyncio
 import logging
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -20,7 +20,13 @@ from voice.realtime.coreview import (
     is_coreview_still_frame_enabled,
 )
 from voice.realtime.events import ProviderEvent, ProviderEventType
-from voice.realtime.gemini_live import DEFAULT_GEMINI_LIVE_MODEL
+from voice.realtime.gemini_live import (
+    DEFAULT_GEMINI_LIVE_MODEL,
+    is_gemini_live_compression_enabled,
+    is_gemini_live_continuity_enabled,
+    is_gemini_live_google_search_enabled,
+    is_gemini_live_web_fetch_enabled,
+)
 from voice.realtime.gemini_memory_context import (
     build_gemini_live_realtime_instructions_with_memory_context,
 )
@@ -42,7 +48,10 @@ from voice.realtime.gemini_tool_loop import (
     gemini_tool_response_client_action,
     is_explicit_builder_request,
 )
-from voice.realtime.gemini_langsmith_tracing import GeminiLiveTraceRecorder
+from voice.realtime.gemini_langsmith_tracing import (
+    GeminiLiveTraceRecorder,
+    build_gemini_live_setup_fingerprint,
+)
 from voice.realtime.runtime_selection import VoiceRuntimeMode
 
 logger = logging.getLogger(__name__)
@@ -74,7 +83,11 @@ _GEMINI_LIVE_SERVER_EVENT_KEYS = frozenset(
     }
 )
 
-_GEMINI_LIVE_BROWSER_OWNED_SETUP_FIELDS = frozenset({"sessionResumption"})
+# The browser owns the private resumption handle and mode-specific tool surface.
+# Gemini 3.1 Live supports only Search and function declarations here. Search is
+# explicitly controlled by the server baseline, browser co-review functions are
+# handled in the browser, and every backend-relayed function remains allow-listed.
+_GEMINI_LIVE_BROWSER_OWNED_SETUP_FIELDS = frozenset({"sessionResumption", "tools"})
 
 _RETRIEVE_MEMORIES_SAFE_DIAGNOSTIC_KEYS = frozenset(
     {
@@ -276,6 +289,9 @@ class GeminiReliabilityDiagnostics:
         elif name == "continuation_bootstrap_conflict":
             self.continuation_bootstrap_attempts += 1
             self.continuation_bootstrap_conflicts += 1
+
+    def record_trace_export_failure(self) -> None:
+        self.trace_export_failures += 1
 
     def record_provider_event(
         self,
@@ -518,13 +534,38 @@ class GeminiLiveEphemeralTokenMinter:
         return GeminiLiveEphemeralToken(value=value, response=dict(payload))
 
 
-def _server_owned_token_field_mask(setup: Mapping[str, Any]) -> str:
-    """Lock stable setup fields while leaving the resume handle browser-owned."""
-
-    return ",".join(
+def _token_owned_setup_fields(setup: Mapping[str, Any]) -> tuple[str, ...]:
+    return tuple(
         field_name
         for field_name in setup
         if field_name not in _GEMINI_LIVE_BROWSER_OWNED_SETUP_FIELDS
+    )
+
+
+def _server_owned_token_field_mask(setup: Mapping[str, Any]) -> str:
+    """Lock stable setup fields while leaving handle and tools browser-owned."""
+
+    return ",".join(_token_owned_setup_fields(setup))
+
+
+def _effective_setup_fingerprint(
+    setup: Mapping[str, Any],
+    *,
+    provider_epoch: int,
+) -> dict[str, Any]:
+    return build_gemini_live_setup_fingerprint(
+        setup,
+        token_owned_fields=_token_owned_setup_fields(setup),
+        browser_owned_fields=_GEMINI_LIVE_BROWSER_OWNED_SETUP_FIELDS,
+        provider_epoch=provider_epoch,
+        configured_flags={
+            "continuity_enabled": is_gemini_live_continuity_enabled(),
+            "compression_enabled": is_gemini_live_compression_enabled(),
+            "google_search_enabled": is_gemini_live_google_search_enabled(),
+            "web_fetch_enabled": is_gemini_live_web_fetch_enabled(),
+            "coreview_enabled": is_coreview_enabled(),
+            "coreview_still_frame_enabled": is_coreview_still_frame_enabled(),
+        },
     )
 
 
@@ -561,6 +602,78 @@ class GeminiBrowserDogfoodSessionManager:
         self._continuation_epoch_by_session: dict[str, int] = {}
         self._continuation_locks_by_session: dict[str, asyncio.Lock] = {}
         self._logical_session_id_by_session: dict[str, str] = {}
+
+    def _record_trace_failure(
+        self,
+        session_id: str,
+        operation: str,
+        exc: Exception,
+    ) -> None:
+        diagnostics = self._diagnostics_by_session.get(session_id)
+        if diagnostics is not None:
+            diagnostics.record_trace_export_failure()
+        logger.warning(
+            "gemini.langsmith.fail_open session_id=%s operation=%s error_type=%s",
+            session_id,
+            operation,
+            exc.__class__.__name__,
+            exc_info=True,
+        )
+
+    def _trace_operation(
+        self,
+        session_id: str,
+        trace: GeminiLiveTraceRecorder | None,
+        operation: str,
+        callback: Callable[[GeminiLiveTraceRecorder], Any],
+        *,
+        default: Any = None,
+    ) -> Any:
+        if trace is None or self._traces_by_session.get(session_id) is not trace:
+            return default
+        if not bool(getattr(trace, "enabled", True)):
+            self._traces_by_session.pop(session_id, None)
+            return default
+        try:
+            return callback(trace)
+        except Exception as exc:
+            self._traces_by_session.pop(session_id, None)
+            self._record_trace_failure(session_id, operation, exc)
+            return default
+
+    def _create_trace_recorder(
+        self,
+        *,
+        session_id: str,
+        user_id: str,
+        model: str,
+        thread_id: str | None,
+        setup: Mapping[str, Any],
+        provider_epoch: int,
+    ) -> GeminiLiveTraceRecorder | None:
+        try:
+            trace = GeminiLiveTraceRecorder(
+                session_id=session_id,
+                user_id=user_id,
+                model=model,
+                thread_id=thread_id,
+                setup_fingerprint=_effective_setup_fingerprint(
+                    setup,
+                    provider_epoch=provider_epoch,
+                ),
+                failure_callback=lambda operation, exc: self._record_trace_failure(
+                    session_id,
+                    operation,
+                    exc,
+                ),
+            )
+        except Exception as exc:
+            self._record_trace_failure(session_id, "construction", exc)
+            return None
+        if not bool(getattr(trace, "enabled", False)):
+            return None
+        self._traces_by_session[session_id] = trace
+        return trace
 
     async def start_browser_session(
         self,
@@ -626,13 +739,14 @@ class GeminiBrowserDogfoodSessionManager:
         mapping_observer = getattr(dogfood_session.bundle.provider_session, "set_mapping_observer", None)
         if callable(mapping_observer):
             mapping_observer(lambda _raw_event, provider_events: diagnostics.record_mapping_outputs(provider_events))
-        trace = GeminiLiveTraceRecorder(
+        trace = self._create_trace_recorder(
             session_id=dogfood_session.session_id,
             user_id=user_id,
             model=str(getattr(settings, "gemini_live_model", DEFAULT_GEMINI_LIVE_MODEL)),
             thread_id=thread_id,
+            setup=setup,
+            provider_epoch=1,
         )
-        self._traces_by_session[dogfood_session.session_id] = trace
         self._schedule_preconnect_cleanup(
             dogfood_session.session_id,
             preconnect_ttl_seconds,
@@ -643,8 +757,8 @@ class GeminiBrowserDogfoodSessionManager:
             ephemeral_token=ephemeral_token,
             setup=setup,
             memory_context_diagnostics=dict(memory_context_diagnostics or {}),
-            langsmith_trace_id=trace.trace_id,
-            audio_capture_enabled=trace.audio_capture_enabled,
+            langsmith_trace_id=trace.trace_id if trace is not None else None,
+            audio_capture_enabled=trace.audio_capture_enabled if trace is not None else False,
             provider_connection_epoch=1,
             continuation_bootstrap_url=continuation_bootstrap_url,
             logical_session_id=logical_session_id,
@@ -708,6 +822,20 @@ class GeminiBrowserDogfoodSessionManager:
                 resume_secret_generation=int(secret_generation),
             )
             trace = self._traces_by_session.get(dogfood_session_id)
+            self._trace_operation(
+                dogfood_session_id,
+                trace,
+                "update_setup_fingerprint",
+                lambda recorder: recorder.update_setup_fingerprint(
+                    _effective_setup_fingerprint(
+                        setup,
+                        provider_epoch=next_epoch,
+                    )
+                ),
+            )
+            if trace is not None and not bool(getattr(trace, "enabled", False)):
+                self._traces_by_session.pop(dogfood_session_id, None)
+                trace = None
             return GeminiBrowserDogfoodSession(
                 dogfood_session=dogfood_session,
                 ephemeral_token=token,
@@ -782,8 +910,11 @@ class GeminiBrowserDogfoodSessionManager:
         categories = categorize_gemini_provider_event(validated_event)
         diagnostics.record_provider_event(validated_event, source_metadata)
         trace = self._traces_by_session.get(dogfood_session.session_id)
-        if trace is not None:
-            trace.record_provider_event(
+        self._trace_operation(
+            dogfood_session.session_id,
+            trace,
+            "record_provider_event",
+            lambda recorder: recorder.record_provider_event(
                 validated_event,
                 categories=categories,
                 provider_receive_sequence=(
@@ -798,7 +929,8 @@ class GeminiBrowserDogfoodSessionManager:
                 relay_correlation_id=(
                     source_metadata.relay_correlation_id if source_metadata else None
                 ),
-            )
+            ),
+        )
         provider_event_for_public_boundary = _without_automatic_artifact_public_events(validated_event)
         stale_payload = await self._apply_provider_event_in_source_order(
             dogfood_session,
@@ -882,11 +1014,16 @@ class GeminiBrowserDogfoodSessionManager:
                 for execution in executions:
                     executed_call_ids.add(execution.call.call_id)
                     if execution.call.call_id not in cancelled_after_execution:
-                        trace.record_function_response(
-                            tool_call_id=execution.call.call_id,
-                            tool_name=execution.call.name,
-                            response=execution.response,
-                            success=execution.success,
+                        self._trace_operation(
+                            dogfood_session.session_id,
+                            trace,
+                            "record_function_response",
+                            lambda recorder, execution=execution: recorder.record_function_response(
+                                tool_call_id=execution.call.call_id,
+                                tool_name=execution.call.name,
+                                response=execution.response,
+                                success=execution.success,
+                            ),
                         )
                 for diagnostic in tool_diagnostics:
                     call_id = diagnostic.get("id")
@@ -898,13 +1035,18 @@ class GeminiBrowserDogfoodSessionManager:
                     summary = str(
                         diagnostic.get("result_summary") or "Tool call was not executed."
                     )
-                    trace.record_tool_call(
-                        tool_call_id=call_id,
-                        tool_name=tool_name,
-                        arguments={},
-                        success=False,
-                        result_summary=summary,
-                        error=summary,
+                    self._trace_operation(
+                        dogfood_session.session_id,
+                        trace,
+                        "record_rejected_tool_call",
+                        lambda recorder, call_id=call_id, tool_name=tool_name, summary=summary: recorder.record_tool_call(
+                            tool_call_id=call_id,
+                            tool_name=tool_name,
+                            arguments={},
+                            success=False,
+                            result_summary=summary,
+                            error=summary,
+                        ),
                     )
 
         if function_calls:
@@ -1133,32 +1275,50 @@ class GeminiBrowserDogfoodSessionManager:
             trace_headers: Mapping[str, str] | None = None
             trace_context: dict[str, Any] | None = None
             if trace is not None:
-                tool_span = trace.start_tool_call(
-                    tool_call_id=function_call.call_id,
-                    tool_name=function_call.name,
-                    arguments=function_call.args,
-                    provider_receive_sequence=(
-                        source_metadata.provider_receive_sequence if source_metadata else None
-                    ),
-                    relay_correlation_id=(
-                        source_metadata.relay_correlation_id if source_metadata else None
+                tool_span = self._trace_operation(
+                    dogfood_session.session_id,
+                    trace,
+                    "start_tool_call",
+                    lambda recorder: recorder.start_tool_call(
+                        tool_call_id=function_call.call_id,
+                        tool_name=function_call.name,
+                        arguments=function_call.args,
+                        provider_receive_sequence=(
+                            source_metadata.provider_receive_sequence if source_metadata else None
+                        ),
+                        relay_correlation_id=(
+                            source_metadata.relay_correlation_id if source_metadata else None
+                        ),
                     ),
                 )
-                trace_headers = trace.handoff_headers(tool_span)
-                trace_context = {
-                    "voice_session_id": dogfood_session.session_id,
-                    "voice_trace_id": trace.trace_id,
-                    "voice_tool_call_id": function_call.call_id,
-                    "voice_tool_run_id": (
-                        str(getattr(tool_span, "id", "") or "") or None
-                    ),
-                    "relay_correlation_id": (
-                        source_metadata.relay_correlation_id if source_metadata else None
-                    ),
-                    "provider_receive_sequence": (
-                        source_metadata.provider_receive_sequence if source_metadata else None
-                    ),
-                }
+                trace_headers = self._trace_operation(
+                    dogfood_session.session_id,
+                    trace,
+                    "handoff_headers",
+                    lambda recorder: recorder.handoff_headers(tool_span),
+                    default={},
+                )
+                trace_id = self._trace_operation(
+                    dogfood_session.session_id,
+                    trace,
+                    "trace_id",
+                    lambda recorder: recorder.trace_id,
+                )
+                if trace_id is not None:
+                    trace_context = {
+                        "voice_session_id": dogfood_session.session_id,
+                        "voice_trace_id": trace_id,
+                        "voice_tool_call_id": function_call.call_id,
+                        "voice_tool_run_id": (
+                            str(getattr(tool_span, "id", "") or "") or None
+                        ),
+                        "relay_correlation_id": (
+                            source_metadata.relay_correlation_id if source_metadata else None
+                        ),
+                        "provider_receive_sequence": (
+                            source_metadata.provider_receive_sequence if source_metadata else None
+                        ),
+                    }
             inflight_ids.add(function_call.call_id)
             try:
                 execution = await self._tool_executor.execute(
@@ -1186,12 +1346,17 @@ class GeminiBrowserDogfoodSessionManager:
                 )
             except GeminiDogfoodToolError as exc:
                 if trace is not None:
-                    trace.finish_tool_call(
-                        tool_span,
-                        tool_name=function_call.name,
-                        success=False,
-                        result_summary="Tool execution rejected before a response was available.",
-                        error=str(exc),
+                    self._trace_operation(
+                        dogfood_session.session_id,
+                        trace,
+                        "finish_rejected_tool_call",
+                        lambda recorder: recorder.finish_tool_call(
+                            tool_span,
+                            tool_name=function_call.name,
+                            success=False,
+                            result_summary="Tool execution rejected before a response was available.",
+                            error=str(exc),
+                        ),
                     )
                 if function_call.name in _BUILDER_LIFECYCLE_TOOL_NAMES:
                     logger.warning(
@@ -1204,25 +1369,35 @@ class GeminiBrowserDogfoodSessionManager:
                 raise GeminiBrowserRelayError(str(exc)) from exc
             except Exception as exc:
                 if trace is not None:
-                    trace.finish_tool_call(
-                        tool_span,
-                        tool_name=function_call.name,
-                        success=False,
-                        result_summary="Tool execution failed before a response was available.",
-                        error=f"{exc.__class__.__name__}: {exc}",
+                    self._trace_operation(
+                        dogfood_session.session_id,
+                        trace,
+                        "finish_failed_tool_call",
+                        lambda recorder: recorder.finish_tool_call(
+                            tool_span,
+                            tool_name=function_call.name,
+                            success=False,
+                            result_summary="Tool execution failed before a response was available.",
+                            error=f"{exc.__class__.__name__}: {exc}",
+                        ),
                     )
                 raise
             finally:
                 inflight_ids.discard(function_call.call_id)
 
             if trace is not None:
-                trace.finish_tool_call(
-                    tool_span,
-                    tool_name=function_call.name,
-                    success=execution.success,
-                    result_summary=execution.result_summary,
-                    error=execution.error_text,
-                    response=execution.response,
+                self._trace_operation(
+                    dogfood_session.session_id,
+                    trace,
+                    "finish_tool_call",
+                    lambda recorder: recorder.finish_tool_call(
+                        tool_span,
+                        tool_name=function_call.name,
+                        success=execution.success,
+                        result_summary=execution.result_summary,
+                        error=execution.error_text,
+                        response=execution.response,
+                    ),
                 )
 
             if execution.updated_async_tasks:
@@ -1366,7 +1541,6 @@ class GeminiBrowserDogfoodSessionManager:
         self._continuation_locks_by_session.pop(dogfood_session_id, None)
         self._logical_session_id_by_session.pop(dogfood_session_id, None)
         self._parent_thread_id_by_session.pop(dogfood_session_id, None)
-        self._diagnostics_by_session.pop(dogfood_session_id, None)
         self._context_mode_by_session.pop(dogfood_session_id, None)
         self._memory_retrieval_config_by_session.pop(dogfood_session_id, None)
         self._source_order_locks_by_session.pop(dogfood_session_id, None)
@@ -1374,18 +1548,27 @@ class GeminiBrowserDogfoodSessionManager:
         self._source_order_buffers_by_session.pop(dogfood_session_id, None)
         trace = self._traces_by_session.pop(dogfood_session_id, None)
         try:
-            closed = await self._realtime_sessions.close_session(dogfood_session_id)
+            try:
+                closed = await self._realtime_sessions.close_session(dogfood_session_id)
+            finally:
+                # Trace finalization is best-effort but must never replace a
+                # provider close result or suppress teardown.
+                if trace is not None:
+                    try:
+                        await asyncio.to_thread(
+                            trace.close,
+                            conversation_audio=conversation_audio,
+                            conversation_audio_mime_type=conversation_audio_mime_type,
+                        )
+                    except Exception as exc:
+                        self._record_trace_failure(
+                            dogfood_session_id,
+                            "close",
+                            exc,
+                        )
+            return closed
         finally:
-            # Trace finalization is best-effort but must run even when the provider
-            # WebSocket close path raises, otherwise the root remains open and the
-            # async LangSmith queue may never flush.
-            if trace is not None:
-                await asyncio.to_thread(
-                    trace.close,
-                    conversation_audio=conversation_audio,
-                    conversation_audio_mime_type=conversation_audio_mime_type,
-                )
-        return closed
+            self._diagnostics_by_session.pop(dogfood_session_id, None)
 
 
 _BUILDER_LIFECYCLE_TOOL_NAMES = {

@@ -22,6 +22,8 @@ GEMINI_LIVE_VOICE_NAME_ENV = "SOPHIA_GEMINI_LIVE_VOICE_NAME"
 GEMINI_LIVE_ADAPTER_FEATURE_FLAG = "SOPHIA_VOICE_GEMINI_LIVE_ADAPTER_ENABLED"
 GEMINI_LIVE_CONTINUITY_FEATURE_FLAG = "SOPHIA_GEMINI_LIVE_CONTINUITY_ENABLED"
 GEMINI_LIVE_COMPRESSION_FEATURE_FLAG = "SOPHIA_GEMINI_LIVE_COMPRESSION_ENABLED"
+GEMINI_LIVE_GOOGLE_SEARCH_FEATURE_FLAG = "SOPHIA_GEMINI_LIVE_GOOGLE_SEARCH_ENABLED"
+GEMINI_LIVE_WEB_FETCH_FEATURE_FLAG = "SOPHIA_GEMINI_LIVE_WEB_FETCH_ENABLED"
 ALLOWED_GEMINI_LIVE_VOICE_NAMES = (
     "Zephyr",
     "Puck",
@@ -1057,7 +1059,7 @@ def build_gemini_live_setup_config(
         else bool(continuity_enabled)
     )
     compression = (
-        continuity
+        is_gemini_live_compression_enabled()
         if compression_enabled is None
         else bool(compression_enabled)
     )
@@ -1077,7 +1079,7 @@ def is_gemini_live_adapter_enabled(value: str | None = None) -> bool:
 
 
 def is_gemini_live_continuity_enabled(value: str | None = None) -> bool:
-    """Return whether native Gemini resumption/compression is enabled."""
+    """Return whether native Gemini session resumption is enabled."""
 
     raw_value = os.getenv(GEMINI_LIVE_CONTINUITY_FEATURE_FLAG) if value is None else value
     return raw_value is not None and raw_value.strip().lower() in _TRUE_VALUES
@@ -1088,6 +1090,20 @@ def is_gemini_live_compression_enabled(value: str | None = None) -> bool:
 
     raw_value = os.getenv(GEMINI_LIVE_COMPRESSION_FEATURE_FLAG) if value is None else value
     return raw_value is not None and raw_value.strip().lower() in _TRUE_VALUES
+
+
+def is_gemini_live_google_search_enabled(value: str | None = None) -> bool:
+    """Return whether provider-native Google Search is declared (default on)."""
+
+    raw_value = os.getenv(GEMINI_LIVE_GOOGLE_SEARCH_FEATURE_FLAG) if value is None else value
+    return True if raw_value is None else raw_value.strip().lower() in _TRUE_VALUES
+
+
+def is_gemini_live_web_fetch_enabled(value: str | None = None) -> bool:
+    """Return whether the bounded backend ``web_fetch`` tool is declared (default on)."""
+
+    raw_value = os.getenv(GEMINI_LIVE_WEB_FETCH_FEATURE_FLAG) if value is None else value
+    return True if raw_value is None else raw_value.strip().lower() in _TRUE_VALUES
 
 
 def _delivery_intent_from_artifact(artifact: Mapping[str, Any]) -> DeliveryIntent:

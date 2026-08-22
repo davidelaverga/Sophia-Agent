@@ -8,6 +8,10 @@ from voice.realtime.coreview import (
     COREVIEW_PROMPT_SOURCE,
     build_gemini_coreview_prompt_overlay,
 )
+from voice.realtime.gemini_live import (
+    is_gemini_live_google_search_enabled,
+    is_gemini_live_web_fetch_enabled,
+)
 from voice.realtime.skill_slow_state import (
     VoiceSkillSlowStateSeed,
     build_voice_skill_state_seed_block,
@@ -128,7 +132,6 @@ Spoken turn contract:
 - If a setup phrase is captured as its own separate turn, acknowledge lightly and do not reset the topic or start a new session agenda.
 - For artifact-functionality tests or requests like "create a short reflection artifact," call emit_artifact directly with a minimal valid companion artifact. Do not ask the user for a reflection question, main idea, or topic first.
 - If the user asks for another/new artifact after one completed, emit exactly one new artifact and briefly acknowledge completion.
-- You can search the current public web with Google Search. Use it for current facts, unfamiliar topics, or whenever the user asks you to search, verify, or look something up. Use web_fetch when you need the readable contents of one exact public URL supplied by the user or returned by Search. Do not claim that you lack web access.
 - Call start_builder_task only when the user's latest complete utterance directly asks you to create a deliverable or explicitly conduct research. Statements about what the user is personally trying to build, learn, or understand are conversation context, not permission to launch a builder. If intent is ambiguous, ask one concise clarifying question.
 - A builder launch or update only means the work was accepted. Never say a deck, presentation, document, or other builder artifact is ready, complete, finished, or done based on start_builder_task, update_async_task, elapsed time, or your own expectation.
 - Say a builder artifact is ready only after check_async_task for that exact task returns status=success together with a non-empty accepted artifact_path. If it returns running, say it is still building. If it returns error, timeout, or cancelled, report that outcome and do not imply the artifact exists. Use list_async_tasks only to recover the real task id, then verify that task with check_async_task before announcing readiness.
@@ -246,9 +249,61 @@ def build_gemini_live_realtime_setup_instructions(
     return "\n\n---\n\n".join(block.strip() for block in blocks if block.strip())
 
 
-def build_gemini_live_spoken_turn_policy_overlay() -> str:
+def build_gemini_live_spoken_turn_policy_overlay(
+    *,
+    google_search_enabled: bool | None = None,
+    web_fetch_enabled: bool | None = None,
+) -> str:
     """Return Gemini Live's spoken-turn policy overlay."""
-    return _GEMINI_LIVE_SPOKEN_TURN_POLICY_OVERLAY
+
+    effective_google_search = (
+        is_gemini_live_google_search_enabled()
+        if google_search_enabled is None
+        else bool(google_search_enabled)
+    )
+    effective_web_fetch = (
+        is_gemini_live_web_fetch_enabled()
+        if web_fetch_enabled is None
+        else bool(web_fetch_enabled)
+    )
+    web_policy = _gemini_live_web_capability_policy(
+        google_search_enabled=effective_google_search,
+        web_fetch_enabled=effective_web_fetch,
+    )
+    if not web_policy:
+        return _GEMINI_LIVE_SPOKEN_TURN_POLICY_OVERLAY
+    return _GEMINI_LIVE_SPOKEN_TURN_POLICY_OVERLAY.replace(
+        "</gemini_live_spoken_turn_policy>",
+        f"{web_policy}\n</gemini_live_spoken_turn_policy>",
+    )
+
+
+def _gemini_live_web_capability_policy(
+    *,
+    google_search_enabled: bool,
+    web_fetch_enabled: bool,
+) -> str:
+    if google_search_enabled and web_fetch_enabled:
+        return (
+            "- You can search the current public web with Google Search. Use it for current facts, "
+            "unfamiliar topics, or whenever the user asks you to search, verify, or look something "
+            "up. Use web_fetch when you need the readable contents of one exact public URL supplied "
+            "by the user or returned by Search. Do not claim that you lack web access."
+        )
+    if google_search_enabled:
+        return (
+            "- You can search the current public web with Google Search. Use it for current facts, "
+            "unfamiliar topics, or whenever the user asks you to search, verify, or look something "
+            "up. Exact-page web_fetch retrieval is not available in this canary. Do not claim that "
+            "you lack web search access."
+        )
+    if web_fetch_enabled:
+        return (
+            "- Native Google Search is not available in this canary. You can still use web_fetch to "
+            "read one exact public URL supplied by the user or already present in the conversation. "
+            "Do not imply that web_fetch can discover URLs or perform a general web search."
+        )
+    return ""
 
 
 def build_realtime_memory_recall_guidance() -> str:
