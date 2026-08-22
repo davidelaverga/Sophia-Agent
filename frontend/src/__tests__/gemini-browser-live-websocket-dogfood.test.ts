@@ -14,6 +14,7 @@ import {
   registerCoreviewBuilderToolBridge,
 } from '../app/lib/coreview-builder-actions';
 import {
+  assembleGeminiOutputTranscription,
   buildGeminiArtifactFrameRealtimeInput,
   buildGeminiArtifactTextReaderHint,
   buildGeminiLiveWebSocketUrl,
@@ -24,6 +25,7 @@ import {
   connectGeminiBrowserLiveFromBootstrap,
   createGeminiConversationAudioRecorder,
   createGeminiOutputAudioPlaybackController,
+  detectGeminiSameResponseRepeatedIntent,
   isGeminiServerInterruptedEvent,
   isGeminiSetupCompleteMessage,
   isRelayableGeminiProviderEvent,
@@ -41,6 +43,10 @@ import {
   type GeminiBrowserLiveDogfoodInterruptionDiagnostic,
   type GeminiBargeInTranscriptHandoffDiagnostic,
   type GeminiBrowserLiveDogfoodToolLoopDiagnostic,
+  type GeminiInputAudioActivityDiagnostic,
+  type GeminiProviderReceiveMetadata,
+  type GeminiRepeatedIntentGateDiagnostic,
+  type GeminiStaleOutputSuppressionDiagnostic,
 } from '../app/lib/gemini-browser-live-websocket-dogfood';
 
 const emitArtifactArgs = {
@@ -263,6 +269,48 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(classifyArtifactReviewUserIntent('   ')).toBe('unknown');
   });
 
+  it("preserves the later repeated What's/right now fragments and detects the repeated intent", () => {
+    const fragments = [
+      'Got it.',
+      "Sounds like you're really deep in the design phase.",
+      "What's",
+      'the main blocker',
+      'right now',
+      'architecturally?',
+      "You're in the thick of it, weighing the options.",
+      "What's",
+      'the biggest consideration',
+      'right now',
+      'between the separation of the control plane and the execution layer?',
+    ];
+    let assembled = '';
+    let previousFragment: string | null = null;
+    const decisions: string[] = [];
+
+    for (const fragment of fragments) {
+      const result = assembleGeminiOutputTranscription(assembled, fragment, previousFragment);
+      assembled = result.text;
+      previousFragment = fragment;
+      decisions.push(result.decision);
+    }
+
+    expect(assembled).toBe(
+      "Got it. Sounds like you're really deep in the design phase. What's the main blocker right now architecturally? You're in the thick of it, weighing the options. What's the biggest consideration right now between the separation of the control plane and the execution layer?",
+    );
+    expect(assembled.match(/What's/g)).toHaveLength(2);
+    expect(assembled.match(/right now/g)).toHaveLength(2);
+    expect(decisions.slice(7)).toContain('delta_append');
+    expect(detectGeminiSameResponseRepeatedIntent(assembled)).toMatchObject({
+      detected: true,
+      questionCount: 2,
+      matchedSignals: expect.arrayContaining([
+        'same_question_opener',
+        'shared_right_now_frame',
+        'shared_intent_concept',
+      ]),
+    });
+  });
+
   it('decodes Gemini output PCM16 little-endian bytes into normalized float samples', () => {
     const samples = pcm16BytesToFloat32(new Uint8Array([
       0x00, 0x00,
@@ -280,6 +328,22 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
 
   it('tees captured assistant audio to the speakers and resumes a suspended context', async () => {
     const fakeAudioContext = new FakeAudioContext();
+    const audioTrack = {
+      stop: vi.fn(),
+      getSettings: () => ({
+        echoCancellation: true,
+        noiseSuppression: false,
+        autoGainControl: true,
+        sampleRate: 48000,
+        channelCount: 1,
+        latency: 0.02,
+      }),
+    };
+    const localStream = {
+      getTracks: () => [audioTrack],
+      getAudioTracks: () => [audioTrack],
+    } as unknown as MediaStream;
+    const getUserMedia = vi.fn(async () => localStream);
     const recorder = createGeminiConversationAudioRecorder(
       fakeAudioContext as unknown as AudioContext,
     );
@@ -288,13 +352,17 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(fakeAudioContext.createdGains[1]?.connect).toHaveBeenCalledWith(fakeAudioContext.destination);
 
     const diagnostics: unknown[] = [];
+    const microphoneDiagnostics: unknown[] = [];
+    const inputActivityDiagnostics: GeminiInputAudioActivityDiagnostic[] = [];
     const connection = await connectGeminiBrowserLiveDogfood({
       userId: 'user-1',
       fetchFn: makeGeminiBrowserSessionFetch('browser-gemini-audio', true) as typeof fetch,
       webSocketFactory: (url) => new FakeWebSocket(url),
-      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      getUserMedia,
       audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
       onAudioContextDiagnostics: (diagnostic) => diagnostics.push(diagnostic),
+      onMicrophoneAudioSettings: (diagnostic) => microphoneDiagnostics.push(diagnostic),
+      onInputAudioActivity: (diagnostic) => inputActivityDiagnostics.push(diagnostic),
     });
 
     expect(fakeAudioContext.resume).toHaveBeenCalledTimes(1);
@@ -312,6 +380,36 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         resumeSucceeded: null,
       }),
     ]);
+    expect(getUserMedia).toHaveBeenCalledWith({
+      audio: {
+        echoCancellation: true,
+        noiseSuppression: true,
+        autoGainControl: true,
+      },
+    });
+    expect(microphoneDiagnostics).toEqual([
+      expect.objectContaining({
+        requested: {
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+        },
+        tracks: [{
+          echoCancellation: true,
+          noiseSuppression: false,
+          autoGainControl: true,
+          sampleRate: 48000,
+          channelCount: 1,
+          latency: 0.02,
+        }],
+      }),
+    ]);
+    expect(connection.microphoneAudioSettings).toEqual(microphoneDiagnostics[0]);
+    expect(inputActivityDiagnostics).toContainEqual(expect.objectContaining({
+      eventType: 'microphone_settings_recorded',
+      trigger: 'microphone_track_settings',
+      microphoneAudioSettings: microphoneDiagnostics[0],
+    }));
     expect(fakeAudioContext.createdGains[1]?.connect).toHaveBeenCalledWith(fakeAudioContext.destination);
 
     await connection.close();
@@ -339,7 +437,13 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(fakeAudioContext.createdSources[1]?.stop).toHaveBeenCalledTimes(1);
     expect(fakeAudioContext.createdSources[0]?.disconnect).toHaveBeenCalledTimes(1);
     expect(fakeAudioContext.createdSources[1]?.disconnect).toHaveBeenCalledTimes(1);
-    expect(player.snapshot()).toEqual({ nextPlaybackTime: 0, activeSourceCount: 0, playbackGeneration: 1 });
+    expect(player.snapshot()).toEqual({
+      nextPlaybackTime: 0,
+      activeSourceCount: 0,
+      playbackGeneration: 1,
+      queuedChunkCount: 0,
+      playbackAheadSeconds: 0,
+    });
   });
 
   it('records bounded non-raw diagnostics for scheduled Gemini output audio chunks', () => {
@@ -400,6 +504,80 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       playbackGeneration: 0,
     });
     expect((diagnostics[0] as { chunkHash?: unknown }).chunkHash).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('suppresses only bounded exact transport audio replays and preserves legitimate repeated audio', () => {
+    const fakeAudioContext = new FakeAudioContext();
+    const diagnostics: Array<{ dropReason?: string | null; scheduled?: boolean }> = [];
+    let nowMs = 1_000;
+    const player = createGeminiOutputAudioPlaybackController(fakeAudioContext as unknown as AudioContext, {
+      nowMs: () => nowMs,
+      onChunkDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+    const chunk = Buffer.from([0x00, 0x00, 0x01, 0x00]).toString('base64');
+    const audioEvent = (eventId: string | null) => ({
+      ...(eventId ? { eventId } : {}),
+      responseId: 'response-audio-1',
+      serverContent: {
+        responseId: 'response-audio-1',
+        modelTurn: {
+          parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: chunk } }],
+        },
+      },
+    });
+    const metadata = (sequence: number, epoch: number): GeminiProviderReceiveMetadata => ({
+      providerReceiveSequence: sequence,
+      providerConnectionEpoch: epoch,
+      providerReceivedAt: `2026-08-22T12:00:00.00${sequence}Z`,
+      relayCorrelationId: `audio-${sequence}`,
+      providerPrimaryCategory: 'serverContent',
+      providerCategories: ['serverContent', 'modelTurnAudio'],
+    });
+
+    expect(player.playEvent(audioEvent('stable-audio-event'), metadata(1, 1))).toBe(1);
+    nowMs += 10;
+    expect(player.playEvent(audioEvent('stable-audio-event'), metadata(2, 1))).toBe(0);
+    nowMs += 10;
+    // Same bytes with a new event identity in the same uninterrupted provider
+    // epoch can be legitimate speech and must still play.
+    expect(player.playEvent(audioEvent('new-audio-event'), metadata(3, 1))).toBe(1);
+    nowMs += 10;
+    expect(player.playEvent(audioEvent(null), metadata(4, 2))).toBe(0);
+
+    expect(diagnostics.filter((diagnostic) => diagnostic.dropReason === 'exact_transport_replay')).toHaveLength(2);
+    expect(diagnostics.filter((diagnostic) => diagnostic.scheduled)).toHaveLength(2);
+  });
+
+  it('bounds playback-ahead, queues excess chunks, and flushes scheduled and queued audio', () => {
+    const fakeAudioContext = new FakeAudioContext();
+    fakeAudioContext.currentTime = 3;
+    const diagnostics: Array<{ dropReason?: string | null }> = [];
+    const player = createGeminiOutputAudioPlaybackController(fakeAudioContext as unknown as AudioContext, {
+      maxPlaybackAheadSeconds: 0.75,
+      maxQueuedChunks: 2,
+      onChunkDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+    });
+    const halfSecondChunk = Buffer.alloc(24_000).toString('base64');
+
+    expect(player.playBase64Chunk(halfSecondChunk)).toBe(true);
+    expect(player.playBase64Chunk(halfSecondChunk)).toBe(true);
+    expect(player.playBase64Chunk(halfSecondChunk)).toBe(true);
+    expect(player.playBase64Chunk(halfSecondChunk)).toBe(false);
+    expect(player.snapshot()).toMatchObject({
+      activeSourceCount: 1,
+      queuedChunkCount: 2,
+      playbackAheadSeconds: 0.5,
+    });
+    expect(diagnostics.at(-1)).toMatchObject({ dropReason: 'playback_queue_full' });
+
+    expect(player.flush()).toEqual({
+      nextPlaybackTime: 0,
+      activeSourceCount: 0,
+      playbackGeneration: 1,
+      queuedChunkCount: 0,
+      playbackAheadSeconds: 0,
+    });
+    expect(fakeAudioContext.createdSources[0]?.stop).toHaveBeenCalledTimes(1);
   });
 
   it('reads Gemini audio chunks from camelCase and snake_case modelTurn inlineData parts', () => {
@@ -810,7 +988,13 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       reason: 'server_interrupted',
       playbackFlushed: true,
       playbackStateBefore: expect.objectContaining({ activeSourceCount: 1, playbackGeneration: 0 }),
-      playbackStateAfter: { nextPlaybackTime: 0, activeSourceCount: 0, playbackGeneration: 1 },
+      playbackStateAfter: expect.objectContaining({
+        nextPlaybackTime: 0,
+        activeSourceCount: 0,
+        playbackGeneration: 1,
+        queuedChunkCount: 0,
+        playbackAheadSeconds: 0,
+      }),
       playbackGeneration: 1,
       interruptedResponseIds: ['gemini-old-response'],
       bargeInConfirmationSource: 'provider_interruption',
@@ -836,7 +1020,13 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     ]));
     expect(fetchMock).toHaveBeenCalledTimes(fetchCallsAfterInterruption);
 
-    expect(connection.flushOutputAudio()).toEqual({ nextPlaybackTime: 0, activeSourceCount: 0, playbackGeneration: 2 });
+    expect(connection.flushOutputAudio()).toEqual({
+      nextPlaybackTime: 0,
+      activeSourceCount: 0,
+      playbackGeneration: 2,
+      queuedChunkCount: 0,
+      playbackAheadSeconds: 0,
+    });
 
     await connection.close();
 
@@ -1725,7 +1915,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     await connection.close();
   });
 
-  it('does not drop raw Gemini outputTranscription fragments while preserving relay sequence numbers', async () => {
+  it('coalesces delta-like output transcription into bounded cumulative snapshots', async () => {
     const firstPartialRelay = deferredResponse();
     const relayTraces: unknown[] = [];
     const coalescingDiagnostics: unknown[] = [];
@@ -1771,41 +1961,29 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     await Promise.resolve();
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
-    expect(coalescingDiagnostics).toHaveLength(0);
+    await vi.waitFor(() => expect(coalescingDiagnostics).toHaveLength(2));
 
     firstPartialRelay.resolve(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }));
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(6));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(4));
 
     const firstRelayBody = JSON.parse(String(fetchMock.mock.calls[2]?.[1]?.body)) as Record<string, unknown>;
     const secondRelayBody = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)) as Record<string, unknown>;
-    const thirdRelayBody = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body)) as Record<string, unknown>;
-    const fourthRelayBody = JSON.parse(String(fetchMock.mock.calls[5]?.[1]?.body)) as Record<string, unknown>;
     expect(firstRelayBody).toMatchObject({
       provider_receive_sequence: 2,
       provider_relay_sequence: 2,
       event: { serverContent: { outputTranscription: { text: "You're asking" } } },
     });
     expect(secondRelayBody).toMatchObject({
-      provider_receive_sequence: 3,
-      provider_relay_sequence: 3,
-      event: { serverContent: { outputTranscription: { text: 'for a' } } },
-    });
-    expect(thirdRelayBody).toMatchObject({
-      provider_receive_sequence: 4,
-      provider_relay_sequence: 4,
-      event: { serverContent: { outputTranscription: { text: 'deeper' } } },
-    });
-    expect(fourthRelayBody).toMatchObject({
       provider_receive_sequence: 5,
-      provider_relay_sequence: 5,
-      event: { serverContent: { outputTranscription: { text: 'understanding' } } },
+      provider_relay_sequence: 3,
+      event: { serverContent: { outputTranscription: { text: "You're asking for a deeper understanding" } } },
     });
     expect(relayTraces.at(-1)).toMatchObject({
       throughput: {
-        transcriptPartialsCoalesced: 0,
-        transcriptPartialsDropped: 0,
-        transcriptPartialsSent: 4,
-        transcriptCoalescingDisabledReason: 'provider_output_transcription_is_delta_like',
+        transcriptPartialsCoalesced: 2,
+        transcriptPartialsDropped: 2,
+        transcriptPartialsSent: 2,
+        transcriptCoalescingDisabledReason: null,
       },
     });
 
@@ -1863,7 +2041,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     await connection.close();
   });
 
-  it('keeps user transcripts, tools, cancellations, and boundaries non-droppable behind a blocked transcript fragment', async () => {
+  it('keeps user transcripts, tools, cancellations, errors, and boundaries non-droppable behind a blocked transcript fragment', async () => {
     const firstPartialRelay = deferredResponse();
     const fetchMock = vi
       .fn()
@@ -1906,15 +2084,16 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       },
     });
     websocket?.emitMessage({ toolCallCancellation: { ids: ['artifact-critical-call'] } });
+    websocket?.emitMessage({ error: { code: 500, message: 'provider issue' } });
     websocket?.emitMessage({ serverContent: { turnComplete: true } });
     await Promise.resolve();
 
     expect(fetchMock).toHaveBeenCalledTimes(3);
     firstPartialRelay.resolve(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }));
-    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(7));
+    await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(8));
 
-    const queuedBodies = fetchMock.mock.calls.slice(3, 7).map((call) => JSON.parse(String(call[1]?.body)) as Record<string, unknown>);
-    expect(queuedBodies.map((body) => body.provider_relay_sequence)).toEqual([3, 4, 5, 6]);
+    const queuedBodies = fetchMock.mock.calls.slice(3, 8).map((call) => JSON.parse(String(call[1]?.body)) as Record<string, unknown>);
+    expect(queuedBodies.map((body) => body.provider_relay_sequence)).toEqual([3, 4, 5, 6, 7]);
     expect(queuedBodies[0]).toMatchObject({
       event: { serverContent: { inputTranscription: { text: 'user words' } } },
     });
@@ -1929,13 +2108,16 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       event: { toolCallCancellation: { ids: ['artifact-critical-call'] } },
     });
     expect(queuedBodies[3]).toMatchObject({
+      event: { error: { code: 500, message: 'provider issue' } },
+    });
+    expect(queuedBodies[4]).toMatchObject({
       event: { serverContent: { turnComplete: true } },
     });
 
     await connection.close();
   });
 
-  it('never coalesces final assistant transcript boundary events behind pending partials', async () => {
+  it('flushes the final assembled assistant transcript before the non-droppable turn boundary', async () => {
     const firstPartialRelay = deferredResponse();
     const fetchMock = vi
       .fn()
@@ -1978,16 +2160,121 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     firstPartialRelay.resolve(new Response(JSON.stringify({ accepted: true }), { status: 202, headers: { 'Content-Type': 'application/json' } }));
     await vi.waitFor(() => expect(fetchMock).toHaveBeenCalledTimes(5));
 
-    const queuedPartialBody = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)) as Record<string, unknown>;
-    const finalBody = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body)) as Record<string, unknown>;
-    expect(queuedPartialBody).toMatchObject({
+    const finalTranscriptBody = JSON.parse(String(fetchMock.mock.calls[3]?.[1]?.body)) as Record<string, unknown>;
+    const boundaryBody = JSON.parse(String(fetchMock.mock.calls[4]?.[1]?.body)) as Record<string, unknown>;
+    expect(finalTranscriptBody).toMatchObject({
       provider_relay_sequence: 3,
-      event: { serverContent: { outputTranscription: { text: 'Queued partial.' } } },
+      event: {
+        serverContent: {
+          outputTranscription: { text: 'Partial in flight. Queued partial. Final caption.' },
+        },
+      },
     });
-    expect(finalBody).toMatchObject({
+    expect(boundaryBody).toMatchObject({
       provider_relay_sequence: 4,
-      event: { serverContent: { outputTranscription: { text: 'Final caption.' }, turnComplete: true } },
+      event: { serverContent: { turnComplete: true } },
     });
+    expect(boundaryBody).not.toMatchObject({ event: { serverContent: { outputTranscription: expect.anything() } } });
+
+    await connection.close();
+  });
+
+  it('gates the exact same-response repeated question fixture before queued audio can mostly play', async () => {
+    const fetchMock = makeGeminiBrowserSessionFetch('browser-gemini-repeated-intent');
+    const fakeAudioContext = new FakeAudioContext();
+    const gateDiagnostics: GeminiRepeatedIntentGateDiagnostic[] = [];
+    const staleSuppressionDiagnostics: GeminiStaleOutputSuppressionDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+    const connection = await connectGeminiBrowserLiveDogfood({
+      userId: 'user-1',
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      transcriptRelayCadenceMs: 0,
+      outputAudioMaxPlaybackAheadSeconds: 0.75,
+      onRepeatedIntentGate: (diagnostic) => gateDiagnostics.push(diagnostic),
+      onStaleOutputSuppression: (diagnostic) => staleSuppressionDiagnostics.push(diagnostic),
+    });
+
+    const responseId = 'gemini-response-repeated-intent';
+    const halfSecondAudio = Buffer.alloc(24_000).toString('base64');
+    const emitAudio = () => websocket?.emitMessage({
+      responseId,
+      serverContent: {
+        responseId,
+        modelTurn: {
+          parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: halfSecondAudio } }],
+        },
+      },
+    });
+    emitAudio();
+    emitAudio();
+    emitAudio();
+    await vi.waitFor(() => expect(fakeAudioContext.createdSources).toHaveLength(1));
+
+    const fragments = [
+      'Got it.',
+      "Sounds like you're really deep in the design phase.",
+      "What's",
+      'the main blocker',
+      'right now',
+      'architecturally?',
+      "You're in the thick of it, weighing the options.",
+      "What's",
+      'the biggest consideration',
+      'right now',
+      'between the separation of the control plane and the execution layer?',
+    ];
+    for (const text of fragments) {
+      websocket?.emitMessage({
+        responseId,
+        serverContent: { responseId, outputTranscription: { text } },
+      });
+      await Promise.resolve();
+      await Promise.resolve();
+    }
+
+    await vi.waitFor(() => expect(gateDiagnostics).toHaveLength(1));
+    expect(gateDiagnostics[0]).toMatchObject({
+      reason: 'repeated_intent_gate',
+      responseId,
+      questionCount: 2,
+      playbackFlushed: true,
+      playbackStateBefore: {
+        activeSourceCount: 1,
+        queuedChunkCount: 2,
+        playbackGeneration: 0,
+      },
+      playbackStateAfter: {
+        activeSourceCount: 0,
+        queuedChunkCount: 0,
+        playbackGeneration: 1,
+      },
+      rawProviderOutputTranscriptionUsed: true,
+    });
+    expect(staleSuppressionDiagnostics).toContainEqual(expect.objectContaining({
+      outputType: 'audio',
+      reason: 'repeated_intent_gate',
+      responseId,
+      assistantAudioDropReason: 'repeated_intent_gate',
+      repeatedIntentGate: {
+        questionCount: gateDiagnostics[0]?.questionCount,
+        firstQuestionFingerprint: gateDiagnostics[0]?.firstQuestionFingerprint,
+        secondQuestionFingerprint: gateDiagnostics[0]?.secondQuestionFingerprint,
+        similarityScore: gateDiagnostics[0]?.similarityScore,
+        matchedSignals: gateDiagnostics[0]?.matchedSignals,
+      },
+    }));
+    expect(fakeAudioContext.createdSources[0]?.stop).toHaveBeenCalledTimes(1);
+
+    emitAudio();
+    await Promise.resolve();
+    await Promise.resolve();
+    expect(fakeAudioContext.createdSources).toHaveLength(1);
 
     await connection.close();
   });

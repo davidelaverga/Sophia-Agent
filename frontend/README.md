@@ -139,6 +139,37 @@ src/
 - Environment validation can be skipped with `SKIP_ENV_VALIDATION=1` (useful for Docker)
 - Backend API URLs are optional; nginx proxy is used by default in development
 
+### Gemini browser voice reliability
+
+The direct Gemini browser provider keeps its reliability controls in
+`src/app/lib/gemini-browser-live-websocket-dogfood.ts`:
+
+- Output-transcription deltas are assembled per response segment and relayed as
+  cumulative snapshots at a maximum cadence of 4 Hz. User transcripts, tool
+  calls, cancellations, errors, interruptions, and final turn boundaries stay
+  ordered and non-droppable; a final assembled transcript is queued before its
+  boundary.
+- Transcript assembly deduplicates only adjacent exact fragments and verified
+  suffix/prefix overlap. A word or phrase appearing earlier in the response is
+  not sufficient reason to discard a later occurrence.
+- A same-response repeated-intent gate scores completed provider-transcribed
+  questions before far-ahead audio is played. When it detects a near-duplicate
+  second question, it flushes queued playback, suppresses later audio for that
+  response, and emits a privacy-safe `repeated_intent_gate` diagnostic.
+- Playback is capped at 750 ms ahead by default and retains at most 96 unscheduled
+  chunks. Exact audio is suppressed only when a stable provider event ID repeats
+  or the same response payload is replayed across provider connection epochs;
+  matching audio inside one uninterrupted epoch remains playable.
+- Microphone capture explicitly requests echo cancellation, noise suppression,
+  and automatic gain control. The connection records the browser's effective
+  track settings without device identifiers.
+
+Run the focused deterministic contract suite with:
+
+```bash
+pnpm test -- src/__tests__/gemini-browser-live-websocket-dogfood.test.ts
+```
+
 ## Validation Status
 
 Validated locally on 2026-04-09 for the current frontend branch state:
