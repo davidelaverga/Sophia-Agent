@@ -14,7 +14,6 @@ from voice.realtime.coreview import GEMINI_COREVIEW_ACTION_TOOL_NAMES
 from voice.realtime.delivery import DeliveryIntent, DeliveryPace
 from voice.realtime.events import ProviderEvent, ProviderEventType
 
-
 GEMINI_LIVE_PROVIDER_NAME = "google-gemini-live"
 DEFAULT_GEMINI_LIVE_MODEL = "gemini-3.1-flash-live-preview"
 DEFAULT_GEMINI_LIVE_VOICE_NAME = "Kore"

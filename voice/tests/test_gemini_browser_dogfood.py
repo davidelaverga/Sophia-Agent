@@ -325,7 +325,7 @@ def _patch_gateway_memory_response(
         def __init__(self, *, timeout: float) -> None:
             self.timeout = timeout
 
-        async def __aenter__(self) -> "FakeAsyncClient":
+        async def __aenter__(self) -> FakeAsyncClient:
             return self
 
         async def __aexit__(self, *_args: object) -> None:
@@ -362,7 +362,7 @@ def _patch_gemini_token_response(
         def __init__(self, *, timeout: float) -> None:
             self.timeout = timeout
 
-        async def __aenter__(self) -> "FakeAsyncClient":
+        async def __aenter__(self) -> FakeAsyncClient:
             return self
 
         async def __aexit__(self, *_args: object) -> None:

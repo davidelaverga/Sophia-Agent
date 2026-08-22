@@ -4,27 +4,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-
 from voice.realtime.gemini_live import build_gemini_live_setup_config
 from voice.realtime.gemini_memory_context import (
     build_gemini_live_memory_context,
     build_gemini_live_realtime_instructions_with_memory_context,
-)
-from voice.realtime.sophia_prompt import (
-    CORE_SKILL_FILES,
-    EMOTIONAL_SKILLS_REPERTOIRE_SOURCE,
-    GEMINI_LIVE_SPOKEN_TURN_POLICY_SOURCE,
-    REPO_ROOT,
-    REALTIME_MEMORY_RECALL_GUIDANCE_SOURCE,
-    SOPHIA_AGENT_MIDDLEWARE_PATH,
-    build_gemini_live_realtime_instructions,
-    build_gemini_live_realtime_setup_instructions,
-    build_gemini_live_spoken_turn_policy_overlay,
-    build_realtime_memory_recall_guidance,
-    build_sophia_realtime_setup_instructions,
-    build_sophia_realtime_instructions,
-    gemini_live_realtime_instruction_sources,
-    sophia_realtime_instruction_sources,
 )
 from voice.realtime.openai_realtime import build_openai_realtime_session_config
 from voice.realtime.skill_slow_state import (
@@ -32,7 +15,22 @@ from voice.realtime.skill_slow_state import (
     VoiceSkillSlowStateSeed,
     build_voice_skill_state_seed_block,
 )
-
+from voice.realtime.sophia_prompt import (
+    CORE_SKILL_FILES,
+    EMOTIONAL_SKILLS_REPERTOIRE_SOURCE,
+    GEMINI_LIVE_SPOKEN_TURN_POLICY_SOURCE,
+    REALTIME_MEMORY_RECALL_GUIDANCE_SOURCE,
+    REPO_ROOT,
+    SOPHIA_AGENT_MIDDLEWARE_PATH,
+    build_gemini_live_realtime_instructions,
+    build_gemini_live_realtime_setup_instructions,
+    build_gemini_live_spoken_turn_policy_overlay,
+    build_realtime_memory_recall_guidance,
+    build_sophia_realtime_instructions,
+    build_sophia_realtime_setup_instructions,
+    gemini_live_realtime_instruction_sources,
+    sophia_realtime_instruction_sources,
+)
 
 EMOTIONAL_SKILL_NAMES = [
     "active_listening",

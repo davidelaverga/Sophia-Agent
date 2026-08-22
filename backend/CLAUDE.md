@@ -278,6 +278,13 @@ through the deployment database gate. Regression coverage is in
 multi-tab/overlap, conflict rebase, stale lifecycle beacon, and deletion
 non-resurrection).
 
+Before calling `/{user_id}/end-session`, the frontend explicitly drains the
+single-flight transcript queue and includes the resulting `base_revision`.
+Finalization applies that revision through the same snapshot admission gate
+and builds offline recap/memory context from the canonical stored rows. A
+revisionless end request is allowed to seed only a revision-zero transcript;
+after that it is non-authoritative and cannot overwrite or resurrect rows.
+
 ### Sandbox System (`packages/harness/deerflow/sandbox/`)
 
 **Interface**: Abstract `Sandbox` with `execute_command`, `read_file`, `write_file`, `list_dir`

@@ -4,7 +4,6 @@ import asyncio
 
 import pytest
 from starlette.requests import Request
-
 from voice.server import _voice_event_cursor
 from voice.sse_broker import VoiceEventBroker, format_sse_event
 

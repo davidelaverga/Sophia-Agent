@@ -163,6 +163,10 @@ The direct Gemini browser provider keeps its reliability controls in
 - Microphone capture explicitly requests echo cancellation, noise suppression,
   and automatic gain control. The connection records the browser's effective
   track settings without device identifiers.
+- Session transcript writes are revision-seeded and single-flight. Ending a
+  session drains the latest snapshot, sends its accepted revision, and lets the
+  backend package recap/resumption context from canonical stored rows rather
+  than the potentially stale end-session request body.
 
 Run the focused deterministic contract suite with:
 

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
-from dataclasses import dataclass, field
 import json
+from dataclasses import dataclass, field
 from typing import Any
 from uuid import UUID
 
@@ -23,9 +23,9 @@ class FakeRun:
     patched: bool = False
     ended: bool = False
     error: str | None = None
-    children: list["FakeRun"] = field(default_factory=list)
+    children: list[FakeRun] = field(default_factory=list)
 
-    def create_child(self, name: str, run_type: str = "chain", **kwargs: Any) -> "FakeRun":
+    def create_child(self, name: str, run_type: str = "chain", **kwargs: Any) -> FakeRun:
         child = FakeRun(
             name=name,
             run_type=run_type,

@@ -334,6 +334,11 @@ class SessionEndRequest(BaseModel):
     ended_at: str | None = Field(default=None)
     turn_count: int | None = Field(default=None)
     platform: str | None = Field(default=None)
+    base_revision: int | None = Field(
+        default=None,
+        ge=0,
+        description="Authoritative transcript revision used by the ending client",
+    )
     messages: list[SessionMessageInput] = Field(default_factory=list)
     recap_artifacts: SessionRecapArtifactsPayload | None = Field(default=None)
 
@@ -614,12 +619,17 @@ def _compute_duration_minutes(started_at: str | None, ended_at: str | None) -> i
     return max(0, int((end_dt - start_dt).total_seconds() // 60))
 
 
-def _build_session_recap_payload(body: SessionEndRequest, ended_at: str) -> dict:
+def _build_session_recap_payload(
+    body: SessionEndRequest,
+    ended_at: str,
+    *,
+    thread_id: str | None = None,
+) -> dict:
     recap_artifacts = body.recap_artifacts.model_dump(exclude_none=True) if body.recap_artifacts else None
     turn_count = body.turn_count if body.turn_count is not None else len(body.messages)
     return {
         "session_id": body.session_id,
-        "thread_id": body.thread_id,
+        "thread_id": thread_id or body.thread_id,
         "session_type": body.session_type,
         "context_mode": body.context_mode,
         "started_at": body.started_at,
@@ -673,17 +683,32 @@ def _get_memory_extraction_window(user_id: str, session_id: str) -> tuple[int, i
     return last_processed, current_max, current_max > last_processed
 
 
-def _build_thread_state_from_end_request(body: SessionEndRequest) -> dict | None:
-    serialized_messages = [
-        {
-            "role": message.role,
-            "content": message.content,
-        }
-        for message in body.messages
-        if message.content.strip()
-        and (message.role in {"user", "assistant", "sophia"})
-        and (message.final if message.final is not None else not bool(message.incomplete))
-    ]
+def _build_thread_state_from_end_request(
+    body: SessionEndRequest,
+    authoritative_messages: list[SessionMessageRecord] | None = None,
+) -> dict | None:
+    if authoritative_messages is None:
+        serialized_messages = [
+            {
+                "role": message.role,
+                "content": message.content,
+            }
+            for message in body.messages
+            if message.content.strip()
+            and (message.role in {"user", "assistant", "sophia"})
+            and (message.final if message.final is not None else not bool(message.incomplete))
+        ]
+    else:
+        serialized_messages = [
+            {
+                "role": message.role,
+                "content": message.content,
+            }
+            for message in authoritative_messages
+            if message.content.strip()
+            and message.role in {"user", "assistant"}
+            and message.final
+        ]
     recap_artifacts = body.recap_artifacts.model_dump(exclude_none=True) if body.recap_artifacts else None
 
     if not serialized_messages and not recap_artifacts:
@@ -706,37 +731,19 @@ def _build_thread_state_from_end_request(body: SessionEndRequest) -> dict | None
     return thread_state
 
 
-def _persist_end_session_transcript(user_id: str, body: SessionEndRequest) -> None:
-    if not body.messages:
-        return
-
+def _persist_end_session_transcript(
+    user_id: str,
+    body: SessionEndRequest,
+) -> list[SessionMessageRecord] | None:
     owner_user_id, record = _resolve_session_record_owner(user_id, body.session_id)
     if record is None:
-        return
+        return None
 
     existing_visible = canonical_visible_messages(
         _session_store.list_messages(owner_user_id, body.session_id)
     )
-    existing_ids = {message.message_id for message in existing_visible if message.message_id}
-    existing_contents = [message.content.strip() for message in existing_visible if message.content.strip()]
-    body_first_content = next(
-        (message.content.strip() for message in body.messages if message.content.strip()),
-        "",
-    )
-    body_has_existing_id = any(
-        (message.message_id or message.id) in existing_ids
-        for message in body.messages
-        if message.message_id or message.id
-    )
-    body_looks_like_full_snapshot = (
-        not existing_visible
-        or body_has_existing_id
-        or (bool(body_first_content) and bool(existing_contents) and body_first_content == existing_contents[0])
-    )
-    base_sequence = 0 if body_looks_like_full_snapshot else max(
-        (message.sequence for message in existing_visible),
-        default=0,
-    )
+    if not body.messages:
+        return existing_visible
 
     records: list[SessionMessageRecord] = []
     for message in body.messages:
@@ -749,7 +756,7 @@ def _persist_end_session_transcript(user_id: str, body: SessionEndRequest) -> No
         is_final = message.final if message.final is not None else not bool(message.incomplete)
         if not is_final:
             continue
-        sequence = base_sequence + len(records) + 1
+        sequence = len(records) + 1
         records.append(
             SessionMessageRecord(
                 message_id=derive_message_id(
@@ -762,7 +769,7 @@ def _persist_end_session_transcript(user_id: str, body: SessionEndRequest) -> No
                     content=content,
                 ),
                 session_id=body.session_id,
-                thread_id=body.thread_id or record.thread_id,
+                thread_id=record.thread_id,
                 role=role,
                 content=content,
                 created_at=message.created_at or datetime.now(UTC).isoformat(),
@@ -776,24 +783,52 @@ def _persist_end_session_transcript(user_id: str, body: SessionEndRequest) -> No
             )
         )
 
-    if records:
-        if body.thread_id and body.thread_id != record.thread_id:
-            record = _session_store.update(
+    if not records:
+        return existing_visible
+
+    if body.base_revision is None:
+        if int(record.message_revision) > 0:
+            logger.info(
+                "session.finalization revisionless_transcript_rejected user_id=%s session_id=%s current_revision=%s",
                 owner_user_id,
                 body.session_id,
-                thread_id=body.thread_id,
-                checkpointer_available=True,
-            ) or record
-        if body_looks_like_full_snapshot:
-            stored_records = _session_store.replace_messages(owner_user_id, body.session_id, records)
+                record.message_revision,
+            )
+            visible_records = existing_visible
         else:
-            stored_records = _session_store.append_or_upsert_messages(owner_user_id, body.session_id, records)
-        visible_records = canonical_visible_messages(stored_records)
-        updates: dict[str, object] = {"message_count": len(visible_records)}
-        last_visible = next((message for message in reversed(visible_records) if message.content.strip()), None)
-        if last_visible is not None:
-            updates["last_message_preview"] = last_visible.content.strip()[:200]
-        _session_store.update(owner_user_id, body.session_id, **updates)
+            # Backward-compatible first write only. Once a revision exists, an
+            # ending client must prove which snapshot it observed.
+            visible_records = canonical_visible_messages(
+                _session_store.replace_messages_revisioned(
+                    owner_user_id,
+                    body.session_id,
+                    records,
+                    expected_revision=0,
+                ).messages
+            )
+    else:
+        snapshot = _session_store.replace_messages_revisioned(
+            owner_user_id,
+            body.session_id,
+            records,
+            expected_revision=body.base_revision,
+        )
+        visible_records = canonical_visible_messages(snapshot.messages)
+        if snapshot.conflict:
+            logger.info(
+                "session.finalization transcript_conflict_rejected user_id=%s session_id=%s expected_revision=%s current_revision=%s",
+                owner_user_id,
+                body.session_id,
+                body.base_revision,
+                snapshot.current_revision,
+            )
+
+    updates: dict[str, object] = {"message_count": len(visible_records)}
+    last_visible = next((message for message in reversed(visible_records) if message.content.strip()), None)
+    if last_visible is not None:
+        updates["last_message_preview"] = last_visible.content.strip()[:200]
+    _session_store.update(owner_user_id, body.session_id, **updates)
+    return visible_records
 
 
 def _build_debrief_prompt(body: SessionEndRequest, recap_artifacts: dict | None, duration_minutes: int) -> str | None:
@@ -1976,7 +2011,14 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         )
         existing_recap = None
 
-    _persist_end_session_transcript(user_id, body)
+    authoritative_transcript = _persist_end_session_transcript(user_id, body)
+    _owner_user_id, authoritative_record = _resolve_session_record_owner(
+        user_id,
+        body.session_id,
+    )
+    authoritative_thread_id = (
+        authoritative_record.thread_id if authoritative_record is not None else body.thread_id
+    )
     last_processed_sequence, current_max_sequence, has_new_messages = _get_memory_extraction_window(
         user_id,
         body.session_id,
@@ -1991,7 +2033,7 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         _mark_session_record_ended(user_id, body.session_id, existing_ended_at)
         try:
             from app.gateway.inactivity_watcher import unregister_thread
-            unregister_thread(body.thread_id)
+            unregister_thread(authoritative_thread_id)
         except ImportError:
             pass
 
@@ -1999,7 +2041,7 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
             "session.finalization duplicate_suppressed user_id=%s session_id=%s thread_id=%s duplicateFinalizationSuppressed=%s recapPipelineQueued=%s currentMaxSequence=%s",
             user_id,
             body.session_id,
-            body.thread_id,
+            authoritative_thread_id,
             True,
             False,
             current_max_sequence,
@@ -2010,7 +2052,15 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
             status="no_new_messages",
         )
 
-    recap_payload = existing_recap if isinstance(existing_recap, dict) else _build_session_recap_payload(body, ended_at)
+    recap_payload = (
+        existing_recap
+        if isinstance(existing_recap, dict)
+        else _build_session_recap_payload(
+            body,
+            ended_at,
+            thread_id=authoritative_thread_id,
+        )
+    )
     duration_minutes = _compute_duration_minutes(body.started_at, ended_at)
     turn_count = recap_payload.get("turn_count", 0)
     recap_artifacts = recap_payload.get("recap_artifacts")
@@ -2040,7 +2090,7 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
     # Remove from inactivity tracking — session explicitly ended
     try:
         from app.gateway.inactivity_watcher import unregister_thread
-        unregister_thread(body.thread_id)
+        unregister_thread(authoritative_thread_id)
     except ImportError:
         pass
 
@@ -2048,14 +2098,14 @@ async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndRespon
         _queue_offline_pipeline(
             user_id,
             body.session_id,
-            body.thread_id,
-            _build_thread_state_from_end_request(body),
+            authoritative_thread_id,
+            _build_thread_state_from_end_request(body, authoritative_transcript),
         )
         logger.info(
             "session.finalization end_session_queued user_id=%s session_id=%s thread_id=%s recapPipelineQueued=%s",
             user_id,
             body.session_id,
-            body.thread_id,
+            authoritative_thread_id,
             True,
         )
         return SessionEndResponse(

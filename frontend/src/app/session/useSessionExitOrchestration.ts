@@ -49,6 +49,8 @@ type UseSessionExitOrchestrationParams = {
   responseMode: 'text' | 'voice';
   messages: ExitGuardMessage[];
   updateMessages: (messages: PersistedSessionMessage[]) => void;
+  flushSessionTranscript?: () => Promise<number>;
+  getSessionTranscriptRevision?: () => number;
   isEnding: boolean;
 };
 
@@ -79,6 +81,8 @@ export function useSessionExitOrchestration({
   responseMode,
   messages,
   updateMessages,
+  flushSessionTranscript,
+  getSessionTranscriptRevision,
   isEnding,
 }: UseSessionExitOrchestrationParams) {
   const {
@@ -119,6 +123,8 @@ export function useSessionExitOrchestration({
     threadId,
     greetingMessageId,
     messages,
+    flushSessionTranscript,
+    getSessionTranscriptRevision,
   });
 
   useSessionExitProtection({

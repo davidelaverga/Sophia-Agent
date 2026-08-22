@@ -16,11 +16,6 @@ from uuid import UUID
 
 import httpx
 
-from voice.realtime.gemini_live import (
-    is_gemini_live_google_search_enabled,
-    is_gemini_live_web_fetch_enabled,
-)
-from voice.realtime.runtime_selection import VoiceRuntimeMode
 from voice.realtime.coreview import (
     GEMINI_COREVIEW_ACTION_TOOL_NAMES,
     GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
@@ -31,6 +26,11 @@ from voice.realtime.coreview import (
     redacted_coreview_action_diagnostic,
     redacted_read_artifact_text_diagnostic,
 )
+from voice.realtime.gemini_live import (
+    is_gemini_live_google_search_enabled,
+    is_gemini_live_web_fetch_enabled,
+)
+from voice.realtime.runtime_selection import VoiceRuntimeMode
 from voice.realtime.sophia_backend_tools import (
     SophiaBackendToolConfigurationError,
     builder_lifecycle_contract,
@@ -40,8 +40,8 @@ from voice.realtime.sophia_backend_tools import (
     execute_realtime_retrieve_memories_unavailable,
     execute_realtime_web_fetch,
     gemini_sophia_function_declarations,
-    redacted_retrieve_memories_diagnostic,
     realtime_memory_query_from_args,
+    redacted_retrieve_memories_diagnostic,
     validate_builder_lifecycle_tool_args,
 )
 
@@ -2095,7 +2095,7 @@ def _revision_artifact_path(source_artifact_path: str, message: str) -> str:
     source_name = source_artifact_path.replace("\\", "/").rsplit("/", 1)[-1]
     stem = source_name.rsplit(".", 1)[0] if "." in source_name else source_name
     suffix = f".{_artifact_ext_from_path(source_name) or 'md'}"
-    revision_id = sha256(f"{source_artifact_path}\n{message}\n{time.time()}".encode("utf-8")).hexdigest()[:8]
+    revision_id = sha256(f"{source_artifact_path}\n{message}\n{time.time()}".encode()).hexdigest()[:8]
     return f"/mnt/user-data/outputs/{_slugify_for_filename(stem)}-revision-{revision_id}{suffix}"
 
 

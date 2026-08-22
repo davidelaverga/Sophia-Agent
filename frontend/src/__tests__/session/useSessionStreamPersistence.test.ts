@@ -164,6 +164,33 @@ describe('useSessionStreamPersistence', () => {
     );
   });
 
+  it('flushes the latest snapshot on demand and returns its accepted revision', async () => {
+    getSessionMessagesMock.mockResolvedValue(historyResponse({ revision: 5 }));
+    const { result } = renderHook(() => useSessionStreamPersistence({
+      messages: [{
+        id: 'final-user-message',
+        role: 'user',
+        content: 'package this exact ending context',
+        createdAt: '2026-04-15T00:03:00.000Z',
+      }],
+      chatStatus: 'ready',
+      updateMessages: vi.fn(),
+    }));
+
+    let revision = -1;
+    await act(async () => {
+      revision = await result.current.flushSessionTranscript();
+    });
+
+    expect(persistSessionMessagesMock).toHaveBeenCalledTimes(1);
+    expect(persistSessionMessagesMock).toHaveBeenCalledWith(
+      SESSION_ONE,
+      expect.objectContaining({ base_revision: 5 }),
+      'user-1',
+    );
+    expect(revision).toBe(6);
+  });
+
   it('resets and reseeds revision state when the active session changes', async () => {
     getSessionMessagesMock.mockImplementation((sessionId: string) => Promise.resolve(historyResponse({
       sessionId,

@@ -3,20 +3,33 @@ from __future__ import annotations
 from voice.realtime.capabilities import ProviderCapabilities
 from voice.realtime.contracts import RealtimeProviderSession
 from voice.realtime.delivery import DeliveryIntent
+from voice.realtime.dogfood_evaluation import (
+    DogfoodEventSummary,
+    summarize_dogfood_events,
+)
 from voice.realtime.dogfood_session import (
     DogfoodRawEventStream,
     RealtimeDogfoodConfigurationError,
     RealtimeDogfoodSession,
     RealtimeDogfoodSessionManager,
 )
-from voice.realtime.dogfood_evaluation import (
-    DogfoodEventSummary,
-    summarize_dogfood_events,
-)
 from voice.realtime.events import (
     ProviderEvent,
     ProviderEventType,
     SophiaEvent,
+)
+from voice.realtime.gemini_browser_dogfood import (
+    GEMINI_LIVE_AUTH_TOKEN_URL,
+    GEMINI_LIVE_WEBSOCKET_URL,
+    GeminiBrowserDogfoodError,
+    GeminiBrowserDogfoodSession,
+    GeminiBrowserDogfoodSessionManager,
+    GeminiBrowserRelayError,
+    GeminiEphemeralTokenMintError,
+    GeminiLiveEphemeralToken,
+    GeminiLiveEphemeralTokenMinter,
+    validate_gemini_browser_dogfood_settings,
+    validate_gemini_browser_provider_event,
 )
 from voice.realtime.gemini_live import (
     DEFAULT_GEMINI_LIVE_MODEL,
@@ -37,35 +50,22 @@ from voice.realtime.gemini_live import (
     is_gemini_live_google_search_enabled,
     is_gemini_live_web_fetch_enabled,
 )
+from voice.realtime.gemini_production_session import (
+    GeminiProductionBrowserSession,
+    GeminiProductionBrowserSessionManager,
+    validate_gemini_production_route_settings,
+)
 from voice.realtime.gemini_tool_loop import (
     GEMINI_DOGFOOD_TOOL_RESPONSE_ACTION,
     GEMINI_EMIT_ARTIFACT_TOOL_NAME,
-    GeminiDogfoodToolExecutor,
-    GeminiDogfoodToolExecution,
     GeminiDogfoodToolError,
+    GeminiDogfoodToolExecution,
+    GeminiDogfoodToolExecutor,
     GeminiLiveFunctionCall,
     extract_gemini_live_function_calls,
     extract_gemini_tool_call_cancellation_ids,
     gemini_dogfood_tool_declarations,
     gemini_tool_response_client_action,
-)
-from voice.realtime.gemini_browser_dogfood import (
-    GEMINI_LIVE_AUTH_TOKEN_URL,
-    GEMINI_LIVE_WEBSOCKET_URL,
-    GeminiBrowserDogfoodError,
-    GeminiBrowserDogfoodSession,
-    GeminiBrowserDogfoodSessionManager,
-    GeminiBrowserRelayError,
-    GeminiEphemeralTokenMintError,
-    GeminiLiveEphemeralToken,
-    GeminiLiveEphemeralTokenMinter,
-    validate_gemini_browser_dogfood_settings,
-    validate_gemini_browser_provider_event,
-)
-from voice.realtime.gemini_production_session import (
-    GeminiProductionBrowserSession,
-    GeminiProductionBrowserSessionManager,
-    validate_gemini_production_route_settings,
 )
 from voice.realtime.legacy_cascade import (
     LEGACY_CASCADE_CAPABILITIES,
@@ -74,17 +74,6 @@ from voice.realtime.legacy_cascade import (
     LegacyCascadeProviderSession,
 )
 from voice.realtime.normalizer import SophiaEventNormalizer
-from voice.realtime.openai_realtime import (
-    DEFAULT_OPENAI_REALTIME_MODEL,
-    OPENAI_REALTIME_ADAPTER_FEATURE_FLAG,
-    OPENAI_REALTIME_CAPABILITIES,
-    OPENAI_REALTIME_PROVIDER_NAME,
-    OpenAIRealtimeAdapterDisabledError,
-    OpenAIRealtimeEventMapper,
-    OpenAIRealtimeProviderSession,
-    build_openai_realtime_session_config,
-    is_openai_realtime_adapter_enabled,
-)
 from voice.realtime.openai_browser_dogfood import (
     OPENAI_REALTIME_CLIENT_SECRET_URL,
     OPENAI_REALTIME_WEBRTC_CALL_URL,
@@ -104,6 +93,17 @@ from voice.realtime.openai_browser_dogfood import (
     extract_openai_call_id_from_location,
     is_valid_openai_call_id,
     validate_openai_browser_dogfood_settings,
+)
+from voice.realtime.openai_realtime import (
+    DEFAULT_OPENAI_REALTIME_MODEL,
+    OPENAI_REALTIME_ADAPTER_FEATURE_FLAG,
+    OPENAI_REALTIME_CAPABILITIES,
+    OPENAI_REALTIME_PROVIDER_NAME,
+    OpenAIRealtimeAdapterDisabledError,
+    OpenAIRealtimeEventMapper,
+    OpenAIRealtimeProviderSession,
+    build_openai_realtime_session_config,
+    is_openai_realtime_adapter_enabled,
 )
 from voice.realtime.runtime import SophiaRealtimeTurnRuntime
 from voice.realtime.runtime_factory import (

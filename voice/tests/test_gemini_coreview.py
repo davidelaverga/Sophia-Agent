@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import pytest
-
 from voice.realtime.coreview import (
     COREVIEW_FEATURE_FLAG,
     COREVIEW_FIXTURE_ARTIFACT_ID,

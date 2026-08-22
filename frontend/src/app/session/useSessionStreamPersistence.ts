@@ -155,6 +155,7 @@ export function useSessionStreamPersistence({
   const pendingSnapshotRef = useRef<QueuedSnapshot | null>(null);
   const writeInFlightRef = useRef(false);
   const seedPromiseRef = useRef<Promise<void>>(Promise.resolve());
+  const queueIdleWaitersRef = useRef<Array<() => void>>([]);
   const updateMessagesRef = useRef(updateMessages);
 
   useEffect(() => {
@@ -300,6 +301,10 @@ export function useSessionStreamPersistence({
       }
     } finally {
       writeInFlightRef.current = false;
+      if (!pendingSnapshotRef.current) {
+        const waiters = queueIdleWaitersRef.current.splice(0);
+        waiters.forEach((resolve) => resolve());
+      }
     }
   }, [applyAuthoritativeResponse]);
 
@@ -308,6 +313,39 @@ export function useSessionStreamPersistence({
     pendingSnapshotRef.current = snapshot;
     void drainQueue();
   }, [drainQueue]);
+
+  const flushSessionTranscript = useCallback(async (): Promise<number> => {
+    if (persistTimerRef.current) {
+      clearTimeout(persistTimerRef.current);
+      persistTimerRef.current = null;
+    }
+
+    const payload = latestPersistPayloadRef.current;
+    if (!payload || payload.messages.length === 0) {
+      await seedPromiseRef.current;
+      return messageRevisionRef.current;
+    }
+
+    const generation = generationRef.current;
+    pendingSnapshotRef.current = {
+      generation,
+      payload,
+      rebaseAttempts: 0,
+    };
+    void drainQueue();
+
+    if (writeInFlightRef.current || pendingSnapshotRef.current) {
+      await new Promise<void>((resolve) => {
+        queueIdleWaitersRef.current.push(resolve);
+      });
+    }
+    return messageRevisionRef.current;
+  }, [drainQueue]);
+
+  const getSessionTranscriptRevision = useCallback(
+    () => messageRevisionRef.current,
+    [],
+  );
 
   useEffect(() => {
     const generation = generationRef.current + 1;
@@ -505,4 +543,6 @@ export function useSessionStreamPersistence({
     messages,
     updateMessages,
   ]);
+
+  return { flushSessionTranscript, getSessionTranscriptRevision };
 }

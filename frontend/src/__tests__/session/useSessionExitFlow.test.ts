@@ -84,6 +84,8 @@ describe('useSessionExitFlow', () => {
     const navigateToMock = vi.fn();
     const promoteToDebriefModeMock = vi.fn();
     const startDebriefWithLLMMock = vi.fn();
+    const flushSessionTranscriptMock = vi.fn().mockResolvedValue(7);
+    const getSessionTranscriptRevisionMock = vi.fn().mockReturnValue(6);
 
     const { result } = renderHook(() =>
       useSessionExitFlow({
@@ -102,6 +104,8 @@ describe('useSessionExitFlow', () => {
         navigateTo: navigateToMock,
         promoteToDebriefMode: promoteToDebriefModeMock,
         startDebriefWithLLM: startDebriefWithLLMMock,
+        flushSessionTranscript: flushSessionTranscriptMock,
+        getSessionTranscriptRevision: getSessionTranscriptRevisionMock,
       })
     );
 
@@ -112,7 +116,10 @@ describe('useSessionExitFlow', () => {
     expect(endSessionApiMock).toHaveBeenCalledWith(expect.objectContaining({
       session_id: 'session-1',
       offer_debrief: false,
+      base_revision: 7,
     }));
+    expect(flushSessionTranscriptMock).toHaveBeenCalledTimes(1);
+    expect(getSessionTranscriptRevisionMock).toHaveBeenCalledTimes(1);
 
     expect(result.current.showDebriefOffer).toBe(false);
     expect(result.current.showEmergence).toBe(true);
@@ -129,6 +136,50 @@ describe('useSessionExitFlow', () => {
     expect(clearSessionStoreMock).toHaveBeenCalledTimes(1);
     expect(clearBootstrapMock).toHaveBeenCalledTimes(1);
     expect(teardownSessionClientStateMock).toHaveBeenCalledWith('session-1');
+  });
+
+  it('uses the last observed transcript revision when the final flush fails', async () => {
+    endSessionApiMock.mockResolvedValue({
+      success: true,
+      data: {
+        session_id: 'session-flush-fallback',
+        ended_at: '2026-03-03T18:00:00.000Z',
+        duration_minutes: 2,
+        turn_count: 1,
+        offer_debrief: false,
+        recap_artifacts: null,
+      },
+    });
+    isSuccessMock.mockImplementation((result: { success?: boolean }) => result.success === true);
+
+    const flushError = new Error('transcript write unavailable');
+    const flushSessionTranscriptMock = vi.fn().mockRejectedValue(flushError);
+    const getSessionTranscriptRevisionMock = vi.fn().mockReturnValue(11);
+    const { result } = renderHook(() => useSessionExitFlow({
+      isReadOnly: false,
+      isSophiaResponding: false,
+      stopStreaming: vi.fn(),
+      setEnding: vi.fn(),
+      sessionId: 'session-flush-fallback',
+      messageCount: 1,
+      endSessionStore: vi.fn(),
+      clearSessionStore: vi.fn(),
+      clearBootstrap: vi.fn(),
+      navigateTo: vi.fn(),
+      promoteToDebriefMode: vi.fn(),
+      startDebriefWithLLM: vi.fn(),
+      flushSessionTranscript: flushSessionTranscriptMock,
+      getSessionTranscriptRevision: getSessionTranscriptRevisionMock,
+    }));
+
+    await act(async () => {
+      await result.current.handleEndSession();
+    });
+
+    expect(endSessionApiMock).toHaveBeenCalledWith(expect.objectContaining({
+      session_id: 'session-flush-fallback',
+      base_revision: 11,
+    }));
   });
 
   it('does not offer debrief again when ending from debrief mode', async () => {

@@ -4,7 +4,6 @@ import asyncio
 import json
 
 import pytest
-
 from voice.realtime import (
     ProviderEvent,
     RealtimeDogfoodConfigurationError,

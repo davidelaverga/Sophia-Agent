@@ -254,6 +254,12 @@ services:
         value: "true"
       - key: SOPHIA_GEMINI_LIVE_COMPRESSION_ENABLED
         value: "true"
+      # Keep web capabilities independently switchable for the 2x2 voice
+      # reliability canary without coupling either control to continuity.
+      - key: SOPHIA_GEMINI_LIVE_GOOGLE_SEARCH_ENABLED
+        value: "true"
+      - key: SOPHIA_GEMINI_LIVE_WEB_FETCH_ENABLED
+        value: "true"
       - key: SOPHIA_GEMINI_LIVE_LANGSMITH_PROJECT
         value: Sophia-Gemini-Live-Voice
       - key: SOPHIA_GEMINI_LIVE_TRACE_SCHEMA

@@ -29,18 +29,13 @@ from vision_agents.core.runner.http.models import StartSessionResponse
 from vision_agents.core.runner.http.options import ServeOptions
 from vision_agents.plugins.deepgram import STT as DeepgramSTT
 from vision_agents.plugins.getstream import Edge as StreamEdge
+
 from voice.config import get_settings
 from voice.conversation_flow import ConversationFlowCoordinator
 from voice.realtime.dogfood_session import (
     RealtimeDogfoodConfigurationError,
     RealtimeDogfoodSession,
     RealtimeDogfoodSessionManager,
-)
-from voice.realtime.openai_browser_dogfood import (
-    OpenAIBrowserDogfoodSessionManager,
-    OpenAIClientSecretMintError,
-    OpenAISidebandAttachError,
-    extract_openai_call_id_from_location,
 )
 from voice.realtime.gemini_browser_dogfood import (
     GeminiBrowserDogfoodSessionManager,
@@ -49,12 +44,18 @@ from voice.realtime.gemini_browser_dogfood import (
     GeminiRelaySourceMetadata,
 )
 from voice.realtime.gemini_production_session import GeminiProductionBrowserSessionManager
+from voice.realtime.openai_browser_dogfood import (
+    OpenAIBrowserDogfoodSessionManager,
+    OpenAIClientSecretMintError,
+    OpenAISidebandAttachError,
+    extract_openai_call_id_from_location,
+)
 from voice.realtime.runtime_factory import build_realtime_runtime_bundle_from_settings
 from voice.realtime.runtime_selection import VoiceRuntimeMode
 from voice.rhythm import RhythmTracker
 from voice.sophia_llm import SophiaLLM
-from voice.sophia_turn import SophiaTurnDetection
 from voice.sophia_tts import SophiaTTS
+from voice.sophia_turn import SophiaTurnDetection
 from voice.sse_broker import VoiceEventBroker, format_sse_event
 from voice.vision_agents_compat import (
     InvalidCallId,
@@ -67,7 +68,6 @@ from voice.vision_agents_compat import (
     TurnEndedEvent,
     resolve_agent_constructor_kwargs,
 )
-
 
 logger = logging.getLogger(__name__)
 voice_event_broker = VoiceEventBroker()
@@ -105,7 +105,7 @@ def _safe_prefix(value: object, *, length: int = 24) -> str | None:
 
 def _gemini_relay_context(
     session_id: str,
-    request: "SophiaGeminiBrowserRelayRequest",
+    request: SophiaGeminiBrowserRelayRequest,
 ) -> dict[str, object]:
     return {
         "session_id_prefix": _safe_prefix(session_id),
@@ -606,7 +606,7 @@ async def _stream_realtime_dogfood_events(
         while True:
             try:
                 event = await asyncio.wait_for(queue.get(), timeout=30.0)
-            except asyncio.TimeoutError:
+            except TimeoutError:
                 if await request.is_disconnected():
                     break
                 yield ": heartbeat\n\n"

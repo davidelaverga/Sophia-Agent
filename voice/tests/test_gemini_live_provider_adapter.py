@@ -5,7 +5,6 @@ import json
 from typing import Any
 
 import pytest
-
 from voice.realtime import SophiaEventNormalizer
 from voice.realtime.events import ProviderEventType
 from voice.realtime.gemini_live import (

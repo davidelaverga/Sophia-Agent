@@ -10,7 +10,7 @@ import pytest
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from deerflow.sophia.session_store import SessionRecord, SessionStore
+from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1657,6 +1657,70 @@ class TestSessionEnd:
             "I needed to talk this through.",
             "You stayed with it.",
         ]
+
+    def test_stale_end_snapshot_cannot_resurrect_deleted_transcript(self, client, tmp_path):
+        store = SessionStore(tmp_path)
+        store.create(
+            SessionRecord(
+                session_id="sess-stale-end",
+                thread_id="thread-stale-end",
+                user_id="test_user",
+                status="open",
+            )
+        )
+        created = store.replace_messages_revisioned(
+            "test_user",
+            "sess-stale-end",
+            [
+                SessionMessageRecord(
+                    message_id="deleted-message",
+                    session_id="sess-stale-end",
+                    thread_id="thread-stale-end",
+                    role="user",
+                    content="This message was deleted.",
+                    sequence=1,
+                )
+            ],
+            expected_revision=0,
+        )
+        deleted = store.replace_messages_revisioned(
+            "test_user",
+            "sess-stale-end",
+            [],
+            expected_revision=created.current_revision,
+        )
+
+        with (
+            patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue,
+            patch("app.gateway.routers.sophia.USERS_DIR", tmp_path),
+            patch("app.gateway.routers.sophia._session_store", store),
+        ):
+            response = client.post(
+                "/api/sophia/test_user/end-session",
+                json={
+                    "session_id": "sess-stale-end",
+                    "thread_id": "stale-browser-thread",
+                    "base_revision": created.current_revision,
+                    "messages": [
+                        {
+                            "id": "deleted-message",
+                            "role": "user",
+                            "content": "This message was deleted.",
+                        }
+                    ],
+                },
+            )
+
+        assert response.status_code == 202
+        assert deleted.current_revision > created.current_revision
+        assert store.list_messages("test_user", "sess-stale-end") == []
+        mock_queue.assert_called_once()
+        assert mock_queue.call_args.args[2] == "thread-stale-end"
+        assert mock_queue.call_args.args[3] is None
+        saved = json.loads(
+            (tmp_path / "test_user" / "recaps" / "sess-stale-end.json").read_text(encoding="utf-8")
+        )
+        assert saved["thread_id"] == "thread-stale-end"
 
     def test_duplicate_end_session_reuses_existing_recap_and_queues_once(self, client, tmp_path):
         store = SessionStore(tmp_path)

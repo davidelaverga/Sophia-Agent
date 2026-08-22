@@ -15,10 +15,10 @@ root after the browser closes the session.
 
 from __future__ import annotations
 
-import logging
 import hashlib
 import hmac
 import json
+import logging
 import os
 import re
 import time

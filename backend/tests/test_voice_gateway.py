@@ -398,6 +398,8 @@ class TestVoiceConnect:
             json_body={
                 "user_id": "user_123",
                 "session_id": ANY,
+                "logical_session_id": ANY,
+                "thread_id": None,
                 "platform": "voice",
                 "context_mode": "life",
                 "ritual": None,
@@ -509,6 +511,8 @@ class TestVoiceConnect:
             json_body={
                 "user_id": "user_123",
                 "session_id": ANY,
+                "logical_session_id": ANY,
+                "thread_id": "thread-1",
                 "platform": "voice",
                 "context_mode": "work",
                 "ritual": "debrief",
@@ -663,6 +667,8 @@ class TestVoiceConnect:
             json_body={
                 "user_id": "user_123",
                 "session_id": ANY,
+                "logical_session_id": ANY,
+                "thread_id": None,
                 "platform": "voice",
                 "context_mode": "life",
                 "ritual": None,

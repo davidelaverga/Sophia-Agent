@@ -605,7 +605,7 @@ function SessionPageContent() {
     ingestArtifacts,
   });
 
-  useSessionStreamPersistence({
+  const { flushSessionTranscript, getSessionTranscriptRevision } = useSessionStreamPersistence({
     messages,
     chatStatus,
     updateMessages,
@@ -2002,6 +2002,8 @@ function SessionPageContent() {
     responseMode: exitProtectionResponseMode,
     messages,
     updateMessages,
+    flushSessionTranscript,
+    getSessionTranscriptRevision,
     isEnding,
   });
 

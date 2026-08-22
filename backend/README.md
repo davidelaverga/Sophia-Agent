@@ -197,6 +197,13 @@ newer transcript or resurrect a deleted message. Apply
 `backend/migrations/2026_08_22_fc01_m01_c2_reject_stale_session_snapshots.sql`
 through the deployment database gate before deploying this contract.
 
+Session finalization follows the same authority boundary. The frontend flushes
+its queued snapshot and sends the accepted `base_revision` to `end-session`;
+the offline recap/memory pipeline is then seeded from the canonical stored
+rows, never directly from a stale request body. Revisionless finalization may
+seed an empty revision-zero session for backward compatibility, but it cannot
+replace a transcript once an authoritative revision exists.
+
 ### IM Channels
 
 The IM bridge supports Feishu, Slack, and Telegram. Slack and Telegram still use the final `runs.wait()` response path, while Feishu now streams through `runs.stream(["messages-tuple", "values"])` and updates a single in-thread card in place.

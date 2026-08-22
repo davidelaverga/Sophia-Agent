@@ -102,7 +102,7 @@ class VoiceEventBroker:
                         queue.get(),
                         timeout=self._heartbeat_interval_seconds,
                     )
-                except asyncio.TimeoutError:
+                except TimeoutError:
                     if await request.is_disconnected():
                         break
 

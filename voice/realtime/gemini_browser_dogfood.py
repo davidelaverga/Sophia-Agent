@@ -1,25 +1,29 @@
 from __future__ import annotations
 
-import os
-import time
 import asyncio
 import logging
+import os
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any
 
 import httpx
 
+from voice.realtime.coreview import (
+    is_coreview_enabled,
+    is_coreview_still_frame_enabled,
+)
 from voice.realtime.dogfood_session import (
     RealtimeDogfoodConfigurationError,
     RealtimeDogfoodSession,
     RealtimeDogfoodSessionManager,
 )
-from voice.realtime.coreview import (
-    is_coreview_enabled,
-    is_coreview_still_frame_enabled,
-)
 from voice.realtime.events import ProviderEvent, ProviderEventType
+from voice.realtime.gemini_langsmith_tracing import (
+    GeminiLiveTraceRecorder,
+    build_gemini_live_setup_fingerprint,
+)
 from voice.realtime.gemini_live import (
     DEFAULT_GEMINI_LIVE_MODEL,
     is_gemini_live_compression_enabled,
@@ -31,10 +35,10 @@ from voice.realtime.gemini_memory_context import (
     build_gemini_live_realtime_instructions_with_memory_context,
 )
 from voice.realtime.gemini_tool_loop import (
-    GEMINI_EMIT_ARTIFACT_TOOL_NAME,
-    GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
     GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME,
     GEMINI_CHECK_ASYNC_TASK_TOOL_NAME,
+    GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
+    GEMINI_EMIT_ARTIFACT_TOOL_NAME,
     GEMINI_LIST_ASYNC_TASKS_TOOL_NAME,
     GEMINI_RETRIEVE_MEMORIES_TOOL_NAME,
     GEMINI_START_BUILDER_TASK_TOOL_NAME,
@@ -47,10 +51,6 @@ from voice.realtime.gemini_tool_loop import (
     extract_gemini_tool_call_cancellation_ids,
     gemini_tool_response_client_action,
     is_explicit_builder_request,
-)
-from voice.realtime.gemini_langsmith_tracing import (
-    GeminiLiveTraceRecorder,
-    build_gemini_live_setup_fingerprint,
 )
 from voice.realtime.runtime_selection import VoiceRuntimeMode
 
@@ -147,7 +147,7 @@ class GeminiRelaySourceMetadata:
         relay_correlation_id: str | None = None,
         provider_primary_category: str | None = None,
         provider_categories: list[str] | tuple[str, ...] | None = None,
-    ) -> "GeminiRelaySourceMetadata | None":
+    ) -> GeminiRelaySourceMetadata | None:
         if provider_receive_sequence is None:
             return None
         if not isinstance(provider_receive_sequence, int) or provider_receive_sequence <= 0:
@@ -1345,17 +1345,18 @@ class GeminiBrowserDogfoodSessionManager:
                     ),
                 )
             except GeminiDogfoodToolError as exc:
+                error_text = str(exc)
                 if trace is not None:
                     self._trace_operation(
                         dogfood_session.session_id,
                         trace,
                         "finish_rejected_tool_call",
-                        lambda recorder: recorder.finish_tool_call(
+                        lambda recorder, error_text=error_text: recorder.finish_tool_call(
                             tool_span,
                             tool_name=function_call.name,
                             success=False,
                             result_summary="Tool execution rejected before a response was available.",
-                            error=str(exc),
+                            error=error_text,
                         ),
                     )
                 if function_call.name in _BUILDER_LIFECYCLE_TOOL_NAMES:
@@ -1368,17 +1369,18 @@ class GeminiBrowserDogfoodSessionManager:
                     )
                 raise GeminiBrowserRelayError(str(exc)) from exc
             except Exception as exc:
+                error_text = f"{exc.__class__.__name__}: {exc}"
                 if trace is not None:
                     self._trace_operation(
                         dogfood_session.session_id,
                         trace,
                         "finish_failed_tool_call",
-                        lambda recorder: recorder.finish_tool_call(
+                        lambda recorder, error_text=error_text: recorder.finish_tool_call(
                             tool_span,
                             tool_name=function_call.name,
                             success=False,
                             result_summary="Tool execution failed before a response was available.",
-                            error=f"{exc.__class__.__name__}: {exc}",
+                            error=error_text,
                         ),
                     )
                 raise

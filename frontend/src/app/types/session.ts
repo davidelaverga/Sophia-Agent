@@ -144,6 +144,7 @@ export interface SessionEndRequest {
   ended_at?: string;
   turn_count?: number;
   platform?: 'voice' | 'text' | 'ios_voice';
+  base_revision?: number;
   messages?: Array<{
     id?: string;
     message_id?: string;

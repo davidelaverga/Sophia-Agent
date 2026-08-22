@@ -232,6 +232,8 @@ interface UseSessionExitFlowParams {
   threadId?: string;
   greetingMessageId?: string;
   messages?: ExitSessionMessage[];
+  flushSessionTranscript?: () => Promise<number>;
+  getSessionTranscriptRevision?: () => number;
 }
 
 export function useSessionExitFlow({
@@ -258,6 +260,8 @@ export function useSessionExitFlow({
   threadId,
   greetingMessageId,
   messages,
+  flushSessionTranscript,
+  getSessionTranscriptRevision,
 }: UseSessionExitFlowParams) {
   const [showExitConfirm, setShowExitConfirm] = useState(false);
   const [showDebriefOffer, setShowDebriefOffer] = useState(false);
@@ -307,6 +311,34 @@ export function useSessionExitFlow({
 
     await new Promise((resolve) => setTimeout(resolve, 300));
 
+    let baseRevision = getSessionTranscriptRevision?.();
+    if (flushSessionTranscript) {
+      let flushTimeout: number | undefined;
+      try {
+        const flushedRevision = await Promise.race([
+          flushSessionTranscript(),
+          new Promise<undefined>((resolve) => {
+            flushTimeout = window.setTimeout(resolve, 2500);
+          }),
+        ]);
+        if (typeof flushedRevision === 'number') {
+          baseRevision = flushedRevision;
+        } else {
+          logger.warn('Transcript flush timed out before session end', {
+            component: 'SessionPage',
+            action: 'flush_session_transcript',
+          });
+        }
+      } catch (error) {
+        logger.logError(error, {
+          component: 'SessionPage',
+          action: 'flush_session_transcript',
+        });
+      } finally {
+        if (flushTimeout) window.clearTimeout(flushTimeout);
+      }
+    }
+
     const recapSessionId = sessionId;
     const recapThreadId = persistedThreadId || threadId || recapSessionId;
     const startedAt = sessionStartedAt || new Date().toISOString();
@@ -327,6 +359,7 @@ export function useSessionExitFlow({
         context_mode: contextMode,
         started_at: startedAt,
         turn_count: messageCount,
+        base_revision: baseRevision,
         messages: serializedMessages,
         recap_artifacts: serializedArtifacts,
       });
@@ -495,6 +528,8 @@ export function useSessionExitFlow({
     threadId,
     greetingMessageId,
     messages,
+    flushSessionTranscript,
+    getSessionTranscriptRevision,
   ]);
 
   // ── Emergence → Recap flow ────────────────────────────────────────────────
