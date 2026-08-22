@@ -41,6 +41,12 @@ class RealtimeRawProviderEvent:
     source_metadata: dict[str, Any] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class RealtimePublicEvent:
+    event_id: int
+    payload: dict[str, object]
+
+
 class DogfoodRawEventStream:
     def __init__(self) -> None:
         self._queue: asyncio.Queue[RealtimeRawProviderEvent | None] = asyncio.Queue()
@@ -85,10 +91,13 @@ class RealtimeDogfoodSession:
     sent_client_events: list[dict[str, Any]]
     gemini_voice_config: ResolvedGeminiLiveVoiceConfig | None = None
     _public_payloads: list[dict[str, object]] = field(default_factory=list)
+    _public_events: list[RealtimePublicEvent] = field(default_factory=list)
     _public_payload_observers: list[Callable[[dict[str, object]], None]] = field(default_factory=list)
     _subscribers: set[asyncio.Queue[dict[str, object] | None]] = field(default_factory=set)
+    _event_subscribers: set[asyncio.Queue[RealtimePublicEvent | None]] = field(default_factory=set)
     _history_changed: asyncio.Event = field(default_factory=asyncio.Event)
     _pump_task: asyncio.Task[None] | None = None
+    _next_public_event_id: int = 1
     _closed: bool = False
 
     @property
@@ -190,6 +199,24 @@ class RealtimeDogfoodSession:
     def unsubscribe(self, queue: asyncio.Queue[dict[str, object] | None]) -> None:
         self._subscribers.discard(queue)
 
+    def subscribe_events(
+        self,
+        *,
+        after_event_id: int | None = None,
+    ) -> asyncio.Queue[RealtimePublicEvent | None]:
+        queue: asyncio.Queue[RealtimePublicEvent | None] = asyncio.Queue()
+        self._event_subscribers.add(queue)
+        cursor = max(after_event_id or 0, 0)
+        for event in self._public_events:
+            if event.event_id > cursor:
+                queue.put_nowait(
+                    RealtimePublicEvent(event_id=event.event_id, payload=dict(event.payload))
+                )
+        return queue
+
+    def unsubscribe_events(self, queue: asyncio.Queue[RealtimePublicEvent | None]) -> None:
+        self._event_subscribers.discard(queue)
+
     def add_public_payload_observer(
         self,
         observer: Callable[[dict[str, object]], None],
@@ -271,17 +298,30 @@ class RealtimeDogfoodSession:
             "type": payload.get("type", "sophia.turn_diagnostic"),
             "data": dict(payload.get("data", {})) if isinstance(payload.get("data"), Mapping) else {},
         }
+        public_event = RealtimePublicEvent(
+            event_id=self._next_public_event_id,
+            payload=public_payload,
+        )
+        self._next_public_event_id += 1
         self._public_payloads.append(public_payload)
+        self._public_events.append(public_event)
         for observer in list(self._public_payload_observers):
             observer(public_payload)
         self._history_changed.set()
         for queue in tuple(self._subscribers):
             queue.put_nowait(public_payload)
+        for queue in tuple(self._event_subscribers):
+            queue.put_nowait(
+                RealtimePublicEvent(event_id=public_event.event_id, payload=dict(public_event.payload))
+            )
 
     def _close_subscribers(self) -> None:
         for queue in tuple(self._subscribers):
             queue.put_nowait(None)
         self._subscribers.clear()
+        for queue in tuple(self._event_subscribers):
+            queue.put_nowait(None)
+        self._event_subscribers.clear()
 
     def metadata(self) -> dict[str, object]:
         metadata = {

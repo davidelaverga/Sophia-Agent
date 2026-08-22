@@ -191,6 +191,7 @@ const STARTUP_READY_TIMEOUT_MS = 10_000
 const STARTUP_READY_TIMEOUT_MESSAGE = "Sophia voice is unavailable right now. Try again."
 const TOKEN_ENDPOINT = "/api/sophia"
 const RECENT_UTTERANCE_IDS_LIMIT = 20
+const RECENT_PUBLIC_EVENT_IDS_LIMIT = 512
 const RECENT_BARGE_IN_TRANSCRIPT_FINGERPRINTS_LIMIT = 10
 const AUTO_PRECONNECT_DELAY_MS = 250
 const PREPARED_VOICE_CONNECT_TTL_MS = 30_000
@@ -223,6 +224,18 @@ const GEMINI_BUILDER_TOOL_NAMES = new Set([
   "cancel_async_task",
   "list_async_tasks",
 ])
+
+function withVoiceEventCursor(streamUrl: string, lastEventId: string | null): string {
+  if (!lastEventId) return streamUrl
+
+  const encodedCursor = encodeURIComponent(lastEventId)
+  if (/([?&])last_event_id=[^&]*/u.test(streamUrl)) {
+    return streamUrl.replace(/([?&])last_event_id=[^&]*/u, `$1last_event_id=${encodedCursor}`)
+  }
+
+  const separator = streamUrl.includes("?") ? "&" : "?"
+  return `${streamUrl}${separator}last_event_id=${encodedCursor}`
+}
 
 function createLegacyRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTelemetry, { runtime: "legacy_cascade" }>> = {}): Extract<VoiceRuntimeTelemetry, { runtime: "legacy_cascade" }> {
   return {
@@ -994,6 +1007,11 @@ export function useStreamVoiceSession(
   const startInFlightRef = useRef(false)
   const eventSourceRef = useRef<EventSource | null>(null)
   const preferSseEventsRef = useRef(false)
+  const publicEventCursorSessionIdRef = useRef<string | null>(null)
+  const lastPublicEventIdRef = useRef<string | null>(null)
+  const lastPublicEventSequenceRef = useRef<number | null>(null)
+  const recentPublicEventIdsRef = useRef<string[]>([])
+  const terminalVoiceSessionIdsRef = useRef<Set<string>>(new Set())
   const connectPrewarmPromiseRef = useRef<Promise<void> | null>(null)
   const connectPrewarmControllerRef = useRef<AbortController | null>(null)
   const connectPrewarmAttemptedUserIdRef = useRef<string | null>(null)
@@ -1484,6 +1502,56 @@ export function useStreamVoiceSession(
       ? { ...current, publicSseState: "disconnected" }
       : current)
   }, [])
+
+  const resetPublicEventCursor = useCallback((voiceSessionId: string | null = null) => {
+    publicEventCursorSessionIdRef.current = voiceSessionId
+    lastPublicEventIdRef.current = null
+    lastPublicEventSequenceRef.current = null
+    recentPublicEventIdsRef.current = []
+  }, [])
+
+  const shouldIngestPublicEvent = useCallback((
+    voiceSessionId: string,
+    eventId: string,
+    eventType: string,
+  ): boolean => {
+    const normalizedEventId = eventId.trim()
+    if (!normalizedEventId) return true
+
+    if (publicEventCursorSessionIdRef.current !== voiceSessionId) {
+      resetPublicEventCursor(voiceSessionId)
+    }
+
+    const sequence = Number(normalizedEventId)
+    const lastSequence = lastPublicEventSequenceRef.current
+    const duplicate = Number.isSafeInteger(sequence) && sequence >= 0
+      ? lastSequence !== null && sequence <= lastSequence
+      : recentPublicEventIdsRef.current.includes(normalizedEventId)
+
+    if (duplicate) {
+      recordSophiaCaptureEvent({
+        category: "voice-sse",
+        name: "duplicate-public-event-ignored",
+        payload: {
+          eventId: normalizedEventId,
+          eventType,
+          sessionId: sessionIdRef.current ?? null,
+          voiceAgentSessionId: voiceSessionId,
+        },
+      })
+      return false
+    }
+
+    recentPublicEventIdsRef.current.push(normalizedEventId)
+    if (recentPublicEventIdsRef.current.length > RECENT_PUBLIC_EVENT_IDS_LIMIT) {
+      recentPublicEventIdsRef.current.shift()
+    }
+    lastPublicEventIdRef.current = normalizedEventId
+    if (Number.isSafeInteger(sequence) && sequence >= 0) {
+      lastPublicEventSequenceRef.current = sequence
+    }
+    return true
+  }, [resetPublicEventCursor])
 
   const clearAutoPreconnectTimer = useCallback(() => {
     if (autoPreconnectTimerRef.current) {
@@ -2131,6 +2199,48 @@ export function useStreamVoiceSession(
     [userId],
   )
 
+  const shutdownTerminalGeminiSession = useCallback((
+    voiceSessionId: string,
+    bootstrapCredentials: GeminiProductionVoiceCredentials,
+  ) => {
+    if (terminalVoiceSessionIdsRef.current.has(voiceSessionId)) {
+      return
+    }
+    terminalVoiceSessionIdsRef.current.add(voiceSessionId)
+
+    closeEventSource()
+    void releasePreparedVoiceConnect({ keepalive: true })
+
+    const activeConnection = geminiConnectionRef.current
+    if (activeConnection?.sessionId === voiceSessionId) {
+      geminiConnectionRef.current = null
+      setGeminiConnection(null)
+      void activeConnection.close().catch((err) => {
+        logger.warn("Terminal Gemini voice teardown failed", {
+          component: "StreamVoiceSession",
+          action: "shutdownTerminalGeminiSession",
+          metadata: {
+            voiceAgentSessionId: voiceSessionId,
+            error: err instanceof Error ? err.message : String(err),
+          },
+        })
+      })
+    } else {
+      void requestGeminiBootstrapDisconnect(bootstrapCredentials, { keepalive: true })
+    }
+
+    credentialsRef.current = null
+    setCredentials(null)
+    recordSophiaCaptureEvent({
+      category: "voice-session",
+      name: "terminal-connection-lost-shutdown",
+      payload: {
+        sessionId: sessionIdRef.current ?? null,
+        voiceAgentSessionId: voiceSessionId,
+      },
+    })
+  }, [closeEventSource, releasePreparedVoiceConnect])
+
   const handleSophiaEvent = useCallback((
     type: string,
     data: Record<string, unknown> | undefined,
@@ -2462,11 +2572,23 @@ export function useStreamVoiceSession(
       return
     }
 
+    if (terminalVoiceSessionIdsRef.current.has(activeEventStreamSessionId)) {
+      closeEventSource()
+      return
+    }
+
     if (typeof EventSource !== "function") {
       return
     }
 
-    const eventSource = new EventSource(activeEventStreamUrl)
+    if (publicEventCursorSessionIdRef.current !== activeEventStreamSessionId) {
+      resetPublicEventCursor(activeEventStreamSessionId)
+    }
+    const eventStreamUrl = withVoiceEventCursor(
+      activeEventStreamUrl,
+      lastPublicEventIdRef.current,
+    )
+    const eventSource = new EventSource(eventStreamUrl)
     eventSourceRef.current = eventSource
     if (activeEventStreamRuntime === "gemini_live") {
       setRuntimeTelemetry((current) => current.runtime === "gemini_live"
@@ -2539,6 +2661,11 @@ export function useStreamVoiceSession(
             data?: Record<string, unknown>
           }
           if (typeof parsed.type !== "string") return
+          if (!shouldIngestPublicEvent(
+            activeEventStreamSessionId,
+            event.lastEventId ?? "",
+            parsed.type,
+          )) return
 
           handleSophiaEvent(parsed.type, parsed.data, "sse")
         } catch {
@@ -2574,7 +2701,7 @@ export function useStreamVoiceSession(
 
       eventSource.close()
     }
-  }, [activeEventStreamRuntime, activeEventStreamSessionId, activeEventStreamUrl, closeEventSource, handleSophiaEvent])
+  }, [activeEventStreamRuntime, activeEventStreamSessionId, activeEventStreamUrl, closeEventSource, handleSophiaEvent, resetPublicEventCursor, shouldIngestPublicEvent])
 
   useEffect(() => {
     if (!userId) {
@@ -2688,6 +2815,8 @@ export function useStreamVoiceSession(
 
     errorStageLockRef.current = false
     closeEventSource()
+    terminalVoiceSessionIdsRef.current.clear()
+    resetPublicEventCursor()
     clearStartupReadyTimeout()
     isSophiaReadyRef.current = false
     recentUserTranscriptIdsRef.current = []
@@ -2838,6 +2967,13 @@ export function useStreamVoiceSession(
           threadId: threadId ?? null,
           bootstrap: creds,
           onStage: (geminiStage) => {
+            if (
+              destroyedRef.current
+              || startRequestVersionRef.current !== requestVersion
+              || terminalVoiceSessionIdsRef.current.has(creds.session_id)
+            ) {
+              return
+            }
             const stageTelemetry = geminiStageTelemetry(geminiStage)
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? { ...current, stage: geminiStage, ...stageTelemetry }
@@ -2871,12 +3007,14 @@ export function useStreamVoiceSession(
               setMetaPresence(userMicMutedRef.current ? "resting" : "listening")
             }
             if (geminiStage === "connection_lost") {
+              errorStageLockRef.current = true
               setStage("error")
               setError("Voice connection was interrupted. Tap to reconnect.")
               setPartialReply("")
               setListeningPresence(false)
               setSpeakingPresence(false)
               setMetaPresence("resting")
+              shutdownTerminalGeminiSession(creds.session_id, creds)
             }
           },
           onOutputAudio: () => {
@@ -3639,7 +3777,11 @@ export function useStreamVoiceSession(
           },
         })
 
-        if (destroyedRef.current || startRequestVersionRef.current !== requestVersion) {
+        if (
+          destroyedRef.current
+          || startRequestVersionRef.current !== requestVersion
+          || terminalVoiceSessionIdsRef.current.has(creds.session_id)
+        ) {
           await connection.close()
           setRuntimeTelemetry(
             createLegacyRuntimeTelemetry({
@@ -3650,6 +3792,7 @@ export function useStreamVoiceSession(
           return
         }
 
+        geminiConnectionRef.current = connection
         setGeminiConnection(connection)
         setCredentials(null)
         clearStartupReadyTimeout()
@@ -3785,6 +3928,7 @@ export function useStreamVoiceSession(
     failVoiceStartup,
     markSophiaReady,
     platform,
+    resetPublicEventCursor,
     resetGeminiOpeningGreetingLatch,
     scheduleBackendWarmup,
     sessionId,
@@ -3792,6 +3936,7 @@ export function useStreamVoiceSession(
     setMetaPresence,
     setSpeakingPresence,
     setVoiceFailed,
+    shutdownTerminalGeminiSession,
     threadId,
     userId,
     voiceRitual,

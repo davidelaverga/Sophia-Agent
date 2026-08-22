@@ -1,7 +1,6 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
 import { fetchSophiaApi } from '../../../../../_lib/sophia';
-
 import { authorizeGeminiDogfoodUser } from '../_lib';
 
 export const dynamic = 'force-dynamic';
@@ -13,11 +12,16 @@ export async function GET(req: NextRequest) {
     return auth.response;
   }
 
+  const lastEventId = req.headers?.get('last-event-id');
+
   const backendResponse = await fetchSophiaApi(
     `/api/sophia/${encodeURIComponent(auth.userId)}/voice/dogfood/gemini/events${req.nextUrl.search}`,
     {
       method: 'GET',
-      headers: { Accept: 'text/event-stream' },
+      headers: {
+        Accept: 'text/event-stream',
+        ...(lastEventId ? { 'Last-Event-ID': lastEventId } : {}),
+      },
     },
   );
 

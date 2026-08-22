@@ -16,12 +16,15 @@ export async function GET(
     return auth.response;
   }
 
+  const lastEventId = req.headers?.get('last-event-id');
+
   const backendResponse = await fetchSophiaApi(
     `/api/sophia/${encodeURIComponent(userId)}/voice/dogfood/openai/events${req.nextUrl.search}`,
     {
       method: 'GET',
       headers: {
         Accept: 'text/event-stream',
+        ...(lastEventId ? { 'Last-Event-ID': lastEventId } : {}),
       },
       cache: 'no-store',
     },

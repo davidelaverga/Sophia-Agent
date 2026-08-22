@@ -13,6 +13,10 @@ import { POST as connectPOST } from '../../app/api/sophia/[userId]/voice/connect
 import { POST as disconnectPOST } from '../../app/api/sophia/[userId]/voice/disconnect/route';
 import { POST as geminiBrowserDogfoodPOST } from '../../app/api/sophia/[userId]/voice/dogfood/gemini/browser-session/route';
 import { POST as geminiBrowserDogfoodRelayPOST } from '../../app/api/sophia/[userId]/voice/dogfood/gemini/relay/route';
+import { POST as openAIBrowserDogfoodPOST } from '../../app/api/sophia/[userId]/voice/dogfood/openai/browser-session/route';
+import { POST as openAIBrowserDogfoodDisconnectPOST } from '../../app/api/sophia/[userId]/voice/dogfood/openai/disconnect/route';
+import { GET as eventsGET } from '../../app/api/sophia/[userId]/voice/events/route';
+import { POST as warmupPOST } from '../../app/api/sophia/[userId]/voice/warmup/route';
 import { POST as geminiStableBrowserDogfoodPOST } from '../../app/api/sophia/voice/dogfood/gemini/browser-session/route';
 import { POST as geminiStableDisconnectPOST } from '../../app/api/sophia/voice/dogfood/gemini/disconnect/route';
 import { GET as geminiStableEventsGET } from '../../app/api/sophia/voice/dogfood/gemini/events/route';
@@ -20,10 +24,6 @@ import { POST as geminiStableRelayPOST } from '../../app/api/sophia/voice/dogfoo
 import { POST as geminiProductionDisconnectPOST } from '../../app/api/sophia/voice/gemini/disconnect/route';
 import { GET as geminiProductionEventsGET } from '../../app/api/sophia/voice/gemini/events/route';
 import { POST as geminiProductionRelayPOST } from '../../app/api/sophia/voice/gemini/relay/route';
-import { POST as openAIBrowserDogfoodPOST } from '../../app/api/sophia/[userId]/voice/dogfood/openai/browser-session/route';
-import { POST as openAIBrowserDogfoodDisconnectPOST } from '../../app/api/sophia/[userId]/voice/dogfood/openai/disconnect/route';
-import { GET as eventsGET } from '../../app/api/sophia/[userId]/voice/events/route';
-import { POST as warmupPOST } from '../../app/api/sophia/[userId]/voice/warmup/route';
 
 describe('voice session proxy routes', () => {
   beforeEach(() => {
@@ -130,7 +130,7 @@ describe('voice session proxy routes', () => {
     expect(response.status).toBe(204);
   });
 
-  it('proxies voice events with the user-scoped bearer token for the matching user', async () => {
+  it('proxies voice events with the resume cursor for the matching user', async () => {
     const stream = new ReadableStream({
       start(controller) {
         controller.enqueue(
@@ -152,6 +152,7 @@ describe('voice session proxy routes', () => {
     const response = await eventsGET(
       {
         nextUrl: new URL('http://localhost:3000/api/sophia/user-1/voice/events?call_id=call-123&session_id=session-456'),
+        headers: new Headers({ 'Last-Event-ID': '7' }),
       } as unknown as NextRequest,
       { params: Promise.resolve({ userId: 'user-1' }) },
     );
@@ -161,6 +162,7 @@ describe('voice session proxy routes', () => {
     expect(path).toBe('/api/sophia/user-1/voice/events?call_id=call-123&session_id=session-456');
     expect(options.method).toBe('GET');
     expect((options.headers as Record<string, string>).Accept).toBe('text/event-stream');
+    expect((options.headers as Record<string, string>)['Last-Event-ID']).toBe('7');
     expect(response.status).toBe(200);
     expect(response.headers.get('content-type')).toContain('text/event-stream');
     await expect(response.text()).resolves.toContain('sophia.turn');
@@ -349,7 +351,7 @@ describe('voice session proxy routes', () => {
     expect(response.status).toBe(202);
   });
 
-  it('proxies stable Gemini browser dogfood events through the authenticated user', async () => {
+  it('proxies stable Gemini browser dogfood events with the resume cursor', async () => {
     const stream = new ReadableStream({
       start(controller) {
         controller.enqueue(new TextEncoder().encode('event: ping\ndata: {}\n\n'));
@@ -367,6 +369,7 @@ describe('voice session proxy routes', () => {
     const response = await geminiStableEventsGET(
       {
         nextUrl: new URL('http://localhost:3000/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-1'),
+        headers: new Headers({ 'Last-Event-ID': '11' }),
       } as unknown as NextRequest,
     );
 
@@ -375,6 +378,7 @@ describe('voice session proxy routes', () => {
     expect(path).toBe('/api/sophia/user-1/voice/dogfood/gemini/events?session_id=browser-gemini-1');
     expect(options.method).toBe('GET');
     expect((options.headers as Record<string, string>).Accept).toBe('text/event-stream');
+    expect((options.headers as Record<string, string>)['Last-Event-ID']).toBe('11');
     expect(response.status).toBe(200);
     await expect(response.text()).resolves.toContain('event: ping');
   });
@@ -465,7 +469,7 @@ describe('voice session proxy routes', () => {
     warnSpy.mockRestore();
   });
 
-  it('proxies production Gemini events through the authenticated user', async () => {
+  it('proxies production Gemini events with the header and query resume cursors', async () => {
     const stream = new ReadableStream({
       start(controller) {
         controller.enqueue(new TextEncoder().encode('event: sophia.turn\ndata: {}\n\n'));
@@ -482,15 +486,17 @@ describe('voice session proxy routes', () => {
 
     const response = await geminiProductionEventsGET(
       {
-        nextUrl: new URL('http://localhost:3000/api/sophia/voice/gemini/events?session_id=gemini-prod-1'),
+        nextUrl: new URL('http://localhost:3000/api/sophia/voice/gemini/events?session_id=gemini-prod-1&last_event_id=12'),
+        headers: new Headers({ 'Last-Event-ID': '12' }),
       } as unknown as NextRequest,
     );
 
     expect(fetchSophiaApiMock).toHaveBeenCalledTimes(1);
     const [path, options] = fetchSophiaApiMock.mock.calls[0] as [string, RequestInit];
-    expect(path).toBe('/api/sophia/user-1/voice/gemini/events?session_id=gemini-prod-1');
+    expect(path).toBe('/api/sophia/user-1/voice/gemini/events?session_id=gemini-prod-1&last_event_id=12');
     expect(options.method).toBe('GET');
     expect((options.headers as Record<string, string>).Accept).toBe('text/event-stream');
+    expect((options.headers as Record<string, string>)['Last-Event-ID']).toBe('12');
     expect(response.status).toBe(200);
     await expect(response.text()).resolves.toContain('sophia.turn');
   });

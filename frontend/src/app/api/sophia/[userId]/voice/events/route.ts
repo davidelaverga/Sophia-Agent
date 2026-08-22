@@ -19,12 +19,15 @@ export async function GET(
     return NextResponse.json({ error: 'Token does not grant access to this user' }, { status: 403 });
   }
 
+  const lastEventId = req.headers?.get('last-event-id');
+
   const backendResponse = await fetchSophiaApi(
     `/api/sophia/${encodeURIComponent(userId)}/voice/events${req.nextUrl.search}`,
     {
     method: 'GET',
     headers: {
       Accept: 'text/event-stream',
+      ...(lastEventId ? { 'Last-Event-ID': lastEventId } : {}),
     },
     cache: 'no-store',
     },

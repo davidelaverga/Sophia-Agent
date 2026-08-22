@@ -608,6 +608,10 @@ The webapp can either reuse `ProgressRenderer.apply` directly (delivers plain-te
 - `gateway_url` - Gateway API URL for auxiliary commands (default: `http://localhost:8001`)
 - Per-channel configs: `feishu` (app_id, app_secret), `slack` (bot_token, app_token), `telegram` (bot_token)
 
+### Voice event-stream resume contract
+
+Every browser-facing voice SSE proxy preserves the session cursor end to end. Next.js forwards `Last-Event-ID`; gateway `routers/voice.py` validates it (or `last_event_id` / `lastEventId` query fallback), then forwards both the header and canonical query cursor to the voice service. The voice service emits integer `id:` lines and replays only events newer than the cursor. Do not strip or rewrite these headers/query parameters when changing a voice events proxy.
+
 ### Render production deployment
 
 **TL;DR:** the file the live containers actually load is `/app/config.yaml`, baked in at Docker build time from **`config.production.yaml`** (the tracked one in repo root) via `COPY config.production.yaml ./config.yaml` in both [Dockerfile.gateway:8](Dockerfile.gateway) and `Dockerfile.langgraph`. The repo's local `config.yaml` is `.gitignore`'d and irrelevant to production.

@@ -10,18 +10,31 @@ from fastapi import Request
 HEARTBEAT_INTERVAL_SECONDS = 30.0
 
 
-def format_sse_event(payload: dict[str, object]) -> str:
+def format_sse_event(
+    payload: dict[str, object],
+    *,
+    event_id: int | str | None = None,
+) -> str:
     event_type = payload.get("type")
     if not isinstance(event_type, str) or not event_type:
         event_type = "message"
 
     body = json.dumps(payload, separators=(",", ":"), ensure_ascii=False)
-    return f"event: {event_type}\ndata: {body}\n\n"
+    id_line = f"id: {event_id}\n" if event_id is not None else ""
+    return f"{id_line}event: {event_type}\ndata: {body}\n\n"
+
+
+@dataclass(frozen=True)
+class _SessionEvent:
+    event_id: int
+    payload: dict[str, object]
 
 
 @dataclass
 class _SessionSubscribers:
-    queues: set[asyncio.Queue[str | None]] = field(default_factory=set)
+    queues: set[asyncio.Queue[_SessionEvent | None]] = field(default_factory=set)
+    history: list[_SessionEvent] = field(default_factory=list)
+    next_event_id: int = 1
 
 
 class VoiceEventBroker:
@@ -39,13 +52,21 @@ class VoiceEventBroker:
         session_id: str,
         payload: dict[str, object],
     ) -> None:
-        message = format_sse_event(payload)
         async with self._lock:
-            subscribers = self._sessions.get((call_id, session_id))
-            queues = tuple(subscribers.queues) if subscribers is not None else ()
+            subscribers = self._sessions.setdefault(
+                (call_id, session_id),
+                _SessionSubscribers(),
+            )
+            event = _SessionEvent(
+                event_id=subscribers.next_event_id,
+                payload=dict(payload),
+            )
+            subscribers.next_event_id += 1
+            subscribers.history.append(event)
+            queues = tuple(subscribers.queues)
 
         for queue in queues:
-            queue.put_nowait(message)
+            queue.put_nowait(event)
 
     async def close_session(self, call_id: str, session_id: str) -> None:
         async with self._lock:
@@ -60,18 +81,24 @@ class VoiceEventBroker:
         call_id: str,
         session_id: str,
         request: Request,
+        *,
+        after_event_id: int | None = None,
     ) -> AsyncIterator[str]:
         key = (call_id, session_id)
-        queue: asyncio.Queue[str | None] = asyncio.Queue()
+        queue: asyncio.Queue[_SessionEvent | None] = asyncio.Queue()
 
         async with self._lock:
             subscribers = self._sessions.setdefault(key, _SessionSubscribers())
             subscribers.queues.add(queue)
+            cursor = max(after_event_id or 0, 0)
+            for event in subscribers.history:
+                if event.event_id > cursor:
+                    queue.put_nowait(event)
 
         try:
             while True:
                 try:
-                    message = await asyncio.wait_for(
+                    event = await asyncio.wait_for(
                         queue.get(),
                         timeout=self._heartbeat_interval_seconds,
                     )
@@ -82,10 +109,10 @@ class VoiceEventBroker:
                     yield ": heartbeat\n\n"
                     continue
 
-                if message is None:
+                if event is None:
                     break
 
-                yield message
+                yield format_sse_event(event.payload, event_id=event.event_id)
         finally:
             async with self._lock:
                 subscribers = self._sessions.get(key)
@@ -93,5 +120,3 @@ class VoiceEventBroker:
                     return
 
                 subscribers.queues.discard(queue)
-                if not subscribers.queues:
-                    self._sessions.pop(key, None)

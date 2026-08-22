@@ -77,6 +77,24 @@ gemini_browser_dogfood_sessions = GeminiBrowserDogfoodSessionManager(realtime_do
 gemini_production_browser_sessions = GeminiProductionBrowserSessionManager(gemini_browser_dogfood_sessions)
 
 
+def _voice_event_cursor(request: Request) -> int | None:
+    candidates = (
+        request.headers.get("last-event-id"),
+        request.query_params.get("last_event_id"),
+        request.query_params.get("lastEventId"),
+    )
+    for raw_cursor in candidates:
+        if raw_cursor is None:
+            continue
+        try:
+            cursor = int(raw_cursor)
+        except (TypeError, ValueError):
+            continue
+        if cursor >= 0:
+            return cursor
+    return None
+
+
 def _has_substantive_transcript(text: str) -> bool:
     return any(char.isalnum() for char in text)
 
@@ -457,7 +475,12 @@ async def stream_sophia_session_events(
         )
 
     return StreamingResponse(
-        voice_event_broker.stream(call_id, session_id, request),
+        voice_event_broker.stream(
+            call_id,
+            session_id,
+            request,
+            after_event_id=_voice_event_cursor(request),
+        ),
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -578,23 +601,23 @@ async def _stream_realtime_dogfood_events(
     session: RealtimeDogfoodSession,
     request: Request,
 ) -> AsyncIterator[str]:
-    queue = session.subscribe()
+    queue = session.subscribe_events(after_event_id=_voice_event_cursor(request))
     try:
         while True:
             try:
-                payload = await asyncio.wait_for(queue.get(), timeout=30.0)
+                event = await asyncio.wait_for(queue.get(), timeout=30.0)
             except asyncio.TimeoutError:
                 if await request.is_disconnected():
                     break
                 yield ": heartbeat\n\n"
                 continue
 
-            if payload is None:
+            if event is None:
                 break
 
-            yield format_sse_event(payload)
+            yield format_sse_event(event.payload, event_id=event.event_id)
     finally:
-        session.unsubscribe(queue)
+        session.unsubscribe_events(queue)
 
 
 @dogfood_router.post(

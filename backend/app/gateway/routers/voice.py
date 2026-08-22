@@ -109,6 +109,37 @@ def _get_voice_server_url() -> str:
     return os.getenv("VOICE_SERVER_URL", "http://localhost:8000").rstrip("/")
 
 
+def _voice_event_cursor(request: Request) -> int | None:
+    candidates = (
+        request.headers.get("last-event-id"),
+        request.query_params.get("last_event_id"),
+        request.query_params.get("lastEventId"),
+    )
+    for raw_cursor in candidates:
+        if raw_cursor is None:
+            continue
+        try:
+            cursor = int(raw_cursor)
+        except (TypeError, ValueError):
+            continue
+        if cursor >= 0:
+            return cursor
+    return None
+
+
+def _voice_event_upstream_request(
+    url: str,
+    cursor: int | None,
+) -> tuple[str, dict[str, str]]:
+    headers = {"Accept": "text/event-stream"}
+    if cursor is None:
+        return url, headers
+
+    separator = "&" if "?" in url else "?"
+    headers["Last-Event-ID"] = str(cursor)
+    return f"{url}{separator}last_event_id={cursor}", headers
+
+
 async def _get_active_voice_session_lock(user_id: str) -> asyncio.Lock:
     async with _active_voice_session_locks_guard:
         return _active_voice_session_locks.setdefault(user_id, asyncio.Lock())
@@ -1512,11 +1543,13 @@ async def voice_connect(
 )
 async def voice_events(
     user_id: str,
+    request: Request,
     call_id: str = Query(..., description="The voice call ID returned from /voice/connect"),
     session_id: str = Query(..., description="The voice session ID returned from /voice/connect"),
 ) -> StreamingResponse:
     voice_url = _get_voice_server_url()
     url = f"{voice_url}/calls/{call_id}/sessions/{session_id}/events"
+    url, upstream_headers = _voice_event_upstream_request(url, _voice_event_cursor(request))
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0),
     )
@@ -1525,7 +1558,7 @@ async def voice_events(
         request = client.build_request(
             "GET",
             url,
-            headers={"Accept": "text/event-stream"},
+            headers=upstream_headers,
         )
         response = await client.send(request, stream=True)
     except httpx.ConnectError as exc:
@@ -1632,11 +1665,13 @@ async def openai_browser_dogfood_sideband(
 )
 async def openai_browser_dogfood_events(
     user_id: str,
+    request: Request,
     session_id: str = Query(..., description="Dogfood session id returned by browser-session"),
 ) -> StreamingResponse:
     voice_url = _get_voice_server_url()
     encoded_session_id = quote(session_id, safe="")
     url = f"{voice_url}/dogfood/realtime/sessions/{encoded_session_id}/events"
+    url, upstream_headers = _voice_event_upstream_request(url, _voice_event_cursor(request))
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0),
     )
@@ -1645,7 +1680,7 @@ async def openai_browser_dogfood_events(
         request = client.build_request(
             "GET",
             url,
-            headers={"Accept": "text/event-stream"},
+            headers=upstream_headers,
         )
         response = await client.send(request, stream=True)
     except httpx.ConnectError as exc:
@@ -1779,11 +1814,13 @@ async def gemini_browser_dogfood_relay(
 )
 async def gemini_browser_dogfood_events(
     user_id: str,
+    request: Request,
     session_id: str = Query(..., description="Dogfood session id returned by browser-session"),
 ) -> StreamingResponse:
     voice_url = _get_voice_server_url()
     encoded_session_id = quote(session_id, safe="")
     url = f"{voice_url}/dogfood/realtime/sessions/{encoded_session_id}/events"
+    url, upstream_headers = _voice_event_upstream_request(url, _voice_event_cursor(request))
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0),
     )
@@ -1792,7 +1829,7 @@ async def gemini_browser_dogfood_events(
         request = client.build_request(
             "GET",
             url,
-            headers={"Accept": "text/event-stream"},
+            headers=upstream_headers,
         )
         response = await client.send(request, stream=True)
     except httpx.ConnectError as exc:
@@ -1950,11 +1987,13 @@ async def gemini_production_continuation_bootstrap(
 )
 async def gemini_production_events(
     user_id: str,
+    request: Request,
     session_id: str = Query(..., description="Gemini production session id returned by /voice/connect"),
 ) -> StreamingResponse:
     voice_url = _get_voice_server_url()
     encoded_session_id = quote(session_id, safe="")
     url = f"{voice_url}/production/realtime/gemini/sessions/{encoded_session_id}/events"
+    url, upstream_headers = _voice_event_upstream_request(url, _voice_event_cursor(request))
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0),
     )
@@ -1963,7 +2002,7 @@ async def gemini_production_events(
         request = client.build_request(
             "GET",
             url,
-            headers={"Accept": "text/event-stream"},
+            headers=upstream_headers,
         )
         response = await client.send(request, stream=True)
     except httpx.ConnectError as exc:

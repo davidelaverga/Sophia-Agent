@@ -773,6 +773,61 @@ class TestVoiceEvents:
         assert resp.headers["content-type"].startswith("text/event-stream")
         assert "sophia.transcript" in resp.text
 
+    @pytest.mark.parametrize(
+        ("resume_params", "resume_headers", "expected_cursor"),
+        [
+            ({"last_event_id": "7"}, {}, "7"),
+            ({"last_event_id": "4"}, {"Last-Event-ID": "8"}, "8"),
+        ],
+    )
+    def test_events_proxy_forwards_resume_cursor(
+        self,
+        resume_params: dict[str, str],
+        resume_headers: dict[str, str],
+        expected_cursor: str,
+    ):
+        captured_request: httpx.Request | None = None
+
+        async def send(request: httpx.Request, *, stream: bool):
+            nonlocal captured_request
+            captured_request = request
+            assert stream is True
+            return httpx.Response(
+                200,
+                request=request,
+                headers={"content-type": "text/event-stream"},
+                content=(
+                    b'id: 9\n'
+                    b'event: sophia.turn\n'
+                    b'data: {"type":"sophia.turn","data":{"phase":"agent_ended"}}\n\n'
+                ),
+            )
+
+        with patch("app.gateway.routers.voice.httpx.AsyncClient") as mock_client_cls:
+            mock_client = AsyncMock()
+            mock_client.send = AsyncMock(side_effect=send)
+            mock_client.aclose = AsyncMock(return_value=None)
+            mock_client.build_request = (
+                lambda method, url, headers: httpx.Request(method, url, headers=headers)
+            )
+            mock_client_cls.return_value = mock_client
+
+            resp = client.get(
+                "/api/sophia/user_123/voice/events",
+                params={
+                    "call_id": "sophia-user_123-abc12345",
+                    "session_id": "test-session-id",
+                    **resume_params,
+                },
+                headers=resume_headers,
+            )
+
+        assert resp.status_code == 200
+        assert captured_request is not None
+        assert captured_request.headers["last-event-id"] == expected_cursor
+        assert captured_request.url.params["last_event_id"] == expected_cursor
+        assert "id: 9" in resp.text
+
 
 class TestOpenAIBrowserDogfoodGateway:
     def test_sideband_proxies_webrtc_readiness_with_sideband_timeout(self):

@@ -111,13 +111,14 @@ vi.stubGlobal("fetch", mockFetch)
 // Mock: EventSource
 // ---------------------------------------------------------------------------
 
-type EventSourceHandler = (event: { data?: string }) => void
+type EventSourceHandler = (event: { data?: string; lastEventId?: string }) => void
 
 class MockEventSource {
   static CONNECTING = 0
   static OPEN = 1
   static CLOSED = 2
   static latest: MockEventSource | null = null
+  static instances: MockEventSource[] = []
 
   readyState = MockEventSource.CONNECTING
   url: string
@@ -126,6 +127,7 @@ class MockEventSource {
   constructor(url: string) {
     this.url = url
     MockEventSource.latest = this
+    MockEventSource.instances.push(this)
   }
 
   addEventListener(type: string, handler: EventSourceHandler) {
@@ -147,10 +149,15 @@ class MockEventSource {
     this.listeners.get("open")?.forEach((handler) => handler({}))
   }
 
-  emit(type: string, payload: Record<string, unknown>) {
+  emit(type: string, payload: Record<string, unknown>, lastEventId = "") {
     this.listeners.get(type)?.forEach((handler) =>
-      handler({ data: JSON.stringify(payload) }),
+      handler({ data: JSON.stringify(payload), lastEventId }),
     )
+  }
+
+  emitError(readyState = MockEventSource.CONNECTING) {
+    this.readyState = readyState
+    this.listeners.get("error")?.forEach((handler) => handler({}))
   }
 }
 
@@ -224,6 +231,7 @@ describe("useStreamVoiceSession", () => {
     mockSessionPresetType = "vent"
     callEventHandlers.clear()
     MockEventSource.latest = null
+    MockEventSource.instances = []
     mockGeminiTrack.enabled = true
     mockGeminiClose.mockClear()
     mockSetListeningPresence.mockClear()
@@ -1643,6 +1651,147 @@ describe("useStreamVoiceSession", () => {
     expect(mockAddMessage).toHaveBeenCalledWith("Hello from SSE")
     expect(onAssistantResponse).toHaveBeenCalledTimes(1)
     expect(onAssistantResponse).toHaveBeenCalledWith("Hello from SSE")
+  })
+
+  it("dedupes every public SSE event type by event id across forced reconnects", async () => {
+    mockCallingState = CallingState.JOINED
+    mockCall = makeCallMock()
+
+    const onAssistantResponse = vi.fn()
+    const onUserTranscript = vi.fn()
+    const onArtifacts = vi.fn()
+    const onBuilderTask = vi.fn()
+    const { result } = renderHook(() => useStreamVoiceSession("user-1", {
+      onAssistantResponse,
+      onUserTranscript,
+      onArtifacts,
+      onBuilderTask,
+    }))
+
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    const source = MockEventSource.latest
+    expect(source).not.toBeNull()
+
+    act(() => {
+      source?.emitOpen()
+      source?.emit("sophia.transcript", {
+        type: "sophia.transcript",
+        data: { text: "Only once", is_final: true },
+      }, "1")
+      source?.emit("sophia.transcript", {
+        type: "sophia.transcript",
+        data: { text: "Duplicate transcript", is_final: true },
+      }, "1")
+      source?.emit("sophia.user_transcript", {
+        type: "sophia.user_transcript",
+        data: { text: "User once", utterance_id: "utterance-1" },
+      }, "2")
+      source?.emit("sophia.user_transcript", {
+        type: "sophia.user_transcript",
+        data: { text: "Duplicate user", utterance_id: "utterance-2" },
+      }, "2")
+      source?.emit("sophia.artifact", {
+        type: "sophia.artifact",
+        data: { takeaway: "Artifact once" },
+      }, "3")
+      source?.emit("sophia.artifact", {
+        type: "sophia.artifact",
+        data: { takeaway: "Duplicate artifact" },
+      }, "3")
+      source?.emit("sophia.builder_task", {
+        type: "sophia.builder_task",
+        data: { task_id: "builder-1" },
+      }, "4")
+      source?.emit("sophia.builder_task", {
+        type: "sophia.builder_task",
+        data: { task_id: "builder-duplicate" },
+      }, "4")
+      source?.emit("sophia.turn", {
+        type: "sophia.turn",
+        data: { phase: "agent_started" },
+      }, "5")
+      source?.emit("sophia.turn", {
+        type: "sophia.turn",
+        data: { phase: "agent_ended" },
+      }, "5")
+      source?.emit("sophia.turn_diagnostic", {
+        type: "sophia.turn_diagnostic",
+        data: { metric: "once" },
+      }, "6")
+      source?.emit("sophia.turn_diagnostic", {
+        type: "sophia.turn_diagnostic",
+        data: { metric: "duplicate" },
+      }, "6")
+      source?.emitError()
+      source?.emitOpen()
+      source?.emit("sophia.artifact", {
+        type: "sophia.artifact",
+        data: { takeaway: "Replay after reconnect" },
+      }, "3")
+      source?.emitError()
+      source?.emitOpen()
+      source?.emit("sophia.artifact", {
+        type: "sophia.artifact",
+        data: { takeaway: "New after second reconnect" },
+      }, "7")
+    })
+
+    expect(onAssistantResponse).toHaveBeenCalledTimes(1)
+    expect(onAssistantResponse).toHaveBeenCalledWith("Only once")
+    expect(onUserTranscript).toHaveBeenCalledTimes(1)
+    expect(onUserTranscript).toHaveBeenCalledWith("User once")
+    expect(onArtifacts.mock.calls).toEqual([
+      [{ takeaway: "Artifact once" }],
+      [{ takeaway: "New after second reconnect" }],
+    ])
+    expect(onBuilderTask).toHaveBeenCalledTimes(1)
+    expect(onBuilderTask).toHaveBeenCalledWith({ task_id: "builder-1" })
+    expect(result.current.stage).toBe("speaking")
+  })
+
+  it("terminal Gemini connection loss closes SSE, tears down once, and never reconnects", async () => {
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve(makeGeminiBootstrap("gemini-prod-terminal-1")),
+      text: () => Promise.resolve(""),
+    })
+    const terminalConnection = {
+      ...mockGeminiConnection,
+      sessionId: "gemini-prod-terminal-1",
+      streamUrl: "/api/sophia/voice/gemini/events?session_id=gemini-prod-terminal-1",
+    }
+    mockConnectGeminiBrowserLiveFromBootstrap.mockResolvedValueOnce(terminalConnection)
+
+    const { result } = renderHook(() => useStreamVoiceSession("user-1"))
+    await act(async () => {
+      await result.current.startTalking()
+    })
+
+    const source = MockEventSource.latest
+    const sourceCount = MockEventSource.instances.length
+    const options = mockConnectGeminiBrowserLiveFromBootstrap.mock.calls[0]?.[0] as {
+      onStage?: (stage: string) => void
+    }
+
+    await act(async () => {
+      options.onStage?.("connection_lost")
+      options.onStage?.("connection_lost")
+      options.onStage?.("reconnecting")
+      options.onStage?.("connected")
+      await Promise.resolve()
+    })
+
+    await waitFor(() => {
+      expect(mockGeminiClose).toHaveBeenCalledTimes(1)
+      expect(result.current.hasLiveCall).toBe(false)
+    })
+    expect(source?.readyState).toBe(MockEventSource.CLOSED)
+    expect(MockEventSource.instances).toHaveLength(sourceCount)
+    expect(result.current.stage).toBe("error")
+    expect(result.current.error).toBe("Voice connection was interrupted. Tap to reconnect.")
   })
 
   it("stopTalking leaves call and resets to idle", async () => {

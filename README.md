@@ -54,6 +54,8 @@ The intelligence layer handles personality, emotional calibration, memory, ritua
 
 They communicate over HTTP. `runs/stream` — not `runs/wait` — pipes text tokens to Cartesia as they arrive, so Sophia's voice starts after TTFT (~600ms) not after full generation (~1,200ms). The `emit_artifact` tool call arrives after the text stream and carries emotion metadata for the next TTS call.
 
+Browser-facing voice events use resumable SSE. Every normalized event has a session-scoped sequence ID; reconnects resume from `Last-Event-ID` (with a query cursor fallback), and an unrecoverable provider disconnect closes the public stream and tears down the backend session instead of reconnecting indefinitely.
+
 ---
 
 ## Three Platforms, One Intelligence

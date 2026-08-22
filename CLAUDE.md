@@ -333,6 +333,17 @@ The langgraph-side middleware doesn't change — it already emits events for eve
 - `bash_tool` is for EXECUTION, NOT text authoring. Heredocs / `python -c "with open(...).write(...)"` / `echo > file` / `printf > file` for file authoring are FORBIDDEN by the system prompt. The Phase 4M prompt injects this explicit prohibition every turn.
 - `str_replace_tool` for targeted edits to existing content.
 
+### Voice SSE resume + terminal lifecycle
+
+Normalized voice events are exactly-once at the browser boundary across proxy reconnects:
+
+- `RealtimeDogfoodSession` (Gemini/OpenAI realtime) and `VoiceEventBroker` (legacy cascade) assign monotonically increasing integer event IDs scoped to one voice session and retain event history until backend teardown.
+- Voice-server SSE frames include `id:`. `Last-Event-ID` is forwarded by every Next.js voice events route and the gateway voice proxy; `last_event_id` (plus legacy `lastEventId`) is the query fallback. Reconnect subscriptions replay every public event type with an ID strictly greater than the cursor.
+- `useStreamVoiceSession` deduplicates all six normalized `sophia.*` event types by the stable SSE ID before event-specific ingestion. The old utterance-ID guard remains defense-in-depth for non-SSE/custom-event fallback.
+- Unrecoverable Gemini `connection_lost` is terminal: close `EventSource`, mark the session terminal, clear active client state, invoke the connection cleanup/backend disconnect, and reject later EventSource creation for that session. A user-initiated fresh start resets the terminal/cursor state.
+
+Focused regressions: `voice/tests/test_sse_broker.py`, `voice/tests/test_realtime_dogfood_session.py`, `backend/tests/test_voice_gateway.py::TestVoiceEvents`, `frontend/src/__tests__/api/voice-session-proxy.route.test.ts`, and `frontend/src/__tests__/hooks/useStreamVoiceSession.test.ts`.
+
 ### Render production deployment topology
 
 **Source of truth for `/app/config.yaml` is `config.production.yaml` in the repo root** — NOT the local `config.yaml` (which is `.gitignore`'d). `backend/Dockerfile.gateway` line 8 does `COPY config.production.yaml ./config.yaml` to bake the file into the image. `backend/Dockerfile.langgraph` does the same. Editing the local `config.yaml` does NOTHING to production. To verify the live state, SSH into the Render service shell and `cat /app/config.yaml`.

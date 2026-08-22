@@ -6,6 +6,7 @@ import json
 import pytest
 
 from voice.realtime import (
+    ProviderEvent,
     RealtimeDogfoodConfigurationError,
     RealtimeDogfoodSessionManager,
     VoiceRuntimeMode,
@@ -200,5 +201,24 @@ async def test_gemini_dogfood_session_pumps_public_events_through_normalizer(
     assert await asyncio.wait_for(late_subscriber.get(), timeout=1.0) == payloads[0]
     assert late_subscriber.empty()
     session.unsubscribe(late_subscriber)
+
+    await session.publish_provider_metric({"metric": "relay_lag_ms", "value": 12})
+    await session.publish_provider_event(
+        ProviderEvent.builder_task_payload(
+            {"type": "task_started", "task_id": "builder-1"},
+        )
+    )
+    event_subscriber = session.subscribe_events(after_event_id=7)
+    replayed_events = [
+        await asyncio.wait_for(event_subscriber.get(), timeout=1.0),
+        await asyncio.wait_for(event_subscriber.get(), timeout=1.0),
+    ]
+    assert [event.event_id for event in replayed_events if event is not None] == [8, 9]
+    assert [event.payload["type"] for event in replayed_events if event is not None] == [
+        "sophia.turn_diagnostic",
+        "sophia.builder_task",
+    ]
+    assert event_subscriber.empty()
+    session.unsubscribe_events(event_subscriber)
 
     await manager.close_session(session.session_id)

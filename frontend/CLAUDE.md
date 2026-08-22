@@ -56,6 +56,7 @@ Backend auth: `getServerAuthToken()` reads `sophia-backend-token` cookie.
 - **Path alias**: `@/*` maps to `src/*`
 - **Environment validation**: `@t3-oss/env-nextjs` in `src/env.js`. Skip with `SKIP_ENV_VALIDATION=1`
 - **ESLint flat config**: `eslint.config.js` with `typescript-eslint`. Run `eslint .` directly (not `next lint`)
+- **Voice SSE lifecycle**: every voice events route forwards `Last-Event-ID`; `useStreamVoiceSession` deduplicates normalized events by the session-scoped SSE ID and permanently closes the stream for an unrecoverable `connection_lost` until the user starts a fresh call
 
 ## Code Style
 
