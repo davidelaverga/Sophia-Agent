@@ -41,6 +41,29 @@ function getBetterAuthSslMode(): BetterAuthSslMode {
   return "auto";
 }
 
+export function applyBetterAuthSslModeToDatabaseUrl(
+  databaseUrl: string,
+  sslMode: BetterAuthSslMode,
+) {
+  if (sslMode !== "no-verify") {
+    return databaseUrl;
+  }
+
+  const normalizedUrl = new URL(databaseUrl);
+
+  // node-postgres reparses connectionString after the surrounding Pool config
+  // and lets URL SSL parameters replace the explicit `ssl` object. Encode the
+  // approved no-verify mode into the connection string as well so an existing
+  // `sslmode=require` value cannot silently restore certificate validation.
+  normalizedUrl.searchParams.delete("sslmode");
+  normalizedUrl.searchParams.delete("sslcert");
+  normalizedUrl.searchParams.delete("sslkey");
+  normalizedUrl.searchParams.delete("sslrootcert");
+  normalizedUrl.searchParams.set("ssl", "no-verify");
+
+  return normalizedUrl.toString();
+}
+
 function isSupabaseHost(hostname: string) {
   return hostname.includes("supabase.co") || hostname.includes("supabase.com");
 }
@@ -88,10 +111,11 @@ function getBetterAuthPoolMax() {
 
 function createBetterAuthPool() {
   const databaseUrl = getBetterAuthDatabaseUrl();
+  const sslMode = getBetterAuthSslMode();
   const ssl = getBetterAuthSslConfig(databaseUrl);
 
   return new Pool({
-    connectionString: databaseUrl,
+    connectionString: applyBetterAuthSslModeToDatabaseUrl(databaseUrl, sslMode),
     max: getBetterAuthPoolMax(),
     ...(ssl === undefined ? {} : { ssl }),
   });
