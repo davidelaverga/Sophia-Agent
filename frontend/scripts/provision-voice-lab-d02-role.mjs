@@ -102,6 +102,51 @@ const CREATE_ROLE_SQL = `
   END
   $voice_lab_d02_role_create$`;
 
+const REVOKE_PUBLIC_APPLICATION_ROUTINE_AUTHORITY_SQL = `
+  DO $voice_lab_d02_public_routine_acl$
+  DECLARE
+    routine_row record;
+  BEGIN
+    FOR routine_row IN
+      SELECT namespace.nspname,
+             procedure.proname,
+             pg_catalog.pg_get_function_identity_arguments(procedure.oid)
+               AS identity_arguments
+        FROM pg_catalog.pg_proc procedure
+        JOIN pg_catalog.pg_namespace namespace
+          ON namespace.oid = procedure.pronamespace
+       WHERE namespace.nspname = 'public'
+         AND procedure.proowner = pg_catalog.to_regrole('postgres')
+         AND NOT EXISTS (
+           SELECT 1
+             FROM pg_catalog.pg_depend dependency
+            WHERE dependency.classid =
+                  pg_catalog.to_regclass('pg_catalog.pg_proc')
+              AND dependency.objid = procedure.oid
+              AND dependency.deptype = 'e'
+         )
+         AND EXISTS (
+           SELECT 1
+             FROM pg_catalog.aclexplode(
+               COALESCE(
+                 procedure.proacl,
+                 pg_catalog.acldefault('f', procedure.proowner)
+               )
+             ) acl
+            WHERE acl.grantee = 0
+              AND acl.privilege_type = 'EXECUTE'
+         )
+    LOOP
+      EXECUTE pg_catalog.format(
+        'REVOKE EXECUTE ON ROUTINE %I.%I(%s) FROM PUBLIC',
+        routine_row.nspname,
+        routine_row.proname,
+        routine_row.identity_arguments
+      );
+    END LOOP;
+  END
+  $voice_lab_d02_public_routine_acl$`;
+
 const REVOKE_DIRECT_AUTHORITY_SQL = `
   DO $voice_lab_d02_role_acl$
   DECLARE
@@ -187,8 +232,18 @@ const REVOKE_DIRECT_AUTHORITY_SQL = `
         FROM pg_catalog.pg_proc procedure
         JOIN pg_catalog.pg_namespace namespace
           ON namespace.oid = procedure.pronamespace
-       WHERE namespace.nspname = 'public'
-          OR namespace.oid IN (SELECT oid FROM application_schemas)
+       WHERE (
+         namespace.nspname = 'public'
+         OR namespace.oid IN (SELECT oid FROM application_schemas)
+       )
+         AND NOT EXISTS (
+           SELECT 1
+             FROM pg_catalog.pg_depend dependency
+            WHERE dependency.classid =
+                  pg_catalog.to_regclass('pg_catalog.pg_proc')
+              AND dependency.objid = procedure.oid
+              AND dependency.deptype = 'e'
+         )
     LOOP
       EXECUTE pg_catalog.format(
         'REVOKE ALL PRIVILEGES ON %s %I.%I(%s) '
@@ -274,6 +329,14 @@ const AUTHORITY_ATTESTATION_SQL = `
       JOIN pg_catalog.pg_namespace namespace
         ON namespace.oid = procedure.pronamespace
      WHERE namespace.nspname = 'public'
+       AND NOT EXISTS (
+         SELECT 1
+           FROM pg_catalog.pg_depend dependency
+          WHERE dependency.classid =
+                pg_catalog.to_regclass('pg_catalog.pg_proc')
+            AND dependency.objid = procedure.oid
+            AND dependency.deptype = 'e'
+       )
        AND (
          (
            pg_catalog.to_regrole($1) IS NOT NULL
@@ -603,6 +666,9 @@ export async function provisionVoiceLabD02Role(
       fail('d02_role_catalog_drift');
     }
     const created = before.length === 0;
+    if (supportPreparation) {
+      await client.query(REVOKE_PUBLIC_APPLICATION_ROUTINE_AUTHORITY_SQL);
+    }
     exactAuthority(await client.query(AUTHORITY_ATTESTATION_SQL, [D02_ROLE]));
     if (created) {
       const configured = await client.query(

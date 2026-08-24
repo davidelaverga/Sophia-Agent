@@ -94,6 +94,7 @@ class FakeClient {
     if (statement.includes('voice_lab_d02_role_password_bind')) {
       return { rows: [{ configured: true }] };
     }
+    if (statement.includes('$voice_lab_d02_public_routine_acl$')) return { rows: [] };
     if (statement.includes('$voice_lab_d02_role_create$')) return { rows: [] };
     if (statement.includes('voice_lab_d02_role_password_clear')) {
       return { rows: [{ cleared: true }] };
@@ -208,6 +209,7 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
     expect(sql).toContain('CREATE ROLE sophia_voice_lab_gateway LOGIN NOINHERIT');
     expect(sql).toContain('NOSUPERUSER NOCREATEDB NOCREATEROLE NOREPLICATION NOBYPASSRLS');
     expect(sql).toContain('REVOKE CREATE ON SCHEMA public FROM sophia_voice_lab_gateway');
+    expect(sql).toContain("dependency.deptype = 'e'");
     expect(sql).toContain('REVOKE ALL PRIVILEGES ON SCHEMA %I');
     expect(sql).toContain('has_any_column_privilege');
     expect(sql).toContain('has_sequence_privilege');
@@ -282,6 +284,15 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
       support_required: true,
       support_action: 'remove_supabase_pg17_creator_membership',
     });
+    const publicRepair = client.calls.find(({ text }) =>
+      text.includes('$voice_lab_d02_public_routine_acl$'));
+    expect(publicRepair?.text).toContain(
+      'REVOKE EXECUTE ON ROUTINE %I.%I(%s) FROM PUBLIC',
+    );
+    expect(publicRepair?.text).toContain(
+      "procedure.proowner = pg_catalog.to_regrole('postgres')",
+    );
+    expect(publicRepair?.text).toContain("dependency.deptype = 'e'");
     expect(client.calls.map(({ text }) => text)).toContain('COMMIT');
     expect(client.calls.map(({ text }) => text)).not.toContain('ROLLBACK');
     expect(JSON.stringify(result)).not.toContain(ROLE_PASSWORD);
@@ -301,6 +312,21 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
 
     expect(client.calls.map(({ text }) => text)).toContain('ROLLBACK');
     expect(client.calls.flatMap(({ values }) => values)).not.toContain(ROLE_PASSWORD);
+  });
+
+  it('does not repair PUBLIC application-routine authority without explicit support preparation', async () => {
+    const client = new FakeClient([[{ ...exactRole }], [{ ...exactRole }]]);
+
+    await provisionVoiceLabD02Role(
+      loadD02RoleProvisionConfig(env()),
+      {
+        pool: new FakePool(client),
+        gatewayPoolFactory: () => new FakeGatewayPool(),
+      },
+    );
+
+    expect(client.calls.some(({ text }) =>
+      text.includes('$voice_lab_d02_public_routine_acl$'))).toBe(false);
   });
 
   it('rejects any non-exact membership even in support-preparation mode', async () => {
