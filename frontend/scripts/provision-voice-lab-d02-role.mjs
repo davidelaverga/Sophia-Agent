@@ -158,7 +158,11 @@ const REVOKE_DIRECT_AUTHORITY_SQL = `
     REVOKE CREATE ON SCHEMA public FROM sophia_voice_lab_gateway;
 
     FOR schema_row IN
-      ${APPLICATION_SCHEMAS}
+      SELECT application_schema.oid, application_schema.nspname
+        FROM (${APPLICATION_SCHEMAS}) application_schema
+        JOIN pg_catalog.pg_namespace namespace
+          ON namespace.oid = application_schema.oid
+       WHERE namespace.nspowner = pg_catalog.to_regrole('postgres')
     LOOP
       EXECUTE pg_catalog.format(
         'REVOKE ALL PRIVILEGES ON SCHEMA %I FROM sophia_voice_lab_gateway',
@@ -177,6 +181,15 @@ const REVOKE_DIRECT_AUTHORITY_SQL = `
          OR namespace.oid IN (SELECT oid FROM application_schemas)
        )
          AND relation.relkind IN ('r', 'p', 'v', 'm', 'f', 'S')
+         AND relation.relowner = pg_catalog.to_regrole('postgres')
+         AND NOT EXISTS (
+           SELECT 1
+             FROM pg_catalog.pg_depend dependency
+            WHERE dependency.classid =
+                  pg_catalog.to_regclass('pg_catalog.pg_class')
+              AND dependency.objid = relation.oid
+              AND dependency.deptype = 'e'
+         )
     LOOP
       IF relation_row.relkind = 'S' THEN
         EXECUTE pg_catalog.format(
@@ -210,6 +223,7 @@ const REVOKE_DIRECT_AUTHORITY_SQL = `
          OR namespace.oid IN (SELECT oid FROM application_schemas)
        )
          AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+         AND relation.relowner = pg_catalog.to_regrole('postgres')
          AND attribute.attnum > 0
          AND NOT attribute.attisdropped
          AND acl.grantee = pg_catalog.to_regrole('sophia_voice_lab_gateway')
@@ -244,6 +258,7 @@ const REVOKE_DIRECT_AUTHORITY_SQL = `
               AND dependency.objid = procedure.oid
               AND dependency.deptype = 'e'
          )
+         AND procedure.proowner = pg_catalog.to_regrole('postgres')
     LOOP
       EXECUTE pg_catalog.format(
         'REVOKE ALL PRIVILEGES ON %s %I.%I(%s) '

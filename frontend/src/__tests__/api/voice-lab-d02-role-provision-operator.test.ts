@@ -211,6 +211,15 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
     expect(sql).toContain('REVOKE CREATE ON SCHEMA public FROM sophia_voice_lab_gateway');
     expect(sql).toContain("dependency.deptype = 'e'");
     expect(sql).toContain('REVOKE ALL PRIVILEGES ON SCHEMA %I');
+    expect(sql).toContain(
+      "namespace.nspowner = pg_catalog.to_regrole('postgres')",
+    );
+    expect(sql).toContain(
+      "relation.relowner = pg_catalog.to_regrole('postgres')",
+    );
+    expect(sql).toContain(
+      "procedure.proowner = pg_catalog.to_regrole('postgres')",
+    );
     expect(sql).toContain('has_any_column_privilege');
     expect(sql).toContain('has_sequence_privilege');
     expect(sql).toContain('has_function_privilege');
