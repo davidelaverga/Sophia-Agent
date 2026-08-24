@@ -37,7 +37,14 @@ const exactRole = Object.freeze({
   rolconnlimit: -1,
   password_no_expiry: true,
   membership_free: true,
+  supabase_pg17_creator_membership_only: false,
   public_schema_create_denied: true,
+});
+
+const supabasePg17PreparedRole = Object.freeze({
+  ...exactRole,
+  membership_free: false,
+  supabase_pg17_creator_membership_only: true,
 });
 
 type QueryCall = { text: string; values: unknown[] };
@@ -211,6 +218,10 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
     expect(sql).toContain('voice_lab_d02_role_pre_migration_footprint');
     expect(sql).toContain('membership.member = role.oid');
     expect(sql).toContain('membership.roleid = role.oid');
+    expect(sql).toContain("grantor_role.rolname = 'supabase_admin'");
+    expect(sql).toContain('membership.admin_option = true');
+    expect(sql).toContain('membership.inherit_option = false');
+    expect(sql).toContain('membership.set_option = false');
     expect(sql).not.toContain('ALTER ROLE');
     expect(gatewayPool.client.calls[0]?.text).toContain(
       'voice_lab_d02_role_login_attestation',
@@ -247,6 +258,70 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
     expect(client.calls.some(({ text }) => text.includes('$voice_lab_d02_role_create$'))).toBe(false);
     expect(client.calls.flatMap(({ values }) => values)).not.toContain(ROLE_PASSWORD);
     expect(gatewayPool.client.calls).toHaveLength(1);
+  });
+
+  it('commits only the exact Supabase PostgreSQL 17 creator edge in explicit support-preparation mode', async () => {
+    const client = new FakeClient([[], [{ ...supabasePg17PreparedRole }]]);
+    const pool = new FakePool(client);
+    const gatewayPool = new FakeGatewayPool();
+    const config = loadD02RoleProvisionConfig(env({
+      SOPHIA_VOICE_LAB_D02_SUPABASE_SUPPORT_PREPARE_APPROVED: 'YES',
+    }));
+
+    const result = await provisionVoiceLabD02Role(config, {
+      pool,
+      gatewayPoolFactory: () => gatewayPool,
+    });
+
+    expect(result).toMatchObject({
+      ok: false,
+      created: true,
+      authority_attested: true,
+      login_attested: true,
+      membership_attested: false,
+      support_required: true,
+      support_action: 'remove_supabase_pg17_creator_membership',
+    });
+    expect(client.calls.map(({ text }) => text)).toContain('COMMIT');
+    expect(client.calls.map(({ text }) => text)).not.toContain('ROLLBACK');
+    expect(JSON.stringify(result)).not.toContain(ROLE_PASSWORD);
+    expect(JSON.stringify(result)).not.toContain(OWNER_DSN);
+  });
+
+  it('does not accept the Supabase PostgreSQL 17 creator edge without explicit support preparation', async () => {
+    const client = new FakeClient([[{ ...supabasePg17PreparedRole }]]);
+
+    await expect(provisionVoiceLabD02Role(
+      loadD02RoleProvisionConfig(env()),
+      {
+        pool: new FakePool(client),
+        gatewayPoolFactory: () => new FakeGatewayPool(),
+      },
+    )).rejects.toMatchObject({ code: 'd02_role_catalog_drift' });
+
+    expect(client.calls.map(({ text }) => text)).toContain('ROLLBACK');
+    expect(client.calls.flatMap(({ values }) => values)).not.toContain(ROLE_PASSWORD);
+  });
+
+  it('rejects any non-exact membership even in support-preparation mode', async () => {
+    const client = new FakeClient([[
+      {
+        ...supabasePg17PreparedRole,
+        supabase_pg17_creator_membership_only: false,
+      },
+    ]]);
+
+    await expect(provisionVoiceLabD02Role(
+      loadD02RoleProvisionConfig(env({
+        SOPHIA_VOICE_LAB_D02_SUPABASE_SUPPORT_PREPARE_APPROVED: 'YES',
+      })),
+      {
+        pool: new FakePool(client),
+        gatewayPoolFactory: () => new FakeGatewayPool(),
+      },
+    )).rejects.toMatchObject({ code: 'd02_role_catalog_drift' });
+
+    expect(client.calls.map(({ text }) => text)).toContain('ROLLBACK');
   });
 
   it('rejects attribute or either-direction membership drift before sending the password', async () => {
@@ -378,6 +453,7 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
     ['project', { BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF: 'foreignprojectref123' }, 'd02_role_owner_target_invalid'],
     ['short password', { SOPHIA_VOICE_LAB_D02_GATEWAY_DATABASE_PASSWORD: 'short' }, 'd02_role_password_invalid'],
     ['reused owner password', { SOPHIA_VOICE_LAB_D02_GATEWAY_DATABASE_PASSWORD: 'owner-only-password' }, 'd02_role_password_invalid'],
+    ['support preparation', { SOPHIA_VOICE_LAB_D02_SUPABASE_SUPPORT_PREPARE_APPROVED: 'NO' }, 'd02_role_supabase_support_preparation_invalid'],
   ])('rejects invalid %s before database access', (_label, override, code) => {
     expect(() => loadD02RoleProvisionConfig(env(override))).toThrowError(
       expect.objectContaining<Partial<VoiceLabD02RoleProvisionError>>({ code }),

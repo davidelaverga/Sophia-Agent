@@ -62,6 +62,24 @@ const ROLE_CATALOG_SQL = `
             WHERE membership.member = role.oid
                OR membership.roleid = role.oid
          ) AS membership_free,
+         COALESCE((
+           SELECT count(*) = 1
+              AND bool_and(
+                membership.roleid = role.oid
+                AND member_role.rolname = 'postgres'
+                AND grantor_role.rolname = 'supabase_admin'
+                AND membership.admin_option = true
+                AND membership.inherit_option = false
+                AND membership.set_option = false
+              )
+             FROM pg_catalog.pg_auth_members membership
+             JOIN pg_catalog.pg_roles member_role
+               ON member_role.oid = membership.member
+             JOIN pg_catalog.pg_roles grantor_role
+               ON grantor_role.oid = membership.grantor
+            WHERE membership.member = role.oid
+               OR membership.roleid = role.oid
+         ), false) AS supabase_pg17_creator_membership_only,
          NOT pg_catalog.has_schema_privilege(role.oid, 'public', 'CREATE')
            AS public_schema_create_denied
     FROM pg_catalog.pg_roles role
@@ -356,6 +374,11 @@ export function loadD02RoleProvisionConfig(env = process.env) {
     'BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF',
   );
   const expectedProjectRef = expectedProjectRefRaw.toLowerCase();
+  const supportPreparationRaw =
+    env.SOPHIA_VOICE_LAB_D02_SUPABASE_SUPPORT_PREPARE_APPROVED;
+  if (supportPreparationRaw && supportPreparationRaw !== 'YES') {
+    fail('d02_role_supabase_support_preparation_invalid');
+  }
   let parsed;
   let ownerPassword;
   let expectedDatabase;
@@ -401,10 +424,11 @@ export function loadD02RoleProvisionConfig(env = process.env) {
       return gatewayUrl.toString();
     })(),
     ssl: sslConfig(ownerDsn, env.BETTER_AUTH_DATABASE_SSL_MODE),
+    supportPreparationApproved: supportPreparationRaw === 'YES',
   });
 }
 
-function exactRole(row) {
+function exactRole(row, { allowSupabasePg17CreatorMembership = false } = {}) {
   return row
     && row.rolname === D02_ROLE
     && row.rolsuper === false
@@ -416,7 +440,13 @@ function exactRole(row) {
     && row.rolbypassrls === false
     && Number(row.rolconnlimit) === -1
     && row.password_no_expiry === true
-    && row.membership_free === true
+    && (
+      row.membership_free === true
+      || (
+        allowSupabasePg17CreatorMembership
+        && row.supabase_pg17_creator_membership_only === true
+      )
+    )
     && row.public_schema_create_denied === true;
 }
 
@@ -560,7 +590,16 @@ export async function provisionVoiceLabD02Role(
     }
 
     const before = await roleRows(client);
-    if (before.length > 1 || (before.length === 1 && !exactRole(before[0]))) {
+    const supportPreparation = config.supportPreparationApproved === true;
+    if (
+      before.length > 1
+      || (
+        before.length === 1
+        && !exactRole(before[0], {
+          allowSupabasePg17CreatorMembership: supportPreparation,
+        })
+      )
+    ) {
       fail('d02_role_catalog_drift');
     }
     const created = before.length === 0;
@@ -587,7 +626,12 @@ export async function provisionVoiceLabD02Role(
 
     await client.query(REVOKE_DIRECT_AUTHORITY_SQL);
     const after = await roleRows(client);
-    if (after.length !== 1 || !exactRole(after[0])) {
+    if (
+      after.length !== 1
+      || !exactRole(after[0], {
+        allowSupabasePg17CreatorMembership: supportPreparation,
+      })
+    ) {
       fail('d02_role_catalog_drift');
     }
     const authority = exactAuthority(
@@ -596,8 +640,9 @@ export async function provisionVoiceLabD02Role(
     await client.query('COMMIT');
     committed = true;
     await attestGatewayLogin(config, gatewayPoolFactory);
+    const supportRequired = after[0].membership_free !== true;
     return Object.freeze({
-      ok: true,
+      ok: !supportRequired,
       role: D02_ROLE,
       role_sha256: createHash('sha256').update(D02_ROLE).digest('hex'),
       database_sha256: createHash('sha256').update(target.database_name).digest('hex'),
@@ -606,6 +651,11 @@ export async function provisionVoiceLabD02Role(
       application_schema_count: Number(authority.application_schema_count),
       authority_attested: true,
       login_attested: true,
+      membership_attested: !supportRequired,
+      support_required: supportRequired,
+      support_action: supportRequired
+        ? 'remove_supabase_pg17_creator_membership'
+        : null,
     });
   } catch (error) {
     if (client && !committed) await client.query('ROLLBACK').catch(() => undefined);
@@ -620,6 +670,7 @@ export async function provisionVoiceLabD02Role(
 export async function main(env = process.env) {
   const result = await provisionVoiceLabD02Role(loadD02RoleProvisionConfig(env));
   process.stdout.write(`${JSON.stringify(result)}\n`);
+  if (result.support_required === true) process.exitCode = 2;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
