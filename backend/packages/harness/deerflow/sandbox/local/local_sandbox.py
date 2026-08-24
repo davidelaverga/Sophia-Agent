@@ -78,6 +78,12 @@ _SANDBOX_PRIVATE_ENV_PREFIXES = (
     "GOOGLE_APPLICATION_CREDENTIALS",
 )
 
+_SANDBOX_PRIVATE_ENV_SUFFIXES = (
+    "_DATABASE_URL",
+    "_POSTGRES_URL",
+    "_POSTGRESQL_URL",
+)
+
 
 def _is_sandbox_private_env_key(key: str) -> bool:
     """Return whether *key* carries parent-process authority.
@@ -91,6 +97,8 @@ def _is_sandbox_private_env_key(key: str) -> bool:
     if normalized in _SANDBOX_PRIVATE_ENV_KEYS:
         return True
     if normalized.startswith(_SANDBOX_PRIVATE_ENV_PREFIXES):
+        return True
+    if normalized.endswith(_SANDBOX_PRIVATE_ENV_SUFFIXES):
         return True
     return any(fragment in normalized for fragment in _SANDBOX_PRIVATE_ENV_NAME_FRAGMENTS)
 
@@ -378,6 +386,7 @@ class LocalSandbox(Sandbox):
         workspace_root: str | Path | None = None,
         outputs_root: str | Path | None = None,
         uploads_root: str | Path | None = None,
+        allow_langsmith: bool = True,
     ) -> tuple[str, dict[str, object]]:
         started_at = datetime.now(UTC)
         started_perf = time.perf_counter()
@@ -432,7 +441,10 @@ class LocalSandbox(Sandbox):
                 telemetry["runner"] = "trusted_image_provider"
                 result = run_trusted_image_request(
                     provider_request,
-                    env=trusted_subprocess_env(allow_openai=True, allow_langsmith=True),
+                    env=trusted_subprocess_env(
+                        allow_openai=True,
+                        allow_langsmith=allow_langsmith,
+                    ),
                     timeout=_COMMAND_TIMEOUT_SECONDS,
                 )
             elif os.name == "nt" and shell_name in ("powershell", "pwsh"):
@@ -552,12 +564,14 @@ class LocalSandbox(Sandbox):
         workspace_root: str | Path | None = None,
         outputs_root: str | Path | None = None,
         uploads_root: str | Path | None = None,
+        allow_langsmith: bool = True,
     ) -> str:
         output, _telemetry = self.execute_command_with_metadata(
             command,
             workspace_root=workspace_root,
             outputs_root=outputs_root,
             uploads_root=uploads_root,
+            allow_langsmith=allow_langsmith,
         )
         return output
 

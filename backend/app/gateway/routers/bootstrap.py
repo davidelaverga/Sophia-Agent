@@ -4,10 +4,16 @@ Development stubs for /api/v1/bootstrap/* endpoints.
 Returns valid response shapes so the frontend dashboard can load.
 """
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel
 
-router = APIRouter(prefix="/api/v1/bootstrap", tags=["bootstrap"])
+from app.gateway.auth import require_authenticated_user
+
+router = APIRouter(
+    prefix="/api/v1/bootstrap",
+    tags=["bootstrap"],
+    dependencies=[Depends(require_authenticated_user)],
+)
 
 
 class EmotionalContext(BaseModel):

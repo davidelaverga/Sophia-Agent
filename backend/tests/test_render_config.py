@@ -187,3 +187,88 @@ def test_render_services_pin_the_same_supabase_project() -> None:
 
     assert gateway["SOPHIA_EXPECTED_SUPABASE_PROJECT_REF"]["value"] == expected
     assert langgraph["SOPHIA_EXPECTED_SUPABASE_PROJECT_REF"]["value"] == expected
+
+
+def test_langgraph_receives_the_dashboard_managed_voice_lab_principal() -> None:
+    langgraph = _service_env("sophia-langgraph")
+
+    assert langgraph["SOPHIA_VOICE_LAB_TEST_PRINCIPAL"] == {
+        "key": "SOPHIA_VOICE_LAB_TEST_PRINCIPAL",
+        "sync": False,
+    }
+
+
+def test_voice_disables_onnx_posix_telemetry_before_smart_turn_import() -> None:
+    voice = _service_env("sophia-voice")
+    dockerfile = (
+        Path(__file__).resolve().parents[2] / "voice" / "Dockerfile"
+    ).read_text(encoding="utf-8")
+
+    assert voice["ORT_DISABLE_TELEMETRY"] == {
+        "key": "ORT_DISABLE_TELEMETRY",
+        "value": "1",
+    }
+    assert "ENV ORT_DISABLE_TELEMETRY=1" in dockerfile
+
+
+def test_product_render_services_require_ordered_manual_deploys() -> None:
+    render_yaml = Path(__file__).resolve().parents[2] / "render.yaml"
+    services = yaml.safe_load(render_yaml.read_text(encoding="utf-8"))["services"]
+    by_name = {service["name"]: service for service in services}
+
+    for service_name in {"sophia-langgraph", "sophia-gateway", "sophia-voice"}:
+        assert by_name[service_name]["autoDeployTrigger"] == "off"
+
+
+def test_voice_lab_database_and_services_use_separate_ordered_blueprints() -> None:
+    root = Path(__file__).resolve().parents[2]
+    database = yaml.safe_load(
+        (root / "render.voice-lab.database.yaml").read_text(encoding="utf-8")
+    )
+    services = yaml.safe_load(
+        (root / "render.voice-lab.yaml").read_text(encoding="utf-8")
+    )
+
+    assert set(database) == {"databases"}
+    assert database["databases"] == [
+        {
+            "name": "sophia-voice-lab-postgres",
+            "plan": "basic-256mb",
+            "region": "oregon",
+            "postgresMajorVersion": "17",
+            "diskSizeGB": 15,
+            "storageAutoscalingEnabled": False,
+            "connectionPool": "none",
+            "ipAllowList": [],
+        }
+    ]
+    assert "databases" not in services
+
+    by_name = {service["name"]: service for service in services["services"]}
+    assert set(by_name) == {"sophia-voice-lab-mcp", "sophia-voice-lab-worker"}
+    for service in by_name.values():
+        assert service["autoDeployTrigger"] == "off"
+        env = {entry.get("key"): entry for entry in service["envVars"] if "key" in entry}
+        assert env["DATABASE_URL"]["fromDatabase"] == {
+            "name": "sophia-voice-lab-postgres",
+            "property": "connectionString",
+        }
+        assert env["SOPHIA_VOICE_LAB_KILL_SWITCH"] == {
+            "key": "SOPHIA_VOICE_LAB_KILL_SWITCH",
+            "sync": False,
+        }
+
+    web_env = {
+        entry.get("key"): entry
+        for entry in by_name["sophia-voice-lab-mcp"]["envVars"]
+        if "key" in entry
+    }
+    worker_env = {
+        entry.get("key"): entry
+        for entry in by_name["sophia-voice-lab-worker"]["envVars"]
+        if "key" in entry
+    }
+    assert web_env["SOPHIA_VOICE_LAB_PROVISIONING_ENABLED"]["sync"] is False
+    assert web_env["SOPHIA_VOICE_LAB_PROVISION_OPERATOR_BEARER_TOKEN"]["sync"] is False
+    assert "SOPHIA_VOICE_LAB_PROVISIONING_ENABLED" not in worker_env
+    assert "SOPHIA_VOICE_LAB_PROVISION_OPERATOR_BEARER_TOKEN" not in worker_env

@@ -14,6 +14,7 @@
 import { type NextRequest, NextResponse } from "next/server"
 
 import { getServerAuthToken } from "../../../lib/auth/server-auth"
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation'
 
 // Curated fallback learnings that reflect Sophia's growth
 const FALLBACK_LEARNINGS = [
@@ -59,6 +60,9 @@ function getDailyLearning() {
 }
 
 export async function GET(_request: NextRequest) {
+  const boundaryResponse = await voiceLabOrdinaryProductBoundaryResponse();
+  if (boundaryResponse) return boundaryResponse;
+
   const backendUrl = process.env.BACKEND_API_URL;
   const apiKey = await getServerAuthToken();
 

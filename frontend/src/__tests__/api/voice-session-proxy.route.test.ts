@@ -3,10 +3,35 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 const resolveSophiaUserIdMock = vi.fn();
 const fetchSophiaApiMock = vi.fn();
+const voiceLabMocks = vi.hoisted(() => {
+  class CapabilityError extends Error {
+    constructor(readonly code: string, readonly status: number) {
+      super(code);
+    }
+  }
+  return {
+    getConnectCapability: vi.fn(),
+    getSessionCreateCapability: vi.fn(),
+    getSessionReadCapability: vi.fn(),
+    getEndSessionCapability: vi.fn(),
+    getPrincipalConfig: vi.fn(),
+    CapabilityError,
+  };
+});
 
 vi.mock('../../app/api/_lib/sophia', () => ({
   resolveSophiaUserId: (...args: unknown[]) => resolveSophiaUserIdMock(...args),
   fetchSophiaApi: (...args: unknown[]) => fetchSophiaApiMock(...args),
+}));
+
+vi.mock('../../server/voice-lab/capability', () => ({
+  getVoiceLabConnectCapability: (...args: unknown[]) => voiceLabMocks.getConnectCapability(...args),
+  getVoiceLabSessionCreateCapability: (...args: unknown[]) => voiceLabMocks.getSessionCreateCapability(...args),
+  getVoiceLabSessionReadCapability: (...args: unknown[]) => voiceLabMocks.getSessionReadCapability(...args),
+  getVoiceLabEndSessionCapability: (...args: unknown[]) => voiceLabMocks.getEndSessionCapability(...args),
+  getVoiceLabPrincipalConfig: (...args: unknown[]) => voiceLabMocks.getPrincipalConfig(...args),
+  VOICE_LAB_CAPABILITY_HEADER: 'X-Sophia-Voice-Lab-Capability',
+  VoiceLabCapabilityError: voiceLabMocks.CapabilityError,
 }));
 
 import { POST as connectPOST } from '../../app/api/sophia/[userId]/voice/connect/route';
@@ -21,6 +46,7 @@ import { POST as geminiStableBrowserDogfoodPOST } from '../../app/api/sophia/voi
 import { POST as geminiStableDisconnectPOST } from '../../app/api/sophia/voice/dogfood/gemini/disconnect/route';
 import { GET as geminiStableEventsGET } from '../../app/api/sophia/voice/dogfood/gemini/events/route';
 import { POST as geminiStableRelayPOST } from '../../app/api/sophia/voice/dogfood/gemini/relay/route';
+import { POST as geminiProductionActivatePOST } from '../../app/api/sophia/voice/gemini/activate/route';
 import { POST as geminiProductionDisconnectPOST } from '../../app/api/sophia/voice/gemini/disconnect/route';
 import { GET as geminiProductionEventsGET } from '../../app/api/sophia/voice/gemini/events/route';
 import { POST as geminiProductionRelayPOST } from '../../app/api/sophia/voice/gemini/relay/route';
@@ -29,6 +55,15 @@ describe('voice session proxy routes', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     resolveSophiaUserIdMock.mockResolvedValue('user-1');
+    voiceLabMocks.getConnectCapability.mockResolvedValue(null);
+    voiceLabMocks.getSessionCreateCapability.mockResolvedValue(null);
+    voiceLabMocks.getSessionReadCapability.mockResolvedValue(null);
+    voiceLabMocks.getEndSessionCapability.mockResolvedValue(null);
+    voiceLabMocks.getPrincipalConfig.mockReturnValue({
+      principalId: 'user-1',
+      email: 'voice-lab@example.com',
+      environment: 'production',
+    });
   });
 
   it('rejects voice connect when the Better Auth user does not match the URL userId', async () => {
@@ -81,6 +116,39 @@ describe('voice session proxy routes', () => {
     expect(options.method).toBe('POST');
     expect(options.body).toBe(JSON.stringify({ platform: 'voice' }));
     expect(response.status).toBe(200);
+  });
+
+  it('forwards the HttpOnly synthetic capability only on voice connect', async () => {
+    voiceLabMocks.getConnectCapability.mockResolvedValue('gateway-capability');
+    fetchSophiaApiMock.mockResolvedValueOnce(new Response(JSON.stringify({ ok: true }), { status: 200 }));
+
+    const response = await connectPOST(
+      {
+        nextUrl: new URL('http://localhost:3000/api/sophia/voice-lab-user-1/voice/connect'),
+        text: async () => JSON.stringify({ platform: 'voice' }),
+      } as unknown as NextRequest,
+      { params: Promise.resolve({ userId: 'user-1' }) },
+    );
+
+    expect(response.status).toBe(200);
+    const [, options] = fetchSophiaApiMock.mock.calls[0] as [string, RequestInit];
+    expect(options.headers).toEqual({ 'X-Sophia-Voice-Lab-Capability': 'gateway-capability' });
+  });
+
+  it('rejects an invalid synthetic context before calling the gateway', async () => {
+    voiceLabMocks.getConnectCapability.mockRejectedValue(
+      new voiceLabMocks.CapabilityError('voice_lab_capability_expired_or_not_yet_valid', 401),
+    );
+    const response = await connectPOST(
+      {
+        nextUrl: new URL('http://localhost:3000/api/sophia/user-1/voice/connect'),
+        text: async () => JSON.stringify({ platform: 'voice' }),
+      } as unknown as NextRequest,
+      { params: Promise.resolve({ userId: 'user-1' }) },
+    );
+
+    expect(response.status).toBe(401);
+    expect(fetchSophiaApiMock).not.toHaveBeenCalled();
   });
 
   it('proxies voice warmup with the user-scoped bearer token for the matching user', async () => {
@@ -469,6 +537,38 @@ describe('voice session proxy routes', () => {
     warnSpy.mockRestore();
   });
 
+  it('proxies the exact synthetic browser activation receipt through the governed lane', async () => {
+    voiceLabMocks.getSessionCreateCapability.mockResolvedValue('session-create-capability');
+    fetchSophiaApiMock.mockResolvedValueOnce(
+      new Response(JSON.stringify({ activated: true, provider_connection_epoch: 1 }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    );
+    const body = {
+      schema: 'sophia_voice_lab_browser_provider_activation_v1',
+      session_id: 'gemini-prod-1',
+      previous_activated_epoch: 0,
+      candidate_epoch: 1,
+    };
+
+    const response = await geminiProductionActivatePOST({
+      nextUrl: new URL('http://localhost:3000/api/sophia/voice/gemini/activate'),
+      text: async () => JSON.stringify(body),
+    } as unknown as NextRequest);
+
+    expect(response.status).toBe(202);
+    expect(fetchSophiaApiMock).toHaveBeenCalledWith(
+      '/api/sophia/user-1/voice/gemini/activate',
+      expect.objectContaining({
+        method: 'POST',
+        body: JSON.stringify(body),
+        headers: { 'X-Sophia-Voice-Lab-Capability': 'session-create-capability' },
+      }),
+      { voiceLabAccess: 'governed' },
+    );
+  });
+
   it('proxies production Gemini events with the header and query resume cursors', async () => {
     const stream = new ReadableStream({
       start(controller) {
@@ -497,6 +597,7 @@ describe('voice session proxy routes', () => {
     expect(options.method).toBe('GET');
     expect((options.headers as Record<string, string>).Accept).toBe('text/event-stream');
     expect((options.headers as Record<string, string>)['Last-Event-ID']).toBe('12');
+    expect(fetchSophiaApiMock.mock.calls[0][2]).toEqual({ voiceLabAccess: 'governed' });
     expect(response.status).toBe(200);
     await expect(response.text()).resolves.toContain('sophia.turn');
   });
@@ -519,5 +620,49 @@ describe('voice session proxy routes', () => {
     expect(options.body).toBe(JSON.stringify({ session_id: 'gemini-prod-1' }));
     expect(response.status).toBe(204);
     await expect(response.text()).resolves.toBe('');
+  });
+
+  it('uses provider cleanup authority after the interactive context expires', async () => {
+    const token = `${'a'.repeat(32)}.${'b'.repeat(43)}`;
+    fetchSophiaApiMock.mockResolvedValueOnce(new Response(null, { status: 204 }));
+
+    const response = await geminiProductionDisconnectPOST(
+      {
+        nextUrl: new URL('http://localhost:3000/api/sophia/voice/gemini/disconnect'),
+        headers: new Headers({
+          'X-Sophia-Voice-Lab-Provider-Cleanup': token,
+        }),
+        text: async () => JSON.stringify({ session_id: 'gemini-prod-1' }),
+      } as unknown as NextRequest,
+    );
+
+    expect(response.status).toBe(204);
+    expect(voiceLabMocks.getEndSessionCapability).not.toHaveBeenCalled();
+    expect(fetchSophiaApiMock).toHaveBeenCalledWith(
+      '/api/sophia/user-1/voice/gemini/disconnect',
+      expect.objectContaining({
+        headers: { 'X-Sophia-Voice-Lab-Provider-Cleanup': token },
+      }),
+      { voiceLabAccess: 'governed' },
+    );
+  });
+
+  it('rejects a malformed provider cleanup authority before gateway allocation', async () => {
+    const response = await geminiProductionDisconnectPOST(
+      {
+        nextUrl: new URL('http://localhost:3000/api/sophia/voice/gemini/disconnect'),
+        headers: new Headers({
+          'X-Sophia-Voice-Lab-Provider-Cleanup': 'not-a-token',
+        }),
+        text: async () => JSON.stringify({ session_id: 'gemini-prod-1' }),
+      } as unknown as NextRequest,
+    );
+
+    expect(response.status).toBe(401);
+    await expect(response.json()).resolves.toEqual({
+      error: 'voice_lab_provider_cleanup_malformed',
+    });
+    expect(fetchSophiaApiMock).not.toHaveBeenCalled();
+    expect(voiceLabMocks.getEndSessionCapability).not.toHaveBeenCalled();
   });
 });

@@ -3,6 +3,7 @@
 import { useEffect, useRef, useState, type Dispatch, type SetStateAction } from 'react';
 
 import { recordSophiaCaptureEvent } from '../lib/session-capture';
+import { recordSyntheticBuilderCanvasProjection } from '../lib/synthetic-builder-evidence';
 import type {
   BuilderCanvasEventV1,
   BuilderCanvasSnapshotV1,
@@ -479,12 +480,14 @@ export function useBuilderCanvas(
   const [state, setState] = useState<BuilderCanvasState>(EMPTY_STATE);
   const snapshotTelemetrySignatureRef = useRef<string | null>(null);
   const artifactReviewActiveRef = useRef(artifactReviewActive);
+  const committedProjectionEventsRef = useRef<Set<string>>(new Set());
 
   useEffect(() => {
     artifactReviewActiveRef.current = artifactReviewActive;
   }, [artifactReviewActive]);
 
   useEffect(() => {
+    committedProjectionEventsRef.current = new Set();
     setState(EMPTY_STATE);
     logCanvasClient('hook-start', {
       enabled,
@@ -520,6 +523,28 @@ export function useBuilderCanvas(
       source.close();
     };
   }, [enabled, parentThreadId]);
+
+  useEffect(() => {
+    if (!enabled || !parentThreadId || !state.activeTask) {
+      return;
+    }
+    for (const event of state.recentEvents) {
+      if (
+        event.parent_thread_id !== parentThreadId
+        || event.task_id !== state.activeTask.task_id
+        || event.run_id !== state.activeTask.run_id
+        || committedProjectionEventsRef.current.has(event.event_id)
+      ) {
+        continue;
+      }
+      // This effect runs only after React has committed the reducer result.
+      // Provider/SSE ingestion alone is therefore never evidence of a canvas
+      // projection, and events rejected by applyEvent/applySnapshot cannot be
+      // stamped with source_ui_projected_at.
+      committedProjectionEventsRef.current.add(event.event_id);
+      void recordSyntheticBuilderCanvasProjection(event, 'canvas_current');
+    }
+  }, [enabled, parentThreadId, state.activeTask, state.recentEvents]);
 
   return state;
 }

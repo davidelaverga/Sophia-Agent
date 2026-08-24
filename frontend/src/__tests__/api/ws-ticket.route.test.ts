@@ -1,4 +1,11 @@
-import { describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { NextRequest } from 'next/server';
+
+const voiceLabBoundary = vi.hoisted(() => vi.fn());
+
+vi.mock('@/server/voice-lab/ordinary-route-isolation', () => ({
+  voiceLabOrdinaryProductBoundaryResponse: voiceLabBoundary,
+}));
 
 vi.mock('../../app/lib/auth/server-auth', () => ({
   getUserScopedAuthToken: vi.fn(),
@@ -18,10 +25,31 @@ import { getUserScopedAuthToken } from '../../app/lib/auth/server-auth';
 import { apiLimiters } from '../../app/lib/rate-limiter';
 
 describe('/api/ws-ticket POST', () => {
+  const request = () => new NextRequest('https://sophia.example.test/api/ws-ticket', { method: 'POST' });
+
+  beforeEach(() => {
+    vi.clearAllMocks();
+    voiceLabBoundary.mockResolvedValue(null);
+    vi.mocked(apiLimiters.wsTicket.checkSync).mockReturnValue(true);
+  });
+
+  it('denies a marker-free dedicated identity before limiter or token access', async () => {
+    voiceLabBoundary.mockResolvedValue(Response.json(
+      { error: 'voice_lab_ordinary_product_route_forbidden' },
+      { status: 403 },
+    ));
+
+    const response = await POST(request());
+
+    expect(response.status).toBe(403);
+    expect(apiLimiters.wsTicket.checkSync).not.toHaveBeenCalled();
+    expect(getUserScopedAuthToken).not.toHaveBeenCalled();
+  });
+
   it('returns 429 when rate limited', async () => {
     vi.mocked(apiLimiters.wsTicket.checkSync).mockReturnValue(false);
 
-    const response = await POST();
+    const response = await POST(request());
     const data = await response.json();
 
     expect(response.status).toBe(429);
@@ -34,7 +62,7 @@ describe('/api/ws-ticket POST', () => {
   it('returns 401 when unauthenticated', async () => {
     vi.mocked(getUserScopedAuthToken).mockResolvedValue('');
 
-    const response = await POST();
+    const response = await POST(request());
     const data = await response.json();
 
     expect(response.status).toBe(401);
@@ -44,7 +72,7 @@ describe('/api/ws-ticket POST', () => {
   it('returns token when authenticated', async () => {
     vi.mocked(getUserScopedAuthToken).mockResolvedValue('token-123');
 
-    const response = await POST();
+    const response = await POST(request());
     const data = await response.json();
 
     expect(response.status).toBe(200);

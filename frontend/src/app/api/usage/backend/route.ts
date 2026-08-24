@@ -8,14 +8,14 @@
  * Reads auth from httpOnly cookie (server-side).
  */
 
-import { NextResponse } from 'next/server';
+import { type NextRequest, NextResponse } from 'next/server';
 
 import { getUserScopedAuthHeader } from '../../../lib/auth/server-auth';
 import { logger } from '../../../lib/error-logger';
 
 const BACKEND_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
-export async function GET() {
+export async function GET(request: NextRequest) {
   const authHeader = await getUserScopedAuthHeader();
 
   if (!authHeader) {
@@ -41,7 +41,7 @@ export async function GET() {
     const data = await response.json();
     return NextResponse.json(data);
   } catch (error) {
-    logger.logError(error, { component: 'api/usage/backend', action: 'check_usage' });
+    logger.logError(error, { component: 'api/usage/backend', action: 'check_usage', request });
     return NextResponse.json({ error: 'Failed to check usage' }, { status: 502 });
   }
 }

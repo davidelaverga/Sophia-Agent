@@ -172,6 +172,51 @@ describe('SessionEndResponseSchema', () => {
       expect(result.data.recap_artifacts?.builder_artifact?.decisionsMade).toEqual(['Cut the pricing appendix']);
     }
   });
+
+  it('should parse the durable Postgres session finalization receipt', () => {
+    const response = {
+      session_id: '123e4567-e89b-12d3-a456-426614174000',
+      ended_at: '2026-08-24T04:00:00.000Z',
+      duration_minutes: 1,
+      turn_count: 2,
+      recap_artifacts: null,
+      offer_debrief: false,
+      evidence_receipt: {
+        storage: 'postgres_session',
+        object_path: 'public.sophia_sessions/123e4567-e89b-12d3-a456-426614174000#synthetic_voice_lab.finalization_receipt',
+        sha256: 'a'.repeat(64),
+      },
+    };
+
+    const result = SessionEndResponseSchema.safeParse(response);
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.evidence_receipt).toEqual(response.evidence_receipt);
+    }
+  });
+
+  it('should reject an unknown finalization receipt storage authority', () => {
+    const result = SessionEndResponseSchema.safeParse({
+      session_id: '123e4567-e89b-12d3-a456-426614174000',
+      ended_at: '2026-08-24T04:00:00.000Z',
+      duration_minutes: 1,
+      turn_count: 2,
+      recap_artifacts: null,
+      offer_debrief: false,
+      evidence_receipt: {
+        storage: 'filesystem',
+        object_path: '/tmp/finalization.json',
+        sha256: 'b'.repeat(64),
+      },
+    });
+
+    expect(result.success).toBe(false);
+    if (!result.success) {
+      expect(result.error.issues).toContainEqual(
+        expect.objectContaining({ path: ['evidence_receipt', 'storage'] }),
+      );
+    }
+  });
 });
 
 describe('ActiveSessionResponseSchema', () => {

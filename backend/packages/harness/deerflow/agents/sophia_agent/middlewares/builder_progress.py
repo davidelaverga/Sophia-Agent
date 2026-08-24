@@ -38,8 +38,9 @@ import asyncio
 import logging
 import os
 import time
+from collections.abc import Mapping
 from datetime import UTC, datetime
-from typing import Annotated, Any, NotRequired, TypedDict, override
+from typing import Annotated, Any, Literal, NotRequired, TypedDict, override
 
 import httpx
 from langchain.agents import AgentState
@@ -47,6 +48,14 @@ from langchain.agents.middleware import AgentMiddleware
 from langgraph.runtime import Runtime
 
 from deerflow.agents.sophia_agent.utils import log_middleware
+from deerflow.sophia.builder_event_auth import (
+    encode_builder_event_body,
+    signed_builder_event_headers,
+)
+from deerflow.sophia.synthetic_builder import (
+    normalize_synthetic_builder_context,
+    synthetic_builder_projection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -120,6 +129,24 @@ class _ProgressPost(TypedDict, total=False):
     parent_thread_id: str | None
     sequence: int | None
     occurred_at: str | None
+    synthetic_test: bool
+    test_run_id: str
+    test_principal_id: str
+    scenario_id: str
+    scenario_version: str
+    environment: str
+    provider_expires_at: str
+    retention_expires_at: str
+    deployment_identity: dict[str, str]
+    isolation_status: str
+    memory_retrieval_excluded: bool
+    memory_learning_excluded: bool
+    ordinary_artifact_publication_excluded: bool
+    ordinary_analytics_excluded: bool
+    deck_quality_publication_excluded: bool
+    langsmith_export_excluded: bool
+    langsmith_trace_status: Literal["trace_unavailable"]
+    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy"]
 
 
 def _classify_tool(tool_name: str) -> str | None:
@@ -172,7 +199,7 @@ def _resolve_task_id_and_run_id(runtime: Runtime) -> tuple[str | None, str | Non
     return task_id, run_id
 
 
-def _resolve_parent_thread_id(state: dict[str, Any]) -> str | None:
+def _resolve_parent_thread_id(state: Mapping[str, Any]) -> str | None:
     delegation_context = state.get("delegation_context")
     if not isinstance(delegation_context, dict):
         return None
@@ -181,7 +208,7 @@ def _resolve_parent_thread_id(state: dict[str, Any]) -> str | None:
 
 
 def _web_event_context(
-    state: dict[str, Any],
+    state: Mapping[str, Any],
     *,
     offset: int = 1,
 ) -> tuple[dict[str, Any], int | None]:
@@ -193,10 +220,12 @@ def _web_event_context(
     if not isinstance(last_sequence, int):
         last_sequence = 0
     sequence = last_sequence + offset
+    synthetic_context = normalize_synthetic_builder_context(state)
     return {
         "parent_thread_id": parent_thread_id,
         "sequence": sequence,
         "occurred_at": datetime.now(UTC).isoformat(),
+        **synthetic_builder_projection(synthetic_context),
     }, sequence
 
 
@@ -209,6 +238,29 @@ async def _post_progress_event(
     parent_thread_id: str | None = None,
     sequence: int | None = None,
     occurred_at: str | None = None,
+    synthetic_test: bool | None = None,
+    test_run_id: str | None = None,
+    test_principal_id: str | None = None,
+    scenario_id: str | None = None,
+    scenario_version: str | None = None,
+    environment: str | None = None,
+    cleanup_obligation_id: str | None = None,
+    retention_hours: int | None = None,
+    retention_anchor: str | None = None,
+    retention_anchor_at: str | None = None,
+    retention_expires_at: str | None = None,
+    provider_expires_at: str | None = None,
+    deployment_identity: dict[str, str] | None = None,
+    isolation_status: str | None = None,
+    memory_retrieval_excluded: bool | None = None,
+    memory_learning_excluded: bool | None = None,
+    ordinary_artifact_publication_excluded: bool | None = None,
+    ordinary_analytics_excluded: bool | None = None,
+    deck_quality_publication_excluded: bool | None = None,
+    langsmith_export_excluded: bool | None = None,
+    langsmith_trace_status: Literal["trace_unavailable"] | None = None,
+    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy"] | None = None,
+    synthetic_builder_join: dict[str, Any] | None = None,
 ) -> None:
     """Fire one progress event at the gateway.
 
@@ -229,9 +281,39 @@ async def _post_progress_event(
         payload["sequence"] = sequence
     if occurred_at:
         payload["occurred_at"] = occurred_at
+    for key in (
+        "synthetic_test",
+        "test_run_id",
+        "test_principal_id",
+        "scenario_id",
+        "scenario_version",
+        "environment",
+        "cleanup_obligation_id",
+            "retention_hours",
+            "retention_anchor",
+            "retention_anchor_at",
+            "retention_expires_at",
+            "provider_expires_at",
+        "deployment_identity",
+        "isolation_status",
+        "memory_retrieval_excluded",
+        "memory_learning_excluded",
+        "ordinary_artifact_publication_excluded",
+        "ordinary_analytics_excluded",
+        "deck_quality_publication_excluded",
+        "langsmith_export_excluded",
+        "langsmith_trace_status",
+            "langsmith_trace_unavailable_reason",
+            "synthetic_builder_join",
+    ):
+        value = locals().get(key)
+        if value is not None:
+            payload[key] = value
     try:
+        body = encode_builder_event_body(payload)
+        headers = signed_builder_event_headers(body)
         async with httpx.AsyncClient(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
-            response = await client.post(url, json=payload)
+            response = await client.post(url, content=body, headers=headers)
             if response.status_code >= 400:
                 logger.warning(
                     "BuilderProgress: webhook rejected status=%s task_id=%s event=%s body=%s",
@@ -258,6 +340,7 @@ def _schedule_post(
     parent_thread_id: str | None = None,
     sequence: int | None = None,
     occurred_at: str | None = None,
+    **isolation: Any,
 ) -> None:
     """Schedule a webhook POST without awaiting it.
 
@@ -287,6 +370,7 @@ def _schedule_post(
             parent_thread_id=parent_thread_id,
             sequence=sequence,
             occurred_at=occurred_at,
+            **isolation,
         )
     )
     _POST_TASKS.add(task)
@@ -494,6 +578,9 @@ def _keep_max_sequence(left: int | None, right: int | None) -> int:
 class BuilderProgressState(AgentState):
     builder_progress_last_phase: NotRequired[str]
     builder_progress_sequence: NotRequired[Annotated[int, _keep_max_sequence]]
+    synthetic_test: NotRequired[dict[str, Any] | None]
+    synthetic_builder_join: NotRequired[dict[str, Any] | None]
+    delegation_context: NotRequired[dict[str, Any] | None]
 
 
 class BuilderProgressMiddleware(AgentMiddleware[BuilderProgressState]):

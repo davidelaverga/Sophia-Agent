@@ -14,10 +14,14 @@ import { getUserScopedAuthHeader } from '../../../lib/auth/server-auth';
 import { debugLog } from '../../../lib/debug-logger';
 import { logger } from '../../../lib/error-logger';
 import { apiLimiters } from '../../../lib/rate-limiter';
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation';
 
 const BACKEND_URL = process.env.RENDER_BACKEND_URL || process.env.NEXT_PUBLIC_API_URL || 'http://localhost:8000';
 
 export async function POST(req: NextRequest) {
+  const voiceLabDenied = await voiceLabOrdinaryProductBoundaryResponse();
+  if (voiceLabDenied) return voiceLabDenied;
+
   // Rate limiting check
   if (!apiLimiters.companion.checkSync()) {
     return NextResponse.json(
@@ -71,6 +75,7 @@ export async function POST(req: NextRequest) {
         component: 'api/companion/invoke',
         action: 'backend_response',
         metadata: { status: backendResponse.status, errorText },
+        request: req,
       });
       
       // Return mock response ONLY in development if backend is unavailable
@@ -89,7 +94,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(data);
     
   } catch (error) {
-    logger.logError(error, { component: 'api/companion/invoke', action: 'invoke_post' });
+    logger.logError(error, { component: 'api/companion/invoke', action: 'invoke_post', request: req });
     
     // For development: return mock response if backend is down
     if (process.env.NODE_ENV !== 'production' && error instanceof TypeError && error.message.includes('fetch')) {

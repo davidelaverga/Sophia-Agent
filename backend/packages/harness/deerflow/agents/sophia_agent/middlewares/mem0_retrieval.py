@@ -57,6 +57,7 @@ from deerflow.sophia.builder_memory_filter import (
     DEFAULT_BUILDER_MEMORY_TOP_K,
     should_exclude_builder_memory,
 )
+from deerflow.sophia.synthetic_builder import declares_synthetic_builder_run
 
 # Note: ``search_memories`` is lazy-imported inside ``_safe_search`` rather
 # than at module top. Keeps the deerflow_agents → deerflow_sophia_services
@@ -80,6 +81,7 @@ class BuilderMem0RetrievalState(AgentState):
     injected_memories: NotRequired[list[str]]
     injected_memory_contents: NotRequired[list[str]]
     delegation_context: NotRequired[dict | None]
+    synthetic_test: NotRequired[dict | None]
 
 
 class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState]):
@@ -120,6 +122,22 @@ class BuilderMem0RetrievalMiddleware(AgentMiddleware[BuilderMem0RetrievalState])
         self, state: BuilderMem0RetrievalState, runtime: Runtime
     ) -> dict | None:
         _t0 = time.perf_counter()
+
+        runtime_config = getattr(runtime, "config", None)
+        if declares_synthetic_builder_run(state, runtime_config):
+            # This guard intentionally precedes user/query resolution and the
+            # lazy Mem0 import. A malformed synthetic identity must still make
+            # zero memory-provider calls; the stricter identity validation in
+            # BuilderTaskMiddleware then fails the run closed.
+            log_middleware(
+                "BuilderMem0Retrieval",
+                "synthetic run — memory retrieval excluded",
+                _t0,
+            )
+            return {
+                "injected_memories": [],
+                "injected_memory_contents": [],
+            }
 
         user_id = self._resolve_user_id(state, runtime)
         if not user_id:

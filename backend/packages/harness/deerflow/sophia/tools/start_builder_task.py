@@ -37,20 +37,22 @@ SDK failure fallback, and user_id resolution (mirroring
 
 from __future__ import annotations
 
+import asyncio
 import datetime as dt
 import logging
+import os
 import re
 import shutil
 import time
 import uuid
+from contextlib import asynccontextmanager
 from dataclasses import dataclass
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Literal
+from typing import TYPE_CHECKING, Any, Literal, cast
 
 from langchain.tools import ToolRuntime, tool
 from langchain_core.messages import AIMessage, ToolMessage
 from langgraph.types import Command
-from langgraph.typing import ContextT
 
 from deerflow.sophia.build_runtime.identity import new_build_id, new_operation_id
 from deerflow.sophia.builder_memory_filter import filter_builder_memory_snippets
@@ -58,6 +60,11 @@ from deerflow.sophia.builder_web_policy import (
     extract_explicit_user_urls,
     make_builder_web_budget,
     should_allow_builder_web_research,
+)
+from deerflow.sophia.synthetic_builder import (
+    SyntheticBuilderContextError,
+    normalize_synthetic_builder_context,
+    synthetic_builder_projection,
 )
 
 # Importing ``deerflow.agents.sophia_agent.state`` (or any module under
@@ -92,6 +99,7 @@ __all__ = [
 ]
 
 _ASYNC_BUILDER_AGENT_NAME = "sophia_builder"
+_LOCAL_SYNTHETIC_CLEANUP_BARRIERS: dict[str, asyncio.Lock] = {}
 
 # Terminal builder-task statuses. Anything NOT in this set is treated as
 # active (covers ``running``, ``pending``, ``interrupted``, ``queued``,
@@ -1080,7 +1088,7 @@ def _build_edit_existing_artifact_description(
     )
 
 
-def _resolve_thread_id(runtime: ToolRuntime[ContextT, SophiaState] | None) -> str | None:
+def _resolve_thread_id(runtime: ToolRuntime[Any, Any] | None) -> str | None:
     """Resolve thread_id from runtime context/configurable with contextvar fallback."""
     if runtime is not None:
         if runtime.context and runtime.context.get("thread_id"):
@@ -1093,7 +1101,7 @@ def _resolve_thread_id(runtime: ToolRuntime[ContextT, SophiaState] | None) -> st
     try:
         from langchain_core.runnables.config import var_child_runnable_config
 
-        run_config = var_child_runnable_config.get({})
+        run_config = var_child_runnable_config.get({}) or {}
         return run_config.get("configurable", {}).get("thread_id")
     except Exception:
         return None
@@ -1159,13 +1167,13 @@ def _resolve_companion_artifact(
         for name, payload, _source in artifacts
     }
     for _name, payload, source in artifacts:
-        if _artifact_payload_present(payload):
-            return payload, source, diagnostics
+        if isinstance(payload, dict) and payload:
+            return dict(payload), source, diagnostics
     return {}, "default_empty", diagnostics
 
 
 def _resolve_user_id(
-    runtime: ToolRuntime[ContextT, SophiaState] | None,
+    runtime: ToolRuntime[Any, Any] | None,
     state: SophiaState,
     configured_user_id: str | None = None,
     explicit_tool_arg: str | None = None,
@@ -1243,7 +1251,7 @@ def _resolve_user_id(
             trusted_resolved,
         )
 
-    if trusted_resolved is not None:
+    if trusted_resolved is not None and trusted_source is not None:
         return trusted_resolved, trusted_source, diagnostics
 
     if tool_arg_user_id:
@@ -1562,7 +1570,7 @@ _TRUSTED_ATTACHMENT_FILENAME = re.compile(r"^[A-Za-z0-9._-]+$")
 
 
 def _read_current_turn_attached_files(
-    runtime: ToolRuntime[ContextT, SophiaState] | None,
+    runtime: ToolRuntime[Any, Any] | None,
 ) -> Any:
     """Read the raw per-run attachment list from runtime config/context.
 
@@ -1604,7 +1612,7 @@ def _read_current_turn_attached_files(
 
 
 def _extract_current_turn_attachment_filenames(
-    runtime: ToolRuntime[ContextT, SophiaState] | None,
+    runtime: ToolRuntime[Any, Any] | None,
 ) -> frozenset[str]:
     """Return the filenames the user attached on THIS turn.
 
@@ -1920,7 +1928,207 @@ def _has_active_builder_task(state: SophiaState) -> str | None:
     return None
 
 
-async def _dispatch_via_asgi(
+def _synthetic_admission_metadata(
+    context: dict[str, Any],
+    *,
+    parent_thread_id: str | None,
+) -> dict[str, Any]:
+    """Return the exact safe identity persisted on a synthetic task thread."""
+
+    if not isinstance(parent_thread_id, str) or not parent_thread_id.strip():
+        raise SyntheticBuilderContextError(
+            "synthetic_builder_parent_thread_id_invalid"
+        )
+    projection = synthetic_builder_projection(context)
+    return {
+        "synthetic": True,
+        "principal_id": context["test_principal_id"],
+        "parent_thread_id": parent_thread_id.strip(),
+        **projection,
+    }
+
+
+def _synthetic_thread_ttl_minutes(context: dict[str, Any]) -> int:
+    """Translate the canonical expiry into a bounded LangGraph thread TTL."""
+
+    raw_expiry = context.get("retention_expires_at")
+    if not isinstance(raw_expiry, str):
+        raise SyntheticBuilderContextError("synthetic_builder_retention_invalid")
+    try:
+        expiry = dt.datetime.fromisoformat(raw_expiry.replace("Z", "+00:00"))
+    except ValueError:
+        raise SyntheticBuilderContextError(
+            "synthetic_builder_retention_invalid"
+        ) from None
+    if expiry.tzinfo is None:
+        expiry = expiry.replace(tzinfo=dt.UTC)
+    remaining_seconds = (
+        expiry.astimezone(dt.UTC) - dt.datetime.now(dt.UTC)
+    ).total_seconds()
+    if remaining_seconds < 60 or remaining_seconds > 7 * 24 * 60 * 60:
+        raise SyntheticBuilderContextError("synthetic_builder_retention_invalid")
+    # LangGraph TTLs are minute-granular. Floor to avoid extending the
+    # canonical retention window. A sub-minute residual is categorically
+    # rejected above because LangGraph cannot represent it without extending
+    # the signed deadline.
+    return min(7 * 24 * 60, int(remaining_seconds // 60))
+
+
+@asynccontextmanager
+async def _synthetic_cleanup_obligation_admission_barrier(
+    cleanup_obligation_id: str,
+    retention_expires_at: str,
+    provider_expires_at: str,
+    *,
+    resource_id: str,
+):  # noqa: ANN201
+    """Reserve an exact Builder thread before any cross-store allocation."""
+
+    from deerflow.sophia.cleanup_fence import (
+        CleanupFenceError,
+        reserve_cleanup_admission,
+    )
+
+    try:
+        admission = await asyncio.to_thread(
+            reserve_cleanup_admission,
+            cleanup_obligation_id,
+            retention_expires_at,
+            provider_expires_at=provider_expires_at,
+            resource_kind="builder",
+            resource_id=resource_id,
+        )
+    except CleanupFenceError as exc:
+        raise SyntheticBuilderContextError(
+            "synthetic_builder_cleanup_obligation_closed"
+        ) from exc
+    yield admission
+
+
+@asynccontextmanager
+async def _synthetic_builder_run_commit_barrier(
+    admission,  # noqa: ANN001
+    *,
+    retention_expires_at: str,
+    provider_expires_at: str,
+):  # noqa: ANN201
+    """Serialize the final metadata check + run create with CLOSED."""
+
+    cleanup_id = admission.cleanup_obligation_id
+    dsn = (
+        os.getenv("SOPHIA_VOICE_LAB_AUTH_DATABASE_URL")
+        or os.getenv("BETTER_AUTH_DATABASE_URL")
+        or ""
+    ).strip()
+    if not dsn:
+        if (
+            (os.getenv("RENDER") or "").strip().lower() == "true"
+            or bool((os.getenv("RENDER_SERVICE_ID") or "").strip())
+        ):
+            raise SyntheticBuilderContextError(
+                "synthetic_builder_cleanup_barrier_unavailable"
+            )
+        lock = _LOCAL_SYNTHETIC_CLEANUP_BARRIERS.setdefault(
+            cleanup_id,
+            asyncio.Lock(),
+        )
+        async with lock:
+            from deerflow.sophia.cleanup_fence import (
+                assert_cleanup_obligation_open,
+                cleanup_admission_authorized,
+            )
+
+            if not await asyncio.to_thread(cleanup_admission_authorized, admission):
+                raise SyntheticBuilderContextError(
+                    "synthetic_builder_cleanup_obligation_closed"
+                )
+            await asyncio.to_thread(
+                assert_cleanup_obligation_open,
+                cleanup_id,
+                retention_expires_at,
+                provider_expires_at,
+            )
+            yield
+        return
+
+    import psycopg
+
+    connection = await psycopg.AsyncConnection.connect(dsn, connect_timeout=5)
+    try:
+        async with connection.transaction():
+            await connection.execute(
+                "SELECT pg_advisory_xact_lock(hashtextextended(%s, 731944))",
+                (cleanup_id,),
+            )
+            result = await connection.execute(
+                """
+                SELECT 1
+                  FROM public.sophia_voice_lab_cleanup_obligations AS obligation
+                  JOIN public.sophia_voice_lab_cleanup_admissions AS admission
+                    ON admission.cleanup_obligation_id = obligation.cleanup_obligation_id
+                 WHERE obligation.cleanup_obligation_id = %s
+                   AND obligation.state = 'open'
+                   AND obligation.retention_expires_at = %s
+                   AND obligation.retention_expires_at > clock_timestamp()
+                   AND obligation.provider_expires_at = %s
+                   AND obligation.provider_expires_at > clock_timestamp()
+                   AND admission.admission_id = %s
+                   AND admission.resource_kind = 'builder'
+                   AND admission.resource_id = %s
+                   AND admission.lease_expires_at > clock_timestamp()
+                 FOR UPDATE OF obligation, admission
+                """,
+                (
+                    cleanup_id,
+                    retention_expires_at,
+                    provider_expires_at,
+                    admission.admission_id,
+                    admission.resource_id,
+                ),
+            )
+            if await result.fetchone() is None:
+                raise SyntheticBuilderContextError(
+                    "synthetic_builder_cleanup_obligation_closed"
+                )
+            yield
+    finally:
+        await connection.close()
+
+
+def _thread_has_exact_synthetic_admission(
+    thread: object,
+    expected: dict[str, Any],
+) -> bool:
+    if not isinstance(thread, dict):
+        return False
+    metadata = thread.get("metadata")
+    if not isinstance(metadata, dict):
+        return False
+    return all(metadata.get(key) == value for key, value in expected.items())
+
+
+async def _discard_unverified_synthetic_thread(
+    client: Any,
+    thread_id: str,
+) -> bool:
+    try:
+        await client.threads.delete(thread_id)
+    except Exception as exc:  # noqa: BLE001 - TTL still bounds the empty thread.
+        logger.error(
+            "[Builder] could not confirm removal of an unverified synthetic "
+            "thread; bounded TTL remains (error_type=%s)",
+            type(exc).__name__,
+        )
+        return False
+    try:
+        await client.threads.get(thread_id)
+    except Exception as exc:  # noqa: BLE001 - SDK represents 404 as an exception.
+        response = getattr(exc, "response", None)
+        return getattr(response, "status_code", None) == 404
+    return False
+
+
+async def _dispatch_via_asgi_unfenced(
     *,
     description: str,
     task_type: str,
@@ -1934,6 +2142,9 @@ async def _dispatch_via_asgi(
     parent_model: str | None,
     current_turn_attachments: frozenset[str],
     edit_context: dict[str, Any] | None = None,
+    synthetic_context: dict[str, Any] | None = None,
+    synthetic_thread_id: str | None = None,
+    synthetic_cleanup_admission: Any | None = None,
 ) -> tuple[str, str]:
     """Create a builder thread + run via LangGraph SDK ASGI in-process.
 
@@ -1943,8 +2154,43 @@ async def _dispatch_via_asgi(
     from langgraph_sdk import get_client
 
     client = get_client(url=None)  # ASGI in-process via langgraph.json
-    thread = await client.threads.create()
+    synthetic_admission = (
+        _synthetic_admission_metadata(
+            synthetic_context,
+            parent_thread_id=parent_thread_id,
+        )
+        if synthetic_context is not None
+        else None
+    )
+    if synthetic_admission is None:
+        thread = await client.threads.create()
+    else:
+        assert synthetic_context is not None
+        thread = await client.threads.create(
+            thread_id=synthetic_thread_id,
+            metadata=synthetic_admission,
+            ttl=_synthetic_thread_ttl_minutes(synthetic_context),
+        )
     thread_id = thread["thread_id"]
+    if synthetic_admission is not None:
+        if thread_id != synthetic_thread_id:
+            await _discard_unverified_synthetic_thread(client, thread_id)
+            if synthetic_thread_id is not None:
+                await _discard_unverified_synthetic_thread(client, synthetic_thread_id)
+            raise RuntimeError("synthetic_builder_thread_identity_mismatch")
+        try:
+            durable_thread = await client.threads.get(thread_id)
+        except Exception as exc:  # noqa: BLE001 - do not allocate a run.
+            await _discard_unverified_synthetic_thread(client, thread_id)
+            raise RuntimeError(
+                "synthetic_builder_admission_unverified"
+            ) from exc
+        if not _thread_has_exact_synthetic_admission(
+            durable_thread,
+            synthetic_admission,
+        ):
+            await _discard_unverified_synthetic_thread(client, thread_id)
+            raise RuntimeError("synthetic_builder_admission_unverified")
 
     # Copy any image uploads from the parent (companion) thread into the
     # builder's freshly-allocated sandbox so ``view_image_tool`` can read
@@ -1984,6 +2230,8 @@ async def _dispatch_via_asgi(
         "parent_user_id": user_id,
         "uploaded_image_paths": uploaded_image_paths,
     }
+    if synthetic_context is not None:
+        delegation_with_parent["synthetic_test"] = dict(synthetic_context)
     if materialized_edit_context is not None:
         delegation_with_parent["edit_context"] = materialized_edit_context
 
@@ -2025,6 +2273,8 @@ async def _dispatch_via_asgi(
     }
     if materialized_edit_context is not None:
         run_input["builder_edit_context"] = materialized_edit_context
+    if synthetic_context is not None:
+        run_input["synthetic_test"] = dict(synthetic_context)
 
     # ``thread_id`` MUST be in configurable so the builder's
     # ``ThreadDataMiddleware.before_agent`` can locate the per-thread
@@ -2032,65 +2282,205 @@ async def _dispatch_via_asgi(
     # argument to ``runs.create`` only associates the run with a thread on
     # the LangGraph side; it does not propagate to the running graph's
     # ``runtime.config["configurable"]``. We populate it explicitly here.
-    run_config: dict[str, Any] = {
-        "metadata": {
-            "build_id": build_id,
-            "operation_id": operation_id,
-            "builder_thread_id": thread_id,
-            "parent_thread_id": parent_thread_id,
-            "task_type": task_type,
-        },
-        "configurable": {
-            "thread_id": thread_id,
-            "user_id": user_id,
-            # Kept for back-compat with any code that still reads from
-            # ``runtime.config["configurable"]``. State carries the
-            # canonical value (see ``delegation_with_parent`` above).
-            "parent_thread_id": parent_thread_id,
-            # Codex P1 review 2026-05-22: explicitly populate
-            # ``graph_id`` so tools running inside the builder run can
-            # gate behaviour by it (see
-            # ``deerflow.sandbox.tools._is_builder_runtime_context``).
-            # langgraph_api propagates this server-side for logging
-            # but does NOT guarantee it lands in
-            # ``runtime.config["configurable"]`` at tool-execution
-            # time — explicit is safe.
-            "graph_id": _ASYNC_BUILDER_AGENT_NAME,
-            "task_type": task_type,
-            "artifact_target_ext": Path(str(delegation_context.get("artifact_target_path") or "")).suffix.lower(),
-            "build_id": build_id,
-            "operation_id": operation_id,
-        }
+    run_metadata: dict[str, Any] = {
+        "build_id": build_id,
+        "operation_id": operation_id,
+        "builder_thread_id": thread_id,
+        "parent_thread_id": parent_thread_id,
+        "task_type": task_type,
     }
+    run_configurable: dict[str, Any] = {
+        "thread_id": thread_id,
+        "user_id": user_id,
+        # Kept for back-compat with any code that still reads from
+        # ``runtime.config["configurable"]``. State carries the
+        # canonical value (see ``delegation_with_parent`` above).
+        "parent_thread_id": parent_thread_id,
+        # Codex P1 review 2026-05-22: explicitly populate
+        # ``graph_id`` so tools running inside the builder run can
+        # gate behaviour by it (see
+        # ``deerflow.sandbox.tools._is_builder_runtime_context``).
+        # langgraph_api propagates this server-side for logging
+        # but does NOT guarantee it lands in
+        # ``runtime.config["configurable"]`` at tool-execution
+        # time — explicit is safe.
+        "graph_id": _ASYNC_BUILDER_AGENT_NAME,
+        "task_type": task_type,
+        "artifact_target_ext": Path(
+            str(delegation_context.get("artifact_target_path") or "")
+        ).suffix.lower(),
+        "build_id": build_id,
+        "operation_id": operation_id,
+    }
+    run_config: dict[str, Any] = {
+        "metadata": run_metadata,
+        "configurable": run_configurable,
+    }
+    if synthetic_admission is not None and synthetic_context is not None:
+        run_metadata.update(synthetic_admission)
+        run_configurable.update(synthetic_admission)
+        run_configurable["synthetic_test"] = dict(synthetic_context)
     if parent_model:
-        run_config["configurable"]["model_name"] = parent_model
+        run_configurable["model_name"] = parent_model
 
-    run = await client.runs.create(
-        thread_id=thread_id,
-        assistant_id=_ASYNC_BUILDER_AGENT_NAME,
-        input=run_input,
-        config=run_config,
-        # stream_resumable=True is REQUIRED for the gateway-side
-        # ``BuilderProgressSubscriber`` to see events via the HTTP
-        # ``runs.join_stream`` consumer. Without it, the run produces
-        # events internally but the langgraph server does NOT buffer
-        # them for late-joining HTTP subscribers, and ``join_stream``
-        # opens a 200 OK connection that never receives a chunk.
-        #
-        # Asymmetry note: this dispatch uses the SDK ASGI in-process
-        # transport (``get_client(url=None)``); the subscriber dispatches
-        # over HTTP. The ASGI transport bypasses the resumability buffer
-        # the HTTP join_stream consumer depends on. Enabling resumability
-        # here is what lets the HTTP path see anything.
-        #
-        # Regression: ``tests/test_start_builder_task.py::
-        # test_dispatch_sets_stream_resumable_true``.
-        stream_resumable=True,
-    )
+    async def create_run():  # noqa: ANN202
+        return await client.runs.create(
+            thread_id=thread_id,
+            assistant_id=_ASYNC_BUILDER_AGENT_NAME,
+            input=run_input,
+            config=cast(Any, run_config),
+            # stream_resumable=True is REQUIRED for the gateway-side
+            # ``BuilderProgressSubscriber`` to see events via the HTTP
+            # ``runs.join_stream`` consumer. Without it, the run produces
+            # events internally but the langgraph server does NOT buffer
+            # them for late-joining HTTP subscribers, and ``join_stream``
+            # opens a 200 OK connection that never receives a chunk.
+            #
+            # Asymmetry note: this dispatch uses the SDK ASGI in-process
+            # transport (``get_client(url=None)``); the subscriber dispatches
+            # over HTTP. The ASGI transport bypasses the resumability buffer
+            # the HTTP join_stream consumer depends on. Enabling resumability
+            # here is what lets the HTTP path see anything.
+            #
+            # Regression: ``tests/test_start_builder_task.py::
+            # test_dispatch_sets_stream_resumable_true``.
+            stream_resumable=True,
+        )
+
+    try:
+        if synthetic_admission is not None:
+            if synthetic_cleanup_admission is None:
+                raise RuntimeError("synthetic_builder_cleanup_admission_missing")
+            async with _synthetic_builder_run_commit_barrier(
+                synthetic_cleanup_admission,
+                retention_expires_at=str(
+                    synthetic_context.get("retention_expires_at") or ""
+                ),
+                provider_expires_at=str(
+                    synthetic_context.get("provider_expires_at") or ""
+                ),
+            ):
+                durable_thread = await client.threads.get(thread_id)
+                if not _thread_has_exact_synthetic_admission(
+                    durable_thread,
+                    synthetic_admission,
+                ):
+                    raise RuntimeError("synthetic_builder_admission_unverified")
+                run = await create_run()
+        else:
+            run = await create_run()
+    except Exception:
+        if synthetic_admission is not None:
+            await _discard_unverified_synthetic_thread(client, thread_id)
+        raise
     return thread_id, run["run_id"]
 
 
-def _runtime_trace_id(runtime: ToolRuntime[ContextT, SophiaState] | None) -> str:
+async def _discard_synthetic_builder_allocation(
+    task_id: str,
+    run_id: str,
+) -> bool:
+    """Best-effort rollback while the durable cleanup barrier is still held."""
+
+    from langgraph_sdk import get_client
+
+    client = get_client(url=None)
+    try:
+        await client.runs.cancel(
+            task_id,
+            run_id,
+            wait=True,
+            action="interrupt",
+        )
+    except Exception:  # noqa: BLE001 - deletion/read-zero remains authoritative.
+        pass
+    return await _discard_unverified_synthetic_thread(client, task_id)
+
+
+async def _dispatch_via_asgi(
+    *,
+    description: str,
+    task_type: str,
+    delegation_context: dict[str, Any],
+    allow_web_research: bool,
+    explicit_user_urls: list[str],
+    builder_web_budget: dict[str, Any],
+    builder_budget: dict[str, Any],
+    user_id: str,
+    parent_thread_id: str | None,
+    parent_model: str | None,
+    current_turn_attachments: frozenset[str],
+    edit_context: dict[str, Any] | None = None,
+    synthetic_context: dict[str, Any] | None = None,
+) -> tuple[str, str]:
+    """Fence only synthetic allocation; ordinary Builder behavior is unchanged."""
+
+    kwargs = {
+        "description": description,
+        "task_type": task_type,
+        "delegation_context": delegation_context,
+        "allow_web_research": allow_web_research,
+        "explicit_user_urls": explicit_user_urls,
+        "builder_web_budget": builder_web_budget,
+        "builder_budget": builder_budget,
+        "user_id": user_id,
+        "parent_thread_id": parent_thread_id,
+        "parent_model": parent_model,
+        "current_turn_attachments": current_turn_attachments,
+        "edit_context": edit_context,
+        "synthetic_context": synthetic_context,
+    }
+    if synthetic_context is None:
+        return await _dispatch_via_asgi_unfenced(**kwargs)
+
+    cleanup_obligation_id = synthetic_context.get("cleanup_obligation_id")
+    if not isinstance(cleanup_obligation_id, str):
+        raise SyntheticBuilderContextError(
+            "synthetic_builder_cleanup_obligation_id_invalid"
+        )
+    requested_thread_id = str(uuid.uuid4())
+    async with _synthetic_cleanup_obligation_admission_barrier(
+        cleanup_obligation_id,
+        str(synthetic_context.get("retention_expires_at") or ""),
+        str(synthetic_context.get("provider_expires_at") or ""),
+        resource_id=requested_thread_id,
+    ) as cleanup_admission:
+        from deerflow.sophia.cleanup_fence import (
+            cleanup_admission_authorized,
+            release_cleanup_admission,
+        )
+
+        _synthetic_thread_ttl_minutes(synthetic_context)
+        try:
+            task_id, run_id = await _dispatch_via_asgi_unfenced(
+                **kwargs,
+                synthetic_thread_id=requested_thread_id,
+                synthetic_cleanup_admission=cleanup_admission,
+            )
+            if task_id != requested_thread_id or not await asyncio.to_thread(
+                cleanup_admission_authorized,
+                cleanup_admission,
+            ):
+                raise SyntheticBuilderContextError(
+                    "synthetic_builder_cleanup_obligation_closed"
+                )
+            _synthetic_thread_ttl_minutes(synthetic_context)
+        except BaseException:
+            cleanup_confirmed = await _discard_synthetic_builder_allocation(
+                requested_thread_id,
+                locals().get("run_id", ""),
+            )
+            if cleanup_confirmed:
+                await asyncio.to_thread(
+                    release_cleanup_admission,
+                    cleanup_admission,
+                )
+            raise
+        await asyncio.to_thread(release_cleanup_admission, cleanup_admission)
+        return task_id, run_id
+
+
+def _runtime_trace_id(runtime: ToolRuntime[Any, Any] | None) -> str:
     trace_id = str(uuid.uuid4())[:8]
     if runtime is None or not runtime.config:
         return trace_id
@@ -2098,7 +2488,7 @@ def _runtime_trace_id(runtime: ToolRuntime[ContextT, SophiaState] | None) -> str
     return metadata.get("trace_id") or trace_id
 
 
-def _runtime_parent_model(runtime: ToolRuntime[ContextT, SophiaState] | None) -> str | None:
+def _runtime_parent_model(runtime: ToolRuntime[Any, Any] | None) -> str | None:
     if runtime is None or not runtime.config:
         return None
     return (runtime.config.get("metadata", {}) or {}).get("model_name")
@@ -2148,6 +2538,7 @@ def _build_async_task_record(
     demo_mode: bool,
     artifact_target_path: str,
     edit_context: dict[str, Any] | None,
+    synthetic_context: dict[str, Any] | None = None,
 ) -> dict[str, Any]:
     now = _utcnow_iso()
     async_task: dict[str, Any] = {
@@ -2168,13 +2559,16 @@ def _build_async_task_record(
         async_task["edit_mode"] = "edit_existing_artifact"
         async_task["revision_of_artifact_path"] = edit_context.get("source_artifact_path")
         async_task["source_artifact_path"] = edit_context.get("source_artifact_path")
+    if synthetic_context is not None:
+        async_task.update(synthetic_builder_projection(synthetic_context))
+        async_task["synthetic_test"] = dict(synthetic_context)
     return async_task
 
 
 async def _start_builder_task_impl(
     description: str,
     task_type: str,
-    runtime: ToolRuntime[ContextT, SophiaState] | None,
+    runtime: ToolRuntime[Any, Any] | None,
     *,
     configured_user_id: str | None = None,
     user_id_arg: str | None = None,
@@ -2219,9 +2613,29 @@ async def _start_builder_task_impl(
             "safe to retry."
         )
 
-    state: SophiaState = runtime.state if runtime is not None else {}  # type: ignore[assignment]
-    if state is None:
-        state = {}  # type: ignore[assignment]
+    raw_state = runtime.state if runtime is not None else {}
+    if raw_state is None:
+        raw_state = {}
+    state = cast(SophiaState, raw_state)
+
+    try:
+        synthetic_context = normalize_synthetic_builder_context(
+            state,
+            getattr(runtime, "config", None),
+        )
+    except SyntheticBuilderContextError:
+        logger.warning(
+            "[Builder] refusing synthetic dispatch with incomplete isolation identity"
+        )
+        return (
+            "Cannot launch builder task: synthetic_builder_identity_invalid. "
+            "No background work was started."
+        )
+    if synthetic_context is not None and edit_context is not None:
+        return (
+            "Cannot launch builder edit: synthetic_builder_project_edit_excluded. "
+            "No background work was started."
+        )
 
     trace_id = _runtime_trace_id(runtime)
 
@@ -2251,13 +2665,31 @@ async def _start_builder_task_impl(
             f"without calling one of these. Never chain two lifecycle tools on the same turn."
         )
 
-    companion_artifact, artifact_source, artifact_diagnostics = _resolve_companion_artifact(state)
+    if synthetic_context is None:
+        companion_artifact, artifact_source, artifact_diagnostics = (
+            _resolve_companion_artifact(state)
+        )
+    else:
+        # Synthetic tests may not inherit an ordinary user-owned project or
+        # artifact. New isolated deliverables are allowed; edit admission is
+        # rejected above until exact-run source ownership is durable.
+        companion_artifact = {}
+        artifact_source = "synthetic_project_context_excluded"
+        artifact_diagnostics = {"synthetic_project_context_excluded": True}
     user_id, user_id_source, user_id_diagnostics = _resolve_user_id(
         runtime,
         state,
         configured_user_id=configured_user_id,
         explicit_tool_arg=user_id_arg,
     )
+    if (
+        synthetic_context is not None
+        and user_id != synthetic_context["test_principal_id"]
+    ):
+        return (
+            "Cannot launch builder task: synthetic_builder_principal_mismatch. "
+            "No background work was started."
+        )
     handoff_resolution = {
         "user_id_source": user_id_source,
         "artifact_source": artifact_source,
@@ -2265,9 +2697,15 @@ async def _start_builder_task_impl(
         **artifact_diagnostics,
     }
 
-    active_ritual = state.get("active_ritual")
-    ritual_phase = state.get("ritual_phase")
-    memory_snippets = _resolve_memory_snippets(state)
+    active_ritual = (
+        state.get("active_ritual") if synthetic_context is None else None
+    )
+    ritual_phase = (
+        state.get("ritual_phase") if synthetic_context is None else None
+    )
+    memory_snippets = (
+        _resolve_memory_snippets(state) if synthetic_context is None else []
+    )
 
     # Resolve the literal current turn before demo normalization.  Stale
     # companion state must never replace a concrete deliverable brief, and an
@@ -2302,12 +2740,13 @@ async def _start_builder_task_impl(
         task_type,
         format_resolution.final_ext,
     )
-    memory_snippets = filter_builder_memory_snippets(
-        memory_snippets,
-        query=description,
-        task_type=task_type,
-        limit=5,
-    )
+    if synthetic_context is None:
+        memory_snippets = filter_builder_memory_snippets(
+            memory_snippets,
+            query=description,
+            task_type=task_type,
+            limit=5,
+        )
 
     allow_web_research = should_allow_builder_web_research(task_type, description)
     explicit_user_urls = extract_explicit_user_urls(description)
@@ -2456,6 +2895,7 @@ async def _start_builder_task_impl(
             parent_model=parent_model,
             current_turn_attachments=current_turn_attachments,
             edit_context=dispatch_edit_context,
+            synthetic_context=synthetic_context,
         )
     except Exception as exc:  # noqa: BLE001 — LangGraph SDK raises untyped errors
         logger.warning("[Builder] ASGI dispatch failed: %s (trace=%s)", exc, trace_id)
@@ -2469,6 +2909,7 @@ async def _start_builder_task_impl(
         demo_mode=demo_mode,
         artifact_target_path=artifact_target_path,
         edit_context=edit_context,
+        synthetic_context=synthetic_context,
     )
 
     logger.info(
@@ -2491,18 +2932,19 @@ async def _start_builder_task_impl(
         builder_budget.get("max_non_artifact_turns"),
     )
 
-    return Command(
-        update={
-            "messages": [
-                ToolMessage(
-                    content=(f"Launched builder task. task_id: {task_id}. It runs in the background — keep talking to the user. Use check_async_task only when the user asks."),
-                    tool_call_id=tool_call_id,
-                    name=tool_name,
-                )
-            ],
-            "async_tasks": {task_id: async_task},
-        }
-    )
+    state_update: dict[str, Any] = {
+        "messages": [
+            ToolMessage(
+                content=(f"Launched builder task. task_id: {task_id}. It runs in the background — keep talking to the user. Use check_async_task only when the user asks."),
+                tool_call_id=tool_call_id,
+                name=tool_name,
+            )
+        ],
+        "async_tasks": {task_id: async_task},
+    }
+    if synthetic_context is not None:
+        state_update["synthetic_test"] = dict(synthetic_context)
+    return Command(update=state_update)
 
 
 @tool("start_builder_task", parse_docstring=True)
@@ -2576,15 +3018,16 @@ def make_start_builder_task_tool(configured_user_id: str):
 async def _edit_builder_artifact_impl(
     *,
     message: str,
-    runtime: ToolRuntime[ContextT, SophiaState] | None,
+    runtime: ToolRuntime[Any, Any] | None,
     configured_user_id: str | None = None,
     user_id_arg: str | None = None,
     artifact_path: str | None = None,
     task_id: str | None = None,
 ) -> str | Command:
-    state: SophiaState = runtime.state if runtime is not None else {}  # type: ignore[assignment]
-    if state is None:
-        state = {}  # type: ignore[assignment]
+    raw_state = runtime.state if runtime is not None else {}
+    if raw_state is None:
+        raw_state = {}
+    state = cast(SophiaState, raw_state)
 
     existing_task_id = _has_active_builder_task(state)
     if existing_task_id:

@@ -573,6 +573,102 @@ def test_builder_trace_runnable_uses_explicit_builder_context(monkeypatch) -> No
     assert context_kwargs[0]["tags"] == ["sophia_builder", "custom-tag"]
 
 
+def test_synthetic_builder_disables_inherited_and_explicit_langsmith_before_client(
+    monkeypatch,
+) -> None:
+    events: list[bool | None] = []
+
+    @contextmanager
+    def fake_tracing_context(*, enabled: bool | None = None, **_kwargs: Any):
+        events.append(enabled)
+        yield
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("synthetic Builder must not allocate a LangSmith client/tracer")
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "ordinary-project")
+    monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+    _reset_tracing_cache()
+    monkeypatch.setattr(observability, "_tracing_context_factory", lambda: fake_tracing_context)
+    monkeypatch.setattr(observability, "_langsmith_client", forbidden)
+    monkeypatch.setattr(observability, "_builder_langsmith_tracer", forbidden)
+    runnable = _FakeRunnable()
+
+    wrapped = observability.enable_langsmith_tracing_for_builder_runnable(
+        runnable,
+        metadata={
+            "synthetic_test": True,
+            "test_run_id": "raw-run-must-not-export",
+            "test_principal_id": "raw-principal-must-not-export",
+        },
+    )
+
+    assert isinstance(wrapped, observability.LangSmithTraceDisabledRunnable)
+    assert wrapped.invoke({}) == "invoke"
+    assert events == [False]
+
+
+def test_synthetic_builder_completion_is_typed_unavailable_without_run_or_feedback(
+    monkeypatch,
+) -> None:
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("synthetic completion must not inspect/export LangSmith state")
+
+    monkeypatch.setattr(observability, "_current_run_tree", forbidden)
+    monkeypatch.setattr(observability, "_feedback_client", forbidden)
+    artifact = {
+        "synthetic_test": True,
+        "test_run_id": "run-1",
+        "test_principal_id": "principal-1",
+        "builder_trace_id": "caller-supplied-trace",
+        "builder_langsmith_project": "ordinary-project",
+    }
+
+    assert observability.annotate_builder_completion({}, artifact) is False
+    assert artifact["ordinary_analytics_excluded"] is True
+    assert artifact["langsmith_export_excluded"] is True
+    assert artifact["langsmith_trace_status"] == "trace_unavailable"
+    assert (
+        artifact["langsmith_trace_unavailable_reason"]
+        == "synthetic_isolation_policy"
+    )
+    assert "builder_trace_id" not in artifact
+    assert "builder_langsmith_project" not in artifact
+
+
+def test_synthetic_distributed_parent_is_disabled_without_project_or_client(
+    monkeypatch,
+) -> None:
+    context_calls: list[dict[str, Any]] = []
+
+    @contextmanager
+    def fake_tracing_context(**kwargs: Any):
+        context_calls.append(kwargs)
+        yield
+
+    def forbidden(*_args: Any, **_kwargs: Any) -> Any:
+        raise AssertionError("synthetic distributed trace must not allocate a client")
+
+    monkeypatch.setenv("LANGSMITH_TRACING", "true")
+    monkeypatch.setenv("LANGSMITH_API_KEY", "lsv2_key")
+    monkeypatch.setenv("LANGSMITH_PROJECT", "ordinary-project")
+    monkeypatch.setenv("SOPHIA_BUILDER_LANGSMITH_TRACING", "true")
+    _reset_tracing_cache()
+    monkeypatch.setattr(observability, "_tracing_context_factory", lambda: fake_tracing_context)
+    monkeypatch.setattr(observability, "_langsmith_client", forbidden)
+
+    with observability.langsmith_builder_tracing_context(
+        metadata={"synthetic_test": True, "test_run_id": "run-secret"},
+        parent="ordinary-trace-parent",
+        project_name="ordinary-project",
+    ):
+        pass
+
+    assert context_calls == [{"enabled": False}]
+
+
 def test_builder_trace_runnable_allows_global_langsmith_false(monkeypatch) -> None:
     events: list[tuple[str, bool | None]] = []
     context_kwargs: list[dict[str, Any]] = []

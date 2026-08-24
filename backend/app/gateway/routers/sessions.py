@@ -5,17 +5,28 @@ SessionStore implementation. Creates LangGraph threads and persists session
 records plus durable transcript messages.
 """
 
+from __future__ import annotations
+
+import asyncio
 import logging
 import os
 import re
 import uuid
 from datetime import UTC, datetime
-from typing import Literal
+from typing import Any, Literal
 
 import httpx
-from fastapi import APIRouter, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from pydantic import BaseModel
 
+from app.gateway.auth import require_authenticated_user
+from app.gateway.voice_lab_capability import (
+    VoiceLabClaims,
+    assert_voice_lab_session_record,
+    capability_for_gateway_action,
+    voice_lab_provisional_retention_fields,
+    voice_lab_session_record_matches,
+)
 from deerflow.sophia.session_store import (
     SessionMessageRecord,
     SessionMessageSnapshotResult,
@@ -32,6 +43,9 @@ router = APIRouter(prefix="/api/v1/sessions", tags=["sessions"])
 LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS = 5.0
 MAX_OPEN_SESSIONS_PER_USER = 15
 SOPHIA_COMPANION_GRAPH_ID = "sophia_companion"
+_SYNTHETIC_TRANSCRIPT_MAX_MESSAGES = 512
+_SYNTHETIC_TRANSCRIPT_MAX_MESSAGE_BYTES = 32 * 1024
+_SYNTHETIC_TRANSCRIPT_MAX_TOTAL_BYTES = 1024 * 1024
 
 # Singleton store — base path resolved relative to cwd (repo root).
 _store = SessionStore()
@@ -70,6 +84,10 @@ class SessionStartResponse(BaseModel):
     session_type: str
     preset_context: str
     started_at: str
+    synthetic_test: bool = False
+    test_run_id: str | None = None
+    scenario_id: str | None = None
+    scenario_version: str | None = None
 
 
 class SessionInfoResponse(BaseModel):
@@ -215,7 +233,11 @@ def _get_langgraph_base_url() -> str:
     return (os.getenv("SOPHIA_LANGGRAPH_BASE_URL") or os.getenv("SOPHIA_BACKEND_BASE_URL") or "http://127.0.0.1:2024").strip().rstrip("/")
 
 
-async def _create_langgraph_thread() -> str:
+async def _create_langgraph_thread(
+    metadata: dict[str, object] | None = None,
+    *,
+    thread_id: str | None = None,
+) -> str:
     try:
         async with httpx.AsyncClient(
             timeout=LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS,
@@ -225,7 +247,13 @@ async def _create_langgraph_thread() -> str:
                 # Voice sessions can launch builders before the companion graph
                 # has produced a turn. Assign the graph eagerly so terminal
                 # builder state can always be checkpointed on this thread.
-                json={"metadata": {"graph_id": SOPHIA_COMPANION_GRAPH_ID}},
+                json={
+                    **({"thread_id": thread_id} if thread_id is not None else {}),
+                    "metadata": {
+                        "graph_id": SOPHIA_COMPANION_GRAPH_ID,
+                        **(metadata or {}),
+                    }
+                },
             )
             response.raise_for_status()
     except httpx.TimeoutException as exc:
@@ -261,9 +289,236 @@ async def _create_langgraph_thread() -> str:
     return payload["thread_id"]
 
 
+async def _delete_langgraph_thread_authoritatively(thread_id: str) -> bool:
+    """Delete/read-zero a synthetic pre-persistence thread after admission loss."""
+
+    base_url = _get_langgraph_base_url()
+    try:
+        async with httpx.AsyncClient(timeout=LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS) as client:
+            before = await client.get(f"{base_url}/threads/{thread_id}")
+            if before.status_code == 200:
+                try:
+                    before_payload = before.json()
+                except ValueError:
+                    before_payload = None
+                before_metadata = (
+                    before_payload.get("metadata")
+                    if isinstance(before_payload, dict)
+                    else None
+                )
+                if (
+                    isinstance(before_metadata, dict)
+                    and before_metadata.get("synthetic_cleanup_fence") is True
+                ):
+                    return True
+            deleted = await client.delete(f"{base_url}/threads/{thread_id}")
+            if deleted.status_code not in {200, 202, 204, 404}:
+                return False
+            observed = await client.get(f"{base_url}/threads/{thread_id}")
+            return observed.status_code == 404
+    except (httpx.HTTPError, RuntimeError):
+        return False
+
+
+async def _delete_langgraph_threads_authoritatively(
+    thread_ids: set[str],
+) -> bool:
+    """Read-zero every plausible allocation identity before releasing admission."""
+
+    results = []
+    for thread_id in sorted(thread_ids):
+        if thread_id:
+            results.append(await _delete_langgraph_thread_authoritatively(thread_id))
+    return bool(results) and all(results)
+
+
+async def _fence_langgraph_thread_cleanup_admission(
+    thread_id: str,
+    *,
+    cleanup_obligation_id_hmac: str,
+    retention_expires_at: datetime,
+) -> bool:
+    """Replace an overdue in-flight thread create with a durable opaque fence."""
+
+    now = datetime.now(UTC)
+    ttl_minutes = max(
+        1,
+        min(
+            7 * 24 * 60 + 10,
+            int(max(60.0, (retention_expires_at - now).total_seconds() + 600) // 60),
+        ),
+    )
+    expected_metadata: dict[str, object] = {
+        "synthetic_cleanup_fence": True,
+        "cleanup_obligation_id_hmac": cleanup_obligation_id_hmac,
+        "resource_kind": "session_thread",
+    }
+    base_url = _get_langgraph_base_url()
+    try:
+        async with httpx.AsyncClient(timeout=LANGGRAPH_THREAD_CREATE_TIMEOUT_SECONDS) as client:
+            for _attempt in range(3):
+                deleted = await client.delete(f"{base_url}/threads/{thread_id}")
+                if deleted.status_code not in {200, 202, 204, 404}:
+                    return False
+                created = await client.post(
+                    f"{base_url}/threads",
+                    json={
+                        "thread_id": thread_id,
+                        "metadata": expected_metadata,
+                        "ttl": {"strategy": "delete", "ttl": ttl_minutes},
+                    },
+                )
+                if created.status_code not in {200, 201, 409}:
+                    return False
+                observed = await client.get(f"{base_url}/threads/{thread_id}")
+                if observed.status_code != 200:
+                    continue
+                try:
+                    payload = observed.json()
+                except ValueError:
+                    continue
+                metadata = payload.get("metadata") if isinstance(payload, dict) else None
+                if metadata == expected_metadata:
+                    return True
+            return False
+    except (httpx.HTTPError, RuntimeError):
+        return False
+
+
 def _normalize_user_id(user_id: str | None) -> str:
     normalized = (user_id or "").strip()
     return normalized or _LEGACY_USER_ID
+
+
+def _require_authenticated_session_scope(
+    requested_user_id: str | None,
+    authenticated_user_id: str,
+) -> str:
+    normalized = _normalize_user_id(requested_user_id)
+    if normalized != authenticated_user_id:
+        raise HTTPException(
+            status_code=403,
+            detail="Authenticated user does not match requested session user.",
+        )
+    return normalized
+
+
+def _session_route_claims(
+    request: Request,
+    user_id: str,
+    *,
+    required_operation: str,
+) -> VoiceLabClaims | None:
+    return capability_for_gateway_action(
+        request,
+        user_id,
+        required_operation=required_operation,
+    )
+
+
+def _records_for_voice_lab_claims(
+    records: list[SessionRecord],
+    claims: VoiceLabClaims | None,
+) -> list[SessionRecord]:
+    if claims is None:
+        return records
+    return [
+        record
+        for record in records
+        if voice_lab_session_record_matches(record, claims)
+    ]
+
+
+def _synthetic_message_metadata(record: SessionRecord) -> dict[str, Any]:
+    metadata = record.metadata if isinstance(record.metadata, dict) else {}
+    synthetic = metadata.get("synthetic_voice_lab")
+    if not isinstance(synthetic, dict):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_session_binding_mismatch"},
+        )
+    retention_expires_at = synthetic.get("retention_expires_at")
+    if not isinstance(retention_expires_at, str) or not retention_expires_at:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_session_retention_missing"},
+        )
+    return {
+        "synthetic": True,
+        "principal_id": synthetic.get("principal_id"),
+        "test_run_id": synthetic.get("test_run_id"),
+        "scenario_id": synthetic.get("scenario_id"),
+        "scenario_version": synthetic.get("scenario_version"),
+        "environment": synthetic.get("environment"),
+        "expected_deployment": dict(metadata.get("expected_deployment") or {}),
+        "retention_hours": synthetic.get("retention_hours"),
+        "retention_anchor": synthetic.get("retention_anchor"),
+        "finalized_at": synthetic.get("finalized_at"),
+        "retention_expires_at": retention_expires_at,
+        "memory_retrieval_excluded": True,
+        "memory_learning_excluded": True,
+        "offline_pipeline_excluded": True,
+        "ordinary_analytics_excluded": True,
+        "ordinary_projects_excluded": True,
+        "shared_spaces_excluded": True,
+    }
+
+
+def _validate_synthetic_transcript_bounds(
+    messages: list[SessionMessagePersistInput],
+) -> None:
+    if len(messages) > _SYNTHETIC_TRANSCRIPT_MAX_MESSAGES:
+        raise HTTPException(
+            status_code=413,
+            detail={"code": "voice_lab_transcript_too_large"},
+        )
+    total_bytes = 0
+    for message in messages:
+        content_bytes = len(message.content.encode("utf-8"))
+        if content_bytes > _SYNTHETIC_TRANSCRIPT_MAX_MESSAGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "voice_lab_transcript_too_large"},
+            )
+        total_bytes += content_bytes
+        if total_bytes > _SYNTHETIC_TRANSCRIPT_MAX_TOTAL_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "voice_lab_transcript_too_large"},
+            )
+
+
+def _synthetic_transcript_response(
+    *,
+    session_id: str,
+    record: SessionRecord,
+    owner_user_id: str,
+    snapshot: SessionMessageSnapshotResult | None = None,
+) -> dict[str, object]:
+    latest_record, records = _read_authoritative_visible_snapshot(
+        owner_user_id,
+        session_id,
+        record,
+    )
+    visible = [
+        response
+        for response in (_message_record_to_response(message) for message in records)
+        if response is not None
+    ]
+    synthetic_metadata = _synthetic_message_metadata(latest_record)
+    return {
+        **_session_messages_payload(
+            session_id=session_id,
+            thread_id=latest_record.thread_id,
+            messages=visible,
+            message_revision=max(0, int(latest_record.message_revision)),
+            snapshot=snapshot,
+        ),
+        "synthetic_isolated": True,
+        "canonical_persistence": True,
+        "ordinary_consumers_excluded": True,
+        "retention_expires_at": synthetic_metadata["retention_expires_at"],
+    }
 
 
 def _legacy_user_id_for(user_id: str) -> str | None:
@@ -346,9 +601,21 @@ def _activate_session_for_continuation(
 
 
 @router.post("/start", response_model=SessionStartResponse)
-async def start_session(body: SessionStartRequest) -> SessionStartResponse:
+async def start_session(
+    body: SessionStartRequest,
+    request: Request,
+    authenticated_user_id: str = Depends(require_authenticated_user),
+) -> SessionStartResponse:
     """Create a new session with a real LangGraph thread and persist it."""
-    user_id = _normalize_user_id(body.user_id)
+    user_id = _require_authenticated_session_scope(
+        body.user_id,
+        authenticated_user_id,
+    )
+    voice_lab_claims = _session_route_claims(
+        request,
+        user_id,
+        required_operation="session:create",
+    )
     # Enforce resumable-session limit
     open_sessions = _store.list_open(user_id)
     if len(open_sessions) >= MAX_OPEN_SESSIONS_PER_USER:
@@ -357,30 +624,139 @@ async def start_session(body: SessionStartRequest) -> SessionStartResponse:
             detail=f"Maximum of {MAX_OPEN_SESSIONS_PER_USER} open sessions reached. Please end an existing session first.",
         )
 
-    now = datetime.now(UTC).isoformat()
+    now_datetime = datetime.now(UTC)
+    now = now_datetime.isoformat()
     session_id = str(uuid.uuid4())
-    thread_id = await _create_langgraph_thread()
-    message_id = str(uuid.uuid4())
-
-    # Persist the session record
-    record = SessionRecord(
-        session_id=session_id,
-        thread_id=thread_id,
-        user_id=user_id,
-        status="open",
-        preset_type=body.session_type,
-        context_mode=body.preset_context,
-        platform=body.platform,
-        intention=body.intention,
-        focus_cue=body.focus_cue,
-        created_at=now,
-        updated_at=now,
+    synthetic_context = (
+        {
+            **voice_lab_claims.synthetic_context(),
+            **voice_lab_provisional_retention_fields(
+                voice_lab_claims,
+                now_datetime,
+            ),
+        }
+        if voice_lab_claims
+        else None
     )
-    _store.create(record)
+    cleanup_admission = None
+    requested_thread_id = str(uuid.uuid4()) if voice_lab_claims is not None else None
+    if voice_lab_claims is not None and synthetic_context is not None:
+        from deerflow.sophia.cleanup_fence import (
+            CleanupFenceError,
+            reserve_cleanup_admission,
+        )
 
-    from app.gateway.inactivity_watcher import register_activity
+        try:
+            cleanup_admission = await asyncio.to_thread(
+                reserve_cleanup_admission,
+                voice_lab_claims.cleanup_obligation_id,
+                str(synthetic_context["retention_expires_at"]),
+                provider_expires_at=voice_lab_claims.provider_expires_at,
+                resource_kind="session",
+                resource_id=requested_thread_id,
+            )
+        except CleanupFenceError as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_cleanup_obligation_closed"},
+            ) from exc
+        synthetic_context["cleanup_admission_id"] = cleanup_admission.admission_id
 
-    register_activity(thread_id, user_id, session_id, body.preset_context)
+    thread_id: str | None = requested_thread_id
+    allocated_thread_ids: set[str] = set()
+    thread_created = False
+    admission_releasable = False
+    try:
+        thread_id = await _create_langgraph_thread(
+            {
+                **(synthetic_context or {}),
+                **(
+                    {"scenario_version": voice_lab_claims.scenario_version}
+                    if voice_lab_claims and voice_lab_claims.scenario_version
+                    else {}
+                ),
+            }
+            if synthetic_context
+            else None,
+            thread_id=requested_thread_id,
+        )
+        thread_created = True
+        allocated_thread_ids.add(thread_id)
+        if requested_thread_id is not None:
+            allocated_thread_ids.add(requested_thread_id)
+        if cleanup_admission is not None:
+            if thread_id != requested_thread_id:
+                raise HTTPException(
+                    status_code=502,
+                    detail={"code": "voice_lab_session_thread_identity_mismatch"},
+                )
+            from deerflow.sophia.cleanup_fence import cleanup_admission_authorized
+
+            authorized = await asyncio.to_thread(
+                cleanup_admission_authorized,
+                cleanup_admission,
+            )
+            if not authorized:
+                admission_releasable = await _delete_langgraph_thread_authoritatively(
+                    thread_id
+                )
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "voice_lab_cleanup_obligation_closed"},
+                )
+        message_id = str(uuid.uuid4())
+
+        # Persist the session record only while the exact reservation is live.
+        record = SessionRecord(
+            session_id=session_id,
+            thread_id=thread_id,
+            user_id=user_id,
+            status="open",
+            preset_type=body.session_type,
+            context_mode=body.preset_context,
+            platform=body.platform,
+            intention=body.intention,
+            focus_cue=body.focus_cue,
+            run_id=voice_lab_claims.test_run_id if voice_lab_claims else None,
+            metadata=(
+                {
+                    "synthetic_voice_lab": synthetic_context,
+                    "expected_deployment": dict(voice_lab_claims.expected_deployment),
+                    "memory_retrieval_disabled": True,
+                    "inactivity_finalization_disabled": True,
+                    "offline_pipeline_disabled": True,
+                    "memory_learning_disabled": True,
+                    "ordinary_analytics_disabled": True,
+                    "ordinary_projects_disabled": True,
+                    "shared_spaces_disabled": True,
+                }
+                if voice_lab_claims
+                else {}
+            ),
+            created_at=now,
+            updated_at=now,
+        )
+        _store.create(record)
+        admission_releasable = True
+    except BaseException:
+        if thread_created and allocated_thread_ids and not admission_releasable:
+            admission_releasable = await _delete_langgraph_threads_authoritatively(
+                allocated_thread_ids
+            )
+        raise
+    finally:
+        if cleanup_admission is not None and admission_releasable:
+            from deerflow.sophia.cleanup_fence import release_cleanup_admission
+
+            await asyncio.to_thread(
+                release_cleanup_admission,
+                cleanup_admission,
+            )
+
+    if voice_lab_claims is None:
+        from app.gateway.inactivity_watcher import register_activity
+
+        register_activity(thread_id, user_id, session_id, body.preset_context)
 
     return SessionStartResponse(
         session_id=session_id,
@@ -394,15 +770,33 @@ async def start_session(body: SessionStartRequest) -> SessionStartResponse:
         session_type=body.session_type,
         preset_context=body.preset_context,
         started_at=now,
+        synthetic_test=voice_lab_claims is not None,
+        test_run_id=voice_lab_claims.test_run_id if voice_lab_claims else None,
+        scenario_id=voice_lab_claims.scenario_id if voice_lab_claims else None,
+        scenario_version=voice_lab_claims.scenario_version if voice_lab_claims else None,
     )
 
 
 @router.get("/active", response_model=ActiveSessionResponse)
 async def get_active_session(
+    request: Request,
     user_id: str = Query(default="dev-user"),
+    authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> ActiveSessionResponse:
     """Return the most recently updated resumable session for compatibility callers."""
-    records = _list_open_records(_normalize_user_id(user_id))
+    normalized_user_id = _require_authenticated_session_scope(
+        user_id,
+        authenticated_user_id,
+    )
+    claims = _session_route_claims(
+        request,
+        normalized_user_id,
+        required_operation="session:read",
+    )
+    records = _records_for_voice_lab_claims(
+        _list_open_records(normalized_user_id),
+        claims,
+    )
     if not records:
         return ActiveSessionResponse(has_active_session=False, session=None)
     return ActiveSessionResponse(
@@ -413,22 +807,50 @@ async def get_active_session(
 
 @router.get("/open", response_model=OpenSessionsResponse)
 async def get_open_sessions(
+    request: Request,
     user_id: str = Query(default="dev-user"),
+    authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> OpenSessionsResponse:
     """Return all resumable sessions for a user."""
-    records = _list_open_records(_normalize_user_id(user_id))
+    normalized_user_id = _require_authenticated_session_scope(
+        user_id,
+        authenticated_user_id,
+    )
+    claims = _session_route_claims(
+        request,
+        normalized_user_id,
+        required_operation="session:read",
+    )
+    records = _records_for_voice_lab_claims(
+        _list_open_records(normalized_user_id),
+        claims,
+    )
     sessions = [_record_to_info(r) for r in records]
     return OpenSessionsResponse(sessions=sessions, count=len(sessions))
 
 
 @router.get("/list", response_model=SessionListResponse)
 async def list_sessions(
+    request: Request,
     user_id: str = Query(default="dev-user"),
     limit: int = Query(default=30, ge=1, le=100),
     status: str | None = Query(default=None),
+    authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> SessionListResponse:
     """Return recent sessions (all statuses) or filter by status."""
-    records = _list_recent_records(_normalize_user_id(user_id), limit=limit)
+    normalized_user_id = _require_authenticated_session_scope(
+        user_id,
+        authenticated_user_id,
+    )
+    claims = _session_route_claims(
+        request,
+        normalized_user_id,
+        required_operation="session:read",
+    )
+    records = _records_for_voice_lab_claims(
+        _list_recent_records(normalized_user_id, limit=limit),
+        claims,
+    )
     if status:
         records = [r for r in records if r.status == status]
     sessions = [_record_to_info(r) for r in records]
@@ -438,12 +860,24 @@ async def list_sessions(
 @router.get("/{session_id}", response_model=SessionInfoResponse)
 async def get_session(
     session_id: str,
+    request: Request,
     user_id: str = Query(default="dev-user"),
+    authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> SessionInfoResponse:
     """Get a single session by ID."""
-    _, record = _resolve_session_record(_normalize_user_id(user_id), session_id)
+    normalized_user_id = _require_authenticated_session_scope(
+        user_id,
+        authenticated_user_id,
+    )
+    claims = _session_route_claims(
+        request,
+        normalized_user_id,
+        required_operation="session:read",
+    )
+    _, record = _resolve_session_record(normalized_user_id, session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
+    assert_voice_lab_session_record(record, claims)
     return _record_to_info(record)
 
 
@@ -451,16 +885,31 @@ async def get_session(
 async def update_session(
     session_id: str,
     body: SessionUpdateRequest,
+    request: Request,
     user_id: str = Query(default="dev-user"),
+    authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> SessionInfoResponse:
     """Update session metadata or resumable status."""
-    normalized_user_id = _normalize_user_id(user_id)
+    normalized_user_id = _require_authenticated_session_scope(
+        user_id,
+        authenticated_user_id,
+    )
+    claims = _session_route_claims(
+        request,
+        normalized_user_id,
+        required_operation="session:create",
+    )
     updates = body.model_dump(exclude_none=True)
     requested_status = updates.pop("status", None)
 
     owner_user_id, record = _resolve_session_record(normalized_user_id, session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
+    if assert_voice_lab_session_record(record, claims):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_session_metadata_mutation_forbidden"},
+        )
 
     if not updates:
         if requested_status is None:
@@ -519,10 +968,25 @@ def _cleanup_session_ledger(owner_user_id: str, thread_id: str | None) -> None:
 
 @router.delete("/bulk", response_model=SessionBulkDeleteResponse)
 async def delete_all_sessions(
+    request: Request,
     user_id: str = Query(default="dev-user"),
+    authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> SessionBulkDeleteResponse:
     """Delete all persisted session records for the resolved user."""
-    normalized_user_id = _normalize_user_id(user_id)
+    normalized_user_id = _require_authenticated_session_scope(
+        user_id,
+        authenticated_user_id,
+    )
+    claims = _session_route_claims(
+        request,
+        normalized_user_id,
+        required_operation="session:create",
+    )
+    if claims is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_canonical_session_delete_forbidden"},
+        )
     owner_user_id = normalized_user_id
     deleted_records = _store.delete_all(normalized_user_id)
 
@@ -550,11 +1014,26 @@ async def delete_all_sessions(
 @router.delete("/{session_id}", response_model=SessionDeleteResponse)
 async def delete_session(
     session_id: str,
+    request: Request,
     user_id: str = Query(default="dev-user"),
+    authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> SessionDeleteResponse:
     """Delete a persisted session record."""
-    normalized_user_id = _normalize_user_id(user_id)
+    normalized_user_id = _require_authenticated_session_scope(
+        user_id,
+        authenticated_user_id,
+    )
+    claims = _session_route_claims(
+        request,
+        normalized_user_id,
+        required_operation="session:create",
+    )
     owner_user_id, record = _resolve_session_record(normalized_user_id, session_id)
+    if record is not None and assert_voice_lab_session_record(record, claims):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_canonical_session_delete_forbidden"},
+        )
     deleted = _store.delete(owner_user_id, session_id)
     if not deleted:
         raise HTTPException(status_code=404, detail="Session not found.")
@@ -563,10 +1042,33 @@ async def delete_session(
 
 
 @router.post("/end", response_model=SessionEndResponse)
-async def end_session(body: SessionEndRequest) -> SessionEndResponse:
+async def end_session(
+    body: SessionEndRequest,
+    request: Request,
+    authenticated_user_id: str = Depends(require_authenticated_user),
+) -> SessionEndResponse:
     """End a session — marks it as ended and computes duration."""
-    normalized_user_id = _normalize_user_id(body.user_id)
-    owner_user_id, _ = _resolve_session_record(normalized_user_id, body.session_id)
+    normalized_user_id = _require_authenticated_session_scope(
+        body.user_id,
+        authenticated_user_id,
+    )
+    claims = _session_route_claims(
+        request,
+        normalized_user_id,
+        required_operation="session:finalize",
+    )
+    owner_user_id, existing_record = _resolve_session_record(
+        normalized_user_id,
+        body.session_id,
+    )
+    if existing_record is not None and assert_voice_lab_session_record(
+        existing_record,
+        claims,
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_canonical_finalization_required"},
+        )
     record = _store.end(owner_user_id, body.session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
@@ -694,12 +1196,29 @@ def _read_authoritative_visible_snapshot(
 @router.get("/{session_id}/messages")
 async def get_session_messages(
     session_id: str,
+    request: Request,
     user_id: str = Query(default="dev-user"),
+    authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> dict[str, object]:
     """Retrieve durable conversation history, falling back to LangGraph state."""
-    owner_user_id, record = _resolve_session_record(_normalize_user_id(user_id), session_id)
+    normalized_user_id = _require_authenticated_session_scope(
+        user_id,
+        authenticated_user_id,
+    )
+    claims = _session_route_claims(
+        request,
+        normalized_user_id,
+        required_operation="session:read",
+    )
+    owner_user_id, record = _resolve_session_record(normalized_user_id, session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
+    if assert_voice_lab_session_record(record, claims):
+        return _synthetic_transcript_response(
+            session_id=session_id,
+            record=record,
+            owner_user_id=owner_user_id,
+        )
 
     thread_id = record.thread_id
     record, durable_records = _read_authoritative_visible_snapshot(
@@ -852,17 +1371,92 @@ async def get_session_messages(
 async def persist_session_messages(
     session_id: str,
     body: SessionMessagesPersistRequest,
+    request: Request,
     user_id: str = Query(default="dev-user"),
+    authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> dict[str, object]:
     """Persist an ordered transcript snapshot for a session.
 
     The client calls this with finalized visible transcript updates. Streaming
     partials may be included only when marked incomplete/final=false.
     """
-    normalized_user_id = _normalize_user_id(user_id or body.user_id)
+    normalized_user_id = _require_authenticated_session_scope(
+        user_id or body.user_id,
+        authenticated_user_id,
+    )
+    claims = _session_route_claims(
+        request,
+        normalized_user_id,
+        required_operation="session:create",
+    )
     owner_user_id, record = _resolve_session_record(normalized_user_id, session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
+    if assert_voice_lab_session_record(record, claims):
+        if record.status == "ended":
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_session_terminal"},
+            )
+        if body.thread_id is not None and body.thread_id != record.thread_id:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_session_thread_mismatch"},
+            )
+        _validate_synthetic_transcript_bounds(body.messages)
+        if body.base_revision is None:
+            authoritative_record, _ = _read_authoritative_visible_snapshot(
+                owner_user_id,
+                session_id,
+                record,
+            )
+            missing_revision = SessionMessageSnapshotResult(
+                messages=_store.list_messages(owner_user_id, session_id),
+                previous_revision=max(0, int(authoritative_record.message_revision)),
+                current_revision=max(0, int(authoritative_record.message_revision)),
+                accepted=False,
+                conflict=True,
+                rejection_reason="base_revision_required",
+            )
+            return _synthetic_transcript_response(
+                session_id=session_id,
+                record=authoritative_record,
+                owner_user_id=owner_user_id,
+                snapshot=missing_revision,
+            )
+        message_metadata = _synthetic_message_metadata(record)
+        records: list[SessionMessageRecord] = []
+        for item in body.messages:
+            message = _persist_input_to_message_record(
+                item,
+                session_id=session_id,
+                thread_id=record.thread_id,
+                sequence=len(records) + 1,
+                metadata=message_metadata,
+            )
+            if message is not None:
+                records.append(message)
+        snapshot = _store.replace_messages_revisioned(
+            owner_user_id,
+            session_id,
+            records,
+            expected_revision=body.base_revision,
+        )
+        visible_records = canonical_visible_messages(snapshot.messages)
+        if snapshot.accepted:
+            _store.update(
+                owner_user_id,
+                session_id,
+                message_count=len(visible_records),
+                last_message_preview=None,
+                title=record.title,
+            )
+        return _synthetic_transcript_response(
+            session_id=session_id,
+            record=record,
+            owner_user_id=owner_user_id,
+            snapshot=snapshot,
+        )
 
     thread_id = record.thread_id
     if body.base_revision is None:
@@ -921,26 +1515,50 @@ async def persist_session_messages(
 async def persist_session_messages_beacon(
     session_id: str,
     body: SessionMessagesPersistRequest,
+    request: Request,
     user_id: str = Query(default="dev-user"),
+    authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> dict[str, object]:
     """POST alias for browser sendBeacon/keepalive transcript flushes."""
-    return await persist_session_messages(session_id, body, user_id)
+    return await persist_session_messages(
+        session_id,
+        body,
+        request,
+        user_id,
+        authenticated_user_id,
+    )
 
 
 @router.post("/{session_id}/touch", response_model=SessionInfoResponse)
 async def touch_session(
     session_id: str,
+    request: Request,
     user_id: str = Query(default="dev-user"),
     message_preview: str | None = Query(default=None, max_length=200),
+    authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> SessionInfoResponse:
     """Increment message count and update last_message_preview.
 
     Called by the chat handler after each user message.
     """
-    normalized_user_id = _normalize_user_id(user_id)
+    normalized_user_id = _require_authenticated_session_scope(
+        user_id,
+        authenticated_user_id,
+    )
+    claims = _session_route_claims(
+        request,
+        normalized_user_id,
+        required_operation="session:create",
+    )
     owner_user_id, record = _resolve_session_record(normalized_user_id, session_id)
     if record is None:
         raise HTTPException(status_code=404, detail="Session not found.")
+
+    if assert_voice_lab_session_record(record, claims):
+        # Synthetic touches are content-free acknowledgements only. Never
+        # reopen an ended lab record, store a preview/title, or register the
+        # ordinary inactivity watcher.
+        return _record_to_info(record)
 
     if record.status in {"ended", "paused", "resumable"}:
         record = _activate_session_for_continuation(owner_user_id, record)
@@ -1049,6 +1667,7 @@ def _persist_input_to_message_record(
     session_id: str,
     thread_id: str,
     sequence: int = 0,
+    metadata: dict[str, Any] | None = None,
 ) -> SessionMessageRecord | None:
     content = _extract_visible_message_text(item.content)
     if not content:
@@ -1083,6 +1702,7 @@ def _persist_input_to_message_record(
         provider_event_id=item.provider_event_id,
         sequence=sequence,
         redaction_level=item.redaction_level,
+        metadata=dict(metadata or {}),
     )
 
 

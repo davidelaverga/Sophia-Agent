@@ -354,7 +354,9 @@ class SophiaTTS(CartesiaTTS):
         if self._echo_guard is not None:
             self._echo_guard.note_agent_will_speak()
 
-        self._synthesis_count += 1
+        # Some embedders construct this subclass via ``__new__`` while
+        # supplying an already configured SDK client.
+        self._synthesis_count = getattr(self, "_synthesis_count", 0) + 1
         generate_started = time.perf_counter()
         response = await self.client.tts.generate(**kwargs)
         generate_ms = (time.perf_counter() - generate_started) * 1000
@@ -362,7 +364,7 @@ class SophiaTTS(CartesiaTTS):
             "[VOICE:TTS] GENERATE_RETURNED | synthesis=%d | generate_ms=%.0f | "
             "emotion=%s | speed=%s | user_id=%s",
             self._synthesis_count, generate_ms, emotion, delivery.speed_label,
-            self._active_response_user_id,
+            getattr(self, "_active_response_user_id", None),
         )
         # Remember the response so stop_audio() can abort its HTTP stream if
         # the user barges in mid-synthesis. The parent epoch bump already

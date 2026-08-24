@@ -6,6 +6,8 @@
  * terminal task transition (success | error | timeout | cancelled).
  */
 
+import type { GeminiSyntheticBuilderJoin } from '../lib/gemini-browser-live-websocket-dogfood';
+
 export type BuilderCompletionStatus = 'success' | 'error' | 'timeout' | 'cancelled';
 
 export type BuilderCompletionArtifactFileRole = 'primary' | 'source' | 'preview' | 'illustration_asset' | 'internal';
@@ -91,6 +93,8 @@ export type BuilderCompletionEventV1 = {
   task_brief?: string | null;
   artifact_path?: string | null;
   artifact_id?: string | null;
+  logical_artifact_id?: string | null;
+  current_artifact_version_id?: string | null;
   artifact_url?: string | null;
   artifact_title?: string | null;
   artifact_type?: string | null;
@@ -139,4 +143,9 @@ export type BuilderCompletionEventV1 = {
   builder_failure_diagnostics?: BuilderFailureDiagnosticsV1 | null;
   completed_at?: string | null;
   source?: string | null;
+  synthetic_test?: boolean | Record<string, unknown>;
+  test_run_id?: string | null;
+  scenario_id?: string | null;
+  scenario_version?: string | null;
+  synthetic_builder_join?: GeminiSyntheticBuilderJoin | null;
 };

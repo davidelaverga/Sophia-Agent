@@ -94,6 +94,75 @@ def mock_steps():
 # ==================================================================
 
 
+def test_dedicated_voice_lab_session_is_rejected_before_every_offline_consumer(
+    monkeypatch,
+    mock_steps,
+):
+    from deerflow.sophia import offline_pipeline as module
+
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL", "voice-lab-user-1")
+    record = MagicMock(
+        run_id="run-001",
+        metadata={
+            "synthetic_voice_lab": {
+                "synthetic": True,
+                "principal_id": "voice-lab-user-1",
+                "test_run_id": "run-001",
+            },
+            "memory_retrieval_disabled": True,
+            "offline_pipeline_disabled": True,
+            "memory_learning_disabled": True,
+            "ordinary_analytics_disabled": True,
+            "ordinary_projects_disabled": True,
+            "shared_spaces_disabled": True,
+        },
+    )
+    store = MagicMock()
+    store.get.return_value = record
+    monkeypatch.setattr(module, "SessionStore", lambda: store)
+
+    result = module.run_offline_pipeline(
+        "voice-lab-user-1",
+        "synthetic-session",
+        "synthetic-thread",
+        _make_thread_state(),
+    )
+
+    assert result["status"] == "synthetic_excluded"
+    assert result["reason"] == "voice_lab_ordinary_consumers_excluded"
+    assert result["test_run_id"] == "run-001"
+    assert set(result["steps"].values()) == {"excluded"}
+    for downstream in mock_steps.values():
+        downstream.assert_not_called()
+
+
+def test_dedicated_principal_missing_canonical_record_fails_closed(
+    monkeypatch,
+    mock_steps,
+):
+    from deerflow.sophia import offline_pipeline as module
+
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL", "voice-lab-user-1")
+    store = MagicMock()
+    store.get.return_value = None
+    monkeypatch.setattr(module, "SessionStore", lambda: store)
+
+    result = module.run_offline_pipeline(
+        "voice-lab-user-1",
+        "missing-session",
+        "synthetic-thread",
+        _make_thread_state(),
+    )
+
+    assert result == {
+        "status": "synthetic_excluded",
+        "reason": "canonical_session_missing",
+        "session_id": "missing-session",
+    }
+    for downstream in mock_steps.values():
+        downstream.assert_not_called()
+
+
 class TestHappyPath:
     def test_all_steps_succeed(self, mock_steps):
         from deerflow.sophia.offline_pipeline import run_offline_pipeline

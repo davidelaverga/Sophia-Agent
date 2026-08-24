@@ -63,6 +63,10 @@ export const SessionStartResponseSchema = z.object({
   session_type: z.string(),
   preset_context: z.string(),
   started_at: ISODateSchema,
+  synthetic_test: z.boolean().optional(),
+  test_run_id: z.string().optional(),
+  scenario_id: z.string().optional(),
+  scenario_version: z.string().optional(),
 });
 
 export type SessionStartResponseValidated = z.infer<typeof SessionStartResponseSchema>;
@@ -120,6 +124,78 @@ export const SessionEndResponseSchema = z.object({
   recap_artifacts: RecapArtifactsSchema,
   offer_debrief: z.boolean().default(false),
   debrief_prompt: z.string().optional(),
+  synthetic_isolated: z.boolean().optional(),
+  test_run_id: z.string().optional(),
+  exclusions: z.record(z.string(), z.boolean()).optional(),
+  evidence_receipt: z.object({
+    storage: z.enum(['supabase', 'local_ephemeral', 'postgres_session']),
+    object_path: z.string().min(1),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+  }).strict().optional(),
+  canonical_transcript: z.object({
+    schema: z.literal('sophia_voice_lab_canonical_transcript_v1'),
+    source: z.literal('sophia_session_messages'),
+    synthetic: z.literal(true),
+    principal_id: z.string().min(1),
+    test_run_id: z.string().min(1),
+    scenario_id: z.string().min(1),
+    scenario_version: z.string().min(1),
+    environment: z.string().min(1),
+    session_id: z.string().min(1),
+    thread_id: z.string().min(1),
+    expected_deployment: z.object({
+      frontend: z.string().min(1),
+      backend: z.string().min(1),
+      voice: z.string().min(1),
+    }).strict(),
+    message_revision: z.number().int().nonnegative(),
+    message_count: z.number().int().nonnegative(),
+    input_message_count: z.number().int().nonnegative(),
+    output_message_count: z.number().int().nonnegative(),
+    turn_boundary_count: z.number().int().nonnegative(),
+    digest_algorithm: z.literal('sha-256'),
+    canonicalization: z.literal('utf8-json-sort-keys-compact-ascii-v1'),
+    sha256: z.string().regex(/^[a-f0-9]{64}$/),
+    retention_expires_at: ISODateSchema,
+    raw_audio_excluded: z.literal(true),
+    messages: z.array(z.object({
+      message_id: z.string().min(1),
+      sequence: z.number().int().positive(),
+      role: z.enum(['user', 'assistant']),
+      content: z.string(),
+      created_at: ISODateSchema,
+      source: z.string().min(1),
+      final: z.boolean(),
+      approximate: z.boolean(),
+      turn_id: z.string().nullable(),
+      provider_event_id: z.string().nullable(),
+      redaction_level: z.string(),
+    }).strict()),
+    turn_boundaries: z.array(z.object({
+      turn_id: z.string().nullable(),
+      first_sequence: z.number().int().positive(),
+      last_sequence: z.number().int().positive(),
+      input_message_count: z.number().int().nonnegative(),
+      output_message_count: z.number().int().nonnegative(),
+    }).strict()),
+  }).strict().optional(),
+}).superRefine((value, context) => {
+  if (value.synthetic_isolated === true) {
+    if (!value.canonical_transcript) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['canonical_transcript'],
+        message: 'Synthetic finalization requires a canonical transcript receipt.',
+      });
+    }
+    if (!value.evidence_receipt) {
+      context.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ['evidence_receipt'],
+        message: 'Synthetic finalization requires durable evidence identity.',
+      });
+    }
+  }
 });
 
 export type SessionEndResponseValidated = z.infer<typeof SessionEndResponseSchema>;

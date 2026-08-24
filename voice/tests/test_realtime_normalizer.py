@@ -944,10 +944,22 @@ def test_interruption_maps_to_agent_end_and_turn_diagnostic() -> None:
     )
 
     assert payloads == [
-        {"type": "sophia.turn", "data": {"phase": "agent_started"}},
         {
             "type": "sophia.turn",
-            "data": {"phase": "agent_ended", "reason": "interrupted"},
+            "data": {
+                "phase": "agent_started",
+                "response_id": "cancel-response-1",
+                "turn_id": "turn-1",
+            },
+        },
+        {
+            "type": "sophia.turn",
+            "data": {
+                "phase": "agent_ended",
+                "response_id": "cancel-response-1",
+                "turn_id": "cancel-turn-1",
+                "reason": "interrupted",
+            },
         },
         {
             "type": "sophia.turn_diagnostic",
@@ -978,10 +990,22 @@ def test_provider_error_maps_to_public_diagnostic_without_raw_event_leakage() ->
     )
 
     assert payloads == [
-        {"type": "sophia.turn", "data": {"phase": "agent_started"}},
         {
             "type": "sophia.turn",
-            "data": {"phase": "agent_ended", "reason": "provider_error"},
+            "data": {
+                "phase": "agent_started",
+                "response_id": "error-response-1",
+                "turn_id": "turn-1",
+            },
+        },
+        {
+            "type": "sophia.turn",
+            "data": {
+                "phase": "agent_ended",
+                "response_id": "error-response-1",
+                "turn_id": "error-response-1",
+                "reason": "provider_error",
+            },
         },
         {
             "type": "sophia.turn_diagnostic",

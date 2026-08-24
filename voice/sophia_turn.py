@@ -319,15 +319,15 @@ class SophiaTurnDetection(SmartTurnDetection):
             and _FRAGMENT_CONJUNCTION_START_PATTERN.match(stripped)
         )
 
-    def _emit_start_turn_event(self, event: Any) -> None:
-        """Debounce TurnStartedEvent inside a single utterance.
+    def _should_emit_turn_started(self, event_or_participant: Any) -> bool:
+        """Return whether a TurnStarted event survives Sophia's debounce.
 
         Silero VAD re-triggers on every short silence (commas, "um", mid-sentence
         pauses), which the agent layer treats as barge-in and calls
         ``tts.interrupt`` repeatedly. We collapse starts that arrive within the
         debounce window to a single event per participant.
         """
-        participant = getattr(event, "participant", None)
+        participant = getattr(event_or_participant, "participant", event_or_participant)
         pid = getattr(participant, "user_id", None)
         now = time.monotonic()
         last = self._last_turn_start_at.get(pid)
@@ -342,11 +342,37 @@ class SophiaTurnDetection(SmartTurnDetection):
                 (now - last) * 1000,
                 self._turn_start_debounce_sec * 1000,
             )
-            return
+            return False
         self._last_turn_start_at[pid] = now
-        super()._emit_start_turn_event(event)
+        return True
 
-    async def _emit_end_turn_event(self, *args: Any, **kwargs: Any) -> None:
+    async def _emit_turn_started_event(self, *args: Any, **kwargs: Any) -> None:
+        """Vision Agents 0.6 turn-started hook."""
+        event_or_participant = args[0] if args else kwargs.get("participant")
+        if not self._should_emit_turn_started(event_or_participant):
+            return
+
+        parent_method = getattr(super(), "_emit_turn_started_event", None)
+        if not callable(parent_method):
+            raise AttributeError("SmartTurn base lacks the 0.6 turn-started emitter")
+        await parent_method(*args, **kwargs)
+
+    def _emit_start_turn_event(self, event: Any) -> None:
+        """Vision Agents 0.5 turn-started hook retained for compatibility."""
+        if not self._should_emit_turn_started(event):
+            return
+
+        parent_method = getattr(super(), "_emit_start_turn_event", None)
+        if not callable(parent_method):
+            raise AttributeError("SmartTurn base lacks the 0.5 turn-started emitter")
+        parent_method(event)
+
+    async def _emit_guarded_turn_end(
+        self,
+        parent_method_name: str,
+        *args: Any,
+        **kwargs: Any,
+    ) -> None:
         if self._should_suppress_turn_end():
             logger.info(
                 "[VAD] TURN_END_SUPPRESSED fingerprint=%r transcript_chars=%d",
@@ -365,7 +391,26 @@ class SophiaTurnDetection(SmartTurnDetection):
             self._turn_end_guard_was_final,
             self._turn_end_guard_transcript[:80],
         )
-        await super()._emit_end_turn_event(*args, **kwargs)
+        parent = super()
+        parent_method = getattr(parent, parent_method_name, None)
+        if not callable(parent_method):
+            alternate_name = (
+                "_emit_turn_ended_event"
+                if parent_method_name == "_emit_end_turn_event"
+                else "_emit_end_turn_event"
+            )
+            parent_method = getattr(parent, alternate_name, None)
+        if not callable(parent_method):
+            raise AttributeError("SmartTurn base lacks a turn-ended emitter")
+        await parent_method(*args, **kwargs)
+
+    async def _emit_turn_ended_event(self, *args: Any, **kwargs: Any) -> None:
+        """Vision Agents 0.6 turn-ended hook."""
+        await self._emit_guarded_turn_end("_emit_turn_ended_event", *args, **kwargs)
+
+    async def _emit_end_turn_event(self, *args: Any, **kwargs: Any) -> None:
+        """Vision Agents 0.5 turn-ended hook retained for compatibility."""
+        await self._emit_guarded_turn_end("_emit_end_turn_event", *args, **kwargs)
 
     def _should_suppress_turn_end(self) -> bool:
         if not self._turn_end_guard_active:

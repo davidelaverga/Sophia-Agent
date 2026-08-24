@@ -128,6 +128,10 @@ export interface SessionStartResponse {
   session_type: string;
   preset_context: string;
   started_at: string;
+  synthetic_test?: boolean;
+  test_run_id?: string;
+  scenario_id?: string;
+  scenario_version?: string;
 }
 
 /**
@@ -228,6 +232,61 @@ export interface SessionEndResponse {
   /** Debrief offer */
   offer_debrief: boolean;
   debrief_prompt?: string;
+  synthetic_isolated?: boolean;
+  test_run_id?: string;
+  exclusions?: Record<string, boolean>;
+  evidence_receipt?: {
+    storage: 'supabase' | 'local_ephemeral' | 'postgres_session';
+    object_path: string;
+    sha256: string;
+  };
+  canonical_transcript?: {
+    schema: 'sophia_voice_lab_canonical_transcript_v1';
+    source: 'sophia_session_messages';
+    synthetic: true;
+    principal_id: string;
+    test_run_id: string;
+    scenario_id: string;
+    scenario_version: string;
+    environment: string;
+    session_id: string;
+    thread_id: string;
+    expected_deployment: {
+      frontend: string;
+      backend: string;
+      voice: string;
+    };
+    message_revision: number;
+    message_count: number;
+    input_message_count: number;
+    output_message_count: number;
+    turn_boundary_count: number;
+    digest_algorithm: 'sha-256';
+    canonicalization: 'utf8-json-sort-keys-compact-ascii-v1';
+    sha256: string;
+    retention_expires_at: string;
+    raw_audio_excluded: true;
+    messages: Array<{
+      message_id: string;
+      sequence: number;
+      role: 'user' | 'assistant';
+      content: string;
+      created_at: string;
+      source: string;
+      final: boolean;
+      approximate: boolean;
+      turn_id: string | null;
+      provider_event_id: string | null;
+      redaction_level: string;
+    }>;
+    turn_boundaries: Array<{
+      turn_id: string | null;
+      first_sequence: number;
+      last_sequence: number;
+      input_message_count: number;
+      output_message_count: number;
+    }>;
+  };
 }
 
 /**

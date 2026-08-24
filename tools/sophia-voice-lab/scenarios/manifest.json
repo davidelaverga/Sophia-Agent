@@ -1,0 +1,8 @@
+{
+  "catalog_version": "vt00.scenarios.v1",
+  "scenario_ids": ["V-A01", "V-A02", "V-A03", "V-O01", "V-O02", "V-B01", "V-B02", "V-B03", "V-B04", "V-I01", "V-I02", "V-N01", "V-N02", "V-F01", "V-F02", "V-S01", "V-S02", "V-D01", "V-D02", "V-L01", "V-P01"],
+  "execution": "agent_guided_sequential",
+  "unsupported": {
+    "V-F02": "governed_product_clock_not_available"
+  }
+}

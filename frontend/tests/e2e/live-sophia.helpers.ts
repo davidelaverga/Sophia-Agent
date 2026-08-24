@@ -2,6 +2,7 @@ import { expect, test, type Page } from '@playwright/test';
 
 const ONBOARDING_STORAGE_KEY = 'sophia-onboarding-v2';
 const LEGACY_ONBOARDING_STORAGE_KEY = 'sophia-onboarding';
+const DASHBOARD_SPOTLIGHT_STORAGE_KEY = 'sophia-onboarded';
 const CAPTURE_FLAG_STORAGE_KEY = 'sophia.capture.enabled';
 
 const END_SESSION_PATHS = ['/api/sophia/end-session', '/api/sessions/end'] as const;
@@ -38,7 +39,17 @@ type CaptureBridge = {
 
 type SeedBrowserStateOptions = {
   enableCapture?: boolean;
+  completeDashboardSpotlight?: boolean;
 };
+
+function dashboardMicButton(page: Page) {
+  return page
+    .locator('[data-onboarding="mic-cta"]')
+    .first()
+    .locator('..')
+    .getByRole('button')
+    .first();
+}
 
 function isEndSessionRequest(url: string): boolean {
   return END_SESSION_PATHS.some((path) => url.includes(path));
@@ -48,9 +59,19 @@ export async function seedSophiaBrowserState(
   page: Page,
   options: SeedBrowserStateOptions = {},
 ): Promise<void> {
-  const { enableCapture = false } = options;
+  const {
+    enableCapture = false,
+    completeDashboardSpotlight = true,
+  } = options;
 
-  await page.addInitScript(({ captureEnabled, onboardingStorageKey, legacyStorageKey, captureStorageKey }) => {
+  await page.addInitScript(({
+    captureEnabled,
+    dashboardSpotlightComplete,
+    onboardingStorageKey,
+    legacyStorageKey,
+    spotlightStorageKey,
+    captureStorageKey,
+  }) => {
     const completedOnboarding = {
       state: {
         firstRun: {
@@ -83,6 +104,15 @@ export async function seedSophiaBrowserState(
       }
 
       window.localStorage.setItem(onboardingStorageKey, JSON.stringify(completedOnboarding));
+      // The dashboard has a separate three-step spotlight with its own
+      // completion key. These media E2Es exercise the product voice path, not
+      // onboarding, so seed the same durable completion state the spotlight
+      // writes after its final semantic advance.
+      if (dashboardSpotlightComplete) {
+        window.localStorage.setItem(spotlightStorageKey, '1');
+      } else {
+        window.localStorage.removeItem(spotlightStorageKey);
+      }
 
       if (captureEnabled) {
         window.localStorage.setItem(captureStorageKey, '1');
@@ -94,17 +124,47 @@ export async function seedSophiaBrowserState(
     }
   }, {
     captureEnabled: enableCapture,
+    dashboardSpotlightComplete: completeDashboardSpotlight,
     onboardingStorageKey: ONBOARDING_STORAGE_KEY,
     legacyStorageKey: LEGACY_ONBOARDING_STORAGE_KEY,
+    spotlightStorageKey: DASHBOARD_SPOTLIGHT_STORAGE_KEY,
     captureStorageKey: CAPTURE_FLAG_STORAGE_KEY,
   });
+}
+
+async function completeDashboardSpotlightIfPending(page: Page): Promise<void> {
+  const isPending = await page.evaluate((storageKey) => {
+    return window.localStorage.getItem(storageKey) !== '1';
+  }, DASHBOARD_SPOTLIGHT_STORAGE_KEY);
+  if (!isPending) return;
+
+  const spotlightSteps = [
+    'Set your context — it shapes the rituals',
+    'Choose a ritual to focus the conversation',
+    'Tap to talk with Sophia',
+  ] as const;
+  const advanceHint = page.getByText('tap anywhere to continue', { exact: true });
+  for (const stepText of spotlightSteps) {
+    await expect(page.getByText(stepText, { exact: true })).toBeVisible({
+      timeout: 8_000,
+    });
+    // Exercise the product-authored spotlight advance semantics. The click is
+    // a normal pointer action on the visible CTA copy and bubbles to the
+    // overlay's onClick handler; no forced or raw-JS click bypass is used.
+    await advanceHint.click();
+  }
+  await expect(advanceHint).toBeHidden({ timeout: 5_000 });
+  await expect.poll(
+    () => page.evaluate((storageKey) => window.localStorage.getItem(storageKey), DASHBOARD_SPOTLIGHT_STORAGE_KEY),
+    { timeout: 5_000 },
+  ).toBe('1');
 }
 
 export async function ensureDashboardReadyOrSkip(page: Page): Promise<void> {
   const deadline = Date.now() + 30_000;
 
   while (Date.now() < deadline) {
-    const micButton = page.locator('[data-onboarding="mic-cta"]').first();
+    const micButton = dashboardMicButton(page);
     if (await micButton.isVisible({ timeout: 500 }).catch(() => false)) {
       return;
     }
@@ -137,11 +197,12 @@ export async function ensureDashboardReadyOrSkip(page: Page): Promise<void> {
     'AuthGate quedó en loading (Opening a gentle space...). Provee sesión autenticada o storageState para E2E.',
   );
 
-  await expect(page.locator('[data-onboarding="mic-cta"]').first()).toBeVisible({ timeout: 10_000 });
+  await expect(dashboardMicButton(page)).toBeVisible({ timeout: 10_000 });
 }
 
 export async function openDashboard(page: Page): Promise<void> {
   await page.goto('/');
+  await completeDashboardSpotlightIfPending(page);
   await ensureDashboardReadyOrSkip(page);
 }
 
@@ -153,7 +214,7 @@ export async function startSessionFromDashboard(
     await page.locator(`[data-ritual="${options.ritual}"]`).first().click();
   }
 
-  await page.locator('[data-onboarding="mic-cta"]').first().click();
+  await dashboardMicButton(page).click();
 
   const replaceStartFresh = page.getByRole('button', { name: /start fresh/i }).first();
   if (await replaceStartFresh.isVisible({ timeout: 1_200 }).catch(() => false)) {

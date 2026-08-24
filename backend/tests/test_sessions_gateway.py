@@ -1,17 +1,145 @@
+import base64
+import hashlib
+import hmac
+import json
+import time
+import uuid
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, patch
 
 import httpx
 import pytest
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.testclient import TestClient
 
 import app.gateway.routers.sessions as sessions_router
+from app.gateway.auth import require_authenticated_user
 from app.gateway.routers.sessions import router
 from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
 
 app = FastAPI()
 app.include_router(router)
+
+
+async def _mock_authenticated_session_user(request: Request) -> str:
+    query_user_id = request.query_params.get("user_id")
+    if query_user_id:
+        return query_user_id
+    try:
+        body = await request.json()
+    except ValueError:
+        body = {}
+    if isinstance(body, dict) and isinstance(body.get("user_id"), str):
+        return body["user_id"]
+    return "dev-user"
+
+
+app.dependency_overrides[require_authenticated_user] = _mock_authenticated_session_user
 client = TestClient(app)
+
+VOICE_LAB_BUILD = "41a9b127af780bbe9d88acf34566a6aaf443e6b0"
+VOICE_LAB_SECRET = "capability-secret-at-least-thirty-two-bytes"
+VOICE_LAB_PROVIDER_EXPIRES_AT = (
+    datetime.now(UTC) + timedelta(minutes=30)
+).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _cleanup_id(test_run_id: str) -> str:
+    return str(uuid.UUID(bytes=hashlib.sha256(test_run_id.encode()).digest()[:16], version=4))
+
+
+def _session_create_capability(**overrides: object) -> str:
+    now = int(time.time())
+    claims: dict[str, object] = {
+        "v": 1,
+        "iss": "sophia-frontend",
+        "aud": "sophia-voice-gateway",
+        "sub": "voice-lab-user-1",
+        "principal_id": "voice-lab-user-1",
+        "test_run_id": "run-create-001",
+        "cleanup_obligation_id": _cleanup_id("run-create-001"),
+        "scenario_id": "vt00-create-001",
+        "scenario_version": "v1",
+        "synthetic": True,
+        "environment": "production",
+        "retention_hours": 24,
+        "provider_expires_at": VOICE_LAB_PROVIDER_EXPIRES_AT,
+        "allowed_ops": ["session:create"],
+        "expected_deployment": {
+            "frontend": VOICE_LAB_BUILD,
+            "backend": VOICE_LAB_BUILD,
+            "voice": VOICE_LAB_BUILD,
+        },
+        "iat": now,
+        "nbf": now,
+        "exp": now + 120,
+        "jti": "jti-create-001",
+        "nonce": "nonce-create-001",
+    }
+    claims.update(overrides)
+    claims.setdefault("cleanup_obligation_id", _cleanup_id(str(claims["test_run_id"])))
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(claims, separators=(",", ":")).encode("utf-8")
+    ).rstrip(b"=")
+    signature = hmac.new(VOICE_LAB_SECRET.encode(), encoded, hashlib.sha256).digest()
+    return f"{encoded.decode()}.{base64.urlsafe_b64encode(signature).rstrip(b'=').decode()}"
+
+
+def _enable_voice_lab(monkeypatch, *, kill_switch: str = "false") -> None:
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_ENABLED", "true")
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_KILL_SWITCH", kill_switch)
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL", "voice-lab-user-1")
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_ENVIRONMENT", "production")
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_CAPABILITY_SECRET", VOICE_LAB_SECRET)
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_BUILDER_RETENTION_SECONDS", "86400")
+    monkeypatch.setenv("RENDER_GIT_COMMIT", VOICE_LAB_BUILD)
+
+
+def _synthetic_session_record(
+    *,
+    session_id: str = "synthetic-session",
+    thread_id: str = "synthetic-thread",
+    test_run_id: str = "run-create-001",
+    status: str = "open",
+) -> SessionRecord:
+    created_at = datetime.now(UTC)
+    return SessionRecord(
+        session_id=session_id,
+        thread_id=thread_id,
+        user_id="voice-lab-user-1",
+        status=status,
+        run_id=test_run_id,
+        created_at=created_at.isoformat(),
+        metadata={
+            "synthetic_voice_lab": {
+                "synthetic": True,
+                "principal_id": "voice-lab-user-1",
+                "test_run_id": test_run_id,
+                "cleanup_obligation_id": _cleanup_id(test_run_id),
+                "environment": "production",
+                "scenario_id": "vt00-create-001",
+                "scenario_version": "v1",
+                "retention_hours": 24,
+                "provider_expires_at": VOICE_LAB_PROVIDER_EXPIRES_AT,
+                "retention_anchor": "session_created_at_provisional",
+                "retention_expires_at": (created_at + timedelta(days=1)).isoformat(
+                    timespec="milliseconds"
+                ).replace("+00:00", "Z"),
+            },
+            "expected_deployment": {
+                "frontend": VOICE_LAB_BUILD,
+                "backend": VOICE_LAB_BUILD,
+                "voice": VOICE_LAB_BUILD,
+            },
+            "memory_retrieval_disabled": True,
+            "inactivity_finalization_disabled": True,
+            "offline_pipeline_disabled": True,
+            "memory_learning_disabled": True,
+            "ordinary_analytics_disabled": True,
+            "ordinary_projects_disabled": True,
+            "shared_spaces_disabled": True,
+        },
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -72,6 +200,296 @@ def test_start_session_returns_503_when_langgraph_is_unavailable():
 
     assert response.status_code == 503
     assert response.json()["detail"] == "LangGraph is unavailable for session start."
+
+
+def test_synthetic_session_create_rejects_missing_capability_before_langgraph_or_store(
+    monkeypatch,
+    isolated_session_store,
+):
+    _enable_voice_lab(monkeypatch)
+    with patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls:
+        response = client.post(
+            "/api/v1/sessions/start",
+            json={"user_id": "voice-lab-user-1", "platform": "voice"},
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == {"code": "voice_lab_capability_missing"}
+    mock_client_cls.assert_not_called()
+    assert isolated_session_store.list_open("voice-lab-user-1") == []
+
+
+def test_synthetic_session_create_is_blocked_by_kill_switch_before_langgraph(
+    monkeypatch,
+):
+    _enable_voice_lab(monkeypatch, kill_switch="true")
+    with patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls:
+        response = client.post(
+            "/api/v1/sessions/start",
+            headers={"X-Sophia-Voice-Lab-Capability": _session_create_capability()},
+            json={"user_id": "voice-lab-user-1", "platform": "voice"},
+        )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == {"code": "voice_lab_kill_switch_active"}
+    mock_client_cls.assert_not_called()
+
+
+def test_synthetic_session_create_tags_thread_and_record_without_idle_watcher(
+    monkeypatch,
+    isolated_session_store,
+):
+    _enable_voice_lab(monkeypatch)
+
+    async def create_exact_thread(_url: str, *, json: dict[str, object]):
+        request = httpx.Request("POST", "http://127.0.0.1:2024/threads")
+        return httpx.Response(
+            200,
+            request=request,
+            json={"thread_id": json["thread_id"]},
+        )
+
+    with (
+        patch("app.gateway.routers.sessions.httpx.AsyncClient") as mock_client_cls,
+        patch("app.gateway.inactivity_watcher.register_activity") as mock_register_activity,
+    ):
+        mock_client = AsyncMock()
+        mock_client.post = AsyncMock(side_effect=create_exact_thread)
+        mock_client.__aenter__ = AsyncMock(return_value=mock_client)
+        mock_client.__aexit__ = AsyncMock(return_value=False)
+        mock_client_cls.return_value = mock_client
+        response = client.post(
+            "/api/v1/sessions/start",
+            headers={"X-Sophia-Voice-Lab-Capability": _session_create_capability()},
+            json={"user_id": "voice-lab-user-1", "platform": "voice"},
+        )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["synthetic_test"] is True
+    assert payload["test_run_id"] == "run-create-001"
+    assert payload["scenario_id"] == "vt00-create-001"
+    mock_register_activity.assert_not_called()
+    mock_client.post.assert_awaited_once()
+    thread_request = mock_client.post.await_args.kwargs["json"]["metadata"]
+    assert thread_request == {
+        "graph_id": "sophia_companion",
+        "synthetic": True,
+        "principal_id": "voice-lab-user-1",
+        "test_run_id": "run-create-001",
+        "environment": "production",
+        "scenario_id": "vt00-create-001",
+        "scenario_version": "v1",
+        "cleanup_obligation_id": _cleanup_id("run-create-001"),
+        "cleanup_admission_id": thread_request["cleanup_admission_id"],
+        "retention_hours": 24,
+        "provider_expires_at": VOICE_LAB_PROVIDER_EXPIRES_AT,
+        "retention_anchor": "session_created_at_provisional",
+        "retention_expires_at": thread_request["retention_expires_at"],
+    }
+    retention = datetime.fromisoformat(thread_request["retention_expires_at"])
+    assert timedelta(hours=23, minutes=59) < retention - datetime.now(UTC) <= timedelta(days=1)
+    record = isolated_session_store.get("voice-lab-user-1", payload["session_id"])
+    assert record is not None
+    assert record.run_id == "run-create-001"
+    assert record.metadata["memory_retrieval_disabled"] is True
+    assert record.metadata["inactivity_finalization_disabled"] is True
+    assert record.metadata["offline_pipeline_disabled"] is True
+
+
+def test_sessions_gateway_rejects_public_requests_before_store_access(
+    isolated_session_store,
+):
+    original_override = app.dependency_overrides.pop(require_authenticated_user)
+    try:
+        with patch.object(isolated_session_store, "get") as mock_get:
+            response = client.get(
+                "/api/v1/sessions/synthetic-session?user_id=voice-lab-user-1"
+            )
+    finally:
+        app.dependency_overrides[require_authenticated_user] = original_override
+
+    assert response.status_code == 401
+    mock_get.assert_not_called()
+
+
+def test_sessions_gateway_rejects_authenticated_scope_mismatch_before_store(
+    isolated_session_store,
+):
+    original_override = app.dependency_overrides[require_authenticated_user]
+    app.dependency_overrides[require_authenticated_user] = lambda: "ordinary-user"
+    try:
+        with patch.object(isolated_session_store, "get") as mock_get:
+            response = client.get(
+                "/api/v1/sessions/synthetic-session?user_id=voice-lab-user-1"
+            )
+    finally:
+        app.dependency_overrides[require_authenticated_user] = original_override
+
+    assert response.status_code == 403
+    mock_get.assert_not_called()
+
+
+def test_synthetic_session_read_requires_capability_before_store(
+    monkeypatch,
+    isolated_session_store,
+):
+    _enable_voice_lab(monkeypatch)
+    isolated_session_store.create(_synthetic_session_record())
+    with patch.object(isolated_session_store, "get", wraps=isolated_session_store.get) as mock_get:
+        response = client.get(
+            "/api/v1/sessions/synthetic-session?user_id=voice-lab-user-1"
+        )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == {"code": "voice_lab_capability_missing"}
+    mock_get.assert_not_called()
+
+
+def test_synthetic_late_touch_is_content_free_and_never_reopens_or_registers_watcher(
+    monkeypatch,
+    isolated_session_store,
+):
+    _enable_voice_lab(monkeypatch)
+    isolated_session_store.create(_synthetic_session_record(status="ended"))
+    with (
+        patch.object(isolated_session_store, "update", wraps=isolated_session_store.update) as mock_update,
+        patch("app.gateway.inactivity_watcher.register_activity") as mock_register,
+    ):
+        response = client.post(
+            "/api/v1/sessions/synthetic-session/touch"
+            "?user_id=voice-lab-user-1&message_preview=private-content",
+            headers={"X-Sophia-Voice-Lab-Capability": _session_create_capability()},
+        )
+
+    assert response.status_code == 200
+    assert response.json()["status"] == "ended"
+    mock_update.assert_not_called()
+    mock_register.assert_not_called()
+    record = isolated_session_store.get("voice-lab-user-1", "synthetic-session")
+    assert record is not None
+    assert record.status == "ended"
+    assert record.last_message_preview is None
+
+
+def test_synthetic_transcript_write_is_canonical_revisioned_and_isolated(
+    monkeypatch,
+    isolated_session_store,
+):
+    _enable_voice_lab(monkeypatch)
+    isolated_session_store.create(_synthetic_session_record())
+    response = client.put(
+        "/api/v1/sessions/synthetic-session/messages?user_id=voice-lab-user-1",
+        headers={"X-Sophia-Voice-Lab-Capability": _session_create_capability()},
+        json={
+            "user_id": "voice-lab-user-1",
+            "thread_id": "synthetic-thread",
+            "base_revision": 0,
+            "messages": [
+                {
+                    "id": "synthetic-user-1",
+                    "role": "user",
+                    "content": "private synthetic transcript",
+                    "turn_id": "turn-1",
+                    "provider_event_id": "input-final-1",
+                    "source": "voice",
+                },
+                {
+                    "id": "synthetic-output-1",
+                    "role": "assistant",
+                    "content": "private synthetic reply",
+                    "turn_id": "turn-1",
+                    "provider_event_id": "output-final-1",
+                    "source": "voice",
+                },
+            ],
+        },
+    )
+
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["synthetic_isolated"] is True
+    assert payload["canonical_persistence"] is True
+    assert payload["ordinary_consumers_excluded"] is True
+    assert payload["message_revision"] == 1
+    assert [message["content"] for message in payload["messages"]] == [
+        "private synthetic transcript",
+        "private synthetic reply",
+    ]
+    stored = isolated_session_store.list_messages(
+        "voice-lab-user-1",
+        "synthetic-session",
+    )
+    assert len(stored) == 2
+    assert stored[0].metadata["test_run_id"] == "run-create-001"
+    assert stored[0].metadata["scenario_version"] == "v1"
+    assert stored[0].metadata["offline_pipeline_excluded"] is True
+    assert stored[0].turn_id == "turn-1"
+
+    read = client.get(
+        "/api/v1/sessions/synthetic-session/messages?user_id=voice-lab-user-1",
+        headers={
+            "X-Sophia-Voice-Lab-Capability": _session_create_capability(
+                allowed_ops=["session:read"]
+            )
+        },
+    )
+    assert read.status_code == 200
+    assert read.json()["message_revision"] == 1
+    assert read.json()["messages"] == payload["messages"]
+
+
+def test_cross_run_touch_is_rejected_without_store_or_watcher_mutation(
+    monkeypatch,
+    isolated_session_store,
+):
+    _enable_voice_lab(monkeypatch)
+    isolated_session_store.create(
+        _synthetic_session_record(test_run_id="run-B")
+    )
+    with (
+        patch.object(isolated_session_store, "update", wraps=isolated_session_store.update) as mock_update,
+        patch("app.gateway.inactivity_watcher.register_activity") as mock_register,
+    ):
+        response = client.post(
+            "/api/v1/sessions/synthetic-session/touch?user_id=voice-lab-user-1",
+            headers={
+                "X-Sophia-Voice-Lab-Capability": _session_create_capability(
+                    test_run_id="run-A"
+                )
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "voice_lab_session_binding_mismatch"
+    }
+    mock_update.assert_not_called()
+    mock_register.assert_not_called()
+
+
+def test_generic_end_cannot_bypass_synthetic_canonical_finalization(
+    monkeypatch,
+    isolated_session_store,
+):
+    _enable_voice_lab(monkeypatch, kill_switch="true")
+    isolated_session_store.create(_synthetic_session_record())
+    response = client.post(
+        "/api/v1/sessions/end",
+        headers={
+            "X-Sophia-Voice-Lab-Capability": _session_create_capability(
+                allowed_ops=["session:finalize"]
+            )
+        },
+        json={"user_id": "voice-lab-user-1", "session_id": "synthetic-session"},
+    )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "voice_lab_canonical_finalization_required"
+    }
+    record = isolated_session_store.get("voice-lab-user-1", "synthetic-session")
+    assert record is not None and record.status == "open"
 
 
 def test_delete_session_removes_persisted_record(isolated_session_store):

@@ -699,6 +699,7 @@ export function useSessionRouteExperience({
     setVoiceStatusCompat,
     // PR-B: builder completion card surface
     builderCompletion: effectiveBuilderCompletion,
+    builderCanvasEvents: builderCanvas.recentEvents,
     handleBuilderRetry,
     handleBuilderCompletionDismiss,
   };

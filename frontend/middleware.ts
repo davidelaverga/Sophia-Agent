@@ -1,9 +1,37 @@
 import { type NextRequest, NextResponse } from "next/server"
 
 import { DEFAULT_LOCALE, LOCALE_COOKIE_NAME, localeFromAcceptLanguage } from "./src/app/copy/config"
+import {
+  VOICE_LAB_CONTEXT_COOKIE_NAME,
+  VOICE_LAB_RUN_BINDING_COOKIE_NAME,
+} from "./src/app/lib/synthetic-isolation-policy"
 
 // Cookie to track if user manually selected a language (vs auto-detected)
 const LOCALE_MANUAL_COOKIE = "sophia-locale-manual"
+
+const VOICE_LAB_GOVERNED_API_ROUTES: ReadonlyArray<{
+  methods: ReadonlySet<string>
+  path: RegExp
+}> = [
+  { methods: new Set(['GET']), path: /^\/api\/(?:app-version|health)$/ },
+  { methods: new Set(['GET', 'POST']), path: /^\/api\/voice-lab\/auth\/(?:grant|provision|continue|refresh|cleanup|readiness)$/ },
+  { methods: new Set(['GET']), path: /^\/api\/auth\/(?:get-session|session)$/ },
+  { methods: new Set(['POST']), path: /^\/api\/auth\/sign-out$/ },
+  { methods: new Set(['GET', 'POST', 'PUT', 'PATCH', 'DELETE']), path: /^\/api\/sessions(?:\/.*)?$/ },
+  { methods: new Set(['POST']), path: /^\/api\/sophia\/[^/]+\/voice\/connect$/ },
+  { methods: new Set(['GET']), path: /^\/api\/sophia\/voice\/gemini\/events$/ },
+  { methods: new Set(['POST']), path: /^\/api\/sophia\/voice\/gemini\/(?:relay|disconnect|activate|continuation-bootstrap)$/ },
+  { methods: new Set(['POST']), path: /^\/api\/sophia\/end-session$/ },
+  { methods: new Set(['GET', 'POST']), path: /^\/api\/sophia\/builder\/threads\/[^/]+\/canvas(?:\/.*)?$/ },
+  { methods: new Set(['GET']), path: /^\/api\/threads\/[^/]+\/builder-events(?:\/last)?$/ },
+  { methods: new Set(['GET']), path: /^\/api\/threads\/[^/]+\/artifacts(?:\/.*)?$/ },
+]
+
+export function voiceLabFrontendApiAccessAllowed(method: string, pathname: string): boolean {
+  return VOICE_LAB_GOVERNED_API_ROUTES.some(
+    (entry) => entry.methods.has(method.toUpperCase()) && entry.path.test(pathname),
+  )
+}
 
 export function middleware(request: NextRequest) {
   // 🔒 SECURITY: Block /debug route in production
@@ -11,6 +39,19 @@ export function middleware(request: NextRequest) {
     if (process.env.NODE_ENV !== 'development') {
       return NextResponse.redirect(new URL('/', request.url))
     }
+  }
+
+  const voiceLabContextPresent = request.cookies.has(VOICE_LAB_CONTEXT_COOKIE_NAME)
+    || request.cookies.has(VOICE_LAB_RUN_BINDING_COOKIE_NAME)
+  if (
+    voiceLabContextPresent
+    && request.nextUrl.pathname.startsWith('/api/')
+    && !voiceLabFrontendApiAccessAllowed(request.method, request.nextUrl.pathname)
+  ) {
+    return NextResponse.json(
+      { error: 'voice_lab_ordinary_product_route_forbidden' },
+      { status: 403, headers: { 'Cache-Control': 'no-store' } },
+    )
   }
 
   const response = NextResponse.next()

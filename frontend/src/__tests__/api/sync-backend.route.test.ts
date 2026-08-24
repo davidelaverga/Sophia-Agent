@@ -5,6 +5,7 @@ const listUserAccountsMock = vi.fn();
 const providerLoginMock = vi.fn();
 const cookieSetMock = vi.fn();
 const headersMock = vi.fn();
+const voiceLabBoundaryMock = vi.fn();
 
 let authBypassEnabledMock = false;
 
@@ -37,12 +38,17 @@ vi.mock('../../server/better-auth', () => ({
   getSession: (...args: unknown[]) => getSessionMock(...args),
 }));
 
+vi.mock('@/server/voice-lab/ordinary-route-isolation', () => ({
+  voiceLabOrdinaryProductBoundaryResponse: (...args: unknown[]) => voiceLabBoundaryMock(...args),
+}));
+
 import { POST } from '../../app/api/auth/sync-backend/route';
 
 describe('/api/auth/sync-backend POST', () => {
   beforeEach(() => {
     vi.clearAllMocks();
     authBypassEnabledMock = false;
+    voiceLabBoundaryMock.mockResolvedValue(null);
     headersMock.mockReturnValue(new Headers({ cookie: 'better-auth.session=abc123' }));
     getSessionMock.mockResolvedValue({
       user: {
@@ -60,6 +66,20 @@ describe('/api/auth/sync-backend POST', () => {
       username: 'Test User',
       api_token: 'token-123',
     });
+  });
+
+  it('denies the dedicated identity before provider login or cookie allocation', async () => {
+    voiceLabBoundaryMock.mockResolvedValue(Response.json(
+      { error: 'voice_lab_ordinary_product_route_forbidden' },
+      { status: 403 },
+    ));
+
+    const response = await POST();
+
+    expect(response.status).toBe(403);
+    expect(getSessionMock).not.toHaveBeenCalled();
+    expect(providerLoginMock).not.toHaveBeenCalled();
+    expect(cookieSetMock).not.toHaveBeenCalled();
   });
 
   it('syncs the Google account through the legacy backend bridge and sets the backend token cookie', async () => {

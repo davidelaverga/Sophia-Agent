@@ -1,5 +1,5 @@
-import { render, screen, fireEvent } from "@testing-library/react"
-import { describe, it, expect, vi, beforeEach } from "vitest"
+import { act, render, screen, fireEvent } from "@testing-library/react"
+import { afterEach, describe, it, expect, vi, beforeEach } from "vitest"
 
 import { SettingsDrawer } from "../../app/components/dashboard/SettingsDrawer"
 
@@ -20,13 +20,14 @@ vi.mock("../../app/hooks/useHaptics", () => ({
   haptic: vi.fn(),
 }))
 
-vi.mock("../../app/components/ThemeToggle", () => ({
-  ThemeToggle: () => <button data-testid="theme-toggle">Theme</button>,
-}))
-
 describe("SettingsDrawer", () => {
   beforeEach(() => {
+    vi.useFakeTimers()
     pushMock.mockClear()
+  })
+
+  afterEach(() => {
+    vi.useRealTimers()
   })
 
   it("does not render when closed", () => {
@@ -36,14 +37,14 @@ describe("SettingsDrawer", () => {
     expect(container.innerHTML).toBe("")
   })
 
-  it("renders settings and history links when open", () => {
+  it("renders the current settings action when open", () => {
     render(
       <SettingsDrawer isOpen={true} onClose={() => {}} />
     )
 
     expect(screen.getByText("Settings")).toBeTruthy()
-    expect(screen.getByText("History")).toBeTruthy()
-    expect(screen.getByTestId("theme-toggle")).toBeTruthy()
+    expect(screen.getByText("Voice, account, memory, and conversation preferences.")).toBeTruthy()
+    expect(screen.queryByText("History")).toBeNull()
   })
 
   it("navigates to /settings on settings click", () => {
@@ -53,6 +54,9 @@ describe("SettingsDrawer", () => {
     )
 
     fireEvent.click(screen.getByText("Settings"))
+    act(() => {
+      vi.advanceTimersByTime(220)
+    })
     expect(onClose).toHaveBeenCalled()
     expect(pushMock).toHaveBeenCalledWith("/settings")
   })
@@ -64,9 +68,12 @@ describe("SettingsDrawer", () => {
     )
 
     // Click the backdrop (first child of the fixed overlay)
-    const backdrop = container.querySelector(".bg-black\\/40")
+    const backdrop = container.querySelector(".cosmic-modal-backdrop")
     expect(backdrop).toBeTruthy()
-    fireEvent.click(backdrop)
+    fireEvent.click(backdrop as HTMLElement)
+    act(() => {
+      vi.advanceTimersByTime(220)
+    })
     expect(onClose).toHaveBeenCalled()
   })
 
@@ -77,6 +84,9 @@ describe("SettingsDrawer", () => {
     )
 
     fireEvent.click(screen.getByLabelText("Close"))
+    act(() => {
+      vi.advanceTimersByTime(220)
+    })
     expect(onClose).toHaveBeenCalled()
   })
 })

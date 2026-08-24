@@ -87,7 +87,7 @@ export async function GET(request: NextRequest) {
       count: entries.length,
     })
   } catch (error) {
-    logger.logError(error, { component: 'api/journal', action: 'list_journal_entries' })
+    logger.logError(error, { component: 'api/journal', action: 'list_journal_entries', request })
     return NextResponse.json(
       { error: 'Failed to fetch journal entries' },
       { status: 500 },

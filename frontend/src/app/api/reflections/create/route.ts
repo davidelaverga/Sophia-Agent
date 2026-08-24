@@ -1,8 +1,12 @@
 import { type NextRequest, NextResponse } from "next/server";
 
 import { getAuthenticatedUserId, getUserScopedAuthToken } from "../../../lib/auth/server-auth";
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation';
 
 export async function POST(request: NextRequest) {
+  const voiceLabDenied = await voiceLabOrdinaryProductBoundaryResponse();
+  if (voiceLabDenied) return voiceLabDenied;
+
   const backendUrl = process.env.BACKEND_API_URL;
 
   if (!backendUrl) {
@@ -62,4 +66,3 @@ export async function POST(request: NextRequest) {
     return NextResponse.json({ error: "Failed to create reflection" }, { status: 500 });
   }
 }
-

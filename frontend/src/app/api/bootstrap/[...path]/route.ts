@@ -90,7 +90,7 @@ async function proxyRequest(req: NextRequest, pathSegments: string[]) {
       },
     });
   } catch (error) {
-    logger.logError(error, { component: 'api/bootstrap', action: 'proxy_request' });
+    logger.logError(error, { component: 'api/bootstrap', action: 'proxy_request', request: req });
     return NextResponse.json(
       { error: 'Failed to connect to backend', has_opener: false },
       { status: 502 }

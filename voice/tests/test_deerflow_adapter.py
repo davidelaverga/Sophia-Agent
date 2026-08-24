@@ -247,6 +247,7 @@ async def test_stream_events_text_and_artifact_via_content_blocks() -> None:
             "assistant_id": "sophia_companion",
             "input": {"messages": [{"role": "user", "content": "hello"}]},
             "config": {
+                "recursion_limit": 150,
                 "configurable": {
                     "user_id": "user-1",
                     "platform": "voice",
@@ -340,6 +341,7 @@ async def test_stream_events_reuse_explicit_thread_id_without_creating_thread() 
             "assistant_id": "sophia_companion",
             "input": {"messages": [{"role": "user", "content": "hello"}]},
             "config": {
+                "recursion_limit": 150,
                 "configurable": {
                     "user_id": "user-1",
                     "platform": "voice",

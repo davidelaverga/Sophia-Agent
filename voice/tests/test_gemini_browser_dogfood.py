@@ -3,11 +3,13 @@ from __future__ import annotations
 import asyncio
 import json
 from collections.abc import Mapping
+from datetime import UTC, datetime, timedelta
 from typing import Any
 
 import httpx
 import pytest
 import voice.realtime.gemini_browser_dogfood as gemini_browser_dogfood
+import voice.realtime.gemini_production_session as gemini_production_session
 import voice.realtime.gemini_tool_loop as gemini_tool_loop
 import voice.realtime.sophia_backend_tools as sophia_backend_tools
 from fastapi import FastAPI
@@ -137,6 +139,7 @@ class FakeGeminiTokenMinter:
         setup: Mapping[str, Any],
         uses: int = 1,
         field_mask: str | None = None,
+        expire_time: str | None = None,
     ) -> GeminiLiveEphemeralToken:
         self.requests.append(
             {
@@ -144,6 +147,7 @@ class FakeGeminiTokenMinter:
                 "setup": dict(setup),
                 "uses": uses,
                 "field_mask": field_mask,
+                "expire_time": expire_time,
             }
         )
         return GeminiLiveEphemeralToken(
@@ -816,6 +820,99 @@ async def test_browser_session_mints_gemini_ephemeral_token_without_promoting_de
 
 
 @pytest.mark.anyio
+async def test_synthetic_trace_fault_skips_trace_adapter_and_preserves_provider_bootstrap(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    manager = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+
+    def forbidden_trace_adapter(**_: object) -> None:
+        raise AssertionError("trace adapter must not be constructed for the governed fault")
+
+    monkeypatch.setattr(manager, "_create_trace_recorder", forbidden_trace_adapter)
+    receipt = {
+        "schema": "sophia_voice_lab_trace_fault_v1",
+        "fault": "langsmith_unavailable",
+        "phase": "applied",
+        "principal_id": "voice-lab-user-1",
+        "test_run_id": "run-001",
+        "scenario_id": "V-L01",
+        "scenario_version": "vt00.scenarios.v1",
+        "environment": "production",
+        "expected_deployment": {
+            "frontend": "a" * 40,
+            "backend": "b" * 40,
+            "voice": "c" * 40,
+        },
+        "trace_unavailable": True,
+        "canonical_behavior_unchanged": True,
+        "applied_at": "2026-08-23T12:00:00+00:00",
+        "restored_at": None,
+    }
+    session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="voice-lab-user-1",
+        session_id="browser-gemini-trace-fault",
+        synthetic_context={
+            "synthetic": True,
+            "principal_id": "voice-lab-user-1",
+            "test_run_id": "run-001",
+            "scenario_id": "V-L01",
+            "scenario_version": "vt00.scenarios.v1",
+            "environment": "production",
+        },
+        trace_fault_receipt=receipt,
+    )
+
+    assert session.ephemeral_token.value == "auth_tokens/gemini-browser-test"
+    assert session.langsmith_trace_id is None
+    assert session.langsmith_trace_unavailable_reason == "governed_synthetic_fault"
+    assert (
+        session.as_public_payload()["langsmith_trace_unavailable_reason"]
+        == "governed_synthetic_fault"
+    )
+    assert session.as_public_payload()["trace_fault"] == receipt
+    session_id = session.dogfood_session.session_id
+    assert manager.trace_fault_for_session(session_id) == receipt
+    assert await manager.close_session(session_id) is True
+    assert manager.trace_fault_for_session(session_id) is None
+
+
+@pytest.mark.anyio
+async def test_synthetic_session_reports_policy_unavailable_without_trace_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    manager = GeminiBrowserDogfoodSessionManager(
+        RealtimeDogfoodSessionManager(),
+        token_minter=FakeGeminiTokenMinter(),  # type: ignore[arg-type]
+    )
+    session = await manager.start_browser_session(
+        _gemini_settings(),
+        user_id="voice-lab-user-1",
+        session_id="browser-gemini-policy-unavailable",
+        synthetic_context={
+            "synthetic": True,
+            "principal_id": "voice-lab-user-1",
+            "test_run_id": "run-policy-001",
+            "scenario_id": "V-A01",
+            "scenario_version": "vt00.scenarios.v1",
+            "environment": "production",
+        },
+    )
+
+    payload = session.as_public_payload()
+    assert payload["langsmith_trace_id"] is None
+    assert payload["langsmith_trace_unavailable_reason"] == "synthetic_isolation_policy"
+    assert session.dogfood_session.session_id not in manager._traces_by_session
+    await manager.close_session(session.dogfood_session.session_id)
+
+
+@pytest.mark.anyio
 @pytest.mark.parametrize(
     ("continuity_enabled", "compression_enabled"),
     [
@@ -1469,6 +1566,333 @@ async def test_production_browser_session_uses_production_public_payload(
     assert "latest complete user utterance" in system_instruction
 
     await manager.close_session("gemini-prod-1")
+
+
+@pytest.mark.anyio
+async def test_production_cleanup_retries_one_exact_trace_restore_receipt_until_ack(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "gemini-prod-trace-cleanup"
+    applied = {
+        "schema": "sophia_voice_lab_trace_fault_v1",
+        "fault": "langsmith_unavailable",
+        "phase": "applied",
+        "principal_id": "voice-lab-user-1",
+        "test_run_id": "run-v-l01",
+        "scenario_id": "V-L01",
+        "scenario_version": "vt00.scenarios.v1",
+        "environment": "production",
+        "expected_deployment": {
+            "frontend": "a" * 40,
+            "backend": "b" * 40,
+            "voice": "c" * 40,
+        },
+        "trace_unavailable": True,
+        "canonical_behavior_unchanged": True,
+        "applied_at": "2026-08-23T12:00:00.000Z",
+        "restored_at": None,
+    }
+
+    class BrowserSessions:
+        def __init__(self) -> None:
+            self.exists = True
+            self.applied: dict[str, object] | None = dict(applied)
+
+        def trace_fault_for_session(self, _session_id: str) -> dict[str, object] | None:
+            return dict(self.applied) if self.applied is not None else None
+
+        def session_exists(self, _session_id: str) -> bool:
+            return self.exists
+
+        def provider_epoch_snapshot(self, _session_id: str) -> tuple[int, ...]:
+            return (1,) if self.exists else ()
+
+        async def close_session(self, _session_id: str, **_kwargs: object) -> bool:
+            was_open = self.exists
+            self.exists = False
+            self.applied = None
+            return was_open
+
+    browser_sessions = BrowserSessions()
+    manager = GeminiProductionBrowserSessionManager(browser_sessions)  # type: ignore[arg-type]
+    watch = gemini_production_session._ProviderCleanupWatch(
+        admission_id="cleanup-admission-v-l01",
+        cleanup_obligation_id="123e4567-e89b-42d3-a456-426614174000",
+        resource_id=session_id,
+        reserved_lease_expires_at="2026-08-23T12:01:00.000Z",
+        resource_expires_at="2026-08-23T12:30:00.000Z",
+    )
+    manager._cleanup_watches[session_id] = watch
+    callback_receipts: list[dict[str, object] | None] = []
+
+    async def callback(
+        _watch: object,
+        action: str,
+        *,
+        phase: str | None = None,
+        trace_fault: Mapping[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        assert action == "complete"
+        assert phase is None
+        callback_receipts.append(dict(trace_fault) if trace_fault is not None else None)
+        return None if len(callback_receipts) == 1 else {"completed": True}
+
+    monkeypatch.setattr(manager, "_post_cleanup_callback", callback)
+
+    assert await manager.close_session(session_id) is True
+    assert session_id in manager._cleanup_watches
+    assert await manager.close_session(session_id) is False
+    assert session_id not in manager._cleanup_watches
+    assert callback_receipts[0] == callback_receipts[1]
+    restored = callback_receipts[0]
+    assert restored is not None
+    assert restored["phase"] == "restored"
+    assert restored["applied_at"] == applied["applied_at"]
+    assert isinstance(restored["restored_at"], str)
+    assert str(restored["restored_at"]).endswith("Z")
+
+
+@pytest.mark.anyio
+async def test_production_graceful_shutdown_persists_freeze_after_generic_close_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "gemini-prod-d02-shutdown-race"
+
+    class BrowserSessions:
+        def __init__(self) -> None:
+            self.exists = True
+            self.epochs = (7, 8)
+
+        def trace_fault_for_session(self, _session_id: str) -> None:
+            return None
+
+        def session_exists(self, _session_id: str) -> bool:
+            return self.exists
+
+        def provider_epoch_snapshot(self, _session_id: str) -> tuple[int, ...]:
+            return self.epochs if self.exists else ()
+
+        def terminal_state_absent(self, _session_id: str) -> bool:
+            return not self.exists
+
+        async def close_session(self, _session_id: str, **_kwargs: object) -> bool:
+            was_open = self.exists
+            self.exists = False
+            return was_open
+
+    browser_sessions = BrowserSessions()
+    manager = GeminiProductionBrowserSessionManager(browser_sessions)  # type: ignore[arg-type]
+    watch = gemini_production_session._ProviderCleanupWatch(
+        admission_id="cleanup-admission-d02-shutdown",
+        cleanup_obligation_id="123e4567-e89b-42d3-a456-426614174000",
+        resource_id=session_id,
+        reserved_lease_expires_at="2026-08-23T12:01:00.000Z",
+        resource_expires_at="2026-08-23T12:30:00.000Z",
+    )
+    manager._cleanup_watches[session_id] = watch
+    authorize_count = 0
+    terminal_receipts: list[dict[str, object]] = []
+
+    async def callback(
+        _watch: object,
+        action: str,
+        *,
+        phase: str | None = None,
+        trace_fault: Mapping[str, object] | None = None,
+        terminal_receipt: Mapping[str, object] | None = None,
+    ) -> dict[str, object] | None:
+        nonlocal authorize_count
+        del trace_fault
+        if action == "authorize":
+            assert phase == "heartbeat"
+            authorize_count += 1
+            if authorize_count == 1:
+                return {
+                    "authorized": True,
+                    "status": "browser_active",
+                    "resource_expires_at": watch.resource_expires_at,
+                }
+            return {
+                "authorized": False,
+                "status": "browser_closed",
+                "d02_freeze": {
+                    "schema": "sophia_voice_lab_gateway_browser_worker_termination_freeze_request_v1",
+                    "cleanup_obligation_id": watch.cleanup_obligation_id,
+                    "provider_session_id": session_id,
+                    "frozen_provider_connection_epochs": [7, 8],
+                },
+            }
+        assert action == "complete"
+        assert phase is None
+        if terminal_receipt is None:
+            # Simulate the ordinary completion losing the race to the freeze.
+            return None
+        terminal_receipts.append(dict(terminal_receipt))
+        return {"d02_terminal_proof_persisted": True}
+
+    monkeypatch.setattr(manager, "_post_cleanup_callback", callback)
+
+    await manager.close_all(timeout_seconds=1.0)
+
+    assert authorize_count == 2
+    assert session_id not in manager._cleanup_watches
+    assert len(terminal_receipts) == 1
+    assert terminal_receipts[0]["provider_connection_epochs"] == [7, 8]
+    assert terminal_receipts[0]["voice_provider_session_absent"] is True
+
+
+@pytest.mark.anyio
+async def test_production_cleanup_consumes_expired_owned_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    session_id = "gemini-prod-expired-reserved"
+
+    class BrowserSessions:
+        def __init__(self) -> None:
+            self.exists = True
+            self.close_count = 0
+
+        def trace_fault_for_session(self, _session_id: str) -> None:
+            return None
+
+        def session_exists(self, _session_id: str) -> bool:
+            return self.exists
+
+        def provider_epoch_snapshot(self, _session_id: str) -> tuple[int, ...]:
+            return (1,) if self.exists else ()
+
+        async def close_session(self, _session_id: str, **_kwargs: object) -> bool:
+            self.close_count += 1
+            self.exists = False
+            return True
+
+    browser_sessions = BrowserSessions()
+    manager = GeminiProductionBrowserSessionManager(browser_sessions)  # type: ignore[arg-type]
+    watch = gemini_production_session._ProviderCleanupWatch(
+        admission_id="cleanup-admission-expired-reserved",
+        cleanup_obligation_id="123e4567-e89b-42d3-a456-426614174000",
+        resource_id=session_id,
+        reserved_lease_expires_at="2026-08-23T12:01:00.000Z",
+        resource_expires_at="2026-08-23T12:30:00.000Z",
+    )
+    manager._cleanup_watches[session_id] = watch
+    actions: list[str] = []
+
+    async def callback(
+        _watch: object,
+        action: str,
+        *,
+        phase: str | None = None,
+        trace_fault: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        del phase, trace_fault
+        actions.append(action)
+        if action == "authorize":
+            return {
+                "authorized": False,
+                "status": "allocating",
+                "expired": True,
+            }
+        return {"completed": True}
+
+    async def no_sleep(_seconds: float) -> None:
+        return None
+
+    monkeypatch.setattr(manager, "_post_cleanup_callback", callback)
+    monkeypatch.setattr(gemini_production_session.asyncio, "sleep", no_sleep)
+
+    await manager._watch_cleanup_admission(session_id, watch)
+
+    assert browser_sessions.close_count == 1
+    assert actions == ["authorize", "complete"]
+    assert session_id not in manager._cleanup_watches
+
+
+@pytest.mark.anyio
+async def test_production_installs_cleanup_watch_before_external_allocation(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _set_gemini_env(monkeypatch)
+    _make_backend_emit_artifact_import_fail(monkeypatch)
+    realtime_sessions = RealtimeDogfoodSessionManager()
+    token_minter = FakeGeminiTokenMinter()
+    browser_sessions = GeminiBrowserDogfoodSessionManager(
+        realtime_sessions,
+        token_minter=token_minter,  # type: ignore[arg-type]
+    )
+    manager = GeminiProductionBrowserSessionManager(browser_sessions)
+    session_id = "gemini-prod-watch-before-allocation"
+    lease_expires_at = "2033-05-18T03:35:00.000Z"
+    resource_expires_at = "2033-05-18T04:03:20.000Z"
+    watcher_release = asyncio.Event()
+
+    async def parked_watcher(
+        _session_id: str,
+        _watch: object,
+    ) -> None:
+        await watcher_release.wait()
+
+    async def authorize(
+        _watch: object,
+        action: str,
+        *,
+        phase: str | None = None,
+        trace_fault: Mapping[str, object] | None = None,
+    ) -> dict[str, object]:
+        del trace_fault
+        assert action == "authorize"
+        assert phase == "start"
+        return {
+            "authorized": True,
+            "status": "allocating",
+            "lease_expires_at": lease_expires_at,
+            "resource_expires_at": resource_expires_at,
+        }
+
+    original_start = browser_sessions.start_browser_session
+
+    async def checked_start(*args: object, **kwargs: object) -> object:
+        assert session_id in manager._cleanup_watches
+        assert session_id in manager._cleanup_watch_tasks
+        return await original_start(*args, **kwargs)
+
+    monkeypatch.setattr(manager, "_watch_cleanup_admission", parked_watcher)
+    monkeypatch.setattr(manager, "_post_cleanup_callback", authorize)
+    monkeypatch.setattr(browser_sessions, "start_browser_session", checked_start)
+
+    await manager.start_browser_session(
+        _gemini_production_settings(),
+        user_id="voice-lab-user-1",
+        session_id=session_id,
+        realtime_context={
+            "synthetic_test": {
+                "synthetic": True,
+                "principal_id": "voice-lab-user-1",
+                "test_run_id": "run-watch-before-allocation",
+                "scenario_id": "vt00-realtime-001",
+                "scenario_version": "v1",
+                "environment": "production",
+                "retention_hours": 24,
+                "cleanup_obligation_id": "123e4567-e89b-42d3-a456-426614174000",
+                "provider_expires_at": resource_expires_at,
+            }
+        },
+        cleanup_admission_id="cleanup-admission-watch-before-allocation",
+        cleanup_obligation_id="123e4567-e89b-42d3-a456-426614174000",
+        cleanup_admission_expires_at_epoch=datetime.fromisoformat(
+            lease_expires_at.replace("Z", "+00:00")
+        ).timestamp(),
+        cleanup_resource_expires_at_epoch=datetime.fromisoformat(
+            resource_expires_at.replace("Z", "+00:00")
+        ).timestamp(),
+    )
+
+    watcher_release.set()
+    task = manager._cleanup_watch_tasks.get(session_id)
+    if task is not None:
+        await task
+    assert token_minter.requests[0]["expire_time"] == resource_expires_at
+    await browser_sessions.close_session(session_id)
 
 
 @pytest.mark.anyio
@@ -2841,6 +3265,371 @@ async def test_http_lifecycle_new_runs_separate_companion_parent_from_voice_sess
     assert run_body["config"]["configurable"]["voice_session_id"] == provider_session_id
     assert result.updated_async_tasks is not None
     assert result.updated_async_tasks["builder-thread-new"]["parent_thread_id"] == companion_thread_id
+    assert backend.requests[0]["json_body"] == {}
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("tool_name", "args"),
+    [
+        (
+            "start_builder_task",
+            {"description": "Make a document.", "task_type": "document"},
+        ),
+        (
+            "edit_builder_artifact",
+            {
+                "artifact_path": "/mnt/user-data/outputs/report.md",
+                "message": "Tighten the conclusion.",
+            },
+        ),
+    ],
+)
+@pytest.mark.parametrize("retention_hours", [1, 168])
+async def test_http_lifecycle_synthetic_threads_have_exact_bounded_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+    tool_name: str,
+    args: dict[str, str],
+    retention_hours: int,
+) -> None:
+    backend = CapturingBuilderLifecycleHttpBackend(
+        [{"thread_id": "builder-thread-synthetic"}, {"run_id": "run-synthetic"}]
+    )
+    execution_args = dict(args)
+    provider_expires_at = (
+        datetime.now(UTC) + timedelta(minutes=30)
+    ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    synthetic_test = {
+        "synthetic": True,
+        "principal_id": "voice-lab-user-1",
+        "test_run_id": "run-001",
+        "scenario_id": "vt00-builder-001",
+        "scenario_version": "v1",
+        "environment": "production",
+        "retention_hours": retention_hours,
+        "cleanup_obligation_id": "123e4567-e89b-42d3-a456-426614174000",
+        "provider_expires_at": provider_expires_at,
+    }
+    async_tasks: dict[str, dict[str, Any]] = {}
+    if tool_name == "edit_builder_artifact":
+        execution_args["task_id"] = "completed-source-task"
+        async_tasks["completed-source-task"] = {
+            "task_id": "completed-source-task",
+            "thread_id": "completed-source-task",
+            "run_id": "completed-source-run",
+            "status": "success",
+            "task_type": "document",
+            "artifact_path": execution_args["artifact_path"],
+            "synthetic_test": synthetic_test,
+        }
+
+    await backend.execute(
+        tool_name,
+        execution_args,
+        session_id="voice-session-synthetic",
+        parent_thread_id="companion-thread-synthetic",
+        user_id="voice-lab-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        async_tasks=async_tasks,
+        trace_context={
+            **synthetic_test,
+            "synthetic_tool_evidence": {
+                "schema": "sophia_synthetic_tool_evidence_v1",
+                "test_run_id": "run-001",
+                "scenario_id": "vt00-builder-001",
+                "scenario_version": "v1",
+                "operation_id": "operation-001",
+                "utterance_id": "utterance-001",
+                "provider_input_sequence": 1,
+                "public_utterance_id": "public-utterance-001",
+                "tool_call_id": "tool-call-001",
+                "effect_id": "effect-001",
+                "provider_connection_epoch": 1,
+                "relay_correlation_id": "relay-001",
+                "tool_name": tool_name,
+                "received_at": "2026-08-23T12:00:00.000Z",
+            },
+        },
+    )
+
+    thread_body = backend.requests[0]["json_body"]
+    assert set(thread_body) == {"metadata", "ttl"}
+    assert 1 <= thread_body["ttl"] <= retention_hours * 60
+    metadata = thread_body["metadata"]
+    assert metadata == {
+        "synthetic": True,
+        "principal_id": "voice-lab-user-1",
+        "test_principal_id": "voice-lab-user-1",
+        "test_run_id": "run-001",
+        "scenario_id": "vt00-builder-001",
+        "scenario_version": "v1",
+        "environment": "production",
+        "retention_hours": retention_hours,
+        "cleanup_obligation_id": "123e4567-e89b-42d3-a456-426614174000",
+        "provider_expires_at": provider_expires_at,
+        "retention_anchor": "builder_task_created_at_provisional",
+        "retention_anchor_at": metadata["retention_anchor_at"],
+        "retention_expires_at": metadata["retention_expires_at"],
+    }
+    anchor_at = datetime.fromisoformat(
+        metadata["retention_anchor_at"].replace("Z", "+00:00")
+    )
+    expiry = datetime.fromisoformat(
+        metadata["retention_expires_at"].replace("Z", "+00:00")
+    )
+    remaining = (expiry.astimezone(UTC) - datetime.now(UTC)).total_seconds()
+    assert expiry - anchor_at == timedelta(hours=retention_hours)
+    assert retention_hours * 3600 - 100 < remaining <= retention_hours * 3600
+    assert backend.requests[1]["json_body"]["input"]["synthetic_test"] == metadata
+
+
+def _synthetic_builder_trace_context(
+    tool_name: str,
+    *,
+    index: int,
+    test_run_id: str = "run-join-001",
+) -> dict[str, Any]:
+    provider_expires_at = (
+        datetime.now(UTC) + timedelta(minutes=30)
+    ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    return {
+        "synthetic": True,
+        "principal_id": "voice-lab-user-1",
+        "test_run_id": test_run_id,
+        "scenario_id": "V-B03",
+        "scenario_version": "vt00.scenarios.v1",
+        "environment": "production",
+        "retention_hours": 24,
+        "cleanup_obligation_id": "123e4567-e89b-42d3-a456-426614174000",
+        "provider_expires_at": provider_expires_at,
+        "synthetic_tool_evidence": {
+            "schema": "sophia_synthetic_tool_evidence_v1",
+            "test_run_id": test_run_id,
+            "scenario_id": "V-B03",
+            "scenario_version": "vt00.scenarios.v1",
+            "operation_id": f"operation-{index}",
+            "utterance_id": f"utterance-{index}",
+            "provider_input_sequence": index,
+            "public_utterance_id": f"public-utterance-{index}",
+            "tool_call_id": f"tool-call-{index}",
+            "effect_id": f"effect-{index}",
+            "provider_connection_epoch": 7,
+            "relay_correlation_id": f"relay-{index}",
+            "tool_name": tool_name,
+            "received_at": f"2026-08-23T12:00:{index:02d}.000Z",
+        },
+    }
+
+
+@pytest.mark.anyio
+async def test_synthetic_builder_lifecycle_preserves_exact_join_and_one_cancel() -> None:
+    backend = CapturingBuilderLifecycleHttpBackend(
+        [{"thread_id": "builder-task-join"}, {"run_id": "builder-run-start"}]
+    )
+    started = await backend.execute(
+        "start_builder_task",
+        {"description": "Create an HTML brief.", "task_type": "document"},
+        session_id="voice-session-join",
+        parent_thread_id="parent-thread-join",
+        user_id="voice-lab-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        async_tasks={},
+        trace_context=_synthetic_builder_trace_context("start_builder_task", index=1),
+    )
+    assert started.updated_async_tasks is not None
+    tasks = started.updated_async_tasks
+    started_join = started.response["synthetic_builder_join"]
+    assert started_join["effect_id"] == "effect-1"
+    assert started_join["task_id"] == "builder-task-join"
+    assert started_join["run_id"] == "builder-run-start"
+    assert tasks["builder-task-join"]["synthetic_builder_join"] == started_join
+
+    backend.responses.extend([{"status": "running"}])
+    checked = await backend.execute(
+        "check_async_task",
+        {"task_id": "builder-task-join"},
+        session_id="voice-session-join",
+        parent_thread_id="parent-thread-join",
+        user_id="voice-lab-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        async_tasks=tasks,
+        trace_context=_synthetic_builder_trace_context("check_async_task", index=2),
+    )
+    assert checked.response["synthetic_builder_join"]["effect_id"] == "effect-2"
+    assert checked.response["synthetic_builder_join"]["task_id"] == started_join["task_id"]
+    tasks = checked.updated_async_tasks or tasks
+
+    backend.responses.extend([{"status": "running"}, {"run_id": "builder-run-update"}])
+    updated = await backend.execute(
+        "update_async_task",
+        {"task_id": "builder-task-join", "message": "Add the reliability topic."},
+        session_id="voice-session-join",
+        parent_thread_id="parent-thread-join",
+        user_id="voice-lab-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        async_tasks=tasks,
+        trace_context=_synthetic_builder_trace_context("update_async_task", index=3),
+    )
+    updated_join = updated.response["synthetic_builder_join"]
+    assert updated_join["effect_id"] == "effect-3"
+    assert updated_join["task_id"] == started_join["task_id"]
+    assert updated_join["run_id"] == "builder-run-update"
+    assert updated_join["scenario_assertions"]["revision_updated_same_task"] is True
+    assert updated_join["scenario_assertions"]["current_behavior_result"] is False
+    assert updated_join["ui_projection_state"] is None
+    assert updated_join["source_ui_projected_at"] is None
+    tasks = updated.updated_async_tasks or tasks
+
+    backend.responses.extend([{}, {"status": "cancelled"}])
+    cancelled = await backend.execute(
+        "cancel_async_task",
+        {"task_id": "builder-task-join"},
+        session_id="voice-session-join",
+        parent_thread_id="parent-thread-join",
+        user_id="voice-lab-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        async_tasks=tasks,
+        trace_context=_synthetic_builder_trace_context("cancel_async_task", index=4),
+    )
+    cancel_join = cancelled.response["synthetic_builder_join"]
+    assert cancelled.response["cancel_count"] == 1
+    assert cancel_join["cancel_count"] == 1
+    assert cancel_join["scenario_assertions"]["cancel_terminal_settled"] is True
+    tasks = cancelled.updated_async_tasks or tasks
+
+    request_count = len(backend.requests)
+    repeated = await backend.execute(
+        "cancel_async_task",
+        {"task_id": "builder-task-join"},
+        session_id="voice-session-join",
+        parent_thread_id="parent-thread-join",
+        user_id="voice-lab-user-1",
+        runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+        provider="google-gemini-live",
+        async_tasks=tasks,
+        trace_context=_synthetic_builder_trace_context("cancel_async_task", index=5),
+    )
+    assert repeated.response["duplicate_guard"] is True
+    assert repeated.response["cancel_count"] == 1
+    assert len(backend.requests) == request_count
+
+
+@pytest.mark.anyio
+async def test_synthetic_cancel_binding_mismatch_fails_before_backend_side_effect() -> None:
+    backend = CapturingBuilderLifecycleHttpBackend([])
+    owned_context = _synthetic_builder_trace_context("cancel_async_task", index=1)
+    owned_context.pop("synthetic_tool_evidence")
+    task = {
+        "task_id": "builder-task-owned",
+        "thread_id": "builder-task-owned",
+        "run_id": "builder-run-owned",
+        "status": "running",
+        "parent_thread_id": "parent-thread-owned",
+        "synthetic_test": owned_context,
+    }
+    with pytest.raises(
+        gemini_tool_loop.GeminiDogfoodToolError,
+        match="owned task run binding",
+    ):
+        await backend.execute(
+            "cancel_async_task",
+            {"task_id": "builder-task-owned"},
+            session_id="voice-session-owned",
+            parent_thread_id="parent-thread-owned",
+            user_id="voice-lab-user-1",
+            runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+            provider="google-gemini-live",
+            async_tasks={"builder-task-owned": task},
+            trace_context=_synthetic_builder_trace_context(
+                "cancel_async_task",
+                index=2,
+                test_run_id="foreign-run",
+            ),
+        )
+    assert backend.requests == []
+
+
+@pytest.mark.anyio
+async def test_http_lifecycle_rejects_synthetic_thread_before_allocation_without_bounded_ttl(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    backend = CapturingBuilderLifecycleHttpBackend(
+        [{"thread_id": "must-not-allocate"}, {"run_id": "must-not-run"}]
+    )
+
+    with pytest.raises(
+        gemini_tool_loop.GeminiDogfoodToolError,
+        match="retention policy is missing or invalid",
+    ):
+        await backend.execute(
+            "start_builder_task",
+            {"description": "Make a document.", "task_type": "document"},
+            session_id="voice-session-synthetic",
+            parent_thread_id="companion-thread-synthetic",
+            user_id="voice-lab-user-1",
+            runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+            provider="google-gemini-live",
+            async_tasks={},
+            trace_context={
+                "synthetic": True,
+                "principal_id": "voice-lab-user-1",
+                "test_run_id": "run-001",
+                "scenario_id": "vt00-builder-001",
+                "scenario_version": "v1",
+                "environment": "production",
+                "cleanup_obligation_id": "123e4567-e89b-42d3-a456-426614174000",
+            },
+        )
+
+    assert backend.requests == []
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "provider_expires_at",
+    [None, "not-a-timestamp", "2020-01-01T00:00:00.000Z"],
+)
+async def test_http_lifecycle_rejects_missing_or_expired_provider_deadline_before_allocation(
+    provider_expires_at: str | None,
+) -> None:
+    backend = CapturingBuilderLifecycleHttpBackend(
+        [{"thread_id": "must-not-allocate"}, {"run_id": "must-not-run"}]
+    )
+    trace_context: dict[str, Any] = {
+        "synthetic": True,
+        "principal_id": "voice-lab-user-1",
+        "test_run_id": "run-001",
+        "scenario_id": "vt00-builder-001",
+        "scenario_version": "v1",
+        "environment": "production",
+        "retention_hours": 24,
+        "cleanup_obligation_id": "123e4567-e89b-42d3-a456-426614174000",
+    }
+    if provider_expires_at is not None:
+        trace_context["provider_expires_at"] = provider_expires_at
+
+    with pytest.raises(
+        gemini_tool_loop.GeminiDogfoodToolError,
+        match="provider deadline is missing or invalid",
+    ):
+        await backend.execute(
+            "start_builder_task",
+            {"description": "Make a document.", "task_type": "document"},
+            session_id="voice-session-synthetic",
+            parent_thread_id="companion-thread-synthetic",
+            user_id="voice-lab-user-1",
+            runtime_mode=VoiceRuntimeMode.GEMINI_LIVE,
+            provider="google-gemini-live",
+            async_tasks={},
+            trace_context=trace_context,
+        )
+
+    assert backend.requests == []
 
 
 @pytest.mark.anyio

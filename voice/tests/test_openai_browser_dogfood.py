@@ -366,7 +366,11 @@ async def test_sideband_messages_enter_existing_adapter_and_normalizer_path(
         "sophia.transcript",
         "sophia.turn",
     ]
-    assert payloads[1]["data"] == {"text": "Hello from browser WebRTC.", "is_final": False}
+    assert payloads[1]["data"] == {
+        "text": "Hello from browser WebRTC.",
+        "is_final": False,
+        "assistant_transcript_source": "output_audio_transcript",
+    }
     assert all(str(payload["type"]).startswith("sophia.") for payload in payloads)
     assert "response.output_audio_transcript" not in json.dumps(payloads)
 

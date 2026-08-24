@@ -1,0 +1,22 @@
+{
+  "schema_version": "sophia.voice-lab.fixture-sources.v1",
+  "generator": {
+    "engine": "apple-speech-synthesis",
+    "engine_version": "macOS-26.5-build-25F71",
+    "voice": "Samantha-en_US",
+    "rate": "155-wpm",
+    "output": "pcm16-mono-16000hz"
+  },
+  "sources": {
+    "short_command": {
+      "text": "Create a blue page titled Calm Harbor.",
+      "expected_tokens": ["create", "blue", "page", "calm", "harbor"],
+      "expected_slots": { "intent": "create_page", "color": "blue", "title": "calm harbor" }
+    },
+    "long_brief": {
+      "text": "Create an accessible calm workspace titled North Star. Add a navy header, a checklist with Prepare, Review, and Publish, and a footer that says Draft for Sophia Voice Lab.",
+      "expected_tokens": ["accessible", "workspace", "north", "star", "navy", "header", "prepare", "review", "publish", "draft", "sophia", "voice", "lab"],
+      "expected_slots": { "intent": "create_workspace", "title": "north star", "header_color": "navy", "checklist": ["prepare", "review", "publish"], "footer": "draft for sophia voice lab" }
+    }
+  }
+}

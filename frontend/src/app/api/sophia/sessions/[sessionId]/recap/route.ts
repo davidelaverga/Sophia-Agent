@@ -31,7 +31,7 @@ export async function GET(
       },
     });
   } catch (error) {
-    logger.logError(error, { component: 'api/sophia/sessions/[sessionId]/recap', action: 'get_recap' });
+    logger.logError(error, { component: 'api/sophia/sessions/[sessionId]/recap', action: 'get_recap', request });
     return NextResponse.json({ error: 'Failed to load Sophia recap' }, { status: 500 });
   }
 }

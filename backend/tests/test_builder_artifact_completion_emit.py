@@ -1451,12 +1451,10 @@ def test_exact_canary_is_durable_before_thread_start_and_only_posts_baseline(
     assert len(threads) == 1
     assert threads[0].kwargs["target"] is posted
     delivery_payload = threads[0].kwargs["args"][0]
-    assert calls == [
-        {
-            "url": "http://gateway.test/internal/builder-events",
-            "json": delivery_payload,
-        }
-    ]
+    assert len(calls) == 1
+    assert calls[0]["url"] == "http://gateway.test/internal/builder-events"
+    assert json.loads(calls[0]["content"]) == delivery_payload
+    assert calls[0]["headers"]["Content-Type"] == "application/json"
     assert "deck_quality_publication_intent" not in delivery_payload
     assert state == state_before
     assert artifact == artifact_before
@@ -2480,7 +2478,9 @@ def test_delivery_retries_never_replay_quality(
         call["url"] == "http://gateway.test/internal/builder-events"
         for call in calls
     )
-    assert all(call["json"] == payload for call in calls)
+    assert all(json.loads(call["content"]) == payload for call in calls)
+    nonces = [call["headers"]["X-Sophia-Builder-Nonce"] for call in calls]
+    assert len(set(nonces)) == len(nonces)
 
 
 def test_fire_webhook_allows_new_run_on_same_task_id():

@@ -16,6 +16,12 @@ from voice.sophia_tts import (
 from voice.tests.conftest import make_settings
 
 
+@pytest.fixture(autouse=True)
+def _cartesia_test_api_key(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Cartesia 3 validates its credential before tests replace the client."""
+    monkeypatch.setenv("CARTESIA_API_KEY", "test-cartesia-api-key")
+
+
 def _make_tts() -> SophiaTTS:
     """Create a SophiaTTS with mocked Cartesia client (no real API calls)."""
     settings = make_settings(cartesia_voice_id="test-voice-id", cartesia_model_id="sonic-3")

@@ -1,10 +1,16 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
 import {
+  getAuthenticatedUserId,
   getUserScopedAuthHeader,
   refreshUserScopedAuthHeader,
 } from '../../../../../lib/auth/server-auth';
 import { getPrimaryGatewayUrl } from '../../../../_lib/gateway-url';
+import {
+  getVoiceLabEndSessionCapability,
+  VOICE_LAB_CAPABILITY_HEADER,
+  VoiceLabCapabilityError,
+} from '@/server/voice-lab/capability';
 
 const BACKEND_URL = getPrimaryGatewayUrl();
 
@@ -25,6 +31,19 @@ async function proxyQuickPatchRequest(
   if (!authHeader) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
+  const authenticatedUserId = await getAuthenticatedUserId();
+  if (!authenticatedUserId) {
+    return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  }
+  let capability: string | null;
+  try {
+    capability = await getVoiceLabEndSessionCapability(authenticatedUserId);
+  } catch (error) {
+    if (error instanceof VoiceLabCapabilityError) {
+      return NextResponse.json({ error: error.code }, { status: error.status });
+    }
+    throw error;
+  }
 
   const body = await req.text();
   const url = new URL(`${BACKEND_URL}/api/threads/${encodeURIComponent(threadId)}/artifacts/quick-html-patch`);
@@ -35,6 +54,7 @@ async function proxyQuickPatchRequest(
       Authorization: authorization,
       'Content-Type': req.headers.get('content-type') || 'application/json',
       Accept: 'application/json',
+      ...(capability ? { [VOICE_LAB_CAPABILITY_HEADER]: capability } : {}),
     },
     body,
     cache: 'no-store',

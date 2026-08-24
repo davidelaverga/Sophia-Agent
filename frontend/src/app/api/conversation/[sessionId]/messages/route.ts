@@ -63,7 +63,7 @@ export async function GET(
     const data = await response.json();
     return NextResponse.json(data);
   } catch (error) {
-    logger.logError(error, { component: 'api/conversation/messages', action: 'fetch_messages' });
+    logger.logError(error, { component: 'api/conversation/messages', action: 'fetch_messages', request: req });
     return NextResponse.json({ error: 'Failed to fetch messages' }, { status: 502 });
   }
 }

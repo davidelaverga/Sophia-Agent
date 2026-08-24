@@ -55,7 +55,7 @@ export async function GET(req: NextRequest) {
     const data = await response.json();
     return NextResponse.json(data);
   } catch (error) {
-    logger.logError(error, { component: 'api/conversation/sessions', action: 'fetch_sessions' });
+    logger.logError(error, { component: 'api/conversation/sessions', action: 'fetch_sessions', request: req });
     return NextResponse.json({ error: 'Failed to fetch conversations' }, { status: 502 });
   }
 }

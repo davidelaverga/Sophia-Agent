@@ -26,6 +26,7 @@ from deerflow.sophia.deck_design_lift.invocation_auth import (
 
 _SECRET = "0123456789abcdef0123456789abcdef"
 _NOW = 2_000_000_000
+_COMMIT_SHA = "0123456789abcdef0123456789abcdef01234567"
 
 
 def _payload(**updates: object) -> dict[str, object]:
@@ -52,6 +53,51 @@ def _configured_auth(monkeypatch: pytest.MonkeyPatch) -> None:
         "authenticate_deck_design_lift_invocation",
         partial(authenticate_deck_design_lift_invocation, now=_NOW),
     )
+
+
+@pytest.mark.anyio
+async def test_version_exposes_only_the_exact_render_commit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("RENDER_GIT_COMMIT", _COMMIT_SHA)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/version")
+
+    assert response.status_code == 200
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "service": "sophia-langgraph",
+        "commit_sha": _COMMIT_SHA,
+    }
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("candidate", [None, "main", "A" * 40, "a" * 39])
+async def test_version_fails_closed_without_an_exact_render_commit(
+    monkeypatch: pytest.MonkeyPatch,
+    candidate: str | None,
+) -> None:
+    if candidate is None:
+        monkeypatch.delenv("RENDER_GIT_COMMIT", raising=False)
+    else:
+        monkeypatch.setenv("RENDER_GIT_COMMIT", candidate)
+
+    async with httpx.AsyncClient(
+        transport=httpx.ASGITransport(app=app),
+        base_url="http://test",
+    ) as client:
+        response = await client.get("/version")
+
+    assert response.status_code == 503
+    assert response.headers["cache-control"] == "no-store"
+    assert response.json() == {
+        "service": "sophia-langgraph",
+        "status": "identity_unavailable",
+    }
 
 
 def test_invocation_auth_accepts_one_fresh_exact_body_and_rejects_replay() -> None:

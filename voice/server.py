@@ -6,14 +6,17 @@ import binascii
 import logging
 import time
 from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
+from uuid import UUID
 
 from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request, Response, status
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import StreamingResponse
+from fastapi.responses import JSONResponse, StreamingResponse
 from fastapi.routing import APIRoute
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 from vision_agents.core import Agent, AgentLauncher, Runner, User
 from vision_agents.core.llm.llm import LLMResponseEvent
 from vision_agents.core.runner.http.api import lifespan as runner_http_lifespan
@@ -68,6 +71,14 @@ from voice.vision_agents_compat import (
     TurnEndedEvent,
     resolve_agent_constructor_kwargs,
 )
+from voice.internal_auth import (
+    capability_for_production_action,
+    capability_for_production_start,
+    capability_for_retention_reap,
+    require_voice_internal_auth,
+    voice_security_readiness,
+    voice_service_identity,
+)
 
 logger = logging.getLogger(__name__)
 voice_event_broker = VoiceEventBroker()
@@ -75,6 +86,19 @@ realtime_dogfood_sessions = RealtimeDogfoodSessionManager()
 openai_browser_dogfood_sessions = OpenAIBrowserDogfoodSessionManager(realtime_dogfood_sessions)
 gemini_browser_dogfood_sessions = GeminiBrowserDogfoodSessionManager(realtime_dogfood_sessions)
 gemini_production_browser_sessions = GeminiProductionBrowserSessionManager(gemini_browser_dogfood_sessions)
+
+VOICE_LAB_TRACE_FAULT_SCENARIO_ID = "V-L01"
+VOICE_LAB_TRACE_FAULT_MODE = "langsmith_unavailable"
+VOICE_LAB_TRACE_FAULT_SCHEMA = "sophia_voice_lab_trace_fault_v1"
+
+
+@asynccontextmanager
+async def _sophia_voice_lifespan(app: FastAPI):  # noqa: ANN201
+    async with runner_http_lifespan(app):
+        try:
+            yield
+        finally:
+            await gemini_production_browser_sessions.close_all()
 
 
 def _voice_event_cursor(request: Request) -> int | None:
@@ -204,6 +228,25 @@ class SophiaGeminiBrowserDogfoodStartRequest(BaseModel):
     session_id: str | None = Field(default=None, description="Optional deterministic dogfood session id")
 
 
+class SophiaGeminiSyntheticToolEvidenceRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema: str = Field(pattern=r"^sophia_synthetic_tool_evidence_v1$")
+    test_run_id: str = Field(min_length=1, max_length=512)
+    scenario_id: str = Field(min_length=1, max_length=512)
+    scenario_version: str = Field(min_length=1, max_length=512)
+    operation_id: str = Field(min_length=1, max_length=512)
+    utterance_id: str = Field(min_length=1, max_length=512)
+    provider_input_sequence: int = Field(gt=0)
+    public_utterance_id: str | None = Field(default=None, min_length=1, max_length=512)
+    tool_call_id: str = Field(min_length=1, max_length=512)
+    effect_id: str = Field(pattern=r"^effect:[0-9a-f-]{36}$")
+    provider_connection_epoch: int = Field(gt=0)
+    relay_correlation_id: str = Field(min_length=1, max_length=512)
+    tool_name: str = Field(min_length=1, max_length=256)
+    received_at: str = Field(min_length=1, max_length=64)
+
+
 class SophiaGeminiBrowserRelayRequest(BaseModel):
     """Browser-captured Gemini Live server message for normalized observation."""
 
@@ -218,6 +261,7 @@ class SophiaGeminiBrowserRelayRequest(BaseModel):
         gt=0,
         description="Browser-assigned monotonic sequence for relayed Gemini provider messages",
     )
+    provider_connection_epoch: int | None = Field(default=None, gt=0)
     provider_received_at: str | None = Field(
         default=None,
         description="Browser ISO timestamp recorded when the provider WebSocket message was received",
@@ -234,15 +278,23 @@ class SophiaGeminiBrowserRelayRequest(BaseModel):
         default=None,
         description="Browser-classified provider event categories",
     )
+    synthetic_tool_evidence: list[SophiaGeminiSyntheticToolEvidenceRequest] = Field(
+        default_factory=list,
+        max_length=16,
+    )
 
     def source_metadata(self) -> GeminiRelaySourceMetadata | None:
         return GeminiRelaySourceMetadata.from_relay_fields(
             provider_receive_sequence=self.provider_receive_sequence,
             provider_relay_sequence=self.provider_relay_sequence,
+            provider_connection_epoch=self.provider_connection_epoch,
             provider_received_at=self.provider_received_at,
             relay_correlation_id=self.relay_correlation_id,
             provider_primary_category=self.provider_primary_category,
             provider_categories=self.provider_categories,
+            synthetic_tool_evidence=[
+                item.model_dump(mode="json") for item in self.synthetic_tool_evidence
+            ],
         )
 
 
@@ -283,6 +335,26 @@ class SophiaGeminiProductionStartRequest(BaseModel):
         default=None,
         description="Best-effort cleanup TTL for an unused preconnect bootstrap",
     )
+    synthetic_test: dict[str, str | bool | int] | None = Field(
+        default=None,
+        description="Gateway-authenticated synthetic run identity; never accepted without a capability.",
+    )
+    synthetic_trace_mode: str | None = Field(
+        default=None,
+        description="Gateway-authorized synthetic-only trace outage mode.",
+    )
+    cleanup_admission_id: str | None = Field(
+        default=None,
+        description="Gateway-authored opaque provider allocation admission.",
+    )
+    cleanup_admission_expires_at: str | None = Field(
+        default=None,
+        description="Exact admission quiescence deadline for rolling replicas.",
+    )
+    cleanup_resource_expires_at: str | None = Field(
+        default=None,
+        description="Provider-enforced immutable absolute message deadline.",
+    )
 
 
 class SophiaGeminiContinuationBootstrapRequest(BaseModel):
@@ -291,9 +363,175 @@ class SophiaGeminiContinuationBootstrapRequest(BaseModel):
     secret_generation: int = Field(default=0, ge=0)
 
 
-session_router = APIRouter()
-dogfood_router = APIRouter(prefix="/dogfood/realtime", tags=["internal-realtime-dogfood"])
-production_realtime_router = APIRouter(prefix="/production/realtime", tags=["production-realtime"])
+class SophiaGeminiProviderActivationRequest(BaseModel):
+    previous_activated_epoch: int = Field(ge=0)
+    candidate_epoch: int = Field(gt=0)
+
+
+def _provider_cleanup_admission_deadline(
+    body: SophiaGeminiProductionStartRequest,
+    *,
+    synthetic: bool,
+) -> tuple[float | None, float | None]:
+    admission_id = body.cleanup_admission_id
+    raw_deadline = body.cleanup_admission_expires_at
+    raw_resource_deadline = body.cleanup_resource_expires_at
+    if not synthetic:
+        if (
+            admission_id is not None
+            or raw_deadline is not None
+            or raw_resource_deadline is not None
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "voice_cleanup_admission_not_allowed"},
+            )
+        return None, None
+    try:
+        parsed_id = UUID(str(admission_id))
+        parsed_deadline = datetime.fromisoformat(
+            str(raw_deadline).replace("Z", "+00:00")
+        ).astimezone(UTC)
+        parsed_resource_deadline = datetime.fromisoformat(
+            str(raw_resource_deadline).replace("Z", "+00:00")
+        ).astimezone(UTC)
+    except (TypeError, ValueError):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "voice_lab_cleanup_admission_invalid"},
+        ) from None
+    canonical_deadline = (
+        parsed_deadline.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    )
+    canonical_resource_deadline = (
+        parsed_resource_deadline.isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+    deadline_epoch = parsed_deadline.timestamp()
+    if (
+        parsed_id.version != 4
+        or str(parsed_id) != admission_id
+        or canonical_deadline != raw_deadline
+        or canonical_resource_deadline != raw_resource_deadline
+        or body.session_id is None
+        or parsed_resource_deadline < parsed_deadline
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail={"code": "voice_lab_cleanup_admission_invalid"},
+        )
+    return deadline_epoch, parsed_resource_deadline.timestamp()
+
+
+_internal_dependencies = [Depends(require_voice_internal_auth)]
+session_router = APIRouter(dependencies=_internal_dependencies)
+dogfood_router = APIRouter(
+    prefix="/dogfood/realtime",
+    tags=["internal-realtime-dogfood"],
+    dependencies=_internal_dependencies,
+)
+production_realtime_router = APIRouter(
+    prefix="/production/realtime",
+    tags=["production-realtime"],
+    dependencies=_internal_dependencies,
+)
+
+
+def _capability_for_existing_production_session(
+    request: Request,
+    session_id: str,
+    *,
+    required_operation: str,
+    allow_kill_switch: bool,
+):
+    synthetic_context = gemini_production_browser_sessions.synthetic_context_for_session(
+        session_id
+    )
+    user_id = (
+        str(synthetic_context.get("principal_id"))
+        if synthetic_context is not None
+        else "ordinary-production-session"
+    )
+    return capability_for_production_action(
+        request,
+        user_id=user_id,
+        synthetic_context=synthetic_context,
+        required_operation=required_operation,
+        allow_kill_switch=allow_kill_switch,
+    )
+
+
+def _trace_fault_receipt(
+    claims: object,
+    *,
+    phase: str,
+    applied_at: str | None = None,
+) -> dict[str, object]:
+    now = (
+        datetime.now(UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+    resolved_applied_at = applied_at or now
+    return {
+        "schema": VOICE_LAB_TRACE_FAULT_SCHEMA,
+        "fault": VOICE_LAB_TRACE_FAULT_MODE,
+        "phase": phase,
+        "principal_id": getattr(claims, "principal_id"),
+        "test_run_id": getattr(claims, "test_run_id"),
+        "scenario_id": getattr(claims, "scenario_id"),
+        "scenario_version": getattr(claims, "scenario_version"),
+        "environment": getattr(claims, "environment"),
+        "expected_deployment": dict(getattr(claims, "expected_deployment")),
+        "trace_unavailable": True,
+        "canonical_behavior_unchanged": True,
+        "applied_at": resolved_applied_at,
+        "restored_at": now if phase == "restored" else None,
+    }
+
+
+def _finalize_or_recover_capability_for_existing_production_session(
+    request: Request,
+    session_id: str,
+):
+    synthetic_context = gemini_production_browser_sessions.synthetic_context_for_session(
+        session_id
+    )
+    if (
+        synthetic_context is None
+        and not gemini_production_browser_sessions.session_exists(session_id)
+        and bool(request.headers.get("X-Sophia-Voice-Lab-Capability"))
+    ):
+        return capability_for_retention_reap(
+            request,
+            provider_session_id=session_id,
+            synthetic_context=None,
+        )
+    try:
+        return _capability_for_existing_production_session(
+            request,
+            session_id,
+            required_operation="session:finalize",
+            allow_kill_switch=True,
+        )
+    except HTTPException as exc:
+        if exc.detail != {"code": "voice_lab_capability_operation_denied"}:
+            raise
+    try:
+        return _capability_for_existing_production_session(
+            request,
+            session_id,
+            required_operation="session:recover",
+            allow_kill_switch=True,
+        )
+    except HTTPException as exc:
+        if exc.detail != {"code": "voice_lab_capability_operation_denied"}:
+            raise
+    return capability_for_retention_reap(
+        request,
+        provider_session_id=session_id,
+        synthetic_context=synthetic_context,
+    )
 
 
 def _bind_agent_session_context(
@@ -890,24 +1128,93 @@ async def close_gemini_browser_dogfood_session(
     ),
 )
 async def start_gemini_production_browser_session(
-    request: SophiaGeminiProductionStartRequest,
+    body: SophiaGeminiProductionStartRequest,
+    http_request: Request,
 ) -> dict[str, object]:
+    voice_lab_claims = capability_for_production_start(
+        http_request,
+        user_id=body.user_id,
+        synthetic_context=body.synthetic_test,
+    )
+    (
+        cleanup_admission_deadline_epoch,
+        cleanup_resource_deadline_epoch,
+    ) = _provider_cleanup_admission_deadline(
+        body,
+        synthetic=voice_lab_claims is not None,
+    )
+    trace_fault_receipt: dict[str, object] | None = None
+    if voice_lab_claims is not None and voice_lab_claims.scenario_id == VOICE_LAB_TRACE_FAULT_SCENARIO_ID:
+        if body.synthetic_trace_mode != VOICE_LAB_TRACE_FAULT_MODE:
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail={"code": "voice_lab_trace_fault_mode_required"},
+            )
+    if body.synthetic_trace_mode is not None:
+        if body.synthetic_trace_mode != VOICE_LAB_TRACE_FAULT_MODE:
+            raise HTTPException(
+                status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+                detail={"code": "voice_lab_trace_fault_mode_invalid"},
+            )
+        trace_claims = capability_for_production_action(
+            http_request,
+            user_id=body.user_id,
+            synthetic_context=body.synthetic_test,
+            required_operation="trace:fault",
+        )
+        if (
+            trace_claims is None
+            or trace_claims.scenario_id != VOICE_LAB_TRACE_FAULT_SCENARIO_ID
+        ):
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "voice_lab_trace_fault_scope_mismatch"},
+            )
+        trace_fault_receipt = _trace_fault_receipt(trace_claims, phase="applied")
+    realtime_context = dict(body.realtime_context or {})
+    if voice_lab_claims is not None:
+        if "dynamic_memory_retrieval" in realtime_context:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "voice_lab_memory_retrieval_forbidden"},
+            )
+        expected_synthetic_context = voice_lab_claims.synthetic_context()
+        if realtime_context.get("synthetic_test") != expected_synthetic_context:
+            raise HTTPException(
+                status_code=status.HTTP_403_FORBIDDEN,
+                detail={"code": "voice_lab_synthetic_context_mismatch"},
+            )
+        realtime_context["synthetic_test"] = expected_synthetic_context
+        diagnostics = realtime_context.setdefault("diagnostics", {})
+        if isinstance(diagnostics, dict):
+            diagnostics["dynamic_retrieve_configured"] = False
+            diagnostics["memory_retrieval_disabled"] = True
+            diagnostics["synthetic_test"] = True
     try:
         settings = get_settings()
         validate_live_voice_server_runtime(settings)
         browser_session = await gemini_production_browser_sessions.start_browser_session(
             settings,
-            user_id=request.user_id,
-            session_id=request.session_id,
-            thread_id=request.thread_id,
-            platform=request.platform,
-            context_mode=request.context_mode,
-            ritual=request.ritual,
-            realtime_context=request.realtime_context,
+            user_id=body.user_id,
+            session_id=body.session_id,
+            thread_id=body.thread_id,
+            platform=body.platform,
+            context_mode=body.context_mode,
+            ritual=body.ritual,
+            realtime_context=realtime_context,
             preconnect_ttl_seconds=(
-                request.preconnect_ttl_seconds if request.preconnect else None
+                body.preconnect_ttl_seconds if body.preconnect else None
             ),
-            logical_session_id=request.logical_session_id,
+            logical_session_id=body.logical_session_id,
+            trace_fault_receipt=trace_fault_receipt,
+            cleanup_admission_expires_at_epoch=cleanup_admission_deadline_epoch,
+            cleanup_resource_expires_at_epoch=cleanup_resource_deadline_epoch,
+            cleanup_admission_id=body.cleanup_admission_id,
+            cleanup_obligation_id=(
+                voice_lab_claims.cleanup_obligation_id
+                if voice_lab_claims is not None
+                else None
+            ),
         )
     except RealtimeDogfoodConfigurationError as exc:
         raise HTTPException(
@@ -925,7 +1232,12 @@ async def start_gemini_production_browser_session(
             detail=str(exc),
         ) from exc
 
-    return browser_session.as_public_payload()
+    payload = browser_session.as_public_payload()
+    if voice_lab_claims is not None:
+        payload["synthetic_test"] = voice_lab_claims.synthetic_context()
+    if trace_fault_receipt is not None:
+        payload["trace_fault"] = trace_fault_receipt
+    return payload
 
 
 @production_realtime_router.post(
@@ -935,17 +1247,24 @@ async def start_gemini_production_browser_session(
 )
 async def continue_gemini_production_browser_session(
     session_id: str,
-    request: SophiaGeminiContinuationBootstrapRequest,
+    body: SophiaGeminiContinuationBootstrapRequest,
+    http_request: Request,
 ) -> dict[str, object]:
+    _capability_for_existing_production_session(
+        http_request,
+        session_id,
+        required_operation="session:create",
+        allow_kill_switch=False,
+    )
     try:
         settings = get_settings()
         validate_live_voice_server_runtime(settings)
         browser_session = await gemini_production_browser_sessions.continue_browser_session(
             settings,
             session_id=session_id,
-            expected_epoch=request.expected_epoch,
-            handle_present=request.handle_present,
-            secret_generation=request.secret_generation,
+            expected_epoch=body.expected_epoch,
+            handle_present=body.handle_present,
+            secret_generation=body.secret_generation,
         )
     except RealtimeDogfoodConfigurationError as exc:
         raise HTTPException(status_code=status.HTTP_409_CONFLICT, detail=str(exc)) from exc
@@ -959,7 +1278,57 @@ async def continue_gemini_production_browser_session(
     except GeminiEphemeralTokenMintError as exc:
         raise HTTPException(status_code=status.HTTP_502_BAD_GATEWAY, detail=str(exc)) from exc
 
-    return browser_session.as_public_payload()
+    payload = browser_session.as_public_payload()
+    synthetic_context = gemini_production_browser_sessions.synthetic_context_for_session(
+        session_id
+    )
+    if synthetic_context is not None:
+        payload["synthetic_test"] = synthetic_context
+    return payload
+
+
+@production_realtime_router.post(
+    "/gemini/browser-sessions/{session_id}/activate",
+    status_code=status.HTTP_200_OK,
+    summary="Commit one browser-open synthetic Gemini provider epoch",
+)
+async def activate_gemini_production_browser_session(
+    session_id: str,
+    body: SophiaGeminiProviderActivationRequest,
+    http_request: Request,
+) -> dict[str, object]:
+    _capability_for_existing_production_session(
+        http_request,
+        session_id,
+        required_operation="session:create",
+        allow_kill_switch=False,
+    )
+    if (
+        gemini_production_browser_sessions.synthetic_context_for_session(session_id)
+        is None
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_422_UNPROCESSABLE_ENTITY,
+            detail={"code": "provider_activation_not_allowed"},
+        )
+    try:
+        activated_epoch = (
+            await gemini_production_browser_sessions.activate_browser_session_epoch(
+                session_id=session_id,
+                previous_activated_epoch=body.previous_activated_epoch,
+                candidate_epoch=body.candidate_epoch,
+            )
+        )
+    except (RealtimeDogfoodConfigurationError, GeminiBrowserRelayError) as exc:
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail=str(exc),
+        ) from exc
+    return {
+        "activated": True,
+        "session_id": session_id,
+        "provider_connection_epoch": activated_epoch,
+    }
 
 
 @production_realtime_router.post(
@@ -969,16 +1338,23 @@ async def continue_gemini_production_browser_session(
 )
 async def relay_gemini_production_provider_event(
     session_id: str,
-    request: SophiaGeminiBrowserRelayRequest,
+    body: SophiaGeminiBrowserRelayRequest,
+    http_request: Request,
 ) -> dict[str, object]:
-    log_context = _gemini_relay_context(session_id, request)
+    _capability_for_existing_production_session(
+        http_request,
+        session_id,
+        required_operation="session:create",
+        allow_kill_switch=False,
+    )
+    log_context = _gemini_relay_context(session_id, body)
     try:
         settings = get_settings()
         payload = await gemini_production_browser_sessions.ingest_browser_provider_event(
             settings,
             session_id=session_id,
-            event=request.event,
-            source_metadata=request.source_metadata(),
+            event=body.event,
+            source_metadata=body.source_metadata(),
         )
         logger.info("voice.gemini.production_relay accepted context=%s", log_context)
         return payload
@@ -1023,6 +1399,12 @@ async def stream_gemini_production_session_events(
     session_id: str,
     request: Request,
 ) -> StreamingResponse:
+    _capability_for_existing_production_session(
+        request,
+        session_id,
+        required_operation="session:finalize",
+        allow_kill_switch=True,
+    )
     session = _get_dogfood_session_or_404(session_id)
     if session.runtime_mode != VoiceRuntimeMode.GEMINI_LIVE:
         raise HTTPException(
@@ -1047,24 +1429,69 @@ async def stream_gemini_production_session_events(
 )
 async def close_gemini_production_browser_session(
     session_id: str,
-    request: SophiaGeminiBrowserDisconnectRequest | None = None,
+    http_request: Request,
+    body: SophiaGeminiBrowserDisconnectRequest | None = None,
 ) -> Response:
-    disconnect_request = request or SophiaGeminiBrowserDisconnectRequest(session_id=session_id)
+    voice_lab_claims = _finalize_or_recover_capability_for_existing_production_session(
+        http_request,
+        session_id,
+    )
+    disconnect_request = body or SophiaGeminiBrowserDisconnectRequest(session_id=session_id)
+    if voice_lab_claims is not None and disconnect_request.conversation_audio_base64:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN,
+            detail={"code": "voice_lab_raw_audio_forbidden"},
+        )
     try:
         audio, mime_type = _decode_conversation_audio(disconnect_request)
     except ValueError as exc:
         raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST, detail=str(exc)) from exc
-    closed = await gemini_production_browser_sessions.close_session(
-        session_id,
-        conversation_audio=audio,
-        conversation_audio_mime_type=mime_type,
+    applied_trace_fault = gemini_production_browser_sessions.trace_fault_for_session(
+        session_id
     )
+    if (
+        voice_lab_claims is not None
+        and "session:retention-reap" in voice_lab_claims.allowed_ops
+    ):
+        cleanup_requested = await gemini_production_browser_sessions.request_browser_cleanup(
+            session_id
+        )
+        if not cleanup_requested:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail=f"Gemini production session with id '{session_id}' not found",
+            )
+        return JSONResponse(
+            {"ok": True, "closed": False, "cleanup_requested": True},
+            status_code=status.HTTP_202_ACCEPTED,
+        )
+    else:
+        restored_trace_fault = (
+            {
+                **applied_trace_fault,
+                "phase": "restored",
+                "restored_at": datetime.now(UTC)
+                .isoformat(timespec="milliseconds")
+                .replace("+00:00", "Z"),
+            }
+            if applied_trace_fault is not None
+            else None
+        )
+        closed = await gemini_production_browser_sessions.close_session(
+            session_id,
+            conversation_audio=audio,
+            conversation_audio_mime_type=mime_type,
+            trace_fault_restore_receipt=restored_trace_fault,
+        )
     if not closed:
         raise HTTPException(
             status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Gemini production session with id '{session_id}' not found",
         )
-    return Response(status_code=status.HTTP_202_ACCEPTED)
+    payload: dict[str, object] = {"ok": True, "closed": True}
+    if restored_trace_fault is not None:
+        payload["trace_fault"] = restored_trace_fault
+    return JSONResponse(payload, status_code=status.HTTP_202_ACCEPTED)
 
 
 @dogfood_router.post(
@@ -1140,9 +1567,50 @@ def create_fastapi_app(
     options: ServeOptions | None = None,
 ) -> FastAPI:
     resolved_options = options or ServeOptions()
-    app = FastAPI(lifespan=runner_http_lifespan)
+    app = FastAPI(lifespan=_sophia_voice_lifespan)
     app.state.launcher = launcher
     app.state.options = resolved_options
+
+    @app.get("/version", include_in_schema=False)
+    async def voice_version() -> dict[str, str | None]:
+        return voice_service_identity()
+
+    @app.get("/health", include_in_schema=False)
+    async def voice_health() -> dict[str, str]:
+        return {"status": "ok", "service": "sophia-voice"}
+
+    @app.get("/ready", include_in_schema=False)
+    async def voice_ready() -> dict[str, object]:
+        security = voice_security_readiness()
+        try:
+            settings = get_settings()
+            if security["voice_lab_enabled"] is True:
+                if (
+                    settings.voice_runtime_selection.mode != VoiceRuntimeMode.GEMINI_LIVE
+                    or not settings.gemini_production_route_enabled
+                ):
+                    raise RuntimeError("synthetic production route not selected")
+            validate_live_voice_server_runtime(settings)
+        except (RuntimeError, ValueError) as exc:
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "voice_provider_configuration_invalid"},
+            ) from exc
+        return {
+            "status": "ready",
+            "service": "sophia-voice",
+            **security,
+            "provider_configured": True,
+        }
+
+    @app.middleware("http")
+    async def protect_runner_call_resources(request: Request, call_next):  # noqa: ANN001
+        if request.url.path.startswith("/calls/"):
+            try:
+                require_voice_internal_auth(request)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        return await call_next(request)
 
     app.dependency_overrides[can_start_session] = resolved_options.can_start_session
     app.dependency_overrides[can_close_session] = resolved_options.can_close_session

@@ -35,11 +35,19 @@ from fastapi import FastAPI
 from httpx import ASGITransport
 
 from app.gateway.routers import builder_events as routes
+from app.gateway.workers import companion_wakeup as wakeup_module
 from app.gateway.workers.builder_events import install_builder_events_worker
 from app.gateway.workers.companion_wakeup import (
     CompanionWakeup,
     install_companion_wakeup,
 )
+
+
+@pytest.fixture(autouse=True)
+def _allow_readable_langgraph_thread_ids(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Legacy fixtures use readable IDs; production still requires UUIDs."""
+
+    monkeypatch.setattr(wakeup_module, "_is_langgraph_thread_id", lambda _value: True)
 
 
 class _FakeRunsClient:
@@ -284,6 +292,7 @@ def app_with_wakeup() -> FastAPI:
     test_app = FastAPI()
     install_builder_events_worker(test_app, cache_ttl_seconds=60)
     install_companion_wakeup(test_app, langgraph_url="http://test-langgraph")
+    test_app.dependency_overrides[routes.require_builder_event_service_auth] = lambda: None
     test_app.include_router(routes.internal_router)
     test_app.include_router(routes.public_router)
     return test_app
@@ -364,6 +373,7 @@ async def test_internal_post_works_without_wakeup_installed():
     """
     test_app = FastAPI()
     install_builder_events_worker(test_app, cache_ttl_seconds=60)
+    test_app.dependency_overrides[routes.require_builder_event_service_auth] = lambda: None
     # Note: install_companion_wakeup is NOT called.
     test_app.include_router(routes.internal_router)
     test_app.include_router(routes.public_router)

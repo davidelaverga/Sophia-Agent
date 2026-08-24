@@ -40,6 +40,7 @@ from deerflow.agents.sophia_agent.paths import SKILLS_PATH
 from deerflow.agents.sophia_agent.state import _merge_builder_non_artifact_turns
 from deerflow.agents.sophia_agent.utils import log_middleware
 from deerflow.sophia.builder_memory_filter import filter_builder_memory_snippets
+from deerflow.sophia.synthetic_builder import normalize_synthetic_builder_context
 
 logger = logging.getLogger(__name__)
 
@@ -490,7 +491,7 @@ def _page_range_target(combined: str) -> tuple[int, int] | None:
         low = _valid_page_count(match.group(1))
         high = _valid_page_count(match.group(2))
         if low is not None and high is not None:
-            return tuple(sorted((low, high)))
+            return (min(low, high), max(low, high))
     return None
 
 
@@ -1092,6 +1093,10 @@ class BuilderTaskState(AgentState):
     # `tests/test_sophia_state_schema_invariants.py` guard locks this.
     allow_web_research: NotRequired[bool]
     builder_run_id: NotRequired[str]
+    synthetic_test: NotRequired[dict[str, Any] | None]
+    synthetic_builder_join: NotRequired[dict[str, Any] | None]
+    injected_memories: NotRequired[list[str]]
+    injected_memory_contents: NotRequired[list[str]]
 
 
 class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
@@ -1122,25 +1127,55 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         _t0 = time.perf_counter()
 
         delegation_context: dict[str, Any] = state.get("delegation_context") or {}
+        runtime_config = getattr(runtime, "config", None)
+        synthetic_context = normalize_synthetic_builder_context(
+            state,
+            delegation_context,
+            runtime_config,
+        )
 
         if not delegation_context:
             log_middleware("BuilderTask", "no delegation_context", _t0)
-            return None
+            return (
+                {
+                    "synthetic_test": synthetic_context,
+                    "injected_memories": [],
+                    "injected_memory_contents": [],
+                }
+                if synthetic_context is not None
+                else None
+            )
 
         # ``or {}`` handles the Builder-as-Main synthesised path where
         # ``companion_artifact`` is explicitly None (no companion to source it
         # from). Spec Appendix B shows the canonical synthesised shape.
-        companion_artifact: dict[str, Any] = delegation_context.get("companion_artifact") or {}
+        companion_artifact: dict[str, Any] = (
+            {}
+            if synthetic_context is not None
+            else delegation_context.get("companion_artifact") or {}
+        )
         task_type: str = delegation_context.get("task_type", "unknown")
         task_brief = str(delegation_context.get("task") or delegation_context.get("task_brief") or "")
-        relevant_memories: list[str] = filter_builder_memory_snippets(
-            delegation_context.get("relevant_memories") or [],
-            query=task_brief,
-            task_type=task_type,
-            limit=5,
+        relevant_memories: list[str] = (
+            []
+            if synthetic_context is not None
+            else filter_builder_memory_snippets(
+                delegation_context.get("relevant_memories") or [],
+                query=task_brief,
+                task_type=task_type,
+                limit=5,
+            )
         )
-        active_ritual: str | None = delegation_context.get("active_ritual")
-        ritual_phase: str | None = delegation_context.get("ritual_phase")
+        active_ritual: str | None = (
+            None
+            if synthetic_context is not None
+            else delegation_context.get("active_ritual")
+        )
+        ritual_phase: str | None = (
+            None
+            if synthetic_context is not None
+            else delegation_context.get("ritual_phase")
+        )
         state_research_policy = state.get("allow_web_research")
         delegated_research_policy = delegation_context.get("allow_web_research")
         if isinstance(state_research_policy, bool):
@@ -1410,9 +1445,10 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         # plans from turn 0 instead of discovering the limit mid-loop.
         # Sourced from the per-run builder_budget tier so prompt math matches
         # the middleware's force-emit threshold for simple and complex builds.
-        _HARD_CEILING = max_non_artifact_turns(state)
+        state_dict = dict(state)
+        _HARD_CEILING = max_non_artifact_turns(state_dict)
         remaining = max(_HARD_CEILING - non_artifact_turns, 0)
-        wall_clock_force_fraction = force_emit_wall_clock_fraction(state)
+        wall_clock_force_fraction = force_emit_wall_clock_fraction(state_dict)
         wall_clock_force_pct = int(round(wall_clock_force_fraction * 100))
 
         wall_clock_line = ""
@@ -1592,6 +1628,16 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         briefing = "<builder_briefing>\n" + "\n\n".join(sections) + "\n</builder_briefing>"
 
         blocks = list(state.get("system_prompt_blocks", []))
+        if synthetic_context is not None:
+            # A resumed state may contain a memory block from an earlier
+            # ordinary invocation. Synthetic execution strips only the two
+            # explicitly memory-authored block shapes and leaves all product
+            # task guidance unchanged.
+            blocks = [
+                block
+                for block in blocks
+                if not str(block).lstrip().startswith(("<memory>", "<memories>"))
+            ]
         blocks.append(briefing)
 
         log_middleware(
@@ -1602,6 +1648,15 @@ class BuilderTaskMiddleware(AgentMiddleware[BuilderTaskState]):
         return {
             "system_prompt_blocks": blocks,
             **({"builder_run_id": builder_run_id} if (builder_run_id := _runtime_builder_run_id(runtime)) else {}),
+            **(
+                {
+                    "synthetic_test": synthetic_context,
+                    "injected_memories": [],
+                    "injected_memory_contents": [],
+                }
+                if synthetic_context is not None
+                else {}
+            ),
             **boundary_state_updates,
             **page_target_updates,
             **report_requirement_updates,

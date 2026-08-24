@@ -6,9 +6,10 @@ import tempfile
 import zipfile
 from pathlib import Path
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.gateway.auth import require_authenticated_user
 from app.gateway.path_utils import resolve_thread_virtual_path
 from deerflow.config.extensions_config import ExtensionsConfig, SkillStateConfig, get_extensions_config, reload_extensions_config
 from deerflow.skills import Skill, load_skills
@@ -86,7 +87,11 @@ def _safe_extract_skill_archive(
             shutil.copyfileobj(src, dst)
 
 
-router = APIRouter(prefix="/api", tags=["skills"])
+router = APIRouter(
+    prefix="/api",
+    tags=["skills"],
+    dependencies=[Depends(require_authenticated_user)],
+)
 
 
 class SkillResponse(BaseModel):
@@ -244,6 +249,7 @@ async def get_skill(skill_name: str) -> SkillResponse:
     response_model=SkillResponse,
     summary="Update Skill",
     description="Update a skill's enabled status by modifying the extensions_config.json file.",
+    dependencies=[Depends(require_authenticated_user)],
 )
 async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillResponse:
     """Update a skill's enabled status.
@@ -337,6 +343,7 @@ async def update_skill(skill_name: str, request: SkillUpdateRequest) -> SkillRes
     response_model=SkillInstallResponse,
     summary="Install Skill",
     description="Install a skill from a .skill file (ZIP archive) located in the thread's user-data directory.",
+    dependencies=[Depends(require_authenticated_user)],
 )
 async def install_skill(request: SkillInstallRequest) -> SkillInstallResponse:
     """Install a skill from a .skill file.

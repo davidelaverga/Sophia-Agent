@@ -5,7 +5,8 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi import FastAPI, HTTPException
-from httpx import ASGITransport, AsyncClient, Request as HttpxRequest, Response
+from httpx import ASGITransport, AsyncClient, Response
+from httpx import Request as HttpxRequest
 from langgraph_sdk.errors import NotFoundError
 
 from app.gateway.artifact_registry import ArtifactListResponse, ArtifactRecord
@@ -174,6 +175,25 @@ def test_langgraph_url_honors_deployed_env(monkeypatch) -> None:
     assert builder_canvas._langgraph_url() == "https://langgraph.render.internal"
 
 
+def _synthetic_canvas_session() -> SessionRecord:
+    return SessionRecord(
+        session_id="synthetic-session",
+        thread_id="parent-1",
+        user_id="user-1",
+        run_id="test-run-1",
+        metadata={
+            "synthetic_voice_lab": {
+                "synthetic": True,
+                "principal_id": "user-1",
+                "test_run_id": "test-run-1",
+                "scenario_id": "builder-deck",
+                "scenario_version": "v1",
+                "environment": "production",
+            }
+        },
+    )
+
+
 @pytest.fixture
 def app(tmp_path, monkeypatch) -> FastAPI:
     store = SessionStore(tmp_path / "users")
@@ -204,6 +224,108 @@ async def test_parent_builder_tasks_maps_langgraph_not_found_to_404(monkeypatch)
         await builder_canvas._parent_builder_tasks("missing-parent")
 
     assert exc_info.value.status_code == 404
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    ("method", "path", "required_operation"),
+    [
+        ("GET", "/api/sophia/user-1/threads/parent-1/builder-canvas/snapshot", "session:read"),
+        ("GET", "/api/sophia/user-1/threads/parent-1/builder-canvas/events", "session:read"),
+        (
+            "POST",
+            "/api/sophia/user-1/threads/parent-1/builder-canvas/tasks/task-1/runs/run-1/cancel",
+            "session:finalize",
+        ),
+        (
+            "POST",
+            "/api/sophia/user-1/threads/parent-1/builder-canvas/tasks/task-1/cancel",
+            "session:finalize",
+        ),
+    ],
+)
+async def test_synthetic_canvas_routes_require_capability_before_task_state_access(
+    app: FastAPI,
+    monkeypatch,
+    method: str,
+    path: str,
+    required_operation: str,
+) -> None:
+    record = _synthetic_canvas_session()
+
+    class Store:
+        def find_session_by_thread_id(self, user_id: str, thread_id: str):
+            assert (user_id, thread_id) == ("user-1", "parent-1")
+            return record
+
+    operations: list[str] = []
+
+    def no_capability(_request, user_id: str, *, required_operation: str):
+        assert user_id == "user-1"
+        operations.append(required_operation)
+        return None
+
+    def downstream_access_forbidden(*_args, **_kwargs):
+        raise AssertionError("synthetic route touched canvas state before capability authorization")
+
+    async def async_downstream_access_forbidden(*_args, **_kwargs):
+        downstream_access_forbidden()
+
+    monkeypatch.setattr(builder_canvas, "_session_store", Store())
+    monkeypatch.setattr(builder_canvas, "capability_for_gateway_action", no_capability)
+    monkeypatch.setattr(builder_canvas, "get_builder_canvas_worker", downstream_access_forbidden)
+    monkeypatch.setattr(builder_canvas, "_authorized_task", async_downstream_access_forbidden)
+    monkeypatch.setattr(builder_canvas, "_authorized_latest_task", async_downstream_access_forbidden)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.request(method, path)
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == {"code": "voice_lab_capability_missing"}
+    assert operations == [required_operation]
+
+
+@pytest.mark.anyio
+async def test_synthetic_canvas_snapshot_accepts_exact_bound_read_capability(
+    app: FastAPI,
+    monkeypatch,
+) -> None:
+    record = _synthetic_canvas_session()
+    claims = object()
+    checked: list[tuple[object, object]] = []
+
+    class Store:
+        def find_session_by_thread_id(self, user_id: str, thread_id: str):
+            assert (user_id, thread_id) == ("user-1", "parent-1")
+            return record
+
+    def capability(request, user_id: str, *, required_operation: str):
+        assert request.headers["x-sophia-voice-lab-capability"] == "exact-token"
+        assert user_id == "user-1"
+        assert required_operation == "session:read"
+        return claims
+
+    def assert_record(candidate, candidate_claims):
+        checked.append((candidate, candidate_claims))
+        return True
+
+    async def no_tasks(_parent_thread_id: str):
+        return []
+
+    monkeypatch.setattr(builder_canvas, "_session_store", Store())
+    monkeypatch.setattr(builder_canvas, "capability_for_gateway_action", capability)
+    monkeypatch.setattr(builder_canvas, "assert_voice_lab_session_record", assert_record)
+    monkeypatch.setattr(builder_canvas, "_parent_builder_tasks", no_tasks)
+
+    async with AsyncClient(transport=ASGITransport(app=app), base_url="http://test") as client:
+        response = await client.get(
+            "/api/sophia/user-1/threads/parent-1/builder-canvas/snapshot",
+            headers={"X-Sophia-Voice-Lab-Capability": "exact-token"},
+        )
+
+    assert response.status_code == 200
+    assert response.json() == {"version": 1, "active_task": None, "recent_events": []}
+    assert checked == [(record, claims)]
 
 
 @pytest.mark.anyio

@@ -416,11 +416,27 @@ def test_tool_call_cancellation_maps_to_interruption_diagnostic() -> None:
     assert provider_events[-1].type == ProviderEventType.RESPONSE_INTERRUPTED
     assert provider_events[-1].data["cancelled_tool_call_ids"] == ["artifact-call-1"]
     payloads = _payloads(provider_events)
+    response_id = payloads[0]["data"]["response_id"]
 
-    assert payloads[0] == {"type": "sophia.turn", "data": {"phase": "agent_started"}}
+    assert response_id.startswith("gemini-response-")
+    assert payloads[0] == {
+        "type": "sophia.turn",
+        "data": {
+            "phase": "agent_started",
+            "response_id": response_id,
+            "turn_id": response_id,
+        },
+    }
     assert payloads[1]["type"] == "sophia.turn"
-    assert payloads[1]["data"] == {"phase": "agent_ended", "reason": "interrupted"}
+    assert payloads[1]["data"] == {
+        "phase": "agent_ended",
+        "response_id": response_id,
+        "turn_id": response_id,
+        "reason": "interrupted",
+    }
     assert payloads[2]["type"] == "sophia.turn_diagnostic"
+    assert payloads[2]["data"]["response_id"] == response_id
+    assert payloads[2]["data"]["turn_id"] == response_id
     assert payloads[2]["data"]["provider"] == GEMINI_LIVE_PROVIDER_NAME
     assert payloads[2]["data"]["reason"] == "interrupted"
 
@@ -446,8 +462,18 @@ def test_mapper_uses_one_assistant_transcript_surface_per_response() -> None:
         ProviderEventType.ASSISTANT_TEXT_FINAL,
         ProviderEventType.RESPONSE_ENDED,
     ]
-    assert _payloads(events) == [
-        {"type": "sophia.turn", "data": {"phase": "agent_started"}},
+    payloads = _payloads(events)
+    response_id = payloads[0]["data"]["response_id"]
+    assert response_id.startswith("gemini-response-")
+    assert payloads == [
+        {
+            "type": "sophia.turn",
+            "data": {
+                "phase": "agent_started",
+                "response_id": response_id,
+                "turn_id": response_id,
+            },
+        },
         {
             "type": "sophia.transcript",
             "data": {
@@ -466,7 +492,14 @@ def test_mapper_uses_one_assistant_transcript_surface_per_response() -> None:
                 "assistant_transcript_approximate": False,
             },
         },
-        {"type": "sophia.turn", "data": {"phase": "agent_ended"}},
+        {
+            "type": "sophia.turn",
+            "data": {
+                "phase": "agent_ended",
+                "response_id": response_id,
+                "turn_id": response_id,
+            },
+        },
     ]
 
 

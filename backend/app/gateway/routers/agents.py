@@ -5,14 +5,19 @@ import re
 import shutil
 
 import yaml
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.gateway.auth import require_authenticated_user
 from deerflow.config.agents_config import AgentConfig, list_custom_agents, load_agent_config, load_agent_soul
 from deerflow.config.paths import get_paths
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api", tags=["agents"])
+router = APIRouter(
+    prefix="/api",
+    tags=["agents"],
+    dependencies=[Depends(require_authenticated_user)],
+)
 
 AGENT_NAME_PATTERN = re.compile(r"^[A-Za-z0-9-]+$")
 
@@ -168,6 +173,7 @@ async def get_agent(name: str) -> AgentResponse:
     status_code=201,
     summary="Create Custom Agent",
     description="Create a new custom agent with its config and SOUL.md.",
+    dependencies=[Depends(require_authenticated_user)],
 )
 async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     """Create a new custom agent.
@@ -229,6 +235,7 @@ async def create_agent_endpoint(request: AgentCreateRequest) -> AgentResponse:
     response_model=AgentResponse,
     summary="Update Custom Agent",
     description="Update an existing custom agent's config and/or SOUL.md.",
+    dependencies=[Depends(require_authenticated_user)],
 )
 async def update_agent(name: str, request: AgentUpdateRequest) -> AgentResponse:
     """Update an existing custom agent.
@@ -331,6 +338,7 @@ async def get_user_profile() -> UserProfileResponse:
     response_model=UserProfileResponse,
     summary="Update User Profile",
     description="Write the global USER.md file that is injected into all custom agents.",
+    dependencies=[Depends(require_authenticated_user)],
 )
 async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileResponse:
     """Create or overwrite the global USER.md.
@@ -357,6 +365,7 @@ async def update_user_profile(request: UserProfileUpdateRequest) -> UserProfileR
     status_code=204,
     summary="Delete Custom Agent",
     description="Delete a custom agent and all its files (config, SOUL.md, memory).",
+    dependencies=[Depends(require_authenticated_user)],
 )
 async def delete_agent(name: str) -> None:
     """Delete a custom agent.

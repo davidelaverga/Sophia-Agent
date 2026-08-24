@@ -8,14 +8,16 @@ surface is shaped so a Postgres/Supabase implementation can replace it later.
 
 from __future__ import annotations
 
+import builtins
 import hashlib
 import json
 import logging
 import mimetypes
 import os
+import re
 import uuid
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 from typing import Any, Literal
 from urllib.parse import unquote
@@ -27,6 +29,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator, model_valida
 from deerflow.agents.sophia_agent.utils import safe_user_path
 from deerflow.sophia.session_store import SessionTranscriptStore
 from deerflow.sophia.storage import supabase_artifact_store
+from deerflow.sophia.synthetic_builder import synthetic_retention_expired
 
 logger = logging.getLogger(__name__)
 
@@ -109,6 +112,20 @@ _SOURCE_PRIORITY: dict[str, int] = {
     "file_library_backfill": 50,
     "backfill": 50,
 }
+_SYNTHETIC_DEPLOYMENT_KEYS = {
+    "repository_sha",
+    "frontend_deployment_id",
+    "backend_deployment_id",
+    "voice_deployment_id",
+    "frontend_sha",
+    "backend_sha",
+    "voice_sha",
+    "builder_sha",
+    "builder_deployment_id",
+    "builder_service_id",
+    "builder_service_name",
+}
+_MAX_SYNTHETIC_ARTIFACT_RETENTION = timedelta(days=7)
 
 
 def _now_iso() -> str:
@@ -137,6 +154,52 @@ def _normalize_iso(value: object) -> str | None:
     except ValueError:
         return None
     return text
+
+
+def _canonical_utc_millis(value: datetime) -> str:
+    return value.astimezone(UTC).isoformat(timespec="milliseconds").replace(
+        "+00:00", "Z"
+    )
+
+
+def _parse_canonical_utc_millis(value: object) -> datetime | None:
+    text = _normalize_token(value)
+    if text is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    normalized = parsed.astimezone(UTC)
+    return normalized if _canonical_utc_millis(normalized) == text else None
+
+
+def _normalize_deployment_identity(value: object) -> dict[str, str] | None:
+    if value is None:
+        return None
+    if not isinstance(value, dict):
+        raise ValueError("deployment identity must be an object")
+    normalized: dict[str, str] = {}
+    for raw_key, raw_value in value.items():
+        key = str(raw_key)
+        if key not in _SYNTHETIC_DEPLOYMENT_KEYS:
+            raise ValueError("deployment identity contains an unsupported field")
+        token = _normalize_token(raw_value)
+        if token is None or len(token) > 512 or "\x00" in token:
+            raise ValueError("deployment identity contains an invalid value")
+        normalized[key] = token
+    return normalized
+
+
+def _assert_bounded_synthetic_retention(*, created_at: str, expires_at: str) -> None:
+    created = _parse_timestamp(created_at)
+    expires = _parse_timestamp(expires_at)
+    if created <= 0 or expires <= created:
+        raise ValueError("synthetic artifact retention expiry must follow creation")
+    if expires - created > _MAX_SYNTHETIC_ARTIFACT_RETENTION.total_seconds():
+        raise ValueError("synthetic artifact retention exceeds the seven-day safety bound")
 
 
 def _decode_artifact_virtual_path(path: str) -> str:
@@ -553,6 +616,30 @@ class ArtifactRecord(BaseModel):
     opened_count: int = Field(default=0, ge=0)
     raw_content_excluded: bool = True
     signed_url_excluded: bool = True
+    synthetic_test: bool = False
+    test_run_id: str | None = None
+    test_principal_id: str | None = None
+    scenario_id: str | None = None
+    scenario_version: str | None = None
+    environment: str | None = None
+    retention_hours: int | None = Field(default=None, ge=1, le=168)
+    retention_anchor: Literal["builder_task_created_at_provisional"] | None = None
+    retention_anchor_at: str | None = None
+    retention_expires_at: str | None = None
+    cleanup_obligation_id: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    )
+    provider_expires_at: str | None = None
+    deployment_identity: dict[str, str] | None = None
+    memory_retrieval_excluded: bool = False
+    memory_learning_excluded: bool = False
+    ordinary_artifact_publication_excluded: bool = False
+    ordinary_analytics_excluded: bool = False
+    deck_quality_publication_excluded: bool = False
+    langsmith_export_excluded: bool = False
+    langsmith_trace_status: Literal["trace_unavailable"] | None = None
+    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy"] | None = None
 
     @field_validator("local_path")
     @classmethod
@@ -571,15 +658,104 @@ class ArtifactRecord(BaseModel):
             raise ValueError("artifact registry rows must exclude raw content and signed URLs")
         return True
 
+    @field_validator("deployment_identity")
+    @classmethod
+    def _validate_deployment_identity(
+        cls, value: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return _normalize_deployment_identity(value)
+
+    @field_validator(
+        "retention_anchor_at", "retention_expires_at", "provider_expires_at"
+    )
+    @classmethod
+    def _validate_retention_expiry(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if _parse_canonical_utc_millis(value) is None:
+            raise ValueError("synthetic artifact deadline must be canonical UTC millis")
+        return value
+
     @model_validator(mode="after")
     def _normalize_library_visibility(self) -> ArtifactRecord:
         detected_role = _effective_artifact_role(self)
         role = detected_role if detected_role != "primary" else self.artifact_role
         visible = (
             self.is_library_visible
-            if role == "primary" and self.deleted_at is None and self.storage_status == "available"
+            if (
+                role == "primary"
+                and self.deleted_at is None
+                and self.storage_status == "available"
+                and not self.synthetic_test
+            )
             else False
         )
+        if self.synthetic_test:
+            required = {
+                "test_run_id": self.test_run_id,
+                "test_principal_id": self.test_principal_id,
+                "scenario_id": self.scenario_id,
+                "scenario_version": self.scenario_version,
+                "environment": self.environment,
+                "retention_hours": self.retention_hours,
+                "retention_anchor": self.retention_anchor,
+                "retention_anchor_at": self.retention_anchor_at,
+                "retention_expires_at": self.retention_expires_at,
+                "cleanup_obligation_id": self.cleanup_obligation_id,
+                "provider_expires_at": self.provider_expires_at,
+            }
+            missing = sorted(
+                key
+                for key, value in required.items()
+                if value is None
+                or (isinstance(value, str) and not value.strip())
+            )
+            if missing:
+                raise ValueError(
+                    "synthetic artifact is missing isolation metadata: "
+                    + ", ".join(missing)
+                )
+            if self.user_id != self.test_principal_id:
+                raise ValueError("synthetic artifact principal does not match user scope")
+            _assert_bounded_synthetic_retention(
+                created_at=self.created_at,
+                expires_at=str(self.retention_expires_at),
+            )
+            anchor_at = _parse_canonical_utc_millis(self.retention_anchor_at)
+            expires_at = _parse_canonical_utc_millis(self.retention_expires_at)
+            provider_expires_at = _parse_canonical_utc_millis(
+                self.provider_expires_at
+            )
+            if (
+                self.retention_anchor != "builder_task_created_at_provisional"
+                or anchor_at is None
+                or expires_at is None
+                or provider_expires_at is None
+                or not isinstance(self.retention_hours, int)
+                or isinstance(self.retention_hours, bool)
+                or expires_at
+                != anchor_at + timedelta(hours=self.retention_hours)
+                or provider_expires_at > expires_at
+            ):
+                raise ValueError("synthetic artifact retention receipt is invalid")
+            exclusions = (
+                self.memory_retrieval_excluded,
+                self.memory_learning_excluded,
+                self.ordinary_artifact_publication_excluded,
+                self.ordinary_analytics_excluded,
+                self.deck_quality_publication_excluded,
+                self.langsmith_export_excluded,
+            )
+            if not all(value is True for value in exclusions):
+                raise ValueError("synthetic artifact isolation exclusions must be explicit")
+            if (
+                self.langsmith_trace_status != "trace_unavailable"
+                or self.langsmith_trace_unavailable_reason
+                != "synthetic_isolation_policy"
+            ):
+                raise ValueError(
+                    "synthetic artifact LangSmith status must reflect isolation policy"
+                )
         object.__setattr__(self, "artifact_role", role)
         object.__setattr__(self, "is_library_visible", bool(visible))
         return self
@@ -620,6 +796,30 @@ class ArtifactUpsertRequest(BaseModel):
     deleted_at: str | None = None
     raw_content_excluded: bool = True
     signed_url_excluded: bool = True
+    synthetic_test: bool | None = None
+    test_run_id: str | None = None
+    test_principal_id: str | None = None
+    scenario_id: str | None = None
+    scenario_version: str | None = None
+    environment: str | None = None
+    retention_hours: int | None = Field(default=None, ge=1, le=168)
+    retention_anchor: Literal["builder_task_created_at_provisional"] | None = None
+    retention_anchor_at: str | None = None
+    retention_expires_at: str | None = None
+    cleanup_obligation_id: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    )
+    provider_expires_at: str | None = None
+    deployment_identity: dict[str, str] | None = None
+    memory_retrieval_excluded: bool | None = None
+    memory_learning_excluded: bool | None = None
+    ordinary_artifact_publication_excluded: bool | None = None
+    ordinary_analytics_excluded: bool | None = None
+    deck_quality_publication_excluded: bool | None = None
+    langsmith_export_excluded: bool | None = None
+    langsmith_trace_status: Literal["trace_unavailable"] | None = None
+    langsmith_trace_unavailable_reason: Literal["synthetic_isolation_policy"] | None = None
 
     @model_validator(mode="before")
     @classmethod
@@ -647,6 +847,24 @@ class ArtifactUpsertRequest(BaseModel):
         if value is not True:
             raise ValueError("artifact registry rows must exclude raw content and signed URLs")
         return True
+
+    @field_validator("deployment_identity")
+    @classmethod
+    def _validate_deployment_identity(
+        cls, value: dict[str, str] | None
+    ) -> dict[str, str] | None:
+        return _normalize_deployment_identity(value)
+
+    @field_validator(
+        "retention_anchor_at", "retention_expires_at", "provider_expires_at"
+    )
+    @classmethod
+    def _validate_retention_expiry(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if _parse_canonical_utc_millis(value) is None:
+            raise ValueError("synthetic artifact deadline must be canonical UTC millis")
+        return value
 
     def to_record(
         self,
@@ -703,6 +921,29 @@ class ArtifactUpsertRequest(BaseModel):
             if self.is_library_visible is not None
             else (existing.is_library_visible if existing else True)
         )
+        if (
+            existing is not None
+            and self.synthetic_test is not None
+            and self.synthetic_test is not existing.synthetic_test
+        ):
+            raise ValueError("artifact synthetic isolation identity cannot be changed")
+        if (
+            existing is not None
+            and self.cleanup_obligation_id is not None
+            and self.cleanup_obligation_id != existing.cleanup_obligation_id
+        ):
+            raise ValueError("artifact cleanup obligation identity cannot be changed")
+        if (
+            existing is not None
+            and self.provider_expires_at is not None
+            and self.provider_expires_at != existing.provider_expires_at
+        ):
+            raise ValueError("artifact provider deadline cannot be changed")
+        synthetic_test = (
+            existing.synthetic_test
+            if self.synthetic_test is None and existing is not None
+            else bool(self.synthetic_test)
+        )
         deleted_at = _normalize_iso(self.deleted_at) or (existing.deleted_at if existing else None)
         storage_status = (
             _normalize_token(self.storage_status)
@@ -714,6 +955,7 @@ class ArtifactUpsertRequest(BaseModel):
             and artifact_role == "primary"
             and deleted_at is None
             and storage_status == "available"
+            and not synthetic_test
         )
         session_id = _normalize_token(self.session_id) or (existing.session_id if existing else None)
         storage_object_path = validate_artifact_storage_object_path(
@@ -769,6 +1011,82 @@ class ArtifactUpsertRequest(BaseModel):
             opened_count=existing.opened_count if existing else 0,
             raw_content_excluded=True,
             signed_url_excluded=True,
+            synthetic_test=synthetic_test,
+            test_run_id=_normalize_token(self.test_run_id)
+            or (existing.test_run_id if existing else None),
+            test_principal_id=_normalize_token(self.test_principal_id)
+            or (existing.test_principal_id if existing else None),
+            scenario_id=_normalize_token(self.scenario_id)
+            or (existing.scenario_id if existing else None),
+            scenario_version=_normalize_token(self.scenario_version)
+            or (existing.scenario_version if existing else None),
+            environment=_normalize_token(self.environment)
+            or (existing.environment if existing else None),
+            retention_hours=self.retention_hours
+            if self.retention_hours is not None
+            else (existing.retention_hours if existing else None),
+            retention_anchor=self.retention_anchor
+            if self.retention_anchor is not None
+            else (existing.retention_anchor if existing else None),
+            retention_anchor_at=_normalize_iso(self.retention_anchor_at)
+            or (existing.retention_anchor_at if existing else None),
+            retention_expires_at=_normalize_iso(self.retention_expires_at)
+            or (existing.retention_expires_at if existing else None),
+            cleanup_obligation_id=_normalize_token(self.cleanup_obligation_id)
+            or (existing.cleanup_obligation_id if existing else None),
+            provider_expires_at=_normalize_iso(self.provider_expires_at)
+            or (existing.provider_expires_at if existing else None),
+            deployment_identity=self.deployment_identity
+            if self.deployment_identity is not None
+            else (existing.deployment_identity if existing else None),
+            memory_retrieval_excluded=self.memory_retrieval_excluded
+            if self.memory_retrieval_excluded is not None
+            else (existing.memory_retrieval_excluded if existing else False),
+            memory_learning_excluded=self.memory_learning_excluded
+            if self.memory_learning_excluded is not None
+            else (existing.memory_learning_excluded if existing else False),
+            ordinary_artifact_publication_excluded=(
+                self.ordinary_artifact_publication_excluded
+                if self.ordinary_artifact_publication_excluded is not None
+                else (
+                    existing.ordinary_artifact_publication_excluded
+                    if existing
+                    else False
+                )
+            ),
+            ordinary_analytics_excluded=self.ordinary_analytics_excluded
+            if self.ordinary_analytics_excluded is not None
+            else (existing.ordinary_analytics_excluded if existing else False),
+            deck_quality_publication_excluded=(
+                self.deck_quality_publication_excluded
+                if self.deck_quality_publication_excluded is not None
+                else (existing.deck_quality_publication_excluded if existing else False)
+            ),
+            langsmith_export_excluded=self.langsmith_export_excluded
+            if self.langsmith_export_excluded is not None
+            else (
+                existing.langsmith_export_excluded
+                if existing
+                else synthetic_test
+            ),
+            langsmith_trace_status=_normalize_token(self.langsmith_trace_status)
+            or (
+                existing.langsmith_trace_status
+                if existing
+                else ("trace_unavailable" if synthetic_test else None)
+            ),
+            langsmith_trace_unavailable_reason=_normalize_token(
+                self.langsmith_trace_unavailable_reason
+            )
+            or (
+                existing.langsmith_trace_unavailable_reason
+                if existing
+                else (
+                    "synthetic_isolation_policy"
+                    if synthetic_test
+                    else None
+                )
+            ),
         )
 
 
@@ -803,8 +1121,42 @@ class ArtifactRegistryFilters(BaseModel):
     created_before: str | None = None
     recent_after: str | None = None
     include_hidden: bool = False
+    include_synthetic: bool = False
     sort: Literal["updated", "created", "recent", "title"] = "updated"
     limit: int = Field(default=100, ge=1, le=250)
+
+
+class SyntheticArtifactCleanupIssue(BaseModel):
+    kind: Literal["artifact_object", "artifact_record"]
+    identifier_hash: str = Field(pattern=r"^[0-9a-f]{32}$")
+    code: str
+
+
+class SyntheticArtifactPurgeReceipt(BaseModel):
+    test_run_id: str
+    test_principal_id: str
+    matched_artifact_count: int = Field(ge=0)
+    artifact_records_deleted: int = Field(ge=0)
+    artifact_objects_deleted: int = Field(ge=0)
+    artifact_objects_missing: int = Field(ge=0)
+    artifact_objects_not_applicable: int = Field(ge=0)
+    remaining_artifact_count: int = Field(ge=0)
+    cleanup_complete: bool
+    unresolved: list[SyntheticArtifactCleanupIssue] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def _require_zero_artifact_proof(self) -> SyntheticArtifactPurgeReceipt:
+        if self.cleanup_complete and (
+            self.remaining_artifact_count != 0 or self.unresolved
+        ):
+            raise ValueError(
+                "synthetic artifact cleanup success requires verified zero records"
+            )
+        return self
+
+
+def _synthetic_cleanup_identifier(kind: str, value: str) -> str:
+    return hashlib.sha256(f"{kind}\0{value}".encode()).hexdigest()[:32]
 
 
 class ArtifactRegistryConfigurationError(RuntimeError):
@@ -896,7 +1248,7 @@ class LocalArtifactRegistry:
     def _registry_path(self, user_id: str) -> Path:
         return self._user_dir(user_id) / "registry.json"
 
-    def _read_records(self, user_id: str) -> list[ArtifactRecord]:
+    def _read_records(self, user_id: str) -> builtins.list[ArtifactRecord]:
         path = self._registry_path(user_id)
         if not path.is_file():
             return []
@@ -915,7 +1267,11 @@ class LocalArtifactRegistry:
                 continue
         return records
 
-    def _write_records(self, user_id: str, records: list[ArtifactRecord]) -> None:
+    def _write_records(
+        self,
+        user_id: str,
+        records: builtins.list[ArtifactRecord],
+    ) -> None:
         path = self._registry_path(user_id)
         path.parent.mkdir(parents=True, exist_ok=True)
         payload = {
@@ -970,7 +1326,11 @@ class LocalArtifactRegistry:
         self._write_sorted_records(user_id, records)
         return record
 
-    def _write_sorted_records(self, user_id: str, records: list[ArtifactRecord]) -> None:
+    def _write_sorted_records(
+        self,
+        user_id: str,
+        records: builtins.list[ArtifactRecord],
+    ) -> None:
         records.sort(key=lambda item: (_parse_timestamp(item.updated_at), item.title.lower()), reverse=True)
         self._write_records(user_id, records)
 
@@ -1030,9 +1390,213 @@ class LocalArtifactRegistry:
             self._write_records(user_id, records)
         return updated
 
+    def synthetic_run_records(
+        self,
+        *,
+        user_id: str,
+        test_run_id: str,
+    ) -> builtins.list[ArtifactRecord]:
+        """Return only records bearing the exact synthetic principal/run tuple."""
+
+        principal = _normalize_token(user_id)
+        run_id = _normalize_token(test_run_id)
+        if principal is None or run_id is None:
+            raise ValueError("synthetic cleanup requires exact principal and run ids")
+        return [
+            record
+            for record in self._read_records(principal)
+            if record.synthetic_test
+            and record.test_principal_id == principal
+            and record.test_run_id == run_id
+        ]
+
+    def synthetic_cleanup_obligation_records(
+        self,
+        *,
+        cleanup_obligation_id: str,
+    ) -> builtins.list[ArtifactRecord]:
+        """Return globally indexed synthetic records for one opaque obligation."""
+
+        if not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            cleanup_obligation_id,
+        ):
+            raise ValueError("cleanup obligation id must be a canonical UUIDv4")
+        if not self._base.is_dir():
+            return []
+        matched: builtins.list[ArtifactRecord] = []
+        for registry_path in self._base.glob("*/artifacts/registry.json"):
+            principal = registry_path.parent.parent.name
+            matched.extend(
+                record
+                for record in self._read_records(principal)
+                if record.synthetic_test
+                and record.cleanup_obligation_id == cleanup_obligation_id
+            )
+        return sorted(matched, key=lambda record: (record.user_id, record.artifact_id))
+
+    def expired_synthetic_records(
+        self,
+        *,
+        user_id: str,
+        now: datetime | None = None,
+    ) -> builtins.list[ArtifactRecord]:
+        """Return expired synthetic rows for an authenticated bounded reaper."""
+
+        principal = _normalize_token(user_id)
+        if principal is None:
+            raise ValueError("synthetic cleanup requires an exact principal id")
+        return [
+            record
+            for record in self._read_records(principal)
+            if record.synthetic_test
+            and record.test_principal_id == principal
+            and synthetic_retention_expired(record.model_dump(), now=now)
+        ]
+
+    def expired_synthetic_records_global(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> builtins.list[ArtifactRecord]:
+        """Return a bounded cross-principal scan of expired synthetic rows."""
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
+            raise ValueError("synthetic artifact scan limit must be between 1 and 10000")
+        if not self._base.is_dir():
+            return []
+        due: builtins.list[ArtifactRecord] = []
+        for registry_path in self._base.glob("*/artifacts/registry.json"):
+            principal = registry_path.parent.parent.name
+            for record in self.expired_synthetic_records(user_id=principal, now=now):
+                due.append(record)
+        due.sort(
+            key=lambda record: (
+                str(record.retention_expires_at or ""),
+                record.user_id,
+                record.artifact_id,
+            )
+        )
+        return due[:limit]
+
+    def _delete_synthetic_metadata_record(
+        self,
+        record: ArtifactRecord,
+        *,
+        user_id: str,
+    ) -> None:
+        records = self._read_records(user_id)
+        retained = [
+            current
+            for current in records
+            if not (
+                current.artifact_id == record.artifact_id
+                and current.synthetic_test
+                and current.test_principal_id == user_id
+                and current.test_run_id == record.test_run_id
+            )
+        ]
+        if len(retained) != len(records):
+            self._write_sorted_records(user_id, retained)
+
+    def purge_synthetic_run(
+        self,
+        *,
+        user_id: str,
+        test_run_id: str,
+    ) -> SyntheticArtifactPurgeReceipt:
+        """Delete exact-run artifact objects then metadata, safely and idempotently.
+
+        Object bytes are removed before their registry row. If a process dies
+        between those steps, the next invocation observes a missing object and
+        completes the metadata deletion. Ambiguous transport failures retain the
+        metadata row so the cleanup remains auditable and retryable.
+        """
+
+        records = self.synthetic_run_records(user_id=user_id, test_run_id=test_run_id)
+        objects_deleted = 0
+        objects_missing = 0
+        objects_not_applicable = 0
+        records_deleted = 0
+        unresolved: list[SyntheticArtifactCleanupIssue] = []
+
+        for record in records:
+            if record.storage_provider in {"supabase", "hybrid"} and record.storage_object_path:
+                try:
+                    outcome = supabase_artifact_store.delete_artifact_object_if_present(
+                        record.storage_object_path
+                    )
+                except Exception as exc:  # noqa: BLE001 - retain metadata for retry.
+                    logger.warning(
+                        "Synthetic artifact object cleanup failed artifact_id_hash=%s error_type=%s",
+                        _synthetic_cleanup_identifier("artifact", record.artifact_id),
+                        type(exc).__name__,
+                    )
+                    unresolved.append(
+                        SyntheticArtifactCleanupIssue(
+                            kind="artifact_object",
+                            identifier_hash=_synthetic_cleanup_identifier(
+                                "artifact_object", record.storage_object_path
+                            ),
+                            code="object_delete_unconfirmed",
+                        )
+                    )
+                    continue
+                if outcome == "deleted":
+                    objects_deleted += 1
+                else:
+                    objects_missing += 1
+            else:
+                objects_not_applicable += 1
+
+            try:
+                self._delete_synthetic_metadata_record(record, user_id=user_id)
+                records_deleted += 1
+            except Exception as exc:  # noqa: BLE001 - exact typed retry receipt.
+                logger.warning(
+                    "Synthetic artifact metadata cleanup failed artifact_id_hash=%s error_type=%s",
+                    _synthetic_cleanup_identifier("artifact", record.artifact_id),
+                    type(exc).__name__,
+                )
+                unresolved.append(
+                    SyntheticArtifactCleanupIssue(
+                        kind="artifact_record",
+                        identifier_hash=_synthetic_cleanup_identifier(
+                            "artifact", record.artifact_id
+                        ),
+                        code="record_delete_unconfirmed",
+                    )
+                )
+
+        remaining = self.synthetic_run_records(user_id=user_id, test_run_id=test_run_id)
+        known_issue_hashes = {issue.identifier_hash for issue in unresolved}
+        for record in remaining:
+            identifier_hash = _synthetic_cleanup_identifier("artifact", record.artifact_id)
+            if identifier_hash not in known_issue_hashes:
+                unresolved.append(
+                    SyntheticArtifactCleanupIssue(
+                        kind="artifact_record",
+                        identifier_hash=identifier_hash,
+                        code="record_still_present",
+                    )
+                )
+        return SyntheticArtifactPurgeReceipt(
+            test_run_id=test_run_id,
+            test_principal_id=user_id,
+            matched_artifact_count=len(records),
+            artifact_records_deleted=records_deleted,
+            artifact_objects_deleted=objects_deleted,
+            artifact_objects_missing=objects_missing,
+            artifact_objects_not_applicable=objects_not_applicable,
+            remaining_artifact_count=len(remaining),
+            cleanup_complete=not remaining and not unresolved,
+            unresolved=unresolved,
+        )
+
     def _find_existing_index(
         self,
-        records: list[ArtifactRecord],
+        records: builtins.list[ArtifactRecord],
         request: ArtifactUpsertRequest,
         *,
         user_id: str,
@@ -1065,8 +1629,16 @@ class LocalArtifactRegistry:
             renderer_kind=renderer_kind,
             artifact_type=artifact_type,
         )
+        request_is_synthetic = request.synthetic_test is True
 
         for index, record in enumerate(records):
+            if record.synthetic_test is not request_is_synthetic:
+                continue
+            if request_is_synthetic and (
+                record.test_run_id != request.test_run_id
+                or record.test_principal_id != request.test_principal_id
+            ):
+                continue
             if request.artifact_id and record.artifact_id == request.artifact_id:
                 return index
             if (
@@ -1084,10 +1656,12 @@ class LocalArtifactRegistry:
 
     def _apply_filters(
         self,
-        records: list[ArtifactRecord],
+        records: builtins.list[ArtifactRecord],
         filters: ArtifactRegistryFilters,
-    ) -> list[ArtifactRecord]:
+    ) -> builtins.list[ArtifactRecord]:
         result = records
+        if not filters.include_synthetic:
+            result = [record for record in result if not record.synthetic_test]
         if not filters.include_hidden:
             result = [record for record in result if _is_effectively_visible(record)]
         if filters.artifact_type:
@@ -1127,13 +1701,16 @@ class LocalArtifactRegistry:
             and role == "primary"
             and record.deleted_at is None
             and record.storage_status == "available"
+            and not record.synthetic_test
         )
         if role == record.artifact_role and visible == record.is_library_visible:
             return record
         return record.model_copy(update={"artifact_role": role, "is_library_visible": visible})
 
     @staticmethod
-    def _dedupe_visible(records: list[ArtifactRecord]) -> list[ArtifactRecord]:
+    def _dedupe_visible(
+        records: builtins.list[ArtifactRecord],
+    ) -> builtins.list[ArtifactRecord]:
         by_identity: dict[tuple[str, str, str, str, str], ArtifactRecord] = {}
         for record in records:
             identity = _record_artifact_identity(record)
@@ -1173,7 +1750,10 @@ class LocalArtifactRegistry:
         )
 
     @staticmethod
-    def _sort(records: list[ArtifactRecord], sort: str) -> list[ArtifactRecord]:
+    def _sort(
+        records: builtins.list[ArtifactRecord],
+        sort: str,
+    ) -> builtins.list[ArtifactRecord]:
         if sort == "title":
             return sorted(records, key=lambda record: record.title.lower())
         if sort == "created":
@@ -1328,7 +1908,7 @@ class SupabaseArtifactRegistry(LocalArtifactRegistry):
             }
         )
 
-    def _read_records(self, user_id: str) -> list[ArtifactRecord]:
+    def _read_records(self, user_id: str) -> builtins.list[ArtifactRecord]:
         result = self._request(
             "GET",
             params={
@@ -1340,6 +1920,102 @@ class SupabaseArtifactRegistry(LocalArtifactRegistry):
         )
         rows = result if isinstance(result, list) else []
         return [record for record in (self._record_from_row(row) for row in rows) if record]
+
+    def expired_synthetic_records_global(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> builtins.list[ArtifactRecord]:
+        """Return only due synthetic rows from durable global metadata."""
+
+        if isinstance(limit, bool) or not isinstance(limit, int) or not 1 <= limit <= 10_000:
+            raise ValueError("synthetic artifact scan limit must be between 1 and 10000")
+        due: builtins.list[ArtifactRecord] = []
+        page_size = 100
+        offset = 0
+        max_scanned = 10_000
+        rows: builtins.list[object] = []
+        while len(due) < limit and offset < max_scanned:
+            result = self._request(
+                "GET",
+                params={
+                    "select": "*",
+                    "record_payload->>synthetic_test": "eq.true",
+                    "record_payload->>retention_expires_at": (
+                        f"lte.{_canonical_utc_millis(now.astimezone(UTC))}"
+                    ),
+                    "order": "record_payload->>retention_expires_at.asc,artifact_id.asc",
+                    "limit": str(page_size),
+                    "offset": str(offset),
+                },
+            )
+            rows = result if isinstance(result, list) else []
+            for row in rows:
+                record = self._record_from_row(row)
+                if (
+                    record is not None
+                    and record.synthetic_test
+                    and synthetic_retention_expired(record.model_dump(), now=now)
+                ):
+                    due.append(record)
+                    if len(due) >= limit:
+                        break
+            offset += len(rows)
+            if len(rows) < page_size:
+                break
+        if len(due) < limit and offset >= max_scanned and len(rows) == page_size:
+            raise ArtifactRegistryStoreError(
+                "Synthetic artifact reaper scan exceeded its bounded poison-page budget."
+            )
+        due.sort(
+            key=lambda record: (
+                str(record.retention_expires_at or ""),
+                record.user_id,
+                record.artifact_id,
+            )
+        )
+        return due[:limit]
+
+    def synthetic_cleanup_obligation_records(
+        self,
+        *,
+        cleanup_obligation_id: str,
+    ) -> builtins.list[ArtifactRecord]:
+        if not re.fullmatch(
+            r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
+            cleanup_obligation_id,
+        ):
+            raise ValueError("cleanup obligation id must be a canonical UUIDv4")
+        result = self._request(
+            "GET",
+            params={
+                "select": "*",
+                "record_payload->>synthetic_test": "eq.true",
+                "record_payload->>cleanup_obligation_id": (
+                    f"eq.{cleanup_obligation_id}"
+                ),
+                "order": "artifact_id.asc",
+                "limit": "1001",
+            },
+        )
+        rows = result if isinstance(result, list) else []
+        if len(rows) > 1000:
+            raise ArtifactRegistryStoreError(
+                "Synthetic cleanup obligation lookup exceeded its hard bound."
+            )
+        records = [
+            record
+            for record in (self._record_from_row(row) for row in rows)
+            if record is not None
+            and record.synthetic_test
+            and record.cleanup_obligation_id == cleanup_obligation_id
+        ]
+        if len(records) != len(rows):
+            raise ArtifactRegistryStoreError(
+                "Synthetic cleanup obligation lookup contained malformed rows."
+            )
+        return records
 
     def upsert(self, request: ArtifactUpsertRequest, *, user_id: str) -> ArtifactRecord:
         if request.user_id is not None and request.user_id != user_id:
@@ -1430,6 +2106,25 @@ class SupabaseArtifactRegistry(LocalArtifactRegistry):
         )
         return self.upsert_record(updated, user_id=user_id)
 
+    def _delete_synthetic_metadata_record(
+        self,
+        record: ArtifactRecord,
+        *,
+        user_id: str,
+    ) -> None:
+        self._request(
+            "DELETE",
+            params={
+                "artifact_id": f"eq.{record.artifact_id}",
+                "user_id": f"eq.{user_id}",
+            },
+        )
+        remaining = self.get(record.artifact_id, user_id=user_id)
+        if remaining is not None:
+            raise ArtifactRegistryStoreError(
+                "Supabase synthetic artifact metadata deletion was not confirmed"
+            )
+
 
 class HybridArtifactRegistry(LocalArtifactRegistry):
     """Supabase-primary registry with local JSON fallback for migration windows."""
@@ -1443,7 +2138,10 @@ class HybridArtifactRegistry(LocalArtifactRegistry):
         self._local = local_registry or LocalArtifactRegistry()
         self._supabase = supabase_registry or SupabaseArtifactRegistry()
 
-    def _read_merged_records(self, user_id: str) -> list[ArtifactRecord]:
+    def _read_merged_records(
+        self,
+        user_id: str,
+    ) -> builtins.list[ArtifactRecord]:
         records: list[ArtifactRecord] = []
         seen_artifact_ids: set[str] = set()
         seen_identities: set[tuple[str, str, str, str, str]] = set()
@@ -1462,6 +2160,61 @@ class HybridArtifactRegistry(LocalArtifactRegistry):
             seen_identities.add(identity)
 
         return records
+
+    def _read_records(self, user_id: str) -> builtins.list[ArtifactRecord]:
+        return self._read_merged_records(user_id)
+
+    def expired_synthetic_records_global(
+        self,
+        *,
+        now: datetime,
+        limit: int,
+    ) -> builtins.list[ArtifactRecord]:
+        candidates = [
+            *self._supabase.expired_synthetic_records_global(now=now, limit=limit),
+            *self._local.expired_synthetic_records_global(now=now, limit=limit),
+        ]
+        deduped: dict[tuple[str, str], ArtifactRecord] = {}
+        for record in candidates:
+            deduped.setdefault((record.user_id, record.artifact_id), record)
+        return sorted(
+            deduped.values(),
+            key=lambda record: (
+                str(record.retention_expires_at or ""),
+                record.user_id,
+                record.artifact_id,
+            ),
+        )[:limit]
+
+    def synthetic_cleanup_obligation_records(
+        self,
+        *,
+        cleanup_obligation_id: str,
+    ) -> builtins.list[ArtifactRecord]:
+        candidates = [
+            *self._supabase.synthetic_cleanup_obligation_records(
+                cleanup_obligation_id=cleanup_obligation_id
+            ),
+            *self._local.synthetic_cleanup_obligation_records(
+                cleanup_obligation_id=cleanup_obligation_id
+            ),
+        ]
+        deduped: dict[tuple[str, str], ArtifactRecord] = {}
+        for record in candidates:
+            deduped.setdefault((record.user_id, record.artifact_id), record)
+        return sorted(
+            deduped.values(),
+            key=lambda record: (record.user_id, record.artifact_id),
+        )
+
+    def _delete_synthetic_metadata_record(
+        self,
+        record: ArtifactRecord,
+        *,
+        user_id: str,
+    ) -> None:
+        self._supabase._delete_synthetic_metadata_record(record, user_id=user_id)
+        self._local._delete_synthetic_metadata_record(record, user_id=user_id)
 
     def upsert(self, request: ArtifactUpsertRequest, *, user_id: str) -> ArtifactRecord:
         record = self._supabase.upsert(request, user_id=user_id)
@@ -1608,17 +2361,39 @@ def builder_completion_upsert_request(
     if not user_id:
         return None
 
+    raw_synthetic = payload.get("synthetic_test")
+    synthetic_mapping = raw_synthetic if isinstance(raw_synthetic, dict) else {}
+    synthetic_test = raw_synthetic is True or synthetic_mapping.get("synthetic") is True
+
+    def _synthetic_value(key: str) -> object:
+        value = payload.get(key)
+        return value if value is not None else synthetic_mapping.get(key)
+
     local_path = normalize_artifact_registry_path(artifact_path)
     relative = _relative_output_path(local_path)
     filename = _normalize_token(payload.get("artifact_filename")) or _filename_from_path(local_path)
     mime_type = _infer_mime_type(filename, None)
     artifact_type = _normalize_artifact_type(_normalize_token(payload.get("artifact_type")), local_path, mime_type)
     renderer_kind = _normalize_renderer_kind(_normalize_token(payload.get("renderer_kind")), artifact_type)
-    artifact_id = _normalize_token(payload.get("artifact_id")) or supabase_artifact_store.builder_artifact_record_id(
-        user_id=user_id,
-        thread_id=thread_id,
-        local_path=local_path,
-        renderer_kind=renderer_kind,
+    emitted_artifact_id = _normalize_token(payload.get("artifact_id"))
+    artifact_id = (
+        _hash_id(
+            "synthetic_artifact",
+            user_id,
+            _normalize_token(_synthetic_value("test_run_id")) or "missing-run",
+            emitted_artifact_id or "",
+            thread_id,
+            local_path,
+            renderer_kind,
+        )
+        if synthetic_test
+        else emitted_artifact_id
+        or supabase_artifact_store.builder_artifact_record_id(
+            user_id=user_id,
+            thread_id=thread_id,
+            local_path=local_path,
+            renderer_kind=renderer_kind,
+        )
     )
     storage_bucket = _normalize_token(payload.get("storage_bucket")) or supabase_artifact_store.configured_bucket_name()
     storage_object_path = normalize_artifact_storage_object_path(payload.get("storage_object_path"))
@@ -1630,7 +2405,9 @@ def builder_completion_upsert_request(
             filename=filename,
         )
     storage_provider: ArtifactStorageProvider = "supabase" if storage_bucket and storage_object_path else "local"
-
+    deployment_identity = _normalize_deployment_identity(
+        _synthetic_value("deployment_identity")
+    )
     return user_id, ArtifactUpsertRequest(
         artifact_id=artifact_id,
         user_id=user_id,
@@ -1662,7 +2439,46 @@ def builder_completion_upsert_request(
         storage_bucket=storage_bucket,
         storage_object_path=storage_object_path,
         storage_status=_normalize_token(payload.get("storage_status")) or "available",
+        is_library_visible=not synthetic_test,
         created_at=_normalize_iso(payload.get("completed_at")),
         raw_content_excluded=True,
         signed_url_excluded=True,
+        synthetic_test=synthetic_test,
+        test_run_id=_normalize_token(_synthetic_value("test_run_id")),
+        test_principal_id=_normalize_token(
+            _synthetic_value("test_principal_id")
+            or _synthetic_value("principal_id")
+        ),
+        scenario_id=_normalize_token(_synthetic_value("scenario_id")),
+        scenario_version=_normalize_token(_synthetic_value("scenario_version")),
+        environment=_normalize_token(_synthetic_value("environment")),
+        retention_hours=(
+            _synthetic_value("retention_hours")
+            if isinstance(_synthetic_value("retention_hours"), int)
+            and not isinstance(_synthetic_value("retention_hours"), bool)
+            else None
+        ),
+        retention_anchor=_normalize_token(_synthetic_value("retention_anchor")),
+        retention_anchor_at=_normalize_iso(_synthetic_value("retention_anchor_at")),
+        retention_expires_at=_normalize_iso(
+            _synthetic_value("retention_expires_at")
+            or _synthetic_value("retention_expiry")
+        ),
+        cleanup_obligation_id=_normalize_token(
+            _synthetic_value("cleanup_obligation_id")
+        ),
+        provider_expires_at=_normalize_iso(
+            _synthetic_value("provider_expires_at")
+        ),
+        deployment_identity=deployment_identity,
+        memory_retrieval_excluded=synthetic_test,
+        memory_learning_excluded=synthetic_test,
+        ordinary_artifact_publication_excluded=synthetic_test,
+        ordinary_analytics_excluded=synthetic_test,
+        deck_quality_publication_excluded=synthetic_test,
+        langsmith_export_excluded=synthetic_test,
+        langsmith_trace_status=("trace_unavailable" if synthetic_test else None),
+        langsmith_trace_unavailable_reason=(
+            "synthetic_isolation_policy" if synthetic_test else None
+        ),
     )

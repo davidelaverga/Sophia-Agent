@@ -106,7 +106,7 @@ describe("useBuilderEvents", () => {
     })
     // /last endpoint was probed.
     expect(globalThis.fetch).toHaveBeenCalledWith(
-      expect.stringContaining("/api/threads/thread-1/builder-events/last"),
+      "/api/threads/thread-1/builder-events/last",
       expect.any(Object),
     )
   })
@@ -119,7 +119,7 @@ describe("useBuilderEvents", () => {
       expect(FakeEventSource.instances).toHaveLength(1)
     })
     const source = FakeEventSource.instances[0]
-    expect(source.url).toContain("/api/threads/thread-1/builder-events")
+    expect(source.url).toBe("/api/threads/thread-1/builder-events")
 
     // Simulate the gateway pushing a completion event.
     act(() => {

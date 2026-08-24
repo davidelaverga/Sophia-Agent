@@ -13839,37 +13839,12 @@ class BuilderArtifactMiddleware(AgentMiddleware[BuilderArtifactState]):
             tool_call_id=request.tool_call.get("id", ""),
             name=name or "unknown",
         )
-        # LangGraph executes sibling tool calls concurrently. Returning one
-        # ``Command(goto='model')`` per rejected call fans out into duplicate
-        # model branches, which can then write the same LastValue state key in
-        # one super-step. Elect the first rejected call as the only routing
-        # leader; sibling calls return ordinary ToolMessages and are merged by
-        # the tool node before that single model continuation.
-        current_id = str(request.tool_call.get("id") or "")
-        latest_ai = next(
-            (
-                message
-                for message in reversed(state.get("messages", []) or [])
-                if getattr(message, "type", None) == "ai"
-            ),
-            None,
-        )
-        blocked_calls = [
-            call
-            for call in (getattr(latest_ai, "tool_calls", []) or [])
-            if str(call.get("name") or "")
-            not in {_PREPARE_DECK_BUILD_TOOL_NAME, "emit_builder_artifact"}
-        ]
-        if len(blocked_calls) > 1:
-            leader_id = str(blocked_calls[0].get("id") or "")
-            if current_id and leader_id and current_id != leader_id:
-                return result
-        return Command(
-            update={
-                "messages": [result],
-            },
-            goto="model",
-        )
+        # LangGraph's tool node already merges sibling results and then routes
+        # to one model continuation. A Command jump from even one sibling can
+        # race that normal continuation and consume two authoring turns. Keep
+        # every latch rejection as an ordinary result so the node closes the
+        # complete tool-call batch before continuing exactly once.
+        return result
 
     @staticmethod
     def _deck_improvisation_haystack(name: str, args: dict[str, Any]) -> str | None:

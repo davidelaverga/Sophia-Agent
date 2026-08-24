@@ -124,6 +124,11 @@ def test_local_sandbox_ordinary_shell_excludes_all_provider_and_service_authorit
     monkeypatch.setenv("ANTHROPIC_API_KEY", "builder-parent-private")
     monkeypatch.setenv("MEM0_API_KEY", "memory-private")
     monkeypatch.setenv("DATABASE_URL", "postgresql://private")
+    monkeypatch.setenv(
+        "SOPHIA_VOICE_LAB_AUTH_DATABASE_URL",
+        "postgresql://voice-lab-private",
+    )
+    monkeypatch.setenv("FUTURE_PRODUCT_DATABASE_URL", "postgresql://future-private")
     monkeypatch.setenv("STREAM_API_SECRET", "stream-private")
     monkeypatch.setenv("TELEGRAM_BOT_TOKEN", "telegram-private")
     monkeypatch.setenv("AWS_ACCESS_KEY_ID", "cloud-private")
@@ -145,6 +150,8 @@ print(json.dumps({
     "anthropic": os.getenv("ANTHROPIC_API_KEY"),
     "memory": os.getenv("MEM0_API_KEY"),
     "database": os.getenv("DATABASE_URL"),
+    "voice_lab_database": os.getenv("SOPHIA_VOICE_LAB_AUTH_DATABASE_URL"),
+    "future_database": os.getenv("FUTURE_PRODUCT_DATABASE_URL"),
     "stream": os.getenv("STREAM_API_SECRET"),
     "telegram": os.getenv("TELEGRAM_BOT_TOKEN"),
     "cloud": os.getenv("AWS_ACCESS_KEY_ID"),
@@ -169,6 +176,8 @@ print(json.dumps({
         "anthropic": None,
         "memory": None,
         "database": None,
+        "voice_lab_database": None,
+        "future_database": None,
         "stream": None,
         "telegram": None,
         "cloud": None,

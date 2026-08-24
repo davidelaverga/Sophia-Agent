@@ -1,0 +1,39 @@
+{
+  "name": "sophia-voice-lab",
+  "version": "0.1.0",
+  "description": "Private autonomous production voice dogfood and evidence tooling for Sophia.",
+  "author": {
+    "name": "Sophia Engineering",
+    "url": "https://github.com/davidelaverga/Sophia-Agent"
+  },
+  "homepage": "https://github.com/davidelaverga/Sophia-Agent/tree/codex/sophia-observability-v1/plugins/sophia-voice-lab",
+  "repository": "https://github.com/davidelaverga/Sophia-Agent",
+  "license": "MIT",
+  "keywords": [
+    "sophia",
+    "voice",
+    "dogfood",
+    "evidence",
+    "playwright"
+  ],
+  "skills": "./skills/",
+  "mcpServers": "./.mcp.json",
+  "interface": {
+    "displayName": "Sophia Voice Lab",
+    "shortDescription": "Run governed Sophia voice dogfood and export evidence.",
+    "longDescription": "Drives an isolated production Sophia browser through real synthetic audio, inspects canonical receipts, and exports truthful harness and product verdicts.",
+    "developerName": "Sophia Engineering",
+    "category": "Engineering",
+    "capabilities": [
+      "Voice testing",
+      "Production evidence",
+      "Regression suites"
+    ],
+    "websiteURL": "https://www.sophia-ei.com/",
+    "defaultPrompt": [
+      "Run a bounded Sophia voice smoke against the exact deployed build.",
+      "Inspect a Sophia voice run and export its evidence.",
+      "Run the governed Sophia voice regression suite."
+    ]
+  }
+}

@@ -1,24 +1,30 @@
 """Voice session API — Stream token generation, agent dispatch, and call lifecycle."""
 
 import asyncio
+import base64
+import hashlib
+import json
 import logging
 import os
 import re
 import time
 import uuid
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Literal
 from urllib.parse import quote, urlsplit, urlunsplit
+from uuid import UUID
 
 import httpx
+from cryptography.hazmat.primitives import serialization
+from cryptography.hazmat.primitives.asymmetric.ed25519 import Ed25519PublicKey
 from dotenv import dotenv_values
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field
 
 from app.gateway.auth import require_authorized_user_scope
 from app.gateway.sophia_realtime_context import (
@@ -28,6 +34,21 @@ from app.gateway.sophia_realtime_context import (
     build_degraded_realtime_context_response,
     build_sophia_realtime_context,
     create_realtime_memory_retrieval_grant,
+)
+from app.gateway.voice_lab_capability import (
+    VOICE_LAB_CAPABILITY_HEADER,
+    VoiceLabClaims,
+    VoiceLabProviderCleanupClaims,
+    assert_voice_lab_session_record,
+    capability_for_gateway_action,
+    capability_for_voice_connect,
+    mint_provider_cleanup_token,
+    sign_retention_reaper_runtime_capability,
+    sign_runtime_capability,
+    voice_internal_auth_headers,
+)
+from app.gateway.workers.voice_lab_retention import (
+    get_voice_lab_retention_reaper_or_none,
 )
 
 logger = logging.getLogger(__name__)
@@ -47,6 +68,8 @@ VOICE_SERVER_PRODUCTION_RUNTIME_TIMEOUT = 15.0
 GEMINI_PRECONNECT_CLIENT_TTL_MS = 30_000
 GEMINI_PRECONNECT_SERVER_CLEANUP_SECONDS = 65.0
 GEMINI_PRODUCTION_ROUTE_FEATURE_FLAG = "SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED"
+VOICE_LAB_TRACE_FAULT_SCENARIO_ID = "V-L01"
+VOICE_LAB_TRACE_FAULT_MODE = "langsmith_unavailable"
 BACKEND_DIR = Path(__file__).resolve().parents[3]
 REPO_ROOT = BACKEND_DIR.parent
 
@@ -56,6 +79,41 @@ class ActiveVoiceSession:
     call_id: str
     session_id: str
     runtime: str = "legacy_cascade"
+    voice_lab_binding: dict[str, object] | None = None
+
+
+@dataclass(frozen=True)
+class GeminiProductionDisconnectResult:
+    disconnected: bool
+    trace_fault: dict[str, object] | None = None
+
+    def __bool__(self) -> bool:
+        return self.disconnected
+
+
+class _FinalizingStreamingResponse(StreamingResponse):
+    """Run an async owner finalizer even before the body's first iteration."""
+
+    def __init__(
+        self,
+        *args: Any,
+        finalizer: Callable[[], Awaitable[None]],
+        **kwargs: Any,
+    ) -> None:
+        super().__init__(*args, **kwargs)
+        self._owner_finalizer = finalizer
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            # The detached task survives cancellation of the ASGI sender.  The
+            # finalizer is idempotent, so the body generator may invoke it too.
+            cleanup = asyncio.create_task(self._owner_finalizer())
+            try:
+                await asyncio.shield(cleanup)
+            except asyncio.CancelledError:
+                raise
 
 
 _active_voice_sessions: dict[str, ActiveVoiceSession] = {}
@@ -88,10 +146,19 @@ def _schedule_background_disconnect(call_id: str, session_id: str) -> None:
     task.add_done_callback(_background_disconnect_tasks.discard)
 
 
-def _schedule_background_active_session_disconnect(session: ActiveVoiceSession) -> None:
+def _schedule_background_active_session_disconnect(
+    session: ActiveVoiceSession,
+    *,
+    runtime_capability: str | None = None,
+) -> None:
     try:
         if session.runtime == "gemini_live":
-            task = asyncio.create_task(_disconnect_gemini_production_session(session.session_id))
+            task = asyncio.create_task(
+                _disconnect_gemini_production_session(
+                    session.session_id,
+                    capability=runtime_capability,
+                )
+            )
         else:
             task = asyncio.create_task(_disconnect_voice_session(session.call_id, session.session_id))
     except RuntimeError:
@@ -107,6 +174,1078 @@ def _schedule_background_active_session_disconnect(session: ActiveVoiceSession) 
 
 def _get_voice_server_url() -> str:
     return os.getenv("VOICE_SERVER_URL", "http://localhost:8000").rstrip("/")
+
+
+def _voice_lab_active_binding(claims: VoiceLabClaims) -> dict[str, object]:
+    return {
+        **claims.synthetic_context(),
+        "expected_deployment": dict(claims.expected_deployment),
+    }
+
+
+def _provider_cleanup_voice_lab_claims(
+    cleanup_claims: VoiceLabProviderCleanupClaims,
+    *,
+    user_id: str,
+    provider_session_id: str,
+) -> VoiceLabClaims:
+    """Project settlement-only claims into the exact canonical run binding.
+
+    The browser cleanup token is independently signed and deliberately
+    survives the short interactive capability.  It is never promoted back to
+    product authority: this projection is used only by provider settlement and
+    by the cleanup-only Voice runtime capability minted after the browser's
+    exact socket proof has been persisted.
+    """
+
+    if (
+        cleanup_claims.principal_id != user_id
+        or cleanup_claims.provider_session_id != provider_session_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_provider_cleanup_binding_mismatch"},
+        )
+    return VoiceLabClaims(
+        principal_id=cleanup_claims.principal_id,
+        test_run_id=cleanup_claims.test_run_id,
+        scenario_id=cleanup_claims.scenario_id,
+        scenario_version=cleanup_claims.scenario_version,
+        environment=cleanup_claims.environment,
+        retention_hours=cleanup_claims.retention_hours,
+        cleanup_obligation_id=cleanup_claims.cleanup_obligation_id,
+        provider_expires_at=cleanup_claims.provider_expires_at,
+        allowed_ops=("provider:settle",),
+        expected_deployment=dict(cleanup_claims.expected_deployment),
+        issued_at=cleanup_claims.issued_at,
+        not_before=cleanup_claims.not_before,
+        expires_at=cleanup_claims.expires_at,
+        jti=cleanup_claims.jti,
+        nonce=cleanup_claims.jti,
+        raw=dict(cleanup_claims.raw),
+        provider_session_id=cleanup_claims.provider_session_id,
+        voice_lab_run_id_sha256=cleanup_claims.voice_lab_run_id_sha256,
+        browser_worker_id_sha256=cleanup_claims.browser_worker_id_sha256,
+        browser_lease_epoch=cleanup_claims.browser_lease_epoch,
+        browser_context_id_sha256=cleanup_claims.browser_context_id_sha256,
+    )
+
+
+def _provider_cleanup_claims_for_disconnect(
+    request: Request,
+    *,
+    user_id: str,
+    provider_session_id: str,
+) -> tuple[VoiceLabClaims, str] | None:
+    """Validate the standalone cleanup token against durable product state.
+
+    A deleted canonical session is allowed only for an exact settlement replay;
+    the content-free obligation digest performs that check later.  While the
+    session exists, every signed and provider-owned field is joined before any
+    settlement mutation or Voice call.
+    """
+
+    cleanup_claims = getattr(
+        request.state,
+        "voice_lab_provider_cleanup_claims",
+        None,
+    )
+    if cleanup_claims is None:
+        return None
+    if not isinstance(cleanup_claims, VoiceLabProviderCleanupClaims):
+        raise HTTPException(
+            status_code=401,
+            detail={"code": "voice_lab_provider_cleanup_malformed"},
+        )
+    claims = _provider_cleanup_voice_lab_claims(
+        cleanup_claims,
+        user_id=user_id,
+        provider_session_id=provider_session_id,
+    )
+
+    from app.gateway.routers.sessions import _store
+
+    record = _store.find_session_by_cleanup_obligation_id(
+        cleanup_claims.cleanup_obligation_id
+    )
+    if record is not None:
+        assert_voice_lab_session_record(record, claims)
+        metadata = getattr(record, "metadata", None)
+        synthetic = (
+            metadata.get("synthetic_voice_lab")
+            if isinstance(metadata, dict)
+            else None
+        )
+        current_retention_expires_at = (
+            synthetic.get("retention_expires_at")
+            if isinstance(synthetic, dict)
+            else None
+        )
+        try:
+            token_retention_deadline = datetime.fromisoformat(
+                cleanup_claims.retention_expires_at.replace("Z", "+00:00")
+            ).astimezone(UTC)
+            current_retention_deadline = datetime.fromisoformat(
+                str(current_retention_expires_at).replace("Z", "+00:00")
+            ).astimezone(UTC)
+        except (TypeError, ValueError):
+            token_retention_deadline = None
+            current_retention_deadline = None
+        if (
+            not isinstance(synthetic, dict)
+            or synthetic.get("voice_runtime_session_id") != provider_session_id
+            or synthetic.get("cleanup_provider_admission_id")
+            != cleanup_claims.cleanup_provider_admission_id
+            or token_retention_deadline is None
+            or current_retention_deadline is None
+            or token_retention_deadline > current_retention_deadline
+            or metadata.get("expected_deployment")
+            != cleanup_claims.expected_deployment
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_provider_cleanup_binding_mismatch"},
+            )
+    return claims, cleanup_claims.cleanup_provider_admission_id
+
+
+def _persisted_provider_trace_fault_restore_receipt(
+    claims: VoiceLabClaims,
+    *,
+    provider_session_id: str,
+    cleanup_provider_admission_id: str,
+) -> dict[str, object] | None:
+    """Read the exact owning Voice relay-zero receipt from canonical state."""
+
+    from app.gateway.routers.sessions import _store
+    from app.gateway.routers.voice_lab_recovery import (
+        _canonical_provider_trace_fault_restore_receipt,
+    )
+
+    record = _store.find_session_by_cleanup_obligation_id(
+        claims.cleanup_obligation_id
+    )
+    if record is None:
+        return None
+    assert_voice_lab_session_record(record, claims)
+    metadata = getattr(record, "metadata", None)
+    synthetic = (
+        metadata.get("synthetic_voice_lab")
+        if isinstance(metadata, dict)
+        else None
+    )
+    if (
+        not isinstance(synthetic, dict)
+        or synthetic.get("voice_runtime_session_id") != provider_session_id
+        or synthetic.get("cleanup_provider_admission_id")
+        != cleanup_provider_admission_id
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_provider_cleanup_binding_mismatch"},
+        )
+    stored = synthetic.get("voice_provider_trace_fault_restore_receipt")
+    if stored is None:
+        return None
+    if (
+        not isinstance(stored, dict)
+        or set(stored)
+        != {
+            "schema",
+            "cleanup_obligation_id",
+            "cleanup_provider_admission_id",
+            "provider_session_id",
+            "trace_fault",
+        }
+        or stored.get("schema")
+        != "sophia_voice_lab_provider_trace_fault_terminal_v1"
+        or stored.get("cleanup_obligation_id") != claims.cleanup_obligation_id
+        or stored.get("cleanup_provider_admission_id")
+        != cleanup_provider_admission_id
+        or stored.get("provider_session_id") != provider_session_id
+        or not isinstance(stored.get("trace_fault"), dict)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_trace_fault_restore_receipt_invalid"},
+        )
+    return _canonical_provider_trace_fault_restore_receipt(
+        record,
+        stored["trace_fault"],
+    )
+
+
+def _canonical_voice_lab_session_for_connect(
+    user_id: str,
+    logical_session_id: str | None,
+    claims: VoiceLabClaims,
+) -> Any:
+    if not logical_session_id:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_canonical_session_required"},
+        )
+    from app.gateway.routers.sessions import _store
+
+    record = _store.get(user_id, logical_session_id)
+    if record is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_session_record_not_found"},
+        )
+    assert_voice_lab_session_record(record, claims)
+    return record
+
+
+def _bind_synthetic_provider_session(
+    user_id: str,
+    canonical_session_id: str,
+    provider_session_id: str,
+    claims: VoiceLabClaims,
+    cleanup_admission: Any,
+    provider_connection_epoch: int,
+    provider_resource_expires_at: datetime,
+    voice_runtime_instance_id_sha256: str | None = None,
+    voice_runtime_instance_public_key_spki_base64: str | None = None,
+) -> bool:
+    from app.gateway.routers.sessions import _store
+    from deerflow.sophia.cleanup_fence import bind_cleanup_provider_session
+
+    record = _store.get(user_id, canonical_session_id)
+    if record is None:
+        return False
+    assert_voice_lab_session_record(record, claims)
+    synthetic = dict(record.metadata.get("synthetic_voice_lab") or {})
+    if (
+        getattr(cleanup_admission, "resource_id", None) != provider_session_id
+        or getattr(cleanup_admission, "resource_expires_at", None)
+        != provider_resource_expires_at
+    ):
+        return False
+    provider_owner: dict[str, str] | None = None
+    if claims.scenario_id == "V-D02":
+        expected_deployment = record.metadata.get("expected_deployment")
+        voice_deployment = (
+            expected_deployment.get("voice")
+            if isinstance(expected_deployment, dict)
+            else None
+        )
+        try:
+            public_bytes = (
+                base64.b64decode(
+                    voice_runtime_instance_public_key_spki_base64,
+                    validate=True,
+                )
+                if isinstance(
+                    voice_runtime_instance_public_key_spki_base64, str
+                )
+                else b""
+            )
+            public_key = serialization.load_der_public_key(public_bytes)
+        except (TypeError, ValueError):
+            return False
+        if (
+            not isinstance(public_key, Ed25519PublicKey)
+            or not isinstance(voice_runtime_instance_id_sha256, str)
+            or not re.fullmatch(r"[a-f0-9]{64}", voice_runtime_instance_id_sha256)
+            or hashlib.sha256(public_bytes).hexdigest()
+            != voice_runtime_instance_id_sha256
+            or base64.b64encode(public_bytes).decode("ascii")
+            != voice_runtime_instance_public_key_spki_base64
+            or not isinstance(voice_deployment, str)
+            or not re.fullmatch(r"[a-f0-9]{40}", voice_deployment)
+        ):
+            return False
+        provider_owner = {
+            "voice_runtime_owner_deployment_sha": voice_deployment,
+            "voice_runtime_instance_id_sha256": voice_runtime_instance_id_sha256,
+            "voice_runtime_instance_public_key_spki_base64": (
+                voice_runtime_instance_public_key_spki_base64
+            ),
+        }
+    elif (
+        voice_runtime_instance_id_sha256 is not None
+        or voice_runtime_instance_public_key_spki_base64 is not None
+    ):
+        provider_owner = None
+    bound = bind_cleanup_provider_session(
+        cleanup_admission,
+        user_id=user_id,
+        session_id=canonical_session_id,
+        provider_connection_epoch=provider_connection_epoch,
+        provider_owner=provider_owner,
+        existing_synthetic=synthetic,
+        local_persist=lambda expected, updates: (
+            _persist_synthetic_provider_metadata_if_unchanged(
+                _store,
+                user_id=user_id,
+                session_id=canonical_session_id,
+                expected=expected,
+                updates=updates,
+            )
+        ),
+    )
+    return bound.status == "credential_minted"
+
+
+def _abort_unpublished_synthetic_provider_session(
+    user_id: str,
+    canonical_session_id: str,
+    provider_session_id: str,
+    claims: VoiceLabClaims,
+    cleanup_admission: Any,
+    provider_connection_epoch: int,
+) -> bool:
+    """Atomically close a bound credential that no browser could receive."""
+
+    from app.gateway.routers.sessions import _store
+    from deerflow.sophia.cleanup_fence import (
+        abort_unpublished_cleanup_provider_session,
+    )
+
+    record = _store.get(user_id, canonical_session_id)
+    if record is None:
+        return False
+    assert_voice_lab_session_record(record, claims)
+    metadata = getattr(record, "metadata", None)
+    synthetic = (
+        dict(metadata.get("synthetic_voice_lab") or {})
+        if isinstance(metadata, dict)
+        else {}
+    )
+    retention_expires_at = synthetic.get("retention_expires_at")
+    aborted = abort_unpublished_cleanup_provider_session(
+        cleanup_admission,
+        user_id=user_id,
+        session_id=canonical_session_id,
+        expected_pending_epoch=provider_connection_epoch,
+        existing_synthetic=synthetic,
+        retention_expires_at=retention_expires_at,
+        provider_expires_at=claims.provider_expires_at,
+        local_persist=lambda expected, updates: (
+            _persist_synthetic_provider_metadata_if_unchanged(
+                _store,
+                user_id=user_id,
+                session_id=canonical_session_id,
+                expected=expected,
+                updates=updates,
+            )
+        ),
+    )
+    return aborted.status == "activation_aborted"
+
+
+def _persist_synthetic_provider_metadata_if_unchanged(
+    store: object,
+    *,
+    user_id: str,
+    session_id: str,
+    expected: dict[str, object],
+    updates: dict[str, object],
+) -> bool:
+    """CAS provider-owned keys without overwriting finalization metadata."""
+
+    current = store.get(user_id, session_id)
+    current_metadata = getattr(current, "metadata", None)
+    current_synthetic = (
+        current_metadata.get("synthetic_voice_lab")
+        if isinstance(current_metadata, dict)
+        else None
+    )
+    if not isinstance(current_synthetic, dict) or any(
+        current_synthetic.get(key) != value for key, value in expected.items()
+    ):
+        return False
+    next_synthetic = dict(current_synthetic)
+    next_synthetic.update(updates)
+    next_metadata = dict(current_metadata)
+    next_metadata["synthetic_voice_lab"] = next_synthetic
+    return store.update(user_id, session_id, metadata=next_metadata) is not None
+
+
+def _record_synthetic_browser_provider_activation(
+    claims: VoiceLabClaims,
+    provider_session_id: str,
+    receipt: "GeminiBrowserProviderActivationReceipt",
+) -> dict[str, object]:
+    """Promote only the exact browser-open candidate into the canonical epoch."""
+
+    from app.gateway.routers.sessions import _store
+    from deerflow.sophia.cleanup_fence import (
+        activate_cleanup_provider_session,
+        cleanup_admissions,
+    )
+
+    record = _store.find_session_by_cleanup_obligation_id(
+        claims.cleanup_obligation_id
+    )
+    if record is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_session_record_not_found"},
+        )
+    assert_voice_lab_session_record(record, claims)
+    metadata = dict(record.metadata)
+    synthetic = dict(metadata.get("synthetic_voice_lab") or {})
+    admission_id = synthetic.get("cleanup_provider_admission_id")
+    current_epoch = synthetic.get("voice_provider_connection_epoch")
+    pending_epoch = synthetic.get("voice_provider_pending_connection_epoch")
+    expected_previous_epoch = current_epoch if isinstance(current_epoch, int) else 0
+    idempotent_activation = (
+        synthetic.get("voice_provider_resource_state") == "active"
+        and current_epoch == receipt.candidate_epoch
+        and pending_epoch is None
+        and receipt.previous_activated_epoch == receipt.candidate_epoch - 1
+    )
+    pending_activation = (
+        pending_epoch == receipt.candidate_epoch
+        and receipt.previous_activated_epoch == expected_previous_epoch
+        and receipt.candidate_epoch == expected_previous_epoch + 1
+    )
+    if (
+        receipt.session_id != provider_session_id
+        or synthetic.get("voice_runtime_session_id") != provider_session_id
+        or not isinstance(admission_id, str)
+        or not (pending_activation or idempotent_activation)
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_provider_activation_binding_mismatch"},
+        )
+    try:
+        opened_at = datetime.fromisoformat(
+            receipt.websocket_opened_at.replace("Z", "+00:00")
+        ).astimezone(UTC)
+    except ValueError:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "voice_lab_provider_activation_receipt_malformed"},
+        ) from None
+    if (
+        opened_at.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        != receipt.websocket_opened_at
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "voice_lab_provider_activation_receipt_malformed"},
+        )
+    previous_close = receipt.previous_socket_close_receipt
+    if receipt.previous_activated_epoch == 0:
+        if previous_close is not None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_provider_activation_previous_close_unexpected"},
+            )
+        canonical_previous_close: dict[str, object] | None = None
+    else:
+        if (
+            previous_close is None
+            or previous_close.session_id != provider_session_id
+            or previous_close.provider_connection_epoch
+            != receipt.previous_activated_epoch
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_provider_activation_previous_close_missing"},
+            )
+        try:
+            previous_closed_at = datetime.fromisoformat(
+                previous_close.websocket_closed_at.replace("Z", "+00:00")
+            ).astimezone(UTC)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "voice_lab_provider_activation_receipt_malformed"},
+            ) from None
+        if (
+            previous_closed_at.isoformat(timespec="milliseconds").replace(
+                "+00:00", "Z"
+            )
+            != previous_close.websocket_closed_at
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "voice_lab_provider_activation_receipt_malformed"},
+            )
+        canonical_previous_close = previous_close.model_dump(mode="json")
+    canonical_receipt = {
+        "schema": receipt.schema,
+        "activation_id": str(receipt.activation_id),
+        "session_id": provider_session_id,
+        "previous_activated_epoch": receipt.previous_activated_epoch,
+        "candidate_epoch": receipt.candidate_epoch,
+        "websocket_open_observed": True,
+        "close_observer_attached": True,
+        "websocket_opened_at": receipt.websocket_opened_at,
+        "previous_socket_close_receipt": canonical_previous_close,
+    }
+    matches = [
+        admission
+        for admission in cleanup_admissions(claims.cleanup_obligation_id)
+        if admission.admission_id == admission_id
+        and admission.resource_kind == "provider"
+        and admission.resource_id == provider_session_id
+    ]
+    if len(matches) != 1 or matches[0].status not in {
+        "credential_minted",
+        "browser_active",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_provider_admission_binding_missing"},
+        )
+    stored_receipt = synthetic.get("voice_provider_activation_receipt")
+    expected_synthetic = {
+        "cleanup_obligation_id": claims.cleanup_obligation_id,
+        "cleanup_provider_admission_id": admission_id,
+        "voice_runtime_session_id": provider_session_id,
+        "voice_provider_resource_state": synthetic.get(
+            "voice_provider_resource_state"
+        ),
+        "voice_provider_connection_epoch": current_epoch,
+        "voice_provider_pending_connection_epoch": pending_epoch,
+        "voice_provider_activation_receipt": stored_receipt,
+    }
+    if idempotent_activation:
+        if stored_receipt != canonical_receipt or matches[0].status != "browser_active":
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_provider_activation_receipt_conflict"},
+            )
+    else:
+        synthetic.update(
+            {
+                "voice_provider_resource_state": "active",
+                "voice_provider_connection_epoch": receipt.candidate_epoch,
+                "voice_provider_pending_connection_epoch": None,
+                "voice_provider_activated_at": datetime.now(UTC).isoformat(
+                    timespec="milliseconds"
+                ).replace("+00:00", "Z"),
+                "voice_provider_activation_receipt": canonical_receipt,
+            }
+        )
+        metadata["synthetic_voice_lab"] = synthetic
+    try:
+        activate_cleanup_provider_session(
+            matches[0],
+            user_id=record.user_id,
+            session_id=record.session_id,
+            metadata=metadata,
+            expected_synthetic=expected_synthetic,
+            local_persist=lambda expected, updates: (
+                _persist_synthetic_provider_metadata_if_unchanged(
+                    _store,
+                    user_id=record.user_id,
+                    session_id=record.session_id,
+                    expected=expected,
+                    updates=updates,
+                )
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - one atomic fail-closed transition.
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "voice_lab_provider_activation_persistence_failed"},
+        ) from exc
+    return canonical_receipt
+
+
+def _canonical_browser_provider_settlement(
+    provider_session_id: str,
+    close_receipts: list["GeminiBrowserProviderCloseReceipt"],
+    activation_abort_receipts: list["GeminiBrowserProviderActivationAbortReceipt"],
+) -> tuple[list[dict[str, object]], list[dict[str, object]], str]:
+    close_by_epoch: dict[int, dict[str, object]] = {}
+    for receipt in close_receipts:
+        if (
+            receipt.session_id != provider_session_id
+            or receipt.provider_connection_epoch in close_by_epoch
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_browser_close_binding_mismatch"},
+            )
+        try:
+            closed_at = datetime.fromisoformat(
+                receipt.websocket_closed_at.replace("Z", "+00:00")
+            ).astimezone(UTC)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "voice_lab_browser_close_receipt_malformed"},
+            ) from None
+        if (
+            closed_at.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            != receipt.websocket_closed_at
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "voice_lab_browser_close_receipt_malformed"},
+            )
+        close_by_epoch[receipt.provider_connection_epoch] = receipt.model_dump(
+            mode="json"
+        )
+
+    abort_by_epoch: dict[int, dict[str, object]] = {}
+    for receipt in activation_abort_receipts:
+        if (
+            receipt.session_id != provider_session_id
+            or receipt.candidate_epoch in abort_by_epoch
+            or receipt.candidate_epoch != receipt.previous_activated_epoch + 1
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_provider_activation_abort_binding_mismatch"},
+            )
+        try:
+            aborted_at = datetime.fromisoformat(
+                receipt.aborted_at.replace("Z", "+00:00")
+            ).astimezone(UTC)
+        except ValueError:
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "voice_lab_provider_activation_abort_malformed"},
+            ) from None
+        if (
+            aborted_at.isoformat(timespec="milliseconds").replace("+00:00", "Z")
+            != receipt.aborted_at
+        ):
+            raise HTTPException(
+                status_code=422,
+                detail={"code": "voice_lab_provider_activation_abort_malformed"},
+            )
+        abort_by_epoch[receipt.candidate_epoch] = receipt.model_dump(mode="json")
+
+    if set(close_by_epoch).intersection(abort_by_epoch):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_provider_settlement_conflict"},
+        )
+    canonical_close_receipts = [
+        close_by_epoch[epoch] for epoch in sorted(close_by_epoch)
+    ]
+    canonical_abort_receipts = [
+        abort_by_epoch[epoch] for epoch in sorted(abort_by_epoch)
+    ]
+    encoded = json.dumps(
+        {
+            "browser_provider_close_receipts": canonical_close_receipts,
+            "browser_provider_activation_abort_receipts": canonical_abort_receipts,
+        },
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return (
+        canonical_close_receipts,
+        canonical_abort_receipts,
+        hashlib.sha256(encoded).hexdigest(),
+    )
+
+
+def _record_synthetic_browser_provider_close(
+    claims: VoiceLabClaims,
+    provider_session_id: str,
+    close_receipts: list["GeminiBrowserProviderCloseReceipt"],
+    activation_abort_receipts: list["GeminiBrowserProviderActivationAbortReceipt"],
+    *,
+    expected_cleanup_provider_admission_id: str | None = None,
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+    """Persist exact closure/abort proof for every potentially live epoch."""
+
+    from app.gateway.routers.sessions import _store
+    from deerflow.sophia.cleanup_fence import (
+        cleanup_admissions,
+        close_cleanup_provider_session,
+        verify_cleanup_provider_settlement_replay,
+    )
+
+    (
+        canonical_close_receipts,
+        canonical_abort_receipts,
+        settlement_sha256,
+    ) = _canonical_browser_provider_settlement(
+        provider_session_id,
+        close_receipts,
+        activation_abort_receipts,
+    )
+    close_by_epoch = {
+        int(receipt["provider_connection_epoch"]): receipt
+        for receipt in canonical_close_receipts
+    }
+    abort_by_epoch = {
+        int(receipt["candidate_epoch"]): receipt
+        for receipt in canonical_abort_receipts
+    }
+    record = _store.find_session_by_cleanup_obligation_id(
+        claims.cleanup_obligation_id
+    )
+    if record is None:
+        try:
+            replay_matches = verify_cleanup_provider_settlement_replay(
+                claims.cleanup_obligation_id,
+                settlement_sha256,
+            )
+        except Exception as exc:  # noqa: BLE001 - fail closed on replay lookup.
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "voice_lab_provider_settlement_replay_unavailable"},
+            ) from exc
+        if replay_matches:
+            return canonical_close_receipts, canonical_abort_receipts
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_session_record_not_found"},
+        )
+    assert_voice_lab_session_record(record, claims)
+    metadata = dict(record.metadata)
+    synthetic = dict(metadata.get("synthetic_voice_lab") or {})
+    admission_id = synthetic.get("cleanup_provider_admission_id")
+    expected_provider_session_id = synthetic.get("voice_runtime_session_id")
+    expected_provider_state = synthetic.get("voice_provider_resource_state")
+    activated_epoch = synthetic.get("voice_provider_connection_epoch")
+    pending_epoch = synthetic.get("voice_provider_pending_connection_epoch")
+    expected_activation_receipt = synthetic.get("voice_provider_activation_receipt")
+    if (
+        expected_provider_session_id != provider_session_id
+        or not isinstance(admission_id, str)
+        or (
+            expected_cleanup_provider_admission_id is not None
+            and admission_id != expected_cleanup_provider_admission_id
+        )
+        or expected_provider_state not in {"credential_minted", "active", "closed"}
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_browser_close_binding_mismatch"},
+        )
+    stored_close_receipts = synthetic.get("voice_provider_browser_close_receipts")
+    stored_abort_receipts = synthetic.get("voice_provider_activation_abort_receipts")
+    if expected_provider_state == "closed":
+        if (
+            stored_close_receipts != canonical_close_receipts
+            or stored_abort_receipts != canonical_abort_receipts
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_browser_close_receipt_conflict"},
+            )
+        try:
+            replay_matches = verify_cleanup_provider_settlement_replay(
+                claims.cleanup_obligation_id,
+                settlement_sha256,
+            )
+        except Exception as exc:  # noqa: BLE001 - fail closed on replay lookup.
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "voice_lab_provider_settlement_replay_unavailable"},
+            ) from exc
+        if not replay_matches:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_browser_close_receipt_conflict"},
+            )
+        return canonical_close_receipts, canonical_abort_receipts
+    expected_epochs = {
+        epoch
+        for epoch in (activated_epoch, pending_epoch)
+        if isinstance(epoch, int) and epoch > 0
+    }
+    if not expected_epochs:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_browser_close_epoch_missing"},
+        )
+
+    expected_previous_epoch = activated_epoch if isinstance(activated_epoch, int) else 0
+    if any(
+        epoch != pending_epoch
+        or int(receipt["previous_activated_epoch"]) != expected_previous_epoch
+        for epoch, receipt in abort_by_epoch.items()
+    ):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_provider_activation_abort_binding_mismatch"},
+        )
+    settled_epochs = set(close_by_epoch).union(abort_by_epoch)
+    stored_activation = synthetic.get("voice_provider_activation_receipt")
+    allowed_previous_close: dict[str, object] | None = None
+    if isinstance(stored_activation, dict):
+        candidate = stored_activation.get("previous_socket_close_receipt")
+        if isinstance(candidate, dict):
+            allowed_previous_close = candidate
+    extra_epochs = settled_epochs - expected_epochs
+    if extra_epochs:
+        allowed_extra_epochs: set[int] = set()
+        if allowed_previous_close is not None:
+            previous_close_epoch = allowed_previous_close.get(
+                "provider_connection_epoch"
+            )
+            if (
+                isinstance(previous_close_epoch, int)
+                and close_by_epoch.get(previous_close_epoch)
+                == allowed_previous_close
+            ):
+                allowed_extra_epochs.add(previous_close_epoch)
+        if (
+            expected_provider_state == "active"
+            and isinstance(activated_epoch, int)
+            and not isinstance(pending_epoch, int)
+        ):
+            speculative_candidate = activated_epoch + 1
+            speculative_abort = abort_by_epoch.get(speculative_candidate)
+            if (
+                speculative_abort is not None
+                and speculative_abort.get("previous_activated_epoch")
+                == activated_epoch
+            ):
+                # The browser initiated this exact continuation but may lose the
+                # staged response. Closing under the obligation lock makes a
+                # queued stage lose while proving no candidate socket existed.
+                allowed_extra_epochs.add(speculative_candidate)
+        if not extra_epochs.issubset(allowed_extra_epochs):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_provider_settlement_epoch_mismatch"},
+            )
+    if not expected_epochs.issubset(settled_epochs):
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_provider_settlement_incomplete"},
+        )
+
+    matches = [
+        admission
+        for admission in cleanup_admissions(claims.cleanup_obligation_id)
+        if admission.admission_id == admission_id
+        and admission.resource_kind == "provider"
+        and admission.resource_id == provider_session_id
+    ]
+    if len(matches) != 1 or matches[0].status not in {
+        "credential_minted",
+        "browser_active",
+        "activation_aborted",
+        "browser_closed",
+    }:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_provider_admission_binding_missing"},
+        )
+    retention_expires_at = synthetic.get("retention_expires_at")
+    initial_activation_aborted = (
+        expected_provider_state == "credential_minted"
+        and not isinstance(activated_epoch, int)
+        and isinstance(pending_epoch, int)
+        and pending_epoch in abort_by_epoch
+        and not close_by_epoch
+    ) or (
+        expected_provider_state == "credential_minted"
+        and activated_epoch == 0
+        and isinstance(pending_epoch, int)
+        and pending_epoch in abort_by_epoch
+        and not close_by_epoch
+    )
+    terminal_status = (
+        "activation_aborted" if initial_activation_aborted else "browser_closed"
+    )
+    synthetic.update(
+        {
+            "voice_provider_resource_state": "closed",
+            "voice_provider_closed_at": datetime.now(UTC).isoformat(
+                timespec="milliseconds"
+            ).replace("+00:00", "Z"),
+            "voice_provider_pending_connection_epoch": None,
+            "voice_provider_browser_close_receipts": canonical_close_receipts,
+            "voice_provider_activation_abort_receipts": canonical_abort_receipts,
+        }
+    )
+    metadata["synthetic_voice_lab"] = synthetic
+
+    try:
+        close_cleanup_provider_session(
+            matches[0],
+            user_id=record.user_id,
+            session_id=record.session_id,
+            metadata=metadata,
+            expected_provider_state=str(expected_provider_state),
+            expected_activated_epoch=(
+                activated_epoch if isinstance(activated_epoch, int) else None
+            ),
+            expected_pending_epoch=(
+                pending_epoch if isinstance(pending_epoch, int) else None
+            ),
+            expected_activation_receipt=expected_activation_receipt,
+            terminal_status=terminal_status,
+            settlement_sha256=settlement_sha256,
+            retention_expires_at=retention_expires_at,
+            provider_expires_at=claims.provider_expires_at,
+            local_persist=lambda expected, updates: (
+                _persist_synthetic_provider_metadata_if_unchanged(
+                    _store,
+                    user_id=record.user_id,
+                    session_id=record.session_id,
+                    expected=expected,
+                    updates=updates,
+                )
+            ),
+        )
+    except Exception as exc:  # noqa: BLE001 - one atomic fail-closed transition.
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "voice_lab_browser_close_fence_unavailable"},
+        ) from exc
+    return canonical_close_receipts, canonical_abort_receipts
+
+
+def _stage_synthetic_provider_connection_epoch(
+    claims: VoiceLabClaims,
+    provider_session_id: str,
+    *,
+    expected_epoch: int,
+    next_epoch: int,
+) -> bool:
+    """Persist one minted candidate without advancing the activated epoch."""
+
+    from app.gateway.routers.sessions import _store
+    from deerflow.sophia.cleanup_fence import (
+        cleanup_admissions,
+        stage_cleanup_provider_candidate,
+    )
+
+    record = _store.find_session_by_cleanup_obligation_id(
+        claims.cleanup_obligation_id
+    )
+    if record is None:
+        return False
+    assert_voice_lab_session_record(record, claims)
+    metadata = dict(record.metadata)
+    synthetic = dict(metadata.get("synthetic_voice_lab") or {})
+    admission_id = synthetic.get("cleanup_provider_admission_id")
+    if (
+        synthetic.get("voice_provider_resource_state") != "active"
+        or synthetic.get("voice_runtime_session_id") != provider_session_id
+        or synthetic.get("voice_provider_connection_epoch") != expected_epoch
+        or synthetic.get("voice_provider_resource_expires_at")
+        != claims.provider_expires_at
+        or not isinstance(admission_id, str)
+        or next_epoch != expected_epoch + 1
+    ):
+        return False
+    if synthetic.get("voice_provider_pending_connection_epoch") not in {None, next_epoch}:
+        return False
+    expected_pending_epoch = synthetic.get("voice_provider_pending_connection_epoch")
+    matches = [
+        admission
+        for admission in cleanup_admissions(claims.cleanup_obligation_id)
+        if admission.admission_id == admission_id
+        and admission.resource_kind == "provider"
+        and admission.resource_id == provider_session_id
+        and admission.status == "browser_active"
+    ]
+    if len(matches) != 1:
+        return False
+    try:
+        stage_cleanup_provider_candidate(
+            matches[0],
+            user_id=record.user_id,
+            session_id=record.session_id,
+            expected_epoch=expected_epoch,
+            expected_pending_epoch=(
+                expected_pending_epoch
+                if isinstance(expected_pending_epoch, int)
+                else None
+            ),
+            next_epoch=next_epoch,
+            local_persist=lambda expected, updates: (
+                _persist_synthetic_provider_metadata_if_unchanged(
+                    _store,
+                    user_id=record.user_id,
+                    session_id=record.session_id,
+                    expected=expected,
+                    updates=updates,
+                )
+            ),
+        )
+    except Exception:  # noqa: BLE001 - one fail-closed persistence boundary.
+        return False
+    return True
+
+
+def _voice_lab_claims_for_active_session(
+    request: Request,
+    user_id: str,
+    session_id: str,
+    *,
+    required_operation: str,
+) -> VoiceLabClaims | None:
+    claims = capability_for_gateway_action(
+        request,
+        user_id,
+        required_operation=required_operation,
+    )
+    active_session = _active_voice_sessions.get(user_id)
+    if claims is None:
+        if active_session is not None and active_session.voice_lab_binding is not None:
+            raise HTTPException(
+                status_code=401,
+                detail={"code": "voice_lab_capability_missing"},
+            )
+        return None
+    if (
+        active_session is None
+        or active_session.runtime != "gemini_live"
+        or active_session.session_id != session_id
+        or active_session.voice_lab_binding != _voice_lab_active_binding(claims)
+    ):
+        from app.gateway.routers.sessions import _store
+
+        record = _store.find_session_by_cleanup_obligation_id(
+            claims.cleanup_obligation_id
+        )
+        if record is not None:
+            assert_voice_lab_session_record(record, claims)
+            record_metadata = getattr(record, "metadata", None)
+            synthetic = (
+                record_metadata.get("synthetic_voice_lab")
+                if isinstance(record_metadata, dict)
+                else None
+            )
+            if (
+                isinstance(synthetic, dict)
+                and synthetic.get("voice_runtime_session_id") == session_id
+            ):
+                if required_operation == "session:finalize":
+                    return claims
+                admission_id = synthetic.get("cleanup_provider_admission_id")
+                if isinstance(admission_id, str):
+                    try:
+                        from deerflow.sophia.cleanup_fence import (
+                            inspect_cleanup_admission,
+                        )
+
+                        admission = inspect_cleanup_admission(
+                            admission_id=admission_id,
+                            cleanup_obligation_id=claims.cleanup_obligation_id,
+                            resource_kind="provider",
+                            resource_id=session_id,
+                        )
+                    except Exception:  # noqa: BLE001 - CLOSED is fail-closed.
+                        pass
+                    else:
+                        if admission.status in {
+                            "credential_minted",
+                            "browser_active",
+                        }:
+                            return claims
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_active_session_binding_mismatch"},
+        )
+    return claims
+
+
+def _voice_auth_request_kwargs(extra: dict[str, str] | None = None) -> dict[str, dict[str, str]]:
+    headers = voice_internal_auth_headers(extra)
+    return {"headers": headers} if headers else {}
 
 
 def _voice_event_cursor(request: Request) -> int | None:
@@ -131,7 +1270,7 @@ def _voice_event_upstream_request(
     url: str,
     cursor: int | None,
 ) -> tuple[str, dict[str, str]]:
-    headers = {"Accept": "text/event-stream"}
+    headers = voice_internal_auth_headers({"Accept": "text/event-stream"})
     if cursor is None:
         return url, headers
 
@@ -201,6 +1340,10 @@ class GeminiVoiceConnectResponse(BaseModel):
     session_id: str
     logical_session_id: str | None = None
     voice_runtime_session_id: str | None = None
+    voice_runtime_instance_id_sha256: str | None = Field(
+        default=None, pattern=r"^[a-f0-9]{64}$"
+    )
+    voice_runtime_instance_public_key_spki_base64: str | None = None
     thread_id: str | None = None
     stream_url: str
     event_stream_url: str
@@ -219,6 +1362,11 @@ class GeminiVoiceConnectResponse(BaseModel):
     gemini_voice_configured_value_valid: bool | None = None
     gemini_voice_diagnostic: str | None = None
     langsmith_trace_id: str | None = None
+    langsmith_trace_unavailable_reason: Literal[
+        "synthetic_isolation_policy",
+        "governed_synthetic_fault",
+    ] | None = None
+    trace_fault: dict[str, Any] | None = None
     audio_capture_enabled: bool = False
     backendCoreviewFlagParsed: bool | None = None
     backendStillFrameFlagParsed: bool | None = None
@@ -227,6 +1375,10 @@ class GeminiVoiceConnectResponse(BaseModel):
     preconnect_expires_at: str | None = None
     provider_connection_epoch: int = 1
     continuation_bootstrap_url: str | None = None
+    provider_activation_url: str | None = None
+    provider_cleanup_token: str | None = None
+    provider_cleanup_expires_at: str | None = None
+    synthetic_test: dict[str, str | bool | int] | None = None
 
 
 class GeminiVoicePreconnectSkippedResponse(BaseModel):
@@ -292,6 +1444,27 @@ class GeminiBrowserDogfoodStartRequest(BaseModel):
     session_id: str | None = Field(default=None, description="Optional deterministic dogfood session id")
 
 
+class GeminiSyntheticToolEvidenceRequest(BaseModel):
+    """Browser-authored exact effect/input binding; safe identifiers only."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    schema: Literal["sophia_synthetic_tool_evidence_v1"]
+    test_run_id: str = Field(min_length=1, max_length=512)
+    scenario_id: str = Field(min_length=1, max_length=512)
+    scenario_version: str = Field(min_length=1, max_length=512)
+    operation_id: str = Field(min_length=1, max_length=512)
+    utterance_id: str = Field(min_length=1, max_length=512)
+    provider_input_sequence: int = Field(gt=0)
+    public_utterance_id: str | None = Field(default=None, min_length=1, max_length=512)
+    tool_call_id: str = Field(min_length=1, max_length=512)
+    effect_id: str = Field(pattern=r"^effect:[0-9a-f-]{36}$")
+    provider_connection_epoch: int = Field(gt=0)
+    relay_correlation_id: str = Field(min_length=1, max_length=512)
+    tool_name: str = Field(min_length=1, max_length=256)
+    received_at: str = Field(min_length=1, max_length=64)
+
+
 class GeminiBrowserDogfoodRelayRequest(BaseModel):
     """Relay one browser-captured Gemini Live server message."""
 
@@ -306,6 +1479,11 @@ class GeminiBrowserDogfoodRelayRequest(BaseModel):
         default=None,
         gt=0,
         description="Browser-assigned monotonic sequence for relayed Gemini provider messages",
+    )
+    provider_connection_epoch: int | None = Field(
+        default=None,
+        gt=0,
+        description="Browser-authored provider connection generation for this message",
     )
     provider_received_at: str | None = Field(
         default=None,
@@ -327,6 +1505,11 @@ class GeminiBrowserDogfoodRelayRequest(BaseModel):
         default=None,
         description="Browser-safe artifact review context for suppressing review-only artifact churn",
     )
+    synthetic_tool_evidence: list[GeminiSyntheticToolEvidenceRequest] = Field(
+        default_factory=list,
+        max_length=16,
+        description="Exact browser-authored synthetic operation/effect bindings for tool calls in this event",
+    )
 
     def voice_relay_payload(self) -> dict[str, object]:
         payload: dict[str, object] = {
@@ -338,6 +1521,7 @@ class GeminiBrowserDogfoodRelayRequest(BaseModel):
         for key in (
             "provider_receive_sequence",
             "provider_relay_sequence",
+            "provider_connection_epoch",
             "provider_received_at",
             "relay_correlation_id",
             "provider_primary_category",
@@ -346,6 +1530,10 @@ class GeminiBrowserDogfoodRelayRequest(BaseModel):
             value = getattr(self, key)
             if value is not None:
                 payload[key] = value
+        if self.synthetic_tool_evidence:
+            payload["synthetic_tool_evidence"] = [
+                item.model_dump(mode="json") for item in self.synthetic_tool_evidence
+            ]
         return payload
 
 
@@ -362,6 +1550,58 @@ class GeminiBrowserDogfoodDisconnectRequest(BaseModel):
         default="audio/webm",
         description="MIME type for the optional combined conversation recording",
     )
+    browser_provider_close_receipt: "GeminiBrowserProviderCloseReceipt | None" = None
+    browser_provider_close_receipts: list["GeminiBrowserProviderCloseReceipt"] = Field(
+        default_factory=list,
+        max_length=8,
+    )
+    browser_provider_activation_abort_receipts: list[
+        "GeminiBrowserProviderActivationAbortReceipt"
+    ] = Field(default_factory=list, max_length=8)
+
+
+class GeminiBrowserProviderCloseReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema: Literal["sophia_gemini_browser_provider_close_v1"]
+    receipt_id: UUID
+    session_id: str = Field(min_length=1, max_length=128)
+    provider_connection_epoch: int = Field(gt=0)
+    websocket_close_observed: Literal[True]
+    websocket_close_code: int = Field(ge=1000, le=4999)
+    websocket_closed_at: str = Field(
+        pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
+    )
+
+
+class GeminiBrowserProviderActivationAbortReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema: Literal["sophia_gemini_browser_provider_activation_abort_v1"]
+    receipt_id: UUID
+    session_id: str = Field(min_length=1, max_length=128)
+    previous_activated_epoch: int = Field(ge=0)
+    candidate_epoch: int = Field(gt=0)
+    websocket_created: Literal[False]
+    aborted_at: str = Field(
+        pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
+    )
+
+
+class GeminiBrowserProviderActivationReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    schema: Literal["sophia_gemini_browser_provider_activation_v1"]
+    activation_id: UUID
+    session_id: str = Field(min_length=1, max_length=128)
+    previous_activated_epoch: int = Field(ge=0)
+    candidate_epoch: int = Field(gt=0)
+    websocket_open_observed: Literal[True]
+    close_observer_attached: Literal[True]
+    websocket_opened_at: str = Field(
+        pattern=r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$"
+    )
+    previous_socket_close_receipt: GeminiBrowserProviderCloseReceipt | None
 
 
 class GeminiContinuationBootstrapRequest(BaseModel):
@@ -1103,6 +2343,7 @@ async def _proxy_voice_dogfood_json(
     *,
     json_body: dict[str, object] | None = None,
     timeout: float = VOICE_SERVER_DOGFOOD_TIMEOUT,
+    capability: str | None = None,
 ) -> dict[str, object]:
     voice_url = _get_voice_server_url()
     try:
@@ -1111,6 +2352,9 @@ async def _proxy_voice_dogfood_json(
                 method,
                 f"{voice_url}{path}",
                 json=json_body,
+                **_voice_auth_request_kwargs(
+                    {VOICE_LAB_CAPABILITY_HEADER: capability} if capability else None,
+                ),
             )
     except httpx.ConnectError as exc:
         raise HTTPException(
@@ -1171,6 +2415,7 @@ async def _proxy_voice_runtime_json(
     *,
     json_body: dict[str, object] | None = None,
     timeout: float = VOICE_SERVER_PRODUCTION_RUNTIME_TIMEOUT,
+    capability: str | None = None,
 ) -> dict[str, object]:
     voice_url = _get_voice_server_url()
     try:
@@ -1179,6 +2424,9 @@ async def _proxy_voice_runtime_json(
                 method,
                 f"{voice_url}{path}",
                 json=json_body,
+                **_voice_auth_request_kwargs(
+                    {VOICE_LAB_CAPABILITY_HEADER: capability} if capability else None,
+                ),
             )
     except httpx.ConnectError as exc:
         raise HTTPException(
@@ -1261,6 +2509,12 @@ async def _start_gemini_production_voice_session(
     user_id: str,
     body: VoiceConnectRequest,
     request_base_url: str | None = None,
+    voice_lab_claims: VoiceLabClaims | None = None,
+    synthetic_trace_mode: str | None = None,
+    reserved_provider_session_id: str | None = None,
+    cleanup_admission_id: str | None = None,
+    cleanup_admission_expires_at: str | None = None,
+    cleanup_resource_expires_at: str | None = None,
 ) -> GeminiVoiceConnectResponse:
     if not _gemini_production_route_enabled():
         raise HTTPException(
@@ -1274,17 +2528,18 @@ async def _start_gemini_production_voice_session(
         )
 
     logical_session_id = body.session_id or str(uuid.uuid4())
-    session_id = f"gemini-prod-{uuid.uuid4().hex}"
+    session_id = reserved_provider_session_id or f"gemini-prod-{uuid.uuid4().hex}"
     realtime_context = await _build_gemini_realtime_context_payload(
         user_id=user_id,
         body=body,
         session_id=logical_session_id,
         request_base_url=request_base_url,
+        voice_lab_claims=voice_lab_claims,
     )
-    payload = await _proxy_voice_runtime_json(
-        "POST",
-        "/production/realtime/gemini/browser-sessions",
-        json_body={
+    runtime_capability = sign_runtime_capability(voice_lab_claims) if voice_lab_claims else None
+    synthetic_test = voice_lab_claims.synthetic_context() if voice_lab_claims else None
+    proxy_kwargs: dict[str, Any] = {
+        "json_body": {
             "user_id": user_id,
             "session_id": session_id,
             "logical_session_id": logical_session_id,
@@ -1293,6 +2548,25 @@ async def _start_gemini_production_voice_session(
             "context_mode": body.context_mode,
             "ritual": body.ritual,
             "realtime_context": realtime_context,
+            **({"synthetic_test": synthetic_test} if synthetic_test else {}),
+            **(
+                {
+                    "cleanup_admission_id": cleanup_admission_id,
+                    "cleanup_admission_expires_at": cleanup_admission_expires_at,
+                    "cleanup_resource_expires_at": cleanup_resource_expires_at,
+                }
+                if (
+                    cleanup_admission_id
+                    and cleanup_admission_expires_at
+                    and cleanup_resource_expires_at
+                )
+                else {}
+            ),
+            **(
+                {"synthetic_trace_mode": synthetic_trace_mode}
+                if synthetic_trace_mode
+                else {}
+            ),
             **(
                 {
                     "preconnect": True,
@@ -1302,6 +2576,13 @@ async def _start_gemini_production_voice_session(
                 else {}
             ),
         },
+    }
+    if runtime_capability:
+        proxy_kwargs["capability"] = runtime_capability
+    payload = await _proxy_voice_runtime_json(
+        "POST",
+        "/production/realtime/gemini/browser-sessions",
+        **proxy_kwargs,
     )
 
     returned_session_id = payload.get("session_id")
@@ -1310,6 +2591,21 @@ async def _start_gemini_production_voice_session(
             status_code=502,
             detail="Voice runtime server returned a Gemini bootstrap without session_id.",
         )
+    if voice_lab_claims is not None:
+        ephemeral_token = payload.get("ephemeral_token")
+        if (
+            not isinstance(ephemeral_token, dict)
+            or ephemeral_token.get("expireTime")
+            != voice_lab_claims.provider_expires_at
+        ):
+            await _disconnect_gemini_production_session(
+                returned_session_id,
+                capability=sign_runtime_capability(voice_lab_claims),
+            )
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "voice_lab_provider_deadline_mismatch"},
+            )
 
     stream_url = _build_gemini_production_events_stream_url(returned_session_id)
     payload["runtime"] = "gemini_live"
@@ -1323,10 +2619,14 @@ async def _start_gemini_production_voice_session(
     payload["provider_event_relay_url"] = _build_gemini_production_relay_url()
     payload["disconnect_url"] = _build_gemini_production_disconnect_url()
     payload["continuation_bootstrap_url"] = (
-        f"/api/sophia/{quote(user_id, safe='')}/voice/gemini/continuation-bootstrap"
+        "/api/sophia/voice/gemini/continuation-bootstrap"
         f"?session_id={quote(returned_session_id, safe='')}"
     )
+    if voice_lab_claims is not None:
+        payload["provider_activation_url"] = "/api/sophia/voice/gemini/activate"
     payload["preconnect"] = body.preconnect
+    if synthetic_test:
+        payload["synthetic_test"] = synthetic_test
     if body.preconnect:
         payload["preconnect_ttl_ms"] = GEMINI_PRECONNECT_CLIENT_TTL_MS
         payload["preconnect_expires_at"] = _utc_iso_from_epoch(
@@ -1341,6 +2641,7 @@ async def _build_gemini_realtime_context_payload(
     body: VoiceConnectRequest,
     session_id: str,
     request_base_url: str | None = None,
+    voice_lab_claims: VoiceLabClaims | None = None,
 ) -> dict[str, Any]:
     request = RealtimeContextRequest(
         thread_id=body.thread_id,
@@ -1349,6 +2650,19 @@ async def _build_gemini_realtime_context_payload(
         context_mode=body.context_mode,
         ritual=body.ritual,
     )
+    if voice_lab_claims is not None:
+        context = build_degraded_realtime_context_response(
+            reason="synthetic_test_memory_isolation",
+            limit=request.limit,
+        )
+        payload = context.model_dump(mode="json")
+        diagnostics = payload.setdefault("diagnostics", {})
+        if isinstance(diagnostics, dict):
+            diagnostics["dynamic_retrieve_configured"] = False
+            diagnostics["synthetic_test"] = True
+            diagnostics["memory_retrieval_disabled"] = True
+        payload["synthetic_test"] = voice_lab_claims.synthetic_context()
+        return payload
     try:
         context = await asyncio.to_thread(
             build_sophia_realtime_context,
@@ -1412,6 +2726,36 @@ async def voice_connect(
 ) -> VoiceConnectResponse | GeminiVoiceConnectResponse | GeminiVoicePreconnectSkippedResponse:
     """Create a Stream call, dispatch the voice agent, and return credentials."""
 
+    voice_lab_claims = capability_for_voice_connect(request, user_id)
+    if voice_lab_claims is not None:
+        retention_reaper = get_voice_lab_retention_reaper_or_none(request.app)
+        retention_readiness = (
+            retention_reaper.readiness() if retention_reaper is not None else None
+        )
+        if (
+            retention_readiness is None
+            or retention_readiness.get("running") is not True
+            or retention_readiness.get("status") != "ready"
+        ):
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "voice_lab_retention_plane_not_ready"},
+            )
+    synthetic_trace_mode: str | None = None
+    if (
+        voice_lab_claims is not None
+        and voice_lab_claims.scenario_id == VOICE_LAB_TRACE_FAULT_SCENARIO_ID
+    ):
+        # V-L01 must carry a second, explicit fault authority. This check is
+        # deliberately before canonical/provider allocation and the mode is
+        # server-derived rather than accepted from a browser request body.
+        capability_for_gateway_action(
+            request,
+            user_id,
+            required_operation="trace:fault",
+        )
+        synthetic_trace_mode = VOICE_LAB_TRACE_FAULT_MODE
+
     if body.platform not in SUPPORTED_PLATFORMS:
         raise HTTPException(
             status_code=422,
@@ -1424,10 +2768,33 @@ async def voice_connect(
             detail=f"Invalid context_mode '{body.context_mode}'. Must be one of: {', '.join(sorted(SUPPORTED_CONTEXT_MODES))}",
         )
 
+    if voice_lab_claims is not None and not _is_gemini_production_runtime_selected():
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_requires_gemini_runtime"},
+        )
+
     if _is_gemini_production_runtime_selected():
+        canonical_voice_lab_record = None
+        if voice_lab_claims is not None:
+            canonical_voice_lab_record = _canonical_voice_lab_session_for_connect(
+                user_id,
+                body.session_id,
+                voice_lab_claims,
+            )
         lock = await _get_active_voice_session_lock(user_id)
         async with lock:
             previous_session = _active_voice_sessions.get(user_id)
+            if (
+                voice_lab_claims is not None
+                and previous_session is not None
+                and previous_session.voice_lab_binding
+                != _voice_lab_active_binding(voice_lab_claims)
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "voice_lab_active_session_binding_mismatch"},
+                )
             if body.preconnect and previous_session is not None:
                 logger.info(
                     "voice.connect preconnect skipped because active session exists user_id=%s runtime=%s session_id=%s",
@@ -1440,11 +2807,242 @@ async def voice_connect(
                     thread_id=body.thread_id,
                 )
 
+            cleanup_admission = None
+            reserved_provider_session_id = None
+            if voice_lab_claims is not None:
+                from deerflow.sophia.cleanup_fence import (
+                    CleanupFenceError,
+                    reserve_cleanup_admission,
+                )
+
+                metadata = getattr(canonical_voice_lab_record, "metadata", None)
+                synthetic = (
+                    metadata.get("synthetic_voice_lab")
+                    if isinstance(metadata, dict)
+                    else None
+                )
+                retention_expires_at = (
+                    synthetic.get("retention_expires_at")
+                    if isinstance(synthetic, dict)
+                    else None
+                )
+                reserved_provider_session_id = f"gemini-prod-{uuid.uuid4().hex}"
+                try:
+                    cleanup_admission = await asyncio.to_thread(
+                        reserve_cleanup_admission,
+                        voice_lab_claims.cleanup_obligation_id,
+                        retention_expires_at,
+                        provider_expires_at=voice_lab_claims.provider_expires_at,
+                        resource_kind="provider",
+                        resource_id=reserved_provider_session_id,
+                        resource_expires_at=voice_lab_claims.provider_expires_at,
+                    )
+                except CleanupFenceError as exc:
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"code": "voice_lab_cleanup_obligation_closed"},
+                    ) from exc
+
             gemini_response = await _start_gemini_production_voice_session(
                 user_id,
                 body,
                 request_base_url=str(request.base_url),
+                voice_lab_claims=voice_lab_claims,
+                synthetic_trace_mode=synthetic_trace_mode,
+                reserved_provider_session_id=reserved_provider_session_id,
+                cleanup_admission_id=(
+                    cleanup_admission.admission_id
+                    if cleanup_admission is not None
+                    else None
+                ),
+                cleanup_admission_expires_at=(
+                    cleanup_admission.lease_expires_at.astimezone(UTC)
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z")
+                    if cleanup_admission is not None
+                    else None
+                ),
+                cleanup_resource_expires_at=(
+                    cleanup_admission.resource_expires_at.astimezone(UTC)
+                    .isoformat(timespec="milliseconds")
+                    .replace("+00:00", "Z")
+                    if cleanup_admission is not None
+                    and cleanup_admission.resource_expires_at is not None
+                    else None
+                ),
             )
+            if cleanup_admission is not None:
+                from deerflow.sophia.cleanup_fence import (
+                    cleanup_admission_authorized,
+                    close_cleanup_obligation,
+                )
+
+                async def close_provider_admission() -> None:
+                    try:
+                        await asyncio.to_thread(
+                            close_cleanup_obligation,
+                            cleanup_admission.cleanup_obligation_id,
+                            retention_expires_at,
+                            voice_lab_claims.provider_expires_at,
+                        )
+                    except Exception:  # noqa: BLE001 - never release on ambiguity.
+                        logger.exception(
+                            "voice_lab.provider_admission_close_failed admission_id=%s",
+                            cleanup_admission.admission_id,
+                        )
+
+                async def abort_unpublished_provider_credential() -> bool:
+                    try:
+                        return await asyncio.to_thread(
+                            _abort_unpublished_synthetic_provider_session,
+                            user_id,
+                            str(body.session_id),
+                            gemini_response.session_id,
+                            voice_lab_claims,
+                            cleanup_admission,
+                            gemini_response.provider_connection_epoch,
+                        )
+                    except Exception:  # noqa: BLE001 - retain admission on ambiguity.
+                        logger.exception(
+                            "voice_lab.provider_admission_abort_failed admission_id=%s",
+                            cleanup_admission.admission_id,
+                        )
+                        return False
+
+                if gemini_response.session_id != reserved_provider_session_id:
+                    await close_provider_admission()
+                    for provider_session_id in dict.fromkeys(
+                        (
+                            reserved_provider_session_id,
+                            gemini_response.session_id,
+                        )
+                    ):
+                        if not isinstance(provider_session_id, str) or not provider_session_id:
+                            continue
+                        await _disconnect_gemini_production_session(
+                            provider_session_id,
+                            capability=sign_runtime_capability(voice_lab_claims),
+                        )
+                    raise HTTPException(
+                        status_code=502,
+                        detail={"code": "voice_lab_provider_session_identity_mismatch"},
+                    )
+
+                authorized = await asyncio.to_thread(
+                    cleanup_admission_authorized,
+                    cleanup_admission,
+                )
+                if not authorized:
+                    await close_provider_admission()
+                    await _disconnect_gemini_production_session(
+                        gemini_response.session_id,
+                        capability=sign_runtime_capability(voice_lab_claims),
+                    )
+                    raise HTTPException(
+                        status_code=409,
+                        detail={"code": "voice_lab_cleanup_obligation_closed"},
+                    )
+                try:
+                    provider_bound = _bind_synthetic_provider_session(
+                        user_id,
+                        str(body.session_id),
+                        gemini_response.session_id,
+                        voice_lab_claims,
+                        cleanup_admission,
+                        gemini_response.provider_connection_epoch,
+                        cleanup_admission.resource_expires_at,
+                        gemini_response.voice_runtime_instance_id_sha256,
+                        gemini_response.voice_runtime_instance_public_key_spki_base64,
+                    )
+                except Exception:  # noqa: BLE001 - reservation remains on failed cleanup.
+                    provider_bound = False
+                if not provider_bound:
+                    await close_provider_admission()
+                    await _disconnect_gemini_production_session(
+                        gemini_response.session_id,
+                        capability=sign_runtime_capability(voice_lab_claims),
+                    )
+                    raise HTTPException(
+                        status_code=503,
+                        detail={"code": "voice_lab_provider_binding_persistence_failed"},
+                    )
+                # The atomic bind already promoted allocating ->
+                # credential_minted with the canonical provider-key merge.
+                # Recheck OPEN once after that transaction; repeating the
+                # promotion in a second transaction lets CLOSED win between
+                # them and strands an unpublished credential.
+                authorization_unavailable = False
+                try:
+                    authorized_after_bind = await asyncio.to_thread(
+                        cleanup_admission_authorized,
+                        cleanup_admission,
+                    )
+                except Exception:  # noqa: BLE001 - compensate an ambiguous bind.
+                    logger.exception(
+                        "voice_lab.provider_post_bind_authorization_failed admission_id=%s",
+                        cleanup_admission.admission_id,
+                    )
+                    authorized_after_bind = False
+                    authorization_unavailable = True
+                if not authorized_after_bind:
+                    compensated = await abort_unpublished_provider_credential()
+                    await _disconnect_gemini_production_session(
+                        gemini_response.session_id,
+                        capability=sign_runtime_capability(voice_lab_claims),
+                    )
+                    if not compensated:
+                        raise HTTPException(
+                            status_code=503,
+                            detail={
+                                "code": "voice_lab_provider_compensation_pending"
+                            },
+                        )
+                    raise HTTPException(
+                        status_code=503 if authorization_unavailable else 409,
+                        detail={
+                            "code": (
+                                "voice_lab_provider_authorization_unavailable"
+                                if authorization_unavailable
+                                else "voice_lab_cleanup_obligation_closed"
+                            )
+                        },
+                    )
+                try:
+                    cleanup_authority = mint_provider_cleanup_token(
+                        voice_lab_claims,
+                        gemini_response.session_id,
+                        cleanup_admission.admission_id,
+                        str(retention_expires_at),
+                    )
+                except Exception as exc:  # noqa: BLE001 - bound provider must fail closed.
+                    compensated = await abort_unpublished_provider_credential()
+                    await _disconnect_gemini_production_session(
+                        gemini_response.session_id,
+                        capability=sign_runtime_capability(voice_lab_claims),
+                    )
+                    if not compensated:
+                        raise HTTPException(
+                            status_code=503,
+                            detail={
+                                "code": "voice_lab_provider_compensation_pending"
+                            },
+                        ) from exc
+                    raise HTTPException(
+                        status_code=503,
+                        detail={"code": "voice_lab_provider_cleanup_authority_unavailable"},
+                    ) from exc
+                gemini_response = gemini_response.model_copy(
+                    update={
+                        "provider_cleanup_token": cleanup_authority.token,
+                        "provider_cleanup_expires_at": (
+                            cleanup_authority.cleanup_expires_at
+                        ),
+                    }
+                )
+                # The provider admission becomes a durable bound-resource
+                # heartbeat in the SQL trigger. The owning Voice replica
+                # releases it only after its local provider session is closed;
+                # a load-balanced 404 from another replica is never global zero.
             previous_session = _active_voice_sessions.get(user_id)
             if previous_session is not None:
                 logger.info(
@@ -1454,11 +3052,23 @@ async def voice_connect(
                     previous_session.call_id,
                     previous_session.session_id,
                 )
-                _schedule_background_active_session_disconnect(previous_session)
+                _schedule_background_active_session_disconnect(
+                    previous_session,
+                    runtime_capability=(
+                        sign_runtime_capability(voice_lab_claims)
+                        if voice_lab_claims is not None
+                        else None
+                    ),
+                )
             _active_voice_sessions[user_id] = ActiveVoiceSession(
                 call_id=gemini_response.session_id,
                 session_id=gemini_response.session_id,
                 runtime="gemini_live",
+                voice_lab_binding=(
+                    _voice_lab_active_binding(voice_lab_claims)
+                    if voice_lab_claims is not None
+                    else None
+                ),
             )
 
         logger.info(
@@ -1906,7 +3516,19 @@ async def gemini_browser_dogfood_disconnect(
 async def gemini_production_relay(
     user_id: str,
     body: GeminiBrowserDogfoodRelayRequest,
+    request: Request,
 ) -> dict[str, object]:
+    voice_lab_claims = _voice_lab_claims_for_active_session(
+        request,
+        user_id,
+        body.session_id,
+        required_operation="session:create",
+    )
+    runtime_capability = (
+        sign_runtime_capability(voice_lab_claims)
+        if voice_lab_claims is not None
+        else None
+    )
     encoded_session_id = quote(body.session_id, safe="")
     log_context = _gemini_relay_log_context(user_id=user_id, session_id=body.session_id, body=body)
     guard_payload = _artifact_review_emit_suppression_payload(body)
@@ -1928,12 +3550,47 @@ async def gemini_production_relay(
         else body.voice_relay_payload()
     )
 
-    try:
-        payload = await _proxy_voice_runtime_json(
-            "POST",
-            f"/production/realtime/gemini/browser-sessions/{encoded_session_id}/provider-events",
-            json_body=relay_payload,
+    from app.gateway.routers.voice_lab_d02_settlement import (
+        gateway_d02_relay_lease,
+    )
+
+    relay_epoch = body.provider_connection_epoch
+    if (
+        voice_lab_claims is not None
+        and voice_lab_claims.scenario_id == "V-D02"
+        and (
+            not isinstance(relay_epoch, int)
+            or isinstance(relay_epoch, bool)
+            or relay_epoch <= 0
         )
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "voice_lab_d02_provider_epoch_required"},
+        )
+    try:
+        async with gateway_d02_relay_lease(
+            cleanup_obligation_id=(
+                voice_lab_claims.cleanup_obligation_id
+                if voice_lab_claims is not None
+                else ""
+            ),
+            provider_session_id=body.session_id,
+            provider_connection_epoch=relay_epoch or 1,
+            scenario_id=(
+                voice_lab_claims.scenario_id
+                if voice_lab_claims is not None
+                else None
+            ),
+            relay_kind="provider_event",
+        ) as relay_lease:
+            payload = await _proxy_voice_runtime_json(
+                "POST",
+                f"/production/realtime/gemini/browser-sessions/{encoded_session_id}/provider-events",
+                json_body=relay_payload,
+                capability=runtime_capability,
+            )
+            await relay_lease.assert_live()
     except HTTPException as exc:
         logger.warning(
             "voice.gemini.relay failed status=%s detail=%s context=%s",
@@ -1952,6 +3609,69 @@ async def gemini_production_relay(
 
 
 @router.post(
+    "/{user_id}/voice/gemini/activate",
+    status_code=202,
+    summary="Activate one browser-open synthetic Gemini provider epoch",
+)
+async def gemini_production_browser_activation(
+    user_id: str,
+    body: GeminiBrowserProviderActivationReceipt,
+    request: Request,
+) -> dict[str, object]:
+    claims = _voice_lab_claims_for_active_session(
+        request,
+        user_id,
+        body.session_id,
+        required_operation="session:create",
+    )
+    if claims is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "provider_activation_receipt_not_allowed"},
+        )
+    if claims.scenario_id == "V-D02":
+        from app.gateway.routers.voice_lab_d02_settlement import (
+            assert_d02_producer_open,
+        )
+
+        await asyncio.to_thread(
+            assert_d02_producer_open,
+            claims.cleanup_obligation_id,
+        )
+    canonical_receipt = await asyncio.to_thread(
+        _record_synthetic_browser_provider_activation,
+        claims,
+        body.session_id,
+        body,
+    )
+    encoded_session_id = quote(body.session_id, safe="")
+    activation = await _proxy_voice_runtime_json(
+        "POST",
+        f"/production/realtime/gemini/browser-sessions/{encoded_session_id}/activate",
+        json_body={
+            "previous_activated_epoch": body.previous_activated_epoch,
+            "candidate_epoch": body.candidate_epoch,
+        },
+        capability=sign_runtime_capability(claims),
+    )
+    if (
+        activation.get("activated") is not True
+        or activation.get("session_id") != body.session_id
+        or activation.get("provider_connection_epoch") != body.candidate_epoch
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "voice_lab_provider_activation_unconfirmed"},
+        )
+    return {
+        "activated": True,
+        "session_id": body.session_id,
+        "provider_connection_epoch": body.candidate_epoch,
+        "provider_activation_receipt": canonical_receipt,
+    }
+
+
+@router.post(
     "/{user_id}/voice/gemini/continuation-bootstrap",
     status_code=200,
     summary="Mint the next native Gemini Live continuation credential",
@@ -1959,24 +3679,232 @@ async def gemini_production_relay(
 async def gemini_production_continuation_bootstrap(
     user_id: str,
     body: GeminiContinuationBootstrapRequest,
+    request: Request,
     session_id: str = Query(..., description="Gemini voice runtime session id"),
 ) -> dict[str, object]:
-    encoded_session_id = quote(session_id, safe="")
-    payload = await _proxy_voice_runtime_json(
-        "POST",
-        f"/production/realtime/gemini/browser-sessions/{encoded_session_id}/continuation-bootstrap",
-        json_body=body.model_dump(),
+    voice_lab_claims = _voice_lab_claims_for_active_session(
+        request,
+        user_id,
+        session_id,
+        required_operation="session:create",
     )
+    voice_lab_retention_expires_at: str | None = None
+    cleanup_provider_admission_id: str | None = None
+    epoch_pre_reserved = False
+    expected_voice_runtime_instance_id_sha256: str | None = None
+    expected_voice_runtime_instance_public_key_spki_base64: str | None = None
+    if voice_lab_claims is not None:
+        from app.gateway.routers.sessions import _store
+
+        record = _store.find_session_by_cleanup_obligation_id(
+            voice_lab_claims.cleanup_obligation_id
+        )
+        if record is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_session_record_not_found"},
+            )
+        assert_voice_lab_session_record(record, voice_lab_claims)
+        metadata = getattr(record, "metadata", None)
+        synthetic = (
+            metadata.get("synthetic_voice_lab")
+            if isinstance(metadata, dict)
+            else None
+        )
+        candidate = (
+            synthetic.get("retention_expires_at")
+            if isinstance(synthetic, dict)
+            else None
+        )
+        if not isinstance(candidate, str):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_session_retention_missing"},
+            )
+        voice_lab_retention_expires_at = candidate
+        admission_candidate = synthetic.get("cleanup_provider_admission_id")
+        if (
+            synthetic.get("voice_runtime_session_id") != session_id
+            or synthetic.get("provider_expires_at")
+            != voice_lab_claims.provider_expires_at
+            or not isinstance(admission_candidate, str)
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_provider_continuation_binding_mismatch"},
+            )
+        cleanup_provider_admission_id = admission_candidate
+        if voice_lab_claims.scenario_id == "V-D02":
+            from app.gateway.routers.voice_lab_d02_settlement import (
+                assert_d02_producer_open,
+            )
+
+            expected_voice_runtime_instance_id_sha256 = synthetic.get(
+                "voice_runtime_instance_id_sha256"
+            )
+            expected_voice_runtime_instance_public_key_spki_base64 = synthetic.get(
+                "voice_runtime_instance_public_key_spki_base64"
+            )
+            if (
+                not isinstance(expected_voice_runtime_instance_id_sha256, str)
+                or not isinstance(
+                    expected_voice_runtime_instance_public_key_spki_base64, str
+                )
+            ):
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "voice_lab_d02_voice_owner_binding_missing"},
+                )
+            await asyncio.to_thread(
+                assert_d02_producer_open,
+                voice_lab_claims.cleanup_obligation_id,
+            )
+            epoch_pre_reserved = await asyncio.to_thread(
+                _stage_synthetic_provider_connection_epoch,
+                voice_lab_claims,
+                session_id,
+                expected_epoch=body.expected_epoch,
+                next_epoch=body.expected_epoch + 1,
+            )
+            if not epoch_pre_reserved:
+                raise HTTPException(
+                    status_code=409,
+                    detail={"code": "voice_lab_d02_continuation_reservation_failed"},
+                )
+    encoded_session_id = quote(session_id, safe="")
+    try:
+        payload = await _proxy_voice_runtime_json(
+            "POST",
+            f"/production/realtime/gemini/browser-sessions/{encoded_session_id}/continuation-bootstrap",
+            json_body=body.model_dump(),
+            capability=(
+                sign_runtime_capability(voice_lab_claims)
+                if voice_lab_claims is not None
+                else None
+            ),
+        )
+    except Exception:
+        if epoch_pre_reserved and voice_lab_claims is not None:
+            from deerflow.sophia.cleanup_fence import close_cleanup_obligation
+
+            try:
+                await asyncio.to_thread(
+                    close_cleanup_obligation,
+                    voice_lab_claims.cleanup_obligation_id,
+                    voice_lab_retention_expires_at,
+                    voice_lab_claims.provider_expires_at,
+                )
+            except Exception:  # noqa: BLE001 - retain durable pending epoch.
+                logger.exception(
+                    "voice_lab.d02_continuation_compensation_failed cleanup_id=%s",
+                    voice_lab_claims.cleanup_obligation_id,
+                )
+        raise
     returned_session_id = payload.get("session_id")
     if not isinstance(returned_session_id, str) or returned_session_id != session_id:
         raise HTTPException(
             status_code=502,
             detail="Voice runtime returned an invalid continuation session identity.",
         )
+    if voice_lab_claims is not None:
+        ephemeral_token = payload.get("ephemeral_token")
+        next_epoch = payload.get("provider_connection_epoch")
+        if (
+            not isinstance(ephemeral_token, dict)
+            or ephemeral_token.get("expireTime")
+            != voice_lab_claims.provider_expires_at
+            or not isinstance(next_epoch, int)
+            or isinstance(next_epoch, bool)
+            or next_epoch != body.expected_epoch + 1
+            or (
+                voice_lab_claims.scenario_id == "V-D02"
+                and (
+                    payload.get("voice_runtime_instance_id_sha256")
+                    != expected_voice_runtime_instance_id_sha256
+                    or payload.get(
+                        "voice_runtime_instance_public_key_spki_base64"
+                    )
+                    != expected_voice_runtime_instance_public_key_spki_base64
+                )
+            )
+        ):
+            from deerflow.sophia.cleanup_fence import close_cleanup_obligation
+
+            await asyncio.to_thread(
+                close_cleanup_obligation,
+                voice_lab_claims.cleanup_obligation_id,
+                voice_lab_retention_expires_at,
+                voice_lab_claims.provider_expires_at,
+            )
+            await _disconnect_gemini_production_session(
+                session_id,
+                capability=sign_runtime_capability(voice_lab_claims),
+            )
+            raise HTTPException(
+                status_code=502,
+                detail={"code": "voice_lab_provider_continuation_mismatch"},
+            )
+        try:
+            epoch_persisted = epoch_pre_reserved or await asyncio.to_thread(
+                _stage_synthetic_provider_connection_epoch,
+                voice_lab_claims,
+                session_id,
+                expected_epoch=body.expected_epoch,
+                next_epoch=next_epoch,
+            )
+        except Exception:  # noqa: BLE001 - close without claiming zero.
+            epoch_persisted = False
+        if not epoch_persisted:
+            from deerflow.sophia.cleanup_fence import close_cleanup_obligation
+
+            await asyncio.to_thread(
+                close_cleanup_obligation,
+                voice_lab_claims.cleanup_obligation_id,
+                voice_lab_retention_expires_at,
+                voice_lab_claims.provider_expires_at,
+            )
+            await _disconnect_gemini_production_session(
+                session_id,
+                capability=sign_runtime_capability(voice_lab_claims),
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "voice_lab_provider_epoch_persistence_failed"},
+            )
+        try:
+            cleanup_authority = mint_provider_cleanup_token(
+                voice_lab_claims,
+                session_id,
+                str(cleanup_provider_admission_id),
+                str(voice_lab_retention_expires_at),
+            )
+        except Exception as exc:  # noqa: BLE001 - staged credential must fail closed.
+            from deerflow.sophia.cleanup_fence import close_cleanup_obligation
+
+            await asyncio.to_thread(
+                close_cleanup_obligation,
+                voice_lab_claims.cleanup_obligation_id,
+                voice_lab_retention_expires_at,
+                voice_lab_claims.provider_expires_at,
+            )
+            await _disconnect_gemini_production_session(
+                session_id,
+                capability=sign_runtime_capability(voice_lab_claims),
+            )
+            raise HTTPException(
+                status_code=503,
+                detail={"code": "voice_lab_provider_cleanup_authority_unavailable"},
+            ) from exc
+        payload["provider_cleanup_token"] = cleanup_authority.token
+        payload["provider_cleanup_expires_at"] = (
+            cleanup_authority.cleanup_expires_at
+        )
     payload["continuation_bootstrap_url"] = (
-        f"/api/sophia/{quote(user_id, safe='')}/voice/gemini/continuation-bootstrap"
+        "/api/sophia/voice/gemini/continuation-bootstrap"
         f"?session_id={encoded_session_id}"
     )
+    if voice_lab_claims is not None:
+        payload["provider_activation_url"] = "/api/sophia/voice/gemini/activate"
     return payload
 
 
@@ -1990,45 +3918,117 @@ async def gemini_production_events(
     request: Request,
     session_id: str = Query(..., description="Gemini production session id returned by /voice/connect"),
 ) -> StreamingResponse:
+    voice_lab_claims = _voice_lab_claims_for_active_session(
+        request,
+        user_id,
+        session_id,
+        required_operation="session:finalize",
+    )
     voice_url = _get_voice_server_url()
     encoded_session_id = quote(session_id, safe="")
     url = f"{voice_url}/production/realtime/gemini/sessions/{encoded_session_id}/events"
     url, upstream_headers = _voice_event_upstream_request(url, _voice_event_cursor(request))
+    if voice_lab_claims is not None:
+        upstream_headers[VOICE_LAB_CAPABILITY_HEADER] = sign_runtime_capability(
+            voice_lab_claims
+        )
+    relay_epoch = 1
+    if voice_lab_claims is not None and voice_lab_claims.scenario_id == "V-D02":
+        from app.gateway.routers.sessions import _store
+
+        record = _store.find_session_by_cleanup_obligation_id(
+            voice_lab_claims.cleanup_obligation_id
+        )
+        metadata = getattr(record, "metadata", None)
+        synthetic = (
+            metadata.get("synthetic_voice_lab")
+            if isinstance(metadata, dict)
+            else None
+        )
+        candidate_epoch = (
+            synthetic.get("voice_provider_connection_epoch")
+            if isinstance(synthetic, dict)
+            else None
+        )
+        if (
+            record is None
+            or not isinstance(candidate_epoch, int)
+            or isinstance(candidate_epoch, bool)
+            or candidate_epoch <= 0
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_d02_provider_epoch_unavailable"},
+            )
+        relay_epoch = candidate_epoch
+    from app.gateway.routers.voice_lab_d02_settlement import (
+        gateway_d02_relay_lease,
+    )
+
+    relay_context = gateway_d02_relay_lease(
+        cleanup_obligation_id=(
+            voice_lab_claims.cleanup_obligation_id
+            if voice_lab_claims is not None
+            else ""
+        ),
+        provider_session_id=session_id,
+        provider_connection_epoch=relay_epoch,
+        scenario_id=(
+            voice_lab_claims.scenario_id
+            if voice_lab_claims is not None
+            else None
+        ),
+        relay_kind="event_stream",
+    )
+    relay_lease = await relay_context.__aenter__()
     client = httpx.AsyncClient(
         timeout=httpx.Timeout(connect=5.0, read=None, write=5.0, pool=5.0),
     )
+    cleanup_lock = asyncio.Lock()
+    cleaned = False
+    response: httpx.Response | None = None
+
+    async def _finalize_stream_owner() -> None:
+        nonlocal cleaned
+        async with cleanup_lock:
+            if cleaned:
+                return
+            cleaned = True
+            if response is not None:
+                await response.aclose()
+            await client.aclose()
+            await relay_context.__aexit__(None, None, None)
 
     try:
-        request = client.build_request(
+        upstream_request = client.build_request(
             "GET",
             url,
             headers=upstream_headers,
         )
-        response = await client.send(request, stream=True)
+        response = await client.send(upstream_request, stream=True)
     except httpx.ConnectError as exc:
-        await client.aclose()
+        await _finalize_stream_owner()
         raise HTTPException(
             status_code=503,
             detail="Voice Gemini event stream unavailable.",
         ) from exc
     except httpx.RequestError as exc:
-        await client.aclose()
+        await _finalize_stream_owner()
         raise HTTPException(
             status_code=503,
             detail="Voice Gemini event stream request failed.",
         ) from exc
 
+    assert response is not None
     if response.status_code == 404:
-        await response.aclose()
-        await client.aclose()
+        await _finalize_stream_owner()
         raise HTTPException(status_code=404, detail="Voice Gemini session not found.")
 
     if response.status_code >= 400:
         try:
             detail = (await response.aread()).decode("utf-8", errors="replace")[:200]
         finally:
-            await response.aclose()
-            await client.aclose()
+            await _finalize_stream_owner()
 
         raise HTTPException(
             status_code=502,
@@ -2036,15 +4036,18 @@ async def gemini_production_events(
         )
 
     async def _proxy_stream() -> AsyncIterator[bytes]:
+        relay_lease.bind_current_task()
         try:
+            await relay_lease.assert_live()
             async for chunk in response.aiter_bytes():
+                await relay_lease.assert_live()
                 yield chunk
         finally:
-            await response.aclose()
-            await client.aclose()
+            await _finalize_stream_owner()
 
-    return StreamingResponse(
+    return _FinalizingStreamingResponse(
         _proxy_stream(),
+        finalizer=_finalize_stream_owner,
         media_type="text/event-stream",
         headers={
             "Cache-Control": "no-cache, no-transform",
@@ -2056,17 +4059,115 @@ async def gemini_production_events(
 
 @router.post(
     "/{user_id}/voice/gemini/disconnect",
-    status_code=204,
+    status_code=202,
     summary="Close a production Gemini browser Live session",
 )
 async def gemini_production_disconnect(
     user_id: str,
     body: GeminiBrowserDogfoodDisconnectRequest,
-) -> None:
-    await _disconnect_gemini_production_session(
-        body.session_id,
-        body=body.model_dump(exclude_none=True),
+    request: Request,
+) -> dict[str, object]:
+    cleanup_binding = _provider_cleanup_claims_for_disconnect(
+        request,
+        user_id=user_id,
+        provider_session_id=body.session_id,
     )
+    cleanup_provider_admission_id: str | None = None
+    if cleanup_binding is not None:
+        voice_lab_claims, cleanup_provider_admission_id = cleanup_binding
+    else:
+        voice_lab_claims = _voice_lab_claims_for_active_session(
+            request,
+            user_id,
+            body.session_id,
+            required_operation="session:finalize",
+        )
+    browser_close_receipts: list[dict[str, object]] | None = None
+    browser_activation_abort_receipts: list[dict[str, object]] | None = None
+    if voice_lab_claims is not None:
+        submitted_close_receipts = list(body.browser_provider_close_receipts)
+        if body.browser_provider_close_receipt is not None:
+            submitted_close_receipts.append(body.browser_provider_close_receipt)
+        if not submitted_close_receipts and not body.browser_provider_activation_abort_receipts:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_browser_provider_settlement_required"},
+            )
+        (
+            browser_close_receipts,
+            browser_activation_abort_receipts,
+        ) = await asyncio.to_thread(
+            _record_synthetic_browser_provider_close,
+            voice_lab_claims,
+            body.session_id,
+            submitted_close_receipts,
+            list(body.browser_provider_activation_abort_receipts),
+            expected_cleanup_provider_admission_id=(
+                cleanup_provider_admission_id
+            ),
+        )
+    elif (
+        body.browser_provider_close_receipt is not None
+        or body.browser_provider_close_receipts
+        or body.browser_provider_activation_abort_receipts
+    ):
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "browser_provider_settlement_not_allowed"},
+        )
+    voice_disconnect_body = body.model_dump(
+        exclude_none=True,
+        exclude={
+            "browser_provider_close_receipt",
+            "browser_provider_close_receipts",
+            "browser_provider_activation_abort_receipts",
+        },
+    )
+    disconnect_result = await _disconnect_gemini_production_session(
+        body.session_id,
+        body=voice_disconnect_body,
+        capability=(
+            sign_retention_reaper_runtime_capability(
+                voice_lab_claims,
+                provider_session_id=body.session_id,
+            )
+            if cleanup_binding is not None
+            else sign_runtime_capability(voice_lab_claims)
+            if voice_lab_claims is not None
+            else None
+        ),
+    )
+    if (
+        cleanup_provider_admission_id is not None
+        and voice_lab_claims is not None
+        and voice_lab_claims.scenario_id == VOICE_LAB_TRACE_FAULT_SCENARIO_ID
+        and disconnect_result.trace_fault is None
+    ):
+        persisted_trace_fault = await asyncio.to_thread(
+            _persisted_provider_trace_fault_restore_receipt,
+            voice_lab_claims,
+            provider_session_id=body.session_id,
+            cleanup_provider_admission_id=cleanup_provider_admission_id,
+        )
+        if persisted_trace_fault is not None:
+            disconnect_result = GeminiProductionDisconnectResult(
+                disconnected=True,
+                trace_fault=persisted_trace_fault,
+            )
+    if voice_lab_claims is not None and not disconnect_result:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "voice_lab_provider_disconnect_unconfirmed"},
+        )
+    if (
+        voice_lab_claims is not None
+        and voice_lab_claims.scenario_id == VOICE_LAB_TRACE_FAULT_SCENARIO_ID
+        and disconnect_result.trace_fault is None
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "voice_lab_trace_fault_restore_receipt_missing"},
+        )
 
     lock = await _get_active_voice_session_lock(user_id)
     async with lock:
@@ -2077,6 +4178,25 @@ async def gemini_production_disconnect(
             and active_session.session_id == body.session_id
         ):
             _active_voice_sessions.pop(user_id, None)
+    return {
+        "ok": bool(disconnect_result),
+        "closed": bool(disconnect_result),
+        **(
+            {
+                "browser_provider_close_receipts": browser_close_receipts,
+                "browser_provider_activation_abort_receipts": (
+                    browser_activation_abort_receipts
+                ),
+            }
+            if browser_close_receipts is not None
+            else {}
+        ),
+        **(
+            {"trace_fault": disconnect_result.trace_fault}
+            if disconnect_result.trace_fault is not None
+            else {}
+        ),
+    }
 
 
 @router.post(
@@ -2094,6 +4214,7 @@ async def voice_warmup(user_id: str, body: VoiceWarmupRequest) -> None:
             resp = await client.post(
                 url,
                 json={"user_id": user_id},
+                **_voice_auth_request_kwargs(),
             )
             resp.raise_for_status()
     except httpx.ConnectError as exc:
@@ -2143,6 +4264,7 @@ async def _dispatch_voice_agent(
                     "session_id": session_id,
                     "thread_id": thread_id,
                 },
+                **_voice_auth_request_kwargs(),
             )
             resp.raise_for_status()
             try:
@@ -2223,7 +4345,7 @@ async def _disconnect_voice_session(call_id: str, session_id: str) -> None:
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.delete(url)
+            resp = await client.delete(url, **_voice_auth_request_kwargs())
             if resp.status_code == 404:
                 logger.info(
                     "voice.disconnect session already gone call_id=%s session_id=%s",
@@ -2255,35 +4377,63 @@ async def _disconnect_gemini_production_session(
     session_id: str,
     *,
     body: dict[str, object] | None = None,
-) -> None:
+    capability: str | None = None,
+) -> GeminiProductionDisconnectResult:
     voice_url = _get_voice_server_url()
     encoded_session_id = quote(session_id, safe="")
     url = f"{voice_url}/production/realtime/gemini/browser-sessions/{encoded_session_id}"
 
     try:
         async with httpx.AsyncClient(timeout=5.0) as client:
-            resp = await client.request("DELETE", url, json=body)
+            resp = await client.request(
+                "DELETE",
+                url,
+                json=body,
+                **_voice_auth_request_kwargs(
+                    {VOICE_LAB_CAPABILITY_HEADER: capability}
+                    if capability
+                    else None
+                ),
+            )
             if resp.status_code == 404:
                 logger.info(
                     "voice.gemini.disconnect session already gone session_id=%s",
                     session_id,
                 )
-                return
+                return GeminiProductionDisconnectResult(disconnected=True)
             resp.raise_for_status()
+            trace_fault: dict[str, object] | None = None
+            try:
+                payload = resp.json()
+            except ValueError:
+                payload = None
+            if isinstance(payload, dict) and isinstance(payload.get("trace_fault"), dict):
+                trace_fault = dict(payload["trace_fault"])
+            return GeminiProductionDisconnectResult(
+                disconnected=(
+                    payload.get("closed") is True
+                    if isinstance(payload, dict) and "closed" in payload
+                    else True
+                ),
+                trace_fault=trace_fault,
+            )
     except (httpx.ConnectError, httpx.TimeoutException):
         logger.warning(
             "voice.gemini.disconnect — voice server unreachable, relying on idle timeout for session_id=%s",
             session_id,
         )
+        return GeminiProductionDisconnectResult(disconnected=False)
     except httpx.HTTPStatusError as exc:
         logger.warning(
             "voice.gemini.disconnect failed — %s: %s",
             exc.response.status_code,
             exc.response.text[:200],
         )
+        return GeminiProductionDisconnectResult(disconnected=False)
     except httpx.RequestError as exc:
         logger.warning(
             "voice.gemini.disconnect failed — request error for session_id=%s: %s",
             session_id,
             exc,
         )
+        return GeminiProductionDisconnectResult(disconnected=False)

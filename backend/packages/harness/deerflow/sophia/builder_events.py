@@ -44,9 +44,21 @@ from typing import Any
 
 import httpx
 
+from deerflow.sophia.builder_event_auth import (
+    encode_builder_event_body,
+    signed_builder_event_headers,
+)
 from deerflow.sophia.builder_failure_diagnostics import (
     build_builder_failure_diagnostics,
     merge_builder_failure_diagnostics,
+)
+from deerflow.sophia.deck_quality.producer_failure_signal import (
+    ProducerFailureStage,
+    ProducerUpstreamFailureCode,
+)
+from deerflow.sophia.synthetic_builder import (
+    normalize_synthetic_builder_context,
+    synthetic_builder_projection,
 )
 
 logger = logging.getLogger(__name__)
@@ -119,8 +131,8 @@ class _ProducerPreparationSnapshot:
     prepared: Any | None
     instrument: Any | None
     intent: Any | None
-    failure_stage: str
-    failure_code: str
+    failure_stage: ProducerFailureStage
+    failure_code: ProducerUpstreamFailureCode
     error: Exception | None
 
 
@@ -135,8 +147,10 @@ class _ProducerPreparationState:
         self._prepared: Any | None = None
         self._instrument: Any | None = None
         self._intent: Any | None = None
-        self._failure_stage = "candidate_metadata"
-        self._failure_code = "candidate_metadata_invalid"
+        self._failure_stage: ProducerFailureStage = "candidate_metadata"
+        self._failure_code: ProducerUpstreamFailureCode = (
+            "candidate_metadata_invalid"
+        )
         self._error: Exception | None = None
 
     def update(self, **values: Any) -> None:
@@ -480,12 +494,23 @@ def _post_webhook(
     url = f"{_gateway_url()}{_WEBHOOK_PATH}"
     task_id = payload.get("task_id")
     max_attempts = len(_WEBHOOK_RETRY_BACKOFFS_SECONDS) + 1
+    try:
+        body = encode_builder_event_body(delivery_payload)
+    except Exception:
+        logger.warning(
+            "Builder-events webhook serialization failed for task_id=%s",
+            task_id,
+            exc_info=True,
+        )
+        return
     for attempt in range(1, max_attempts + 1):
         try:
+            # Every response-loss retry receives a fresh nonce while signing
+            # the same canonical bytes. Gateway mutation is unreachable until
+            # this service boundary authenticates.
+            headers = signed_builder_event_headers(body)
             with httpx.Client(timeout=_WEBHOOK_TIMEOUT_SECONDS) as client:
-                # Preserve the baseline delivery wire contract. DQ durability
-                # is an independent pre-delivery producer transaction.
-                response = client.post(url, json=delivery_payload)
+                response = client.post(url, content=body, headers=headers)
             if 200 <= response.status_code < 300:
                 if attempt > 1:
                     logger.info(
@@ -590,8 +615,8 @@ def _post_deck_quality_producer_failure_signal(
     *,
     candidate_digest: str,
     user_id: str,
-    failure_stage: str,
-    upstream_failure_code: str,
+    failure_stage: ProducerFailureStage,
+    upstream_failure_code: ProducerUpstreamFailureCode,
     quality_run_id: str | None,
     deadline: float | None = None,
 ) -> bool:
@@ -1178,6 +1203,12 @@ def build_completion_payload_from_artifact(
     parent_thread_id = _parent_thread_id(delegation, cfg)
     user_id = _parent_user_id(delegation, cfg)
     trace_id = _trace_id(runtime_config)
+    synthetic_context = normalize_synthetic_builder_context(
+        state_dict,
+        delegation,
+        artifact_dict,
+        runtime_config,
+    )
 
     artifact_path = _canonical_artifact_path(artifact_dict.get("artifact_path"))
     artifact_storage_path = _relative_output_artifact_path(artifact_path)
@@ -1247,6 +1278,7 @@ def build_completion_payload_from_artifact(
         "completed_at": _iso(datetime.now(UTC)),
         "source": "builder_artifact_middleware",
         "user_id": user_id,
+        **synthetic_builder_projection(synthetic_context),
     }
     if failure_diagnostics:
         payload["builder_failure_diagnostics"] = failure_diagnostics
@@ -1619,18 +1651,26 @@ def fire_completion_webhook_from_artifact(
     # process dies after Thread.start(), the producer bundle (or deterministic
     # failure marker) must already be discoverable. The helper catches every
     # quality exception, so shadow observation can never suppress delivery.
-    try:
-        _persist_deck_quality_before_delivery_off_loop(
-            state=_state_dict(state),
-            artifact=_state_dict(artifact),
-            completion_payload=payload,
-        )
-    except Exception as exc:  # noqa: BLE001 - final delivery is authoritative
-        logger.warning(
-            "[Builder] DQ-1 producer boundary failed closed-to-quality task_id=%s run_id=%s error_type=%s",
+    if payload.get("synthetic_test") is not True:
+        try:
+            _persist_deck_quality_before_delivery_off_loop(
+                state=_state_dict(state),
+                artifact=_state_dict(artifact),
+                completion_payload=payload,
+            )
+        except Exception as exc:  # noqa: BLE001 - final delivery is authoritative
+            logger.warning(
+                "[Builder] DQ-1 producer boundary failed closed-to-quality task_id=%s run_id=%s error_type=%s",
+                task_id,
+                builder_run_id,
+                exc.__class__.__name__,
+            )
+    else:
+        logger.info(
+            "[Builder] DQ-1 producer boundary excluded for synthetic test task_id=%s run_id=%s test_run_id=%s",
             task_id,
             builder_run_id,
-            exc.__class__.__name__,
+            payload.get("test_run_id"),
         )
 
     # Permanent breadcrumb so we can audit the webhook chain end-to-end:

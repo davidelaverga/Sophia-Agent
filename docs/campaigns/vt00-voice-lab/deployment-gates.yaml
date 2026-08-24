@@ -1,0 +1,666 @@
+schema_version: vt00.deployment-gates.v1
+status: unpassed
+updated_at: "2026-08-24"
+
+source:
+  target_branch: codex/sophia-observability-v1
+  inspected_source_sha: 41a9b127af780bbe9d88acf34566a6aaf443e6b0
+  bootstrap_candidate_a_sha: PENDING
+  final_candidate_b_sha: PENDING
+  candidate_deployment_sha: PENDING
+  candidate_deployment_must_equal: final_candidate_b_sha
+  packaging_finalization_committed_to_target_branch: unpassed
+  rollback_source_sha: a793100008f7ccb5a25e9e018f896e7ec9dc2a3d
+
+deployment_order:
+  - order: 1
+    component: protected_product_auto_deploy_gates
+    action: disable_vercel_and_existing_render_git_auto_deploys_disable_main_blueprint_auto_sync_and_attest_blueprint_service_auto_deploy_off
+    status: unpassed
+  - order: 2
+    component: bootstrap_candidate_a_source
+    action: commit_and_push_complete_pre_registration_tree_to_target_branch
+    status: unpassed
+  - order: 3
+    component: sophia-voice-lab-postgres
+    action: create_from_database_only_blueprint_at_exact_bootstrap_candidate_a
+    status: unpassed
+  - order: 4
+    component: product_auth_postgres
+    action: provision_d02_role_verify_files_apply_migrations_then_preflight_from_exact_bootstrap_candidate_a
+    status: unpassed
+  - order: 5
+    component: protected_product_plane
+    action: deploy_langgraph_frontend_gateway_voice_exact_bootstrap_candidate_a_kill_switched_with_frontend_provisioning_temporarily_enabled
+    status: unpassed
+  - order: 6
+    component: sophia-voice-lab-worker
+    action: deploy_exact_bootstrap_candidate_a_kill_switched_worker_with_pre_registration_plugin_version_and_hash
+    status: unpassed
+  - order: 7
+    component: sophia-voice-lab-mcp
+    action: deploy_exact_bootstrap_candidate_a_kill_switched_web_after_matching_worker_heartbeat
+    status: unpassed
+  - order: 8
+    component: dedicated_principal
+    action: provision_once_through_audited_mcp_operator_then_disable_provisioning
+    status: unpassed
+  - order: 9
+    component: private_registered_app
+    action: register_exact_kill_switched_candidate_a_mcp_endpoint_and_capture_real_technical_id
+    status: unpassed
+  - order: 10
+    component: packaging_finalization_candidate_b
+    action: add_real_app_mapping_manifest_apps_and_cachebuster_compute_final_hash_commit_and_push_target_branch
+    status: unpassed
+  - order: 11
+    component: protected_product_plane
+    action: redeploy_langgraph_frontend_gateway_voice_exact_final_candidate_b_with_flags_disabled
+    status: unpassed
+  - order: 12
+    component: final_campaign_identity
+    action: set_candidate_b_expected_shas_final_plugin_version_hash_and_registered_app_id_on_both_lab_services
+    status: unpassed
+  - order: 13
+    component: sophia-voice-lab-worker
+    action: redeploy_exact_final_candidate_b_kill_switched_and_prove_final_plugin_identity
+    status: unpassed
+  - order: 14
+    component: sophia-voice-lab-mcp
+    action: redeploy_exact_final_candidate_b_kill_switched_after_matching_final_worker_heartbeat
+    status: unpassed
+  - order: 15
+    component: private_plugin
+    action: install_candidate_b_final_version_hash_registered_app_and_collect_platform_receipt
+    status: unpassed
+  - order: 16
+    component: certification_window
+    action: enable_dedicated_principal_then_open_mutations
+    status: unpassed
+
+blueprint_sources:
+  protected_product_plane:
+    branch: codex/sophia-observability-v1
+    path: render.yaml
+    auto_sync: false
+    status: unpassed
+  voice_lab_database:
+    branch: codex/sophia-observability-v1
+    path: render.voice-lab.database.yaml
+    auto_sync: false
+    status: unpassed
+  voice_lab_services:
+    branch: codex/sophia-observability-v1
+    path: render.voice-lab.yaml
+    auto_sync: false
+    status: unpassed
+
+deployment_identity:
+  frontend:
+    url: https://www.sophia-ei.com
+    bootstrap_candidate_a_sha: PENDING
+    bootstrap_deploy_id: PENDING
+    final_candidate_b_sha: PENDING
+    final_deploy_id: PENDING
+    campaign_open_candidate_b_sha: PENDING
+    campaign_open_deploy_id: PENDING
+    campaign_open_signed_readiness_status: unpassed
+    campaign_close_candidate_b_sha: PENDING
+    campaign_close_deploy_id: PENDING
+    campaign_close_signed_readiness_status: unpassed
+    manual_vercel_redeploy_and_promotion_for_each_gate_change: required
+    version_status: unpassed
+  gateway:
+    url: https://sophia-gateway.onrender.com
+    bootstrap_candidate_a_sha: PENDING
+    bootstrap_deploy_id: PENDING
+    final_candidate_b_sha: PENDING
+    final_deploy_id: PENDING
+    version_status: unpassed
+  langgraph:
+    url: https://sophia-langgraph.onrender.com
+    bootstrap_candidate_a_sha: PENDING
+    bootstrap_deploy_id: PENDING
+    final_candidate_b_sha: PENDING
+    final_deploy_id: PENDING
+    health_path: /ok
+    version_path: /version
+    version_status: unpassed
+  voice:
+    url: https://sophia-voice-2uzr.onrender.com
+    bootstrap_candidate_a_sha: PENDING
+    bootstrap_deploy_id: PENDING
+    final_candidate_b_sha: PENDING
+    final_deploy_id: PENDING
+    version_status: unpassed
+  voice_lab_worker:
+    bootstrap_candidate_a_sha: PENDING
+    bootstrap_deploy_id: PENDING
+    bootstrap_worker_boot_id_sha256: PENDING
+    bootstrap_worker_instance_id_sha256: PENDING
+    bootstrap_deployment_identity_sha256: PENDING
+    bootstrap_heartbeat_observed_at: PENDING
+    bootstrap_kill_switch_engaged: PENDING
+    bootstrap_execution_gate_settled: unpassed
+    final_candidate_b_sha: PENDING
+    final_deploy_id: PENDING
+    final_worker_boot_id_sha256: PENDING
+    final_worker_instance_id_sha256: PENDING
+    final_deployment_identity_sha256: PENDING
+    final_heartbeat_observed_at: PENDING
+    final_kill_switch_engaged: PENDING
+    final_execution_gate_settled: unpassed
+    campaign_open_deploy_id: PENDING
+    campaign_open_worker_boot_id_sha256: PENDING
+    campaign_open_worker_instance_id_sha256: PENDING
+    campaign_open_deployment_identity_sha256: PENDING
+    campaign_open_heartbeat_observed_at: PENDING
+    campaign_open_kill_switch_engaged: PENDING
+    campaign_open_execution_gate_settled: unpassed
+    campaign_close_deploy_id: PENDING
+    campaign_close_worker_boot_id_sha256: PENDING
+    campaign_close_worker_instance_id_sha256: PENDING
+    campaign_close_deployment_identity_sha256: PENDING
+    campaign_close_heartbeat_observed_at: PENDING
+    campaign_close_kill_switch_engaged: PENDING
+    campaign_close_execution_gate_settled: unpassed
+    exactly_one_live_worker_boot_required: true
+    heartbeat_must_follow_current_mcp_boot: true
+    heartbeat_must_follow_recorded_worker_deploy_start: true
+    source_and_dockerfile_match_mcp: unpassed
+    byte_identical_image_digest_required: false
+  voice_lab_mcp:
+    url: PENDING
+    bootstrap_candidate_a_sha: PENDING
+    bootstrap_deploy_id: PENDING
+    final_candidate_b_sha: PENDING
+    final_deploy_id: PENDING
+    version_status: unpassed
+  plugin:
+    bootstrap_manifest_version: PENDING
+    pre_registration_package_sha256: PENDING
+    registered_app_id: PENDING
+    final_manifest_version: PENDING
+    final_manifest_version_requires_codex_build_metadata: true
+    final_manifest_version_contract: strict_semver_base_or_prerelease_plus_codex_dot_single_sanitized_lowercase_alnum_hyphen_token
+    final_package_sha256: PENDING
+    packaging_finalization_candidate_b_sha: PENDING
+    target_branch_contains_registered_package: unpassed
+    both_lab_services_redeployed_on_final_candidate_b_identity: unpassed
+    all_six_components_match_final_candidate_b: unpassed
+
+environment_ownership:
+  blueprint_nonsecret:
+    owner: repository
+    keys:
+      - NODE_ENV
+      - LOG_LEVEL
+      - ORT_DISABLE_TELEMETRY
+      - SOPHIA_VOICE_LAB_ENVIRONMENT
+      - SOPHIA_VOICE_LAB_ALLOWED_HOSTS
+      - SOPHIA_VOICE_LAB_ALLOWED_ORIGINS
+      - SOPHIA_VOICE_LAB_WEBSOCKET_ORIGINS
+      - SOPHIA_VOICE_LAB_AUTH_GRANT_PATH
+      - SOPHIA_VOICE_LAB_AUTH_PROVISION_PATH
+      - SOPHIA_VOICE_LAB_AUTH_REFRESH_PATH
+      - SOPHIA_VOICE_LAB_AUTH_CLEANUP_PATH
+      - SOPHIA_VOICE_LAB_AUTH_CONTINUE_PATH
+      - SOPHIA_VOICE_LAB_AUTH_READINESS_PATH
+      - SOPHIA_VOICE_LAB_AUTH_SESSION_PATH
+      - SOPHIA_VOICE_LAB_RECOVERY_PATH_PREFIX
+      - SOPHIA_VOICE_LAB_TARGET_FRONTEND_URL
+      - SOPHIA_VOICE_LAB_TARGET_GATEWAY_URL
+      - SOPHIA_VOICE_LAB_TARGET_LANGGRAPH_URL
+      - SOPHIA_VOICE_LAB_TARGET_VOICE_URL
+      - SOPHIA_VOICE_LAB_REPOSITORY_BASE_SHA
+      - SOPHIA_VOICE_LAB_REPOSITORY_ROLLBACK_SHA
+      - SOPHIA_VOICE_LAB_HARNESS_VERSION
+      - SOPHIA_VOICE_LAB_MCP_VERSION
+      - SOPHIA_VOICE_LAB_ESPEAK_VERSION
+      - SOPHIA_VOICE_LAB_FIXTURE_MANIFEST_SHA256
+      - SOPHIA_VOICE_LAB_BEARER_SUBJECT
+      - SOPHIA_VOICE_LAB_CAPABILITY_ISSUER
+      - SOPHIA_VOICE_LAB_CAPABILITY_TTL_SECONDS
+      - SOPHIA_VOICE_LAB_MAX_TTL_SECONDS
+      - SOPHIA_VOICE_LAB_RETENTION_REAPER_REQUIRED
+      - SOPHIA_VOICE_LAB_RETENTION_REAPER_INTERVAL_SECONDS
+      - SOPHIA_VOICE_LAB_RETENTION_REAPER_BATCH_SIZE
+      - SOPHIA_VOICE_LAB_DURABLE_EVIDENCE_REQUIRED
+      - SOPHIA_VOICE_LAB_OAUTH_ISSUER
+      - SOPHIA_VOICE_LAB_OAUTH_RESOURCE
+      - SOPHIA_VOICE_LAB_OAUTH_RESOURCE_METADATA_URL
+      - SOPHIA_VOICE_LAB_OAUTH_CLIENT_METADATA_URL
+      - SOPHIA_VOICE_LAB_OAUTH_CLIENT_REDIRECT_URI
+      - SOPHIA_VOICE_LAB_OAUTH_OPERATOR_SUBJECT
+      - SOPHIA_VOICE_LAB_OAUTH_ACCESS_TOKEN_TTL_SECONDS
+      - SOPHIA_VOICE_LAB_OAUTH_REFRESH_TOKEN_TTL_SECONDS
+      - SOPHIA_VOICE_LAB_OAUTH_ADMISSION_RETENTION_SECONDS
+      - SOPHIA_VOICE_LAB_OAUTH_ENDPOINT_WINDOW_SECONDS
+      - SOPHIA_VOICE_LAB_OAUTH_AUTHORIZE_REQUESTS_PER_WINDOW
+      - SOPHIA_VOICE_LAB_OAUTH_TOKEN_REQUESTS_PER_WINDOW
+      - SOPHIA_VOICE_LAB_OAUTH_REVOKE_REQUESTS_PER_WINDOW
+      - SOPHIA_VOICE_LAB_OAUTH_PURGE_BATCH_SIZE
+      - SOPHIA_VOICE_LAB_MAX_CONCURRENT_RUNS
+      - SOPHIA_VOICE_LAB_MAX_RUNS_PER_CALLER
+      - SOPHIA_VOICE_LAB_MAX_TEXT_CHARACTERS
+      - SOPHIA_VOICE_LAB_MAX_AUDIO_BYTES
+      - SOPHIA_VOICE_LAB_MAX_AUDIO_DURATION_MS
+      - SOPHIA_VOICE_LAB_MAX_INJECTED_BYTES
+      - SOPHIA_VOICE_LAB_MAX_INJECTED_DURATION_MS
+      - SOPHIA_VOICE_LAB_MAX_UTTERANCES_PER_RUN
+      - SOPHIA_VOICE_LAB_MIN_UTTERANCE_INTERVAL_MS
+      - SOPHIA_VOICE_LAB_TTS_TIMEOUT_MS
+      - SOPHIA_VOICE_LAB_MAX_RUN_SECONDS
+      - SOPHIA_VOICE_LAB_MAX_OPERATION_SECONDS
+      - SOPHIA_VOICE_LAB_START_OPERATION_SECONDS
+      - SOPHIA_VOICE_LAB_END_OPERATION_SECONDS
+      - SOPHIA_VOICE_LAB_FAULT_OPERATION_SECONDS
+      - SOPHIA_VOICE_LAB_ADMISSION_WINDOW_SECONDS
+      - SOPHIA_VOICE_LAB_MAX_WAIT_MS
+      - SOPHIA_VOICE_LAB_OPERATION_LEASE_SECONDS
+      - SOPHIA_VOICE_LAB_BROWSER_LEASE_SECONDS
+      - SOPHIA_VOICE_LAB_WORKER_POLL_MS
+      - SOPHIA_VOICE_LAB_MAX_ROLLING_INJECTED_BYTES
+      - SOPHIA_VOICE_LAB_MAX_ROLLING_INJECTED_BYTES_PER_CALLER
+      - SOPHIA_VOICE_LAB_MAX_ROLLING_INJECTED_DURATION_MS
+      - SOPHIA_VOICE_LAB_MAX_ROLLING_INJECTED_DURATION_MS_PER_CALLER
+      - SOPHIA_VOICE_LAB_MAX_ROLLING_PROVIDER_SECONDS
+      - SOPHIA_VOICE_LAB_MAX_ROLLING_PROVIDER_SECONDS_PER_CALLER
+      - SOPHIA_VOICE_LAB_MAX_ROLLING_RUN_STARTS
+      - SOPHIA_VOICE_LAB_MAX_ROLLING_RUN_STARTS_PER_CALLER
+      - SOPHIA_VOICE_LAB_MAX_ROLLING_SUITES
+      - SOPHIA_VOICE_LAB_MAX_ROLLING_SUITES_PER_CALLER
+      - SOPHIA_VOICE_LAB_MAX_ROLLING_SUITE_CHILDREN
+      - SOPHIA_VOICE_LAB_MAX_ROLLING_SUITE_CHILDREN_PER_CALLER
+      - SOPHIA_VOICE_LAB_FRESH_BUTTON_NAME
+      - SOPHIA_VOICE_LAB_START_BUTTON_NAME
+      - SOPHIA_VOICE_LAB_STOP_BUTTON_NAME
+      - SOPHIA_VOICE_LAB_ONBOARDING_MIC_SELECTOR
+      - SOPHIA_VOICE_LAB_ALLOW_RAW_AUDIO
+  render_derived:
+    owner: render
+    keys:
+      - DATABASE_URL
+      - RENDER_GIT_COMMIT
+      - RENDER_EXTERNAL_HOSTNAME
+      - PORT
+  dashboard_secret:
+    owner: campaign_security_operator
+    values_committed: false
+    keys:
+      - SOPHIA_VOICE_LAB_BEARER_TOKEN
+      - SOPHIA_VOICE_LAB_FAULT_BEARER_TOKEN
+      - SOPHIA_VOICE_LAB_PRINCIPAL_ID
+      - SOPHIA_VOICE_LAB_CAPABILITY_SECRET
+      - SOPHIA_VOICE_LAB_GRANT_SECRET
+      - SOPHIA_VOICE_LAB_RECOVERY_INTERNAL_SECRET
+      - SOPHIA_VOICE_LAB_CALLER_PARTITION_KEYS_JSON
+      - SOPHIA_VOICE_LAB_OAUTH_CONSENT_SECRET
+      - SOPHIA_VOICE_LAB_OAUTH_TOKEN_PEPPER
+  voice_lab_service_gates:
+    owner: campaign_operator
+    values_committed: false
+    service_scoped: true
+    keys:
+      sophia-voice-lab-mcp:
+        - SOPHIA_VOICE_LAB_KILL_SWITCH
+      sophia-voice-lab-worker:
+        - SOPHIA_VOICE_LAB_KILL_SWITCH
+    initial_value: "true"
+    open_order:
+      - sophia-voice-lab-worker
+      - sophia-voice-lab-mcp
+    close_order:
+      - sophia-voice-lab-mcp
+      - drain_and_terminalize_owned_resources
+      - sophia-voice-lab-worker
+  voice_lab_bootstrap_provisioning_gate:
+    owner: campaign_operator
+    values_committed: false
+    service: sophia-voice-lab-mcp
+    keys:
+      - SOPHIA_VOICE_LAB_PROVISIONING_ENABLED
+    bootstrap_value: "true"
+    close_after_principal_receipt: "false"
+  campaign_identity_dashboard:
+    owner: campaign_operator
+    values_committed: false
+    identical_on_voice_lab_web_and_worker: true
+    bootstrap_candidate_a:
+      repository_candidate_sha: source.bootstrap_candidate_a_sha
+      expected_product_and_dependency_shas: source.bootstrap_candidate_a_sha
+      plugin_version: deployment_identity.plugin.bootstrap_manifest_version
+      plugin_package_sha256: deployment_identity.plugin.pre_registration_package_sha256
+      registered_app_id: blank
+      purpose: kill_switched_registration_infrastructure_only
+    final_candidate_b:
+      repository_candidate_sha: source.final_candidate_b_sha
+      expected_product_and_dependency_shas: source.final_candidate_b_sha
+      plugin_version: deployment_identity.plugin.final_manifest_version
+      plugin_package_sha256: deployment_identity.plugin.final_package_sha256
+      registered_app_id: deployment_identity.plugin.registered_app_id
+      required_before_installation: true
+    keys:
+      - SOPHIA_VOICE_LAB_REPOSITORY_CANDIDATE_SHA
+      - SOPHIA_VOICE_LAB_PLUGIN_PACKAGE_SHA256
+      - SOPHIA_VOICE_LAB_PLUGIN_VERSION
+      - SOPHIA_VOICE_LAB_REGISTERED_APP_ID
+      - SOPHIA_VOICE_LAB_EXPECTED_FRONTEND_SHA
+      - SOPHIA_VOICE_LAB_EXPECTED_BACKEND_SHA
+      - SOPHIA_VOICE_LAB_EXPECTED_LANGGRAPH_SHA
+      - SOPHIA_VOICE_LAB_EXPECTED_VOICE_SHA
+      - SOPHIA_VOICE_LAB_ATTESTATION_PUBLIC_KEYS_JSON
+  gateway_service_secret:
+    owner: gateway_security_operator
+    values_committed: false
+    keys:
+      - SOPHIA_VOICE_LAB_D02_GATEWAY_CAPABILITY_SECRET
+      - SOPHIA_VOICE_LAB_D02_GATEWAY_DATABASE_URL
+      - SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID
+      - SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_SECRET
+      - SOPHIA_VOICE_LAB_D02_SETTLEMENT_IDENTITY_HMAC_SECRET
+      - SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PRIVATE_KEY_PKCS8_BASE64
+      - SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEY_SPKI_BASE64
+      - SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEYRING_JSON
+      - SOPHIA_VOICE_LAB_D02_SETTLEMENT_AUTHORITY_KEY_ID
+  protected_product_database_runtime_secret:
+    owner: product_auth_database_operator
+    values_committed: false
+    services:
+      - sophia-langgraph
+      - sophia-gateway
+    keys:
+      - SOPHIA_VOICE_LAB_AUTH_DATABASE_URL
+    database_role: better_auth_app
+    exact_voice_lab_table_privileges:
+      sophia_voice_lab_auth_grants: [SELECT, INSERT, UPDATE, DELETE]
+      sophia_sessions: [SELECT, UPDATE]
+      sophia_session_messages: []
+      artifact_registry_records: []
+      sophia_voice_lab_cleanup_obligations: [SELECT, INSERT, UPDATE, DELETE]
+      sophia_voice_lab_cleanup_admissions: [SELECT, INSERT, UPDATE, DELETE]
+      sophia_voice_lab_cleanup_scan_cursors: [SELECT, UPDATE]
+    preexisting_better_auth_table_privileges:
+      user: [SELECT, INSERT, UPDATE, DELETE]
+      session: [SELECT, INSERT, UPDATE, DELETE]
+      account: [SELECT, INSERT, UPDATE, DELETE]
+      verification: [SELECT, INSERT, UPDATE, DELETE]
+    exact_d02_function_execute:
+      - sophia_voice_lab_d02_sources_zero(text)
+    all_other_d02_function_execute: false
+    raw_d02_table_column_sequence_privileges: []
+    schema_create: false
+    grant_option: false
+    distinct_from:
+      - SOPHIA_VOICE_LAB_AUTH_MIGRATION_DATABASE_URL
+      - SOPHIA_VOICE_LAB_D02_GATEWAY_DATABASE_URL
+  migration_operator_ephemeral:
+    owner: postgres_schema_operator
+    values_committed: false
+    shell_only: true
+    unset_after_operation: true
+    keys:
+      - BETTER_AUTH_DATABASE_URL
+      - BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF
+      - SOPHIA_VOICE_LAB_AUTH_MIGRATION_DATABASE_URL
+      - SOPHIA_VOICE_LAB_D02_ROLE_PROVISION_APPROVED
+      - SOPHIA_VOICE_LAB_D02_GATEWAY_DATABASE_PASSWORD
+      - SOPHIA_VOICE_LAB_ENVIRONMENT
+      - SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID
+      - SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_SECRET
+      - SOPHIA_VOICE_LAB_D02_FINALIZE_AUTHORITY_ROTATION_APPROVED
+  voice_lab_web_service_secret:
+    owner: frontend_security_operator
+    values_committed: false
+    keys:
+      - SOPHIA_VOICE_LAB_PROVISION_OPERATOR_BEARER_TOKEN
+      - SOPHIA_VOICE_LAB_ATTESTATION_TRANSPORT_TOKENS_JSON
+      - SOPHIA_VOICE_LAB_D02_GATEWAY_CAPABILITY_SECRET
+      - SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEY_SPKI_BASE64
+      - SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEYRING_JSON
+      - SOPHIA_VOICE_LAB_D02_SETTLEMENT_AUTHORITY_KEY_ID
+  principal_provision_operator_ephemeral:
+    owner: principal_provision_operator
+    values_committed: false
+    shell_only: true
+    unset_after_operation: true
+    keys:
+      - SOPHIA_VOICE_LAB_PRINCIPAL_PROVISION_APPROVED
+      - SOPHIA_VOICE_LAB_PROVISIONING_ENABLED
+      - SOPHIA_VOICE_LAB_ENVIRONMENT
+      - SOPHIA_VOICE_LAB_PROVISION_OPERATOR_BEARER_TOKEN
+      - SOPHIA_VOICE_LAB_PRINCIPAL_PROVISION_IDEMPOTENCY_KEY
+      - SOPHIA_VOICE_LAB_TARGET_MCP_URL
+      - SOPHIA_VOICE_LAB_EXPECTED_FRONTEND_SHA
+      - SOPHIA_VOICE_LAB_EXPECTED_BACKEND_SHA
+      - SOPHIA_VOICE_LAB_EXPECTED_VOICE_SHA
+      - SOPHIA_VOICE_LAB_EXPECTED_MCP_SHA
+  protected_product_plane:
+    owner: frontend_gateway_voice_operator
+    values_committed: false
+    keys:
+      - SOPHIA_VOICE_LAB_ENABLED
+      - SOPHIA_VOICE_LAB_KILL_SWITCH
+      - SOPHIA_VOICE_LAB_PROVISIONING_ENABLED
+      - SOPHIA_VOICE_LAB_TEST_PRINCIPAL
+      - SOPHIA_VOICE_LAB_TEST_EMAIL
+      - SOPHIA_VOICE_LAB_TEST_NAME
+      - SOPHIA_VOICE_LAB_CAPABILITY_SECRET
+      - SOPHIA_VOICE_LAB_SESSION_TTL_SECONDS
+      - SOPHIA_VOICE_LAB_AUTH_TOMBSTONE_ACTIVE_KID
+      - SOPHIA_VOICE_LAB_AUTH_TOMBSTONE_KEYS
+      - SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEY_SPKI_BASE64
+      - SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEYRING_JSON
+      - SOPHIA_VOICE_LAB_D02_SETTLEMENT_AUTHORITY_KEY_ID
+
+rollback:
+  frontend_deployment_id: dpl_7WFUuPa8QTX9SZQPS8DK1XSPCLSF
+  gateway_deploy_id: dep-da4br1m1egvs73bfprk0
+  langgraph_deploy_id: dep-da4brdv10e5c73ala3t0
+  voice_deploy_id: dep-da4m52btqb8s7389ri80
+  voice_lab_mcp_deploy_id: PENDING
+  voice_lab_worker_deploy_id: PENDING
+  database_snapshot_or_recovery_id: PENDING
+
+provisioning:
+  dedicated_principal_only: true
+  enable_once_key: SOPHIA_VOICE_LAB_PROVISIONING_ENABLED
+  enable_once_status: unpassed
+  disable_before_campaign: true
+  disable_status: unpassed
+  bootstrap_gate_state:
+    protected_frontend:
+      kill_switch_engaged: true
+      provisioning_enabled: true
+    voice_lab_mcp:
+      kill_switch_engaged: true
+      provisioning_enabled: true
+    after_receipt_provisioning_enabled: false
+  ordinary_user_provisioning_forbidden: true
+  operator_path: frontend_package_script_to_authenticated_voice_lab_mcp_operator_endpoint
+  grant_secret_in_operator_shell: forbidden
+  durable_audit_required:
+    - action
+    - outcome
+    - request_sha256
+    - capability_sha256
+    - principal_id_sha256
+    - expected_frontend_sha
+    - observed_frontend_sha
+    - operator_subject_sha256
+    - database_observed_at
+  exact_response_loss_replay: required
+  audit_status: unpassed
+  d02_gateway_database_role:
+    name: sophia_voice_lab_gateway
+    target: product_auth_postgres
+    isolated_harness_database_forbidden: true
+    operator_credential_separate: true
+    runtime_dsn_key: SOPHIA_VOICE_LAB_D02_GATEWAY_DATABASE_URL
+    login: true
+    noinherit: true
+    superuser: false
+    createdb: false
+    createrole: false
+    replication: false
+    bypassrls: false
+    memberships: []
+    public_schema_create: false
+    raw_table_privileges: []
+    external_function_execute_only: true
+    finalize_hmac_key_id_key: SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID
+    finalize_hmac_secret_key: SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_SECRET
+    finalize_hmac_rotation: maintenance_drain_only
+    finalize_hmac_initial_key_id: d02-db-finalize-v1
+    finalize_hmac_key_id_dashboard_managed: true
+    finalize_hmac_secret_distinct_from:
+      - SOPHIA_VOICE_LAB_GRANT_SECRET
+      - SOPHIA_VOICE_LAB_CAPABILITY_SECRET
+      - SOPHIA_VOICE_LAB_D02_GATEWAY_CAPABILITY_SECRET
+      - SOPHIA_VOICE_LAB_RECOVERY_INTERNAL_SECRET
+      - SOPHIA_VOICE_INTERNAL_AUTH_SECRET
+      - SOPHIA_BUILDER_EVENTS_HMAC_SECRET
+      - SOPHIA_VOICE_LAB_D02_SETTLEMENT_IDENTITY_HMAC_SECRET
+      - SOPHIA_VOICE_LAB_AUTH_TOMBSTONE_KEYS
+      - SOPHIA_VOICE_LAB_OAUTH_CONSENT_SECRET
+      - SOPHIA_VOICE_LAB_OAUTH_TOKEN_PEPPER
+      - SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET
+      - SOPHIA_BACKEND_TOKEN_SECRET
+    exact_catalog_and_effective_acl_attestation: required
+    status: unpassed
+
+concurrency:
+  max_global_runs: 1
+  max_runs_per_caller: 1
+  suite_execution: sequential
+  reason: gateway_active_session_is_keyed_by_single_dedicated_principal
+  parallel_execution_status: forbidden_pending_product_ownership_change
+
+kill_switch:
+  default_engaged: true
+  voice_lab_web_and_worker_values_are_service_scoped: true
+  bounded_open_order:
+    - protected_product_plane_enabled_with_product_kill_switch_open
+    - sophia-voice-lab-worker_execution_gate_open
+    - sophia-voice-lab-mcp_admission_gate_open
+  bounded_close_order:
+    - sophia-voice-lab-mcp_admission_gate_closed
+    - exact_owned_cleanup_and_terminal_zero
+    - sophia-voice-lab-worker_execution_gate_closed
+    - protected_product_plane_kill_switch_closed_and_flags_disabled
+  provisioned_readiness_gate_states:
+    both_engaged: ready_mutations_closed
+    frontend_open_mcp_engaged: ready_mutations_closed_ordered_transition
+    both_open: ready_mutations_enabled
+    frontend_engaged_mcp_open: not_ready_forbidden_order
+    frontend_voice_lab_enabled_may_be_false_only_while_mcp_engaged: true
+    mcp_open_requires_frontend_voice_lab_enabled: true
+  protected_product_gate_attestation:
+    bootstrap:
+      frontend_voice_lab_enabled: false
+      frontend_kill_switch_engaged: true
+      frontend_provisioning_enabled: true
+      gateway_voice_lab_admission_ready: true
+      gateway_voice_lab_mutation_ready: false
+      voice_voice_lab_mutation_ready: false
+    final_candidate_b_closed:
+      frontend_build: source.final_candidate_b_sha
+      frontend_deploy_id: deployment_identity.frontend.final_deploy_id
+      frontend_voice_lab_enabled: false
+      frontend_kill_switch_engaged: true
+      frontend_provisioning_enabled: false
+    campaign_open_required_before_worker:
+      frontend_build: source.final_candidate_b_sha
+      frontend_deploy_id: deployment_identity.frontend.campaign_open_deploy_id
+      frontend_voice_lab_enabled: true
+      frontend_kill_switch_engaged: false
+      frontend_provisioning_enabled: false
+      frontend_signed_readiness_status: unpassed
+      gateway_voice_lab_enabled: true
+      gateway_voice_lab_kill_switch_engaged: false
+      gateway_voice_lab_mutation_ready: true
+      voice_voice_lab_enabled: true
+      voice_voice_lab_kill_switch_engaged: false
+      voice_voice_lab_mutation_ready: true
+    campaign_close_required_after_worker:
+      frontend_build: source.final_candidate_b_sha
+      frontend_deploy_id: deployment_identity.frontend.campaign_close_deploy_id
+      frontend_voice_lab_enabled: false
+      frontend_kill_switch_engaged: true
+      frontend_provisioning_enabled: false
+      frontend_signed_readiness_status: unpassed
+    mcp_open_requires_product_mutation_gates_open: true
+    fresh_api_and_worker_admission_reprobe_required: true
+  bounded_campaign_override_status: unpassed
+  while_engaged_reject:
+    - start_voice_run
+    - speak
+    - barge_in
+    - force_socket_rotation
+    - run_regression_suite
+  cleanup_exception_allow:
+    - end_voice_run
+    - browser_and_provider_reaping
+    - evidence_export
+    - read_only_inspection
+  terminal_zero_orphan_audit_status: unpassed
+
+manual_exception:
+  allowed_lane: periodic_physical_device_check_only
+  may_satisfy_autonomous_certification: false
+  human_voice_fallback_allowed: false
+  raw_browser_or_shell_takeover_allowed: false
+  status: unpassed
+
+cost:
+  estimate_binding: false
+  estimate_basis: two_starter_service_months_plus_one_basic_256mb_database_month_plus_provider_and_storage_usage
+  monetary_estimate: PENDING
+  budget_approval: PENDING
+  actual_reconciliation: PENDING
+
+evidence_policy:
+  raw_audio_default: disabled
+  default_event_retention_hours: 24
+  approved_redacted_manifest_retention_days: 30
+  unrestricted_logs_allowed: false
+  secrets_allowed: false
+  unredacted_ordinary_user_data_allowed: false
+  deletion_enforcement_status: unpassed
+  redaction_verification_status: unpassed
+
+quantitative_gates:
+  - id: dynamic_scheduling_idempotency
+    threshold: 20_of_20_deterministic_trials_zero_duplicate_injections
+    status: unpassed
+  - id: malformed_unauthorized_rejection
+    threshold: 100_percent_before_provider_bearing_resource_creation
+    status: unpassed
+  - id: fresh_session_smoke
+    threshold: 5_consecutive_sessions_zero_harness_caused_failures
+    status: unpassed
+  - id: identity_evidence_joins
+    threshold: 100_percent_present_or_typed_unavailable_zero_silent_inference
+    status: unpassed
+  - id: capture_overflow
+    threshold: at_least_1_run_over_ring_capacity_zero_sequence_gap_after_incremental_drain
+    status: unpassed
+  - id: orphan_cleanup
+    threshold: 0_live_owned_browser_synthetic_session_provider_or_task_resources
+    status: unpassed
+  - id: plugin_cold_flow
+    threshold: 1_fresh_agent_no_more_than_10_high_level_mcp_calls_excluding_deliberately_long_read_only_polling
+    status: unpassed
+  - id: evidence_availability
+    threshold: within_30_seconds_of_terminal_browser_cleanup_or_explicit_pending_finalizer
+    status: unpassed
+  - id: exact_deployment_mismatch
+    threshold: 100_percent_hard_refusal
+    status: unpassed
+
+promotion:
+  decision: PENDING
+  gates_passed: false
+  final_candidate_b_deployed_to_all_six_components: false
+  final_registered_plugin_identity_verified: false
+  documentation_alone_can_promote: false

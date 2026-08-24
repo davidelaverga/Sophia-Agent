@@ -1,11 +1,17 @@
 import { NextResponse } from 'next/server';
 
 import { fetchSophiaApi, resolveSophiaUserId } from '../../../_lib/sophia';
+import {
+  getVoiceLabEndSessionCapability,
+  getVoiceLabSessionCreateCapability,
+  VOICE_LAB_CAPABILITY_HEADER,
+  VoiceLabCapabilityError,
+} from '@/server/voice-lab/capability';
 
 type GeminiProductionAuthResult = { userId: string } | { response: NextResponse };
 
 export async function authorizeGeminiProductionUser(): Promise<GeminiProductionAuthResult> {
-  const userId = await resolveSophiaUserId();
+  const userId = await resolveSophiaUserId({ voiceLabAccess: 'governed' });
 
   if (!userId) {
     return {
@@ -14,6 +20,22 @@ export async function authorizeGeminiProductionUser(): Promise<GeminiProductionA
   }
 
   return { userId };
+}
+
+export async function geminiProductionVoiceLabHeaders(
+  userId: string,
+  operation: 'mutate' | 'finalize',
+): Promise<Record<string, string>> {
+  const capability = operation === 'mutate'
+    ? await getVoiceLabSessionCreateCapability(userId)
+    : await getVoiceLabEndSessionCapability(userId);
+  return capability ? { [VOICE_LAB_CAPABILITY_HEADER]: capability } : {};
+}
+
+export function geminiProductionVoiceLabFailure(error: unknown): NextResponse | null {
+  return error instanceof VoiceLabCapabilityError
+    ? NextResponse.json({ error: error.code }, { status: error.status })
+    : null;
 }
 
 function safePrefix(value: unknown): string | null {
@@ -62,7 +84,7 @@ export async function proxyGeminiProductionResponse(path: string, init: RequestI
   const relayContext = path.includes('/voice/gemini/relay')
     ? safeRelayRequestContext(init.body)
     : {};
-  const backendResponse = await fetchSophiaApi(path, init);
+  const backendResponse = await fetchSophiaApi(path, init, { voiceLabAccess: 'governed' });
   const responseText = await backendResponse.text();
 
   if (path.includes('/voice/gemini/relay') && backendResponse.status >= 400) {

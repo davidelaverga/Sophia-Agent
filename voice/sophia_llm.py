@@ -5,6 +5,7 @@ import logging
 import re
 import time
 from collections.abc import Awaitable, Callable
+from inspect import Parameter, signature
 from typing import Any
 from uuid import uuid4
 
@@ -16,7 +17,6 @@ from vision_agents.core.llm.llm import LLMResponseEvent
 from voice.adapters import build_backend_adapter
 from voice.adapters.base import (
     BackendAdapter,
-    BackendEvent,
     BackendRequest,
     BackendStageError,
     ARTIFACT_VOICE_DELIVERY_DEFAULTS,
@@ -42,6 +42,60 @@ _MIN_STREAMING_CLAUSE_WORDS = 5
 _MIN_STREAMING_SOFT_SPLIT_CHARS = 72
 _MIN_STREAMING_SOFT_SPLIT_WORDS = 12
 _STREAMING_SOFT_SPLIT_TARGET_WORDS = 14
+
+
+def _build_compatible_llm_event(
+    event_names: tuple[str, ...],
+    **attributes: object,
+) -> object | None:
+    """Build an SDK telemetry event when the installed release exposes it.
+
+    Vision Agents 0.6 removed the request/chunk/completed event classes used by
+    0.5 and replaced the completed event with ``LLMResponseFinalEvent``. Voice
+    streaming must not fail merely because optional SDK telemetry changed.
+    """
+
+    for event_name in event_names:
+        event_type = getattr(llm_events, event_name, None)
+        if not isinstance(event_type, type):
+            continue
+
+        try:
+            parameters = signature(event_type).parameters
+        except (TypeError, ValueError):
+            event_attributes = attributes
+        else:
+            accepts_extra = any(
+                parameter.kind is Parameter.VAR_KEYWORD
+                for parameter in parameters.values()
+            )
+            event_attributes = (
+                attributes
+                if accepts_extra
+                else {key: value for key, value in attributes.items() if key in parameters}
+            )
+
+        try:
+            return event_type(**event_attributes)
+        except TypeError:
+            logger.debug(
+                "voice.llm_event compatibility_build_failed event=%s",
+                event_name,
+                exc_info=True,
+            )
+
+    return None
+
+
+def _send_compatible_llm_event(
+    event_manager: object,
+    event_names: tuple[str, ...],
+    **attributes: object,
+) -> object | None:
+    event = _build_compatible_llm_event(event_names, **attributes)
+    if event is not None:
+        event_manager.send(event)  # type: ignore[attr-defined]
+    return event
 
 
 def _soft_streaming_boundary(text: str, start: int) -> int | None:
@@ -659,14 +713,14 @@ class SophiaLLM(LLM):
         request_started = time.perf_counter()
         first_token_ms: float | None = None
 
-        request_event = llm_events.LLMRequestStartedEvent(
+        request_event = _send_compatible_llm_event(
+            self.events,
+            ("LLMRequestStartedEvent",),
             plugin_name="sophia_llm",
             model=self.settings.llm_label,
             streaming=True,
         )
-        self.events.send(
-            request_event
-        )
+        request_id = getattr(request_event, "request_id", item_id)
 
         if self._tts_ref is not None:
             note_response_started = getattr(self._tts_ref, "note_response_started", None)
@@ -713,7 +767,7 @@ class SophiaLLM(LLM):
                     plugin_name="sophia_llm",
                     error=exc,
                     context=stage,
-                    request_id=request_event.request_id,
+                    request_id=request_id,
                     is_recoverable=recoverable,
                 )
             )
@@ -727,16 +781,16 @@ class SophiaLLM(LLM):
 
         latency_ms = (time.perf_counter() - request_started) * 1000
 
-        self.events.send(
-            llm_events.LLMResponseCompletedEvent(
-                plugin_name="sophia_llm",
-                original=original,
-                text=response_text,
-                item_id=item_id,
-                latency_ms=latency_ms,
-                time_to_first_token_ms=first_token_ms,
-                model=self.settings.llm_label,
-            )
+        _send_compatible_llm_event(
+            self.events,
+            ("LLMResponseCompletedEvent", "LLMResponseFinalEvent"),
+            plugin_name="sophia_llm",
+            original=original,
+            text=response_text,
+            item_id=item_id,
+            latency_ms=latency_ms,
+            time_to_first_token_ms=first_token_ms,
+            model=self.settings.llm_label,
         )
         await self._drain_background_call_event_tasks()
 
@@ -790,17 +844,17 @@ class SophiaLLM(LLM):
                         self.note_first_text_emitted(request.user_id)
 
                     text_parts.append(text_chunk)
-                    self.events.send(
-                        llm_events.LLMResponseChunkEvent(
-                            plugin_name="sophia_llm",
-                            item_id=item_id,
-                            output_index=0,
-                            content_index=sequence,
-                            sequence_number=sequence,
-                            delta=text_chunk,
-                            is_first_chunk=sequence == 0,
-                            time_to_first_token_ms=first_token_ms if sequence == 0 else None,
-                        )
+                    _send_compatible_llm_event(
+                        self.events,
+                        ("LLMResponseChunkEvent",),
+                        plugin_name="sophia_llm",
+                        item_id=item_id,
+                        output_index=0,
+                        content_index=sequence,
+                        sequence_number=sequence,
+                        delta=text_chunk,
+                        is_first_chunk=sequence == 0,
+                        time_to_first_token_ms=first_token_ms if sequence == 0 else None,
                     )
                     if is_first_chunk and not speech_started:
                         speech_started = True

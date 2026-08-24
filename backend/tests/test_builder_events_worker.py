@@ -33,6 +33,8 @@ from app.gateway.workers.builder_events import (
 def app() -> FastAPI:
     test_app = FastAPI()
     install_builder_events_worker(test_app, cache_ttl_seconds=60)
+    test_app.dependency_overrides[routes.require_builder_event_service_auth] = lambda: None
+    test_app.dependency_overrides[routes.require_authenticated_user] = lambda: "fixture-user"
     test_app.include_router(routes.internal_router)
     test_app.include_router(routes.public_router)
     return test_app
@@ -52,6 +54,11 @@ def allow_fixture_parent_thread_id(monkeypatch):
         routes,
         "_is_langgraph_thread_id",
         lambda value: value == "parent-thread" or original(value),
+    )
+    monkeypatch.setattr(
+        routes._session_store,
+        "find_session_by_thread_id",
+        lambda _user_id, _thread_id: object(),
     )
 
 

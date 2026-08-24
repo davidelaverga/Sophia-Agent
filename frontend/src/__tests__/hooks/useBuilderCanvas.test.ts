@@ -1,6 +1,12 @@
 import { act, renderHook, waitFor } from '@testing-library/react';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+const recordCanvasProjection = vi.hoisted(() => vi.fn(async () => null));
+
+vi.mock('../../app/lib/synthetic-builder-evidence', () => ({
+  recordSyntheticBuilderCanvasProjection: recordCanvasProjection,
+}));
+
 import { useBuilderCanvas } from '../../app/hooks/useBuilderCanvas';
 import type { BuilderCanvasEventV1, BuilderCanvasSnapshotV1 } from '../../app/types/builder-canvas';
 
@@ -48,6 +54,7 @@ function mockFetchSnapshots(...snapshots: BuilderCanvasSnapshotV1[]) {
 
 beforeEach(() => {
   FakeEventSource.instances = [];
+  recordCanvasProjection.mockClear();
   globalThis.fetch = vi.fn(async () => new Response(JSON.stringify(SNAPSHOT), { status: 200 })) as typeof fetch;
   (globalThis as { EventSource?: unknown }).EventSource = FakeEventSource as unknown as typeof EventSource;
 });
@@ -375,6 +382,61 @@ describe('useBuilderCanvas', () => {
     expect(result.current.activeTask?.run_id).toBe('run-2');
     expect(result.current.activeTask?.latest_activity?.label).toBe('Drafting new run');
     expect(result.current.completion).toBeNull();
+  });
+
+  it('records projection only after reducer state commits and never for a rejected retired event', async () => {
+    const { result } = renderHook(() => useBuilderCanvas('thread-1'));
+    await waitFor(() => expect(result.current.activeTask?.run_id).toBe('run-1'));
+
+    const committedEvent: BuilderCanvasEventV1 = {
+      version: 1,
+      event_id: 'task-1:run-2:1',
+      sequence: 1,
+      parent_thread_id: 'thread-1',
+      task_id: 'task-1',
+      run_id: 'run-2',
+      occurred_at: '2026-05-25T10:00:01Z',
+      kind: 'progress',
+      status: 'running',
+      activity: { kind: 'phase', phase: 'drafting', label: 'Drafting current run' },
+    };
+    act(() => {
+      FakeEventSource.instances[0].emit(committedEvent);
+    });
+    await waitFor(() => expect(recordCanvasProjection).toHaveBeenCalledWith(
+      committedEvent,
+      'canvas_current',
+    ));
+    expect(result.current.activeTask?.run_id).toBe('run-2');
+
+    recordCanvasProjection.mockClear();
+    const rejectedRetiredEvent: BuilderCanvasEventV1 = {
+      version: 1,
+      event_id: 'task-1:run-1:2',
+      sequence: 2,
+      parent_thread_id: 'thread-1',
+      task_id: 'task-1',
+      run_id: 'run-1',
+      occurred_at: '2026-05-25T10:00:02Z',
+      kind: 'terminal',
+      status: 'completed',
+      completion: {
+        thread_id: 'thread-1',
+        task_id: 'task-1',
+        run_id: 'run-1',
+        status: 'success',
+      },
+    };
+    await act(async () => {
+      FakeEventSource.instances[0].emit(rejectedRetiredEvent);
+      await Promise.resolve();
+    });
+
+    expect(result.current.activeTask?.run_id).toBe('run-2');
+    expect(result.current.recentEvents.map((event) => event.event_id)).toEqual([
+      committedEvent.event_id,
+    ]);
+    expect(recordCanvasProjection).not.toHaveBeenCalled();
   });
 
   it('ignores stale terminal snapshot events when a newer active run exists', async () => {

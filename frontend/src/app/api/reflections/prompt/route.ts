@@ -12,6 +12,7 @@
  */
 
 import { type NextRequest, NextResponse } from "next/server";
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation';
 
 /**
  * Generic reflection prompts for when no context is available.
@@ -41,6 +42,9 @@ const GENERIC_REFLECTION_PROMPTS = [
 ];
 
 export async function POST(request: NextRequest) {
+  const voiceLabDenied = await voiceLabOrdinaryProductBoundaryResponse();
+  if (voiceLabDenied) return voiceLabDenied;
+
   let body: { conversation_id: string; user_id?: string };
   try {
     body = await request.json();
@@ -76,4 +80,3 @@ export async function POST(request: NextRequest) {
     source: "client-generated", // Indicates this came from frontend, not backend
   });
 }
-

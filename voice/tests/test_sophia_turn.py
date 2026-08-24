@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -11,7 +10,6 @@ import pytest
 from voice.sophia_turn import (
     SophiaTurnDetection,
     DEFAULT_ECHO_COOLDOWN_MS,
-    _CONTINUATION_PATTERNS,
 )
 
 
@@ -26,9 +24,22 @@ def _make_detector(**overrides) -> SophiaTurnDetection:
         speech_probability_threshold=0.75,
         pre_speech_buffer_ms=200,
         vad_reset_interval_seconds=5.0,
+        adaptive_silence_short_ms=1000,
+        adaptive_silence_medium_ms=1500,
+        adaptive_silence_long_ms=2000,
+        adaptive_silence_ceiling_ms=2800,
+        adaptive_silence_continuation_bonus_ms=800,
+        adaptive_silence_fragment_bonus_ms=1400,
     )
     defaults.update(overrides)
     return SophiaTurnDetection(**defaults)
+
+
+def _parent_turn_ended_emitter_name() -> str:
+    parent = SophiaTurnDetection.__mro__[1]
+    if hasattr(parent, "_emit_turn_ended_event"):
+        return "_emit_turn_ended_event"
+    return "_emit_end_turn_event"
 
 
 # ---------------------------------------------------------------------------
@@ -346,8 +357,9 @@ class TestContinuationSignals:
     async def test_trailing_filler_you_know(self):
         td = _make_detector()
         td.update_transcript("the thing is you know")
-        # 5 words → medium (1500) + non-final fragment hold (+1400) = 2800 (cap)
-        assert td._trailing_silence_ms == 2800
+        # Five words exceeds the tuned fragment window, so only the
+        # continuation bonus applies: medium (1500) + 800 = 2300.
+        assert td._trailing_silence_ms == 2300
 
     async def test_trailing_incomplete_i_think(self):
         td = _make_detector()
@@ -358,8 +370,9 @@ class TestContinuationSignals:
     async def test_trailing_article_the(self):
         td = _make_detector()
         td.update_transcript("I want to find the")
-        # 6 words → medium (1500) + continuation (+800) = 2300
-        assert td._trailing_silence_ms == 2300
+        # Articles were intentionally removed from the aggressive tuned
+        # continuation set.
+        assert td._trailing_silence_ms == 1500
 
     async def test_no_continuation_after_complete_word(self):
         td = _make_detector()
@@ -466,8 +479,8 @@ class TestFragmentDetection:
     async def test_subordinate_when_she_said(self):
         td = _make_detector()
         td.update_transcript("when she said that")
-        # 4 words → medium (1500) + non-final fragment hold (+1400) = 2800 (cap)
-        assert td._trailing_silence_ms == 2800
+        # Four words exceeds the tuned three-word non-conjunction window.
+        assert td._trailing_silence_ms == 1500
 
     async def test_participle_getting_closer(self):
         td = _make_detector()
@@ -484,14 +497,14 @@ class TestFragmentDetection:
     async def test_fragment_at_five_words(self):
         td = _make_detector()
         td.update_transcript("is really hard to say")
-        # 5 words → medium (1500) + non-final fragment hold (+1400) = 2800 (cap)
-        assert td._trailing_silence_ms == 2800
+        # Five words exceeds the tuned three-word fragment window.
+        assert td._trailing_silence_ms == 1500
 
     async def test_conjunction_fragment_at_six_words(self):
         td = _make_detector()
         td.update_transcript("but I still feel off sometimes")
-        # 6 words → medium (1500) + non-final fragment hold (+1400) = 2800 (cap)
-        assert td._trailing_silence_ms == 2800
+        # Six words exceeds the tuned four-word conjunction window.
+        assert td._trailing_silence_ms == 1500
 
     async def test_final_fragment_uses_lighter_bonus(self):
         td = _make_detector()
@@ -611,12 +624,12 @@ class TestTurnEndedGuard:
 
         with patch.object(
             SophiaTurnDetection.__mro__[1],
-            "_emit_end_turn_event",
+            _parent_turn_ended_emitter_name(),
             new_callable=AsyncMock,
         ) as parent_emit:
-            await td._emit_end_turn_event(MagicMock())
+            await td._emit_turn_ended_event(MagicMock())
             td.update_transcript("I need a second right now")
-            await td._emit_end_turn_event(MagicMock())
+            await td._emit_turn_ended_event(MagicMock())
 
             parent_emit.assert_awaited_once()
 
@@ -626,12 +639,12 @@ class TestTurnEndedGuard:
 
         with patch.object(
             SophiaTurnDetection.__mro__[1],
-            "_emit_end_turn_event",
+            _parent_turn_ended_emitter_name(),
             new_callable=AsyncMock,
         ) as parent_emit:
-            await td._emit_end_turn_event(MagicMock())
+            await td._emit_turn_ended_event(MagicMock())
             td.update_transcript("I need a second", is_final=True)
-            await td._emit_end_turn_event(MagicMock())
+            await td._emit_turn_ended_event(MagicMock())
 
             assert parent_emit.await_count == 2
 
@@ -641,17 +654,17 @@ class TestTurnEndedGuard:
 
         with patch.object(
             SophiaTurnDetection.__mro__[1],
-            "_emit_end_turn_event",
+            _parent_turn_ended_emitter_name(),
             new_callable=AsyncMock,
         ) as parent_emit:
-            await td._emit_end_turn_event(MagicMock())
+            await td._emit_turn_ended_event(MagicMock())
             td.update_transcript("I need a second right now")
-            await td._emit_end_turn_event(MagicMock())
+            await td._emit_turn_ended_event(MagicMock())
 
             parent_emit.assert_awaited_once()
 
             td.update_transcript("I need a second to explain what happened there")
-            await td._emit_end_turn_event(MagicMock())
+            await td._emit_turn_ended_event(MagicMock())
 
             assert parent_emit.await_count == 2
 
@@ -661,13 +674,13 @@ class TestTurnEndedGuard:
 
         with patch.object(
             SophiaTurnDetection.__mro__[1],
-            "_emit_end_turn_event",
+            _parent_turn_ended_emitter_name(),
             new_callable=AsyncMock,
         ) as parent_emit:
-            await td._emit_end_turn_event(MagicMock())
+            await td._emit_turn_ended_event(MagicMock())
             td.note_agent_will_speak()
             td.reset_transcript()
             td.update_transcript("I need a second")
-            await td._emit_end_turn_event(MagicMock())
+            await td._emit_turn_ended_event(MagicMock())
 
             assert parent_emit.await_count == 2

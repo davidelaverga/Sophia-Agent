@@ -17,6 +17,7 @@ from app.gateway.workers.builder_events import (
 def _app() -> FastAPI:
     app = FastAPI()
     install_builder_events_worker(app, cache_ttl_seconds=60)
+    app.dependency_overrides[routes.require_builder_event_service_auth] = lambda: None
     app.include_router(routes.internal_router)
     return app
 

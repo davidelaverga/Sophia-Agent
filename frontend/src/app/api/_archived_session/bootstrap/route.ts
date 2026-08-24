@@ -19,6 +19,7 @@ import { getServerAuthToken } from '../../../lib/auth/server-auth';
 import { debugLog, debugWarn } from '../../../lib/debug-logger';
 import { logger } from '../../../lib/error-logger';
 import type { BootstrapResponse, EmotionalTrend, UICard } from '../../../types/sophia-ui-message';
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation';
 
 // ============================================================================
 // CONFIGURATION
@@ -187,6 +188,9 @@ function generateMockBootstrap(
 // ============================================================================
 
 export async function GET(request: NextRequest) {
+  const boundaryResponse = await voiceLabOrdinaryProductBoundaryResponse();
+  if (boundaryResponse) return boundaryResponse;
+
   const searchParams = request.nextUrl.searchParams;
   const userId = searchParams.get('user_id');
   const sessionType = searchParams.get('session_type') || undefined;
@@ -242,7 +246,7 @@ export async function GET(request: NextRequest) {
     return NextResponse.json(data);
     
   } catch (error) {
-    logger.logError(error, { component: 'api/session/bootstrap', action: 'fetch_bootstrap' });
+    logger.logError(error, { component: 'api/session/bootstrap', action: 'fetch_bootstrap', request });
     // Fallback to mock on error
     const mockBootstrap = generateMockBootstrap(userId, sessionType, contextMode);
     return NextResponse.json(mockBootstrap);

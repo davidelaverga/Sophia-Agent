@@ -8,6 +8,7 @@ from pathlib import PurePosixPath
 from typing import Any
 
 from deerflow.sandbox.tools import get_thread_data
+from deerflow.sophia.synthetic_builder import declares_synthetic_builder_run
 
 DEFAULT_DECK_ROUTE = "deck_creative_html_native"
 NOT_COMPILED_DECK_COMPILE_MODE = "not_compiled"
@@ -148,6 +149,13 @@ def deck_span(
     deck_compile_mode: str | None = None,
     artifact_target_ext: str | None = None,
 ):
+    if declares_synthetic_builder_run(
+        getattr(runtime, "state", None),
+        getattr(runtime, "config", None),
+        getattr(runtime, "context", None),
+    ):
+        yield None
+        return
     try:
         from langsmith import trace
         from langsmith.run_helpers import get_current_run_tree

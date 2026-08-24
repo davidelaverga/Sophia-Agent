@@ -14,6 +14,7 @@ import {
 } from "./theme"
 import { ThemeBootstrap } from "./ThemeBootstrap"
 import { VisualTierBootstrap } from "./VisualTierBootstrap"
+import { getVoiceLabSyntheticIsolationPolicy } from "@/server/voice-lab/capability"
 
 export async function generateMetadata() {
   const locale = await getRequestLocale()
@@ -52,6 +53,7 @@ export default async function RootLayout({
   children: React.ReactNode
 }) {
   const locale = await getRequestLocale()
+  const syntheticIsolationPolicy = await getVoiceLabSyntheticIsolationPolicy()
 
   return (
     <html
@@ -61,6 +63,11 @@ export default async function RootLayout({
       suppressHydrationWarning
     >
       <head>
+        <script
+          dangerouslySetInnerHTML={{
+            __html: `Object.defineProperty(window,"__SOPHIA_SYNTHETIC_ISOLATION_POLICY__",{value:Object.freeze(${JSON.stringify(syntheticIsolationPolicy)}),writable:false,configurable:false,enumerable:false});`,
+          }}
+        />
         {/* DNS prefetch for external resources */}
         <link rel="dns-prefetch" href="https://api.openai.com" />
         <link rel="preconnect" href="https://api.openai.com" crossOrigin="anonymous" />

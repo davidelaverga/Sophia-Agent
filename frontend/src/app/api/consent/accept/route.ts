@@ -1,8 +1,12 @@
 import { type NextRequest, NextResponse } from 'next/server'
 
 import { getSession } from '@/server/better-auth'
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation'
 
 export async function POST(request: NextRequest) {
+  const voiceLabDenied = await voiceLabOrdinaryProductBoundaryResponse()
+  if (voiceLabDenied) return voiceLabDenied
+
   try {
     // Authenticate user via Better Auth session
     const session = await getSession()

@@ -1,0 +1,325 @@
+# yaml-language-server: $schema=https://render.com/schema/render.yaml.json
+# Isolated VT00 production test services. This service-only Blueprint is
+# intentionally separate from render.yaml and from the database-only
+# render.voice-lab.database.yaml Blueprint. The referenced database must exist
+# before this Blueprint is synced. Both services remain kill-switched until the
+# runbook preflight passes.
+
+envVarGroups:
+  - name: sophia-voice-lab-runtime-v1
+    envVars:
+      - key: NODE_ENV
+        value: production
+      - key: LOG_LEVEL
+        value: info
+      - key: SOPHIA_VOICE_LAB_ENVIRONMENT
+        value: production
+      - key: SOPHIA_VOICE_LAB_ALLOWED_HOSTS
+        # Keep DNS-rebinding protection explicit while allowing Render and
+        # container-local health probes to reach the unauthenticated health
+        # routes through their real Host headers.
+        value: sophia-voice-lab-mcp.onrender.com,localhost,127.0.0.1
+      - key: SOPHIA_VOICE_LAB_ALLOWED_ORIGINS
+        value: https://www.sophia-ei.com,https://sophia-gateway.onrender.com,https://sophia-langgraph.onrender.com,https://sophia-voice-2uzr.onrender.com
+      - key: SOPHIA_VOICE_LAB_WEBSOCKET_ORIGINS
+        value: wss://generativelanguage.googleapis.com
+      - key: SOPHIA_VOICE_LAB_AUTH_GRANT_PATH
+        value: /api/voice-lab/auth/grant
+      - key: SOPHIA_VOICE_LAB_AUTH_PROVISION_PATH
+        value: /api/voice-lab/auth/provision
+      - key: SOPHIA_VOICE_LAB_AUTH_REFRESH_PATH
+        value: /api/voice-lab/auth/refresh
+      - key: SOPHIA_VOICE_LAB_AUTH_CONTINUE_PATH
+        value: /api/voice-lab/auth/continue
+      - key: SOPHIA_VOICE_LAB_AUTH_CLEANUP_PATH
+        value: /api/voice-lab/auth/cleanup
+      - key: SOPHIA_VOICE_LAB_AUTH_SESSION_PATH
+        value: /api/auth/get-session
+      - key: SOPHIA_VOICE_LAB_AUTH_READINESS_PATH
+        value: /api/voice-lab/auth/readiness
+      - key: SOPHIA_VOICE_LAB_RECOVERY_PATH_PREFIX
+        value: /internal/voice-lab/runs
+      - key: SOPHIA_VOICE_LAB_BEARER_SUBJECT
+        value: private-codex-desktop
+      - key: SOPHIA_VOICE_LAB_CAPABILITY_ISSUER
+        value: sophia-voice-lab
+      - key: SOPHIA_VOICE_LAB_CAPABILITY_TTL_SECONDS
+        value: "120"
+      - key: SOPHIA_VOICE_LAB_MAX_CONCURRENT_RUNS
+        value: "1"
+      - key: SOPHIA_VOICE_LAB_MAX_RUNS_PER_CALLER
+        value: "1"
+      - key: SOPHIA_VOICE_LAB_MAX_TEXT_CHARACTERS
+        value: "2000"
+      - key: SOPHIA_VOICE_LAB_MAX_AUDIO_BYTES
+        value: "8000000"
+      - key: SOPHIA_VOICE_LAB_MAX_AUDIO_DURATION_MS
+        value: "30000"
+      - key: SOPHIA_VOICE_LAB_MAX_UTTERANCES_PER_RUN
+        value: "20"
+      - key: SOPHIA_VOICE_LAB_MAX_INJECTED_DURATION_MS
+        value: "180000"
+      - key: SOPHIA_VOICE_LAB_MAX_INJECTED_BYTES
+        value: "32000000"
+      - key: SOPHIA_VOICE_LAB_ADMISSION_WINDOW_SECONDS
+        value: "86400"
+      - key: SOPHIA_VOICE_LAB_MAX_ROLLING_RUN_STARTS
+        value: "40"
+      - key: SOPHIA_VOICE_LAB_MAX_ROLLING_RUN_STARTS_PER_CALLER
+        value: "40"
+      - key: SOPHIA_VOICE_LAB_MAX_ROLLING_PROVIDER_SECONDS
+        value: "45000"
+      - key: SOPHIA_VOICE_LAB_MAX_ROLLING_PROVIDER_SECONDS_PER_CALLER
+        value: "45000"
+      - key: SOPHIA_VOICE_LAB_MAX_ROLLING_SUITES
+        value: "1"
+      - key: SOPHIA_VOICE_LAB_MAX_ROLLING_SUITES_PER_CALLER
+        value: "1"
+      - key: SOPHIA_VOICE_LAB_MAX_ROLLING_SUITE_CHILDREN
+        value: "20"
+      - key: SOPHIA_VOICE_LAB_MAX_ROLLING_SUITE_CHILDREN_PER_CALLER
+        value: "20"
+      - key: SOPHIA_VOICE_LAB_MAX_ROLLING_INJECTED_DURATION_MS
+        value: "3600000"
+      - key: SOPHIA_VOICE_LAB_MAX_ROLLING_INJECTED_DURATION_MS_PER_CALLER
+        value: "3600000"
+      - key: SOPHIA_VOICE_LAB_MAX_ROLLING_INJECTED_BYTES
+        value: "640000000"
+      - key: SOPHIA_VOICE_LAB_MAX_ROLLING_INJECTED_BYTES_PER_CALLER
+        value: "640000000"
+      - key: SOPHIA_VOICE_LAB_MIN_UTTERANCE_INTERVAL_MS
+        value: "250"
+      - key: SOPHIA_VOICE_LAB_TTS_TIMEOUT_MS
+        value: "10000"
+      - key: SOPHIA_VOICE_LAB_ESPEAK_VERSION
+        value: "1.51"
+      - key: SOPHIA_VOICE_LAB_MAX_RUN_SECONDS
+        value: "1800"
+      - key: SOPHIA_VOICE_LAB_MAX_OPERATION_SECONDS
+        value: "45"
+      - key: SOPHIA_VOICE_LAB_START_OPERATION_SECONDS
+        value: "150"
+      - key: SOPHIA_VOICE_LAB_END_OPERATION_SECONDS
+        value: "120"
+      - key: SOPHIA_VOICE_LAB_FAULT_OPERATION_SECONDS
+        value: "60"
+      - key: SOPHIA_VOICE_LAB_MAX_WAIT_MS
+        value: "30000"
+      - key: SOPHIA_VOICE_LAB_OPERATION_LEASE_SECONDS
+        value: "60"
+      - key: SOPHIA_VOICE_LAB_BROWSER_LEASE_SECONDS
+        value: "30"
+      - key: SOPHIA_VOICE_LAB_WORKER_POLL_MS
+        value: "250"
+      - key: SOPHIA_VOICE_LAB_ALLOW_RAW_AUDIO
+        value: "false"
+      - key: SOPHIA_VOICE_LAB_ONBOARDING_MIC_SELECTOR
+        value: '[data-onboarding="mic-cta"]'
+      - key: SOPHIA_VOICE_LAB_FRESH_BUTTON_NAME
+        value: Start fresh
+      - key: SOPHIA_VOICE_LAB_START_BUTTON_NAME
+        value: Tap to speak
+      - key: SOPHIA_VOICE_LAB_STOP_BUTTON_NAME
+        value: Stop recording
+      - key: SOPHIA_VOICE_LAB_HARNESS_VERSION
+        value: 0.1.0
+      - key: SOPHIA_VOICE_LAB_MCP_VERSION
+        value: 0.1.0
+      - key: SOPHIA_VOICE_LAB_REPOSITORY_BASE_SHA
+        value: 41a9b127af780bbe9d88acf34566a6aaf443e6b0
+      - key: SOPHIA_VOICE_LAB_REPOSITORY_ROLLBACK_SHA
+        value: a793100008f7ccb5a25e9e018f896e7ec9dc2a3d
+      - key: SOPHIA_VOICE_LAB_TARGET_FRONTEND_URL
+        value: https://www.sophia-ei.com
+      - key: SOPHIA_VOICE_LAB_TARGET_GATEWAY_URL
+        value: https://sophia-gateway.onrender.com
+      - key: SOPHIA_VOICE_LAB_TARGET_LANGGRAPH_URL
+        value: https://sophia-langgraph.onrender.com
+      - key: SOPHIA_VOICE_LAB_TARGET_VOICE_URL
+        value: https://sophia-voice-2uzr.onrender.com
+      - key: SOPHIA_VOICE_LAB_FIXTURE_MANIFEST_SHA256
+        value: 574806ada0f6450c097bffe6aa50c469c03bcc55cd21c8f5c78e9c9ef72073b8
+      - key: SOPHIA_VOICE_LAB_OAUTH_ISSUER
+        value: https://sophia-voice-lab-mcp.onrender.com
+      - key: SOPHIA_VOICE_LAB_OAUTH_RESOURCE
+        value: https://sophia-voice-lab-mcp.onrender.com/mcp
+      - key: SOPHIA_VOICE_LAB_OAUTH_RESOURCE_METADATA_URL
+        value: https://sophia-voice-lab-mcp.onrender.com/.well-known/oauth-protected-resource/mcp
+      - key: SOPHIA_VOICE_LAB_OAUTH_CLIENT_METADATA_URL
+        value: https://chatgpt.com/oauth/client.json
+      - key: SOPHIA_VOICE_LAB_OAUTH_CLIENT_REDIRECT_URI
+        value: https://chatgpt.com/connector_platform_oauth_redirect
+      - key: SOPHIA_VOICE_LAB_OAUTH_OPERATOR_SUBJECT
+        value: voice-lab-private-operator
+      - key: SOPHIA_VOICE_LAB_OAUTH_ACCESS_TOKEN_TTL_SECONDS
+        value: "300"
+      - key: SOPHIA_VOICE_LAB_OAUTH_REFRESH_TOKEN_TTL_SECONDS
+        value: "86400"
+      - key: SOPHIA_VOICE_LAB_OAUTH_ENDPOINT_WINDOW_SECONDS
+        value: "900"
+      - key: SOPHIA_VOICE_LAB_OAUTH_AUTHORIZE_REQUESTS_PER_WINDOW
+        value: "30"
+      - key: SOPHIA_VOICE_LAB_OAUTH_TOKEN_REQUESTS_PER_WINDOW
+        value: "120"
+      - key: SOPHIA_VOICE_LAB_OAUTH_REVOKE_REQUESTS_PER_WINDOW
+        value: "120"
+      - key: SOPHIA_VOICE_LAB_OAUTH_PURGE_BATCH_SIZE
+        value: "500"
+      - key: SOPHIA_VOICE_LAB_OAUTH_ADMISSION_RETENTION_SECONDS
+        value: "86400"
+
+services:
+  - type: web
+    name: sophia-voice-lab-mcp
+    runtime: docker
+    branch: codex/sophia-observability-v1
+    dockerfilePath: ./tools/sophia-voice-lab/Dockerfile
+    dockerContext: .
+    dockerCommand: pnpm start:web
+    plan: starter
+    region: oregon
+    numInstances: 1
+    autoDeployTrigger: "off"
+    healthCheckPath: /readyz
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sophia-voice-lab-postgres
+          property: connectionString
+      - fromGroup: sophia-voice-lab-runtime-v1
+      # Render does not support `sync: false` inside environment groups. Keep
+      # every dashboard-managed identity and secret directly on each owning
+      # service so the first Blueprint sync prompts for the exact values.
+      # Campaign identities/public verification material must match the worker.
+      - key: SOPHIA_VOICE_LAB_REPOSITORY_CANDIDATE_SHA
+        sync: false
+      - key: SOPHIA_VOICE_LAB_PLUGIN_PACKAGE_SHA256
+        sync: false
+      - key: SOPHIA_VOICE_LAB_PLUGIN_VERSION
+        sync: false
+      - key: SOPHIA_VOICE_LAB_REGISTERED_APP_ID
+        sync: false
+      - key: SOPHIA_VOICE_LAB_EXPECTED_FRONTEND_SHA
+        sync: false
+      - key: SOPHIA_VOICE_LAB_EXPECTED_BACKEND_SHA
+        sync: false
+      - key: SOPHIA_VOICE_LAB_EXPECTED_LANGGRAPH_SHA
+        sync: false
+      - key: SOPHIA_VOICE_LAB_EXPECTED_VOICE_SHA
+        sync: false
+      - key: SOPHIA_VOICE_LAB_ATTESTATION_PUBLIC_KEYS_JSON
+        sync: false
+      - key: SOPHIA_VOICE_LAB_BEARER_TOKEN
+        sync: false
+      - key: SOPHIA_VOICE_LAB_FAULT_BEARER_TOKEN
+        sync: false
+      - key: SOPHIA_VOICE_LAB_PRINCIPAL_ID
+        sync: false
+      - key: SOPHIA_VOICE_LAB_CAPABILITY_SECRET
+        sync: false
+      - key: SOPHIA_VOICE_LAB_GRANT_SECRET
+        sync: false
+      - key: SOPHIA_VOICE_LAB_RECOVERY_INTERNAL_SECRET
+        sync: false
+      - key: SOPHIA_VOICE_LAB_CALLER_PARTITION_KEYS_JSON
+        sync: false
+      - key: SOPHIA_VOICE_LAB_OAUTH_CONSENT_SECRET
+        sync: false
+      - key: SOPHIA_VOICE_LAB_OAUTH_TOKEN_PEPPER
+        sync: false
+      # Admission is service-specific so the operator can close the web gate
+      # before draining the worker. It is never opened through the shared group.
+      - key: SOPHIA_VOICE_LAB_KILL_SWITCH
+        sync: false
+      # Bootstrap-only principal creation gate. Set true only while the web
+      # kill switch is engaged; set false immediately after the audited call.
+      - key: SOPHIA_VOICE_LAB_PROVISIONING_ENABLED
+        sync: false
+      - key: SOPHIA_VOICE_LAB_PROVISION_OPERATOR_BEARER_TOKEN
+        sync: false
+      # Web-only transport credentials authenticate independently operated
+      # A03, D02, and P01 evidence submitters. Their Ed25519 private keys stay
+      # offline; the evaluator worker must receive neither transport tokens
+      # nor private signing material.
+      - key: SOPHIA_VOICE_LAB_ATTESTATION_TRANSPORT_TOKENS_JSON
+        sync: false
+      # Product-owned, key-separated authority for the Gateway D02 freeze and
+      # settlement endpoints. The browser worker and external controller must
+      # never receive this credential.
+      - key: SOPHIA_VOICE_LAB_D02_GATEWAY_CAPABILITY_SECRET
+        sync: false
+      # Gateway receipt verification is public material but remains web-only
+      # because the evaluator must consume the product-authenticated event,
+      # never validate or ingest a Gateway receipt directly.
+      - key: SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEY_SPKI_BASE64
+        sync: false
+      - key: SOPHIA_VOICE_LAB_D02_SETTLEMENT_AUTHORITY_KEY_ID
+        sync: false
+      - key: SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEYRING_JSON
+        sync: false
+
+  - type: worker
+    name: sophia-voice-lab-worker
+    runtime: docker
+    branch: codex/sophia-observability-v1
+    dockerfilePath: ./tools/sophia-voice-lab/Dockerfile
+    dockerContext: .
+    dockerCommand: pnpm start:worker
+    plan: starter
+    region: oregon
+    numInstances: 1
+    autoDeployTrigger: "off"
+    # The worker can spend 20s resolving an in-flight D02 freeze/dispatch and
+    # then up to 25s in its concurrent quiescence/loop-drain boundary. Keep
+    # Render's hard SIGKILL deadline beyond that bounded convergence path.
+    maxShutdownDelaySeconds: 60
+    envVars:
+      - key: DATABASE_URL
+        fromDatabase:
+          name: sophia-voice-lab-postgres
+          property: connectionString
+      - fromGroup: sophia-voice-lab-runtime-v1
+      # These values are immutable campaign identities, public verification
+      # material, or shared worker authorities. They are dashboard-managed and
+      # must match the web service exactly. The post-registration plugin version
+      # includes the helper-exact `+codex.<sanitized-lowercase-token>` metadata.
+      - key: SOPHIA_VOICE_LAB_REPOSITORY_CANDIDATE_SHA
+        sync: false
+      - key: SOPHIA_VOICE_LAB_PLUGIN_PACKAGE_SHA256
+        sync: false
+      - key: SOPHIA_VOICE_LAB_PLUGIN_VERSION
+        sync: false
+      - key: SOPHIA_VOICE_LAB_REGISTERED_APP_ID
+        sync: false
+      - key: SOPHIA_VOICE_LAB_EXPECTED_FRONTEND_SHA
+        sync: false
+      - key: SOPHIA_VOICE_LAB_EXPECTED_BACKEND_SHA
+        sync: false
+      - key: SOPHIA_VOICE_LAB_EXPECTED_LANGGRAPH_SHA
+        sync: false
+      - key: SOPHIA_VOICE_LAB_EXPECTED_VOICE_SHA
+        sync: false
+      - key: SOPHIA_VOICE_LAB_ATTESTATION_PUBLIC_KEYS_JSON
+        sync: false
+      - key: SOPHIA_VOICE_LAB_BEARER_TOKEN
+        sync: false
+      - key: SOPHIA_VOICE_LAB_FAULT_BEARER_TOKEN
+        sync: false
+      - key: SOPHIA_VOICE_LAB_PRINCIPAL_ID
+        sync: false
+      - key: SOPHIA_VOICE_LAB_CAPABILITY_SECRET
+        sync: false
+      - key: SOPHIA_VOICE_LAB_GRANT_SECRET
+        sync: false
+      - key: SOPHIA_VOICE_LAB_RECOVERY_INTERNAL_SECRET
+        sync: false
+      - key: SOPHIA_VOICE_LAB_CALLER_PARTITION_KEYS_JSON
+        sync: false
+      - key: SOPHIA_VOICE_LAB_OAUTH_CONSENT_SECRET
+        sync: false
+      - key: SOPHIA_VOICE_LAB_OAUTH_TOKEN_PEPPER
+        sync: false
+      # Execution is independently service-scoped. Open it before web admission
+      # and close it only after web admission has been stopped and drained.
+      - key: SOPHIA_VOICE_LAB_KILL_SWITCH
+        sync: false

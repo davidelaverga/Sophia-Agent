@@ -103,6 +103,35 @@ describe('voice benchmark analysis', () => {
     expect(mapEmotionToFamily('unknown')).toBeNull();
   });
 
+  it('accepts older partial capture snapshots without artifact DOM telemetry', () => {
+    const definition: VoiceBenchmarkCaseDefinition = {
+      id: 'older-partial-capture',
+      label: 'Older partial capture',
+      category: 'compatibility',
+      audioFile: 'older-partial-capture.wav',
+    };
+
+    const report = analyzeVoiceBenchmarkCapture({
+      capture: buildCapture([
+        buildEvent({
+          at: '2026-04-02T02:28:55.274Z',
+          category: 'voice-session',
+          name: 'start-talking-requested',
+        }),
+        buildEvent({
+          at: '2026-04-02T02:28:57.477Z',
+          category: 'voice-session',
+          name: 'calling-state-changed',
+          data: { callingState: 'joined', mappedStage: 'listening' },
+        }),
+      ]),
+      definition,
+    });
+
+    expect(report.telemetry?.metrics.counts.artifactRenderedCount).toBe(0);
+    expect(report.metrics.artifact_receipt).toBe(false);
+  });
+
   it('analyzes a successful completed clip with artifact comparison', () => {
     const definition: VoiceBenchmarkCaseDefinition = {
       id: 'map_03_mixed',

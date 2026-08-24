@@ -1,5 +1,11 @@
 import { type NextRequest } from 'next/server';
 
+import {
+  getVoiceLabSessionReadCapability,
+  VOICE_LAB_CAPABILITY_HEADER,
+  VoiceLabCapabilityError,
+} from '@/server/voice-lab/capability';
+
 import { fetchSophiaApi, resolveSophiaUserId } from '../../../../../../_lib/sophia';
 
 export const dynamic = 'force-dynamic';
@@ -18,7 +24,7 @@ export async function GET(
 ) {
   const { parentThreadId } = await params;
   const requestId = correlationId();
-  const userId = await resolveSophiaUserId();
+  const userId = await resolveSophiaUserId({ voiceLabAccess: 'governed' });
   if (!userId) {
     console.warn('[builder-canvas-proxy] events auth failed', {
       route: 'events',
@@ -37,13 +43,33 @@ export async function GET(
     auth_present: true,
     last_event_id: shortId(lastEventId),
   });
+  let capability: string | null;
+  try {
+    capability = await getVoiceLabSessionReadCapability(userId);
+  } catch (error) {
+    if (error instanceof VoiceLabCapabilityError) {
+      return new Response(JSON.stringify({ error: error.code }), {
+        status: error.status,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    }
+    throw error;
+  }
+  const headers: Record<string, string> = {};
+  if (lastEventId) {
+    headers['Last-Event-ID'] = lastEventId.slice(0, 256);
+  }
+  if (capability) {
+    headers[VOICE_LAB_CAPABILITY_HEADER] = capability;
+  }
   const response = await fetchSophiaApi(
     `/api/sophia/${encodeURIComponent(userId)}/threads/${encodeURIComponent(parentThreadId)}/builder-canvas/events`,
     {
       method: 'GET',
       cache: 'no-store',
-      headers: lastEventId ? { 'Last-Event-ID': lastEventId } : undefined,
+      headers: Object.keys(headers).length > 0 ? headers : undefined,
     },
+    { voiceLabAccess: 'governed' },
   );
   console.log('[builder-canvas-proxy] events response', {
     route: 'events',

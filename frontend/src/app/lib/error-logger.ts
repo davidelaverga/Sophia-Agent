@@ -10,6 +10,10 @@
 import * as Sentry from "@sentry/nextjs"
 
 import { debugLog } from "./debug-logger"
+import {
+  ordinaryAnalyticsSinkAllowed,
+  ordinaryServerErrorSinkAllowed,
+} from "./synthetic-isolation-policy"
 
 type ErrorContext = {
   component?: string
@@ -17,6 +21,8 @@ type ErrorContext = {
   userId?: string
   metadata?: Record<string, unknown>
   context?: string
+  /** Server API routes pass their request so HttpOnly Voice Lab state can fence Sentry. */
+  request?: Pick<Request, 'headers'>
   [key: string]: unknown
 }
 
@@ -25,6 +31,12 @@ type TelemetryWindow = Window & {
 }
 
 type ErrorSeverity = 'fatal' | 'error' | 'warning' | 'info'
+
+function errorSinkAllowed(context?: ErrorContext): boolean {
+  return typeof window === 'undefined'
+    ? ordinaryServerErrorSinkAllowed(context?.request, context?.userId)
+    : ordinaryAnalyticsSinkAllowed()
+}
 
 class ErrorLogger {
   private static instance: ErrorLogger
@@ -54,7 +66,9 @@ class ErrorLogger {
     context: ErrorContext = {},
     severity: ErrorSeverity = 'error'
   ) {
+    if (!errorSinkAllowed(context)) return
     const errorMessage = error instanceof Error ? error.message : String(error)
+    const { request: _request, ...safeContext } = context
     
     // Send to monitoring service (Sentry)
     try {
@@ -65,12 +79,12 @@ class ErrorLogger {
         Sentry.captureException(error, {
           level: sentryLevel,
           tags: {
-            component: context.component,
-            action: context.action,
-            context: context.context,
+            component: safeContext.component,
+            action: safeContext.action,
+            context: safeContext.context,
           },
-          user: context.userId ? { id: context.userId } : undefined,
-          extra: context.metadata || context,
+          user: safeContext.userId ? { id: safeContext.userId } : undefined,
+          extra: safeContext.metadata || safeContext,
         })
       }
       
@@ -79,8 +93,8 @@ class ErrorLogger {
         ;(window as TelemetryWindow).emitTelemetry?.('error', {
           message: errorMessage,
           severity,
-          component: context.component,
-          action: context.action,
+          component: safeContext.component,
+          action: safeContext.action,
         })
       }
     } catch {
@@ -129,7 +143,13 @@ class ErrorLogger {
   /**
    * Add breadcrumb for debugging context
    */
-  addBreadcrumb(message: string, data?: Record<string, unknown>) {
+  addBreadcrumb(
+    message: string,
+    data?: Record<string, unknown>,
+    request?: Pick<Request, 'headers'>,
+    userId?: string,
+  ) {
+    if (!errorSinkAllowed({ request, userId })) return
     if (process.env.NEXT_PUBLIC_SENTRY_DSN) {
       Sentry.addBreadcrumb({
         message,
@@ -142,7 +162,8 @@ class ErrorLogger {
   /**
    * Set user context for error tracking
    */
-  setUser(userId: string | null, email?: string, username?: string) {
+  setUser(userId: string | null, email?: string, username?: string, request?: Pick<Request, 'headers'>) {
+    if (!errorSinkAllowed({ request, userId: userId ?? undefined })) return
     if (process.env.NEXT_PUBLIC_SENTRY_DSN) {
       Sentry.setUser(userId ? { 
         id: userId,

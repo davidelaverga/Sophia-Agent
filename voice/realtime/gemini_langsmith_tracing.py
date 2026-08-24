@@ -11,6 +11,12 @@ Tracing is opt-in with ``SOPHIA_GEMINI_LIVE_LANGSMITH_TRACING``.  All payloads
 are compacted before they enter LangSmith; provider audio bytes are never
 placed in inputs or outputs.  The single combined recording is attached to the
 root after the browser closes the session.
+
+Protected Voice Lab runs never allocate a LangSmith trace.  LangSmith SaaS
+retention cannot meet the Voice Lab's shorter, verifiable purge contract, so
+synthetic evidence remains in the product-owned canonical evidence plane and
+is reported as supplementally unavailable.  This is deliberately independent
+from ordinary-user tracing.
 """
 
 from __future__ import annotations
@@ -618,6 +624,7 @@ class GeminiLiveTraceRecorder:
         client: Any | None = None,
         enabled: bool | None = None,
         setup_fingerprint: Mapping[str, Any] | None = None,
+        synthetic_context: Mapping[str, Any] | None = None,
         failure_callback: Callable[[str, Exception], None] | None = None,
     ) -> None:
         self.session_id = session_id
@@ -641,6 +648,23 @@ class GeminiLiveTraceRecorder:
         self._ready_claim_count = 0
         self._false_ready_claim_count = 0
         self._setup_fingerprint = dict(setup_fingerprint or {})
+        self._synthetic_context = (
+            {
+                key: value
+                for key in (
+                    "synthetic",
+                    "principal_id",
+                    "test_run_id",
+                    "scenario_id",
+                    "scenario_version",
+                    "environment",
+                )
+                if (value := (synthetic_context or {}).get(key)) is not None
+            }
+            if (synthetic_context or {}).get("synthetic") is True
+            else {}
+        )
+        self.unavailable_reason: str | None = None
         self.trace_schema = os.getenv(
             "SOPHIA_GEMINI_LIVE_TRACE_SCHEMA",
             "sophia_gemini_live_trace_v2",
@@ -650,6 +674,14 @@ class GeminiLiveTraceRecorder:
             "structural",
         ).strip().lower() or "structural"
         try:
+            if self._synthetic_context:
+                # Synthetic traces must not enter the ordinary LangSmith
+                # project.  LangSmith deletion is asynchronous and supplies no
+                # authoritative deletion confirmation, so even a separately
+                # named project cannot satisfy the bounded Voice Lab retention
+                # contract.  Keep canonical evidence local and fail open.
+                self.unavailable_reason = "synthetic_isolation_policy"
+                return
             requested = langsmith_gemini_live_enabled() if enabled is None else enabled
             self.enabled = bool(
                 requested
@@ -660,6 +692,7 @@ class GeminiLiveTraceRecorder:
             hmac_secret = os.getenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "").encode()
             self.audio_capture_enabled = bool(
                 self.enabled
+                and not self._synthetic_context
                 and (
                     _env_bool("SOPHIA_GEMINI_LIVE_AUDIO_CAPTURE_ENABLED", False)
                     or not hmac_secret
@@ -695,6 +728,18 @@ class GeminiLiveTraceRecorder:
                 "input_transcription_enabled": True,
                 "output_transcription_enabled": True,
                 "effective_setup_fingerprint": dict(self._setup_fingerprint),
+                **(
+                    {
+                        "synthetic_test": True,
+                        "test_principal": self._synthetic_context.get("principal_id"),
+                        "test_run_id": self._synthetic_context.get("test_run_id"),
+                        "scenario_id": self._synthetic_context.get("scenario_id"),
+                        "scenario_version": self._synthetic_context.get("scenario_version"),
+                        "test_environment": self._synthetic_context.get("environment"),
+                    }
+                    if self._synthetic_context
+                    else {}
+                ),
             }
             if not hmac_secret:
                 metadata["thread_id"] = self.thread_id
@@ -710,9 +755,20 @@ class GeminiLiveTraceRecorder:
                     "thread_ref": thread_ref,
                     "voice_runtime_ref": runtime_ref,
                     "effective_setup_fingerprint": dict(self._setup_fingerprint),
+                    **(
+                        {"synthetic_test": dict(self._synthetic_context)}
+                        if self._synthetic_context
+                        else {}
+                    ),
                 },
                 extra={"metadata": metadata},
-                tags=["sophia", "voice", "gemini_live", "s2s"],
+                tags=[
+                    "sophia",
+                    "voice",
+                    "gemini_live",
+                    "s2s",
+                    *(["synthetic_voice_lab"] if self._synthetic_context else []),
+                ],
                 ls_client=self.client,
                 dangerously_allow_filesystem=False,
             )

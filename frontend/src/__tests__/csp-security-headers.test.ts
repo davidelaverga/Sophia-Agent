@@ -5,8 +5,12 @@ async function getContentSecurityPolicy(): Promise<string> {
   const nextConfigModule = await import('../../next.config.js');
   const nextConfig = nextConfigModule.default ?? nextConfigModule;
   const headerEntries = await nextConfig.headers();
-  const rootHeaders = headerEntries.find((entry: { source: string }) => entry.source === '/(.*)')?.headers ?? [];
-  const policy = rootHeaders.find((header: { key: string }) => header.key === 'Content-Security-Policy')?.value;
+  const applicationHeaders = headerEntries.find(
+    (entry: { source: string }) => entry.source === '/((?!api/artifacts/[^/]+/content).*)',
+  )?.headers ?? [];
+  const policy = applicationHeaders.find(
+    (header: { key: string }) => header.key === 'Content-Security-Policy',
+  )?.value;
 
   if (typeof policy !== 'string') {
     throw new Error('Content-Security-Policy header was not found.');

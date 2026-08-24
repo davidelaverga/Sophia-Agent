@@ -147,6 +147,44 @@ def test_structural_trace_mode_excludes_transcript_and_tool_content(monkeypatch:
     assert "PRIVATE RESULT" not in serialized
 
 
+def test_synthetic_trace_is_policy_disabled_before_client_or_project_allocation(
+    monkeypatch: Any,
+) -> None:
+    class ForbiddenClient:
+        def __init__(self, **_: Any) -> None:
+            raise AssertionError("synthetic trace must not allocate a LangSmith client")
+
+    class ForbiddenRunTree:
+        def __init__(self, **_: Any) -> None:
+            raise AssertionError("synthetic trace must not allocate a LangSmith run")
+
+    monkeypatch.setattr(tracing, "Client", ForbiddenClient)
+    monkeypatch.setattr(tracing, "RunTree", ForbiddenRunTree)
+    monkeypatch.setattr(tracing, "Attachment", FakeAttachment)
+    monkeypatch.setattr(tracing, "langsmith_gemini_live_enabled", lambda: True)
+    monkeypatch.setenv("SOPHIA_GEMINI_LIVE_LANGSMITH_PROJECT", "ordinary-project")
+    monkeypatch.setenv("SOPHIA_VOICE_OBSERVABILITY_HMAC_SECRET", "x" * 32)
+
+    recorder = tracing.GeminiLiveTraceRecorder(
+        session_id="synthetic-session-secret",
+        user_id="synthetic-principal-secret",
+        model="gemini-live-test",
+        synthetic_context={
+            "synthetic": True,
+            "principal_id": "synthetic-principal-secret",
+            "test_run_id": "synthetic-run-secret",
+            "scenario_id": "V-A01",
+            "scenario_version": "vt00.scenarios.v1",
+            "environment": "production",
+        },
+    )
+
+    assert recorder.enabled is False
+    assert recorder.root is None
+    assert recorder.trace_id is None
+    assert recorder.unavailable_reason == "synthetic_isolation_policy"
+
+
 def test_one_root_contains_socket_event_and_tool_spans(monkeypatch: Any) -> None:
     _enable_fake_sdk(monkeypatch)
     client = FakeClient()

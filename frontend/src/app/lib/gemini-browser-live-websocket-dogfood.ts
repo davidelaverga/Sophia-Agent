@@ -21,6 +21,10 @@ import {
   isCoreviewBuilderToolName,
   type CoreviewBuilderToolCallInput,
 } from './coreview-builder-actions';
+import {
+  isOpaqueVoiceLabProviderCleanupToken,
+  VOICE_LAB_PROVIDER_CLEANUP_HEADER,
+} from './voice-lab-provider-cleanup';
 
 export type GeminiBrowserLiveDogfoodStage =
   | 'starting_backend_session'
@@ -261,6 +265,220 @@ export interface GeminiInputAudioActivityDiagnostic {
   suppressionBlockedBecauseNoIntentCount?: number;
   rawAssistantUserOverlapMs?: number;
   confirmedAssistantUserOverlapMs?: number;
+  syntheticInputOperation?: GeminiSyntheticInputOperationBinding | null;
+  outgoingPcm?: GeminiSyntheticOutgoingPcmFrameDiagnostic | null;
+}
+
+export type GeminiSyntheticInputOperationPhase =
+  | 'scheduled'
+  | 'started'
+  | 'completed'
+  | 'interrupted'
+  | 'rejected';
+
+export interface GeminiSyntheticInputOperationBinding {
+  schema: 'sophia_voice_lab_input_operation_v1';
+  phase: GeminiSyntheticInputOperationPhase;
+  test_run_id: string;
+  operation_id: string;
+  utterance_id: string;
+  source_sha256: string;
+  expected_silence: boolean | null;
+  frame_window_id: string;
+  provider_input_sequence: number | null;
+  public_utterance_id: string | null;
+}
+
+export interface GeminiSyntheticToolEvidence {
+  schema: 'sophia_synthetic_tool_evidence_v1';
+  test_run_id: string;
+  scenario_id: string;
+  scenario_version: string;
+  operation_id: string;
+  utterance_id: string;
+  provider_input_sequence: number;
+  public_utterance_id: string | null;
+  tool_call_id: string;
+  effect_id: string;
+  provider_connection_epoch: number;
+  relay_correlation_id: string;
+  tool_name: string;
+  received_at: string;
+}
+
+export interface GeminiSyntheticBuilderJoin {
+  schema: 'sophia_synthetic_builder_join_v1';
+  test_run_id: string;
+  scenario_id: string;
+  scenario_version: string;
+  operation_id: string;
+  utterance_id: string;
+  provider_input_sequence: number;
+  tool_call_id: string;
+  effect_id: string;
+  provider_connection_epoch: number;
+  relay_correlation_id: string;
+  tool_name: string;
+  tool_state: string;
+  builder_operation_id: string;
+  parent_thread_id: string;
+  task_id: string;
+  thread_id: string;
+  run_id: string;
+  build_id: string;
+  artifact_id: string | null;
+  artifact_path_sha256: string | null;
+  ui_projection_state: string | null;
+  cancel_count: number;
+  no_post_cancel_publication: boolean;
+  source_tool_received_at: string;
+  source_backend_accepted_at: string;
+  source_tool_response_sent_at: string | null;
+  source_builder_event_id: string | null;
+  source_builder_event_at: string | null;
+  source_ui_projected_at: string | null;
+  scenario_assertions: Record<string, boolean | number | string | null>;
+}
+
+export interface GeminiSyntheticOutgoingPcmFrameDiagnostic {
+  sample_count: number;
+  nonzero_sample_count: number;
+  rms: number;
+  peak: number;
+  byte_length: number;
+  raw_audio_excluded: true;
+}
+
+export interface GeminiSyntheticInputLegReceipt {
+  schema: 'sophia_gemini_input_leg_v1';
+  status: 'verified' | 'inconclusive' | 'unavailable';
+  reason: string | null;
+  synthetic: true;
+  test_run_id: string;
+  operation_id: string;
+  utterance_id: string;
+  source_sha256: string;
+  expected_silence: boolean | null;
+  frame_window_id: string;
+  provider_connection_epoch: number;
+  first_audio_frame_sequence: number | null;
+  last_audio_frame_sequence: number | null;
+  frame_count: number;
+  sample_count: number;
+  nonzero_sample_count: number;
+  byte_length: number;
+  pcm_rms: number | null;
+  pcm_peak: number | null;
+  pcm_digest_algorithm: 'sha-256-chain-v1' | null;
+  pcm_sha256_chain: string | null;
+  started_at: string;
+  completed_at: string;
+  raw_audio_excluded: true;
+}
+
+export interface GeminiSyntheticInputTurnReceipt {
+  schema: 'sophia_gemini_input_turn_v1';
+  synthetic: true;
+  test_run_id: string;
+  operation_id: string;
+  utterance_id: string;
+  frame_window_id: string;
+  expected_silence: boolean | null;
+  source: 'provider_input_transcription' | 'public_user_turn' | 'settlement';
+  outcome:
+    | 'provider_input_transcription_observed'
+    | 'public_user_turn_accepted'
+    | 'no_user_turn_observed'
+    | 'unexpected_user_turn_observed'
+    | 'user_turn_observed'
+    | 'user_turn_unavailable';
+  observed_at: string;
+  provider_receive_sequence: number | null;
+  provider_received_at: string | null;
+  public_utterance_id: string | null;
+  transcript_length: number | null;
+  settlement_window_ms: number;
+  raw_audio_excluded: true;
+}
+
+export interface GeminiSyntheticInputFaultReceipt {
+  schema: 'sophia_gemini_input_fault_v1';
+  synthetic: true;
+  test_run_id: string;
+  code:
+    | 'input_operation_signal_malformed'
+    | 'input_operation_signal_binding_mismatch'
+    | 'input_operation_phase_invalid'
+    | 'input_operation_overlap_forbidden'
+    | 'input_operation_turn_correlation_ambiguous';
+  observed_at: string;
+  provider_connection_epoch: number;
+  raw_audio_excluded: true;
+}
+
+export interface GeminiSyntheticInteractionBinding {
+  schema: 'sophia_gemini_interaction_binding_v1';
+  synthetic: true;
+  test_run_id: string;
+  scenario_id: string;
+  scenario_version: string;
+  interaction_id: string;
+  operation_id: string;
+  utterance_id: string;
+  frame_window_id: string;
+  provider_input_sequence: number;
+  public_utterance_id: string;
+  public_user_turn_accepted_at: string;
+  response_id: string;
+  assistant_turn_id: string;
+  assistant_started_at: string;
+  provider_connection_epoch: number;
+}
+
+export interface GeminiSyntheticInteractionReceipt extends Omit<GeminiSyntheticInteractionBinding, 'schema'> {
+  schema: 'sophia_gemini_interaction_v1';
+  phase: 'assistant_response_assigned' | 'assistant_response_completed' | 'assistant_response_interrupted' | 'tool_settled' | 'output_settled';
+  assistant_ended_at: string | null;
+  response_boundary_reason: 'turn_complete' | 'generation_complete' | 'interrupted' | null;
+  provider_first_receive_sequence: number;
+  provider_last_receive_sequence: number;
+  provider_event_ids: string[];
+  relay_correlation_ids: string[];
+  tool_call_ids: string[];
+  effect_ids: string[];
+  tool_final_states: Record<string, GeminiToolCallLedgerFinalState>;
+  output_realization_ids: string[];
+  output_provider_chunk_sequences: string[];
+  output_audio_received_count: number;
+  output_audio_playback_scheduled_count: number;
+  output_audio_playback_started_count: number;
+  output_audio_playback_completed_count: number;
+  raw_audio_excluded: true;
+  raw_transcript_excluded: true;
+  secrets_excluded: true;
+}
+
+export interface GeminiSyntheticInteractionFaultReceipt {
+  schema: 'sophia_gemini_interaction_fault_v1';
+  synthetic: true;
+  test_run_id: string;
+  code:
+    | 'interaction_synthetic_binding_incomplete'
+    | 'interaction_public_turn_binding_malformed'
+    | 'interaction_pending_input_overlap'
+    | 'interaction_response_id_missing'
+    | 'interaction_response_overlap'
+    | 'interaction_response_rebind'
+    | 'interaction_turn_boundary_conflict'
+    | 'interaction_provider_epoch_conflict';
+  operation_id: string | null;
+  utterance_id: string | null;
+  response_id: string | null;
+  observed_at: string;
+  provider_connection_epoch: number;
+  raw_audio_excluded: true;
+  raw_transcript_excluded: true;
+  secrets_excluded: true;
 }
 
 export type GeminiBargeInNewTurnDispatchBlockedReason =
@@ -335,6 +553,56 @@ export interface GeminiProviderReceiveMetadata {
   providerCategories: GeminiProviderEventCategory[];
 }
 
+export type GeminiLangSmithTraceStatus = 'available' | 'trace_unavailable';
+
+export type GeminiLangSmithTraceUnavailableReason =
+  | 'not_provided'
+  | 'invalid'
+  | 'governed_synthetic_fault'
+  | 'synthetic_isolation_policy';
+
+export interface GeminiLangSmithTraceContext {
+  langsmithTraceId: string | null;
+  langsmithTraceStatus: GeminiLangSmithTraceStatus;
+  langsmithTraceUnavailableReason: GeminiLangSmithTraceUnavailableReason | null;
+}
+
+export interface GeminiVoiceLabTraceFaultReceipt {
+  schema: 'sophia_voice_lab_trace_fault_v1';
+  fault: 'langsmith_unavailable';
+  phase: 'applied' | 'restored';
+  principal_id: string;
+  test_run_id: string;
+  scenario_id: string;
+  scenario_version: string;
+  environment: string;
+  expected_deployment: {
+    frontend: string;
+    backend: string;
+    voice: string;
+  };
+  trace_unavailable: true;
+  canonical_behavior_unchanged: true;
+  applied_at: string;
+  restored_at: string | null;
+}
+
+export type GeminiProviderConnectionEpochReceiptPhase =
+  | 'bootstrap'
+  | 'rotation_pending'
+  | 'rotated'
+  | 'restored'
+  | 'degraded';
+
+export interface GeminiProviderConnectionEpochReceipt extends GeminiLangSmithTraceContext {
+  timestamp: string;
+  phase: GeminiProviderConnectionEpochReceiptPhase;
+  previousProviderConnectionEpoch: number | null;
+  providerConnectionEpoch: number;
+  continuityState: 'active' | 'rotation_pending' | 'degraded' | 'ended';
+  reason: string;
+}
+
 export interface GeminiArtifactReviewRelayContext {
   active: true;
   artifact_id: string | null;
@@ -359,6 +627,7 @@ export interface GeminiBrowserLiveProviderEventTelemetry {
   correlationId: string;
   responseId: string | null;
   providerReceiveSequence: number | null;
+  providerConnectionEpoch: number | null;
   providerReceivedAt: string | null;
   primaryCategory: GeminiProviderEventCategory | 'unknown';
   categories: GeminiProviderEventCategory[];
@@ -378,12 +647,19 @@ export interface GeminiBrowserLiveProviderEventTelemetry {
   serverContentInterrupted: boolean;
   generationComplete: boolean;
   turnComplete: boolean;
+  syntheticInputOperation?: GeminiSyntheticInputOperationBinding | null;
 }
 
 export interface GeminiOutputAudioChunkDiagnostic {
   timestamp: string;
+  realizationId: string;
+  responseId: string | null;
+  assistantTurnId: string | null;
+  providerEventId: string | null;
+  providerChunkSequence: string;
   providerReceiveSequence: number | null;
   providerRelaySequence: number | null;
+  providerConnectionEpoch: number | null;
   providerReceivedAt: string | null;
   relayCorrelationId: string | null;
   chunkIndex: number | null;
@@ -406,12 +682,98 @@ export interface GeminiOutputAudioChunkDiagnostic {
   audioContextState: AudioContextState | null;
   dropReason: GeminiOutputAudioDropReason | null;
   scheduled: boolean;
+  syntheticInteraction?: GeminiSyntheticInteractionBinding;
+}
+
+export interface GeminiOutputAudioReceivedDiagnostic {
+  timestamp: string;
+  realizationId: string;
+  providerChunkSequence: string;
+  providerReceiveSequence: number;
+  providerRelaySequence: number | null;
+  providerConnectionEpoch: number | null;
+  providerReceivedAt: string;
+  relayCorrelationId: string;
+  responseId: string | null;
+  assistantTurnId: string | null;
+  providerEventId: string | null;
+  chunkIndex: number;
+  chunksInEvent: number;
+  chunkHash: string;
+  byteLength: number;
+  duplicateOrdinal: number;
+  playbackGeneration: number;
+  syntheticInteraction?: GeminiSyntheticInteractionBinding;
+}
+
+export type GeminiOutputAudioPlaybackReceiptPhase =
+  | 'scheduled'
+  | 'started'
+  | 'completed'
+  | 'flushed'
+  | 'dropped';
+
+export interface GeminiOutputAudioPlaybackReceipt {
+  timestamp: string;
+  phase: GeminiOutputAudioPlaybackReceiptPhase;
+  realizationId: string;
+  providerChunkSequence: string;
+  responseId: string | null;
+  assistantTurnId: string | null;
+  providerEventId: string | null;
+  providerReceiveSequence: number | null;
+  providerRelaySequence: number | null;
+  providerConnectionEpoch: number | null;
+  providerReceivedAt: string | null;
+  relayCorrelationId: string | null;
+  chunkIndex: number | null;
+  chunksInEvent: number | null;
+  chunkHash: string;
+  byteLength: number;
+  playbackGeneration: number;
+  invalidatedByPlaybackGeneration: number | null;
+  audioContextCurrentTime: number;
+  scheduledStartTime: number | null;
+  durationSeconds: number;
+  dropReason: GeminiOutputAudioDropReason | null;
+  flushReason: string | null;
+  syntheticInteraction?: GeminiSyntheticInteractionBinding;
+}
+
+export type GeminiOutputLegMonitorStatus = 'verified' | 'inconclusive' | 'unavailable';
+
+export interface GeminiOutputLegMonitorReceipt {
+  schema: 'sophia_gemini_output_leg_v1';
+  status: GeminiOutputLegMonitorStatus;
+  reason: string | null;
+  realizationId: string;
+  providerChunkFingerprint: string;
+  providerConnectionEpoch: number | null;
+  playbackGeneration: number;
+  monitorKind: 'webaudio-per-realization-final-path-analyser' | 'unavailable';
+  monitorDigestAlgorithm: 'sha-256-chain-v1' | null;
+  monitorDigestSha256: string | null;
+  monitorWindowCount: number;
+  monitorFrameCount: number;
+  monitorNonSilentFrameCount: number;
+  monitorRms: number | null;
+  monitorPeak: number | null;
+  scheduledAt: string;
+  firstSampledAt: string | null;
+  firstNonSilentAt: string | null;
+  completedAt: string;
+  monitorDurationMs: number;
+  playbackDurationSeconds: number;
+  completionPhase: 'completed' | 'flushed';
+  rawAudioExcluded: true;
 }
 
 export type GeminiOutputAudioDropReason =
   | GeminiStaleOutputSuppressionReason
   | 'exact_transport_replay'
-  | 'playback_queue_full';
+  | 'playback_queue_full'
+  | 'invalid_pcm_payload'
+  | 'artifact_review_response_suppressed';
 
 export interface GeminiAudioContextDiagnostic {
   timestamp: string;
@@ -433,6 +795,7 @@ export interface GeminiBrowserLiveRelayTrace {
   timestamp: string;
   correlationId: string;
   providerReceiveSequence: number;
+  providerConnectionEpoch: number | null;
   providerReceivedAt: string;
   eventCategory: GeminiProviderEventCategory | 'unknown';
   categories: GeminiProviderEventCategory[];
@@ -503,6 +866,8 @@ export type GeminiToolCallLedgerFinalState =
 
 export interface GeminiBrowserLiveToolCallLedgerEntry {
   toolCallId: string;
+  effectId: string;
+  providerConnectionEpoch: number;
   toolName: string | null;
   receivedAt: string | null;
   cancelledAt: string | null;
@@ -514,6 +879,9 @@ export interface GeminiBrowserLiveToolCallLedgerEntry {
   sendSuppressedAt: string | null;
   suppressionReason: string | null;
   finalState: GeminiToolCallLedgerFinalState;
+  syntheticToolEvidence: GeminiSyntheticToolEvidence | null;
+  syntheticBuilderJoin: GeminiSyntheticBuilderJoin | null;
+  syntheticInteraction?: GeminiSyntheticInteractionBinding;
 }
 
 type FetchLike = (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>;
@@ -547,8 +915,13 @@ export interface GeminiBrowserLiveDogfoodConnectOptions {
   reviewToolTimeoutMs?: number;
   onStage?: (stage: GeminiBrowserLiveDogfoodStage) => void;
   onProviderEvent?: (event: unknown) => void;
+  onOutputAudioReceived?: (diagnostic: GeminiOutputAudioReceivedDiagnostic) => void;
+  /** @deprecated This callback reports provider audio accepted for local playback, not realized playback. */
   onOutputAudio?: () => void;
   onOutputAudioChunk?: (diagnostic: GeminiOutputAudioChunkDiagnostic) => void;
+  onOutputAudioPlaybackReceipt?: (receipt: GeminiOutputAudioPlaybackReceipt) => void;
+  onOutputLegMonitorReceipt?: (receipt: GeminiOutputLegMonitorReceipt) => void;
+  onProviderConnectionEpoch?: (receipt: GeminiProviderConnectionEpochReceipt) => void;
   onAudioContextDiagnostics?: (diagnostic: GeminiAudioContextDiagnostic) => void;
   onMicrophoneAudioSettings?: (diagnostic: GeminiMicrophoneAudioSettingsDiagnostic) => void;
   onRepeatedIntentGate?: (diagnostic: GeminiRepeatedIntentGateDiagnostic) => void;
@@ -563,12 +936,32 @@ export interface GeminiBrowserLiveDogfoodConnectOptions {
   onInterruption?: (diagnostic: GeminiBrowserLiveDogfoodInterruptionDiagnostic) => void;
   onStaleOutputSuppression?: (diagnostic: GeminiStaleOutputSuppressionDiagnostic) => void;
   onInputAudioActivity?: (diagnostic: GeminiInputAudioActivityDiagnostic) => void;
+  onSyntheticInputLegReceipt?: (receipt: GeminiSyntheticInputLegReceipt) => void;
+  onSyntheticInputTurnReceipt?: (receipt: GeminiSyntheticInputTurnReceipt) => void;
+  onSyntheticInputFaultReceipt?: (receipt: GeminiSyntheticInputFaultReceipt) => void;
+  onSyntheticInteractionReceipt?: (receipt: GeminiSyntheticInteractionReceipt) => void;
+  onSyntheticInteractionFaultReceipt?: (receipt: GeminiSyntheticInteractionFaultReceipt) => void;
+  onSyntheticTraceFaultReceipt?: (receipt: GeminiVoiceLabTraceFaultReceipt) => void;
   onBargeInTranscriptHandoff?: (diagnostic: GeminiBargeInTranscriptHandoffDiagnostic) => void;
   onToolLoopDiagnostic?: (diagnostic: GeminiBrowserLiveDogfoodToolLoopDiagnostic) => void;
 }
 
 export interface GeminiBrowserLiveProductionConnectOptions extends Omit<GeminiBrowserLiveDogfoodConnectOptions, 'bootstrapPayload'> {
   bootstrap: GeminiBrowserLiveSessionBootstrap;
+}
+
+export interface GeminiProviderCleanupControl {
+  providerConnectionEpochs: number[];
+}
+
+/**
+ * The exact canonical browser-terminal arrays echoed by the authenticated
+ * Gateway disconnect response.  This deliberately excludes the cleanup token,
+ * raw response metadata, and any locally invented success marker.
+ */
+export interface GeminiProviderCleanupSettlementAcknowledgement {
+  browser_provider_close_receipts: Record<string, unknown>[];
+  browser_provider_activation_abort_receipts: Record<string, unknown>[];
 }
 
 export interface GeminiBrowserLiveDogfoodConnection {
@@ -591,10 +984,23 @@ export interface GeminiBrowserLiveDogfoodConnection {
   ) => Promise<GeminiArtifactFrameSendResult>;
   getArtifactFrameTransportStatus: () => GeminiArtifactFrameTransportStatusSnapshot;
   setMicrophoneMuted: (muted: boolean) => void;
+  acknowledgeSyntheticPublicUserTurn: (input: {
+    publicUtteranceId?: string | null;
+    transcriptLength: number;
+  }) => void;
   flushOutputAudio: () => GeminiOutputAudioPlaybackState;
-  close: () => Promise<void>;
-  providerConnectionEpoch: number;
-  continuityState: 'active' | 'rotation_pending' | 'degraded' | 'ended';
+  close: (
+    control?: GeminiProviderCleanupControl,
+  ) => Promise<GeminiProviderCleanupSettlementAcknowledgement | null>;
+  readonly providerConnectionEpoch: number;
+  getProviderConnectionEpoch: () => number;
+  getProviderSocketEpochs: () => number[];
+  readonly continuityState: 'active' | 'rotation_pending' | 'degraded' | 'ended';
+  readonly langsmithTraceId: string | null;
+  readonly langsmithTraceStatus: GeminiLangSmithTraceStatus;
+  readonly langsmithTraceUnavailableReason: GeminiLangSmithTraceUnavailableReason | null;
+  readonly syntheticTest: GeminiSyntheticTestContext | null;
+  readonly syntheticTraceFault: GeminiVoiceLabTraceFaultReceipt | null;
 }
 
 export interface GeminiArtifactFrameDimensions {
@@ -677,7 +1083,7 @@ export interface GeminiArtifactFrameSendResult {
   rawFrameExcluded: true;
 }
 
-interface BrowserSessionPayload {
+export interface BrowserSessionPayload {
   runtime?: unknown;
   voice_runtime?: unknown;
   production_route?: unknown;
@@ -695,16 +1101,40 @@ interface BrowserSessionPayload {
   backendStillFrameFlagParsed?: unknown;
   audio_capture_enabled?: unknown;
   continuation_bootstrap_url?: unknown;
+  provider_activation_url?: unknown;
+  provider_cleanup_token?: unknown;
+  provider_cleanup_expires_at?: unknown;
   provider_connection_epoch?: unknown;
   logical_session_id?: unknown;
   voice_runtime_session_id?: unknown;
+  langsmith_trace_id?: unknown;
+  langsmith_trace_unavailable_reason?: unknown;
+  synthetic_test?: unknown;
+  trace_fault?: unknown;
 }
 
 export type GeminiBrowserLiveSessionBootstrap = BrowserSessionPayload;
 
+export type GeminiSyntheticTestContext = {
+  synthetic: true;
+  principal_id: string;
+  test_run_id: string;
+  scenario_id?: string;
+  scenario_version?: string;
+  voice_lab_run_id_sha256?: string;
+  browser_worker_id_sha256?: string;
+  browser_lease_epoch?: number;
+  browser_context_id_sha256?: string;
+  environment: string;
+  retention_hours: number;
+  cleanup_obligation_id: string;
+  provider_expires_at: string;
+};
+
 interface EphemeralTokenPayload {
   value?: unknown;
   name?: unknown;
+  expireTime?: unknown;
 }
 
 interface DogfoodErrorPayload {
@@ -779,6 +1209,51 @@ interface GeminiConversationAudioRecorder {
   stop: () => Promise<GeminiConversationAudioRecording | null>;
 }
 
+type GeminiOutputLegMonitorRealization = {
+  realizationId: string;
+  providerChunkFingerprint: string;
+  providerConnectionEpoch: number | null;
+  playbackGeneration: number;
+  scheduledAt: string;
+  firstSampledAt: string | null;
+  firstNonSilentAt: string | null;
+  lastSampledAt: string | null;
+  windowCount: number;
+  frameCount: number;
+  nonSilentFrameCount: number;
+  squareSum: number;
+  peak: number;
+  digest: Uint8Array;
+  digestSequence: number;
+  digestPromise: Promise<void>;
+  digestFailed: boolean;
+  analyser: AnalyserNode;
+  samples: Float32Array;
+  timer: ReturnType<typeof setInterval> | null;
+  startedAt: string | null;
+  samplingBusy: boolean;
+  sampleInFlight: Promise<void>;
+};
+
+interface GeminiOutputLegMonitor {
+  outputNode: AudioNode;
+  begin: (metadata: {
+    realizationId: string;
+    providerChunkFingerprint: string;
+    providerConnectionEpoch: number | null;
+    playbackGeneration: number;
+    scheduledAt: string;
+  }, downstreamNode: AudioNode) => AudioNode;
+  markStarted: (realizationId: string, startedAt: string) => void;
+  finish: (
+    realizationId: string,
+    phase: 'completed' | 'flushed',
+    completedAt: string,
+    playbackDurationSeconds: number,
+  ) => Promise<GeminiOutputLegMonitorReceipt>;
+  stop: () => void;
+}
+
 export interface GeminiOutputAudioPlaybackState {
   nextPlaybackTime: number;
   activeSourceCount: number;
@@ -790,14 +1265,23 @@ export interface GeminiOutputAudioPlaybackState {
 export interface GeminiOutputAudioPlaybackController {
   playEvent: (event: Record<string, unknown>, receiveMetadata?: GeminiProviderReceiveMetadata) => number;
   playBase64Chunk: (chunk: string) => boolean;
-  stop: () => void;
-  flush: () => GeminiOutputAudioPlaybackState;
+  dropEvent: (
+    event: Record<string, unknown>,
+    receiveMetadata: GeminiProviderReceiveMetadata | undefined,
+    reason: GeminiOutputAudioDropReason,
+  ) => number;
+  stop: (reason?: string) => void;
+  flush: (reason?: string) => GeminiOutputAudioPlaybackState;
   snapshot: () => GeminiOutputAudioPlaybackState;
 }
 
 interface GeminiOutputAudioPlaybackControllerOptions {
   maxDiagnostics?: number;
+  onChunkReceived?: (diagnostic: GeminiOutputAudioReceivedDiagnostic) => void;
   onChunkDiagnostic?: (diagnostic: GeminiOutputAudioChunkDiagnostic) => void;
+  onPlaybackReceipt?: (receipt: GeminiOutputAudioPlaybackReceipt) => void;
+  onOutputLegMonitorReceipt?: (receipt: GeminiOutputLegMonitorReceipt) => void;
+  outputLegMonitor?: GeminiOutputLegMonitor;
   outputNode?: AudioNode;
   maxPlaybackAheadSeconds?: number;
   maxQueuedChunks?: number;
@@ -805,8 +1289,281 @@ interface GeminiOutputAudioPlaybackControllerOptions {
   nowMs?: () => number;
 }
 
+function outputLegUnavailableReceipt(
+  realizationId: string,
+  phase: 'completed' | 'flushed',
+  completedAt: string,
+  playbackDurationSeconds: number,
+  metadata?: {
+    providerChunkFingerprint: string;
+    providerConnectionEpoch: number | null;
+    playbackGeneration: number;
+    scheduledAt: string;
+  },
+): GeminiOutputLegMonitorReceipt {
+  return {
+    schema: 'sophia_gemini_output_leg_v1',
+    status: 'unavailable',
+    reason: 'webaudio_output_monitor_unavailable',
+    realizationId,
+    providerChunkFingerprint: metadata?.providerChunkFingerprint ?? 'unavailable',
+    providerConnectionEpoch: metadata?.providerConnectionEpoch ?? null,
+    playbackGeneration: metadata?.playbackGeneration ?? 0,
+    monitorKind: 'unavailable',
+    monitorDigestAlgorithm: null,
+    monitorDigestSha256: null,
+    monitorWindowCount: 0,
+    monitorFrameCount: 0,
+    monitorNonSilentFrameCount: 0,
+    monitorRms: null,
+    monitorPeak: null,
+    scheduledAt: metadata?.scheduledAt ?? completedAt,
+    firstSampledAt: null,
+    firstNonSilentAt: null,
+    completedAt,
+    monitorDurationMs: 0,
+    playbackDurationSeconds,
+    completionPhase: phase,
+    rawAudioExcluded: true,
+  };
+}
+
+function bytesToHex(bytes: Uint8Array): string {
+  return Array.from(bytes, (value) => value.toString(16).padStart(2, '0')).join('');
+}
+
+/**
+ * Monitor the actual final WebAudio output bus without retaining PCM bytes.
+ * Each bounded analyser window is SHA-256 hashed immediately, then folded into
+ * a per-realization SHA-256 chain. Only the chain and derived metrics survive.
+ */
+export function createGeminiOutputLegMonitor(
+  audioContext: AudioContext,
+  sampleIntervalMs = 20,
+): GeminiOutputLegMonitor {
+  const createAnalyser = audioContext.createAnalyser?.bind(audioContext);
+  const subtle = globalThis.crypto?.subtle;
+  if (!createAnalyser || !subtle) {
+    const metadata = new Map<string, {
+      providerChunkFingerprint: string;
+      providerConnectionEpoch: number | null;
+      playbackGeneration: number;
+      scheduledAt: string;
+    }>();
+    return {
+      outputNode: audioContext.destination,
+      begin: (entry, downstreamNode) => {
+        metadata.set(entry.realizationId, entry);
+        return downstreamNode;
+      },
+      markStarted: () => undefined,
+      finish: async (realizationId, phase, completedAt, duration) => {
+        const entry = metadata.get(realizationId);
+        metadata.delete(realizationId);
+        return outputLegUnavailableReceipt(realizationId, phase, completedAt, duration, entry);
+      },
+      stop: () => metadata.clear(),
+    };
+  }
+  const active = new Map<string, GeminiOutputLegMonitorRealization>();
+  let stopped = false;
+
+  const sampleRealization = (realization: GeminiOutputLegMonitorRealization) => {
+    if (stopped || realization.samplingBusy || realization.startedAt === null) return;
+    realization.analyser.getFloatTimeDomainData(
+      realization.samples as Float32Array<ArrayBuffer>,
+    );
+    const sampledAt = new Date().toISOString();
+    const canonical = new Uint8Array(realization.samples.length * 2);
+    const view = new DataView(canonical.buffer);
+    let squareSum = 0;
+    let peak = 0;
+    let nonSilent = 0;
+    for (let index = 0; index < realization.samples.length; index += 1) {
+      const sample = Math.max(-1, Math.min(1, realization.samples[index] ?? 0));
+      const absolute = Math.abs(sample);
+      squareSum += sample * sample;
+      peak = Math.max(peak, absolute);
+      if (absolute >= 0.0005) nonSilent += 1;
+      const pcm16 = sample < 0 ? Math.round(sample * 0x8000) : Math.round(sample * 0x7fff);
+      view.setInt16(index * 2, pcm16, true);
+    }
+    realization.windowCount += 1;
+    realization.frameCount += realization.samples.length;
+    realization.nonSilentFrameCount += nonSilent;
+    realization.squareSum += squareSum;
+    realization.peak = Math.max(realization.peak, peak);
+    realization.firstSampledAt ??= sampledAt;
+    realization.lastSampledAt = sampledAt;
+    if (nonSilent > 0) realization.firstNonSilentAt ??= sampledAt;
+
+    realization.samplingBusy = true;
+    const frameDigest = subtle.digest('SHA-256', canonical.buffer as ArrayBuffer);
+    realization.digestSequence += 1;
+    const sequence = realization.digestSequence;
+    realization.digestPromise = realization.digestPromise.then(async () => {
+      try {
+        const frame = new Uint8Array(await frameDigest);
+        const chained = new Uint8Array(68);
+        chained.set(realization.digest, 0);
+        chained.set(frame, 32);
+        new DataView(chained.buffer).setUint32(64, sequence, false);
+        realization.digest = new Uint8Array(
+          await subtle.digest('SHA-256', chained.buffer as ArrayBuffer),
+        );
+      } catch {
+        realization.digestFailed = true;
+      }
+    });
+    realization.sampleInFlight = frameDigest
+      .then(() => undefined)
+      .catch(() => undefined)
+      .finally(() => {
+        realization.samplingBusy = false;
+      });
+  };
+
+  const finishRealization = async (
+    realization: GeminiOutputLegMonitorRealization,
+    phase: 'completed' | 'flushed',
+    completedAt: string,
+    playbackDurationSeconds: number,
+  ): Promise<GeminiOutputLegMonitorReceipt> => {
+    if (realization.timer !== null) {
+      clearInterval(realization.timer);
+      realization.timer = null;
+    }
+    await realization.sampleInFlight;
+    if (!stopped && realization.startedAt !== null) {
+      sampleRealization(realization);
+      await realization.sampleInFlight;
+    }
+    await realization.digestPromise;
+    active.delete(realization.realizationId);
+    realization.analyser.disconnect();
+    const rms = realization.frameCount > 0
+      ? Math.sqrt(realization.squareSum / realization.frameCount)
+      : null;
+    const startedMs = Date.parse(
+      realization.firstNonSilentAt ?? realization.firstSampledAt ?? realization.scheduledAt,
+    );
+    const endedMs = Date.parse(realization.lastSampledAt ?? completedAt);
+    const cryptographicDigest = !realization.digestFailed && realization.digestSequence > 0
+      ? bytesToHex(realization.digest)
+      : null;
+    const verified = phase === 'completed'
+      && cryptographicDigest !== null
+      && realization.nonSilentFrameCount > 0
+      && realization.frameCount > 0
+      && playbackDurationSeconds > 0;
+    return {
+      schema: 'sophia_gemini_output_leg_v1',
+      status: verified ? 'verified' : 'inconclusive',
+      reason: verified ? null : (
+        realization.digestFailed
+          ? 'output_monitor_digest_failed'
+          : realization.startedAt === null
+              ? 'output_monitor_playback_not_started'
+            : phase === 'flushed'
+              ? 'output_playback_flushed'
+              : 'output_monitor_no_non_silent_frames'
+      ),
+      realizationId: realization.realizationId,
+      providerChunkFingerprint: realization.providerChunkFingerprint,
+      providerConnectionEpoch: realization.providerConnectionEpoch,
+      playbackGeneration: realization.playbackGeneration,
+      monitorKind: 'webaudio-per-realization-final-path-analyser',
+      monitorDigestAlgorithm: 'sha-256-chain-v1',
+      monitorDigestSha256: cryptographicDigest,
+      monitorWindowCount: realization.windowCount,
+      monitorFrameCount: realization.frameCount,
+      monitorNonSilentFrameCount: realization.nonSilentFrameCount,
+      monitorRms: rms,
+      monitorPeak: realization.peak,
+      scheduledAt: realization.scheduledAt,
+      firstSampledAt: realization.firstSampledAt,
+      firstNonSilentAt: realization.firstNonSilentAt,
+      completedAt,
+      monitorDurationMs: Number.isFinite(startedMs) && Number.isFinite(endedMs)
+        ? Math.max(0, endedMs - startedMs)
+        : 0,
+      playbackDurationSeconds,
+      completionPhase: phase,
+      rawAudioExcluded: true,
+    };
+  };
+
+  return {
+    outputNode: audioContext.destination,
+    begin: (metadata, downstreamNode) => {
+      const analyser = createAnalyser();
+      analyser.fftSize = 2048;
+      analyser.smoothingTimeConstant = 0;
+      analyser.connect(downstreamNode);
+      active.set(metadata.realizationId, {
+        ...metadata,
+        firstSampledAt: null,
+        firstNonSilentAt: null,
+        lastSampledAt: null,
+        windowCount: 0,
+        frameCount: 0,
+        nonSilentFrameCount: 0,
+        squareSum: 0,
+        peak: 0,
+        digest: new Uint8Array(32),
+        digestSequence: 0,
+        digestPromise: Promise.resolve(),
+        digestFailed: false,
+        analyser,
+        samples: new Float32Array(analyser.fftSize),
+        timer: null,
+        startedAt: null,
+        samplingBusy: false,
+        sampleInFlight: Promise.resolve(),
+      });
+      return analyser;
+    },
+    markStarted: (realizationId, startedAt) => {
+      const realization = active.get(realizationId);
+      if (!realization || realization.startedAt !== null || stopped) return;
+      realization.startedAt = startedAt;
+      sampleRealization(realization);
+      realization.timer = setInterval(
+        () => sampleRealization(realization),
+        Math.max(10, sampleIntervalMs),
+      );
+    },
+    finish: async (realizationId, phase, completedAt, playbackDurationSeconds) => {
+      const realization = active.get(realizationId);
+      if (!realization) {
+        return outputLegUnavailableReceipt(
+          realizationId,
+          phase,
+          completedAt,
+          playbackDurationSeconds,
+        );
+      }
+      return finishRealization(
+        realization,
+        phase,
+        completedAt,
+        playbackDurationSeconds,
+      );
+    },
+    stop: () => {
+      stopped = true;
+      for (const realization of active.values()) {
+        if (realization.timer !== null) clearInterval(realization.timer);
+        realization.timer = null;
+        realization.analyser.disconnect();
+      }
+    },
+  };
+}
+
 export function createGeminiConversationAudioRecorder(
   audioContext: AudioContext,
+  outputDestination: AudioNode = audioContext.destination,
 ): GeminiConversationAudioRecorder | null {
   if (
     typeof MediaRecorder === 'undefined'
@@ -836,7 +1593,7 @@ export function createGeminiConversationAudioRecorder(
   // while the user still needs the assistant leg at the speakers. Connecting
   // only to the MediaStreamDestination makes all provider audio measurable
   // but inaudible whenever audio capture is enabled.
-  outputGain.connect(audioContext.destination);
+  outputGain.connect(outputDestination);
   merger.connect(destination);
 
   let recorder: MediaRecorder;
@@ -953,11 +1710,16 @@ function recordGeminiMicrophoneAudioSettings(
 
 interface GeminiOutputAudioChunkMetadata {
   receiveMetadata?: GeminiProviderReceiveMetadata;
+  responseId: string | null;
+  assistantTurnId: string | null;
+  providerEventId: string | null;
   chunkIndex: number;
   chunksInEvent: number;
   chunkHash: string;
   byteLength: number;
   duplicateOrdinal: number;
+  realizationId: string;
+  providerChunkSequence: string;
 }
 
 interface GeminiOrderedRelayTask {
@@ -1013,6 +1775,7 @@ const REQUESTED_MICROPHONE_AUDIO_CONSTRAINTS = {
   autoGainControl: true,
 } as const;
 const WEBSOCKET_OPEN = 1;
+const WEBSOCKET_CLOSED = 3;
 const GEMINI_ARTIFACT_FRAME_PAYLOAD_SCHEMA_VERSION = 'realtimeInput.video.v1';
 const ARTIFACT_FRAME_SEND_SETTLE_MS = 125;
 const ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS = 10 * 60 * 1000;
@@ -1120,6 +1883,12 @@ export async function connectGeminiBrowserLiveDogfood(
   let audioContext: AudioContext | null = null;
   let audioPipeline: AudioPipeline | null = null;
   let outputAudioPlayer: GeminiOutputAudioPlaybackController | null = null;
+  let outputLegMonitor: GeminiOutputLegMonitor | null = null;
+  let syntheticInputEvidence: GeminiSyntheticInputEvidenceTracker | null = null;
+  let syntheticInteractionEvidence: GeminiSyntheticInteractionEvidenceTracker | null = null;
+  let syntheticInputEvidenceFaulted = false;
+  let syntheticTestContext: GeminiSyntheticTestContext | null = null;
+  let syntheticTraceFault: GeminiVoiceLabTraceFaultReceipt | null = null;
   let conversationAudioRecorder: GeminiConversationAudioRecorder | null = null;
   let microphoneAudioSettings: GeminiMicrophoneAudioSettingsDiagnostic = {
     timestamp: new Date().toISOString(),
@@ -1128,6 +1897,9 @@ export async function connectGeminiBrowserLiveDogfood(
   };
   let dogfoodSessionId: string | null = null;
   let disconnectTargetPath = DISCONNECT_TARGET_PATH;
+  let providerCleanupToken: string | null = null;
+  let providerCleanupExpiresAt: string | null = null;
+  let cleanupProviderAdmissionId: string | null = null;
   let closed = false;
   let relayConsecutiveFailures = 0;
   let relayFailureObserved = false;
@@ -1135,7 +1907,42 @@ export async function connectGeminiBrowserLiveDogfood(
   let relaySuccessCount = 0;
   let relayFailureCount = 0;
   let providerConnectionEpoch = 1;
+  let providerExpiryTimer: ReturnType<typeof setTimeout> | null = null;
+  const providerSocketEpochs = new WeakMap<WebSocketLike, number>();
+  const providerSockets = new Set<WebSocketLike>();
+  const unsettledProviderEpochs = new Set<number>();
+  const knownProviderCandidateEpochs = new Set<number>();
+  const providerCloseReceiptsByEpoch = new Map<number, Record<string, unknown>>();
+  const activationAbortReceiptsByEpoch = new Map<number, Record<string, unknown>>();
+  const observedProviderSocketCloses = new WeakMap<WebSocketLike, {
+    epoch: number;
+    event: CloseEvent;
+    observedAt: string;
+  }>();
+  const pendingProviderSocketCloses = new Map<WebSocketLike, {
+    socket: WebSocketLike;
+    epoch: number;
+    resolve: (value: { event: CloseEvent; observedAt: string } | null) => void;
+    timer: ReturnType<typeof setTimeout>;
+  }>();
+  let cleanupInFlight: Promise<void> | null = null;
+  let cleanupRetryTimer: ReturnType<typeof setTimeout> | null = null;
+  let cleanupRetryAttempt = 0;
+  let cleanupTeardownComplete = false;
+  let providerCleanupGeneration = 0;
+  let cleanupRequestedProviderEpochs: number[] | null = null;
+  let pendingContinuationCandidateExpected: number | null = null;
+  let cleanupConversationAudio: GeminiConversationAudioRecording | null = null;
+  let cleanupBrowserCloseReceipts: Record<string, unknown>[] = [];
+  let cleanupActivationAbortReceipts: Record<string, unknown>[] = [];
+  let cleanupDisconnectAcknowledged = false;
+  let cleanupSettlementAcknowledgement: GeminiProviderCleanupSettlementAcknowledgement | null = null;
   let continuityState: GeminiBrowserLiveDogfoodConnection['continuityState'] = 'active';
+  let langsmithTraceContext: GeminiLangSmithTraceContext = {
+    langsmithTraceId: null,
+    langsmithTraceStatus: 'trace_unavailable',
+    langsmithTraceUnavailableReason: 'not_provided',
+  };
   let safeResumptionHandle: string | null = null;
   let safeResumptionGeneration = 0;
   let providerReceiveSequence = 0;
@@ -1358,7 +2165,24 @@ export async function connectGeminiBrowserLiveDogfood(
   };
 
   const notifyToolCallLedgerUpdate = (entry: GeminiBrowserLiveToolCallLedgerEntry) => {
-    options.onToolCallLedgerUpdate?.({ ...entry });
+    const enriched = syntheticInteractionEvidence?.noteToolLedger(entry) ?? entry;
+    options.onToolCallLedgerUpdate?.({ ...enriched });
+  };
+
+  const notifyProviderConnectionEpoch = (
+    phase: GeminiProviderConnectionEpochReceiptPhase,
+    previousProviderConnectionEpoch: number | null,
+    reason: string,
+  ) => {
+    options.onProviderConnectionEpoch?.({
+      timestamp: new Date().toISOString(),
+      phase,
+      previousProviderConnectionEpoch,
+      providerConnectionEpoch,
+      continuityState,
+      reason,
+      ...langsmithTraceContext,
+    });
   };
 
   const snapshotArtifactFrameProviderState = () => ({
@@ -1397,6 +2221,19 @@ export async function connectGeminiBrowserLiveDogfood(
     artifactReviewUserIntentAt = new Date().toISOString();
   };
 
+  const dropPendingArtifactReviewAudio = (
+    responseId: string | null,
+    reason: GeminiOutputAudioDropReason,
+  ) => {
+    const responseIds = responseId ? [responseId] : Array.from(pendingArtifactReviewAudio.keys());
+    responseIds.forEach((pendingResponseId) => {
+      pendingArtifactReviewAudio.get(pendingResponseId)?.forEach(({ event, receiveMetadata }) => {
+        outputAudioPlayer?.dropEvent(event, receiveMetadata, reason);
+      });
+      pendingArtifactReviewAudio.delete(pendingResponseId);
+    });
+  };
+
   const snapshotArtifactReviewRelayContext = (): GeminiArtifactReviewRelayContext | null => {
     if (!artifactReviewArtifactId || artifactReviewExpiresAtMs === null) {
       return null;
@@ -1409,7 +2246,7 @@ export async function connectGeminiBrowserLiveDogfood(
       artifactReviewUserIntentAt = null;
       artifactReviewSafeResponseIds.clear();
       artifactReviewSuppressedResponseIds.clear();
-      pendingArtifactReviewAudio.clear();
+      dropPendingArtifactReviewAudio(null, 'artifact_review_response_suppressed');
       return null;
     }
 
@@ -1434,7 +2271,7 @@ export async function connectGeminiBrowserLiveDogfood(
       if (typeof oldest !== 'string') {
         return;
       }
-      pendingArtifactReviewAudio.delete(oldest);
+      dropPendingArtifactReviewAudio(oldest, 'artifact_review_response_suppressed');
     }
   };
 
@@ -1450,11 +2287,14 @@ export async function connectGeminiBrowserLiveDogfood(
     return outputAudioPlayer?.playEvent(event, receiveMetadata) ?? 0;
   };
 
-  const dropBufferedArtifactReviewAudio = (responseId: string | null) => {
+  const dropBufferedArtifactReviewAudio = (
+    responseId: string | null,
+    reason: GeminiOutputAudioDropReason = 'artifact_review_response_suppressed',
+  ) => {
     if (!responseId) {
       return;
     }
-    pendingArtifactReviewAudio.delete(responseId);
+    dropPendingArtifactReviewAudio(responseId, reason);
     artifactReviewSafeResponseIds.delete(responseId);
   };
 
@@ -1481,6 +2321,9 @@ export async function connectGeminiBrowserLiveDogfood(
     }
     pendingArtifactReviewAudio.delete(responseId);
     if (artifactReviewSuppressedResponseIds.has(responseId)) {
+      queued.forEach(({ event, receiveMetadata }) => {
+        outputAudioPlayer?.dropEvent(event, receiveMetadata, 'artifact_review_response_suppressed');
+      });
       return;
     }
     queued.forEach(({ event, receiveMetadata }) => {
@@ -1505,6 +2348,71 @@ export async function connectGeminiBrowserLiveDogfood(
       closeReason: sanitizeDiagnosticText(diagnostic.closeReason),
       relayFailureAlreadyObserved: relayFailureObserved,
     });
+  };
+
+  const noteProviderSocketClosed = (socket: WebSocketLike, event: CloseEvent) => {
+    const epoch = providerSocketEpochs.get(socket);
+    if (!epoch) return;
+    const observedAt = new Date().toISOString();
+    observedProviderSocketCloses.set(socket, { epoch, event, observedAt });
+    const pending = pendingProviderSocketCloses.get(socket);
+    if (pending?.epoch === epoch) {
+      clearTimeout(pending.timer);
+      pendingProviderSocketCloses.delete(socket);
+      pending.resolve({ event, observedAt });
+    }
+  };
+
+  const waitForProviderSocketClose = (
+    socket: WebSocketLike,
+    epoch: number,
+    timeoutMs = 5_000,
+  ): Promise<{ event: CloseEvent; observedAt: string } | null> => {
+    const observed = observedProviderSocketCloses.get(socket);
+    if (observed?.epoch === epoch) {
+      return Promise.resolve({ event: observed.event, observedAt: observed.observedAt });
+    }
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        if (pendingProviderSocketCloses.get(socket)?.epoch === epoch) {
+          pendingProviderSocketCloses.delete(socket);
+        }
+        resolve(null);
+      }, timeoutMs);
+      pendingProviderSocketCloses.set(socket, {
+        socket,
+        epoch,
+        resolve,
+        timer,
+      });
+    });
+  };
+
+  const providerCloseReceipt = (
+    socket: WebSocketLike,
+    epoch: number,
+    observed: { event: CloseEvent; observedAt: string },
+  ): Record<string, unknown> => {
+    const existing = providerCloseReceiptsByEpoch.get(epoch);
+    if (existing) return existing;
+    if (providerSocketEpochs.get(socket) !== epoch) {
+      throw new Error('Synthetic provider close receipt epoch binding is invalid.');
+    }
+    const receiptId = globalThis.crypto?.randomUUID?.();
+    if (!receiptId) {
+      throw new Error('Synthetic provider close receipt identity is unavailable.');
+    }
+    const receipt = {
+      schema: 'sophia_gemini_browser_provider_close_v1',
+      receipt_id: receiptId,
+      session_id: dogfoodSessionId,
+      provider_connection_epoch: epoch,
+      websocket_close_observed: true,
+      websocket_close_code: observed.event.code,
+      websocket_closed_at: observed.observedAt,
+    };
+    providerCloseReceiptsByEpoch.set(epoch, receipt);
+    return receipt;
   };
 
   const defaultPlaybackState = (): GeminiOutputAudioPlaybackState => ({
@@ -1630,7 +2538,7 @@ export async function connectGeminiBrowserLiveDogfood(
       confirmedBargeInCandidateFrameCount = bargeInCandidateFrameCount;
     }
     if (options.stopPlayback) {
-      outputAudioPlayer?.stop();
+      outputAudioPlayer?.stop(options.reason ?? 'confirmed_user_intent');
       closeRawAssistantUserOverlap();
     }
     resetBargeInCandidate();
@@ -2029,16 +2937,57 @@ export async function connectGeminiBrowserLiveDogfood(
 
   const updateToolCallLedger = (
     toolCallId: string | null,
-    update: Partial<Omit<GeminiBrowserLiveToolCallLedgerEntry, 'toolCallId'>>,
+    update: Partial<Omit<GeminiBrowserLiveToolCallLedgerEntry, 'toolCallId' | 'effectId' | 'providerConnectionEpoch'>>,
   ) => {
     if (!toolCallId) {
       return null;
     }
-    const current = toolCallLedger.get(toolCallId) ?? createToolCallLedgerEntry(toolCallId);
+    const current = toolCallLedger.get(toolCallId)
+      ?? createToolCallLedgerEntry(toolCallId, providerConnectionEpoch);
+    if (isTerminalToolCallLedgerState(current.finalState)) {
+      return current;
+    }
     const next = finalizeToolCallLedgerEntry({ ...current, ...update });
     toolCallLedger.set(toolCallId, next);
     notifyToolCallLedgerUpdate(next);
     return next;
+  };
+
+  const buildSyntheticToolEvidence = (
+    toolCall: GeminiBrowserLiveDogfoodToolCallSummary,
+    receiveMetadata: GeminiProviderReceiveMetadata,
+    receivedAt: string,
+  ): GeminiSyntheticToolEvidence | null => {
+    if (!toolCall.id || !toolCall.name) return null;
+    const binding = syntheticInputEvidence?.latestAcceptedBinding() ?? null;
+    const current = toolCallLedger.get(toolCall.id);
+    if (
+      syntheticTestContext === null
+      || !binding
+      || !current
+      || binding.test_run_id !== syntheticTestContext.test_run_id
+      || binding.provider_input_sequence === null
+      || !syntheticTestContext.scenario_id
+      || !syntheticTestContext.scenario_version
+    ) {
+      return null;
+    }
+    return {
+      schema: 'sophia_synthetic_tool_evidence_v1',
+      test_run_id: syntheticTestContext.test_run_id,
+      scenario_id: syntheticTestContext.scenario_id,
+      scenario_version: syntheticTestContext.scenario_version,
+      operation_id: binding.operation_id,
+      utterance_id: binding.utterance_id,
+      provider_input_sequence: binding.provider_input_sequence,
+      public_utterance_id: binding.public_utterance_id,
+      tool_call_id: toolCall.id,
+      effect_id: current.effectId,
+      provider_connection_epoch: current.providerConnectionEpoch,
+      relay_correlation_id: receiveMetadata.relayCorrelationId,
+      tool_name: toolCall.name,
+      received_at: current.receivedAt ?? receivedAt,
+    };
   };
 
   const noteToolResponseSent = (functionResponse: Record<string, unknown>, timestamp: string) => {
@@ -2050,40 +2999,220 @@ export async function connectGeminiBrowserLiveDogfood(
     lastCoreviewToolResponseSentAtMs = Number.isFinite(parsedTimestampMs) ? parsedTimestampMs : Date.now();
   };
 
-  const cleanup = async () => {
+  const performCleanup = async () => {
     notifyStage('closing');
-    if (outputTranscriptRelayTimer !== null) {
-      clearTimeout(outputTranscriptRelayTimer);
-      outputTranscriptRelayTimer = null;
+    continuityState = 'ended';
+    safeResumptionHandle = null;
+    safeResumptionGeneration = 0;
+    if (providerExpiryTimer !== null) {
+      clearTimeout(providerExpiryTimer);
+      providerExpiryTimer = null;
     }
-    pendingOutputTranscriptRelay = null;
-    outputAudioPlayer?.stop();
-    outputAudioPlayer = null;
-    const conversationAudio = await conversationAudioRecorder?.stop().catch(() => null);
-    conversationAudioRecorder = null;
-    await audioPipeline?.stop().catch(() => undefined);
-    if (!audioPipeline && audioContext) {
-      await audioContext.close().catch(() => undefined);
-    }
-    localStream?.getTracks().forEach((track) => track.stop());
-    if (websocket?.readyState === WEBSOCKET_OPEN) {
-      websocket.close(1000, 'Gemini browser dogfood session closed.');
-    }
-    if (dogfoodSessionId) {
-      const disconnectBody: Record<string, unknown> = { session_id: dogfoodSessionId };
-      if (conversationAudio) {
-        disconnectBody.conversation_audio_base64 = bytesToBase64(new Uint8Array(conversationAudio.data));
-        disconnectBody.conversation_audio_mime_type = conversationAudio.mimeType;
+    if (!cleanupTeardownComplete) {
+      const teardownGeneration = providerCleanupGeneration;
+      const requiredEpochs = syntheticTestContext !== null
+        ? Array.from(new Set([
+          ...(cleanupRequestedProviderEpochs ?? []),
+          ...unsettledProviderEpochs,
+        ])).sort((left, right) => left - right)
+        : [];
+      const socketByEpoch = new Map<number, WebSocketLike>();
+      if (syntheticTestContext !== null) {
+        if (requiredEpochs.length === 0) {
+          throw new Error('Synthetic provider cleanup epochs are unavailable.');
+        }
+        for (const epoch of requiredEpochs) {
+          const socket = Array.from(providerSockets).find(
+            (candidate) => providerSocketEpochs.get(candidate) === epoch,
+          );
+          if (socket) socketByEpoch.set(epoch, socket);
+        }
+        // Provider spend is the first teardown priority. Issue every socket
+        // close synchronously before recorder/audio/media cleanup can await or
+        // stall; exact close receipts are collected after local media stops.
+        for (const socket of socketByEpoch.values()) {
+          if (socket.readyState < 2) {
+            socket.close(1000, 'Gemini browser dogfood session closed.');
+          }
+        }
+      } else {
+        const activeProvider = websocketRef.current ?? websocket;
+        if (activeProvider && activeProvider.readyState < 2) {
+          activeProvider.close(1000, 'Gemini browser dogfood session closed.');
+        }
       }
-      await fetchFn(disconnectTargetPath, {
+      if (outputTranscriptRelayTimer !== null) {
+        clearTimeout(outputTranscriptRelayTimer);
+        outputTranscriptRelayTimer = null;
+      }
+      pendingOutputTranscriptRelay = null;
+      dropPendingArtifactReviewAudio(null, 'artifact_review_response_suppressed');
+      outputAudioPlayer?.stop('session_close');
+      outputAudioPlayer = null;
+      cleanupConversationAudio ??= await conversationAudioRecorder?.stop().catch(() => null) ?? null;
+      conversationAudioRecorder = null;
+      outputLegMonitor?.stop();
+      outputLegMonitor = null;
+      syntheticInputEvidence?.stop();
+      syntheticInputEvidence = null;
+      syntheticInteractionEvidence?.stop();
+      syntheticInteractionEvidence = null;
+      await audioPipeline?.stop().catch(() => undefined);
+      if (!audioPipeline && audioContext) {
+        await audioContext.close().catch(() => undefined);
+      }
+      localStream?.getTracks().forEach((track) => track.stop());
+      if (syntheticTestContext !== null) {
+        const closeReceipts: Record<string, unknown>[] = [];
+        const abortReceipts: Record<string, unknown>[] = [];
+        for (const epoch of requiredEpochs) {
+          const socket = socketByEpoch.get(epoch);
+          if (socket) {
+            const observed = await waitForProviderSocketClose(socket, epoch);
+            if (observed === null) {
+              throw new Error(
+                `Synthetic provider socket epoch ${epoch} close was not observed; cleanup remains pending.`,
+              );
+            }
+            closeReceipts.push(providerCloseReceipt(socket, epoch, observed));
+            continue;
+          }
+          if (!knownProviderCandidateEpochs.has(epoch)) {
+            throw new Error(
+              `Synthetic provider candidate epoch ${epoch} ownership is unavailable; cleanup remains pending.`,
+            );
+          }
+          let abortReceipt = activationAbortReceiptsByEpoch.get(epoch);
+          if (!abortReceipt) {
+            const receiptId = globalThis.crypto?.randomUUID?.();
+            if (!receiptId) {
+              throw new Error('Synthetic provider activation-abort identity is unavailable.');
+            }
+            abortReceipt = {
+              schema: 'sophia_gemini_browser_provider_activation_abort_v1',
+              receipt_id: receiptId,
+              session_id: dogfoodSessionId,
+              previous_activated_epoch: epoch - 1,
+              candidate_epoch: epoch,
+              websocket_created: false,
+              aborted_at: new Date().toISOString(),
+            };
+            activationAbortReceiptsByEpoch.set(epoch, abortReceipt);
+          }
+          abortReceipts.push(abortReceipt);
+        }
+        cleanupBrowserCloseReceipts = closeReceipts;
+        cleanupActivationAbortReceipts = abortReceipts;
+      }
+      if (teardownGeneration !== providerCleanupGeneration) {
+        cleanupBrowserCloseReceipts = [];
+        cleanupActivationAbortReceipts = [];
+        cleanupSettlementAcknowledgement = null;
+        cleanupTeardownComplete = false;
+        await performCleanup();
+        return;
+      }
+      cleanupTeardownComplete = true;
+    }
+    if (dogfoodSessionId && !cleanupDisconnectAcknowledged) {
+      const disconnectBody: Record<string, unknown> = { session_id: dogfoodSessionId };
+      if (syntheticTestContext !== null) {
+        disconnectBody.browser_provider_close_receipts = cleanupBrowserCloseReceipts;
+        disconnectBody.browser_provider_activation_abort_receipts = cleanupActivationAbortReceipts;
+      }
+      if (cleanupConversationAudio) {
+        disconnectBody.conversation_audio_base64 = bytesToBase64(
+          new Uint8Array(cleanupConversationAudio.data),
+        );
+        disconnectBody.conversation_audio_mime_type = cleanupConversationAudio.mimeType;
+      }
+      const disconnectResponse = await fetchFn(disconnectTargetPath, {
         method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
+        headers: {
+          'Content-Type': 'application/json',
+          ...(providerCleanupToken
+            ? { [VOICE_LAB_PROVIDER_CLEANUP_HEADER]: providerCleanupToken }
+            : {}),
+        },
         body: JSON.stringify(disconnectBody),
         keepalive: true,
-      }).catch(() => undefined);
+      }).catch(() => null);
+      let disconnectPayload: Record<string, unknown> | null = null;
+      if (syntheticTestContext !== null) {
+        if (!disconnectResponse?.ok || disconnectResponse.status !== 202) {
+          throw new Error('Synthetic provider close receipt was not accepted; cleanup remains pending.');
+        }
+        disconnectPayload = (await disconnectResponse.json()) as Record<string, unknown>;
+        const acceptedCloseReceipts = disconnectPayload.browser_provider_close_receipts;
+        const acceptedAbortReceipts = disconnectPayload.browser_provider_activation_abort_receipts;
+        if (
+          !sameJsonValue(acceptedCloseReceipts, cleanupBrowserCloseReceipts)
+          || !sameJsonValue(acceptedAbortReceipts, cleanupActivationAbortReceipts)
+        ) {
+          throw new Error('Synthetic provider settlement acknowledgement did not match.');
+        }
+        // Retain only the two canonical arrays echoed by the authenticated
+        // 202 response.  The D02 browser-owner bridge must never manufacture a
+        // success receipt from local teardown state alone.
+        cleanupSettlementAcknowledgement = {
+          browser_provider_close_receipts: cleanupBrowserCloseReceipts.map((receipt) => ({ ...receipt })),
+          browser_provider_activation_abort_receipts: cleanupActivationAbortReceipts.map((receipt) => ({ ...receipt })),
+        };
+      }
+      if (syntheticTraceFault !== null) {
+        if (!disconnectResponse?.ok || syntheticTestContext === null) {
+          throw new Error('Governed trace fault cleanup did not return an authenticated restoration receipt.');
+        }
+        disconnectPayload ??= (await disconnectResponse.json()) as Record<string, unknown>;
+        const restored = readGeminiVoiceLabTraceFaultReceipt(
+          disconnectPayload.trace_fault,
+          syntheticTestContext,
+          'Gemini trace fault restoration receipt',
+          'restored',
+        );
+        if (restored === null || restored.applied_at !== syntheticTraceFault.applied_at) {
+          throw new Error('Governed trace fault restoration receipt did not match the applied fault.');
+        }
+        options.onSyntheticTraceFaultReceipt?.(restored);
+      }
+      cleanupDisconnectAcknowledged = syntheticTestContext !== null
+        ? true
+        : disconnectResponse !== null;
+      if (cleanupDisconnectAcknowledged && cleanupRetryTimer !== null) {
+        clearTimeout(cleanupRetryTimer);
+        cleanupRetryTimer = null;
+      }
     }
+    if (!dogfoodSessionId) cleanupDisconnectAcknowledged = true;
     notifyRelayStatus('disconnected');
     notifyStage('closed');
+  };
+
+  const cleanup = async () => {
+    if (cleanupDisconnectAcknowledged) return;
+    cleanupInFlight ??= performCleanup();
+    try {
+      await cleanupInFlight;
+      cleanupRetryAttempt = 0;
+    } catch (error) {
+      if (
+        syntheticTestContext !== null
+        && !cleanupDisconnectAcknowledged
+        && cleanupRetryTimer === null
+      ) {
+        const delayMs = Math.min(1_000 * (2 ** cleanupRetryAttempt), 30_000);
+        cleanupRetryAttempt += 1;
+        cleanupRetryTimer = setTimeout(() => {
+          cleanupRetryTimer = null;
+          void cleanup().catch((retryError: unknown) => {
+            options.onRelayError?.(retryError);
+          });
+        }, delayMs);
+      }
+      throw error;
+    } finally {
+      cleanupInFlight = null;
+    }
   };
 
   try {
@@ -2092,9 +3221,150 @@ export async function connectGeminiBrowserLiveDogfood(
       ? readBrowserSessionPayload(options.bootstrapPayload, 'Gemini browser Live session bootstrap')
       : await startBrowserDogfoodSession(fetchFn, options);
     dogfoodSessionId = browserSession.sessionId;
-    providerConnectionEpoch = browserSession.providerConnectionEpoch;
+    syntheticTestContext = browserSession.syntheticTest;
+    providerCleanupToken = browserSession.providerCleanupToken;
+    providerCleanupExpiresAt = browserSession.providerCleanupExpiresAt;
+    cleanupProviderAdmissionId = browserSession.cleanupProviderAdmissionId;
+    syntheticTraceFault = browserSession.syntheticTraceFault;
+    if (syntheticTraceFault !== null) {
+      options.onSyntheticTraceFaultReceipt?.(syntheticTraceFault);
+    }
+    const initialProviderCandidateEpoch = browserSession.providerConnectionEpoch;
+    providerConnectionEpoch = browserSession.syntheticTest !== null
+      ? initialProviderCandidateEpoch - 1
+      : initialProviderCandidateEpoch;
+    if (browserSession.syntheticTest !== null) {
+      knownProviderCandidateEpochs.add(initialProviderCandidateEpoch);
+      unsettledProviderEpochs.add(initialProviderCandidateEpoch);
+      providerCleanupGeneration += 1;
+      const providerExpiryMs = Date.parse(browserSession.syntheticTest.provider_expires_at);
+      const remainingMs = providerExpiryMs - Date.now();
+      if (!Number.isFinite(providerExpiryMs) || remainingMs <= 0) {
+        throw new Error('Gemini synthetic provider authority has expired.');
+      }
+      providerExpiryTimer = setTimeout(() => {
+        if (closed) return;
+        closed = true;
+        void cleanup().catch((error: unknown) => options.onRelayError?.(error));
+      }, Math.min(remainingMs, 2_147_483_647));
+    }
+    syntheticInteractionEvidence = browserSession.syntheticTest
+      ? createGeminiSyntheticInteractionEvidenceTracker({
+          syntheticTest: browserSession.syntheticTest,
+          getProviderConnectionEpoch: () => providerConnectionEpoch,
+          onReceipt: options.onSyntheticInteractionReceipt,
+          onFaultReceipt: (receipt) => {
+            syntheticInputEvidenceFaulted = true;
+            options.onSyntheticInteractionFaultReceipt?.(receipt);
+            const activeProvider = websocketRef.current;
+            if (activeProvider?.readyState === WEBSOCKET_OPEN) {
+              activeProvider.close(4102, 'voice-lab-interaction-evidence-fault');
+            }
+          },
+        })
+      : null;
+    syntheticInputEvidence = browserSession.syntheticTest
+      ? createGeminiSyntheticInputEvidenceTracker({
+          syntheticTest: browserSession.syntheticTest,
+          getProviderConnectionEpoch: () => providerConnectionEpoch,
+          onLegReceipt: options.onSyntheticInputLegReceipt,
+          onTurnReceipt: options.onSyntheticInputTurnReceipt,
+          onAcceptedPublicUserTurn: (binding, acceptedAt) => {
+            syntheticInteractionEvidence?.noteAcceptedPublicUserTurn(binding, acceptedAt);
+          },
+          onFaultReceipt: (receipt) => {
+            syntheticInputEvidenceFaulted = true;
+            options.onSyntheticInputFaultReceipt?.(receipt);
+            const activeProvider = websocketRef.current;
+            if (activeProvider?.readyState === WEBSOCKET_OPEN) {
+              activeProvider.close(4101, 'voice-lab-input-evidence-fault');
+            }
+          },
+        })
+      : null;
+    langsmithTraceContext = {
+      langsmithTraceId: browserSession.langsmithTraceId,
+      langsmithTraceStatus: browserSession.langsmithTraceStatus,
+      langsmithTraceUnavailableReason: browserSession.langsmithTraceUnavailableReason,
+    };
+    notifyProviderConnectionEpoch('bootstrap', null, 'initial_browser_session');
     websocketRef.current = null;
     disconnectTargetPath = browserSession.disconnectUrl ?? DISCONNECT_TARGET_PATH;
+    const activationReceipts = new Map<number, Record<string, unknown>>();
+    const activateProviderSocket = async (
+      socket: WebSocketLike,
+      candidateEpoch: number,
+      previousActivatedEpoch: number,
+      previousSocketCloseReceipt: Record<string, unknown> | null = null,
+    ) => {
+      if (browserSession.syntheticTest === null) {
+        providerConnectionEpoch = candidateEpoch;
+        return;
+      }
+      const activationUrl = browserSession.providerActivationUrl;
+      if (!activationUrl || !dogfoodSessionId) {
+        throw new Error('Synthetic provider activation endpoint is unavailable.');
+      }
+      if (
+        providerSocketEpochs.get(socket) !== candidateEpoch
+        || candidateEpoch !== previousActivatedEpoch + 1
+      ) {
+        throw new Error('Synthetic provider activation epoch binding is invalid.');
+      }
+      let receipt = activationReceipts.get(candidateEpoch);
+      if (!receipt) {
+        const activationId = globalThis.crypto?.randomUUID?.();
+        if (!activationId) {
+          throw new Error('Synthetic provider activation identity is unavailable.');
+        }
+        receipt = {
+          schema: 'sophia_gemini_browser_provider_activation_v1',
+          activation_id: activationId,
+          session_id: dogfoodSessionId,
+          previous_activated_epoch: previousActivatedEpoch,
+          candidate_epoch: candidateEpoch,
+          websocket_open_observed: true,
+          close_observer_attached: true,
+          websocket_opened_at: new Date().toISOString(),
+          previous_socket_close_receipt: previousSocketCloseReceipt,
+        };
+        activationReceipts.set(candidateEpoch, receipt);
+      }
+      for (let attempt = 0; attempt < 3; attempt += 1) {
+        const response = await fetchFn(activationUrl, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(receipt),
+        }).catch(() => null);
+        if (response?.ok && response.status === 202) {
+          const payload = (await response.json()) as Record<string, unknown>;
+          const accepted = payload.provider_activation_receipt;
+          if (
+            isRecord(accepted)
+            && sameJsonValue(accepted, receipt)
+            && payload.activated === true
+            && payload.provider_connection_epoch === candidateEpoch
+          ) {
+            providerConnectionEpoch = candidateEpoch;
+            if (pendingContinuationCandidateExpected === candidateEpoch) {
+              pendingContinuationCandidateExpected = null;
+            }
+            if (previousActivatedEpoch > 0) {
+              if (unsettledProviderEpochs.delete(previousActivatedEpoch)) {
+                providerCleanupGeneration += 1;
+              }
+            }
+            return;
+          }
+        }
+        if (attempt < 2) {
+          await new Promise<void>((resolve) => {
+            setTimeout(resolve, 100 * (2 ** attempt));
+          });
+        }
+      }
+      throw new Error('Synthetic provider activation was not acknowledged.');
+    };
     const coreviewToolsEnabled = options.coreviewStillFrameEnabled ?? isCoReviewStillFrameEnabled();
     const sessionSetup = withCoreviewGeminiToolDeclarations(browserSession.setup, coreviewToolsEnabled, {
       allowArtifactCreation: false,
@@ -2103,10 +3373,12 @@ export async function connectGeminiBrowserLiveDogfood(
       websocket: WebSocketLike;
       setup: Record<string, unknown>;
     } | null> => {
+      if (closed) return null;
       const continuationUrl = browserSession.continuationBootstrapUrl;
       if (!continuationUrl || !dogfoodSessionId) {
         continuityState = 'degraded';
         notifyRelayStatus('degraded');
+        notifyProviderConnectionEpoch('degraded', providerConnectionEpoch, 'continuation_endpoint_unavailable');
         return null;
       }
       if (!safeResumptionHandle) {
@@ -2114,10 +3386,18 @@ export async function connectGeminiBrowserLiveDogfood(
         // a transport failure into a silent new conversation.
         continuityState = 'degraded';
         notifyRelayStatus('degraded');
+        notifyProviderConnectionEpoch('degraded', providerConnectionEpoch, 'resumption_handle_unavailable');
         return null;
       }
       continuityState = 'rotation_pending';
       const expectedEpoch = providerConnectionEpoch;
+      pendingContinuationCandidateExpected = expectedEpoch + 1;
+      if (browserSession.syntheticTest !== null) {
+        knownProviderCandidateEpochs.add(pendingContinuationCandidateExpected);
+        unsettledProviderEpochs.add(pendingContinuationCandidateExpected);
+        providerCleanupGeneration += 1;
+      }
+      notifyProviderConnectionEpoch('rotation_pending', expectedEpoch, 'provider_continuation_requested');
       const response = await fetchFn(continuationUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -2127,13 +3407,47 @@ export async function connectGeminiBrowserLiveDogfood(
           secret_generation: safeResumptionGeneration,
         }),
       }).catch(() => null);
-      if (!response || !response.ok) {
+      if (!response?.ok) {
         continuityState = 'degraded';
         notifyRelayStatus('degraded');
+        notifyProviderConnectionEpoch('degraded', expectedEpoch, 'provider_continuation_bootstrap_failed');
         return null;
       }
       const payload = (await response.json()) as BrowserSessionPayload;
       const nextSession = readBrowserSessionPayload(payload, 'Gemini continuation bootstrap');
+      if (!sameGeminiSyntheticTestContext(browserSession.syntheticTest, nextSession.syntheticTest)) {
+        throw new Error('Gemini continuation bootstrap synthetic_test did not match the active run.');
+      }
+      if (nextSession.providerExpiresAt !== browserSession.providerExpiresAt) {
+        throw new Error('Gemini continuation provider deadline changed.');
+      }
+      if (
+        nextSession.providerCleanupExpiresAt !== providerCleanupExpiresAt
+        || nextSession.cleanupProviderAdmissionId !== cleanupProviderAdmissionId
+        || (browserSession.syntheticTest !== null && !nextSession.providerCleanupToken)
+      ) {
+        throw new Error('Gemini continuation provider cleanup binding changed.');
+      }
+      if (nextSession.providerCleanupToken) {
+        providerCleanupToken = nextSession.providerCleanupToken;
+      }
+      if (browserSession.syntheticTest !== null) {
+        const candidateWasKnown = knownProviderCandidateEpochs.has(
+          nextSession.providerConnectionEpoch,
+        );
+        const candidateWasUnsettled = unsettledProviderEpochs.has(
+          nextSession.providerConnectionEpoch,
+        );
+        knownProviderCandidateEpochs.add(nextSession.providerConnectionEpoch);
+        unsettledProviderEpochs.add(nextSession.providerConnectionEpoch);
+        if (!candidateWasKnown || !candidateWasUnsettled) {
+          providerCleanupGeneration += 1;
+        }
+      }
+      if (closed) {
+        cleanupTeardownComplete = false;
+        return null;
+      }
       const nextSetup = withCoreviewGeminiToolDeclarations(nextSession.setup, coreviewToolsEnabled, {
         allowArtifactCreation: false,
       });
@@ -2144,14 +3458,35 @@ export async function connectGeminiBrowserLiveDogfood(
         ...currentResumption,
         handle: safeResumptionHandle,
       };
-      providerConnectionEpoch = nextSession.providerConnectionEpoch;
+      if (langsmithTraceContext.langsmithTraceStatus === 'trace_unavailable' && nextSession.langsmithTraceId) {
+        langsmithTraceContext = {
+          langsmithTraceId: nextSession.langsmithTraceId,
+          langsmithTraceStatus: nextSession.langsmithTraceStatus,
+          langsmithTraceUnavailableReason: nextSession.langsmithTraceUnavailableReason,
+        };
+      }
+      if (closed) return null;
+      const nextSocket = webSocketFactory(nextSession.websocketUrl);
+      providerSocketEpochs.set(nextSocket, nextSession.providerConnectionEpoch);
+      providerSockets.add(nextSocket);
+      providerCleanupGeneration += 1;
+      nextSocket.onclose = (event) => noteProviderSocketClosed(nextSocket, event);
+      if (closed) {
+        nextSocket.close(1000, 'Gemini Live continuation cancelled during cleanup.');
+        return null;
+      }
       return {
-        websocket: webSocketFactory(nextSession.websocketUrl),
+        websocket: nextSocket,
         setup: nextSetup,
       };
     };
 
     audioContext = audioContextFactory();
+    // The evidence monitor is part of the protected synthetic test plane only.
+    // Ordinary Sophia sessions preserve the pre-VT00 source -> output wiring.
+    outputLegMonitor = browserSession.syntheticTest
+      ? createGeminiOutputLegMonitor(audioContext)
+      : null;
     // Construct and resume the context while the connect gesture is still
     // active. Waiting until getUserMedia resolves can lose the browser's user
     // activation and leave a perfectly healthy provider stream inaudible.
@@ -2168,7 +3503,29 @@ export async function connectGeminiBrowserLiveDogfood(
     }
     outputAudioPlayer = createGeminiOutputAudioPlaybackController(audioContext, {
       maxDiagnostics: MAX_OUTPUT_AUDIO_CHUNK_DIAGNOSTICS,
-      onChunkDiagnostic: options.onOutputAudioChunk,
+      onChunkReceived: options.onOutputAudioReceived || syntheticInteractionEvidence
+        ? (diagnostic) => {
+            options.onOutputAudioReceived?.(
+              syntheticInteractionEvidence?.noteOutputReceived(diagnostic) ?? diagnostic,
+            );
+          }
+        : undefined,
+      onChunkDiagnostic: options.onOutputAudioChunk || syntheticInteractionEvidence
+        ? (diagnostic) => {
+            options.onOutputAudioChunk?.(
+              syntheticInteractionEvidence?.noteOutputChunk(diagnostic) ?? diagnostic,
+            );
+          }
+        : undefined,
+      onPlaybackReceipt: options.onOutputAudioPlaybackReceipt || syntheticInteractionEvidence
+        ? (receipt) => {
+            options.onOutputAudioPlaybackReceipt?.(
+              syntheticInteractionEvidence?.noteOutputPlayback(receipt) ?? receipt,
+            );
+          }
+        : undefined,
+      onOutputLegMonitorReceipt: options.onOutputLegMonitorReceipt,
+      outputLegMonitor: outputLegMonitor ?? undefined,
       outputNode: conversationAudioRecorder?.outputNode,
       maxPlaybackAheadSeconds: options.outputAudioMaxPlaybackAheadSeconds,
       maxQueuedChunks: options.outputAudioMaxQueuedChunks,
@@ -2176,12 +3533,20 @@ export async function connectGeminiBrowserLiveDogfood(
 
     notifyStage('opening_websocket');
     websocket = webSocketFactory(browserSession.websocketUrl);
+    providerSocketEpochs.set(websocket, initialProviderCandidateEpoch);
+    providerSockets.add(websocket);
+    providerCleanupGeneration += 1;
     websocketRef.current = websocket;
-    await waitForWebSocketOpen(websocket);
+    await waitForWebSocketOpen(websocket, (event) => {
+      noteProviderSocketClosed(websocket as WebSocketLike, event);
+    });
 
     const setupComplete = waitForGeminiSetupComplete(websocket, {
       onProviderEvent: options.onProviderEvent,
       onProviderEventTelemetry: (event, receiveMetadata) => {
+        if (isRecord(event)) {
+          syntheticInteractionEvidence?.observeProviderEvent(event, receiveMetadata);
+        }
         const telemetry = recordGeminiProviderEventTelemetry(
           providerCategoryCounts,
           relayClassificationCounts,
@@ -2195,7 +3560,18 @@ export async function connectGeminiBrowserLiveDogfood(
           latestUsageMetadata = { ...usageMetadata };
           latestUsageMetadataReceiveSequence = receiveMetadata.providerReceiveSequence;
         }
-        options.onProviderEventTelemetry?.(telemetry);
+        const syntheticInputOperation = syntheticInputEvidence?.currentBinding() ?? null;
+        if (telemetry.hasInputTranscriptionText) {
+          syntheticInputEvidence?.noteProviderInputTranscription(
+            receiveMetadata,
+            telemetry.inputTranscriptionTextPreview?.length ?? 0,
+          );
+        }
+        options.onProviderEventTelemetry?.(
+          syntheticInputEvidence
+            ? { ...telemetry, syntheticInputOperation }
+            : telemetry,
+        );
       },
       onProviderToolEvent: (event) => {
         const timestamp = new Date().toISOString();
@@ -2350,13 +3726,13 @@ export async function connectGeminiBrowserLiveDogfood(
                   responseState.gated = true;
                   repeatedIntentSuppressedResponseKeys.add(responseKey);
                   pruneStringSet(repeatedIntentSuppressedResponseKeys, 50);
-                  dropBufferedArtifactReviewAudio(responseId);
+                  dropBufferedArtifactReviewAudio(responseId, 'repeated_intent_gate');
                   const playbackStateBefore = outputAudioPlayer?.snapshot() ?? defaultPlaybackState();
                   const playbackFlushed = playbackStateBefore.activeSourceCount > 0
                     || playbackStateBefore.queuedChunkCount > 0
                     || playbackStateBefore.playbackAheadSeconds > 0;
                   const playbackStateAfter = playbackFlushed
-                    ? outputAudioPlayer?.flush() ?? defaultPlaybackState()
+                    ? outputAudioPlayer?.flush('repeated_intent_gate') ?? defaultPlaybackState()
                     : playbackStateBefore;
                   const gateDiagnostic: GeminiRepeatedIntentGateDiagnostic = {
                     timestamp: new Date().toISOString(),
@@ -2526,11 +3902,17 @@ export async function connectGeminiBrowserLiveDogfood(
           } else if (isNonDroppableCriticalRelayEvent(classification, event, categories)) {
             relayThroughputMetrics.nonDroppableCriticalEventsSent += 1;
           }
+          const syntheticToolEvidence: GeminiSyntheticToolEvidence[] = [];
           for (const toolCall of readGeminiToolCallsFromEvent(event)) {
             updateToolCallLedger(toolCall.id, {
               toolName: toolCall.name,
               relayStartedAt,
             });
+            const evidence = buildSyntheticToolEvidence(toolCall, relayMetadata, relayStartedAt);
+            if (evidence) {
+              syntheticToolEvidence.push(evidence);
+              updateToolCallLedger(toolCall.id, { syntheticToolEvidence: evidence });
+            }
           }
           await relayGeminiProviderEvent(
             fetchFn,
@@ -2539,6 +3921,7 @@ export async function connectGeminiBrowserLiveDogfood(
             relayMetadata,
             browserSession.relayTargetPath ?? RELAY_TARGET_PATH,
             artifactReviewContext,
+            syntheticToolEvidence,
           )
           .then((relayResponse) => {
             providerRelaySequence = Math.max(providerRelaySequence, nextProviderRelaySequence);
@@ -2552,6 +3935,7 @@ export async function connectGeminiBrowserLiveDogfood(
               timestamp: relayCompletedAt,
               correlationId,
               providerReceiveSequence: relayMetadata.providerReceiveSequence,
+              providerConnectionEpoch: relayMetadata.providerConnectionEpoch ?? null,
               providerReceivedAt: relayMetadata.providerReceivedAt,
               eventCategory,
               categories,
@@ -2579,6 +3963,11 @@ export async function connectGeminiBrowserLiveDogfood(
             for (const diagnostic of relayResponse.toolDiagnostics) {
               const toolCallId = typeof diagnostic.id === 'string' ? diagnostic.id : null;
               const backendResponse = recordFromAnyKey(diagnostic, 'response');
+              const currentEntry = toolCallId ? toolCallLedger.get(toolCallId) : null;
+              const syntheticBuilderJoin = readGeminiSyntheticBuilderJoin(
+                backendResponse?.synthetic_builder_join,
+                currentEntry?.syntheticToolEvidence ?? null,
+              );
               const executionRejected = diagnostic.execution_rejected === true
                 || diagnostic.executionRejected === true
                 || diagnostic.success === false
@@ -2587,6 +3976,7 @@ export async function connectGeminiBrowserLiveDogfood(
                 toolName: typeof diagnostic.name === 'string' ? diagnostic.name : null,
                 relayCompletedAt,
                 backendAcceptedAt: executionRejected ? null : relayCompletedAt,
+                syntheticBuilderJoin,
                 finalState: executionRejected ? 'rejected' : 'unknown',
               });
             }
@@ -2595,10 +3985,17 @@ export async function connectGeminiBrowserLiveDogfood(
                 continue;
               }
               for (const functionResponse of readGeminiFunctionResponsesFromToolResponse(action.payload)) {
-                updateToolCallLedger(stringFromAnyKey(functionResponse, 'id'), {
+                const toolCallId = stringFromAnyKey(functionResponse, 'id');
+                const response = recordFromAnyKey(functionResponse, 'response');
+                const currentEntry = toolCallId ? toolCallLedger.get(toolCallId) : null;
+                updateToolCallLedger(toolCallId, {
                   toolName: stringFromAnyKey(functionResponse, 'name'),
                   relayCompletedAt,
                   toolResponsePreparedAt: relayCompletedAt,
+                  syntheticBuilderJoin: readGeminiSyntheticBuilderJoin(
+                    response?.synthetic_builder_join,
+                    currentEntry?.syntheticToolEvidence ?? null,
+                  ),
                 });
               }
             }
@@ -2636,6 +4033,7 @@ export async function connectGeminiBrowserLiveDogfood(
               timestamp: failedAt,
               correlationId,
               providerReceiveSequence: relayMetadata.providerReceiveSequence,
+              providerConnectionEpoch: relayMetadata.providerConnectionEpoch ?? null,
               providerReceivedAt: relayMetadata.providerReceivedAt,
               eventCategory,
               categories,
@@ -2681,15 +4079,18 @@ export async function connectGeminiBrowserLiveDogfood(
           ? `response:${stableResponseId}`
           : `anonymous-response:${anonymousResponseOrdinal}`;
         if (repeatedIntentSuppressedResponseKeys.has(repeatedIntentResponseKey)) {
+          outputAudioPlayer?.dropEvent(event, receiveMetadata, 'repeated_intent_gate');
           return;
         }
         const audioSuppressionReason = staleOutputSuppressionReason(event, categories, receiveMetadata);
         if (audioSuppressionReason) {
+          outputAudioPlayer?.dropEvent(event, receiveMetadata, audioSuppressionReason);
           emitStaleOutputSuppression(event, receiveMetadata, 'audio', audioSuppressionReason);
           return;
         }
         const responseId = readGeminiResponseId(event);
         if (responseId && artifactReviewSuppressedResponseIds.has(responseId)) {
+          outputAudioPlayer?.dropEvent(event, receiveMetadata, 'artifact_review_response_suppressed');
           return;
         }
         const artifactReviewContext = snapshotArtifactReviewRelayContext();
@@ -2754,14 +4155,19 @@ export async function connectGeminiBrowserLiveDogfood(
         // The next rotation will either use the last mechanically safe point or
         // degrade honestly when no continuation endpoint is available.
         continuityState = 'rotation_pending';
+        notifyProviderConnectionEpoch(
+          'rotation_pending',
+          providerConnectionEpoch,
+          'provider_resumption_not_currently_available',
+        );
       },
       onGoAway: bootstrapProviderContinuation,
       onUnexpectedClose: async () => {
-        if (closed) {
+        if (closed || syntheticInputEvidenceFaulted) {
           return null;
         }
         notifyStage('reconnecting');
-        outputAudioPlayer?.stop();
+        outputAudioPlayer?.stop('provider_reconnect');
         clearAssistantOutputState();
         clearStaleOutputFence();
         return bootstrapProviderContinuation();
@@ -2770,8 +4176,39 @@ export async function connectGeminiBrowserLiveDogfood(
         websocket = nextSocket;
         websocketRef.current = nextSocket;
       },
+      onProviderConnectionActivation: async (nextSocket, previousSocket) => {
+        const nextEpoch = providerSocketEpochs.get(nextSocket);
+        const previousEpoch = providerSocketEpochs.get(previousSocket);
+        if (!nextEpoch || !previousEpoch || previousEpoch !== providerConnectionEpoch) {
+          throw new Error('Gemini provider rotation epoch binding is invalid.');
+        }
+        if (previousSocket.readyState === WEBSOCKET_OPEN) {
+          previousSocket.close(1000, 'Gemini Live continuation rotation.');
+        }
+        const previousClosed = await waitForProviderSocketClose(
+          previousSocket,
+          previousEpoch,
+        );
+        if (previousClosed === null) {
+          throw new Error('Previous Gemini provider socket close was not observed.');
+        }
+        await activateProviderSocket(
+          nextSocket,
+          nextEpoch,
+          previousEpoch,
+          providerCloseReceipt(previousSocket, previousEpoch, previousClosed),
+        );
+        notifyProviderConnectionEpoch(
+          'rotated',
+          previousEpoch,
+          'provider_continuation_browser_activated',
+        );
+      },
+      onProviderSocketClosed: noteProviderSocketClosed,
+      isSessionClosed: () => closed,
       onProviderConnectionRestored: () => {
         continuityState = 'active';
+        notifyProviderConnectionEpoch('restored', providerConnectionEpoch, 'provider_continuation_setup_complete');
         notifyRelayStatus('active');
         notifyStage('connected');
         notifyStage('streaming_audio');
@@ -2781,13 +4218,33 @@ export async function connectGeminiBrowserLiveDogfood(
           return;
         }
         continuityState = 'degraded';
+        notifyProviderConnectionEpoch('degraded', providerConnectionEpoch, 'provider_connection_terminated');
         websocketRef.current = null;
-        outputAudioPlayer?.stop();
+        outputAudioPlayer?.stop('provider_connection_terminated');
         clearAssistantOutputState();
         notifyRelayStatus('terminal_error');
         notifyStage('connection_lost');
       },
+      onProviderEventCompleted: (event, receiveMetadata) => {
+        syntheticInteractionEvidence?.finishProviderEvent(event, receiveMetadata);
+      },
     });
+    // Activation is deliberately committed before provider setup is sent. If
+    // that commit fails, cleanup closes the socket before control reaches the
+    // later `await setupComplete`; attach a handler immediately so the exact
+    // setup failure remains awaitable without becoming an unhandled rejection.
+    void setupComplete.catch(() => undefined);
+
+    await activateProviderSocket(
+      websocket,
+      initialProviderCandidateEpoch,
+      providerConnectionEpoch,
+    );
+    notifyProviderConnectionEpoch(
+      'bootstrap',
+      null,
+      'initial_browser_provider_activated',
+    );
 
     notifyStage('sending_setup');
     websocket.send(JSON.stringify({ setup: sessionSetup }));
@@ -2803,6 +4260,7 @@ export async function connectGeminiBrowserLiveDogfood(
       recordingInputNode: conversationAudioRecorder?.inputNode,
       onInputAudioActivity: handleInputAudioActivity,
       microphoneAudioSettings,
+      syntheticInputEvidence,
     });
     notifyStage('streaming_audio');
 
@@ -2819,8 +4277,30 @@ export async function connectGeminiBrowserLiveDogfood(
       websocket,
       localStream,
       microphoneAudioSettings,
-      providerConnectionEpoch,
-      continuityState,
+      get providerConnectionEpoch() {
+        return providerConnectionEpoch;
+      },
+      getProviderConnectionEpoch: () => providerConnectionEpoch,
+      getProviderSocketEpochs: () => Array.from(new Set([
+        ...unsettledProviderEpochs,
+        ...(pendingContinuationCandidateExpected === null
+          ? []
+          : [pendingContinuationCandidateExpected]),
+      ])).sort((left, right) => left - right),
+      get continuityState() {
+        return continuityState;
+      },
+      get langsmithTraceId() {
+        return langsmithTraceContext.langsmithTraceId;
+      },
+      get langsmithTraceStatus() {
+        return langsmithTraceContext.langsmithTraceStatus;
+      },
+      get langsmithTraceUnavailableReason() {
+        return langsmithTraceContext.langsmithTraceUnavailableReason;
+      },
+      syntheticTest: browserSession.syntheticTest,
+      syntheticTraceFault: browserSession.syntheticTraceFault,
       sendText: (text: string) => {
         if (websocket?.readyState !== WEBSOCKET_OPEN) {
           throw new Error('Gemini Live WebSocket is not open.');
@@ -2846,7 +4326,7 @@ export async function connectGeminiBrowserLiveDogfood(
             artifactReviewUserIntentAt = null;
             artifactReviewSafeResponseIds.clear();
             artifactReviewSuppressedResponseIds.clear();
-            pendingArtifactReviewAudio.clear();
+            dropPendingArtifactReviewAudio(null, 'artifact_review_response_suppressed');
           }
           artifactReviewArtifactId = result.artifactId;
           artifactReviewExpiresAtMs = monotonicNowMs() + ARTIFACT_REVIEW_RELAY_CONTEXT_TTL_MS;
@@ -2860,6 +4340,9 @@ export async function connectGeminiBrowserLiveDogfood(
         });
         audioPipeline?.setMuted(muted);
       },
+      acknowledgeSyntheticPublicUserTurn: (input) => {
+        syntheticInputEvidence?.notePublicUserTurn(input);
+      },
       flushOutputAudio: () => {
         confirmBargeIn('manual_interrupt', new Date().toISOString(), {
           stopPlayback: true,
@@ -2867,12 +4350,55 @@ export async function connectGeminiBrowserLiveDogfood(
         });
         return outputAudioPlayer?.snapshot() ?? defaultPlaybackState();
       },
-      close: async () => {
-        if (closed) {
-          return;
+      close: async (control) => {
+        if (control) {
+          const requestedEpochs = Array.from(new Set(control.providerConnectionEpochs))
+            .sort((left, right) => left - right);
+          if (
+            requestedEpochs.length === 0
+            || requestedEpochs.length !== control.providerConnectionEpochs.length
+            || requestedEpochs.some((epoch) => !Number.isSafeInteger(epoch) || epoch <= 0)
+          ) {
+            throw new Error('Synthetic provider cleanup control epochs are malformed.');
+          }
+          if (
+            cleanupDisconnectAcknowledged
+            && !sameJsonValue(cleanupRequestedProviderEpochs, requestedEpochs)
+          ) {
+            throw new Error('Synthetic provider cleanup control conflicts with the accepted settlement.');
+          }
+          for (const epoch of requestedEpochs) {
+            const hasSocket = Array.from(providerSockets).some(
+              (socket) => providerSocketEpochs.get(socket) === epoch,
+            );
+            if (
+              !knownProviderCandidateEpochs.has(epoch)
+              && !hasSocket
+              && epoch === pendingContinuationCandidateExpected
+            ) {
+              knownProviderCandidateEpochs.add(epoch);
+              unsettledProviderEpochs.add(epoch);
+              providerCleanupGeneration += 1;
+            }
+          }
+          if (!sameJsonValue(cleanupRequestedProviderEpochs, requestedEpochs)) {
+            cleanupTeardownComplete = false;
+            cleanupSettlementAcknowledgement = null;
+            providerCleanupGeneration += 1;
+          }
+          cleanupRequestedProviderEpochs = requestedEpochs;
         }
         closed = true;
         await cleanup();
+        if (control && syntheticTestContext !== null && cleanupSettlementAcknowledgement === null) {
+          throw new Error('Synthetic provider settlement acknowledgement is unavailable.');
+        }
+        return cleanupSettlementAcknowledgement === null
+          ? null
+          : {
+            browser_provider_close_receipts: cleanupSettlementAcknowledgement.browser_provider_close_receipts.map((receipt) => ({ ...receipt })),
+            browser_provider_activation_abort_receipts: cleanupSettlementAcknowledgement.browser_provider_activation_abort_receipts.map((receipt) => ({ ...receipt })),
+          };
       },
     };
   } catch (error) {
@@ -3600,6 +5126,7 @@ export function recordGeminiProviderEventTelemetry(
     correlationId: receiveMetadata?.relayCorrelationId ?? geminiProviderEventCorrelationId(event, 0),
     responseId: readGeminiResponseId(event),
     providerReceiveSequence: receiveMetadata?.providerReceiveSequence ?? null,
+    providerConnectionEpoch: receiveMetadata?.providerConnectionEpoch ?? null,
     providerReceivedAt: receiveMetadata?.providerReceivedAt ?? null,
     primaryCategory: categories[0] ?? 'unknown',
     categories,
@@ -3716,7 +5243,7 @@ export function pcm16Base64FromFloat32(
 async function startBrowserDogfoodSession(
   fetchFn: FetchLike,
   options: GeminiBrowserLiveDogfoodConnectOptions,
-): Promise<{
+): Promise<GeminiLangSmithTraceContext & {
   sessionId: string;
   websocketUrl: string;
   streamUrl: string;
@@ -3728,7 +5255,14 @@ async function startBrowserDogfoodSession(
   setup: Record<string, unknown>;
   audioCaptureEnabled: boolean;
   continuationBootstrapUrl: string | null;
+  providerActivationUrl: string | null;
   providerConnectionEpoch: number;
+  providerExpiresAt: string | null;
+  providerCleanupToken: string | null;
+  providerCleanupExpiresAt: string | null;
+  cleanupProviderAdmissionId: string | null;
+  syntheticTest: GeminiSyntheticTestContext | null;
+  syntheticTraceFault: GeminiVoiceLabTraceFaultReceipt | null;
 }> {
   const response = await fetchFn('/api/sophia/voice/dogfood/gemini/browser-session', {
     method: 'POST',
@@ -3744,10 +5278,159 @@ async function startBrowserDogfoodSession(
   return readBrowserSessionPayload(payload, 'Gemini browser dogfood session response');
 }
 
+type GeminiProviderCleanupAuthority = {
+  token: string;
+  cleanupExpiresAt: string;
+  cleanupProviderAdmissionId: string;
+};
+
+function decodeGeminiProviderCleanupPayload(token: string): Record<string, unknown> {
+  const [encodedPayload, encodedSignature] = token.split('.');
+  if (!encodedPayload || !encodedSignature) {
+    throw new Error('Gemini provider cleanup token was malformed.');
+  }
+  try {
+    const normalized = encodedPayload.replace(/-/g, '+').replace(/_/g, '/');
+    const padded = normalized + '='.repeat((4 - (normalized.length % 4)) % 4);
+    const decoded = new TextDecoder('utf-8', { fatal: true }).decode(
+      base64ToBytes(padded),
+    );
+    const payload = JSON.parse(decoded) as unknown;
+    if (!isRecord(payload)) throw new Error('payload');
+    return payload;
+  } catch {
+    throw new Error('Gemini provider cleanup token was malformed.');
+  }
+}
+
+function readGeminiProviderCleanupAuthority(
+  payload: BrowserSessionPayload,
+  sessionId: string,
+  syntheticTest: GeminiSyntheticTestContext | null,
+  label: string,
+): GeminiProviderCleanupAuthority | null {
+  const token = payload.provider_cleanup_token;
+  const cleanupExpiresAt = payload.provider_cleanup_expires_at;
+  if (syntheticTest === null) {
+    if (token !== undefined || cleanupExpiresAt !== undefined) {
+      throw new Error(`${label} exposed provider cleanup authority outside the synthetic lane.`);
+    }
+    return null;
+  }
+  if (
+    typeof token !== 'string'
+    || !isOpaqueVoiceLabProviderCleanupToken(token)
+    || !isCanonicalGeminiUtcMillis(cleanupExpiresAt)
+  ) {
+    throw new Error(`${label} provider cleanup authority was malformed.`);
+  }
+  const claims = decodeGeminiProviderCleanupPayload(token);
+  const allowedKeys = new Set([
+    'v',
+    'iss',
+    'aud',
+    'sub',
+    'principal_id',
+    'test_run_id',
+    'scenario_id',
+    'scenario_version',
+    'voice_lab_run_id_sha256',
+    'browser_worker_id_sha256',
+    'browser_lease_epoch',
+    'browser_context_id_sha256',
+    'synthetic',
+    'environment',
+    'retention_hours',
+    'cleanup_obligation_id',
+    'provider_expires_at',
+    'retention_expires_at',
+    'cleanup_expires_at',
+    'allowed_ops',
+    'expected_deployment',
+    'provider_session_id',
+    'cleanup_provider_admission_id',
+    'iat',
+    'nbf',
+    'exp',
+    'jti',
+  ]);
+  const deployment = claims.expected_deployment;
+  const providerDeadlineMs = Date.parse(syntheticTest.provider_expires_at);
+  const retentionDeadlineMs = typeof claims.retention_expires_at === 'string'
+    ? Date.parse(claims.retention_expires_at)
+    : Number.NaN;
+  const cleanupDeadlineMs = Date.parse(cleanupExpiresAt);
+  const expectedCleanupDeadlineMs = Math.min(
+    retentionDeadlineMs,
+    providerDeadlineMs + 600_000,
+  );
+  const safeOptional = (value: unknown) => (
+    value === undefined
+    || (typeof value === 'string' && GEMINI_SYNTHETIC_SAFE_ID.test(value))
+  );
+  const uuid4 = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+  if (
+    Object.keys(claims).some((key) => !allowedKeys.has(key))
+    || claims.v !== 1
+    || claims.iss !== 'sophia-voice-gateway'
+    || claims.aud !== 'sophia-voice-lab-provider-cleanup'
+    || claims.synthetic !== true
+    || claims.sub !== syntheticTest.principal_id
+    || claims.principal_id !== syntheticTest.principal_id
+    || claims.test_run_id !== syntheticTest.test_run_id
+    || claims.scenario_id !== syntheticTest.scenario_id
+    || claims.scenario_version !== syntheticTest.scenario_version
+    || claims.voice_lab_run_id_sha256 !== syntheticTest.voice_lab_run_id_sha256
+    || claims.browser_worker_id_sha256 !== syntheticTest.browser_worker_id_sha256
+    || claims.browser_lease_epoch !== syntheticTest.browser_lease_epoch
+    || claims.browser_context_id_sha256 !== syntheticTest.browser_context_id_sha256
+    || claims.environment !== syntheticTest.environment
+    || claims.retention_hours !== syntheticTest.retention_hours
+    || claims.cleanup_obligation_id !== syntheticTest.cleanup_obligation_id
+    || claims.provider_expires_at !== syntheticTest.provider_expires_at
+    || claims.cleanup_expires_at !== cleanupExpiresAt
+    || claims.provider_session_id !== sessionId
+    || !safeOptional(claims.scenario_id)
+    || !safeOptional(claims.scenario_version)
+    || !Array.isArray(claims.allowed_ops)
+    || claims.allowed_ops.length !== 1
+    || claims.allowed_ops[0] !== 'provider:settle'
+    || !isRecord(deployment)
+    || Object.keys(deployment).sort().join(',') !== 'backend,frontend,voice'
+    || !['frontend', 'backend', 'voice'].every(
+      (key) => typeof deployment[key] === 'string' && /^[a-f0-9]{40}$/.test(deployment[key]),
+    )
+    || typeof claims.cleanup_provider_admission_id !== 'string'
+    || !uuid4.test(claims.cleanup_provider_admission_id)
+    || typeof claims.jti !== 'string'
+    || !uuid4.test(claims.jti)
+    || !Number.isSafeInteger(claims.iat)
+    || !Number.isSafeInteger(claims.nbf)
+    || !Number.isSafeInteger(claims.exp)
+    || claims.nbf !== claims.iat
+    || Number(claims.exp) <= Number(claims.iat)
+    || Number(claims.exp) !== Math.floor(cleanupDeadlineMs / 1000)
+    || !isCanonicalGeminiUtcMillis(claims.retention_expires_at)
+    || !Number.isFinite(providerDeadlineMs)
+    || !Number.isFinite(retentionDeadlineMs)
+    || !Number.isFinite(cleanupDeadlineMs)
+    || retentionDeadlineMs < providerDeadlineMs
+    || cleanupDeadlineMs !== expectedCleanupDeadlineMs
+    || cleanupDeadlineMs <= Date.now()
+  ) {
+    throw new Error(`${label} provider cleanup authority did not match the authenticated run.`);
+  }
+  return {
+    token,
+    cleanupExpiresAt,
+    cleanupProviderAdmissionId: claims.cleanup_provider_admission_id,
+  };
+}
+
 function readBrowserSessionPayload(
   payload: BrowserSessionPayload,
   label: string,
-): {
+): GeminiLangSmithTraceContext & {
   sessionId: string;
   websocketUrl: string;
   streamUrl: string;
@@ -3759,10 +5442,18 @@ function readBrowserSessionPayload(
   setup: Record<string, unknown>;
   audioCaptureEnabled: boolean;
   continuationBootstrapUrl: string | null;
+  providerActivationUrl: string | null;
   providerConnectionEpoch: number;
+  providerExpiresAt: string | null;
+  providerCleanupToken: string | null;
+  providerCleanupExpiresAt: string | null;
+  cleanupProviderAdmissionId: string | null;
+  syntheticTest: GeminiSyntheticTestContext | null;
+  syntheticTraceFault: GeminiVoiceLabTraceFaultReceipt | null;
 } {
   const sessionId = typeof payload.session_id === 'string' ? payload.session_id : null;
-  const token = readEphemeralToken(payload.ephemeral_token);
+  const ephemeralCredential = readEphemeralToken(payload.ephemeral_token);
+  const token = ephemeralCredential?.value ?? null;
   const baseWebSocketUrl = typeof payload.websocket_url === 'string'
     ? payload.websocket_url
     : DEFAULT_GEMINI_LIVE_WEBSOCKET_URL;
@@ -3784,11 +5475,27 @@ function readBrowserSessionPayload(
     typeof payload.continuation_bootstrap_url === 'string'
     && isBrowserApiPath(payload.continuation_bootstrap_url)
   ) ? payload.continuation_bootstrap_url : null;
+  const providerActivationUrl = (
+    typeof payload.provider_activation_url === 'string'
+    && isBrowserApiPath(payload.provider_activation_url)
+  ) ? payload.provider_activation_url : null;
   const providerConnectionEpoch = (
     typeof payload.provider_connection_epoch === 'number'
     && Number.isInteger(payload.provider_connection_epoch)
     && payload.provider_connection_epoch > 0
   ) ? payload.provider_connection_epoch : 1;
+  const syntheticTest = readGeminiSyntheticTestContext(payload.synthetic_test, label);
+  const providerCleanup = sessionId
+    ? readGeminiProviderCleanupAuthority(payload, sessionId, syntheticTest, label)
+    : null;
+  const providerExpiresAt = ephemeralCredential?.expireTime ?? null;
+  const syntheticTraceFault = readGeminiVoiceLabTraceFaultReceipt(
+    payload.trace_fault,
+    syntheticTest,
+    `${label} trace_fault`,
+    'applied',
+  );
+  const langsmithTrace = readGeminiLangSmithTraceContext(payload, syntheticTraceFault);
 
   if (!sessionId) {
     throw new Error(`${label} omitted session_id.`);
@@ -3801,6 +5508,12 @@ function readBrowserSessionPayload(
   }
   if (!streamUrl) {
     throw new Error(`${label} omitted stream_url.`);
+  }
+  if (
+    syntheticTest !== null
+    && providerExpiresAt !== syntheticTest.provider_expires_at
+  ) {
+    throw new Error(`${label} provider deadline did not match the authenticated run.`);
   }
 
   return {
@@ -3815,7 +5528,285 @@ function readBrowserSessionPayload(
     setup,
     audioCaptureEnabled,
     continuationBootstrapUrl,
+    providerActivationUrl,
     providerConnectionEpoch,
+    providerExpiresAt,
+    providerCleanupToken: providerCleanup?.token ?? null,
+    providerCleanupExpiresAt: providerCleanup?.cleanupExpiresAt ?? null,
+    cleanupProviderAdmissionId: providerCleanup?.cleanupProviderAdmissionId ?? null,
+    syntheticTest,
+    syntheticTraceFault,
+    ...langsmithTrace,
+  };
+}
+
+const GEMINI_SYNTHETIC_SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/;
+const GEMINI_CLEANUP_OBLIGATION_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/;
+const GEMINI_SHA256 = /^[a-f0-9]{64}$/;
+
+function isCanonicalGeminiUtcMillis(value: unknown): value is string {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/.test(value)) {
+    return false;
+  }
+  const parsed = new Date(value);
+  return Number.isFinite(parsed.getTime()) && parsed.toISOString() === value;
+}
+
+export function readGeminiSyntheticTestContext(
+  value: unknown,
+  label = 'Gemini browser session',
+): GeminiSyntheticTestContext | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value)) {
+    throw new Error(`${label} synthetic_test was malformed.`);
+  }
+  const allowed = new Set([
+    'synthetic',
+    'principal_id',
+    'test_run_id',
+    'scenario_id',
+    'scenario_version',
+    'voice_lab_run_id_sha256',
+    'browser_worker_id_sha256',
+    'browser_lease_epoch',
+    'browser_context_id_sha256',
+    'environment',
+    'retention_hours',
+    'cleanup_obligation_id',
+    'provider_expires_at',
+  ]);
+  const optionalSafe = (candidate: unknown) => (
+    candidate === undefined
+    || (typeof candidate === 'string' && GEMINI_SYNTHETIC_SAFE_ID.test(candidate))
+  );
+  const d02Ownership = [
+    value.voice_lab_run_id_sha256,
+    value.browser_worker_id_sha256,
+    value.browser_lease_epoch,
+    value.browser_context_id_sha256,
+  ];
+  const d02OwnershipCount = d02Ownership.filter((candidate) => candidate !== undefined).length;
+  const d02OwnershipValid = value.scenario_id === 'V-D02'
+    ? d02OwnershipCount === 4
+      && GEMINI_SHA256.test(String(value.voice_lab_run_id_sha256 ?? ''))
+      && GEMINI_SHA256.test(String(value.browser_worker_id_sha256 ?? ''))
+      && Number.isSafeInteger(value.browser_lease_epoch)
+      && Number(value.browser_lease_epoch) > 0
+      && GEMINI_SHA256.test(String(value.browser_context_id_sha256 ?? ''))
+    : d02OwnershipCount === 0;
+  if (
+    value.synthetic !== true
+    || Object.keys(value).some((key) => !allowed.has(key))
+    || typeof value.principal_id !== 'string'
+    || !GEMINI_SYNTHETIC_SAFE_ID.test(value.principal_id)
+    || typeof value.test_run_id !== 'string'
+    || !GEMINI_SYNTHETIC_SAFE_ID.test(value.test_run_id)
+    || typeof value.environment !== 'string'
+    || !GEMINI_SYNTHETIC_SAFE_ID.test(value.environment)
+    || !Number.isSafeInteger(value.retention_hours)
+    || Number(value.retention_hours) < 1
+    || Number(value.retention_hours) > 168
+    || typeof value.cleanup_obligation_id !== 'string'
+    || !GEMINI_CLEANUP_OBLIGATION_ID.test(value.cleanup_obligation_id)
+    || !isCanonicalGeminiUtcMillis(value.provider_expires_at)
+    || !optionalSafe(value.scenario_id)
+    || !optionalSafe(value.scenario_version)
+    || !d02OwnershipValid
+  ) {
+    throw new Error(`${label} synthetic_test was malformed.`);
+  }
+  return {
+    synthetic: true,
+    principal_id: value.principal_id,
+    test_run_id: value.test_run_id,
+    ...(typeof value.scenario_id === 'string' ? { scenario_id: value.scenario_id } : {}),
+    ...(typeof value.scenario_version === 'string' ? { scenario_version: value.scenario_version } : {}),
+    ...(value.scenario_id === 'V-D02' ? {
+      voice_lab_run_id_sha256: String(value.voice_lab_run_id_sha256),
+      browser_worker_id_sha256: String(value.browser_worker_id_sha256),
+      browser_lease_epoch: Number(value.browser_lease_epoch),
+      browser_context_id_sha256: String(value.browser_context_id_sha256),
+    } : {}),
+    environment: value.environment,
+    retention_hours: Number(value.retention_hours),
+    cleanup_obligation_id: value.cleanup_obligation_id,
+    provider_expires_at: value.provider_expires_at,
+  };
+}
+
+export function sameGeminiSyntheticTestContext(
+  left: GeminiSyntheticTestContext | null,
+  right: GeminiSyntheticTestContext | null,
+): boolean {
+  if (left === null || right === null) return left === right;
+  return (
+    left.principal_id === right.principal_id
+    && left.test_run_id === right.test_run_id
+    && left.scenario_id === right.scenario_id
+    && left.scenario_version === right.scenario_version
+    && left.voice_lab_run_id_sha256 === right.voice_lab_run_id_sha256
+    && left.browser_worker_id_sha256 === right.browser_worker_id_sha256
+    && left.browser_lease_epoch === right.browser_lease_epoch
+    && left.browser_context_id_sha256 === right.browser_context_id_sha256
+    && left.environment === right.environment
+    && left.retention_hours === right.retention_hours
+    && left.cleanup_obligation_id === right.cleanup_obligation_id
+    && left.provider_expires_at === right.provider_expires_at
+  );
+}
+
+const GEMINI_DEPLOYMENT_SHA = /^[a-f0-9]{40}$/;
+
+export function readGeminiVoiceLabTraceFaultReceipt(
+  value: unknown,
+  syntheticTest: GeminiSyntheticTestContext | null,
+  label = 'Gemini trace fault receipt',
+  expectedPhase?: 'applied' | 'restored',
+): GeminiVoiceLabTraceFaultReceipt | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value) || syntheticTest === null) {
+    throw new Error(`${label} was malformed or lacked an authenticated synthetic binding.`);
+  }
+  const allowed = new Set([
+    'schema',
+    'fault',
+    'phase',
+    'principal_id',
+    'test_run_id',
+    'scenario_id',
+    'scenario_version',
+    'environment',
+    'expected_deployment',
+    'trace_unavailable',
+    'canonical_behavior_unchanged',
+    'applied_at',
+    'restored_at',
+  ]);
+  const deployment = value.expected_deployment;
+  const phase = value.phase;
+  const appliedAt = typeof value.applied_at === 'string' ? value.applied_at : '';
+  const restoredAt = typeof value.restored_at === 'string' ? value.restored_at : null;
+  if (
+    Object.keys(value).some((key) => !allowed.has(key))
+    || value.schema !== 'sophia_voice_lab_trace_fault_v1'
+    || value.fault !== 'langsmith_unavailable'
+    || (phase !== 'applied' && phase !== 'restored')
+    || (expectedPhase !== undefined && phase !== expectedPhase)
+    || value.principal_id !== syntheticTest.principal_id
+    || value.test_run_id !== syntheticTest.test_run_id
+    || value.scenario_id !== syntheticTest.scenario_id
+    || value.scenario_version !== syntheticTest.scenario_version
+    || value.environment !== syntheticTest.environment
+    || syntheticTest.scenario_id !== 'V-L01'
+    || typeof syntheticTest.scenario_version !== 'string'
+    || !isRecord(deployment)
+    || Object.keys(deployment).length !== 3
+    || !GEMINI_DEPLOYMENT_SHA.test(String(deployment.frontend ?? ''))
+    || !GEMINI_DEPLOYMENT_SHA.test(String(deployment.backend ?? ''))
+    || !GEMINI_DEPLOYMENT_SHA.test(String(deployment.voice ?? ''))
+    || value.trace_unavailable !== true
+    || value.canonical_behavior_unchanged !== true
+    || !appliedAt
+    || !Number.isFinite(Date.parse(appliedAt))
+    || (phase === 'applied' && value.restored_at !== null)
+    || (phase === 'restored' && (!restoredAt || !Number.isFinite(Date.parse(restoredAt))))
+  ) {
+    throw new Error(`${label} was malformed or did not match the authenticated synthetic run.`);
+  }
+  return {
+    schema: 'sophia_voice_lab_trace_fault_v1',
+    fault: 'langsmith_unavailable',
+    phase,
+    principal_id: syntheticTest.principal_id,
+    test_run_id: syntheticTest.test_run_id,
+    scenario_id: syntheticTest.scenario_id,
+    scenario_version: syntheticTest.scenario_version,
+    environment: syntheticTest.environment,
+    expected_deployment: {
+      frontend: String(deployment.frontend),
+      backend: String(deployment.backend),
+      voice: String(deployment.voice),
+    },
+    trace_unavailable: true,
+    canonical_behavior_unchanged: true,
+    applied_at: appliedAt,
+    restored_at: restoredAt,
+  };
+}
+
+export function readGeminiLangSmithTraceContext(
+  payload: Pick<BrowserSessionPayload, 'langsmith_trace_id' | 'langsmith_trace_unavailable_reason'>,
+  traceFault: GeminiVoiceLabTraceFaultReceipt | null = null,
+): GeminiLangSmithTraceContext {
+  if (traceFault !== null) {
+    if (payload.langsmith_trace_id !== undefined && payload.langsmith_trace_id !== null) {
+      throw new Error('Governed trace fault bootstrap unexpectedly exposed a LangSmith trace id.');
+    }
+    if (
+      payload.langsmith_trace_unavailable_reason !== undefined
+      && payload.langsmith_trace_unavailable_reason !== null
+      && payload.langsmith_trace_unavailable_reason !== 'governed_synthetic_fault'
+    ) {
+      throw new Error('Governed trace fault bootstrap exposed an inconsistent unavailable reason.');
+    }
+    return {
+      langsmithTraceId: null,
+      langsmithTraceStatus: 'trace_unavailable',
+      langsmithTraceUnavailableReason: 'governed_synthetic_fault',
+    };
+  }
+  if (typeof payload.langsmith_trace_id === 'string') {
+    const langsmithTraceId = payload.langsmith_trace_id.trim();
+    if (langsmithTraceId) {
+      if (
+        payload.langsmith_trace_unavailable_reason !== undefined
+        && payload.langsmith_trace_unavailable_reason !== null
+      ) {
+        throw new Error('LangSmith trace bootstrap exposed both an id and an unavailable reason.');
+      }
+      return {
+        langsmithTraceId,
+        langsmithTraceStatus: 'available',
+        langsmithTraceUnavailableReason: null,
+      };
+    }
+    return {
+      langsmithTraceId: null,
+      langsmithTraceStatus: 'trace_unavailable',
+      langsmithTraceUnavailableReason: 'invalid',
+    };
+  }
+  if (payload.langsmith_trace_id !== undefined && payload.langsmith_trace_id !== null) {
+    return {
+      langsmithTraceId: null,
+      langsmithTraceStatus: 'trace_unavailable',
+      langsmithTraceUnavailableReason: 'invalid',
+    };
+  }
+  if (
+    payload.langsmith_trace_unavailable_reason !== undefined
+    && payload.langsmith_trace_unavailable_reason !== null
+  ) {
+    if (
+      payload.langsmith_trace_unavailable_reason === 'synthetic_isolation_policy'
+      || payload.langsmith_trace_unavailable_reason === 'governed_synthetic_fault'
+    ) {
+      return {
+        langsmithTraceId: null,
+        langsmithTraceStatus: 'trace_unavailable',
+        langsmithTraceUnavailableReason: payload.langsmith_trace_unavailable_reason,
+      };
+    }
+    return {
+      langsmithTraceId: null,
+      langsmithTraceStatus: 'trace_unavailable',
+      langsmithTraceUnavailableReason: 'invalid',
+    };
+  }
+  return {
+    langsmithTraceId: null,
+    langsmithTraceStatus: 'trace_unavailable',
+    langsmithTraceUnavailableReason: 'not_provided',
   };
 }
 
@@ -3830,17 +5821,20 @@ async function relayGeminiProviderEvent(
   receiveMetadata: GeminiProviderReceiveMetadata,
   relayTargetPath = RELAY_TARGET_PATH,
   artifactReviewContext: GeminiArtifactReviewRelayContext | null = null,
+  syntheticToolEvidence: GeminiSyntheticToolEvidence[] = [],
 ): Promise<GeminiBrowserLiveDogfoodRelayResponse> {
   const body = JSON.stringify({
     session_id: sessionId,
     event,
     provider_receive_sequence: receiveMetadata.providerReceiveSequence,
     provider_relay_sequence: receiveMetadata.providerRelaySequence ?? receiveMetadata.providerReceiveSequence,
+    provider_connection_epoch: receiveMetadata.providerConnectionEpoch ?? null,
     provider_received_at: receiveMetadata.providerReceivedAt,
     relay_correlation_id: receiveMetadata.relayCorrelationId,
     provider_primary_category: receiveMetadata.providerPrimaryCategory,
     provider_categories: receiveMetadata.providerCategories,
     ...(artifactReviewContext ? { artifact_review_context: artifactReviewContext } : {}),
+    ...(syntheticToolEvidence.length > 0 ? { synthetic_tool_evidence: syntheticToolEvidence } : {}),
   });
   const eventType = describeGeminiProviderEventType(event);
   const requestBodyBytes = textByteLength(body);
@@ -4066,14 +6060,25 @@ function handleGeminiRelayClientActions(options: {
       options.websocket.send(JSON.stringify(payloadToSend));
       for (const functionResponse of activeFunctionResponses.length ? activeFunctionResponses : functionResponses) {
         const timestamp = new Date().toISOString();
+        const toolCallId = stringFromAnyKey(functionResponse, 'id');
+        const ledgerEntry = toolCallId ? options.toolCallLedger.get(toolCallId) : null;
         options.onToolResponseSent?.(functionResponse, timestamp);
         emitToolCallLedgerEntry(
           options.toolCallLedger,
-          stringFromAnyKey(functionResponse, 'id'),
+          toolCallId,
           {
             toolName: stringFromAnyKey(functionResponse, 'name'),
             toolResponseSentAt: timestamp,
             finalState: 'responded',
+            ...(ledgerEntry?.syntheticBuilderJoin ? {
+              syntheticBuilderJoin: {
+                ...ledgerEntry.syntheticBuilderJoin,
+                tool_state: ledgerEntry.syntheticBuilderJoin.tool_state === 'terminal_settled'
+                  ? 'terminal_settled'
+                  : 'responded',
+                source_tool_response_sent_at: timestamp,
+              },
+            } : {}),
           },
           options.onToolCallLedgerUpdate,
         );
@@ -5108,7 +7113,10 @@ function coreviewToolExceptionResult(
   };
 }
 
-function waitForWebSocketOpen(websocket: WebSocketLike): Promise<void> {
+function waitForWebSocketOpen(
+  websocket: WebSocketLike,
+  onClose?: (event: CloseEvent) => void,
+): Promise<void> {
   if (websocket.readyState === WEBSOCKET_OPEN) {
     return Promise.resolve();
   }
@@ -5116,7 +7124,10 @@ function waitForWebSocketOpen(websocket: WebSocketLike): Promise<void> {
   return new Promise((resolve, reject) => {
     websocket.onopen = () => resolve();
     websocket.onerror = () => reject(new Error('Gemini Live WebSocket failed to open.'));
-    websocket.onclose = () => reject(new Error('Gemini Live WebSocket closed before setup.'));
+    websocket.onclose = (event) => {
+      onClose?.(event);
+      reject(new Error('Gemini Live WebSocket closed before setup.'));
+    };
   });
 }
 
@@ -5142,8 +7153,18 @@ function waitForGeminiSetupComplete(
       event: CloseEvent,
     ) => Promise<{ websocket: WebSocketLike; setup: Record<string, unknown> } | null>;
     onProviderConnectionChanged?: (websocket: WebSocketLike) => void;
+    onProviderConnectionActivation?: (
+      websocket: WebSocketLike,
+      previousWebsocket: WebSocketLike,
+    ) => Promise<void>;
+    onProviderSocketClosed?: (websocket: WebSocketLike, event: CloseEvent) => void;
+    isSessionClosed?: () => boolean;
     onProviderConnectionRestored?: () => void;
     onProviderConnectionTerminated?: (event: CloseEvent) => void;
+    onProviderEventCompleted?: (
+      event: Record<string, unknown>,
+      receiveMetadata: GeminiProviderReceiveMetadata,
+    ) => void;
   },
 ): Promise<void> {
   return new Promise((resolve, reject) => {
@@ -5156,13 +7177,35 @@ function waitForGeminiSetupComplete(
       continuation: { websocket: WebSocketLike; setup: Record<string, unknown> },
       previousSocket: WebSocketLike,
     ) => {
+      if (handlers.isSessionClosed?.()) {
+        continuation.websocket.close(1000, 'Gemini Live continuation cancelled during cleanup.');
+        return;
+      }
       if (previousSocket === activeSocket && previousSocket.readyState === WEBSOCKET_OPEN) {
         previousSocket.close(1000, 'Gemini Live continuation rotation.');
       }
       activeSocket = continuation.websocket;
       handlers.onProviderConnectionChanged?.(activeSocket);
-      await waitForWebSocketOpen(activeSocket);
+      await waitForWebSocketOpen(activeSocket, (event) => {
+        handlers.onProviderSocketClosed?.(activeSocket, event);
+      });
+      if (handlers.isSessionClosed?.()) {
+        activeSocket.close(1000, 'Gemini Live continuation cancelled during cleanup.');
+        return;
+      }
       attach(activeSocket);
+      try {
+        await handlers.onProviderConnectionActivation?.(activeSocket, previousSocket);
+      } catch (error) {
+        if (activeSocket.readyState < 2) {
+          activeSocket.close(1000, 'Gemini Live continuation activation failed.');
+        }
+        throw error;
+      }
+      if (handlers.isSessionClosed?.()) {
+        activeSocket.close(1000, 'Gemini Live continuation cancelled during cleanup.');
+        return;
+      }
       activeSocket.send(JSON.stringify({ setup: continuation.setup }));
     };
 
@@ -5224,6 +7267,7 @@ function waitForGeminiSetupComplete(
         if (!interrupted) {
           handlers.onOutputAudio(parsed, receiveMetadata);
         }
+        handlers.onProviderEventCompleted?.(parsed, receiveMetadata);
 
         if (categories.includes('goAway') && handlers.onGoAway && !rotationInFlight) {
           rotationInFlight = true;
@@ -5269,6 +7313,7 @@ function waitForGeminiSetupComplete(
         }
       };
       socket.onclose = (event) => {
+        handlers.onProviderSocketClosed?.(socket, event);
         handlers.onWebSocketDiagnostic?.({
           timestamp: new Date().toISOString(),
           kind: 'close',
@@ -5289,6 +7334,958 @@ function waitForGeminiSetupComplete(
   });
 }
 
+const VOICE_LAB_INPUT_OPERATION_EVENT = 'sophia:voice-lab-input-operation';
+const VOICE_LAB_INPUT_SETTLEMENT_MS = 5_000;
+
+interface GeminiSyntheticInputOperationSignal extends Omit<
+  GeminiSyntheticInputOperationBinding,
+  'provider_input_sequence' | 'public_utterance_id'
+> {
+  settlement_window_ms: number;
+}
+
+interface GeminiSyntheticInputEvidenceState {
+  signal: GeminiSyntheticInputOperationSignal;
+  startedAt: string;
+  completedAt: string | null;
+  providerConnectionEpoch: number;
+  firstAudioFrameSequence: number | null;
+  lastAudioFrameSequence: number | null;
+  frameCount: number;
+  sampleCount: number;
+  nonzeroSampleCount: number;
+  byteLength: number;
+  squareSum: number;
+  peak: number;
+  digest: Uint8Array;
+  digestSequence: number;
+  digestPromise: Promise<void>;
+  digestFailed: boolean;
+  legReceiptEmitted: boolean;
+  providerInputObserved: boolean;
+  providerInputSequence: number | null;
+  publicUserTurnObserved: boolean;
+  publicUtteranceId: string | null;
+  publicUserTurnAcceptedAt: string | null;
+  settlementEmitted: boolean;
+  settlementTimer: ReturnType<typeof setTimeout> | null;
+}
+
+interface GeminiSyntheticInputEvidenceTracker {
+  observePcmFrame: (
+    bytes: Uint8Array,
+    audioFrameSequence: number,
+  ) => {
+    binding: GeminiSyntheticInputOperationBinding;
+    diagnostic: GeminiSyntheticOutgoingPcmFrameDiagnostic;
+  } | null;
+  currentBinding: () => GeminiSyntheticInputOperationBinding | null;
+  latestAcceptedBinding: () => GeminiSyntheticInputOperationBinding | null;
+  noteProviderInputTranscription: (
+    receiveMetadata: GeminiProviderReceiveMetadata,
+    transcriptLength: number,
+  ) => void;
+  notePublicUserTurn: (input: {
+    publicUtteranceId?: string | null;
+    transcriptLength: number;
+  }) => void;
+  stop: () => void;
+}
+
+interface GeminiSyntheticInteractionEvidenceState {
+  binding: GeminiSyntheticInteractionBinding;
+  providerFirstReceiveSequence: number;
+  providerLastReceiveSequence: number;
+  providerEventIds: Set<string>;
+  relayCorrelationIds: Set<string>;
+  toolCallIds: Set<string>;
+  effectIds: Set<string>;
+  toolFinalStates: Map<string, GeminiToolCallLedgerFinalState>;
+  outputRealizationIds: Set<string>;
+  outputProviderChunkSequences: Set<string>;
+  outputReceivedRealizations: Set<string>;
+  outputScheduledRealizations: Set<string>;
+  outputStartedRealizations: Set<string>;
+  outputCompletedRealizations: Set<string>;
+  assistantEndedAt: string | null;
+  responseBoundaryReason: GeminiSyntheticInteractionReceipt['response_boundary_reason'];
+  emittedToolSignatures: Set<string>;
+  emittedOutputSettlements: Set<string>;
+}
+
+interface GeminiSyntheticInteractionEvidenceTracker {
+  noteAcceptedPublicUserTurn: (
+    binding: GeminiSyntheticInputOperationBinding,
+    acceptedAt: string,
+  ) => void;
+  observeProviderEvent: (
+    event: Record<string, unknown>,
+    receiveMetadata: GeminiProviderReceiveMetadata,
+  ) => void;
+  finishProviderEvent: (
+    event: Record<string, unknown>,
+    receiveMetadata: GeminiProviderReceiveMetadata,
+  ) => void;
+  noteToolLedger: (
+    entry: GeminiBrowserLiveToolCallLedgerEntry,
+  ) => GeminiBrowserLiveToolCallLedgerEntry;
+  noteOutputReceived: (
+    diagnostic: GeminiOutputAudioReceivedDiagnostic,
+  ) => GeminiOutputAudioReceivedDiagnostic;
+  noteOutputChunk: (
+    diagnostic: GeminiOutputAudioChunkDiagnostic,
+  ) => GeminiOutputAudioChunkDiagnostic;
+  noteOutputPlayback: (
+    receipt: GeminiOutputAudioPlaybackReceipt,
+  ) => GeminiOutputAudioPlaybackReceipt;
+  bindingForResponse: (responseId: string | null) => GeminiSyntheticInteractionBinding | null;
+  stop: () => void;
+}
+
+class GeminiSyntheticInputSignalError extends Error {
+  constructor(readonly code: GeminiSyntheticInputFaultReceipt['code']) {
+    super(code);
+  }
+}
+
+function createGeminiSyntheticInteractionEvidenceTracker(options: {
+  syntheticTest: GeminiSyntheticTestContext;
+  getProviderConnectionEpoch: () => number;
+  onReceipt?: (receipt: GeminiSyntheticInteractionReceipt) => void;
+  onFaultReceipt?: (receipt: GeminiSyntheticInteractionFaultReceipt) => void;
+}): GeminiSyntheticInteractionEvidenceTracker {
+  const statesByResponse = new Map<string, GeminiSyntheticInteractionEvidenceState>();
+  const statesByInput = new Map<string, GeminiSyntheticInteractionEvidenceState>();
+  const pendingToolsByInput = new Map<string, Map<string, GeminiBrowserLiveToolCallLedgerEntry>>();
+  let pendingInput: { binding: GeminiSyntheticInputOperationBinding; acceptedAt: string } | null = null;
+  let activeResponseId: string | null = null;
+  let stopped = false;
+  let faulted = false;
+  let fallbackInteractionSequence = 0;
+
+  const inputKey = (binding: Pick<GeminiSyntheticInputOperationBinding, 'operation_id' | 'utterance_id'>) => (
+    `${binding.operation_id}\0${binding.utterance_id}`
+  );
+  const copyBinding = (binding: GeminiSyntheticInteractionBinding): GeminiSyntheticInteractionBinding => ({
+    ...binding,
+  });
+  const newInteractionId = () => {
+    const randomUuid = globalThis.crypto?.randomUUID?.();
+    if (randomUuid) return `interaction:${randomUuid}`;
+    fallbackInteractionSequence += 1;
+    return `interaction:${Date.now().toString(36)}:${fallbackInteractionSequence.toString(36)}`;
+  };
+  const addBounded = (values: Set<string>, value: string | null, maximum = 256) => {
+    if (!value) return;
+    values.add(value);
+    while (values.size > maximum) {
+      const oldest = values.values().next().value;
+      if (typeof oldest !== 'string') break;
+      values.delete(oldest);
+    }
+  };
+  const fail = (
+    code: GeminiSyntheticInteractionFaultReceipt['code'],
+    detail: {
+      operationId?: string | null;
+      utteranceId?: string | null;
+      responseId?: string | null;
+    } = {},
+  ) => {
+    if (stopped || faulted) return;
+    faulted = true;
+    options.onFaultReceipt?.({
+      schema: 'sophia_gemini_interaction_fault_v1',
+      synthetic: true,
+      test_run_id: options.syntheticTest.test_run_id,
+      code,
+      operation_id: detail.operationId ?? pendingInput?.binding.operation_id ?? null,
+      utterance_id: detail.utteranceId ?? pendingInput?.binding.utterance_id ?? null,
+      response_id: detail.responseId ?? activeResponseId,
+      observed_at: new Date().toISOString(),
+      provider_connection_epoch: options.getProviderConnectionEpoch(),
+      raw_audio_excluded: true,
+      raw_transcript_excluded: true,
+      secrets_excluded: true,
+    });
+  };
+  const emit = (
+    state: GeminiSyntheticInteractionEvidenceState,
+    phase: GeminiSyntheticInteractionReceipt['phase'],
+  ) => {
+    if (stopped || faulted) return;
+    options.onReceipt?.({
+      ...copyBinding(state.binding),
+      schema: 'sophia_gemini_interaction_v1',
+      phase,
+      assistant_ended_at: state.assistantEndedAt,
+      response_boundary_reason: state.responseBoundaryReason,
+      provider_first_receive_sequence: state.providerFirstReceiveSequence,
+      provider_last_receive_sequence: state.providerLastReceiveSequence,
+      provider_event_ids: [...state.providerEventIds],
+      relay_correlation_ids: [...state.relayCorrelationIds],
+      tool_call_ids: [...state.toolCallIds],
+      effect_ids: [...state.effectIds],
+      tool_final_states: Object.fromEntries(state.toolFinalStates),
+      output_realization_ids: [...state.outputRealizationIds],
+      output_provider_chunk_sequences: [...state.outputProviderChunkSequences],
+      output_audio_received_count: state.outputReceivedRealizations.size,
+      output_audio_playback_scheduled_count: state.outputScheduledRealizations.size,
+      output_audio_playback_started_count: state.outputStartedRealizations.size,
+      output_audio_playback_completed_count: state.outputCompletedRealizations.size,
+      raw_audio_excluded: true,
+      raw_transcript_excluded: true,
+      secrets_excluded: true,
+    });
+  };
+  const updateProviderEvent = (
+    state: GeminiSyntheticInteractionEvidenceState,
+    event: Record<string, unknown>,
+    receiveMetadata: GeminiProviderReceiveMetadata,
+  ) => {
+    if (receiveMetadata.providerConnectionEpoch !== state.binding.provider_connection_epoch) {
+      fail('interaction_provider_epoch_conflict', {
+        operationId: state.binding.operation_id,
+        utteranceId: state.binding.utterance_id,
+        responseId: state.binding.response_id,
+      });
+      return false;
+    }
+    state.providerLastReceiveSequence = Math.max(
+      state.providerLastReceiveSequence,
+      receiveMetadata.providerReceiveSequence,
+    );
+    addBounded(state.providerEventIds, readGeminiProviderEventId(event));
+    addBounded(state.relayCorrelationIds, receiveMetadata.relayCorrelationId);
+    return true;
+  };
+  const hydratePendingTools = (state: GeminiSyntheticInteractionEvidenceState) => {
+    const key = inputKey(state.binding);
+    const tools = pendingToolsByInput.get(key);
+    if (!tools) return;
+    for (const entry of tools.values()) {
+      state.toolCallIds.add(entry.toolCallId);
+      state.effectIds.add(entry.effectId);
+      if (isTerminalToolCallLedgerState(entry.finalState)) {
+        state.toolFinalStates.set(entry.toolCallId, entry.finalState);
+      }
+    }
+    pendingToolsByInput.delete(key);
+  };
+  const stateForResponse = (responseId: string | null) => (
+    responseId ? statesByResponse.get(responseId) ?? null : null
+  );
+
+  return {
+    noteAcceptedPublicUserTurn: (binding, acceptedAt) => {
+      if (stopped || faulted || binding.expected_silence === true) return;
+      if (
+        typeof options.syntheticTest.scenario_id !== 'string'
+        || typeof options.syntheticTest.scenario_version !== 'string'
+      ) {
+        fail('interaction_synthetic_binding_incomplete', {
+          operationId: binding.operation_id,
+          utteranceId: binding.utterance_id,
+        });
+        return;
+      }
+      if (
+        typeof binding.public_utterance_id !== 'string'
+        || !GEMINI_SYNTHETIC_SAFE_ID.test(binding.public_utterance_id)
+      ) {
+        fail('interaction_public_turn_binding_malformed', {
+          operationId: binding.operation_id,
+          utteranceId: binding.utterance_id,
+        });
+        return;
+      }
+      if (pendingInput !== null) {
+        if (inputKey(pendingInput.binding) === inputKey(binding)) {
+          pendingInput = { binding: { ...binding }, acceptedAt };
+          return;
+        }
+        fail('interaction_pending_input_overlap', {
+          operationId: binding.operation_id,
+          utteranceId: binding.utterance_id,
+        });
+        return;
+      }
+      if (statesByInput.has(inputKey(binding))) return;
+      pendingInput = { binding: { ...binding }, acceptedAt };
+    },
+    observeProviderEvent: (event, receiveMetadata) => {
+      if (stopped || faulted) return;
+      const categories = categorizeGeminiProviderEvent(event);
+      if (!isAssistantOutputCategories(categories)) return;
+      const responseId = readGeminiStableResponseId(event);
+      if (!responseId || !GEMINI_SYNTHETIC_SAFE_ID.test(responseId)) {
+        if (pendingInput !== null) {
+          fail('interaction_response_id_missing');
+        }
+        return;
+      }
+      const existing = statesByResponse.get(responseId);
+      if (existing) {
+        updateProviderEvent(existing, event, receiveMetadata);
+        return;
+      }
+      if (pendingInput === null) {
+        if (activeResponseId !== null && activeResponseId !== responseId) {
+          fail('interaction_response_overlap', { responseId });
+        }
+        return;
+      }
+      if (activeResponseId !== null && activeResponseId !== responseId) {
+        fail('interaction_response_overlap', { responseId });
+        return;
+      }
+      const key = inputKey(pendingInput.binding);
+      if (
+        !Number.isInteger(pendingInput.binding.provider_input_sequence)
+        || Number(pendingInput.binding.provider_input_sequence) <= 0
+      ) {
+        fail('interaction_public_turn_binding_malformed', {
+          operationId: pendingInput.binding.operation_id,
+          utteranceId: pendingInput.binding.utterance_id,
+          responseId,
+        });
+        return;
+      }
+      const rebound = statesByInput.get(key);
+      if (rebound && rebound.binding.response_id !== responseId) {
+        fail('interaction_response_rebind', {
+          operationId: pendingInput.binding.operation_id,
+          utteranceId: pendingInput.binding.utterance_id,
+          responseId,
+        });
+        return;
+      }
+      const providerEpoch = receiveMetadata.providerConnectionEpoch ?? options.getProviderConnectionEpoch();
+      if (!Number.isInteger(providerEpoch) || providerEpoch < 1) {
+        fail('interaction_provider_epoch_conflict', { responseId });
+        return;
+      }
+      const state: GeminiSyntheticInteractionEvidenceState = {
+        binding: {
+          schema: 'sophia_gemini_interaction_binding_v1',
+          synthetic: true,
+          test_run_id: options.syntheticTest.test_run_id,
+          scenario_id: options.syntheticTest.scenario_id as string,
+          scenario_version: options.syntheticTest.scenario_version as string,
+          interaction_id: newInteractionId(),
+          operation_id: pendingInput.binding.operation_id,
+          utterance_id: pendingInput.binding.utterance_id,
+          frame_window_id: pendingInput.binding.frame_window_id,
+          provider_input_sequence: pendingInput.binding.provider_input_sequence as number,
+          public_utterance_id: pendingInput.binding.public_utterance_id as string,
+          public_user_turn_accepted_at: pendingInput.acceptedAt,
+          response_id: responseId,
+          assistant_turn_id: responseId,
+          assistant_started_at: receiveMetadata.providerReceivedAt,
+          provider_connection_epoch: providerEpoch,
+        },
+        providerFirstReceiveSequence: receiveMetadata.providerReceiveSequence,
+        providerLastReceiveSequence: receiveMetadata.providerReceiveSequence,
+        providerEventIds: new Set(),
+        relayCorrelationIds: new Set(),
+        toolCallIds: new Set(),
+        effectIds: new Set(),
+        toolFinalStates: new Map(),
+        outputRealizationIds: new Set(),
+        outputProviderChunkSequences: new Set(),
+        outputReceivedRealizations: new Set(),
+        outputScheduledRealizations: new Set(),
+        outputStartedRealizations: new Set(),
+        outputCompletedRealizations: new Set(),
+        assistantEndedAt: null,
+        responseBoundaryReason: null,
+        emittedToolSignatures: new Set(),
+        emittedOutputSettlements: new Set(),
+      };
+      pendingInput = null;
+      activeResponseId = responseId;
+      statesByResponse.set(responseId, state);
+      statesByInput.set(key, state);
+      hydratePendingTools(state);
+      updateProviderEvent(state, event, receiveMetadata);
+      while (statesByResponse.size > 64) {
+        const oldestResponseId = statesByResponse.keys().next().value;
+        if (typeof oldestResponseId !== 'string' || oldestResponseId === activeResponseId) break;
+        const oldest = statesByResponse.get(oldestResponseId);
+        statesByResponse.delete(oldestResponseId);
+        if (oldest) statesByInput.delete(inputKey(oldest.binding));
+      }
+      emit(state, 'assistant_response_assigned');
+    },
+    finishProviderEvent: (event, receiveMetadata) => {
+      if (stopped || faulted) return;
+      const responseId = readGeminiStableResponseId(event);
+      const state = stateForResponse(responseId);
+      if (!state || state.assistantEndedAt !== null) return;
+      const interrupted = isGeminiServerInterruptedEvent(event);
+      const boundary = hasGeminiServerContentTurnBoundary(event);
+      if (!interrupted && !boundary) return;
+      if (!updateProviderEvent(state, event, receiveMetadata)) return;
+      state.assistantEndedAt = receiveMetadata.providerReceivedAt;
+      state.responseBoundaryReason = interrupted
+        ? 'interrupted'
+        : hasGeminiServerContentFlag(event, 'turnComplete', 'turn_complete')
+          ? 'turn_complete'
+          : 'generation_complete';
+      if (activeResponseId === state.binding.response_id) activeResponseId = null;
+      emit(
+        state,
+        interrupted ? 'assistant_response_interrupted' : 'assistant_response_completed',
+      );
+    },
+    noteToolLedger: (entry) => {
+      if (stopped || faulted || !entry.syntheticToolEvidence) return entry;
+      const evidence = entry.syntheticToolEvidence;
+      const key = inputKey(evidence);
+      const pendingTools = pendingToolsByInput.get(key) ?? new Map<string, GeminiBrowserLiveToolCallLedgerEntry>();
+      pendingTools.set(entry.toolCallId, entry);
+      pendingToolsByInput.set(key, pendingTools);
+      const state = statesByInput.get(key);
+      if (!state) return entry;
+      if (
+        evidence.test_run_id !== state.binding.test_run_id
+        || evidence.provider_connection_epoch !== state.binding.provider_connection_epoch
+      ) {
+        fail('interaction_provider_epoch_conflict', {
+          operationId: evidence.operation_id,
+          utteranceId: evidence.utterance_id,
+          responseId: state.binding.response_id,
+        });
+        return entry;
+      }
+      state.toolCallIds.add(entry.toolCallId);
+      state.effectIds.add(entry.effectId);
+      if (isTerminalToolCallLedgerState(entry.finalState)) {
+        state.toolFinalStates.set(entry.toolCallId, entry.finalState);
+        const signature = `${entry.toolCallId}\0${entry.effectId}\0${entry.finalState}`;
+        if (!state.emittedToolSignatures.has(signature)) {
+          state.emittedToolSignatures.add(signature);
+          emit(state, 'tool_settled');
+        }
+      }
+      return { ...entry, syntheticInteraction: copyBinding(state.binding) };
+    },
+    noteOutputReceived: (diagnostic) => {
+      const state = stateForResponse(diagnostic.responseId);
+      if (!state || faulted || stopped) return diagnostic;
+      addBounded(state.outputRealizationIds, diagnostic.realizationId);
+      addBounded(state.outputProviderChunkSequences, diagnostic.providerChunkSequence);
+      state.outputReceivedRealizations.add(diagnostic.realizationId);
+      return { ...diagnostic, syntheticInteraction: copyBinding(state.binding) };
+    },
+    noteOutputChunk: (diagnostic) => {
+      const state = stateForResponse(diagnostic.responseId);
+      if (!state || faulted || stopped) return diagnostic;
+      addBounded(state.outputRealizationIds, diagnostic.realizationId);
+      addBounded(state.outputProviderChunkSequences, diagnostic.providerChunkSequence);
+      return { ...diagnostic, syntheticInteraction: copyBinding(state.binding) };
+    },
+    noteOutputPlayback: (receipt) => {
+      const state = stateForResponse(receipt.responseId);
+      if (!state || faulted || stopped) return receipt;
+      addBounded(state.outputRealizationIds, receipt.realizationId);
+      addBounded(state.outputProviderChunkSequences, receipt.providerChunkSequence);
+      if (receipt.phase === 'scheduled') state.outputScheduledRealizations.add(receipt.realizationId);
+      if (receipt.phase === 'started') state.outputStartedRealizations.add(receipt.realizationId);
+      if (receipt.phase === 'completed') {
+        state.outputCompletedRealizations.add(receipt.realizationId);
+        if (!state.emittedOutputSettlements.has(receipt.realizationId)) {
+          state.emittedOutputSettlements.add(receipt.realizationId);
+          emit(state, 'output_settled');
+        }
+      }
+      return { ...receipt, syntheticInteraction: copyBinding(state.binding) };
+    },
+    bindingForResponse: (responseId) => {
+      const state = stateForResponse(responseId);
+      return state && !faulted && !stopped ? copyBinding(state.binding) : null;
+    },
+    stop: () => {
+      stopped = true;
+      pendingInput = null;
+      activeResponseId = null;
+      statesByResponse.clear();
+      statesByInput.clear();
+      pendingToolsByInput.clear();
+    },
+  };
+}
+
+function readSyntheticInputOperationSignal(
+  value: unknown,
+  expectedTestRunId: string,
+): GeminiSyntheticInputOperationSignal {
+  if (!isRecord(value)) {
+    throw new GeminiSyntheticInputSignalError('input_operation_signal_malformed');
+  }
+  const allowed = new Set([
+    'schema',
+    'phase',
+    'test_run_id',
+    'operation_id',
+    'utterance_id',
+    'source_sha256',
+    'expected_silence',
+    'settlement_window_ms',
+    'scheduled_context_time',
+    'actual_context_time',
+    'duration_seconds',
+    'forwarded_frame_count',
+    'reason',
+  ]);
+  const phases = new Set<GeminiSyntheticInputOperationPhase>([
+    'scheduled',
+    'started',
+    'completed',
+    'interrupted',
+    'rejected',
+  ]);
+  const phase = value.phase;
+  const expectedSilence = value.expected_silence;
+  const settlementWindow = value.settlement_window_ms;
+  if (value.test_run_id !== expectedTestRunId) {
+    throw new GeminiSyntheticInputSignalError('input_operation_signal_binding_mismatch');
+  }
+  if (
+    value.schema !== 'sophia_voice_lab_input_operation_v1'
+    || Object.keys(value).some((key) => !allowed.has(key))
+    || typeof phase !== 'string'
+    || !phases.has(phase as GeminiSyntheticInputOperationPhase)
+    || typeof value.operation_id !== 'string'
+    || !GEMINI_SYNTHETIC_SAFE_ID.test(value.operation_id)
+    || typeof value.utterance_id !== 'string'
+    || !GEMINI_SYNTHETIC_SAFE_ID.test(value.utterance_id)
+    || typeof value.source_sha256 !== 'string'
+    || !/^[a-f0-9]{64}$/.test(value.source_sha256)
+    || (expectedSilence !== undefined && typeof expectedSilence !== 'boolean')
+    || (
+      settlementWindow !== undefined
+      && (
+        typeof settlementWindow !== 'number'
+        || !Number.isInteger(settlementWindow)
+        || settlementWindow < 1_000
+        || settlementWindow > 15_000
+      )
+    )
+  ) {
+    throw new GeminiSyntheticInputSignalError('input_operation_signal_malformed');
+  }
+  return {
+    schema: 'sophia_voice_lab_input_operation_v1',
+    phase: phase as GeminiSyntheticInputOperationPhase,
+    test_run_id: expectedTestRunId,
+    operation_id: value.operation_id,
+    utterance_id: value.utterance_id,
+    source_sha256: value.source_sha256,
+    expected_silence: typeof expectedSilence === 'boolean' ? expectedSilence : null,
+    frame_window_id: `${value.operation_id}:${value.utterance_id}`,
+    settlement_window_ms: typeof settlementWindow === 'number'
+      ? settlementWindow
+      : VOICE_LAB_INPUT_SETTLEMENT_MS,
+  };
+}
+
+function createGeminiSyntheticInputEvidenceTracker(options: {
+  syntheticTest: GeminiSyntheticTestContext;
+  getProviderConnectionEpoch: () => number;
+  onLegReceipt?: (receipt: GeminiSyntheticInputLegReceipt) => void;
+  onTurnReceipt?: (receipt: GeminiSyntheticInputTurnReceipt) => void;
+  onFaultReceipt?: (receipt: GeminiSyntheticInputFaultReceipt) => void;
+  onAcceptedPublicUserTurn?: (
+    binding: GeminiSyntheticInputOperationBinding,
+    acceptedAt: string,
+  ) => void;
+  eventTarget?: EventTarget | null;
+}): GeminiSyntheticInputEvidenceTracker {
+  const states = new Map<string, GeminiSyntheticInputEvidenceState>();
+  const subtle = globalThis.crypto?.subtle;
+  const eventTarget = options.eventTarget ?? (typeof window === 'undefined' ? null : window);
+  let stopped = false;
+  let faulted = false;
+
+  const keyFor = (signal: Pick<GeminiSyntheticInputOperationBinding, 'operation_id' | 'utterance_id'>) => (
+    `${signal.operation_id}\0${signal.utterance_id}`
+  );
+  const binding = (state: GeminiSyntheticInputEvidenceState): GeminiSyntheticInputOperationBinding => ({
+    schema: state.signal.schema,
+    phase: state.signal.phase,
+    test_run_id: state.signal.test_run_id,
+    operation_id: state.signal.operation_id,
+    utterance_id: state.signal.utterance_id,
+    source_sha256: state.signal.source_sha256,
+    expected_silence: state.signal.expected_silence,
+    frame_window_id: state.signal.frame_window_id,
+    provider_input_sequence: state.providerInputSequence,
+    public_utterance_id: state.publicUtteranceId,
+  });
+  const fail = (code: GeminiSyntheticInputFaultReceipt['code']) => {
+    if (stopped || faulted) return;
+    faulted = true;
+    options.onFaultReceipt?.({
+      schema: 'sophia_gemini_input_fault_v1',
+      synthetic: true,
+      test_run_id: options.syntheticTest.test_run_id,
+      code,
+      observed_at: new Date().toISOString(),
+      provider_connection_epoch: options.getProviderConnectionEpoch(),
+      raw_audio_excluded: true,
+    });
+  };
+  const activeState = () => {
+    const active = [...states.values()].filter((state) => state.signal.phase === 'started');
+    return active.length === 1 ? active[0] : null;
+  };
+  const correlationState = () => {
+    const candidates = [...states.values()].filter((state) => (
+      state.signal.phase === 'started'
+      || (
+        state.completedAt !== null
+        && !state.settlementEmitted
+        && state.signal.phase === 'completed'
+      )
+    ));
+    if (candidates.length > 1) {
+      fail('input_operation_turn_correlation_ambiguous');
+      return null;
+    }
+    return candidates[0] ?? null;
+  };
+  const latestAcceptedState = () => {
+    const accepted = [...states.values()].filter((state) => (
+      state.providerInputObserved || state.publicUserTurnObserved
+    ));
+    return accepted.at(-1) ?? null;
+  };
+  const emitTurnReceipt = (
+    state: GeminiSyntheticInputEvidenceState,
+    source: GeminiSyntheticInputTurnReceipt['source'],
+    outcome: GeminiSyntheticInputTurnReceipt['outcome'],
+    detail: {
+      providerReceiveSequence?: number | null;
+      providerReceivedAt?: string | null;
+      publicUtteranceId?: string | null;
+      transcriptLength?: number | null;
+      observedAt?: string;
+    } = {},
+  ) => {
+    if (stopped) return;
+    options.onTurnReceipt?.({
+      schema: 'sophia_gemini_input_turn_v1',
+      synthetic: true,
+      test_run_id: state.signal.test_run_id,
+      operation_id: state.signal.operation_id,
+      utterance_id: state.signal.utterance_id,
+      frame_window_id: state.signal.frame_window_id,
+      expected_silence: state.signal.expected_silence,
+      source,
+      outcome,
+      observed_at: detail.observedAt ?? new Date().toISOString(),
+      provider_receive_sequence: detail.providerReceiveSequence ?? null,
+      provider_received_at: detail.providerReceivedAt ?? null,
+      public_utterance_id: detail.publicUtteranceId ?? null,
+      transcript_length: detail.transcriptLength ?? null,
+      settlement_window_ms: state.signal.settlement_window_ms,
+      raw_audio_excluded: true,
+    });
+  };
+  const scheduleSettlement = (state: GeminiSyntheticInputEvidenceState) => {
+    if (state.settlementTimer !== null) clearTimeout(state.settlementTimer);
+    state.settlementTimer = setTimeout(() => {
+      state.settlementTimer = null;
+      if (stopped || state.settlementEmitted) return;
+      state.settlementEmitted = true;
+      const turnObserved = state.providerInputObserved || state.publicUserTurnObserved;
+      const outcome: GeminiSyntheticInputTurnReceipt['outcome'] = state.signal.expected_silence === true
+        ? turnObserved ? 'unexpected_user_turn_observed' : 'no_user_turn_observed'
+        : turnObserved ? 'user_turn_observed' : 'user_turn_unavailable';
+      emitTurnReceipt(state, 'settlement', outcome);
+    }, state.signal.settlement_window_ms);
+  };
+  const finishLeg = async (state: GeminiSyntheticInputEvidenceState) => {
+    if (state.legReceiptEmitted) return;
+    state.legReceiptEmitted = true;
+    await state.digestPromise;
+    if (stopped) return;
+    const digest = !state.digestFailed && state.digestSequence > 0
+      ? bytesToHex(state.digest)
+      : null;
+    const completedNormally = state.signal.phase === 'completed';
+    const signalMatchesExpectation = state.signal.expected_silence === true
+      ? state.sampleCount > 0 && state.nonzeroSampleCount === 0
+      : state.nonzeroSampleCount > 0;
+    const verified = completedNormally && digest !== null && signalMatchesExpectation;
+    const reason = verified
+      ? state.signal.expected_silence === true
+        ? 'outgoing_pcm_silence_observed'
+        : 'outgoing_pcm_non_silent_observed'
+      : !completedNormally
+        ? `input_operation_${state.signal.phase}`
+        : state.frameCount === 0
+          ? 'outgoing_pcm_frame_missing'
+          : digest === null
+            ? 'outgoing_pcm_digest_unavailable'
+            : state.nonzeroSampleCount === 0
+              ? state.signal.expected_silence === false
+                ? 'outgoing_pcm_unexpected_zero_only'
+                : 'outgoing_pcm_zero_only_expectation_unknown'
+              : 'outgoing_pcm_unexpected_non_silence';
+    options.onLegReceipt?.({
+      schema: 'sophia_gemini_input_leg_v1',
+      status: verified ? 'verified' : digest === null ? 'unavailable' : 'inconclusive',
+      reason,
+      synthetic: true,
+      test_run_id: state.signal.test_run_id,
+      operation_id: state.signal.operation_id,
+      utterance_id: state.signal.utterance_id,
+      source_sha256: state.signal.source_sha256,
+      expected_silence: state.signal.expected_silence,
+      frame_window_id: state.signal.frame_window_id,
+      provider_connection_epoch: state.providerConnectionEpoch,
+      first_audio_frame_sequence: state.firstAudioFrameSequence,
+      last_audio_frame_sequence: state.lastAudioFrameSequence,
+      frame_count: state.frameCount,
+      sample_count: state.sampleCount,
+      nonzero_sample_count: state.nonzeroSampleCount,
+      byte_length: state.byteLength,
+      pcm_rms: state.sampleCount > 0 ? Math.sqrt(state.squareSum / state.sampleCount) : null,
+      pcm_peak: state.sampleCount > 0 ? state.peak : null,
+      pcm_digest_algorithm: digest === null ? null : 'sha-256-chain-v1',
+      pcm_sha256_chain: digest,
+      started_at: state.startedAt,
+      completed_at: state.completedAt ?? new Date().toISOString(),
+      raw_audio_excluded: true,
+    });
+  };
+  const handleSignal = (event: Event) => {
+    if (stopped || faulted) return;
+    let signal: GeminiSyntheticInputOperationSignal;
+    try {
+      signal = readSyntheticInputOperationSignal(
+        (event as CustomEvent<unknown>).detail,
+        options.syntheticTest.test_run_id,
+      );
+    } catch (error) {
+      fail(
+        error instanceof GeminiSyntheticInputSignalError
+          ? error.code
+          : 'input_operation_signal_malformed',
+      );
+      return;
+    }
+    const key = keyFor(signal);
+    if (signal.phase === 'scheduled') {
+      const existing = states.get(key);
+      if (existing && existing.signal.source_sha256 !== signal.source_sha256) {
+        fail('input_operation_signal_binding_mismatch');
+        return;
+      }
+      if (!existing) {
+        states.set(key, {
+          signal,
+          startedAt: new Date().toISOString(),
+          completedAt: null,
+          providerConnectionEpoch: options.getProviderConnectionEpoch(),
+          firstAudioFrameSequence: null,
+          lastAudioFrameSequence: null,
+          frameCount: 0,
+          sampleCount: 0,
+          nonzeroSampleCount: 0,
+          byteLength: 0,
+          squareSum: 0,
+          peak: 0,
+          digest: new Uint8Array(32),
+          digestSequence: 0,
+          digestPromise: Promise.resolve(),
+          digestFailed: subtle === undefined,
+          legReceiptEmitted: false,
+          providerInputObserved: false,
+          providerInputSequence: null,
+          publicUserTurnObserved: false,
+          publicUtteranceId: null,
+          publicUserTurnAcceptedAt: null,
+          settlementEmitted: false,
+          settlementTimer: null,
+        });
+      }
+      return;
+    }
+    const state = states.get(key);
+    if (!state || state.signal.source_sha256 !== signal.source_sha256) {
+      fail('input_operation_phase_invalid');
+      return;
+    }
+    if (signal.phase === 'started') {
+      if (state.signal.phase === 'started') return;
+      if (state.signal.phase !== 'scheduled') {
+        fail('input_operation_phase_invalid');
+        return;
+      }
+      const unresolvedOther = [...states.values()].some((candidate) => (
+        candidate !== state
+        && (
+          candidate.signal.phase === 'started'
+          || (candidate.signal.phase === 'completed' && !candidate.settlementEmitted)
+        )
+      ));
+      if (unresolvedOther) {
+        fail('input_operation_overlap_forbidden');
+        return;
+      }
+      state.signal = signal;
+      state.startedAt = new Date().toISOString();
+      state.providerConnectionEpoch = options.getProviderConnectionEpoch();
+      return;
+    }
+    if (state.signal.phase === signal.phase && state.completedAt !== null) return;
+    if (
+      (signal.phase === 'completed' || signal.phase === 'interrupted')
+      && state.signal.phase !== 'started'
+    ) {
+      fail('input_operation_phase_invalid');
+      return;
+    }
+    if (signal.phase === 'rejected' && state.signal.phase !== 'scheduled') {
+      fail('input_operation_phase_invalid');
+      return;
+    }
+    state.signal = signal;
+    state.completedAt = new Date().toISOString();
+    void finishLeg(state);
+    scheduleSettlement(state);
+  };
+  eventTarget?.addEventListener(VOICE_LAB_INPUT_OPERATION_EVENT, handleSignal);
+
+  return {
+    observePcmFrame: (bytes, audioFrameSequence) => {
+      if (faulted) return null;
+      const state = activeState();
+      if (!state) return null;
+      const view = new DataView(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+      let squareSum = 0;
+      let peak = 0;
+      let nonzero = 0;
+      const sampleCount = Math.floor(bytes.byteLength / 2);
+      for (let index = 0; index < sampleCount; index += 1) {
+        const pcm = view.getInt16(index * 2, true);
+        const sample = pcm / (pcm < 0 ? 32768 : 32767);
+        const absolute = Math.abs(sample);
+        if (pcm !== 0) nonzero += 1;
+        squareSum += sample * sample;
+        peak = Math.max(peak, absolute);
+      }
+      state.firstAudioFrameSequence ??= audioFrameSequence;
+      state.lastAudioFrameSequence = audioFrameSequence;
+      state.frameCount += 1;
+      state.sampleCount += sampleCount;
+      state.nonzeroSampleCount += nonzero;
+      state.byteLength += bytes.byteLength;
+      state.squareSum += squareSum;
+      state.peak = Math.max(state.peak, peak);
+      if (subtle) {
+        const frameBytes = bytes.slice();
+        state.digestSequence += 1;
+        const sequence = state.digestSequence;
+        state.digestPromise = state.digestPromise.then(async () => {
+          try {
+            const frameDigest = new Uint8Array(
+              await subtle.digest('SHA-256', frameBytes.buffer as ArrayBuffer),
+            );
+            const chained = new Uint8Array(68);
+            chained.set(state.digest, 0);
+            chained.set(frameDigest, 32);
+            new DataView(chained.buffer).setUint32(64, sequence, false);
+            state.digest = new Uint8Array(
+              await subtle.digest('SHA-256', chained.buffer as ArrayBuffer),
+            );
+          } catch {
+            state.digestFailed = true;
+          }
+        });
+      }
+      return {
+        binding: binding(state),
+        diagnostic: {
+          sample_count: sampleCount,
+          nonzero_sample_count: nonzero,
+          rms: sampleCount > 0 ? Math.sqrt(squareSum / sampleCount) : 0,
+          peak,
+          byte_length: bytes.byteLength,
+          raw_audio_excluded: true,
+        },
+      };
+    },
+    currentBinding: () => {
+      if (faulted) return null;
+      const state = correlationState();
+      return state ? binding(state) : null;
+    },
+    latestAcceptedBinding: () => {
+      if (faulted) return null;
+      const state = correlationState() ?? latestAcceptedState();
+      return state ? binding(state) : null;
+    },
+    noteProviderInputTranscription: (receiveMetadata, transcriptLength) => {
+      if (faulted) return;
+      const state = correlationState();
+      if (!state || state.providerInputObserved) return;
+      state.providerInputObserved = true;
+      state.providerInputSequence = receiveMetadata.providerReceiveSequence;
+      emitTurnReceipt(
+        state,
+        'provider_input_transcription',
+        state.signal.expected_silence === true
+          ? 'unexpected_user_turn_observed'
+          : 'provider_input_transcription_observed',
+        {
+          providerReceiveSequence: receiveMetadata.providerReceiveSequence,
+          providerReceivedAt: receiveMetadata.providerReceivedAt,
+          transcriptLength,
+        },
+      );
+      if (state.publicUserTurnObserved && state.publicUserTurnAcceptedAt !== null) {
+        options.onAcceptedPublicUserTurn?.(binding(state), state.publicUserTurnAcceptedAt);
+      }
+    },
+    notePublicUserTurn: (input) => {
+      if (faulted) return;
+      const state = correlationState();
+      if (!state || state.publicUserTurnObserved) return;
+      state.publicUserTurnObserved = true;
+      state.publicUtteranceId = input.publicUtteranceId ?? null;
+      const acceptedAt = new Date().toISOString();
+      state.publicUserTurnAcceptedAt = acceptedAt;
+      emitTurnReceipt(
+        state,
+        'public_user_turn',
+        state.signal.expected_silence === true
+          ? 'unexpected_user_turn_observed'
+          : 'public_user_turn_accepted',
+        {
+          publicUtteranceId: input.publicUtteranceId,
+          transcriptLength: input.transcriptLength,
+          observedAt: acceptedAt,
+        },
+      );
+      if (state.signal.expected_silence !== true) {
+        options.onAcceptedPublicUserTurn?.(binding(state), acceptedAt);
+      }
+    },
+    stop: () => {
+      stopped = true;
+      eventTarget?.removeEventListener(VOICE_LAB_INPUT_OPERATION_EVENT, handleSignal);
+      for (const state of states.values()) {
+        if (state.settlementTimer !== null) clearTimeout(state.settlementTimer);
+      }
+      states.clear();
+    },
+  };
+}
+
 function startMicrophoneAudioPipeline(options: {
   localStream: MediaStream;
   audioContext: AudioContext;
@@ -5296,6 +8293,7 @@ function startMicrophoneAudioPipeline(options: {
   recordingInputNode?: AudioNode;
   onInputAudioActivity?: (diagnostic: GeminiInputAudioActivityDiagnostic) => void;
   microphoneAudioSettings?: GeminiMicrophoneAudioSettingsDiagnostic;
+  syntheticInputEvidence?: GeminiSyntheticInputEvidenceTracker | null;
 }): AudioPipeline {
   const source = options.audioContext.createMediaStreamSource(options.localStream);
   const processor = options.audioContext.createScriptProcessor(4096, 1, 1);
@@ -5373,6 +8371,10 @@ function startMicrophoneAudioPipeline(options: {
     }
     audioFrameSequence += 1;
     framesSinceLastDiagnostic += 1;
+    const exactPcmBytes = options.syntheticInputEvidence ? base64ToBytes(data) : null;
+    const syntheticPcm = exactPcmBytes
+      ? options.syntheticInputEvidence?.observePcmFrame(exactPcmBytes, audioFrameSequence) ?? null
+      : null;
 
     websocket.send(JSON.stringify({
       realtimeInput: {
@@ -5391,6 +8393,8 @@ function startMicrophoneAudioPipeline(options: {
         frameDurationMs: Math.round((input.length / options.audioContext.sampleRate) * 1000),
         audioStreamEndSent: false,
         trigger: 'audio_process',
+        syntheticInputOperation: syntheticPcm?.binding ?? null,
+        outgoingPcm: syntheticPcm?.diagnostic ?? null,
       });
       framesSinceLastDiagnostic = 0;
     }
@@ -5453,9 +8457,18 @@ export function createGeminiOutputAudioPlaybackController(
   interface PendingAudioChunk {
     chunk: string;
     samples: Float32Array<ArrayBuffer>;
-    metadata?: GeminiOutputAudioChunkMetadata;
+    metadata: GeminiOutputAudioChunkMetadata;
     decodeStartedAt: string;
     decodeCompletedAt: string;
+    playbackGeneration: number;
+  }
+
+  interface ActiveAudioSource {
+    pending: PendingAudioChunk;
+    scheduledStartTime: number;
+    durationSeconds: number;
+    startReceiptEmitted: boolean;
+    startReceiptTimer: ReturnType<typeof setTimeout> | null;
   }
 
   interface RecentTransportFingerprint {
@@ -5467,12 +8480,13 @@ export function createGeminiOutputAudioPlaybackController(
   }
 
   let nextPlaybackTime = 0;
-  const activeSources = new Set<AudioBufferSourceNode>();
+  const activeSources = new Map<AudioBufferSourceNode, ActiveAudioSource>();
   const pendingChunks: PendingAudioChunk[] = [];
   const chunkHashCounts = new Map<string, number>();
   const recentTransportFingerprints = new Map<string, RecentTransportFingerprint>();
   let diagnosticsEmitted = 0;
   let playbackGeneration = 0;
+  let localChunkSequence = 0;
   const maxPlaybackAheadSeconds = Math.max(
     0.05,
     options.maxPlaybackAheadSeconds ?? DEFAULT_OUTPUT_AUDIO_MAX_PLAYBACK_AHEAD_SECONDS,
@@ -5523,18 +8537,127 @@ export function createGeminiOutputAudioPlaybackController(
     return duplicateOrdinal;
   };
 
+  const createChunkMetadata = (
+    chunk: string,
+    chunkIndex: number,
+    chunksInEvent: number,
+    receiveMetadata?: GeminiProviderReceiveMetadata,
+    event?: Record<string, unknown>,
+  ): GeminiOutputAudioChunkMetadata => {
+    const chunkHash = hashGeminiOutputAudioChunk(chunk);
+    const duplicateOrdinal = nextChunkDuplicateOrdinal(chunkHash);
+    const responseId = event ? readGeminiStableResponseId(event) : null;
+    const providerEventId = event ? readGeminiProviderEventId(event) : null;
+    if (!receiveMetadata) {
+      localChunkSequence += 1;
+    }
+    const realizationId = receiveMetadata
+      ? [
+          'gemini-output',
+          receiveMetadata.providerConnectionEpoch ?? 0,
+          receiveMetadata.providerReceiveSequence,
+          chunkIndex,
+          chunkHash,
+          duplicateOrdinal,
+        ].join('-')
+      : ['gemini-output-local', playbackGeneration, localChunkSequence, chunkHash, duplicateOrdinal].join('-');
+    const providerChunkSequence = receiveMetadata
+      ? [
+          receiveMetadata.providerConnectionEpoch ?? 0,
+          receiveMetadata.providerReceiveSequence,
+          chunkIndex,
+        ].join(':')
+      : ['local', playbackGeneration, localChunkSequence, chunkIndex].join(':');
+    return {
+      receiveMetadata,
+      responseId,
+      assistantTurnId: responseId,
+      providerEventId,
+      chunkIndex,
+      chunksInEvent,
+      chunkHash,
+      byteLength: estimatedBase64DecodedByteLength(chunk),
+      duplicateOrdinal,
+      realizationId,
+      providerChunkSequence,
+    };
+  };
+
+  const emitPlaybackReceipt = (
+    phase: GeminiOutputAudioPlaybackReceiptPhase,
+    chunk: string,
+    metadata: GeminiOutputAudioChunkMetadata,
+    receiptPlaybackGeneration: number,
+    details: {
+      timestamp?: string;
+      scheduledStartTime?: number | null;
+      durationSeconds?: number;
+      dropReason?: GeminiOutputAudioDropReason | null;
+      flushReason?: string | null;
+      invalidatedByPlaybackGeneration?: number | null;
+    } = {},
+  ) => {
+    const receiveMetadata = metadata.receiveMetadata;
+    options.onPlaybackReceipt?.({
+      timestamp: details.timestamp ?? new Date().toISOString(),
+      phase,
+      realizationId: metadata.realizationId,
+      providerChunkSequence: metadata.providerChunkSequence,
+      responseId: metadata.responseId,
+      assistantTurnId: metadata.assistantTurnId,
+      providerEventId: metadata.providerEventId,
+      providerReceiveSequence: receiveMetadata?.providerReceiveSequence ?? null,
+      providerRelaySequence: receiveMetadata?.providerRelaySequence ?? null,
+      providerConnectionEpoch: receiveMetadata?.providerConnectionEpoch ?? null,
+      providerReceivedAt: receiveMetadata?.providerReceivedAt ?? null,
+      relayCorrelationId: receiveMetadata?.relayCorrelationId ?? null,
+      chunkIndex: metadata.chunkIndex,
+      chunksInEvent: metadata.chunksInEvent,
+      chunkHash: metadata.chunkHash,
+      byteLength: metadata.byteLength,
+      playbackGeneration: receiptPlaybackGeneration,
+      invalidatedByPlaybackGeneration: details.invalidatedByPlaybackGeneration ?? null,
+      audioContextCurrentTime: Number.isFinite(audioContext.currentTime) ? audioContext.currentTime : 0,
+      scheduledStartTime: details.scheduledStartTime ?? null,
+      durationSeconds: details.durationSeconds ?? 0,
+      dropReason: details.dropReason ?? null,
+      flushReason: details.flushReason ?? null,
+    });
+  };
+
+  const finishOutputLegMonitor = (
+    active: ActiveAudioSource,
+    phase: 'completed' | 'flushed',
+    completedAt: string,
+  ) => {
+    const monitor = options.outputLegMonitor;
+    if (!monitor) return;
+    void monitor.finish(
+      active.pending.metadata.realizationId,
+      phase,
+      completedAt,
+      active.durationSeconds,
+    ).then((receipt) => options.onOutputLegMonitorReceipt?.(receipt));
+  };
+
   const emitUnscheduledChunkDiagnostic = (
     chunk: string,
-    metadata: GeminiOutputAudioChunkMetadata | undefined,
-    dropReason: GeminiOutputAudioDropReason | null,
+    metadata: GeminiOutputAudioChunkMetadata,
+    dropReason: GeminiOutputAudioDropReason,
     decodeStartedAt = new Date().toISOString(),
     decodeCompletedAt = decodeStartedAt,
   ) => {
     const currentTime = Number.isFinite(audioContext.currentTime) ? audioContext.currentTime : 0;
     emitChunkDiagnostic({
       timestamp: decodeCompletedAt,
+      realizationId: metadata.realizationId,
+      responseId: metadata.responseId,
+      assistantTurnId: metadata.assistantTurnId,
+      providerEventId: metadata.providerEventId,
+      providerChunkSequence: metadata.providerChunkSequence,
       providerReceiveSequence: metadata?.receiveMetadata?.providerReceiveSequence ?? null,
       providerRelaySequence: metadata?.receiveMetadata?.providerRelaySequence ?? null,
+      providerConnectionEpoch: metadata?.receiveMetadata?.providerConnectionEpoch ?? null,
       providerReceivedAt: metadata?.receiveMetadata?.providerReceivedAt ?? null,
       relayCorrelationId: metadata?.receiveMetadata?.relayCorrelationId ?? null,
       chunkIndex: metadata?.chunkIndex ?? null,
@@ -5558,6 +8681,43 @@ export function createGeminiOutputAudioPlaybackController(
       dropReason,
       scheduled: false,
     });
+    emitPlaybackReceipt('dropped', chunk, metadata, playbackGeneration, {
+      timestamp: decodeCompletedAt,
+      dropReason,
+    });
+  };
+
+  const emitStartedReceipt = (source: AudioBufferSourceNode, active: ActiveAudioSource) => {
+    if (active.startReceiptEmitted || !activeSources.has(source)) {
+      return;
+    }
+    active.startReceiptEmitted = true;
+    active.startReceiptTimer = null;
+    const startedAt = new Date().toISOString();
+    options.outputLegMonitor?.markStarted(
+      active.pending.metadata.realizationId,
+      startedAt,
+    );
+    emitPlaybackReceipt(
+      'started',
+      active.pending.chunk,
+      active.pending.metadata,
+      active.pending.playbackGeneration,
+      {
+        timestamp: startedAt,
+        scheduledStartTime: active.scheduledStartTime,
+        durationSeconds: active.durationSeconds,
+      },
+    );
+  };
+
+  const observeScheduledSourceStart = (source: AudioBufferSourceNode, active: ActiveAudioSource) => {
+    const currentTime = Number.isFinite(audioContext.currentTime) ? audioContext.currentTime : 0;
+    if (audioContext.state !== 'running' || currentTime + 0.001 < active.scheduledStartTime) {
+      active.startReceiptTimer = null;
+      return;
+    }
+    emitStartedReceipt(source, active);
   };
 
   const schedulePendingChunks = () => {
@@ -5581,27 +8741,71 @@ export function createGeminiOutputAudioPlaybackController(
       buffer.copyToChannel(pending.samples, 0);
       const source = audioContext.createBufferSource();
       source.buffer = buffer;
-      source.connect(options.outputNode ?? audioContext.destination);
       const startAt = Math.max(currentTime, nextPlaybackTime);
       const duration = Number.isFinite(buffer.duration) && buffer.duration > 0
         ? buffer.duration
         : pending.samples.length / OUTPUT_AUDIO_RATE_HZ;
-      activeSources.add(source);
+      const sourceStartIssuedAt = new Date().toISOString();
+      const downstreamNode = options.outputNode ?? audioContext.destination;
+      const monitoredOutputNode = options.outputLegMonitor?.begin({
+        realizationId: pending.metadata.realizationId,
+        providerChunkFingerprint: pending.metadata.chunkHash,
+        providerConnectionEpoch: pending.metadata.receiveMetadata?.providerConnectionEpoch ?? null,
+        playbackGeneration: pending.playbackGeneration,
+        scheduledAt: sourceStartIssuedAt,
+      }, downstreamNode) ?? downstreamNode;
+      source.connect(monitoredOutputNode);
+      const active: ActiveAudioSource = {
+        pending,
+        scheduledStartTime: startAt,
+        durationSeconds: duration,
+        startReceiptEmitted: false,
+        startReceiptTimer: null,
+      };
+      activeSources.set(source, active);
       source.onended = () => {
+        const completed = activeSources.get(source);
+        if (!completed) {
+          return;
+        }
+        if (completed.startReceiptTimer !== null) {
+          clearTimeout(completed.startReceiptTimer);
+        }
+        // A natural onended callback proves that the source crossed its start
+        // boundary even if a throttled timer did not run in time.
+        emitStartedReceipt(source, completed);
         activeSources.delete(source);
         source.disconnect();
+        const completedAt = new Date().toISOString();
+        emitPlaybackReceipt(
+          'completed',
+          completed.pending.chunk,
+          completed.pending.metadata,
+          completed.pending.playbackGeneration,
+          {
+            timestamp: completedAt,
+            scheduledStartTime: completed.scheduledStartTime,
+            durationSeconds: completed.durationSeconds,
+          },
+        );
+        finishOutputLegMonitor(completed, 'completed', completedAt);
         if (activeSources.size === 0 && nextPlaybackTime < audioContext.currentTime) {
           nextPlaybackTime = audioContext.currentTime;
         }
         schedulePendingChunks();
       };
-      const sourceStartIssuedAt = new Date().toISOString();
       source.start(startAt);
       nextPlaybackTime = startAt + duration;
       emitChunkDiagnostic({
         timestamp: sourceStartIssuedAt,
+        realizationId: pending.metadata.realizationId,
+        responseId: pending.metadata.responseId,
+        assistantTurnId: pending.metadata.assistantTurnId,
+        providerEventId: pending.metadata.providerEventId,
+        providerChunkSequence: pending.metadata.providerChunkSequence,
         providerReceiveSequence: pending.metadata?.receiveMetadata?.providerReceiveSequence ?? null,
         providerRelaySequence: pending.metadata?.receiveMetadata?.providerRelaySequence ?? null,
+        providerConnectionEpoch: pending.metadata?.receiveMetadata?.providerConnectionEpoch ?? null,
         providerReceivedAt: pending.metadata?.receiveMetadata?.providerReceivedAt ?? null,
         relayCorrelationId: pending.metadata?.receiveMetadata?.relayCorrelationId ?? null,
         chunkIndex: pending.metadata?.chunkIndex ?? null,
@@ -5625,22 +8829,43 @@ export function createGeminiOutputAudioPlaybackController(
         dropReason: null,
         scheduled: true,
       });
+      emitPlaybackReceipt('scheduled', pending.chunk, pending.metadata, pending.playbackGeneration, {
+        timestamp: sourceStartIssuedAt,
+        scheduledStartTime: startAt,
+        durationSeconds: duration,
+      });
+      const startDelayMs = Math.max(0, Math.ceil((startAt - currentTime) * 1000));
+      if (startDelayMs === 0) {
+        observeScheduledSourceStart(source, active);
+      } else {
+        active.startReceiptTimer = setTimeout(
+          () => observeScheduledSourceStart(source, active),
+          startDelayMs + 1,
+        );
+      }
     }
   };
 
-  const enqueueBase64Chunk = (chunk: string, metadata?: GeminiOutputAudioChunkMetadata): boolean => {
+  const enqueueBase64Chunk = (chunk: string, metadata: GeminiOutputAudioChunkMetadata): boolean => {
     const decodeStartedAt = new Date().toISOString();
     const samples = pcm16BytesToFloat32(base64ToBytes(chunk));
     const decodeCompletedAt = new Date().toISOString();
     if (!samples.length) {
-      emitUnscheduledChunkDiagnostic(chunk, metadata, null, decodeStartedAt, decodeCompletedAt);
+      emitUnscheduledChunkDiagnostic(chunk, metadata, 'invalid_pcm_payload', decodeStartedAt, decodeCompletedAt);
       return false;
     }
     if (pendingChunks.length >= maxQueuedChunks) {
       emitUnscheduledChunkDiagnostic(chunk, metadata, 'playback_queue_full', decodeStartedAt, decodeCompletedAt);
       return false;
     }
-    pendingChunks.push({ chunk, samples, metadata, decodeStartedAt, decodeCompletedAt });
+    pendingChunks.push({
+      chunk,
+      samples,
+      metadata,
+      decodeStartedAt,
+      decodeCompletedAt,
+      playbackGeneration,
+    });
     schedulePendingChunks();
     return true;
   };
@@ -5686,10 +8911,28 @@ export function createGeminiOutputAudioPlaybackController(
     return suppress;
   };
 
-  const flush = (): GeminiOutputAudioPlaybackState => {
-    pendingChunks.splice(0, pendingChunks.length);
-    for (const source of activeSources) {
+  const flush = (reason = 'unspecified'): GeminiOutputAudioPlaybackState => {
+    const invalidatedByPlaybackGeneration = playbackGeneration + 1;
+    for (const pending of pendingChunks.splice(0, pendingChunks.length)) {
+      emitPlaybackReceipt('flushed', pending.chunk, pending.metadata, pending.playbackGeneration, {
+        flushReason: reason,
+        invalidatedByPlaybackGeneration,
+      });
+    }
+    for (const [source, active] of activeSources) {
       source.onended = null;
+      if (active.startReceiptTimer !== null) {
+        clearTimeout(active.startReceiptTimer);
+      }
+      const flushedAt = new Date().toISOString();
+      emitPlaybackReceipt('flushed', active.pending.chunk, active.pending.metadata, active.pending.playbackGeneration, {
+        timestamp: flushedAt,
+        scheduledStartTime: active.scheduledStartTime,
+        durationSeconds: active.durationSeconds,
+        flushReason: reason,
+        invalidatedByPlaybackGeneration,
+      });
+      finishOutputLegMonitor(active, 'flushed', flushedAt);
       try {
         source.stop();
       } catch {
@@ -5699,38 +8942,72 @@ export function createGeminiOutputAudioPlaybackController(
     }
     activeSources.clear();
     nextPlaybackTime = 0;
-    playbackGeneration += 1;
+    playbackGeneration = invalidatedByPlaybackGeneration;
     return snapshot();
+  };
+
+  const processEventChunks = (
+    event: Record<string, unknown>,
+    receiveMetadata: GeminiProviderReceiveMetadata | undefined,
+    onChunk: (chunk: string, metadata: GeminiOutputAudioChunkMetadata) => boolean,
+  ) => {
+    let accepted = 0;
+    const chunks = readGeminiOutputAudioChunks(event);
+    chunks.forEach((chunk, index) => {
+      const metadata = createChunkMetadata(chunk, index, chunks.length, receiveMetadata, event);
+      if (receiveMetadata) {
+        options.onChunkReceived?.({
+          timestamp: new Date().toISOString(),
+          realizationId: metadata.realizationId,
+          providerChunkSequence: metadata.providerChunkSequence,
+          providerReceiveSequence: receiveMetadata.providerReceiveSequence,
+          providerRelaySequence: receiveMetadata.providerRelaySequence ?? null,
+          providerConnectionEpoch: receiveMetadata.providerConnectionEpoch ?? null,
+          providerReceivedAt: receiveMetadata.providerReceivedAt,
+          relayCorrelationId: receiveMetadata.relayCorrelationId,
+          responseId: metadata.responseId,
+          assistantTurnId: metadata.assistantTurnId,
+          providerEventId: metadata.providerEventId,
+          chunkIndex: metadata.chunkIndex,
+          chunksInEvent: metadata.chunksInEvent,
+          chunkHash: metadata.chunkHash,
+          byteLength: metadata.byteLength,
+          duplicateOrdinal: metadata.duplicateOrdinal,
+          playbackGeneration,
+        });
+      }
+      if (onChunk(chunk, metadata)) {
+        accepted += 1;
+      }
+    });
+    return accepted;
   };
 
   return {
     playEvent: (event, receiveMetadata) => {
-      let played = 0;
       const chunks = readGeminiOutputAudioChunks(event);
       const replaySuppressed = chunks.length > 0 && isExactTransportReplay(event, chunks, receiveMetadata);
-      chunks.forEach((chunk, index) => {
-        const chunkHash = hashGeminiOutputAudioChunk(chunk);
-        const duplicateOrdinal = nextChunkDuplicateOrdinal(chunkHash);
-        const metadata: GeminiOutputAudioChunkMetadata = {
-          receiveMetadata,
-          chunkIndex: index,
-          chunksInEvent: chunks.length,
-          chunkHash,
-          byteLength: estimatedBase64DecodedByteLength(chunk),
-          duplicateOrdinal,
-        };
+      return processEventChunks(event, receiveMetadata, (chunk, metadata) => {
         if (replaySuppressed) {
           emitUnscheduledChunkDiagnostic(chunk, metadata, 'exact_transport_replay');
-          return;
+          return false;
         }
-        if (enqueueBase64Chunk(chunk, metadata)) {
-          played += 1;
-        }
+        return enqueueBase64Chunk(chunk, metadata);
       });
-      return played;
     },
-    playBase64Chunk: enqueueBase64Chunk,
-    stop: () => { void flush(); },
+    playBase64Chunk: (chunk) => enqueueBase64Chunk(
+      chunk,
+      createChunkMetadata(chunk, 0, 1),
+    ),
+    dropEvent: (event, receiveMetadata, reason) => processEventChunks(
+      event,
+      receiveMetadata,
+      (chunk, metadata) => {
+        emitUnscheduledChunkDiagnostic(chunk, metadata, reason);
+        return true;
+      },
+    ),
+    stop: (reason = 'stop') => { void flush(reason); },
     flush,
     snapshot,
   };
@@ -5783,15 +9060,23 @@ export function estimatedBase64DecodedByteLength(value: string): number {
   return Math.max(0, Math.floor((compact.length * 3) / 4) - padding);
 }
 
-function readEphemeralToken(value: unknown): string | null {
+function readEphemeralToken(value: unknown): { value: string; expireTime: string | null } | null {
   if (typeof value === 'string' && value.trim()) {
-    return value.trim();
+    return { value: value.trim(), expireTime: null };
   }
   if (!isRecord(value)) {
     return null;
   }
   const token = (value as EphemeralTokenPayload).value ?? (value as EphemeralTokenPayload).name;
-  return typeof token === 'string' && token.trim() ? token.trim() : null;
+  if (typeof token !== 'string' || !token.trim()) return null;
+  const expireTime = (value as EphemeralTokenPayload).expireTime;
+  if (expireTime !== undefined && !isCanonicalGeminiUtcMillis(expireTime)) {
+    return null;
+  }
+  return {
+    value: token.trim(),
+    expireTime: typeof expireTime === 'string' ? expireTime : null,
+  };
 }
 
 async function parseWebSocketMessage(data: unknown): Promise<unknown> {
@@ -6334,9 +9619,14 @@ function geminiProviderEventCorrelationId(event: unknown, sequence: number): str
   return `gemini-event-${sequence}`;
 }
 
-function createToolCallLedgerEntry(toolCallId: string): GeminiBrowserLiveToolCallLedgerEntry {
+function createToolCallLedgerEntry(
+  toolCallId: string,
+  providerConnectionEpoch: number,
+): GeminiBrowserLiveToolCallLedgerEntry {
   return {
     toolCallId,
+    effectId: `effect:${globalThis.crypto.randomUUID()}`,
+    providerConnectionEpoch,
     toolName: null,
     receivedAt: null,
     cancelledAt: null,
@@ -6348,7 +9638,85 @@ function createToolCallLedgerEntry(toolCallId: string): GeminiBrowserLiveToolCal
     sendSuppressedAt: null,
     suppressionReason: null,
     finalState: 'unknown',
+    syntheticToolEvidence: null,
+    syntheticBuilderJoin: null,
   };
+}
+
+function readGeminiSyntheticBuilderJoin(
+  value: unknown,
+  evidence: GeminiSyntheticToolEvidence | null,
+): GeminiSyntheticBuilderJoin | null {
+  if (value === undefined || value === null) return null;
+  if (!isRecord(value) || evidence === null) {
+    throw new Error('Synthetic Builder join was present without exact browser tool evidence.');
+  }
+  const expectedKeys = new Set([
+    'schema', 'test_run_id', 'scenario_id', 'scenario_version', 'operation_id',
+    'utterance_id', 'provider_input_sequence', 'tool_call_id', 'effect_id',
+    'provider_connection_epoch', 'relay_correlation_id', 'tool_name', 'tool_state',
+    'builder_operation_id', 'parent_thread_id', 'task_id', 'thread_id', 'run_id',
+    'build_id', 'artifact_id', 'artifact_path_sha256', 'ui_projection_state',
+    'cancel_count', 'no_post_cancel_publication', 'source_tool_received_at',
+    'source_backend_accepted_at', 'source_tool_response_sent_at',
+    'source_builder_event_id', 'source_builder_event_at', 'source_ui_projected_at',
+    'scenario_assertions',
+  ]);
+  if (Object.keys(value).some((key) => !expectedKeys.has(key))) {
+    throw new Error('Synthetic Builder join contained an unexpected field.');
+  }
+  const requiredStrings = [
+    'test_run_id', 'scenario_id', 'scenario_version', 'operation_id', 'utterance_id',
+    'tool_call_id', 'effect_id', 'relay_correlation_id', 'tool_name', 'tool_state',
+    'builder_operation_id', 'parent_thread_id', 'task_id', 'thread_id', 'run_id',
+    'build_id', 'source_tool_received_at', 'source_backend_accepted_at',
+  ] as const;
+  if (
+    value.schema !== 'sophia_synthetic_builder_join_v1'
+    || requiredStrings.some((key) => (
+      typeof value[key] !== 'string'
+      || !value[key]
+      || String(value[key]).length > 512
+      || String(value[key]).includes('\0')
+    ))
+    || !Number.isInteger(value.provider_input_sequence)
+    || Number(value.provider_input_sequence) <= 0
+    || !Number.isInteger(value.provider_connection_epoch)
+    || Number(value.provider_connection_epoch) <= 0
+    || !Number.isInteger(value.cancel_count)
+    || Number(value.cancel_count) < 0
+    || typeof value.no_post_cancel_publication !== 'boolean'
+    || !isRecord(value.scenario_assertions)
+  ) {
+    throw new Error('Synthetic Builder join was malformed.');
+  }
+  const exactBindings: Array<[unknown, unknown]> = [
+    [value.test_run_id, evidence.test_run_id],
+    [value.scenario_id, evidence.scenario_id],
+    [value.scenario_version, evidence.scenario_version],
+    [value.operation_id, evidence.operation_id],
+    [value.utterance_id, evidence.utterance_id],
+    [value.provider_input_sequence, evidence.provider_input_sequence],
+    [value.tool_call_id, evidence.tool_call_id],
+    [value.effect_id, evidence.effect_id],
+    [value.provider_connection_epoch, evidence.provider_connection_epoch],
+    [value.relay_correlation_id, evidence.relay_correlation_id],
+    [value.tool_name, evidence.tool_name],
+    [value.source_tool_received_at, evidence.received_at],
+  ];
+  if (exactBindings.some(([actual, expected]) => actual !== expected)) {
+    throw new Error('Synthetic Builder join conflicted with exact browser tool evidence.');
+  }
+  for (const key of [
+    'artifact_id', 'artifact_path_sha256', 'ui_projection_state',
+    'source_tool_response_sent_at', 'source_builder_event_id',
+    'source_builder_event_at', 'source_ui_projected_at',
+  ] as const) {
+    if (value[key] !== null && (typeof value[key] !== 'string' || !value[key])) {
+      throw new Error(`Synthetic Builder join ${key} was malformed.`);
+    }
+  }
+  return value as unknown as GeminiSyntheticBuilderJoin;
 }
 
 function finalizeToolCallLedgerEntry(
@@ -6363,16 +9731,26 @@ function finalizeToolCallLedgerEntry(
   return entry;
 }
 
+function isTerminalToolCallLedgerState(state: GeminiToolCallLedgerFinalState): boolean {
+  return state !== 'unknown';
+}
+
 function emitToolCallLedgerEntry(
   ledger: Map<string, GeminiBrowserLiveToolCallLedgerEntry>,
   toolCallId: string | null,
-  update: Partial<Omit<GeminiBrowserLiveToolCallLedgerEntry, 'toolCallId'>>,
+  update: Partial<Omit<GeminiBrowserLiveToolCallLedgerEntry, 'toolCallId' | 'effectId' | 'providerConnectionEpoch'>>,
   onUpdate?: (entry: GeminiBrowserLiveToolCallLedgerEntry) => void,
 ): GeminiBrowserLiveToolCallLedgerEntry | null {
   if (!toolCallId) {
     return null;
   }
-  const current = ledger.get(toolCallId) ?? createToolCallLedgerEntry(toolCallId);
+  const current = ledger.get(toolCallId);
+  if (!current) {
+    return null;
+  }
+  if (isTerminalToolCallLedgerState(current.finalState)) {
+    return current;
+  }
   const next = finalizeToolCallLedgerEntry({ ...current, ...update });
   ledger.set(toolCallId, next);
   onUpdate?.({ ...next });
@@ -7377,6 +10755,24 @@ function base64ToBytes(value: string): Uint8Array {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+function sameJsonValue(left: unknown, right: unknown): boolean {
+  if (left === right) return true;
+  if (Array.isArray(left) || Array.isArray(right)) {
+    return Array.isArray(left)
+      && Array.isArray(right)
+      && left.length === right.length
+      && left.every((value, index) => sameJsonValue(value, right[index]));
+  }
+  if (!isRecord(left) || !isRecord(right)) return false;
+  const leftKeys = Object.keys(left).sort();
+  const rightKeys = Object.keys(right).sort();
+  return leftKeys.length === rightKeys.length
+    && leftKeys.every(
+      (key, index) => key === rightKeys[index]
+        && sameJsonValue(left[key], right[key]),
+    );
 }
 
 function isSemanticallyEmptyValue(value: unknown): boolean {

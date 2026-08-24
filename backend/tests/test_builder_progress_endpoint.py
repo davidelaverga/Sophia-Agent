@@ -14,13 +14,14 @@ from fastapi.testclient import TestClient
 
 from app.gateway.builder_progress import get_progress_registry
 from app.gateway.builder_progress.registry import reset_for_tests
-from app.gateway.routers.builder_events import internal_router
+from app.gateway.routers import builder_events as routes
 
 
 @pytest.fixture
 def app() -> FastAPI:
     a = FastAPI()
-    a.include_router(internal_router)
+    a.dependency_overrides[routes.require_builder_event_service_auth] = lambda: None
+    a.include_router(routes.internal_router)
     return a
 
 

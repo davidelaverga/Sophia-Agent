@@ -8,6 +8,11 @@ RUN apt-get update && apt-get install -y \
 
 WORKDIR /app
 
+# ONNX Runtime 1.29 enables POSIX telemetry during native initialization. Keep
+# its uploader disabled before smart-turn imports ONNX so shutdown cannot race
+# destruction of the telemetry client's native mutex.
+ENV ORT_DISABLE_TELEMETRY=1
+
 # Install Python deps
 COPY voice/requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt

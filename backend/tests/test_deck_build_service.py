@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import subprocess
+import sys
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,6 +24,7 @@ from deerflow.agents.sophia_agent.middlewares import builder_artifact as builder
 from deerflow.agents.sophia_agent.middlewares.builder_artifact import BuilderArtifactMiddleware
 from deerflow.sandbox.tools import replace_virtual_path
 from deerflow.sophia.deck_build import service as deck_service
+from deerflow.sophia.deck_build import tracing as deck_tracing
 from deerflow.sophia.deck_build.mechanical_gates import MechanicalGateIssue, MechanicalGateResult
 from deerflow.sophia.deck_build.service import DeckBuildService
 from deerflow.sophia.deck_build.storage import load_deck_build
@@ -64,6 +66,63 @@ def _runtime(outputs: Path, *, user_request: str = "Build a visual 3 slide deck"
         context={"thread_id": "builder-thread"},
         config={},
     )
+
+
+def test_synthetic_image_subprocess_excludes_langsmith_authority(monkeypatch) -> None:
+    for key, value in {
+        "LANGSMITH_API_KEY": "raw-langsmith-key",
+        "LANGSMITH_PROJECT": "ordinary-project",
+        "LANGSMITH_TRACING": "true",
+        "SOPHIA_BUILDER_LANGSMITH_TRACING": "true",
+        "OPENAI_API_KEY": "image-provider-key",
+    }.items():
+        monkeypatch.setenv(key, value)
+    runtime = SimpleNamespace(
+        state={
+            "synthetic_test": {
+                "synthetic": True,
+                "test_run_id": "run-1",
+                "test_principal_id": "principal-1",
+                "scenario_id": "V-B01",
+                "scenario_version": "vt00.scenarios.v1",
+                "environment": "production",
+            }
+        },
+        config={},
+        context={},
+    )
+
+    env = deck_service._image_subprocess_env(runtime)
+
+    assert env["OPENAI_API_KEY"] == "image-provider-key"
+    assert "LANGSMITH_API_KEY" not in env
+    assert "LANGSMITH_PROJECT" not in env
+    assert env["LANGSMITH_TRACING"] == "false"
+    assert env["SOPHIA_BUILDER_LANGSMITH_TRACING"] == "false"
+
+
+def test_synthetic_deck_span_skips_langsmith_before_run_allocation(monkeypatch) -> None:
+    import langsmith
+
+    def forbidden(*_args, **_kwargs):
+        raise AssertionError("synthetic deck span must not allocate a LangSmith run")
+
+    monkeypatch.setattr(langsmith, "trace", forbidden)
+    runtime = SimpleNamespace(
+        state={"synthetic_test": True},
+        config={},
+        context={},
+    )
+
+    with deck_tracing.deck_span(
+        "synthetic.deck",
+        runtime=runtime,
+        build_id="build-1",
+        visual_policy="generated",
+        status="running",
+        slide_count=1,
+    ) as span:
+        assert span is None
 
 
 def test_deck_service_reserves_terminal_cleanup_from_shared_deadline(monkeypatch) -> None:
@@ -1764,7 +1823,7 @@ def test_compact_v2_materializes_simple_offset_position_witness() -> None:
         html_body=str(original_html),
     )
     _sanitized, before = deck_service.validate_and_sanitize_slide_html(
-        {"html_source": assembled},
+        SimpleNamespace(selector="slide:1", html_source=assembled),
         allowed_asset_refs=set(),
     )
     assert any("ineffective_position_offset: class dot uses top" in error for error in before.errors)
@@ -1787,7 +1846,7 @@ def test_compact_v2_materializes_simple_offset_position_witness() -> None:
         html_body=str(original_html),
     )
     _sanitized, after = deck_service.validate_and_sanitize_slide_html(
-        {"html_source": assembled},
+        SimpleNamespace(selector="slide:1", html_source=assembled),
         allowed_asset_refs=set(),
     )
     assert after.valid is True
@@ -3091,10 +3150,17 @@ def test_deck_image_batch_timeout_override_wins(tmp_path: Path, monkeypatch) -> 
 
 
 def test_deck_image_batch_subprocess_timeout_is_structured(tmp_path: Path, monkeypatch) -> None:
-    runtime = _runtime(tmp_path / "outputs")
+    runtime = _runtime(
+        tmp_path / "threads" / "builder-thread" / "user-data" / "outputs"
+    )
     script = tmp_path / "generate.py"
     script.write_text("raise SystemExit(0)\n", encoding="utf-8")
-    manifest_host = tmp_path / "outputs" / "assets" / "slide-visuals.manifest.json"
+    manifest_host = Path(
+        replace_virtual_path(
+            f"{_OUTPUTS}assets/slide-visuals.manifest.json",
+            runtime.state["thread_data"],
+        )
+    )
     manifest_host.parent.mkdir(parents=True)
     manifest_host.write_text(json.dumps({"items": [{"output_file": f"{_OUTPUTS}assets/slide-01.png"}]}), encoding="utf-8")
     monkeypatch.setattr(deck_service, "_image_script_path", lambda: script)
@@ -3117,7 +3183,9 @@ def test_deck_image_batch_subprocess_restores_virtual_output_paths(
     tmp_path: Path,
     monkeypatch,
 ) -> None:
-    runtime = _runtime(tmp_path / "outputs")
+    runtime = _runtime(
+        tmp_path / "threads" / "builder-thread" / "user-data" / "outputs"
+    )
     script = tmp_path / "generate.py"
     script.write_text("raise SystemExit(0)\n", encoding="utf-8")
     manifest_path = f"{_OUTPUTS}assets/slide-visuals.manifest.json"

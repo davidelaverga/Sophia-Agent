@@ -416,7 +416,16 @@ class SophiaEventNormalizer:
             return []
 
         self._agent_started_response_ids.add(response_id)
-        return [SophiaEvent("sophia.turn", {"phase": "agent_started"})]
+        return [
+            SophiaEvent(
+                "sophia.turn",
+                {
+                    "phase": "agent_started",
+                    "response_id": response_id,
+                    "turn_id": event.turn_id or response_id,
+                },
+            )
+        ]
 
     def _interrupt_active_response_for_user_input(self, event: ProviderEvent) -> list[SophiaEvent]:
         response_id = self._active_response_id
@@ -434,7 +443,12 @@ class SophiaEventNormalizer:
             events.append(
                 SophiaEvent(
                     "sophia.turn",
-                    {"phase": "agent_ended", "reason": "interrupted_by_user_input"},
+                    {
+                        "phase": "agent_ended",
+                        "reason": "interrupted_by_user_input",
+                        "response_id": response_id,
+                        "turn_id": response_event.turn_id or response_id,
+                    },
                 )
             )
         events.append(
@@ -467,7 +481,11 @@ class SophiaEventNormalizer:
         self._active_assistant_text_key_by_response.pop(response_id, None)
         self._record_response_boundary_source_sequence(event)
 
-        data: dict[str, Any] = {"phase": "agent_ended"}
+        data: dict[str, Any] = {
+            "phase": "agent_ended",
+            "response_id": response_id,
+            "turn_id": event.turn_id or response_id,
+        }
         if reason:
             data["reason"] = reason
         return [SophiaEvent("sophia.turn", data)]

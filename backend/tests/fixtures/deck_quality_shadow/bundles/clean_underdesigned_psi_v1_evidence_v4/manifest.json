@@ -6,40 +6,40 @@
   "direct_evidence_budget_version": "dq1-direct-evidence-v2",
   "evidence_preprocessor_version": "deck-evidence-v4",
   "fixture_id": "clean_underdesigned_psi_v1_evidence_v4",
-  "raster_max_dimension": 2200,
+  "raster_max_dimension": 2048,
   "render_dimensions": {
     "contact-sheet.png": [
       2048,
-      792
+      794
     ],
     "slide-1.png": [
-      2200,
-      1238
+      2048,
+      1152
     ],
     "slide-2.png": [
-      2200,
-      1238
+      2048,
+      1152
     ],
     "slide-3.png": [
-      2200,
-      1238
+      2048,
+      1152
     ],
     "slide-4.png": [
-      2200,
-      1238
+      2048,
+      1152
     ],
     "slide-5.png": [
-      2200,
-      1238
+      2048,
+      1152
     ]
   },
   "render_hashes": {
-    "contact-sheet.png": "7d90a237e56d9c0a9a4c06a8f929b73825710964580201169768f5de15cd225e",
-    "slide-1.png": "47eb2785ee39d18387101bc9464a16c76b0d772ee039449126fd8474c1a1a102",
-    "slide-2.png": "0bbb24d048a69734db8f9030bc133a1f2fba48ff0ad805e8c744a4d81ddcf813",
-    "slide-3.png": "05a222c5e8cb256ed6369a2daeea5528ad98c14269e059fce7f33fdc118ed67f",
-    "slide-4.png": "59f260b0d619c8606904d249be6344dd517ee89e708d0d26c29a23cc791401b9",
-    "slide-5.png": "5cce1c28778f89cd4180735227f4c6b12a54b6ea3a15d7e3981a35b0f7772c09"
+    "contact-sheet.png": "1780de422639239fc7e5d8de677898b2b9969784ecb3d8d5c9dc4523f6ff63ec",
+    "slide-1.png": "b3798486ece24f3d95392fe579690c6854216053b3896c29c2b8c7a664f8ec44",
+    "slide-2.png": "94e785aab01389d938b11a46f361f2d86f7954c7e207ab72c0cfea2c4aad2873",
+    "slide-3.png": "f8d19c2d2a1c73f388430eff75b300531c5fdbf39c5cb0d8fcd34986bbda2f9e",
+    "slide-4.png": "3f761931992a882618e6f926df889f97b3c8dfcf1d140c34b8951b3c3e872005",
+    "slide-5.png": "bfb3386a2cfac0f6185e466fceaa40a7e704af43acc6d783ea0f3e2d909aa236"
   },
   "schema_version": "deck-quality-fixture-bundle/v1",
   "source": "synthetic production canary",

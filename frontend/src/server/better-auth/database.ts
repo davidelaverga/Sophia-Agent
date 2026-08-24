@@ -93,6 +93,10 @@ function createBetterAuthPool() {
   return new Pool({
     connectionString: databaseUrl,
     max: getBetterAuthPoolMax(),
+    // Explicit pg_temp placement matters: when it is omitted PostgreSQL searches
+    // the temporary schema before the listed path, which would let Better Auth's
+    // library-owned unqualified session/user queries resolve to a temp shadow.
+    options: "-c search_path=pg_catalog,public,pg_temp",
     ...(ssl === undefined ? {} : { ssl }),
   });
 }

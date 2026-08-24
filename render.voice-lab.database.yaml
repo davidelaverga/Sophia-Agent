@@ -1,0 +1,14 @@
+# yaml-language-server: $schema=https://render.com/schema/render.yaml.json
+# Isolated VT00 evidence-plane database. Manage this resource with a dedicated
+# database-only Render Blueprint before creating the Voice Lab services.
+# `render.voice-lab.yaml` references this existing database by exact name.
+
+databases:
+  - name: sophia-voice-lab-postgres
+    plan: basic-256mb
+    region: oregon
+    postgresMajorVersion: "17"
+    diskSizeGB: 15
+    storageAutoscalingEnabled: false
+    connectionPool: none
+    ipAllowList: []

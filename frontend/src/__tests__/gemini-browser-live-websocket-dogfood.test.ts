@@ -25,6 +25,7 @@ import {
   connectGeminiBrowserLiveFromBootstrap,
   createGeminiConversationAudioRecorder,
   createGeminiOutputAudioPlaybackController,
+  createGeminiOutputLegMonitor,
   detectGeminiSameResponseRepeatedIntent,
   isGeminiServerInterruptedEvent,
   isGeminiSetupCompleteMessage,
@@ -32,6 +33,10 @@ import {
   pcm16BytesToFloat32,
   pcm16Base64FromFloat32,
   readGeminiOutputAudioChunks,
+  readGeminiLangSmithTraceContext,
+  readGeminiSyntheticTestContext,
+  sameGeminiSyntheticTestContext,
+  readGeminiVoiceLabTraceFaultReceipt,
   readGeminiConfiguredToolNames,
   recordGeminiProviderEventTelemetry,
   createGeminiProviderEventCategoryCounts,
@@ -45,8 +50,17 @@ import {
   type GeminiBrowserLiveDogfoodToolLoopDiagnostic,
   type GeminiInputAudioActivityDiagnostic,
   type GeminiProviderReceiveMetadata,
+  type GeminiOutputAudioPlaybackReceipt,
+  type GeminiProviderConnectionEpochReceipt,
   type GeminiRepeatedIntentGateDiagnostic,
   type GeminiStaleOutputSuppressionDiagnostic,
+  type GeminiSyntheticInputFaultReceipt,
+  type GeminiSyntheticInputLegReceipt,
+  type GeminiSyntheticInputTurnReceipt,
+  type GeminiSyntheticInteractionFaultReceipt,
+  type GeminiSyntheticInteractionReceipt,
+  type GeminiSyntheticTestContext,
+  type GeminiOutputAudioReceivedDiagnostic,
 } from '../app/lib/gemini-browser-live-websocket-dogfood';
 
 const emitArtifactArgs = {
@@ -72,6 +86,140 @@ function deferredResponse() {
     resolve = innerResolve;
   });
   return { promise, resolve };
+}
+
+function acceptedSyntheticDisconnectResponse(
+  init?: RequestInit,
+  extra: Record<string, unknown> = {},
+): Response {
+  const requestBody = typeof init?.body === 'string'
+    ? JSON.parse(init.body) as Record<string, unknown>
+    : {};
+  if (requestBody.schema === 'sophia_gemini_browser_provider_activation_v1') {
+    return new Response(JSON.stringify({
+      activated: true,
+      session_id: requestBody.session_id,
+      provider_connection_epoch: requestBody.candidate_epoch,
+      provider_activation_receipt: requestBody,
+    }), {
+      status: 202,
+      headers: { 'Content-Type': 'application/json' },
+    });
+  }
+  return new Response(JSON.stringify({
+    accepted: true,
+    ...extra,
+    ...(requestBody.browser_provider_close_receipt
+      ? { browser_provider_close_receipt: requestBody.browser_provider_close_receipt }
+      : {}),
+    ...(requestBody.browser_provider_close_receipts
+      ? { browser_provider_close_receipts: requestBody.browser_provider_close_receipts }
+      : {}),
+    ...(requestBody.browser_provider_activation_abort_receipts
+      ? {
+          browser_provider_activation_abort_receipts:
+            requestBody.browser_provider_activation_abort_receipts,
+        }
+      : {}),
+  }), {
+    status: 202,
+    headers: { 'Content-Type': 'application/json' },
+  });
+}
+
+function providerCleanupFields(
+  syntheticTest: GeminiSyntheticTestContext,
+  sessionId: string,
+  options: {
+    admissionId?: string;
+    jti?: string;
+  } = {},
+) {
+  const providerDeadline = new Date(syntheticTest.provider_expires_at);
+  const retentionDeadline = new Date(providerDeadline.getTime() + 86_400_000);
+  const cleanupDeadline = new Date(providerDeadline.getTime() + 600_000);
+  const payload = {
+    v: 1,
+    iss: 'sophia-voice-gateway',
+    aud: 'sophia-voice-lab-provider-cleanup',
+    sub: syntheticTest.principal_id,
+    principal_id: syntheticTest.principal_id,
+    test_run_id: syntheticTest.test_run_id,
+    ...(syntheticTest.scenario_id
+      ? { scenario_id: syntheticTest.scenario_id }
+      : {}),
+    ...(syntheticTest.scenario_version
+      ? { scenario_version: syntheticTest.scenario_version }
+      : {}),
+    ...(syntheticTest.scenario_id === 'V-D02' ? {
+      voice_lab_run_id_sha256: syntheticTest.voice_lab_run_id_sha256,
+      browser_worker_id_sha256: syntheticTest.browser_worker_id_sha256,
+      browser_lease_epoch: syntheticTest.browser_lease_epoch,
+      browser_context_id_sha256: syntheticTest.browser_context_id_sha256,
+    } : {}),
+    synthetic: true,
+    environment: syntheticTest.environment,
+    retention_hours: syntheticTest.retention_hours,
+    cleanup_obligation_id: syntheticTest.cleanup_obligation_id,
+    provider_expires_at: syntheticTest.provider_expires_at,
+    retention_expires_at: retentionDeadline.toISOString(),
+    cleanup_expires_at: cleanupDeadline.toISOString(),
+    allowed_ops: ['provider:settle'],
+    expected_deployment: {
+      frontend: 'a'.repeat(40),
+      backend: 'b'.repeat(40),
+      voice: 'c'.repeat(40),
+    },
+    provider_session_id: sessionId,
+    cleanup_provider_admission_id:
+      options.admissionId ?? '123e4567-e89b-42d3-a456-426614174001',
+    iat: Math.floor(providerDeadline.getTime() / 1000) - 1_800,
+    nbf: Math.floor(providerDeadline.getTime() / 1000) - 1_800,
+    exp: Math.floor(cleanupDeadline.getTime() / 1000),
+    jti: options.jti ?? '123e4567-e89b-42d3-a456-426614174002',
+  };
+  const encodedPayload = Buffer.from(JSON.stringify(payload)).toString('base64url');
+  const signature = Buffer.alloc(32, 7).toString('base64url');
+  return {
+    provider_cleanup_token: `${encodedPayload}.${signature}`,
+    provider_cleanup_expires_at: cleanupDeadline.toISOString(),
+  };
+}
+
+function syntheticProductionBootstrap(
+  sessionId: string,
+  overrides: Record<string, unknown> = {},
+) {
+  const syntheticTest: GeminiSyntheticTestContext = {
+    synthetic: true,
+    principal_id: 'voice-lab-user-1',
+    test_run_id: 'run-provider-cleanup',
+    scenario_id: 'vt00-realtime-001',
+    scenario_version: 'v1',
+    environment: 'production',
+    retention_hours: 24,
+    cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+    provider_expires_at: '2033-05-18T04:03:20.000Z',
+  };
+  return {
+    runtime: 'gemini_live',
+    voice_runtime: 'gemini_live',
+    production_route: true,
+    session_id: sessionId,
+    websocket_url: 'wss://gemini.example/live',
+    ephemeral_token: {
+      value: `auth_tokens/${sessionId}`,
+      expireTime: '2033-05-18T04:03:20.000Z',
+    },
+    setup: { model: 'models/gemini-live', sessionResumption: {} },
+    stream_url: `/api/sophia/voice/gemini/events?session_id=${sessionId}`,
+    disconnect_url: '/api/sophia/voice/gemini/disconnect',
+    provider_activation_url: '/api/sophia/voice/gemini/activate',
+    provider_connection_epoch: 1,
+    synthetic_test: syntheticTest,
+    ...providerCleanupFields(syntheticTest, sessionId),
+    ...overrides,
+  };
 }
 
 class FakeWebSocket {
@@ -123,6 +271,15 @@ class FakeWebSocket {
   emitClose(code = 1006, reason = 'provider closed test socket', wasClean = false) {
     this.readyState = 3;
     this.onclose?.({ code, reason, wasClean } as CloseEvent);
+  }
+}
+
+class StallingCloseFakeWebSocket extends FakeWebSocket {
+  closeCalls = 0;
+
+  override close() {
+    this.closeCalls += 1;
+    this.readyState = 2;
   }
 }
 
@@ -185,7 +342,7 @@ function makeGeminiBrowserSessionFetch(sessionId = 'browser-gemini-1', audioCapt
         JSON.stringify({
           session_id: sessionId,
           websocket_url: 'wss://gemini.example/live',
-          ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+          ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
           setup: {
             model: 'models/gemini-3.1-flash-live-preview',
             inputAudioTranscription: {},
@@ -219,6 +376,94 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
 
     const encoded = pcm16Base64FromFloat32(new Float32Array([0, 1, -1]), 16000);
     expect(Buffer.from(encoded, 'base64')).toHaveLength(6);
+  });
+
+  it('classifies LangSmith trace identity without silently dropping unavailable values', () => {
+    expect(readGeminiLangSmithTraceContext({ langsmith_trace_id: ' trace-voice-1 ' })).toEqual({
+      langsmithTraceId: 'trace-voice-1',
+      langsmithTraceStatus: 'available',
+      langsmithTraceUnavailableReason: null,
+    });
+    expect(readGeminiLangSmithTraceContext({
+      langsmith_trace_id: 'trace-voice-2',
+      langsmith_trace_unavailable_reason: null,
+    })).toEqual({
+      langsmithTraceId: 'trace-voice-2',
+      langsmithTraceStatus: 'available',
+      langsmithTraceUnavailableReason: null,
+    });
+    expect(readGeminiLangSmithTraceContext({ langsmith_trace_id: null })).toEqual({
+      langsmithTraceId: null,
+      langsmithTraceStatus: 'trace_unavailable',
+      langsmithTraceUnavailableReason: 'not_provided',
+    });
+    expect(readGeminiLangSmithTraceContext({ langsmith_trace_id: '   ' })).toEqual({
+      langsmithTraceId: null,
+      langsmithTraceStatus: 'trace_unavailable',
+      langsmithTraceUnavailableReason: 'invalid',
+    });
+    expect(readGeminiLangSmithTraceContext({
+      langsmith_trace_id: null,
+      langsmith_trace_unavailable_reason: 'synthetic_isolation_policy',
+    })).toEqual({
+      langsmithTraceId: null,
+      langsmithTraceStatus: 'trace_unavailable',
+      langsmithTraceUnavailableReason: 'synthetic_isolation_policy',
+    });
+    expect(() => readGeminiLangSmithTraceContext({
+      langsmith_trace_id: 'trace-must-not-coexist',
+      langsmith_trace_unavailable_reason: 'synthetic_isolation_policy',
+    })).toThrow(/both an id and an unavailable reason/i);
+  });
+
+  it('strictly binds governed trace-fault receipts to the app-authenticated V-L01 run', () => {
+    const synthetic = {
+      synthetic: true as const,
+      principal_id: 'voice-lab-user-1',
+      test_run_id: 'run-v-l01',
+      scenario_id: 'V-L01',
+      scenario_version: 'vt00.scenarios.v1',
+      environment: 'production',
+      retention_hours: 24,
+      cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+      provider_expires_at: '2033-05-18T04:03:20.000Z',
+    };
+    const receipt = {
+      schema: 'sophia_voice_lab_trace_fault_v1',
+      fault: 'langsmith_unavailable',
+      phase: 'applied',
+      principal_id: synthetic.principal_id,
+      test_run_id: synthetic.test_run_id,
+      scenario_id: synthetic.scenario_id,
+      scenario_version: synthetic.scenario_version,
+      environment: synthetic.environment,
+      expected_deployment: {
+        frontend: 'a'.repeat(40),
+        backend: 'b'.repeat(40),
+        voice: 'c'.repeat(40),
+      },
+      trace_unavailable: true,
+      canonical_behavior_unchanged: true,
+      applied_at: '2026-08-23T12:00:00.000Z',
+      restored_at: null,
+    };
+    const parsed = readGeminiVoiceLabTraceFaultReceipt(receipt, synthetic, 'trace', 'applied');
+    expect(parsed).toEqual(receipt);
+    expect(readGeminiLangSmithTraceContext({ langsmith_trace_id: null }, parsed)).toEqual({
+      langsmithTraceId: null,
+      langsmithTraceStatus: 'trace_unavailable',
+      langsmithTraceUnavailableReason: 'governed_synthetic_fault',
+    });
+    expect(() => readGeminiVoiceLabTraceFaultReceipt(
+      { ...receipt, test_run_id: 'run-other' },
+      synthetic,
+      'trace',
+      'applied',
+    )).toThrow('did not match the authenticated synthetic run');
+    expect(() => readGeminiLangSmithTraceContext(
+      { langsmith_trace_id: 'trace-must-not-exist' },
+      parsed,
+    )).toThrow('unexpectedly exposed a LangSmith trace id');
   });
 
   it('builds the experimental artifact still-frame realtimeInput video payload without telemetry fields', () => {
@@ -354,6 +599,12 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     const diagnostics: unknown[] = [];
     const microphoneDiagnostics: unknown[] = [];
     const inputActivityDiagnostics: GeminiInputAudioActivityDiagnostic[] = [];
+    const createAnalyser = vi.fn(() => ({
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      getFloatTimeDomainData: vi.fn(),
+    }) as unknown as AnalyserNode);
+    Object.assign(fakeAudioContext, { createAnalyser });
     const connection = await connectGeminiBrowserLiveDogfood({
       userId: 'user-1',
       fetchFn: makeGeminiBrowserSessionFetch('browser-gemini-audio', true) as typeof fetch,
@@ -405,6 +656,10 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       }),
     ]);
     expect(connection.microphoneAudioSettings).toEqual(microphoneDiagnostics[0]);
+    expect(createAnalyser).not.toHaveBeenCalled();
+    expect(fakeAudioContext.createdGains[3]?.connect).toHaveBeenCalledWith(
+      fakeAudioContext.destination,
+    );
     expect(inputActivityDiagnostics).toContainEqual(expect.objectContaining({
       eventType: 'microphone_settings_recorded',
       trigger: 'microphone_track_settings',
@@ -413,6 +668,243 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(fakeAudioContext.createdGains[1]?.connect).toHaveBeenCalledWith(fakeAudioContext.destination);
 
     await connection.close();
+  });
+
+  it('never verifies the output leg from a provider chunk fingerprint alone', async () => {
+    const fakeAudioContext = new FakeAudioContext();
+    const monitor = createGeminiOutputLegMonitor(
+      fakeAudioContext as unknown as AudioContext,
+    );
+    monitor.begin({
+      realizationId: 'realization-source-only',
+      providerChunkFingerprint: 'deadbeef',
+      providerConnectionEpoch: 1,
+      playbackGeneration: 1,
+      scheduledAt: '2026-08-23T12:00:00.000Z',
+    }, fakeAudioContext.destination);
+
+    const receipt = await monitor.finish(
+      'realization-source-only',
+      'completed',
+      '2026-08-23T12:00:01.000Z',
+      1,
+    );
+
+    expect(receipt).toMatchObject({
+      status: 'unavailable',
+      reason: 'webaudio_output_monitor_unavailable',
+      providerChunkFingerprint: 'deadbeef',
+      monitorDigestSha256: null,
+      rawAudioExcluded: true,
+    });
+  });
+
+  it('cryptographically digests non-silent samples from the final WebAudio output bus', async () => {
+    const fakeAudioContext = new FakeAudioContext();
+    const analyser = {
+      fftSize: 32,
+      smoothingTimeConstant: 0,
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      getFloatTimeDomainData: vi.fn((target: Float32Array) => target.fill(0.25)),
+    };
+    Object.assign(fakeAudioContext, {
+      createAnalyser: vi.fn(() => analyser as unknown as AnalyserNode),
+    });
+    const monitor = createGeminiOutputLegMonitor(
+      fakeAudioContext as unknown as AudioContext,
+      60_000,
+    );
+    monitor.begin({
+      realizationId: 'realization-monitored',
+      providerChunkFingerprint: 'cafebabe',
+      providerConnectionEpoch: 2,
+      playbackGeneration: 4,
+      scheduledAt: '2026-08-23T12:00:00.000Z',
+    }, fakeAudioContext.destination);
+    monitor.markStarted('realization-monitored', '2026-08-23T12:00:00.000Z');
+
+    const receipt = await monitor.finish(
+      'realization-monitored',
+      'completed',
+      '2026-08-23T12:00:01.000Z',
+      1,
+    );
+    monitor.stop();
+
+    expect(analyser.connect).toHaveBeenCalledWith(fakeAudioContext.destination);
+    expect(receipt).toMatchObject({
+      status: 'verified',
+      monitorKind: 'webaudio-per-realization-final-path-analyser',
+      monitorDigestAlgorithm: 'sha-256-chain-v1',
+      providerChunkFingerprint: 'cafebabe',
+      providerConnectionEpoch: 2,
+      playbackGeneration: 4,
+      rawAudioExcluded: true,
+    });
+    expect(receipt.monitorDigestSha256).toMatch(/^[a-f0-9]{64}$/);
+    expect(receipt.monitorFrameCount).toBeGreaterThan(0);
+    expect(receipt.monitorNonSilentFrameCount).toBeGreaterThan(0);
+    expect(receipt.monitorRms).toBeGreaterThan(0);
+    expect(receipt.monitorPeak).toBeGreaterThan(0);
+  });
+
+  it('does not sample or verify a queued realization before its exact playback start', async () => {
+    const fakeAudioContext = new FakeAudioContext();
+    const analyser = {
+      fftSize: 32,
+      smoothingTimeConstant: 0,
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      getFloatTimeDomainData: vi.fn((target: Float32Array) => target.fill(0.5)),
+    };
+    Object.assign(fakeAudioContext, {
+      createAnalyser: vi.fn(() => analyser as unknown as AnalyserNode),
+    });
+    const monitor = createGeminiOutputLegMonitor(
+      fakeAudioContext as unknown as AudioContext,
+      60_000,
+    );
+    monitor.begin({
+      realizationId: 'queued-later',
+      providerChunkFingerprint: 'queued-fingerprint',
+      providerConnectionEpoch: 3,
+      playbackGeneration: 5,
+      scheduledAt: '2026-08-23T12:00:02.000Z',
+    }, fakeAudioContext.destination);
+
+    const receipt = await monitor.finish(
+      'queued-later',
+      'flushed',
+      '2026-08-23T12:00:01.000Z',
+      1,
+    );
+
+    expect(analyser.getFloatTimeDomainData).not.toHaveBeenCalled();
+    expect(receipt).toMatchObject({
+      status: 'inconclusive',
+      reason: 'output_monitor_playback_not_started',
+      monitorFrameCount: 0,
+      monitorNonSilentFrameCount: 0,
+      monitorDigestSha256: null,
+    });
+  });
+
+  it('uses isolated analysers for overlapping realizations without cross-verification', async () => {
+    const fakeAudioContext = new FakeAudioContext();
+    const makeAnalyser = (sample: number) => ({
+      fftSize: 32,
+      smoothingTimeConstant: 0,
+      connect: vi.fn(),
+      disconnect: vi.fn(),
+      getFloatTimeDomainData: vi.fn((target: Float32Array) => target.fill(sample)),
+    });
+    const firstAnalyser = makeAnalyser(0.25);
+    const secondAnalyser = makeAnalyser(0);
+    const createAnalyser = vi
+      .fn()
+      .mockReturnValueOnce(firstAnalyser as unknown as AnalyserNode)
+      .mockReturnValueOnce(secondAnalyser as unknown as AnalyserNode);
+    Object.assign(fakeAudioContext, { createAnalyser });
+    const monitor = createGeminiOutputLegMonitor(
+      fakeAudioContext as unknown as AudioContext,
+      60_000,
+    );
+    const firstNode = monitor.begin({
+      realizationId: 'overlap-first',
+      providerChunkFingerprint: 'first-fingerprint',
+      providerConnectionEpoch: 4,
+      playbackGeneration: 6,
+      scheduledAt: '2026-08-23T12:00:00.000Z',
+    }, fakeAudioContext.destination);
+    const secondNode = monitor.begin({
+      realizationId: 'overlap-second',
+      providerChunkFingerprint: 'second-fingerprint',
+      providerConnectionEpoch: 4,
+      playbackGeneration: 6,
+      scheduledAt: '2026-08-23T12:00:00.250Z',
+    }, fakeAudioContext.destination);
+    monitor.markStarted('overlap-first', '2026-08-23T12:00:00.000Z');
+    monitor.markStarted('overlap-second', '2026-08-23T12:00:00.250Z');
+
+    const [firstReceipt, secondReceipt] = await Promise.all([
+      monitor.finish('overlap-first', 'completed', '2026-08-23T12:00:01.000Z', 1),
+      monitor.finish('overlap-second', 'completed', '2026-08-23T12:00:01.250Z', 1),
+    ]);
+
+    expect(firstNode).toBe(firstAnalyser);
+    expect(secondNode).toBe(secondAnalyser);
+    expect(firstNode).not.toBe(secondNode);
+    expect(firstReceipt.status).toBe('verified');
+    expect(firstReceipt.monitorNonSilentFrameCount).toBeGreaterThan(0);
+    expect(secondReceipt).toMatchObject({
+      status: 'inconclusive',
+      reason: 'output_monitor_no_non_silent_frames',
+      monitorNonSilentFrameCount: 0,
+    });
+  });
+
+  it('parses strict product synthetic provenance and rejects extra fields', () => {
+    const context = readGeminiSyntheticTestContext({
+      synthetic: true,
+      principal_id: 'voice-lab-user-1',
+      test_run_id: 'run-001',
+      scenario_id: 'vt00-realtime-001',
+      scenario_version: 'v1',
+      environment: 'production',
+      retention_hours: 24,
+      cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+      provider_expires_at: '2033-05-18T04:03:20.000Z',
+    });
+    expect(context?.test_run_id).toBe('run-001');
+    expect(context?.retention_hours).toBe(24);
+    for (const retention_hours of [0, 169, true, '24']) {
+      expect(() => readGeminiSyntheticTestContext({
+        ...context,
+        retention_hours,
+      })).toThrow('synthetic_test was malformed');
+    }
+    expect(() => readGeminiSyntheticTestContext({
+      ...context,
+      attacker_selected: true,
+    })).toThrow('synthetic_test was malformed');
+  });
+
+  it('requires exact positive-epoch V-D02 browser ownership and includes it in continuation equality', () => {
+    const d02 = {
+      synthetic: true as const,
+      principal_id: 'voice-lab-user-1',
+      test_run_id: 'run-d02',
+      scenario_id: 'V-D02',
+      scenario_version: 'vt00.scenarios.v1',
+      voice_lab_run_id_sha256: 'd'.repeat(64),
+      browser_worker_id_sha256: 'e'.repeat(64),
+      browser_lease_epoch: 6,
+      browser_context_id_sha256: 'f'.repeat(64),
+      environment: 'production',
+      retention_hours: 24,
+      cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+      provider_expires_at: '2033-05-18T04:03:20.000Z',
+    };
+    const parsed = readGeminiSyntheticTestContext(d02);
+    expect(parsed).toEqual(d02);
+    expect(sameGeminiSyntheticTestContext(parsed, { ...parsed })).toBe(true);
+    expect(sameGeminiSyntheticTestContext(parsed, {
+      ...parsed,
+      browser_context_id_sha256: 'a'.repeat(64),
+    })).toBe(false);
+    expect(sameGeminiSyntheticTestContext(parsed, {
+      ...parsed,
+      browser_lease_epoch: 7,
+    })).toBe(false);
+
+    for (const malformed of [
+      { ...d02, browser_context_id_sha256: undefined },
+      { ...d02, browser_lease_epoch: 0 },
+      { ...d02, scenario_id: 'V-A01' },
+    ]) {
+      expect(() => readGeminiSyntheticTestContext(malformed)).toThrow('synthetic_test was malformed');
+    }
   });
 
   it('schedules successive Gemini output audio chunks sequentially and clears playback state', () => {
@@ -469,6 +961,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     }, {
       providerReceiveSequence: 7,
       providerRelaySequence: 4,
+      providerConnectionEpoch: 3,
       providerReceivedAt: '2026-05-20T12:00:00.000Z',
       relayCorrelationId: 'gemini-event-7',
       providerPrimaryCategory: 'serverContent',
@@ -480,6 +973,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(diagnostics[0]).toMatchObject({
       providerReceiveSequence: 7,
       providerRelaySequence: 4,
+      providerConnectionEpoch: 3,
       providerReceivedAt: '2026-05-20T12:00:00.000Z',
       relayCorrelationId: 'gemini-event-7',
       chunkIndex: 0,
@@ -504,6 +998,82 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       playbackGeneration: 0,
     });
     expect((diagnostics[0] as { chunkHash?: unknown }).chunkHash).toMatch(/^[0-9a-f]{8}$/);
+  });
+
+  it('emits distinct scheduled, realized, completed, flushed, and dropped playback receipts', () => {
+    const fakeAudioContext = new FakeAudioContext();
+    fakeAudioContext.currentTime = 5;
+    fakeAudioContext.state = 'running';
+    const receipts: GeminiOutputAudioPlaybackReceipt[] = [];
+    const player = createGeminiOutputAudioPlaybackController(fakeAudioContext as unknown as AudioContext, {
+      onPlaybackReceipt: (receipt) => receipts.push(receipt),
+    });
+    const chunk = Buffer.from([0x00, 0x00, 0x01, 0x00]).toString('base64');
+    const event = {
+      eventId: 'provider-audio-event-1',
+      responseId: 'provider-response-1',
+      serverContent: {
+        responseId: 'provider-response-1',
+        modelTurn: {
+          parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: chunk } }],
+        },
+      },
+    };
+    const metadata: GeminiProviderReceiveMetadata = {
+      providerReceiveSequence: 9,
+      providerConnectionEpoch: 4,
+      providerReceivedAt: '2026-08-23T10:00:00.000Z',
+      relayCorrelationId: 'gemini-event-9',
+      providerPrimaryCategory: 'serverContent',
+      providerCategories: ['serverContent', 'modelTurnAudio'],
+    };
+
+    expect(player.playEvent(event, metadata)).toBe(1);
+    expect(receipts.map((receipt) => receipt.phase)).toEqual(['scheduled', 'started']);
+    expect(receipts[0]).toMatchObject({
+      providerConnectionEpoch: 4,
+      providerReceiveSequence: 9,
+      playbackGeneration: 0,
+      scheduledStartTime: 5,
+    });
+    expect(receipts[1]?.realizationId).toBe(receipts[0]?.realizationId);
+
+    fakeAudioContext.createdSources[0]?.onended?.();
+    expect(receipts.at(-1)).toMatchObject({
+      phase: 'completed',
+      realizationId: receipts[0]?.realizationId,
+      providerConnectionEpoch: 4,
+    });
+
+    expect(player.playEvent({ ...event, eventId: 'provider-audio-event-2' }, {
+      ...metadata,
+      providerReceiveSequence: 10,
+      relayCorrelationId: 'gemini-event-10',
+    })).toBe(1);
+    player.flush('test_manual_flush');
+    expect(receipts.at(-1)).toMatchObject({
+      phase: 'flushed',
+      playbackGeneration: 0,
+      invalidatedByPlaybackGeneration: 1,
+      flushReason: 'test_manual_flush',
+    });
+
+    expect(player.playBase64Chunk('')).toBe(false);
+    expect(receipts.at(-1)).toMatchObject({
+      phase: 'dropped',
+      playbackGeneration: 1,
+      dropReason: 'invalid_pcm_payload',
+    });
+
+    const suspendedContext = new FakeAudioContext();
+    const suspendedReceipts: GeminiOutputAudioPlaybackReceipt[] = [];
+    const suspendedPlayer = createGeminiOutputAudioPlaybackController(
+      suspendedContext as unknown as AudioContext,
+      { onPlaybackReceipt: (receipt) => suspendedReceipts.push(receipt) },
+    );
+    expect(suspendedPlayer.playEvent(event, metadata)).toBe(1);
+    expect(suspendedReceipts.map((receipt) => receipt.phase)).toEqual(['scheduled']);
+    suspendedPlayer.flush('suspended_test_cleanup');
   });
 
   it('suppresses only bounded exact transport audio replays and preserves legitimate repeated audio', () => {
@@ -630,12 +1200,21 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       createGeminiRelayClassificationCounts(),
       event,
       '2026-05-20T00:00:00.000Z',
+      {
+        providerReceiveSequence: 22,
+        providerConnectionEpoch: 6,
+        providerReceivedAt: '2026-05-20T00:00:00.000Z',
+        relayCorrelationId: 'gemini-event-22',
+        providerPrimaryCategory: 'serverContent',
+        providerCategories: ['serverContent', 'inputTranscription', 'outputTranscription'],
+      },
     );
     expect(telemetry.categoryCounts.serverContent.count).toBe(1);
     expect(telemetry.categoryCounts.toolCall.count).toBe(1);
     expect(telemetry.relayClassification).toBe('critical');
     expect(telemetry.relayClassificationCounts.critical.count).toBe(1);
     expect(telemetry.responseId).toBe('provider-response-1');
+    expect(telemetry.providerConnectionEpoch).toBe(6);
     expect(telemetry.toolCallIds).toEqual(['nested-call-1']);
     expect(telemetry.outputAudioChunkCount).toBe(1);
     expect(telemetry.hasInputTranscriptionText).toBe(true);
@@ -812,7 +1391,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-1',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               inputAudioTranscription: {},
@@ -837,6 +1416,8 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     const inputAudioDiagnostics: unknown[] = [];
     const handoffDiagnostics: GeminiBargeInTranscriptHandoffDiagnostic[] = [];
     const outputAudioDetected = vi.fn();
+    const outputAudioReceivedDiagnostics: unknown[] = [];
+    const playbackReceipts: GeminiOutputAudioPlaybackReceipt[] = [];
     let websocket: FakeWebSocket | null = null;
 
     const connection = await connectGeminiBrowserLiveDogfood({
@@ -853,6 +1434,8 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       onProviderEvent: (event) => providerEvents.push(event),
       onRelayStatus: (status) => relayStatuses.push(status),
       onOutputAudio: outputAudioDetected,
+      onOutputAudioReceived: (diagnostic) => outputAudioReceivedDiagnostics.push(diagnostic),
+      onOutputAudioPlaybackReceipt: (receipt) => playbackReceipts.push(receipt),
       onInterruption: (diagnostic) => interruptionDiagnostics.push(diagnostic),
       onStaleOutputSuppression: (diagnostic) => staleSuppressionDiagnostics.push(diagnostic),
       onInputAudioActivity: (diagnostic) => inputAudioDiagnostics.push(diagnostic),
@@ -928,6 +1511,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       event: { setupComplete: {} },
       provider_receive_sequence: 1,
       provider_relay_sequence: 1,
+      provider_connection_epoch: 1,
       provider_primary_category: 'setupComplete',
       provider_categories: ['setupComplete'],
     });
@@ -936,6 +1520,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       event: { serverContent: { outputTranscription: { text: 'Hi.' } } },
       provider_receive_sequence: 2,
       provider_relay_sequence: 2,
+      provider_connection_epoch: 1,
       provider_primary_category: 'serverContent',
       provider_categories: ['serverContent', 'outputTranscription'],
     });
@@ -950,6 +1535,18 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       },
     });
     await vi.waitFor(() => expect(outputAudioDetected).toHaveBeenCalledTimes(1));
+    expect(outputAudioReceivedDiagnostics).toEqual([
+      expect.objectContaining({
+        providerConnectionEpoch: 1,
+        providerReceiveSequence: 3,
+        chunksInEvent: 1,
+        playbackGeneration: 0,
+      }),
+    ]);
+    expect(playbackReceipts.slice(0, 2)).toEqual([
+      expect.objectContaining({ phase: 'scheduled', providerConnectionEpoch: 1 }),
+      expect.objectContaining({ phase: 'started', providerConnectionEpoch: 1 }),
+    ]);
     expect(fakeAudioContext.createdSources).toHaveLength(1);
     expect(fakeAudioContext.createdSources[0]?.start).toHaveBeenCalledWith(10);
 
@@ -1581,7 +2178,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-sustained-barge-in',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview' },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-sustained-barge-in',
           }),
@@ -1660,7 +2257,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-provider-transcription-barge-in',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-provider-transcription-barge-in',
           }),
@@ -1763,7 +2360,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-candidate-decay',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview' },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-candidate-decay',
           }),
@@ -1843,7 +2440,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-priority',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', tools: [{ functionDeclarations: [{ name: 'emit_artifact' }] }] },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-priority',
           }),
@@ -1926,7 +2523,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-coalescing',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-coalescing',
           }),
@@ -1998,7 +2595,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-relay-reuse',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-relay-reuse',
           }),
@@ -2050,7 +2647,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-critical-events',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-critical-events',
           }),
@@ -2126,7 +2723,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-final-boundary',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-final-boundary',
           }),
@@ -2287,7 +2884,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-muted',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', tools: [] },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-muted',
           }),
@@ -2376,13 +2973,15 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         production_route: true,
         session_id: 'gemini-prod-1',
         websocket_url: 'wss://gemini.example/live',
-        ephemeral_token: { value: 'auth_tokens/prod-test' },
+        ephemeral_token: { value: 'auth_tokens/prod-test', expireTime: '2033-05-18T04:03:20.000Z' },
         setup: { model: 'models/gemini-live', tools: [] },
         stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-1',
         provider_event_relay_url: '/api/sophia/voice/gemini/relay',
         disconnect_url: '/api/sophia/voice/gemini/disconnect',
         public_event_boundary: 'SophiaEventNormalizer',
         transport: 'gemini_browser_websocket_ephemeral_token_with_backend_relay',
+        provider_connection_epoch: 7,
+        langsmith_trace_id: 'trace-gemini-prod-1',
       },
       fetchFn: fetchMock as typeof fetch,
       webSocketFactory: (url) => {
@@ -2397,6 +2996,11 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(connection.streamUrl).toBe('/api/sophia/voice/gemini/events?session_id=gemini-prod-1');
     expect(connection.relayUrl).toBe('/api/sophia/voice/gemini/relay');
     expect(connection.publicEventBoundary).toBe('SophiaEventNormalizer');
+    expect(connection.providerConnectionEpoch).toBe(7);
+    expect(connection.getProviderConnectionEpoch()).toBe(7);
+    expect(connection.langsmithTraceId).toBe('trace-gemini-prod-1');
+    expect(connection.langsmithTraceStatus).toBe('available');
+    expect(connection.langsmithTraceUnavailableReason).toBeNull();
     expect(fetchMock).toHaveBeenCalledTimes(1);
     expect(fetchMock).toHaveBeenCalledWith(
       '/api/sophia/voice/gemini/relay',
@@ -2418,6 +3022,324 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         keepalive: true,
       }),
     );
+  });
+
+  it('settles an initial credential as activation-aborted when microphone setup fails before socket creation', async () => {
+    const disconnectBodies: Record<string, unknown>[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/sophia/voice/gemini/disconnect') {
+        disconnectBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      }
+      return acceptedSyntheticDisconnectResponse(init);
+    });
+
+    await expect(connectGeminiBrowserLiveFromBootstrap({
+      userId: 'voice-lab-user-1',
+      bootstrap: syntheticProductionBootstrap('gemini-initial-abort'),
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: () => {
+        throw new Error('socket must not be constructed');
+      },
+      getUserMedia: vi.fn(async () => {
+        throw new Error('microphone unavailable');
+      }),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    })).rejects.toThrow('microphone unavailable');
+
+    expect(disconnectBodies).toHaveLength(1);
+    expect(disconnectBodies[0]?.browser_provider_close_receipts).toEqual([]);
+    expect(disconnectBodies[0]?.browser_provider_activation_abort_receipts).toEqual([
+      expect.objectContaining({
+        schema: 'sophia_gemini_browser_provider_activation_abort_v1',
+        session_id: 'gemini-initial-abort',
+        previous_activated_epoch: 0,
+        candidate_epoch: 1,
+        websocket_created: false,
+      }),
+    ]);
+  });
+
+  it('settles a socket opened before a lost activation acknowledgement with an exact close receipt', async () => {
+    const sockets: FakeWebSocket[] = [];
+    const disconnectBodies: Record<string, unknown>[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/sophia/voice/gemini/activate') {
+        return new Response(JSON.stringify({ unavailable: true }), { status: 503 });
+      }
+      if (String(input) === '/api/sophia/voice/gemini/disconnect') {
+        disconnectBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      }
+      return acceptedSyntheticDisconnectResponse(init);
+    });
+
+    await expect(connectGeminiBrowserLiveFromBootstrap({
+      userId: 'voice-lab-user-1',
+      bootstrap: syntheticProductionBootstrap('gemini-open-before-activation-loss'),
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+      getUserMedia: vi.fn(async () => ({
+        getTracks: () => [],
+        getAudioTracks: () => [],
+      } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    })).rejects.toThrow('Synthetic provider activation was not acknowledged.');
+
+    expect(sockets).toHaveLength(1);
+    expect(sockets[0]?.readyState).toBe(3);
+    expect(disconnectBodies).toHaveLength(1);
+    expect(disconnectBodies[0]?.browser_provider_close_receipts).toEqual([
+      expect.objectContaining({
+        schema: 'sophia_gemini_browser_provider_close_v1',
+        session_id: 'gemini-open-before-activation-loss',
+        provider_connection_epoch: 1,
+        websocket_close_observed: true,
+      }),
+    ]);
+    expect(disconnectBodies[0]?.browser_provider_activation_abort_receipts).toEqual([]);
+  });
+
+  it('closes every tracked provider socket before awaiting a stalled earlier close event', async () => {
+    const sockets: FakeWebSocket[] = [];
+    const continuationUrl = '/api/sophia/voice/gemini/continue-cleanup-race';
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === continuationUrl) {
+        return new Response(JSON.stringify(syntheticProductionBootstrap(
+          'gemini-close-all-epochs',
+          {
+            websocket_url: 'wss://gemini.example/live-continuation',
+            continuation_bootstrap_url: continuationUrl,
+            provider_connection_epoch: 2,
+          },
+        )), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return acceptedSyntheticDisconnectResponse(init);
+    });
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: 'voice-lab-user-1',
+      bootstrap: syntheticProductionBootstrap('gemini-close-all-epochs', {
+        continuation_bootstrap_url: continuationUrl,
+      }),
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = sockets.length === 0
+          ? new StallingCloseFakeWebSocket(url)
+          : new FakeWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+      getUserMedia: vi.fn(async () => ({
+        getTracks: () => [],
+        getAudioTracks: () => [],
+      } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+    sockets[0]?.emitMessage({
+      sessionResumptionUpdate: { resumable: true, newHandle: 'safe-close-all-handle' },
+    });
+    sockets[0]?.emitMessage({ goAway: { timeLeft: '5s' } });
+    await vi.waitFor(() => expect(sockets).toHaveLength(2));
+    await vi.waitFor(() => expect((sockets[0] as StallingCloseFakeWebSocket).closeCalls).toBe(1));
+
+    const closing = connection.close({ providerConnectionEpochs: [1, 2] });
+    await vi.waitFor(() => expect(sockets[1]?.readyState).toBe(3));
+    expect((sockets[0] as StallingCloseFakeWebSocket).closeCalls).toBeGreaterThanOrEqual(1);
+    (sockets[0] as StallingCloseFakeWebSocket).emitClose(1000, 'observed after candidate close', true);
+    const acknowledgement = await closing;
+
+    const disconnectCall = fetchMock.mock.calls.find(
+      ([input]) => String(input) === '/api/sophia/voice/gemini/disconnect',
+    );
+    const disconnectBody = JSON.parse(
+      String((disconnectCall?.[1] as RequestInit | undefined)?.body),
+    ) as Record<string, unknown>;
+    expect(disconnectBody.browser_provider_close_receipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({ provider_connection_epoch: 1 }),
+      expect.objectContaining({ provider_connection_epoch: 2 }),
+    ]));
+    expect(acknowledgement).toEqual({
+      browser_provider_close_receipts: disconnectBody.browser_provider_close_receipts,
+      browser_provider_activation_abort_receipts: disconnectBody.browser_provider_activation_abort_receipts,
+    });
+  });
+
+  it('replays the exact closed receipt set after a lost disconnect acknowledgement', async () => {
+    let disconnectAttempts = 0;
+    const disconnectBodies: Record<string, unknown>[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/sophia/voice/gemini/disconnect') {
+        disconnectAttempts += 1;
+        disconnectBodies.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+        if (disconnectAttempts === 1) return new Response(JSON.stringify({ pending: true }), { status: 503, headers: { 'Content-Type': 'application/json' } });
+      }
+      return acceptedSyntheticDisconnectResponse(init);
+    });
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: 'voice-lab-user-1',
+      bootstrap: syntheticProductionBootstrap('gemini-cleanup-ack-replay'),
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => new FakeWebSocket(url),
+      getUserMedia: vi.fn(async () => ({
+        getTracks: () => [],
+        getAudioTracks: () => [],
+      } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+
+    await expect(connection.close({ providerConnectionEpochs: [1] })).rejects.toThrow('Synthetic provider close receipt was not accepted');
+    const acknowledgement = await connection.close({ providerConnectionEpochs: [1] });
+    expect(disconnectBodies).toHaveLength(2);
+    expect(disconnectBodies[1]).toEqual(disconnectBodies[0]);
+    expect(acknowledgement).toEqual({
+      browser_provider_close_receipts: disconnectBodies[1]?.browser_provider_close_receipts,
+      browser_provider_activation_abort_receipts: disconnectBodies[1]?.browser_provider_activation_abort_receipts,
+    });
+  });
+
+  it('rejects a 202 response whose echoed browser receipt arrays drift', async () => {
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const accepted = acceptedSyntheticDisconnectResponse(init);
+      const body = await accepted.json() as Record<string, unknown>;
+      if (Array.isArray(body.browser_provider_close_receipts)) body.browser_provider_close_receipts = [];
+      return new Response(JSON.stringify(body), { status: 202, headers: { 'Content-Type': 'application/json' } });
+    });
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: 'voice-lab-user-1',
+      bootstrap: syntheticProductionBootstrap('gemini-cleanup-ack-drift'),
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => new FakeWebSocket(url),
+      getUserMedia: vi.fn(async () => ({
+        getTracks: () => [],
+        getAudioTracks: () => [],
+      } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+    });
+    await expect(connection.close({ providerConnectionEpochs: [1] })).rejects.toThrow('Synthetic provider settlement acknowledgement did not match');
+  });
+
+  it('closes the spend-bearing provider socket before awaiting stalled media teardown', async () => {
+    const fakeAudioContext = new FakeAudioContext();
+    let releaseAudioTeardown!: () => void;
+    const stalledAudioTeardown = new Promise<void>((resolve) => {
+      releaseAudioTeardown = resolve;
+    });
+    fakeAudioContext.close = vi.fn(() => stalledAudioTeardown);
+    let socket: FakeWebSocket | null = null;
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => (
+      acceptedSyntheticDisconnectResponse(init)
+    ));
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: 'voice-lab-user-1',
+      bootstrap: syntheticProductionBootstrap('gemini-close-before-media-await'),
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        socket = new FakeWebSocket(url);
+        return socket;
+      },
+      getUserMedia: vi.fn(async () => ({
+        getTracks: () => [],
+        getAudioTracks: () => [],
+      } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+    });
+
+    let cleanupSettled = false;
+    const closing = connection
+      .close({ providerConnectionEpochs: [1] })
+      .finally(() => {
+        cleanupSettled = true;
+      });
+
+    await vi.waitFor(() => expect(socket?.readyState).toBe(3));
+    expect(fakeAudioContext.close).toHaveBeenCalledTimes(1);
+    expect(cleanupSettled).toBe(false);
+    releaseAudioTeardown();
+    await closing;
+  });
+
+  it('captures app-bound governed trace-fault applied and restored receipts', async () => {
+    const syntheticTest = {
+      synthetic: true as const,
+      principal_id: 'voice-lab-user-1',
+      test_run_id: 'run-v-l01',
+      scenario_id: 'V-L01',
+      scenario_version: 'vt00.scenarios.v1',
+      environment: 'production',
+      retention_hours: 24,
+      cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+      provider_expires_at: '2033-05-18T04:03:20.000Z',
+    };
+    const applied = {
+      schema: 'sophia_voice_lab_trace_fault_v1' as const,
+      fault: 'langsmith_unavailable' as const,
+      phase: 'applied' as const,
+      principal_id: syntheticTest.principal_id,
+      test_run_id: syntheticTest.test_run_id,
+      scenario_id: syntheticTest.scenario_id,
+      scenario_version: syntheticTest.scenario_version,
+      environment: syntheticTest.environment,
+      expected_deployment: {
+        frontend: 'a'.repeat(40),
+        backend: 'b'.repeat(40),
+        voice: 'c'.repeat(40),
+      },
+      trace_unavailable: true as const,
+      canonical_behavior_unchanged: true as const,
+      applied_at: '2026-08-23T12:00:00.000Z',
+      restored_at: null,
+    };
+    const restored = {
+      ...applied,
+      phase: 'restored' as const,
+      restored_at: '2026-08-23T12:05:00.000Z',
+    };
+    const receipts: unknown[] = [];
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === '/api/sophia/voice/gemini/disconnect') {
+        return acceptedSyntheticDisconnectResponse(init, {
+          ok: true,
+          closed: true,
+          trace_fault: restored,
+        });
+      }
+      return acceptedSyntheticDisconnectResponse(init);
+    });
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: syntheticTest.principal_id,
+      bootstrap: {
+        runtime: 'gemini_live',
+        voice_runtime: 'gemini_live',
+        production_route: true,
+        session_id: 'gemini-prod-v-l01',
+        websocket_url: 'wss://gemini.example/live',
+        ephemeral_token: { value: 'auth_tokens/prod-v-l01', expireTime: '2033-05-18T04:03:20.000Z' },
+        setup: { model: 'models/gemini-live', tools: [] },
+        stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-v-l01',
+        provider_event_relay_url: '/api/sophia/voice/gemini/relay',
+        disconnect_url: '/api/sophia/voice/gemini/disconnect',
+        provider_activation_url: '/api/sophia/voice/gemini/activate',
+        provider_connection_epoch: 1,
+        langsmith_trace_id: null,
+        synthetic_test: syntheticTest,
+        ...providerCleanupFields(syntheticTest, 'gemini-prod-v-l01'),
+        trace_fault: applied,
+      },
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => new FakeWebSocket(url),
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onSyntheticTraceFaultReceipt: (receipt) => receipts.push(receipt),
+    });
+
+    expect(connection.langsmithTraceId).toBeNull();
+    expect(connection.langsmithTraceUnavailableReason).toBe('governed_synthetic_fault');
+    expect(connection.syntheticTraceFault).toEqual(applied);
+    expect(receipts).toEqual([applied]);
+    await connection.close();
+    expect(receipts).toEqual([applied, restored]);
   });
 
   it('handles Coreview tool calls in the browser and sends a direct Gemini toolResponse', async () => {
@@ -2618,13 +3540,14 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
   it('resumes an established voice socket after an unexpected provider close', async () => {
     const stages: GeminiBrowserLiveDogfoodStage[] = [];
     const sockets: FakeWebSocket[] = [];
+    const epochReceipts: GeminiProviderConnectionEpochReceipt[] = [];
     const continuationUrl = '/api/sophia/voice/gemini/continue';
     const fetchMock = vi.fn(async (input: RequestInfo | URL, _init?: RequestInit) => {
       if (String(input) === continuationUrl) {
         return new Response(JSON.stringify({
           session_id: 'gemini-prod-reconnect',
           websocket_url: 'wss://gemini.example/live-reconnected',
-          ephemeral_token: { value: 'auth_tokens/reconnected' },
+          ephemeral_token: { value: 'auth_tokens/reconnected', expireTime: '2033-05-18T04:03:20.000Z' },
           setup: {
             model: 'models/gemini-live',
             sessionResumption: {},
@@ -2648,11 +3571,12 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         production_route: true,
         session_id: 'gemini-prod-reconnect',
         websocket_url: 'wss://gemini.example/live-initial',
-        ephemeral_token: { value: 'auth_tokens/initial' },
+        ephemeral_token: { value: 'auth_tokens/initial', expireTime: '2033-05-18T04:03:20.000Z' },
         setup: { model: 'models/gemini-live', sessionResumption: {} },
         stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-reconnect',
         continuation_bootstrap_url: continuationUrl,
         provider_connection_epoch: 1,
+        langsmith_trace_id: 'trace-reconnect-stable',
       },
       fetchFn: fetchMock as typeof fetch,
       webSocketFactory: (url) => {
@@ -2663,6 +3587,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
       audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
       onStage: (stage) => stages.push(stage),
+      onProviderConnectionEpoch: (receipt) => epochReceipts.push(receipt),
     });
 
     sockets[0]?.emitMessage({
@@ -2685,6 +3610,27 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       setup?: { sessionResumption?: { handle?: string } };
     };
     expect(reconnectSetup.setup?.sessionResumption?.handle).toBe('safe-handle-1');
+    expect(connection.providerConnectionEpoch).toBe(2);
+    expect(connection.getProviderConnectionEpoch()).toBe(2);
+    expect(connection.langsmithTraceId).toBe('trace-reconnect-stable');
+    expect(epochReceipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        phase: 'bootstrap',
+        providerConnectionEpoch: 1,
+        langsmithTraceId: 'trace-reconnect-stable',
+      }),
+      expect.objectContaining({
+        phase: 'rotated',
+        previousProviderConnectionEpoch: 1,
+        providerConnectionEpoch: 2,
+        langsmithTraceId: 'trace-reconnect-stable',
+      }),
+      expect.objectContaining({
+        phase: 'restored',
+        providerConnectionEpoch: 2,
+        continuityState: 'active',
+      }),
+    ]));
     const continuationCall = fetchMock.mock.calls.find(([input]) => String(input) === continuationUrl);
     expect(JSON.parse(String((continuationCall?.[1] as RequestInit | undefined)?.body))).toEqual({
       expected_epoch: 1,
@@ -2692,6 +3638,801 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       secret_generation: 1,
     });
 
+    await connection.close();
+  });
+
+  it('rejects a continuation bootstrap bound to another synthetic test run', async () => {
+    const stages: GeminiBrowserLiveDogfoodStage[] = [];
+    const sockets: FakeWebSocket[] = [];
+    const continuationUrl = '/api/sophia/voice/gemini/continue';
+    const syntheticRunA: GeminiSyntheticTestContext = {
+      synthetic: true,
+      principal_id: 'voice-lab-user-1',
+      test_run_id: 'run-A',
+      scenario_id: 'vt00-realtime-001',
+      scenario_version: 'v1',
+      environment: 'production',
+      retention_hours: 24,
+      cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+      provider_expires_at: '2033-05-18T04:03:20.000Z',
+    };
+    const fetchMock = vi.fn(async (input: RequestInfo | URL, init?: RequestInit) => {
+      if (String(input) === continuationUrl) {
+        const continuationSyntheticTest: GeminiSyntheticTestContext = {
+          ...syntheticRunA,
+          test_run_id: 'run-B',
+        };
+        return new Response(JSON.stringify({
+          session_id: 'gemini-prod-cross-run',
+          websocket_url: 'wss://gemini.example/live-reconnected',
+          ephemeral_token: { value: 'auth_tokens/reconnected', expireTime: '2033-05-18T04:03:20.000Z' },
+          setup: { model: 'models/gemini-live', sessionResumption: {} },
+          stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-cross-run',
+          continuation_bootstrap_url: continuationUrl,
+          provider_connection_epoch: 2,
+          synthetic_test: continuationSyntheticTest,
+          ...providerCleanupFields(
+            continuationSyntheticTest,
+            'gemini-prod-cross-run',
+            { jti: '123e4567-e89b-42d3-a456-426614174003' },
+          ),
+        }), { status: 200, headers: { 'Content-Type': 'application/json' } });
+      }
+      return acceptedSyntheticDisconnectResponse(init);
+    });
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: 'voice-lab-user-1',
+      bootstrap: {
+        runtime: 'gemini_live',
+        voice_runtime: 'gemini_live',
+        production_route: true,
+        session_id: 'gemini-prod-cross-run',
+        websocket_url: 'wss://gemini.example/live-initial',
+        ephemeral_token: { value: 'auth_tokens/initial', expireTime: '2033-05-18T04:03:20.000Z' },
+        setup: { model: 'models/gemini-live', sessionResumption: {} },
+        stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-cross-run',
+        continuation_bootstrap_url: continuationUrl,
+        provider_activation_url: '/api/sophia/voice/gemini/activate',
+        provider_connection_epoch: 1,
+        synthetic_test: syntheticRunA,
+        ...providerCleanupFields(syntheticRunA, 'gemini-prod-cross-run'),
+      },
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        const socket = new FakeWebSocket(url);
+        sockets.push(socket);
+        return socket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onStage: (stage) => stages.push(stage),
+    });
+    expect(connection.syntheticTest?.test_run_id).toBe('run-A');
+    sockets[0]?.emitMessage({
+      sessionResumptionUpdate: { resumable: true, newHandle: 'safe-handle-run-A' },
+    });
+    sockets[0]?.emitClose(1011, 'provider transport reset', false);
+
+    await vi.waitFor(() => expect(stages).toContain('connection_lost'));
+    expect(sockets).toHaveLength(1);
+    expect(connection.providerConnectionEpoch).toBe(1);
+    await connection.close();
+  });
+
+  it('binds independently measured outgoing PCM and accepted turns to the exact injected operation', async () => {
+    const fakeAudioContext = new FakeAudioContext();
+    const legReceipts: GeminiSyntheticInputLegReceipt[] = [];
+    const turnReceipts: GeminiSyntheticInputTurnReceipt[] = [];
+    const inputDiagnostics: GeminiInputAudioActivityDiagnostic[] = [];
+    let websocket: FakeWebSocket | null = null;
+    const syntheticTest = {
+      synthetic: true as const,
+      principal_id: 'voice-lab-user-1',
+      test_run_id: 'run-input-evidence-A',
+      scenario_id: 'vt00-input-001',
+      scenario_version: 'v1',
+      environment: 'production',
+      retention_hours: 24,
+      cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+      provider_expires_at: '2033-05-18T04:03:20.000Z',
+    };
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: syntheticTest.principal_id,
+      bootstrap: {
+        runtime: 'gemini_live',
+        voice_runtime: 'gemini_live',
+        production_route: true,
+        session_id: 'gemini-input-evidence',
+        websocket_url: 'wss://gemini.example/live',
+        ephemeral_token: { value: 'auth_tokens/input-evidence', expireTime: '2033-05-18T04:03:20.000Z' },
+        setup: { model: 'models/gemini-live', inputAudioTranscription: {} },
+        stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-input-evidence',
+        provider_activation_url: '/api/sophia/voice/gemini/activate',
+        provider_connection_epoch: 3,
+        synthetic_test: syntheticTest,
+        ...providerCleanupFields(syntheticTest, 'gemini-input-evidence'),
+      },
+      fetchFn: vi.fn(async (_input, init) => acceptedSyntheticDisconnectResponse(init)) as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({
+        getTracks: () => [],
+        getAudioTracks: () => [],
+      } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      onInputAudioActivity: (diagnostic) => inputDiagnostics.push(diagnostic),
+      onSyntheticInputLegReceipt: (receipt) => legReceipts.push(receipt),
+      onSyntheticInputTurnReceipt: (receipt) => turnReceipts.push(receipt),
+    });
+    const sourceSha = 'a'.repeat(64);
+    const signal = (phase: string, testRunId = syntheticTest.test_run_id) => ({
+      schema: 'sophia_voice_lab_input_operation_v1',
+      phase,
+      test_run_id: testRunId,
+      operation_id: 'operation-input-1',
+      utterance_id: 'utterance-input-1',
+      source_sha256: sourceSha,
+      expected_silence: false,
+      settlement_window_ms: 5_000,
+    });
+
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', {
+      detail: signal('scheduled'),
+    }));
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', {
+      detail: signal('started'),
+    }));
+    fakeAudioContext.processor.onaudioprocess?.({
+      inputBuffer: { getChannelData: () => new Float32Array(4096).fill(0.25) },
+      outputBuffer: { numberOfChannels: 1, getChannelData: () => new Float32Array(4096) },
+    } as unknown as AudioProcessingEvent);
+    expect(inputDiagnostics.at(-1)).toMatchObject({
+      eventType: 'input_audio_frame_sent',
+      syntheticInputOperation: {
+        test_run_id: syntheticTest.test_run_id,
+        operation_id: 'operation-input-1',
+        utterance_id: 'utterance-input-1',
+        phase: 'started',
+      },
+      outgoingPcm: {
+        nonzero_sample_count: expect.any(Number),
+        raw_audio_excluded: true,
+      },
+    });
+    expect(inputDiagnostics.at(-1)?.outgoingPcm?.nonzero_sample_count).toBeGreaterThan(0);
+
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'hello' } } });
+    await vi.waitFor(() => expect(turnReceipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: 'provider_input_transcription',
+        outcome: 'provider_input_transcription_observed',
+        test_run_id: syntheticTest.test_run_id,
+        operation_id: 'operation-input-1',
+      }),
+    ])));
+    connection.acknowledgeSyntheticPublicUserTurn({
+      publicUtteranceId: 'public-user-turn-1',
+      transcriptLength: 5,
+    });
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', {
+      detail: signal('completed'),
+    }));
+    await vi.waitFor(() => expect(legReceipts).toHaveLength(1));
+    expect(legReceipts[0]).toMatchObject({
+      schema: 'sophia_gemini_input_leg_v1',
+      status: 'verified',
+      reason: 'outgoing_pcm_non_silent_observed',
+      test_run_id: syntheticTest.test_run_id,
+      operation_id: 'operation-input-1',
+      utterance_id: 'utterance-input-1',
+      provider_connection_epoch: 3,
+      nonzero_sample_count: expect.any(Number),
+      pcm_digest_algorithm: 'sha-256-chain-v1',
+      raw_audio_excluded: true,
+    });
+    expect(legReceipts[0]?.pcm_sha256_chain).toMatch(/^[a-f0-9]{64}$/);
+    expect(JSON.stringify(legReceipts)).not.toContain('audioBase64');
+    expect(turnReceipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: 'public_user_turn',
+        outcome: 'public_user_turn_accepted',
+        public_utterance_id: 'public-user-turn-1',
+      }),
+    ]));
+    await connection.close();
+  });
+
+  it('binds one synthetic Builder tool settlement to app-authored input, effect, epoch, task, and run ids', async () => {
+    const syntheticTest = {
+      synthetic: true as const,
+      principal_id: 'voice-lab-user-1',
+      test_run_id: 'run-builder-join-A',
+      scenario_id: 'V-B01',
+      scenario_version: 'vt00.scenarios.v1',
+      environment: 'production',
+      retention_hours: 24,
+      cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+      provider_expires_at: '2033-05-18T04:03:20.000Z',
+    };
+    const ledgerUpdates: import('../app/lib/gemini-browser-live-websocket-dogfood').GeminiBrowserLiveToolCallLedgerEntry[] = [];
+    const builderInteractionFaults: GeminiSyntheticInteractionFaultReceipt[] = [];
+    const relayBodies: Array<Record<string, unknown>> = [];
+    const fetchMock = vi.fn(async (_input: RequestInfo | URL, init?: RequestInit) => {
+      const body = JSON.parse(String(init?.body ?? '{}')) as Record<string, unknown>;
+      relayBodies.push(body);
+      const event = body.event as { toolCall?: unknown } | undefined;
+      if (!event?.toolCall) {
+        return acceptedSyntheticDisconnectResponse(init);
+      }
+      const evidence = (body.synthetic_tool_evidence as Array<Record<string, unknown>>)[0];
+      const join = {
+        schema: 'sophia_synthetic_builder_join_v1',
+        test_run_id: evidence.test_run_id,
+        scenario_id: evidence.scenario_id,
+        scenario_version: evidence.scenario_version,
+        operation_id: evidence.operation_id,
+        utterance_id: evidence.utterance_id,
+        provider_input_sequence: evidence.provider_input_sequence,
+        tool_call_id: evidence.tool_call_id,
+        effect_id: evidence.effect_id,
+        provider_connection_epoch: evidence.provider_connection_epoch,
+        relay_correlation_id: evidence.relay_correlation_id,
+        tool_name: evidence.tool_name,
+        tool_state: 'backend_accepted',
+        builder_operation_id: 'builder-operation-001',
+        parent_thread_id: 'parent-thread-001',
+        task_id: 'builder-task-001',
+        thread_id: 'builder-task-001',
+        run_id: 'builder-run-001',
+        build_id: 'builder-operation-001',
+        artifact_id: null,
+        artifact_path_sha256: null,
+        ui_projection_state: null,
+        cancel_count: 0,
+        no_post_cancel_publication: true,
+        source_tool_received_at: evidence.received_at,
+        source_backend_accepted_at: '2026-08-23T12:00:01.000Z',
+        source_tool_response_sent_at: null,
+        source_builder_event_id: null,
+        source_builder_event_at: null,
+        source_ui_projected_at: null,
+        scenario_assertions: {
+          artifact_created: false,
+          artifact_visible_current: false,
+          accepted_turn_count: 1,
+          tool_dispatch_count: 1,
+          owned_task_count: 1,
+          stable_task_identity: true,
+          revision_updated_same_task: false,
+          current_behavior_result: false,
+          cancel_request_count: 0,
+          cancel_terminal_settled: false,
+          no_post_cancel_publication: true,
+        },
+      };
+      return new Response(JSON.stringify({
+        accepted: true,
+        client_actions: [{
+          type: 'gemini_tool_response',
+          payload: {
+            toolResponse: {
+              functionResponses: [{
+                id: 'builder-call-001',
+                name: 'start_builder_task',
+                response: {
+                  ok: true,
+                  status: 'running',
+                  task_id: 'builder-task-001',
+                  run_id: 'builder-run-001',
+                  synthetic_builder_join: join,
+                },
+              }],
+            },
+          },
+        }],
+      }), {
+        status: 202,
+        headers: { 'Content-Type': 'application/json' },
+      });
+    });
+    let websocket: FakeWebSocket | null = null;
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: syntheticTest.principal_id,
+      threadId: 'parent-thread-001',
+      bootstrap: {
+        runtime: 'gemini_live',
+        voice_runtime: 'gemini_live',
+        production_route: true,
+        session_id: 'gemini-builder-join',
+        websocket_url: 'wss://gemini.example/live',
+        ephemeral_token: { value: 'auth_tokens/builder-join', expireTime: '2033-05-18T04:03:20.000Z' },
+        setup: {
+          model: 'models/gemini-live',
+          inputAudioTranscription: {},
+          tools: [{ functionDeclarations: [{ name: 'start_builder_task' }] }],
+        },
+        stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-builder-join',
+        provider_event_relay_url: '/api/sophia/voice/gemini/relay',
+        provider_activation_url: '/api/sophia/voice/gemini/activate',
+        provider_connection_epoch: 7,
+        synthetic_test: syntheticTest,
+        ...providerCleanupFields(syntheticTest, 'gemini-builder-join'),
+      },
+      fetchFn: fetchMock as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({
+        getTracks: () => [],
+        getAudioTracks: () => [],
+      } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onToolCallLedgerUpdate: (entry) => ledgerUpdates.push(entry),
+      onSyntheticInteractionFaultReceipt: (receipt) => builderInteractionFaults.push(receipt),
+    });
+    const operation = (phase: string) => ({
+      schema: 'sophia_voice_lab_input_operation_v1',
+      phase,
+      test_run_id: syntheticTest.test_run_id,
+      operation_id: 'operation-builder-001',
+      utterance_id: 'utterance-builder-001',
+      source_sha256: 'd'.repeat(64),
+      expected_silence: false,
+      settlement_window_ms: 5_000,
+    });
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', { detail: operation('scheduled') }));
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', { detail: operation('started') }));
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'Create an HTML brief.' } } });
+    await vi.waitFor(() => expect(relayBodies.length).toBeGreaterThan(0));
+    connection.acknowledgeSyntheticPublicUserTurn({
+      publicUtteranceId: 'public-builder-001',
+      transcriptLength: 21,
+    });
+    websocket?.emitMessage({
+      toolCall: {
+        functionCalls: [{
+          id: 'builder-call-001',
+          name: 'start_builder_task',
+          args: { description: 'Create an HTML brief.', task_type: 'document' },
+        }],
+      },
+    });
+
+    await vi.waitFor(() => expect(ledgerUpdates.some((entry) => (
+      entry.toolCallId === 'builder-call-001' && entry.finalState === 'responded'
+    ))).toBe(true));
+    const terminal = ledgerUpdates.filter((entry) => entry.toolCallId === 'builder-call-001').at(-1);
+    expect(terminal).toMatchObject({
+      providerConnectionEpoch: 7,
+      finalState: 'responded',
+      syntheticToolEvidence: {
+        test_run_id: syntheticTest.test_run_id,
+        operation_id: 'operation-builder-001',
+        utterance_id: 'utterance-builder-001',
+        provider_input_sequence: 2,
+        public_utterance_id: 'public-builder-001',
+        tool_call_id: 'builder-call-001',
+        provider_connection_epoch: 7,
+      },
+      syntheticBuilderJoin: {
+        test_run_id: syntheticTest.test_run_id,
+        operation_id: 'operation-builder-001',
+        task_id: 'builder-task-001',
+        thread_id: 'builder-task-001',
+        run_id: 'builder-run-001',
+        tool_state: 'responded',
+        source_tool_response_sent_at: expect.any(String),
+      },
+    });
+    expect(terminal?.effectId).toMatch(/^effect:[a-f0-9-]{36}$/);
+    expect(terminal?.syntheticBuilderJoin?.effect_id).toBe(terminal?.effectId);
+    expect(builderInteractionFaults).toEqual([]);
+    await connection.close();
+  });
+
+  it('binds one accepted synthetic input to its exact assistant response, output chunks, and playback', async () => {
+    const fakeAudioContext = new FakeAudioContext();
+    const interactionReceipts: GeminiSyntheticInteractionReceipt[] = [];
+    const interactionFaults: GeminiSyntheticInteractionFaultReceipt[] = [];
+    const inputTurns: GeminiSyntheticInputTurnReceipt[] = [];
+    const outputReceived: GeminiOutputAudioReceivedDiagnostic[] = [];
+    const playbackReceipts: GeminiOutputAudioPlaybackReceipt[] = [];
+    let websocket: FakeWebSocket | null = null;
+    const syntheticTest = {
+      synthetic: true as const,
+      principal_id: 'voice-lab-user-1',
+      test_run_id: 'run-interaction-A',
+      scenario_id: 'V-A01',
+      scenario_version: 'vt00.scenarios.v1',
+      environment: 'production',
+      retention_hours: 24,
+      cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+      provider_expires_at: '2033-05-18T04:03:20.000Z',
+    };
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: syntheticTest.principal_id,
+      bootstrap: {
+        runtime: 'gemini_live',
+        voice_runtime: 'gemini_live',
+        production_route: true,
+        session_id: 'gemini-interaction-lineage',
+        websocket_url: 'wss://gemini.example/live',
+        ephemeral_token: { value: 'auth_tokens/interaction-lineage', expireTime: '2033-05-18T04:03:20.000Z' },
+        setup: { model: 'models/gemini-live', inputAudioTranscription: {} },
+        stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-interaction-lineage',
+        provider_event_relay_url: '/api/sophia/voice/gemini/relay',
+        provider_activation_url: '/api/sophia/voice/gemini/activate',
+        provider_connection_epoch: 9,
+        synthetic_test: syntheticTest,
+        ...providerCleanupFields(syntheticTest, 'gemini-interaction-lineage'),
+      },
+      fetchFn: vi.fn(async (_input, init) => acceptedSyntheticDisconnectResponse(init)) as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({
+        getTracks: () => [],
+        getAudioTracks: () => [],
+      } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      onSyntheticInputTurnReceipt: (receipt) => inputTurns.push(receipt),
+      onSyntheticInteractionReceipt: (receipt) => interactionReceipts.push(receipt),
+      onSyntheticInteractionFaultReceipt: (receipt) => interactionFaults.push(receipt),
+      onOutputAudioReceived: (diagnostic) => outputReceived.push(diagnostic),
+      onOutputAudioPlaybackReceipt: (receipt) => playbackReceipts.push(receipt),
+    });
+    const operation = (phase: string) => ({
+      schema: 'sophia_voice_lab_input_operation_v1',
+      phase,
+      test_run_id: syntheticTest.test_run_id,
+      operation_id: 'operation-a01-001',
+      utterance_id: 'utterance-a01-001',
+      source_sha256: 'a'.repeat(64),
+      expected_silence: false,
+      settlement_window_ms: 5_000,
+    });
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', { detail: operation('scheduled') }));
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', { detail: operation('started') }));
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'Tell me the result.' } } });
+    await vi.waitFor(() => expect(inputTurns.some((receipt) => (
+      receipt.outcome === 'provider_input_transcription_observed'
+    ))).toBe(true));
+    connection.acknowledgeSyntheticPublicUserTurn({
+      publicUtteranceId: 'public-a01-001',
+      transcriptLength: 19,
+    });
+
+    const audioChunk = Buffer.from([0x00, 0x00, 0x01, 0x00]).toString('base64');
+    websocket?.emitMessage({
+      eventId: 'provider-event-a01-001',
+      responseId: 'provider-response-a01-001',
+      serverContent: {
+        responseId: 'provider-response-a01-001',
+        outputTranscription: { text: 'Here is the result.' },
+        modelTurn: {
+          parts: [{ inlineData: { mimeType: 'audio/pcm;rate=24000', data: audioChunk } }],
+        },
+        turnComplete: true,
+      },
+    });
+
+    await vi.waitFor(() => expect(interactionReceipts.some((receipt) => (
+      receipt.phase === 'assistant_response_completed'
+    ))).toBe(true));
+    const assigned = interactionReceipts.find((receipt) => receipt.phase === 'assistant_response_assigned');
+    const completed = interactionReceipts.find((receipt) => receipt.phase === 'assistant_response_completed');
+    expect(assigned).toMatchObject({
+      schema: 'sophia_gemini_interaction_v1',
+      test_run_id: syntheticTest.test_run_id,
+      scenario_id: 'V-A01',
+      operation_id: 'operation-a01-001',
+      utterance_id: 'utterance-a01-001',
+      public_utterance_id: 'public-a01-001',
+      response_id: 'provider-response-a01-001',
+      assistant_turn_id: 'provider-response-a01-001',
+      provider_connection_epoch: 9,
+      raw_audio_excluded: true,
+      raw_transcript_excluded: true,
+      secrets_excluded: true,
+    });
+    expect(completed).toMatchObject({
+      interaction_id: assigned?.interaction_id,
+      response_boundary_reason: 'turn_complete',
+      output_audio_received_count: 1,
+      output_audio_playback_scheduled_count: 1,
+      output_audio_playback_started_count: 1,
+    });
+    expect(outputReceived[0]?.syntheticInteraction).toMatchObject({
+      interaction_id: assigned?.interaction_id,
+      operation_id: 'operation-a01-001',
+      response_id: 'provider-response-a01-001',
+    });
+    expect(playbackReceipts.find((receipt) => receipt.phase === 'scheduled')?.syntheticInteraction).toMatchObject({
+      interaction_id: assigned?.interaction_id,
+      assistant_turn_id: 'provider-response-a01-001',
+    });
+    fakeAudioContext.createdSources[0]?.onended?.();
+    expect(interactionReceipts.at(-1)).toMatchObject({
+      phase: 'output_settled',
+      interaction_id: assigned?.interaction_id,
+      output_audio_playback_completed_count: 1,
+    });
+    expect(interactionFaults).toEqual([]);
+    await connection.close();
+  });
+
+  it('hard-fails an ambiguous synthetic assistant response without a stable response id', async () => {
+    const interactionFaults: GeminiSyntheticInteractionFaultReceipt[] = [];
+    const inputTurns: GeminiSyntheticInputTurnReceipt[] = [];
+    let websocket: FakeWebSocket | null = null;
+    const syntheticTest = {
+      synthetic: true as const,
+      principal_id: 'voice-lab-user-1',
+      test_run_id: 'run-interaction-missing-response',
+      scenario_id: 'V-A03',
+      scenario_version: 'vt00.scenarios.v1',
+      environment: 'production',
+      retention_hours: 24,
+      cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+      provider_expires_at: '2033-05-18T04:03:20.000Z',
+    };
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: syntheticTest.principal_id,
+      bootstrap: {
+        runtime: 'gemini_live',
+        voice_runtime: 'gemini_live',
+        production_route: true,
+        session_id: 'gemini-interaction-missing-response',
+        websocket_url: 'wss://gemini.example/live',
+        ephemeral_token: { value: 'auth_tokens/interaction-missing-response', expireTime: '2033-05-18T04:03:20.000Z' },
+        setup: { model: 'models/gemini-live', inputAudioTranscription: {} },
+        stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-interaction-missing-response',
+        provider_activation_url: '/api/sophia/voice/gemini/activate',
+        provider_connection_epoch: 3,
+        synthetic_test: syntheticTest,
+        ...providerCleanupFields(syntheticTest, 'gemini-interaction-missing-response'),
+      },
+      fetchFn: vi.fn(async (_input, init) => acceptedSyntheticDisconnectResponse(init)) as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [], getAudioTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => new FakeAudioContext() as unknown as AudioContext,
+      onSyntheticInputTurnReceipt: (receipt) => inputTurns.push(receipt),
+      onSyntheticInteractionFaultReceipt: (receipt) => interactionFaults.push(receipt),
+    });
+    const operation = (phase: string) => ({
+      schema: 'sophia_voice_lab_input_operation_v1',
+      phase,
+      test_run_id: syntheticTest.test_run_id,
+      operation_id: 'operation-a03-001',
+      utterance_id: 'utterance-a03-001',
+      source_sha256: 'b'.repeat(64),
+      expected_silence: false,
+      settlement_window_ms: 5_000,
+    });
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', { detail: operation('scheduled') }));
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', { detail: operation('started') }));
+    websocket?.emitMessage({ serverContent: { inputTranscription: { text: 'Continue.' } } });
+    await vi.waitFor(() => expect(inputTurns.some((receipt) => (
+      receipt.outcome === 'provider_input_transcription_observed'
+    ))).toBe(true));
+    connection.acknowledgeSyntheticPublicUserTurn({ publicUtteranceId: 'public-a03-001', transcriptLength: 9 });
+    websocket?.emitMessage({ serverContent: { outputTranscription: { text: 'Ambiguous.' } } });
+
+    await vi.waitFor(() => expect(interactionFaults).toEqual([
+      expect.objectContaining({ code: 'interaction_response_id_missing' }),
+    ]));
+    expect(websocket?.readyState).toBe(3);
+    await connection.close();
+  });
+
+  it.each([
+    ['cross-run', 'input_operation_signal_binding_mismatch'],
+    ['malformed', 'input_operation_signal_malformed'],
+  ] as const)('hard-fails a %s Voice Lab input signal instead of silently dropping provenance', async (kind, expectedCode) => {
+    const fakeAudioContext = new FakeAudioContext();
+    const faultReceipts: GeminiSyntheticInputFaultReceipt[] = [];
+    let websocket: FakeWebSocket | null = null;
+    const syntheticTest = {
+      synthetic: true as const,
+      principal_id: 'voice-lab-user-1',
+      test_run_id: 'run-input-fault-A',
+      scenario_id: 'vt00-input-fault-001',
+      scenario_version: 'v1',
+      environment: 'production',
+      retention_hours: 24,
+      cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+      provider_expires_at: '2033-05-18T04:03:20.000Z',
+    };
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: syntheticTest.principal_id,
+      bootstrap: {
+        runtime: 'gemini_live',
+        voice_runtime: 'gemini_live',
+        production_route: true,
+        session_id: `gemini-input-fault-${kind}`,
+        websocket_url: 'wss://gemini.example/live',
+        ephemeral_token: { value: 'auth_tokens/input-fault', expireTime: '2033-05-18T04:03:20.000Z' },
+        setup: { model: 'models/gemini-live' },
+        stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-input-fault',
+        provider_activation_url: '/api/sophia/voice/gemini/activate',
+        synthetic_test: syntheticTest,
+        ...providerCleanupFields(syntheticTest, `gemini-input-fault-${kind}`),
+      },
+      fetchFn: vi.fn(async (_input, init) => acceptedSyntheticDisconnectResponse(init)) as typeof fetch,
+      webSocketFactory: (url) => {
+        websocket = new FakeWebSocket(url);
+        return websocket;
+      },
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [], getAudioTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      onSyntheticInputFaultReceipt: (receipt) => faultReceipts.push(receipt),
+    });
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', {
+      detail: {
+        schema: 'sophia_voice_lab_input_operation_v1',
+        phase: 'scheduled',
+        test_run_id: kind === 'cross-run' ? 'run-input-fault-B' : syntheticTest.test_run_id,
+        operation_id: 'operation-fault-1',
+        utterance_id: 'utterance-fault-1',
+        source_sha256: 'c'.repeat(64),
+        expected_silence: false,
+        settlement_window_ms: 3_000,
+        ...(kind === 'malformed' ? { unknown_field: true } : {}),
+      },
+    }));
+
+    expect(faultReceipts).toEqual([
+      expect.objectContaining({
+        schema: 'sophia_gemini_input_fault_v1',
+        test_run_id: syntheticTest.test_run_id,
+        code: expectedCode,
+        raw_audio_excluded: true,
+      }),
+    ]);
+    expect(websocket?.readyState).toBe(3);
+    await connection.close();
+  });
+
+  it('hard-fails a next operation started inside the prior settlement window', async () => {
+    const fakeAudioContext = new FakeAudioContext();
+    const faultReceipts: GeminiSyntheticInputFaultReceipt[] = [];
+    const syntheticTest = {
+      synthetic: true as const,
+      principal_id: 'voice-lab-user-1',
+      test_run_id: 'run-input-overlap-A',
+      scenario_id: 'vt00-input-overlap-001',
+      scenario_version: 'v1',
+      environment: 'production',
+      retention_hours: 24,
+      cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+      provider_expires_at: '2033-05-18T04:03:20.000Z',
+    };
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: syntheticTest.principal_id,
+      bootstrap: {
+        runtime: 'gemini_live',
+        voice_runtime: 'gemini_live',
+        production_route: true,
+        session_id: 'gemini-input-overlap',
+        websocket_url: 'wss://gemini.example/live',
+        ephemeral_token: { value: 'auth_tokens/input-overlap', expireTime: '2033-05-18T04:03:20.000Z' },
+        setup: { model: 'models/gemini-live' },
+        stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-input-overlap',
+        provider_activation_url: '/api/sophia/voice/gemini/activate',
+        synthetic_test: syntheticTest,
+        ...providerCleanupFields(syntheticTest, 'gemini-input-overlap'),
+      },
+      fetchFn: vi.fn(async (_input, init) => acceptedSyntheticDisconnectResponse(init)) as typeof fetch,
+      webSocketFactory: (url) => new FakeWebSocket(url),
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [], getAudioTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      onSyntheticInputFaultReceipt: (receipt) => faultReceipts.push(receipt),
+    });
+    const signal = (phase: string, ordinal: number) => ({
+      schema: 'sophia_voice_lab_input_operation_v1',
+      phase,
+      test_run_id: syntheticTest.test_run_id,
+      operation_id: `operation-overlap-${ordinal}`,
+      utterance_id: `utterance-overlap-${ordinal}`,
+      source_sha256: String(ordinal).repeat(64),
+      expected_silence: false,
+      settlement_window_ms: 5_000,
+    });
+    for (const phase of ['scheduled', 'started', 'completed']) {
+      window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', { detail: signal(phase, 1) }));
+    }
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', { detail: signal('scheduled', 2) }));
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', { detail: signal('started', 2) }));
+
+    expect(faultReceipts).toEqual([
+      expect.objectContaining({
+        code: 'input_operation_overlap_forbidden',
+        test_run_id: syntheticTest.test_run_id,
+      }),
+    ]);
+    await connection.close();
+  });
+
+  it('certifies exact-window silence only after a bounded no-turn settlement', async () => {
+    const fakeAudioContext = new FakeAudioContext();
+    const legReceipts: GeminiSyntheticInputLegReceipt[] = [];
+    const turnReceipts: GeminiSyntheticInputTurnReceipt[] = [];
+    const syntheticTest = {
+      synthetic: true as const,
+      principal_id: 'voice-lab-user-1',
+      test_run_id: 'run-silence-A',
+      scenario_id: 'vt00-silence-001',
+      scenario_version: 'v1',
+      environment: 'production',
+      retention_hours: 24,
+      cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+      provider_expires_at: '2033-05-18T04:03:20.000Z',
+    };
+    const connection = await connectGeminiBrowserLiveFromBootstrap({
+      userId: syntheticTest.principal_id,
+      bootstrap: {
+        runtime: 'gemini_live',
+        voice_runtime: 'gemini_live',
+        production_route: true,
+        session_id: 'gemini-input-silence',
+        websocket_url: 'wss://gemini.example/live',
+        ephemeral_token: { value: 'auth_tokens/input-silence', expireTime: '2033-05-18T04:03:20.000Z' },
+        setup: { model: 'models/gemini-live', inputAudioTranscription: {} },
+        stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-input-silence',
+        provider_activation_url: '/api/sophia/voice/gemini/activate',
+        synthetic_test: syntheticTest,
+        ...providerCleanupFields(syntheticTest, 'gemini-input-silence'),
+      },
+      fetchFn: vi.fn(async (_input, init) => acceptedSyntheticDisconnectResponse(init)) as typeof fetch,
+      webSocketFactory: (url) => new FakeWebSocket(url),
+      getUserMedia: vi.fn(async () => ({ getTracks: () => [], getAudioTracks: () => [] } as unknown as MediaStream)),
+      audioContextFactory: () => fakeAudioContext as unknown as AudioContext,
+      onSyntheticInputLegReceipt: (receipt) => legReceipts.push(receipt),
+      onSyntheticInputTurnReceipt: (receipt) => turnReceipts.push(receipt),
+    });
+    const detail = (phase: string) => ({
+      schema: 'sophia_voice_lab_input_operation_v1',
+      phase,
+      test_run_id: syntheticTest.test_run_id,
+      operation_id: 'operation-silence-1',
+      utterance_id: 'utterance-silence-1',
+      source_sha256: 'b'.repeat(64),
+      expected_silence: true,
+      settlement_window_ms: 1_000,
+    });
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', { detail: detail('scheduled') }));
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', { detail: detail('started') }));
+    fakeAudioContext.processor.onaudioprocess?.({
+      inputBuffer: { getChannelData: () => new Float32Array(4096) },
+      outputBuffer: { numberOfChannels: 1, getChannelData: () => new Float32Array(4096) },
+    } as unknown as AudioProcessingEvent);
+    vi.useFakeTimers();
+    window.dispatchEvent(new CustomEvent('sophia:voice-lab-input-operation', { detail: detail('completed') }));
+    await vi.advanceTimersByTimeAsync(1_000);
+    await Promise.resolve();
+    vi.useRealTimers();
+
+    await vi.waitFor(() => expect(legReceipts).toHaveLength(1));
+    expect(legReceipts[0]).toMatchObject({
+      status: 'verified',
+      reason: 'outgoing_pcm_silence_observed',
+      expected_silence: true,
+      nonzero_sample_count: 0,
+    });
+    expect(turnReceipts).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        source: 'settlement',
+        outcome: 'no_user_turn_observed',
+        operation_id: 'operation-silence-1',
+      }),
+    ]));
     await connection.close();
   });
 
@@ -2707,11 +4448,11 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
         production_route: true,
         session_id: 'gemini-prod-no-resume',
         websocket_url: 'wss://gemini.example/live',
-        ephemeral_token: { value: 'auth_tokens/initial' },
+        ephemeral_token: { value: 'auth_tokens/initial', expireTime: '2033-05-18T04:03:20.000Z' },
         setup: { model: 'models/gemini-live' },
         stream_url: '/api/sophia/voice/gemini/events?session_id=gemini-prod-no-resume',
       },
-      fetchFn: vi.fn(async () => new Response(JSON.stringify({ accepted: true }), { status: 202 })) as typeof fetch,
+      fetchFn: vi.fn(async (_input, init) => acceptedSyntheticDisconnectResponse(init)) as typeof fetch,
       webSocketFactory: (url) => {
         websocket = new FakeWebSocket(url);
         return websocket;
@@ -2818,7 +4559,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-coreview-builder-actions',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               inputAudioTranscription: {},
@@ -2987,7 +4728,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-direct-edit-coreview',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               inputAudioTranscription: {},
@@ -3088,7 +4829,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-direct-edit-normal',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               inputAudioTranscription: {},
@@ -3146,7 +4887,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-coreview-update-redirect',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               inputAudioTranscription: {},
@@ -3269,7 +5010,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-coreview-check-redirect',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               inputAudioTranscription: {},
@@ -3282,7 +5023,12 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       )
       .mockResolvedValue(new Response(JSON.stringify({ accepted: true }), { status: 202 }));
     const toolDiagnostics: GeminiBrowserLiveDogfoodToolLoopDiagnostic[] = [];
-    const ledgerUpdates: Array<{ toolCallId: string; finalState: string }> = [];
+    const ledgerUpdates: Array<{
+      toolCallId: string;
+      effectId: string;
+      providerConnectionEpoch: number;
+      finalState: string;
+    }> = [];
     let websocket: FakeWebSocket | null = null;
 
     const connection = await connectGeminiBrowserLiveDogfood({
@@ -3299,6 +5045,8 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
       onToolLoopDiagnostic: (diagnostic) => toolDiagnostics.push(diagnostic),
       onToolCallLedgerUpdate: (entry) => ledgerUpdates.push({
         toolCallId: entry.toolCallId,
+        effectId: entry.effectId,
+        providerConnectionEpoch: entry.providerConnectionEpoch,
         finalState: entry.finalState,
       }),
     });
@@ -3366,6 +5114,13 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
     expect(Object.fromEntries(ledgerUpdates.map((entry) => [entry.toolCallId, entry.finalState]))).toMatchObject({
       'generic-check-placeholder': 'responded',
     });
+    const exactToolReceipts = ledgerUpdates.filter((entry) => (
+      entry.toolCallId === 'generic-check-placeholder'
+    ));
+    expect(new Set(exactToolReceipts.map((entry) => entry.effectId)).size).toBe(1);
+    expect(exactToolReceipts[0]?.effectId).toMatch(/^effect:[a-f0-9-]{36}$/);
+    expect(new Set(exactToolReceipts.map((entry) => entry.providerConnectionEpoch))).toEqual(new Set([1]));
+    expect(exactToolReceipts.filter((entry) => entry.finalState !== 'unknown')).toHaveLength(1);
     expect(JSON.stringify(toolDiagnostics)).not.toContain('builder-thread-id');
 
     await connection.close();
@@ -3498,7 +5253,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-tool-loop',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               tools: [{ functionDeclarations: [{ name: 'emit_artifact' }] }],
@@ -3654,7 +5409,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-memory-tool-loop',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               tools: [{ functionDeclarations: [{ name: 'retrieve_memories' }] }],
@@ -3792,7 +5547,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-read-text-loop',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               tools: [{ functionDeclarations: [{ name: 'read_artifact_text' }] }],
@@ -4050,7 +5805,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-mixed-review-tools',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               inputAudioTranscription: {},
@@ -4224,7 +5979,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-cancelled-tool-loop',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               tools: [{ functionDeclarations: [{ name: 'emit_artifact' }] }],
@@ -4311,7 +6066,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-builder-tool-loop',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               tools: [{ functionDeclarations: [{ name: 'start_builder_task' }] }],
@@ -4458,7 +6213,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-lifecycle-tools',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               tools: [{ functionDeclarations: [
@@ -4637,7 +6392,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-lifecycle-rejected',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: {
               model: 'models/gemini-3.1-flash-live-preview',
               tools: [{ functionDeclarations: [{ name: 'check_async_task' }] }],
@@ -4744,7 +6499,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-tool-send-fail',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-tool-send-fail',
           }),
@@ -4849,7 +6604,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-1',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-1',
             provider_event_relay_url: '/dogfood/realtime/gemini/browser-sessions/browser-gemini-1/provider-events',
@@ -4929,7 +6684,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-fetch-fail',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-fetch-fail',
           }),
@@ -4991,7 +6746,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-terminal-relay',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-terminal-relay',
           }),
@@ -5044,7 +6799,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-1',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-1',
           }),
@@ -5105,7 +6860,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-blob-setup',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-blob-setup',
           }),
@@ -5160,7 +6915,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-1',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-1',
           }),
@@ -5202,7 +6957,7 @@ describe('Gemini browser Live WebSocket dogfood connector', () => {
           JSON.stringify({
             session_id: 'browser-gemini-1',
             websocket_url: 'wss://gemini.example/live',
-            ephemeral_token: { value: 'auth_tokens/gemini-browser-test' },
+            ephemeral_token: { value: 'auth_tokens/gemini-browser-test', expireTime: '2033-05-18T04:03:20.000Z' },
             setup: { model: 'models/gemini-3.1-flash-live-preview', inputAudioTranscription: {} },
             stream_url: '/api/sophia/voice/dogfood/gemini/events?session_id=browser-gemini-1',
           }),

@@ -13,6 +13,7 @@ from deerflow.sophia.session_store import (
     SessionRecord,
     SessionStore,
     SessionStoreConfigurationError,
+    SessionStoreError,
     SupabaseSessionStoreConfig,
     SupabaseSessionTranscriptStore,
 )
@@ -323,6 +324,24 @@ def test_supabase_store_finds_session_by_thread_id():
     assert store.find_session_by_thread_id("user-2", "thread-1") is None
 
 
+def test_supabase_cleanup_lookup_fails_closed_for_unmappable_raw_match():
+    fake = FakeSupabasePostgrest()
+    store = _supabase_store(fake)
+    cleanup_id = "123e4567-e89b-42d3-a456-426614174000"
+    fake.sessions["malformed-session"] = {
+        "id": "malformed-session",
+        "metadata": {
+            "synthetic_voice_lab": {
+                "synthetic": True,
+                "cleanup_obligation_id": cleanup_id,
+            }
+        },
+    }
+
+    with pytest.raises(SessionStoreError, match="invalid session row"):
+        store.find_session_by_cleanup_obligation_id(cleanup_id)
+
+
 def test_supabase_store_append_and_retry_are_idempotent():
     fake = FakeSupabasePostgrest()
     store = _supabase_store(fake)
@@ -345,6 +364,40 @@ def test_supabase_store_append_and_retry_are_idempotent():
     assert len(messages) == 1
     assert messages[0].content == "final"
     assert fake.sessions["session-1"]["transcript_available"] is True
+
+
+def test_supabase_retry_prefers_incoming_for_equal_timestamp_spellings():
+    fake = FakeSupabasePostgrest()
+    store = _supabase_store(fake)
+    store.upsert_session(
+        SessionRecord(
+            session_id="session-1", thread_id="thread-1", user_id="user-1"
+        )
+    )
+    first = SessionMessageRecord(
+        message_id="client-msg-1",
+        session_id="session-1",
+        thread_id="thread-1",
+        role="assistant",
+        content="draft",
+        provider_event_id="provider-event-1",
+        sequence=1,
+        created_at="2026-05-26T10:00:00.340Z",
+    )
+    retry = first.model_copy(
+        update={
+            "content": "final",
+            "created_at": "2026-05-26T10:00:00.340+00:00",
+        }
+    )
+
+    store.append_or_upsert_messages("user-1", "session-1", [first])
+    messages = store.append_or_upsert_messages(
+        "user-1", "session-1", [retry]
+    )
+
+    assert len(messages) == 1
+    assert messages[0].content == "final"
 
 
 def test_supabase_store_replace_messages_upserts_then_removes_stale_rows():

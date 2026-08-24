@@ -1,12 +1,17 @@
 """Memory API router for retrieving and managing global memory data."""
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from app.gateway.auth import require_authenticated_user
 from deerflow.agents.memory.updater import get_memory_data, reload_memory_data
 from deerflow.config.memory_config import get_memory_config
 
-router = APIRouter(prefix="/api", tags=["memory"])
+router = APIRouter(
+    prefix="/api",
+    tags=["memory"],
+    dependencies=[Depends(require_authenticated_user)],
+)
 
 
 class ContextSection(BaseModel):
@@ -121,6 +126,7 @@ async def get_memory() -> MemoryResponse:
     response_model=MemoryResponse,
     summary="Reload Memory Data",
     description="Reload memory data from the storage file, refreshing the in-memory cache.",
+    dependencies=[Depends(require_authenticated_user)],
 )
 async def reload_memory() -> MemoryResponse:
     """Reload memory data from file.

@@ -1,7 +1,10 @@
 import asyncio
 import os
 import zipfile
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import FastAPI, HTTPException
@@ -9,6 +12,7 @@ from fastapi.testclient import TestClient
 from starlette.requests import Request
 
 import app.gateway.routers.artifacts as artifacts_router
+from deerflow.sophia.session_store import SessionRecord
 
 
 class OwnedSophiaSessionStore:
@@ -1273,6 +1277,445 @@ def test_list_artifacts_route_requires_authentication(monkeypatch) -> None:
 
     assert response.status_code == 401
     assert response.json()["detail"] == "Missing bearer token"
+
+
+def _synthetic_artifact_session() -> SessionRecord:
+    return SessionRecord(
+        session_id="synthetic-session",
+        thread_id="synthetic-thread",
+        user_id="user-1",
+        run_id="test-run-1",
+        metadata={
+            "synthetic_voice_lab": {
+                "synthetic": True,
+                "principal_id": "user-1",
+                "test_run_id": "test-run-1",
+                "scenario_id": "builder-deck",
+                "scenario_version": "v1",
+                "environment": "production",
+            }
+        },
+    )
+
+
+def _synthetic_builder_child_contract(
+    *,
+    run_id: str = "test-run-1",
+    parent_thread_id: str = "synthetic-thread",
+) -> tuple[SimpleNamespace, dict[str, object]]:
+    anchor = datetime.now(UTC).replace(microsecond=0)
+    cleanup_obligation_id = "123e4567-e89b-42d3-a456-426614174000"
+    provider_expires_at = (
+        anchor + timedelta(minutes=30)
+    ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+    expected_deployment = {
+        "frontend": "f" * 40,
+        "backend": "b" * 40,
+        "voice": "a" * 40,
+    }
+    claims = SimpleNamespace(
+        test_run_id="test-run-1",
+        principal_id="user-1",
+        scenario_id="builder-deck",
+        scenario_version="v1",
+        environment="production",
+        retention_hours=1,
+        cleanup_obligation_id=cleanup_obligation_id,
+        provider_expires_at=provider_expires_at,
+        expected_deployment=expected_deployment,
+    )
+    metadata: dict[str, object] = {
+        "synthetic": True,
+        "synthetic_test": True,
+        "principal_id": "user-1",
+        "test_principal_id": "user-1",
+        "test_run_id": run_id,
+        "scenario_id": "builder-deck",
+        "scenario_version": "v1",
+        "environment": "production",
+        "cleanup_obligation_id": cleanup_obligation_id,
+        "provider_expires_at": provider_expires_at,
+        "parent_thread_id": parent_thread_id,
+        "retention_hours": 1,
+        "retention_anchor": "builder_task_created_at_provisional",
+        "retention_anchor_at": anchor.isoformat(timespec="milliseconds").replace(
+            "+00:00", "Z"
+        ),
+        "retention_expires_at": (
+            anchor + timedelta(hours=1)
+        ).isoformat(timespec="milliseconds").replace("+00:00", "Z"),
+        "deployment_identity": {
+            "frontend_sha": expected_deployment["frontend"],
+            "backend_sha": expected_deployment["backend"],
+            "voice_sha": expected_deployment["voice"],
+        },
+        "isolation_status": "isolated",
+        "memory_retrieval_excluded": True,
+        "memory_learning_excluded": True,
+        "ordinary_artifact_publication_excluded": True,
+        "ordinary_analytics_excluded": True,
+        "deck_quality_publication_excluded": True,
+        "langsmith_export_excluded": True,
+        "langsmith_trace_status": "trace_unavailable",
+        "langsmith_trace_unavailable_reason": "synthetic_isolation_policy",
+    }
+    return claims, metadata
+
+
+def _artifact_route_app() -> FastAPI:
+    app = FastAPI()
+    app.include_router(artifacts_router.router)
+    app.dependency_overrides[artifacts_router.require_authenticated_user] = lambda: "user-1"
+    return app
+
+
+@pytest.mark.parametrize(
+    ("method", "path", "json_body", "required_operation"),
+    [
+        ("GET", "/api/threads/synthetic-thread/artifacts", None, "session:read"),
+        (
+            "GET",
+            "/api/threads/synthetic-thread/artifacts/mnt/user-data/outputs/report.md",
+            None,
+            "session:read",
+        ),
+        (
+            "POST",
+            "/api/threads/synthetic-thread/artifacts/quick-html-patch",
+            {
+                "artifact_path": "mnt/user-data/outputs/report.html",
+                "renderer_kind": "html",
+                "user_update_request": "Update the title",
+                "quick_edit_kind": "title",
+                "target_fields": {"titleText": "Updated"},
+            },
+            "session:finalize",
+        ),
+    ],
+)
+def test_synthetic_thread_artifact_routes_require_capability_before_storage_access(
+    tmp_path,
+    monkeypatch,
+    method: str,
+    path: str,
+    json_body: dict | None,
+    required_operation: str,
+) -> None:
+    record = _synthetic_artifact_session()
+
+    class Store:
+        def find_any_session_by_thread_id(self, thread_id: str):
+            assert thread_id == "synthetic-thread"
+            return record
+
+        def find_session_by_thread_id(self, user_id: str, thread_id: str):
+            assert (user_id, thread_id) == ("user-1", "synthetic-thread")
+            return record
+
+    operations: list[str] = []
+
+    def no_capability(_request, user_id: str, *, required_operation: str):
+        assert user_id == "user-1"
+        operations.append(required_operation)
+        return None
+
+    def storage_access_forbidden(*_args, **_kwargs):
+        raise AssertionError("synthetic artifact route touched storage before capability authorization")
+
+    monkeypatch.setattr(artifacts_router, "_session_store", Store())
+    monkeypatch.setattr(artifacts_router, "capability_for_gateway_action", no_capability)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", storage_access_forbidden)
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "list_artifacts", storage_access_forbidden)
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "download_artifact", storage_access_forbidden)
+
+    with TestClient(_artifact_route_app()) as client:
+        response = client.request(method, path, json=json_body)
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == {"code": "voice_lab_capability_missing"}
+    assert operations == [required_operation]
+
+
+def test_synthetic_thread_artifact_read_accepts_exact_capability_and_edit_fails_closed(tmp_path, monkeypatch) -> None:
+    record = _synthetic_artifact_session()
+    claims = object()
+    operations: list[str] = []
+    checked: list[tuple[object, object]] = []
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+
+    class Store:
+        def find_any_session_by_thread_id(self, thread_id: str):
+            assert thread_id == "synthetic-thread"
+            return record
+
+        def find_session_by_thread_id(self, user_id: str, thread_id: str):
+            assert (user_id, thread_id) == ("user-1", "synthetic-thread")
+            return record
+
+    def capability(request, user_id: str, *, required_operation: str):
+        assert request.headers["x-sophia-voice-lab-capability"] == "exact-token"
+        assert user_id == "user-1"
+        operations.append(required_operation)
+        return claims
+
+    def assert_record(candidate, candidate_claims):
+        checked.append((candidate, candidate_claims))
+        return True
+
+    async def no_builder_tasks(_thread_id: str):
+        return ()
+
+    monkeypatch.setattr(artifacts_router, "_session_store", Store())
+    monkeypatch.setattr(artifacts_router, "capability_for_gateway_action", capability)
+    monkeypatch.setattr(artifacts_router, "assert_voice_lab_session_record", assert_record)
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: outputs)
+    monkeypatch.setattr(artifacts_router, "_builder_task_thread_ids_to_check", no_builder_tasks)
+    monkeypatch.setattr(artifacts_router.supabase_artifact_store, "list_artifacts", lambda **_kwargs: [])
+
+    headers = {"X-Sophia-Voice-Lab-Capability": "exact-token"}
+    with TestClient(_artifact_route_app()) as client:
+        listed = client.get("/api/threads/synthetic-thread/artifacts", headers=headers)
+        patched = client.post(
+            "/api/threads/synthetic-thread/artifacts/quick-html-patch",
+            headers=headers,
+            json={
+                "artifact_path": "mnt/user-data/outputs/report.pdf",
+                "renderer_kind": "pdf",
+                "user_update_request": "Update the title",
+                "quick_edit_kind": "title",
+                "target_fields": {"titleText": "Updated"},
+            },
+        )
+
+    assert listed.status_code == 200
+    assert listed.json() == {"thread_id": "synthetic-thread", "artifacts": []}
+    assert patched.status_code == 409
+    assert patched.json()["detail"] == {"code": "synthetic_artifact_edit_excluded"}
+    assert operations == ["session:read", "session:finalize"]
+    assert checked == [(record, claims), (record, claims)]
+
+
+def test_synthetic_thread_cannot_enter_ordinary_artifact_publication(monkeypatch) -> None:
+    record = _synthetic_artifact_session()
+
+    class Store:
+        def find_session_by_thread_id(self, user_id: str, thread_id: str):
+            assert (user_id, thread_id) == ("user-1", "synthetic-thread")
+            return record
+
+    class Registry:
+        def upsert(self, *_args, **_kwargs):
+            raise AssertionError("synthetic thread reached ordinary artifact publication")
+
+    async def task_lookup_forbidden(_thread_id: str):
+        raise AssertionError("synthetic thread reached ordinary Builder-task lookup")
+
+    monkeypatch.setattr(artifacts_router, "_session_store", Store())
+    monkeypatch.setattr(artifacts_router, "_artifact_registry", Registry())
+    monkeypatch.setattr(artifacts_router, "_builder_task_thread_ids_to_check", task_lookup_forbidden)
+
+    with TestClient(_artifact_route_app()) as client:
+        response = client.post(
+            "/api/artifacts/upsert",
+            json={
+                "thread_id": "synthetic-thread",
+                "title": "Must stay isolated",
+                "source": "file_library_backfill",
+                "local_path": "mnt/user-data/outputs/report.md",
+            },
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {"code": "synthetic_artifact_publication_excluded"}
+
+
+def test_synthetic_builder_child_artifacts_require_exact_run_binding_before_storage(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    canonical_record = _synthetic_artifact_session()
+    claims, child_metadata = _synthetic_builder_child_contract()
+    outputs = tmp_path / "outputs"
+    outputs.mkdir()
+    (outputs / "report.md").write_text("isolated", encoding="utf-8")
+    checks: list[tuple[object, object]] = []
+
+    class Store:
+        def find_any_session_by_thread_id(self, thread_id: str):
+            assert thread_id == "synthetic-builder-child"
+            return None
+
+        def find_session_by_run_id(self, user_id: str, run_id: str):
+            assert (user_id, run_id) == ("user-1", "test-run-1")
+            return canonical_record
+
+        def find_session_by_thread_id(self, _user_id: str, _thread_id: str):
+            return None
+
+    class Threads:
+        async def get(self, thread_id: str):
+            assert thread_id == "synthetic-builder-child"
+            return {"metadata": child_metadata}
+
+    def capability(request, user_id: str, *, required_operation: str):
+        assert request.headers["x-sophia-voice-lab-capability"] == "exact-token"
+        assert user_id == "user-1"
+        assert required_operation == "session:read"
+        return claims
+
+    def assert_record(record, candidate_claims):
+        checks.append((record, candidate_claims))
+        return True
+
+    monkeypatch.setattr(artifacts_router, "_session_store", Store())
+    monkeypatch.setattr(artifacts_router, "capability_for_gateway_action", capability)
+    monkeypatch.setattr(artifacts_router, "assert_voice_lab_session_record", assert_record)
+    async def associated(parent_thread_id: str):
+        assert parent_thread_id == "synthetic-thread"
+        return ("synthetic-builder-child",)
+
+    monkeypatch.setattr(
+        artifacts_router,
+        "_associated_builder_task_thread_ids",
+        associated,
+    )
+    monkeypatch.setattr(
+        artifacts_router,
+        "get_client",
+        lambda **_kwargs: SimpleNamespace(threads=Threads()),
+    )
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", lambda _thread_id, _path: outputs)
+
+    with TestClient(_artifact_route_app()) as client:
+        response = client.get(
+            "/api/threads/synthetic-builder-child/artifacts",
+            headers={"X-Sophia-Voice-Lab-Capability": "exact-token"},
+        )
+
+    assert response.status_code == 200
+    assert [artifact["name"] for artifact in response.json()["artifacts"]] == ["report.md"]
+    assert checks == [(canonical_record, claims)]
+
+
+def test_synthetic_builder_child_artifacts_reject_wrong_run_before_storage(monkeypatch) -> None:
+    canonical_record = _synthetic_artifact_session()
+    claims, child_metadata = _synthetic_builder_child_contract(run_id="different-run")
+
+    class Store:
+        def find_any_session_by_thread_id(self, _thread_id: str):
+            return None
+
+        def find_session_by_run_id(self, _user_id: str, _run_id: str):
+            return canonical_record
+
+    class Threads:
+        async def get(self, _thread_id: str):
+            return {"metadata": child_metadata}
+
+    def storage_access_forbidden(*_args, **_kwargs):
+        raise AssertionError("wrong-run child reached artifact storage")
+
+    monkeypatch.setattr(artifacts_router, "_session_store", Store())
+    monkeypatch.setattr(artifacts_router, "capability_for_gateway_action", lambda *_args, **_kwargs: claims)
+    monkeypatch.setattr(artifacts_router, "assert_voice_lab_session_record", lambda *_args: True)
+    monkeypatch.setattr(
+        artifacts_router,
+        "_associated_builder_task_thread_ids",
+        AsyncMock(return_value=("synthetic-builder-child",)),
+    )
+    monkeypatch.setattr(
+        artifacts_router,
+        "get_client",
+        lambda **_kwargs: SimpleNamespace(threads=Threads()),
+    )
+    monkeypatch.setattr(artifacts_router, "resolve_thread_virtual_path", storage_access_forbidden)
+
+    with TestClient(_artifact_route_app()) as client:
+        response = client.get(
+            "/api/threads/synthetic-builder-child/artifacts",
+            headers={"X-Sophia-Voice-Lab-Capability": "wrong-run-token"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {"code": "voice_lab_session_binding_mismatch"}
+
+
+def test_synthetic_builder_child_rejects_cross_parent_before_storage(
+    monkeypatch,
+) -> None:
+    canonical_record = _synthetic_artifact_session()
+    claims, _child_metadata = _synthetic_builder_child_contract()
+
+    class Store:
+        def find_any_session_by_thread_id(self, _thread_id: str):
+            return None
+
+        def find_session_by_run_id(self, _user_id: str, _run_id: str):
+            return canonical_record
+
+    class Threads:
+        async def get(self, _thread_id: str):
+            raise AssertionError("cross-parent child reached child data lookup")
+
+    def storage_access_forbidden(*_args, **_kwargs):
+        raise AssertionError("cross-parent child reached artifact storage")
+
+    monkeypatch.setattr(artifacts_router, "_session_store", Store())
+    monkeypatch.setattr(
+        artifacts_router,
+        "capability_for_gateway_action",
+        lambda *_args, **_kwargs: claims,
+    )
+    monkeypatch.setattr(
+        artifacts_router,
+        "assert_voice_lab_session_record",
+        lambda *_args: True,
+    )
+    monkeypatch.setattr(
+        artifacts_router,
+        "_associated_builder_task_thread_ids",
+        AsyncMock(return_value=("different-builder-child",)),
+    )
+    monkeypatch.setattr(
+        artifacts_router,
+        "get_client",
+        lambda **_kwargs: SimpleNamespace(threads=Threads()),
+    )
+    monkeypatch.setattr(
+        artifacts_router,
+        "resolve_thread_virtual_path",
+        storage_access_forbidden,
+    )
+
+    with TestClient(_artifact_route_app()) as client:
+        response = client.get(
+            "/api/threads/synthetic-builder-child/artifacts",
+            headers={"X-Sophia-Voice-Lab-Capability": "cross-parent-token"},
+        )
+
+    assert response.status_code == 409
+    assert response.json()["detail"] == {
+        "code": "voice_lab_builder_parent_binding_mismatch"
+    }
+
+
+def test_synthetic_registry_record_cannot_be_revealed_by_delete(monkeypatch) -> None:
+    class Registry:
+        def get(self, artifact_id: str, *, user_id: str):
+            assert (artifact_id, user_id) == ("synthetic-artifact", "user-1")
+            return type("SyntheticRecord", (), {"synthetic_test": True})()
+
+        def mark_deleted(self, *_args, **_kwargs):
+            raise AssertionError("synthetic artifact was mutated through the ordinary delete route")
+
+    monkeypatch.setattr(artifacts_router, "_artifact_registry", Registry())
+
+    with TestClient(_artifact_route_app()) as client:
+        response = client.delete("/api/artifacts/synthetic-artifact")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "Artifact not found"
 
 
 def test_get_artifact_requires_thread_owner_before_supabase_download(tmp_path, monkeypatch) -> None:

@@ -1,4 +1,4 @@
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 const getSessionMock = vi.fn();
 
@@ -36,6 +36,10 @@ describe('legacy Better Auth bridge routes', () => {
         name: 'Session User',
       },
     });
+  });
+
+  afterEach(() => {
+    vi.unstubAllEnvs();
   });
 
   it('issues a backend token bound to the Better Auth user id and round-trips through /me and /validate', async () => {
@@ -120,6 +124,33 @@ describe('legacy Better Auth bridge routes', () => {
     });
   });
 
+  it('denies a marker-free dedicated-principal bearer before minting a refreshed token', async () => {
+    const loginResponse = await loginPOST(
+      new Request('http://localhost:3000/api/v1/auth/discord/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          canonical_user_id: 'session-user-1',
+          email: 'user@example.com',
+        }),
+      }),
+    );
+    const loginPayload = await loginResponse.json();
+    vi.stubEnv('SOPHIA_VOICE_LAB_TEST_PRINCIPAL', 'session-user-1');
+
+    const response = await refreshPOST(
+      new Request('http://localhost:3000/api/v1/auth/token/refresh', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${loginPayload.api_token}` },
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: 'voice_lab_ordinary_product_route_forbidden',
+    });
+  });
+
   it('rejects canonical_user_id mismatches before minting a backend token', async () => {
     const response = await loginPOST(
       new Request('http://localhost:3000/api/v1/auth/discord/login', {
@@ -137,6 +168,24 @@ describe('legacy Better Auth bridge routes', () => {
     await expect(response.json()).resolves.toEqual({
       detail: 'canonical_user_id does not match the Better Auth session user',
     });
+  });
+
+  it('denies a marker-free dedicated Better Auth identity before parsing or token minting', async () => {
+    vi.stubEnv('SOPHIA_VOICE_LAB_TEST_PRINCIPAL', 'session-user-1');
+
+    const response = await loginPOST(
+      new Request('http://localhost:3000/api/v1/auth/discord/login', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: '{not-json',
+      }),
+    );
+
+    expect(response.status).toBe(403);
+    await expect(response.json()).resolves.toEqual({
+      error: 'voice_lab_ordinary_product_route_forbidden',
+    });
+    expect(getSessionMock).toHaveBeenCalledTimes(1);
   });
 
   it('rejects invalid backend bearer tokens', async () => {

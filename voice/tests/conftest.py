@@ -1,5 +1,12 @@
 from __future__ import annotations
 
+import os
+
+# ONNX Runtime 1.29 initializes its POSIX telemetry uploader during import.
+# Disable it before any Voice module can load smart-turn/onnxruntime so pytest
+# teardown exercises the same fail-closed process contract as production.
+os.environ.setdefault("ORT_DISABLE_TELEMETRY", "1")
+
 from voice.config import VoiceSettings
 
 

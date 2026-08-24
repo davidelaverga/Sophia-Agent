@@ -83,10 +83,17 @@ def test_server_import_succeeds_when_turn_detection_events_module_missing(
 
     import voice.vision_agents_compat as compat
 
-    importlib.reload(compat)
-    reloaded_server = importlib.reload(server)
+    try:
+        importlib.reload(compat)
+        reloaded_server = importlib.reload(server)
 
-    assert reloaded_server.TurnEndedEvent.__name__ == "TurnEndedEvent"
+        assert reloaded_server.TurnEndedEvent.__name__ == "TurnEndedEvent"
+    finally:
+        # Reloading mutates the shared module object. Restore it after removing
+        # the import hook so later tests see the installed SDK symbols.
+        monkeypatch.undo()
+        importlib.reload(compat)
+        importlib.reload(server)
 
 
 def test_tts_and_server_import_succeed_when_tts_event_symbols_missing(
@@ -104,13 +111,19 @@ def test_tts_and_server_import_succeed_when_tts_event_symbols_missing(
     import voice.sophia_tts as sophia_tts
     import voice.vision_agents_compat as compat
 
-    importlib.reload(compat)
-    reloaded_tts = importlib.reload(sophia_tts)
-    reloaded_server = importlib.reload(server)
+    try:
+        importlib.reload(compat)
+        reloaded_tts = importlib.reload(sophia_tts)
+        reloaded_server = importlib.reload(server)
 
-    assert reloaded_tts.TTSAudioEvent.__name__ == "TTSAudioEvent"
-    assert reloaded_tts.TTSErrorEvent.__name__ == "TTSErrorEvent"
-    assert reloaded_server.TTSSynthesisStartEvent.__name__ == "TTSSynthesisStartEvent"
+        assert reloaded_tts.TTSAudioEvent.__name__ == "TTSAudioEvent"
+        assert reloaded_tts.TTSErrorEvent.__name__ == "TTSErrorEvent"
+        assert reloaded_server.TTSSynthesisStartEvent.__name__ == "TTSSynthesisStartEvent"
+    finally:
+        monkeypatch.undo()
+        importlib.reload(compat)
+        importlib.reload(sophia_tts)
+        importlib.reload(server)
 
 
 @pytest.mark.parametrize(

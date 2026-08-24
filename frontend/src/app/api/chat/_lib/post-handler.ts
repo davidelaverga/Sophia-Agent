@@ -7,6 +7,7 @@ import { normalizeBuilderArtifactPayload } from '../../../lib/builder-artifacts'
 import { logger } from '../../../lib/error-logger';
 import { apiLimiters } from '../../../lib/rate-limiter';
 import { buildAttachmentPrompt } from '../../../stores/attachment-prompt';
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation';
 
 import { fetchBackendStreamWithBootstrap, isValidSophiaUserId } from './backend-client';
 import { parseAndValidateChatPayload } from './chat-request';
@@ -60,8 +61,8 @@ function mockResponse(sessionId: string, sessionType: string | undefined): Respo
   });
 }
 
-function backendUnavailableResponse(error: unknown): Response {
-  logger.logError(error, { component: 'api/chat', action: 'backend_fetch' });
+function backendUnavailableResponse(error: unknown, request: NextRequest): Response {
+  logger.logError(error, { component: 'api/chat', action: 'backend_fetch', request });
   return new Response(
     JSON.stringify({
       error: 'Backend unavailable',
@@ -78,8 +79,8 @@ function backendUnavailableResponse(error: unknown): Response {
   );
 }
 
-function serviceUnavailableResponse(error: unknown): Response {
-  logger.logError(error, { component: 'api/chat', action: 'service_unavailable' });
+function serviceUnavailableResponse(error: unknown, request: NextRequest): Response {
+  logger.logError(error, { component: 'api/chat', action: 'service_unavailable', request });
   return new Response(
     JSON.stringify({
       error: 'Service unavailable',
@@ -96,6 +97,9 @@ function serviceUnavailableResponse(error: unknown): Response {
 }
 
 export async function handleChatPost(req: NextRequest): Promise<Response> {
+  const voiceLabDenied = await voiceLabOrdinaryProductBoundaryResponse();
+  if (voiceLabDenied) return voiceLabDenied;
+
   if (!apiLimiters.chat.checkSync()) {
     return new Response(
       JSON.stringify({ error: 'Rate limit exceeded. Please slow down.' }),
@@ -272,6 +276,7 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
           component: 'api/chat',
           action: 'backend_sse_error',
           metadata: { status: upstream.status },
+          request: req,
         });
         if (!IS_PRODUCTION) {
           secureLog('[/api/chat] Error details', { errorText });
@@ -398,9 +403,9 @@ export async function handleChatPost(req: NextRequest): Promise<Response> {
         },
       });
     } catch (fetchError) {
-      return backendUnavailableResponse(fetchError);
+      return backendUnavailableResponse(fetchError, req);
     }
   } catch (error) {
-    return serviceUnavailableResponse(error);
+    return serviceUnavailableResponse(error, req);
   }
 }

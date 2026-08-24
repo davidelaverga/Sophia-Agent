@@ -430,7 +430,7 @@ export async function GET(request: NextRequest) {
       }),
     });
   } catch (error) {
-    logger.logError(error, { component: 'api/memory/recent', action: 'list_recent_memories' });
+    logger.logError(error, { component: 'api/memory/recent', action: 'list_recent_memories', request });
     return NextResponse.json(
       { error: 'Failed to fetch recent memories' },
       { status: 500 },

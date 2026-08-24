@@ -1,0 +1,65 @@
+{
+  "schema": "sophia_voice_lab_capability_golden_v1",
+  "secret": "capability-secret-at-least-thirty-two-bytes",
+  "now_seconds": 2000000050,
+  "payload": {
+    "v": 1,
+    "iss": "sophia-gateway",
+    "aud": "sophia-voice-runtime",
+    "sub": "voice-lab-user-1",
+    "principal_id": "voice-lab-user-1",
+    "test_run_id": "golden-run-001",
+    "scenario_id": "vt00-golden-001",
+    "scenario_version": "v1",
+    "synthetic": true,
+    "environment": "production",
+    "retention_hours": 24,
+    "cleanup_obligation_id": "123e4567-e89b-42d3-a456-426614174000",
+    "provider_expires_at": "2033-05-18T04:03:20.000Z",
+    "allowed_ops": ["voice:start", "session:create", "session:finalize"],
+    "expected_deployment": {
+      "frontend": "41a9b127af780bbe9d88acf34566a6aaf443e6b0",
+      "backend": "41a9b127af780bbe9d88acf34566a6aaf443e6b0",
+      "voice": "41a9b127af780bbe9d88acf34566a6aaf443e6b0"
+    },
+    "iat": 2000000000,
+    "nbf": 2000000000,
+    "exp": 2000000120,
+    "jti": "golden-jti-001",
+    "nonce": "golden-nonce-001"
+  },
+  "token": "eyJ2IjoxLCJpc3MiOiJzb3BoaWEtZ2F0ZXdheSIsImF1ZCI6InNvcGhpYS12b2ljZS1ydW50aW1lIiwic3ViIjoidm9pY2UtbGFiLXVzZXItMSIsInByaW5jaXBhbF9pZCI6InZvaWNlLWxhYi11c2VyLTEiLCJ0ZXN0X3J1bl9pZCI6ImdvbGRlbi1ydW4tMDAxIiwic2NlbmFyaW9faWQiOiJ2dDAwLWdvbGRlbi0wMDEiLCJzY2VuYXJpb192ZXJzaW9uIjoidjEiLCJzeW50aGV0aWMiOnRydWUsImVudmlyb25tZW50IjoicHJvZHVjdGlvbiIsInJldGVudGlvbl9ob3VycyI6MjQsImNsZWFudXBfb2JsaWdhdGlvbl9pZCI6IjEyM2U0NTY3LWU4OWItNDJkMy1hNDU2LTQyNjYxNDE3NDAwMCIsInByb3ZpZGVyX2V4cGlyZXNfYXQiOiIyMDMzLTA1LTE4VDA0OjAzOjIwLjAwMFoiLCJhbGxvd2VkX29wcyI6WyJ2b2ljZTpzdGFydCIsInNlc3Npb246Y3JlYXRlIiwic2Vzc2lvbjpmaW5hbGl6ZSJdLCJleHBlY3RlZF9kZXBsb3ltZW50Ijp7ImZyb250ZW5kIjoiNDFhOWIxMjdhZjc4MGJiZTlkODhhY2YzNDU2NmE2YWFmNDQzZTZiMCIsImJhY2tlbmQiOiI0MWE5YjEyN2FmNzgwYmJlOWQ4OGFjZjM0NTY2YTZhYWY0NDNlNmIwIiwidm9pY2UiOiI0MWE5YjEyN2FmNzgwYmJlOWQ4OGFjZjM0NTY2YTZhYWY0NDNlNmIwIn0sImlhdCI6MjAwMDAwMDAwMCwibmJmIjoyMDAwMDAwMDAwLCJleHAiOjIwMDAwMDAxMjAsImp0aSI6ImdvbGRlbi1qdGktMDAxIiwibm9uY2UiOiJnb2xkZW4tbm9uY2UtMDAxIn0.728FYxCfiX98Z9e3tR06UdaGQg5ioDLX1vSjxlEWp1I",
+  "malformed": {
+    "invalid_signature": "eyJ2IjoxLCJpc3MiOiJzb3BoaWEtZ2F0ZXdheSIsImF1ZCI6InNvcGhpYS12b2ljZS1ydW50aW1lIiwic3ViIjoidm9pY2UtbGFiLXVzZXItMSIsInByaW5jaXBhbF9pZCI6InZvaWNlLWxhYi11c2VyLTEiLCJ0ZXN0X3J1bl9pZCI6ImdvbGRlbi1ydW4tMDAxIiwic2NlbmFyaW9faWQiOiJ2dDAwLWdvbGRlbi0wMDEiLCJzY2VuYXJpb192ZXJzaW9uIjoidjEiLCJzeW50aGV0aWMiOnRydWUsImVudmlyb25tZW50IjoicHJvZHVjdGlvbiIsImFsbG93ZWRfb3BzIjpbInZvaWNlOnN0YXJ0Iiwic2Vzc2lvbjpjcmVhdGUiLCJzZXNzaW9uOmZpbmFsaXplIl0sImV4cGVjdGVkX2RlcGxveW1lbnQiOnsiZnJvbnRlbmQiOiI0MWE5YjEyN2FmNzgwYmJlOWQ4OGFjZjM0NTY2YTZhYWY0NDNlNmIwIiwiYmFja2VuZCI6IjQxYTliMTI3YWY3ODBiYmU5ZDg4YWNmMzQ1NjZhNmFhZjQ0M2U2YjAiLCJ2b2ljZSI6IjQxYTliMTI3YWY3ODBiYmU5ZDg4YWNmMzQ1NjZhNmFhZjQ0M2U2YjAifSwiaWF0IjoyMDAwMDAwMDAwLCJuYmYiOjIwMDAwMDAwMDAsImV4cCI6MjAwMDAwMDEyMCwianRpIjoiZ29sZGVuLWp0aS0wMDEiLCJub25jZSI6ImdvbGRlbi1ub25jZS0wMDEifQ.AjCHnXdxrtQeHgbFeCstmUxYScyCJzU66w1d4bKemec",
+    "noncanonical_base64": "eyJ2IjoxLCJpc3MiOiJzb3BoaWEtZ2F0ZXdheSIsImF1ZCI6InNvcGhpYS12b2ljZS1ydW50aW1lIiwic3ViIjoidm9pY2UtbGFiLXVzZXItMSIsInByaW5jaXBhbF9pZCI6InZvaWNlLWxhYi11c2VyLTEiLCJ0ZXN0X3J1bl9pZCI6ImdvbGRlbi1ydW4tMDAxIiwic2NlbmFyaW9faWQiOiJ2dDAwLWdvbGRlbi0wMDEiLCJzY2VuYXJpb192ZXJzaW9uIjoidjEiLCJzeW50aGV0aWMiOnRydWUsImVudmlyb25tZW50IjoicHJvZHVjdGlvbiIsImFsbG93ZWRfb3BzIjpbInZvaWNlOnN0YXJ0Iiwic2Vzc2lvbjpjcmVhdGUiLCJzZXNzaW9uOmZpbmFsaXplIl0sImV4cGVjdGVkX2RlcGxveW1lbnQiOnsiZnJvbnRlbmQiOiI0MWE5YjEyN2FmNzgwYmJlOWQ4OGFjZjM0NTY2YTZhYWY0NDNlNmIwIiwiYmFja2VuZCI6IjQxYTliMTI3YWY3ODBiYmU5ZDg4YWNmMzQ1NjZhNmFhZjQ0M2U2YjAiLCJ2b2ljZSI6IjQxYTliMTI3YWY3ODBiYmU5ZDg4YWNmMzQ1NjZhNmFhZjQ0M2U2YjAifSwiaWF0IjoyMDAwMDAwMDAwLCJuYmYiOjIwMDAwMDAwMDAsImV4cCI6MjAwMDAwMDEyMCwianRpIjoiZ29sZGVuLWp0aS0wMDEiLCJub25jZSI6ImdvbGRlbi1ub25jZS0wMDEifQ=.9jCHnXdxrtQeHgbFeCstmUxYScyCJzU66w1d4bKemec",
+    "non_object_payload": "W10.UR3z7OOYyRbec8E21ZAhp7aNQi8mPMFxTMt9ZxL7TVk",
+    "three_parts": "a.b.c"
+  },
+  "strict_malformed_claims": [
+    {
+      "name": "extra_top_level_key",
+      "overrides": {"unexpected": "rejected"},
+      "expected_code": "voice_lab_capability_malformed"
+    },
+    {
+      "name": "duplicate_allowed_operation",
+      "overrides": {"allowed_ops": ["voice:start", "session:create", "session:create"]},
+      "expected_code": "voice_lab_capability_malformed"
+    },
+    {
+      "name": "not_before_after_expiry",
+      "overrides": {"nbf": 2000000121},
+      "expected_code": "voice_lab_capability_invalid_lifetime"
+    },
+    {
+      "name": "expiry_not_after_issue",
+      "overrides": {"exp": 2000000000},
+      "expected_code": "voice_lab_capability_invalid_lifetime"
+    },
+    {
+      "name": "provider_expiry_not_canonical_millis",
+      "overrides": {"provider_expires_at": "2033-05-18T04:03:20Z"},
+      "expected_code": "voice_lab_capability_malformed"
+    }
+  ]
+}

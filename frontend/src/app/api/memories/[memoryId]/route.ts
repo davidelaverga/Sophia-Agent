@@ -75,7 +75,7 @@ export async function PUT(
 
     return passthroughBackendResponse(backendResponse);
   } catch (error) {
-    logger.logError(error, { component: 'api/memories/[memoryId]', action: 'update_memory' });
+    logger.logError(error, { component: 'api/memories/[memoryId]', action: 'update_memory', request: req });
     return NextResponse.json({ error: 'Failed to update memory' }, { status: 500 });
   }
 }
@@ -105,7 +105,7 @@ export async function DELETE(
 
     return passthroughBackendResponse(backendResponse);
   } catch (error) {
-    logger.logError(error, { component: 'api/memories/[memoryId]', action: 'delete_memory' });
+    logger.logError(error, { component: 'api/memories/[memoryId]', action: 'delete_memory', request: req });
     return NextResponse.json({ error: 'Failed to delete memory' }, { status: 500 });
   }
 }

@@ -19,6 +19,18 @@ def _missing_requested_module(exc: ModuleNotFoundError, module_name: str) -> boo
 
 
 def _make_fallback_type(symbol_name: str, fallback_base: type = _FallbackEvent) -> type:
+    # ``importlib.reload`` re-executes this module in the existing module
+    # dictionary. Reuse an earlier fallback so subscribers and test doubles
+    # that retained the class keep matching ``isinstance`` after a readiness
+    # probe reloads the compatibility layer.
+    existing = globals().get(symbol_name)
+    if (
+        isinstance(existing, type)
+        and existing.__module__ == __name__
+        and existing.__name__ == symbol_name
+    ):
+        return existing
+
     fallback_type = type(symbol_name, (fallback_base,), {})
     fallback_type.__module__ = __name__
     return fallback_type

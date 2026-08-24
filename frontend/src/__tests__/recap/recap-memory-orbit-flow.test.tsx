@@ -1,4 +1,4 @@
-import { act, fireEvent, render, screen, within } from '@testing-library/react';
+import { act, fireEvent, render, screen } from '@testing-library/react';
 import React, { useState } from 'react';
 import { afterEach, describe, expect, it, vi } from 'vitest';
 
@@ -73,16 +73,19 @@ describe('RecapMemoryOrbit demo flow', () => {
     fireEvent.change(reopenedTextarea, { target: { value: 'I want calmer tournament sessions.' } });
     fireEvent.click(screen.getByRole('button', { name: 'Save refinement' }));
 
+    expect(screen.getByText('I want calmer tournament sessions.')).toBeInTheDocument();
+    expect(screen.getByText('Keep refined')).toBeInTheDocument();
+    fireEvent.click(screen.getByRole('button', { name: 'Keep this memory' }));
+
     await act(async () => {
-      vi.advanceTimersByTime(800);
+      vi.advanceTimersByTime(700);
     });
 
     expect(screen.getByText('All memories reviewed')).toBeInTheDocument();
-    expect(screen.getByText('I want calmer tournament sessions.')).toBeInTheDocument();
-    expect(screen.getByText('Refined')).toBeInTheDocument();
+    expect(screen.getByText('1 memory in the pool')).toBeInTheDocument();
   });
 
-  it('shows Refined only for edited memories and excludes discarded memories from the completed list', () => {
+  it('summarizes only approved and edited memories after review', () => {
     render(
       <RecapMemoryOrbit
         candidates={[
@@ -100,17 +103,10 @@ describe('RecapMemoryOrbit demo flow', () => {
     );
 
     expect(screen.getByText('All memories reviewed')).toBeInTheDocument();
-    expect(screen.getByText('I prefer short resets between games.')).toBeInTheDocument();
-    expect(screen.getByText('I recover faster when I slow down and breathe.')).toBeInTheDocument();
+    expect(screen.getByText('2 memories in the pool')).toBeInTheDocument();
+    expect(screen.queryByText('I prefer short resets between games.')).not.toBeInTheDocument();
+    expect(screen.queryByText('I recover faster when I slow down and breathe.')).not.toBeInTheDocument();
     expect(screen.queryByText('Temporary draft memory to remove.')).not.toBeInTheDocument();
-
-    const refinedBadges = screen.getAllByText('Refined');
-    expect(refinedBadges).toHaveLength(1);
-
-    const approvedMemoryRow = screen.getByText('I prefer short resets between games.').closest('div');
-    expect(approvedMemoryRow).not.toBeNull();
-    if (approvedMemoryRow) {
-      expect(within(approvedMemoryRow).queryByText('Refined')).not.toBeInTheDocument();
-    }
+    expect(screen.queryByText('Refined')).not.toBeInTheDocument();
   });
 });

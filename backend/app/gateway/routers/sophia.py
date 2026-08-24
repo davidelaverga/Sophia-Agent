@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
 import os
@@ -11,7 +12,7 @@ from pathlib import Path
 from typing import Any, Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException, Query, Request
-from pydantic import BaseModel, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, model_validator
 
 from app.gateway.auth import require_authorized_user_scope
 from app.gateway.sophia_realtime_context import (
@@ -24,6 +25,11 @@ from app.gateway.sophia_realtime_context import (
     retrieve_sophia_realtime_memories,
     retrieve_sophia_realtime_memories_for_grant,
 )
+from app.gateway.voice_lab_capability import (
+    VoiceLabClaims,
+    assert_voice_lab_session_record,
+    capability_for_gateway_action,
+)
 from deerflow.agents.sophia_agent.paths import USERS_DIR
 from deerflow.agents.sophia_agent.utils import safe_user_path
 from deerflow.sophia.review_metadata_store import (
@@ -35,6 +41,7 @@ from deerflow.sophia.session_store import (
     SessionMessageRecord,
     SessionRecord,
     SessionStore,
+    SessionStoreError,
     canonical_visible_messages,
     derive_message_id,
 )
@@ -343,6 +350,115 @@ class SessionEndRequest(BaseModel):
     recap_artifacts: SessionRecapArtifactsPayload | None = Field(default=None)
 
 
+class SyntheticFinalizationEvidenceReceipt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    storage: Literal["postgres_session", "supabase", "local_ephemeral"]
+    object_path: str = Field(min_length=1, max_length=1024)
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+
+class SyntheticTranscriptExpectedDeployment(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    frontend: str = Field(min_length=1, max_length=256)
+    backend: str = Field(min_length=1, max_length=256)
+    voice: str = Field(min_length=1, max_length=256)
+
+
+class SyntheticCanonicalTranscriptMessage(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    message_id: str = Field(min_length=1, max_length=256)
+    sequence: int = Field(gt=0)
+    role: Literal["user", "assistant"]
+    content: str
+    created_at: str = Field(min_length=1)
+    source: str = Field(min_length=1, max_length=128)
+    final: bool
+    approximate: bool
+    turn_id: str | None = None
+    provider_event_id: str | None = None
+    redaction_level: str
+
+
+class SyntheticCanonicalTurnBoundary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    turn_id: str | None = None
+    first_sequence: int = Field(gt=0)
+    last_sequence: int = Field(gt=0)
+    input_message_count: int = Field(ge=0)
+    output_message_count: int = Field(ge=0)
+
+
+class SyntheticCanonicalTranscript(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    schema: Literal["sophia_voice_lab_canonical_transcript_v1"]
+    source: Literal["sophia_session_messages"]
+    synthetic: Literal[True]
+    principal_id: str = Field(min_length=1, max_length=256)
+    test_run_id: str = Field(min_length=1, max_length=256)
+    scenario_id: str = Field(min_length=1, max_length=256)
+    scenario_version: str = Field(min_length=1, max_length=256)
+    environment: str = Field(min_length=1, max_length=128)
+    session_id: str = Field(min_length=1, max_length=256)
+    thread_id: str = Field(min_length=1, max_length=256)
+    expected_deployment: SyntheticTranscriptExpectedDeployment
+    message_revision: int = Field(ge=0)
+    message_count: int = Field(ge=0)
+    input_message_count: int = Field(ge=0)
+    output_message_count: int = Field(ge=0)
+    turn_boundary_count: int = Field(ge=0)
+    digest_algorithm: Literal["sha-256"]
+    canonicalization: Literal["utf8-json-sort-keys-compact-ascii-v1"]
+    sha256: str = Field(pattern=r"^[a-f0-9]{64}$")
+    finalized_at: str = Field(min_length=1)
+    retention_hours: int = Field(ge=1, le=168)
+    retention_anchor: Literal["finalized_at"]
+    retention_expires_at: str = Field(min_length=1)
+    provider_expires_at: str = Field(min_length=1)
+    cleanup_obligation_id: str = Field(
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$"
+    )
+    raw_audio_excluded: Literal[True]
+    messages: list[SyntheticCanonicalTranscriptMessage]
+    turn_boundaries: list[SyntheticCanonicalTurnBoundary]
+
+    @model_validator(mode="after")
+    def validate_canonical_identity(self) -> SyntheticCanonicalTranscript:
+        canonical_messages = [message.model_dump(mode="json") for message in self.messages]
+        canonical_bytes = json.dumps(
+            canonical_messages,
+            sort_keys=True,
+            separators=(",", ":"),
+            ensure_ascii=True,
+        ).encode("utf-8")
+        input_count = sum(message.role == "user" for message in self.messages)
+        output_count = sum(message.role == "assistant" for message in self.messages)
+        sequences = [message.sequence for message in self.messages]
+        finalized_at = _parse_exact_utc_millis(self.finalized_at)
+        retention_expires_at = _parse_exact_utc_millis(self.retention_expires_at)
+        provider_expires_at = _parse_exact_utc_millis(self.provider_expires_at)
+        if (
+            self.message_count != len(self.messages)
+            or self.input_message_count != input_count
+            or self.output_message_count != output_count
+            or self.turn_boundary_count != len(self.turn_boundaries)
+            or sequences != list(range(1, len(self.messages) + 1))
+            or self.sha256 != hashlib.sha256(canonical_bytes).hexdigest()
+            or finalized_at is None
+            or retention_expires_at is None
+            or provider_expires_at is None
+            or provider_expires_at > retention_expires_at
+            or retention_expires_at
+            != finalized_at + timedelta(hours=self.retention_hours)
+        ):
+            raise ValueError("canonical transcript identity mismatch")
+        return self
+
+
 class SessionEndResponse(BaseModel):
     status: str = Field(default="pipeline_queued")
     session_id: str = Field(default="")
@@ -352,6 +468,64 @@ class SessionEndResponse(BaseModel):
     recap_artifacts: dict | None = Field(default=None)
     offer_debrief: bool = Field(default=False)
     debrief_prompt: str | None = Field(default=None)
+    synthetic_isolated: bool = Field(default=False)
+    test_run_id: str | None = Field(default=None)
+    finalized_at: str | None = Field(default=None)
+    retention_hours: int | None = Field(default=None, ge=1, le=168)
+    retention_anchor: Literal["finalized_at"] | None = Field(default=None)
+    retention_expires_at: str | None = Field(default=None)
+    provider_expires_at: str | None = Field(default=None)
+    cleanup_obligation_id: str | None = Field(
+        default=None,
+        pattern=r"^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$",
+    )
+    exclusions: dict[str, bool] | None = Field(default=None)
+    evidence_receipt: SyntheticFinalizationEvidenceReceipt | None = Field(default=None)
+    canonical_transcript: SyntheticCanonicalTranscript | None = Field(default=None)
+
+    @model_validator(mode="after")
+    def require_synthetic_finalization_evidence(self) -> SessionEndResponse:
+        if self.synthetic_isolated and (
+            self.evidence_receipt is None
+            or self.canonical_transcript is None
+            or self.finalized_at is None
+            or self.retention_hours is None
+            or self.retention_anchor != "finalized_at"
+            or self.retention_expires_at is None
+            or self.provider_expires_at is None
+            or self.cleanup_obligation_id is None
+        ):
+            raise ValueError("synthetic finalization evidence is required")
+        if self.synthetic_isolated:
+            finalized_at = _parse_exact_utc_millis(self.finalized_at)
+            retention_expires_at = _parse_exact_utc_millis(
+                self.retention_expires_at
+            )
+            provider_expires_at = _parse_exact_utc_millis(
+                self.provider_expires_at
+            )
+            if (
+                finalized_at is None
+                or retention_expires_at is None
+                or provider_expires_at is None
+                or provider_expires_at > retention_expires_at
+                or retention_expires_at
+                != finalized_at + timedelta(hours=self.retention_hours or 0)
+                or self.canonical_transcript is None
+                or self.canonical_transcript.finalized_at != self.finalized_at
+                or self.canonical_transcript.retention_hours
+                != self.retention_hours
+                or self.canonical_transcript.retention_anchor
+                != self.retention_anchor
+                or self.canonical_transcript.retention_expires_at
+                != self.retention_expires_at
+                or self.canonical_transcript.provider_expires_at
+                != self.provider_expires_at
+                or self.canonical_transcript.cleanup_obligation_id
+                != self.cleanup_obligation_id
+            ):
+                raise ValueError("synthetic finalization retention mismatch")
+        return self
 
 
 class TaskCancelResponse(BaseModel):
@@ -591,6 +765,656 @@ def _write_session_recap(user_id: str, session_id: str, payload: dict) -> None:
     recap_path = _get_session_recap_path(user_id, session_id)
     recap_path.parent.mkdir(parents=True, exist_ok=True)
     recap_path.write_text(json.dumps(payload, ensure_ascii=True, indent=2), encoding="utf-8")
+
+
+_SYNTHETIC_FINALIZATION_EXCLUSIONS = {
+    "memory": True,
+    "offline_pipeline": True,
+    "learning": True,
+    "ordinary_product_analytics": True,
+    "ordinary_user_projects": True,
+    "shared_spaces": True,
+    "debrief": True,
+}
+
+_SYNTHETIC_TRANSCRIPT_MAX_MESSAGES = 512
+_SYNTHETIC_TRANSCRIPT_MAX_MESSAGE_BYTES = 32 * 1024
+_SYNTHETIC_TRANSCRIPT_MAX_TOTAL_BYTES = 1024 * 1024
+
+
+def _canonical_utc_millis(value: datetime) -> str:
+    return (
+        value.astimezone(UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _parse_exact_utc_millis(value: object) -> datetime | None:
+    if not isinstance(value, str):
+        return None
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    normalized = parsed.astimezone(UTC)
+    return normalized if _canonical_utc_millis(normalized) == value else None
+
+
+def _synthetic_message_metadata(
+    record: SessionRecord,
+    claims: VoiceLabClaims,
+) -> dict[str, Any]:
+    record_metadata = record.metadata if isinstance(record.metadata, dict) else {}
+    synthetic = record_metadata.get("synthetic_voice_lab")
+    retention_expires_at = (
+        synthetic.get("retention_expires_at") if isinstance(synthetic, dict) else None
+    )
+    if not isinstance(retention_expires_at, str) or not retention_expires_at:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_session_retention_missing"},
+        )
+    return {
+        **claims.synthetic_context(),
+        "scenario_version": claims.scenario_version,
+        "expected_deployment": dict(claims.expected_deployment),
+        "retention_hours": synthetic.get("retention_hours"),
+        "retention_anchor": synthetic.get("retention_anchor"),
+        **(
+            {"finalized_at": synthetic.get("finalized_at")}
+            if isinstance(synthetic.get("finalized_at"), str)
+            else {}
+        ),
+        "retention_expires_at": retention_expires_at,
+        "memory_retrieval_excluded": True,
+        "memory_learning_excluded": True,
+        "offline_pipeline_excluded": True,
+        "ordinary_analytics_excluded": True,
+        "ordinary_projects_excluded": True,
+        "shared_spaces_excluded": True,
+    }
+
+
+def _validate_synthetic_finalization_transcript(body: SessionEndRequest) -> None:
+    if len(body.messages) > _SYNTHETIC_TRANSCRIPT_MAX_MESSAGES:
+        raise HTTPException(
+            status_code=413,
+            detail={"code": "voice_lab_transcript_too_large"},
+        )
+    total_bytes = 0
+    for message in body.messages:
+        content_bytes = len(message.content.encode("utf-8"))
+        if content_bytes > _SYNTHETIC_TRANSCRIPT_MAX_MESSAGE_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "voice_lab_transcript_too_large"},
+            )
+        total_bytes += content_bytes
+        if total_bytes > _SYNTHETIC_TRANSCRIPT_MAX_TOTAL_BYTES:
+            raise HTTPException(
+                status_code=413,
+                detail={"code": "voice_lab_transcript_too_large"},
+            )
+
+
+def _synthetic_finalization_messages(
+    user_id: str,
+    body: SessionEndRequest,
+    record: SessionRecord,
+    claims: VoiceLabClaims,
+) -> tuple[list[SessionMessageRecord], int]:
+    """Build a bounded transcript without performing a pre-finalization write."""
+
+    _validate_synthetic_finalization_transcript(body)
+    existing = canonical_visible_messages(
+        _session_store.list_messages(user_id, body.session_id)
+    )
+    if not body.messages:
+        return existing, max(0, int(record.message_revision))
+    if body.base_revision is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_transcript_base_revision_required"},
+        )
+    return (
+        canonical_visible_messages(
+            _synthetic_records_from_end_request(body, record, claims)
+        ),
+        body.base_revision,
+    )
+
+
+def _synthetic_records_from_end_request(
+    body: SessionEndRequest,
+    record: SessionRecord,
+    claims: VoiceLabClaims,
+) -> list[SessionMessageRecord]:
+    message_metadata = _synthetic_message_metadata(record, claims)
+    records: list[SessionMessageRecord] = []
+    for message in body.messages:
+        content = message.content.strip()
+        role = "assistant" if message.role in {"assistant", "sophia"} else message.role
+        is_final = message.final if message.final is not None else not bool(message.incomplete)
+        if not content or role not in {"user", "assistant"} or not is_final:
+            continue
+        sequence = len(records) + 1
+        records.append(
+            SessionMessageRecord(
+                message_id=derive_message_id(
+                    session_id=body.session_id,
+                    role=role,
+                    sequence=sequence,
+                    message_id=message.message_id or message.id,
+                    turn_id=message.turn_id,
+                    provider_event_id=message.provider_event_id,
+                    content=content,
+                ),
+                session_id=body.session_id,
+                thread_id=record.thread_id,
+                role=role,
+                content=content,
+                created_at=_canonical_synthetic_message_timestamp(
+                    message.created_at
+                    or _canonical_utc_millis(datetime.now(UTC))
+                ),
+                source=message.source or body.platform or record.platform or "voice",
+                final=True,
+                approximate=bool(message.approximate),
+                turn_id=message.turn_id,
+                provider_event_id=message.provider_event_id,
+                sequence=sequence,
+                redaction_level=message.redaction_level,
+                metadata=dict(message_metadata),
+            )
+        )
+    return records
+
+
+def _synthetic_message_replay_identity(
+    message: SessionMessageRecord,
+) -> tuple[object, ...]:
+    return (
+        message.message_id,
+        message.sequence,
+        message.role,
+        message.content,
+        message.source,
+        message.final,
+        message.approximate,
+        message.turn_id,
+        message.provider_event_id,
+        message.redaction_level,
+    )
+
+
+def _assert_synthetic_terminal_transcript_replay(
+    user_id: str,
+    body: SessionEndRequest,
+    record: SessionRecord,
+    claims: VoiceLabClaims,
+) -> tuple[SessionRecord, list[SessionMessageRecord]]:
+    """Verify a terminal retry without granting any transcript mutation."""
+    stored = canonical_visible_messages(
+        _session_store.list_messages(user_id, body.session_id)
+    )
+    current = _session_store.get(user_id, body.session_id) or record
+    if body.messages:
+        _validate_synthetic_finalization_transcript(body)
+        incoming = canonical_visible_messages(
+            _synthetic_records_from_end_request(body, current, claims)
+        )
+        if [
+            _synthetic_message_replay_identity(message) for message in incoming
+        ] != [
+            _synthetic_message_replay_identity(message) for message in stored
+        ]:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_finalization_transcript_conflict"},
+            )
+
+    return current, stored
+
+
+def _assert_synthetic_provisional_retention_open(
+    record: SessionRecord,
+    *,
+    now: datetime | None = None,
+) -> None:
+    synthetic = (
+        record.metadata.get("synthetic_voice_lab")
+        if isinstance(record.metadata, dict)
+        else None
+    )
+    deadline = (
+        _parse_exact_utc_millis(synthetic.get("retention_expires_at"))
+        if isinstance(synthetic, dict)
+        and synthetic.get("retention_anchor") == "session_created_at_provisional"
+        else None
+    )
+    if deadline is None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "voice_lab_provisional_retention_binding_invalid"},
+        )
+    observed_at = (now or datetime.now(UTC)).astimezone(UTC)
+    if observed_at >= deadline:
+        raise HTTPException(
+            status_code=410,
+            detail={"code": "voice_lab_provisional_retention_expired"},
+        )
+
+
+def _finalize_synthetic_session_atomically(
+    user_id: str,
+    body: SessionEndRequest,
+    record: SessionRecord,
+    claims: VoiceLabClaims,
+    *,
+    authoritative_messages: list[SessionMessageRecord] | None = None,
+) -> tuple[
+    SessionRecord,
+    list[SessionMessageRecord],
+    dict[str, object],
+    dict[str, str],
+]:
+    """Commit transcript, lifecycle, retention, and CLOSED as one boundary."""
+
+    if authoritative_messages is None:
+        messages, expected_revision = _synthetic_finalization_messages(
+            user_id,
+            body,
+            record,
+            claims,
+        )
+    else:
+        # Terminal retries are read-only. Reuse committed rows (including
+        # DB-authoritative timestamps) after the caller compared the incoming
+        # content identity to this snapshot.
+        messages = canonical_visible_messages(authoritative_messages)
+        expected_revision = max(0, int(record.message_revision))
+    message_metadata_base: dict[str, object] = {
+        **claims.synthetic_context(),
+        "scenario_version": claims.scenario_version,
+        "expected_deployment": dict(claims.expected_deployment),
+        "memory_retrieval_excluded": True,
+        "memory_learning_excluded": True,
+        "offline_pipeline_excluded": True,
+        "ordinary_analytics_excluded": True,
+        "ordinary_projects_excluded": True,
+        "shared_spaces_excluded": True,
+    }
+    canonical_transcript_json = _canonical_synthetic_messages_json(messages)
+    canonical_transcript_sha256 = hashlib.sha256(
+        canonical_transcript_json.encode("utf-8")
+    ).hexdigest()
+    try:
+        started_at = datetime.fromisoformat(
+            str(body.started_at or record.created_at).replace("Z", "+00:00")
+        )
+    except ValueError as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "voice_lab_finalization_started_at_invalid"},
+        ) from exc
+    if started_at.tzinfo is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "voice_lab_finalization_started_at_invalid"},
+        )
+    finalization_started_at = _canonical_utc_millis(started_at)
+    turn_count = body.turn_count if body.turn_count is not None else len(messages)
+    try:
+        result = _session_store.finalize_synthetic_session(
+            user_id,
+            record.session_id,
+            messages,
+            expected_revision=expected_revision,
+            cleanup_obligation_id=claims.cleanup_obligation_id,
+            provider_expires_at=claims.provider_expires_at,
+            retention_hours=claims.retention_hours,
+            expected_synthetic_binding=claims.synthetic_context(),
+            expected_deployment=dict(claims.expected_deployment),
+            message_metadata_base=message_metadata_base,
+            canonical_transcript_sha256=canonical_transcript_sha256,
+            canonical_transcript_json=canonical_transcript_json,
+            finalization_started_at=finalization_started_at,
+            turn_count=turn_count,
+            capability_jti_sha256=hashlib.sha256(
+                claims.jti.encode("utf-8")
+            ).hexdigest(),
+        )
+    except (OSError, RuntimeError, SessionStoreError) as exc:
+        reason = str(exc).lower()
+        if "provisional" in reason and (
+            "expired" in reason or "deadline" in reason
+        ):
+            status_code = 410
+            code = "voice_lab_provisional_retention_expired"
+        elif "revision" in reason:
+            status_code = 409
+            code = "voice_lab_transcript_revision_conflict"
+        elif any(
+            marker in reason
+            for marker in ("closed", "unavailable", "binding", "conflict")
+        ):
+            status_code = 409
+            code = "voice_lab_finalization_unavailable"
+        else:
+            status_code = 503
+            code = "voice_lab_finalization_transaction_failed"
+        raise HTTPException(status_code=status_code, detail={"code": code}) from exc
+    retention_fields: dict[str, object] = {
+        "finalized_at": result.finalized_at,
+        "retention_hours": claims.retention_hours,
+        "retention_anchor": "finalized_at",
+        "retention_expires_at": result.retention_expires_at,
+    }
+    if _canonical_synthetic_messages_sha256(result.messages) != canonical_transcript_sha256:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "voice_lab_finalization_readback_conflict"},
+        )
+    return result.record, result.messages, retention_fields, result.evidence_receipt
+
+
+def _canonical_synthetic_messages(
+    messages: list[SessionMessageRecord],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "message_id": message.message_id,
+            "sequence": message.sequence,
+            "role": message.role,
+            "content": message.content,
+            "created_at": _canonical_synthetic_message_timestamp(
+                message.created_at
+            ),
+            "source": message.source,
+            "final": message.final,
+            "approximate": message.approximate,
+            "turn_id": message.turn_id,
+            "provider_event_id": message.provider_event_id,
+            "redaction_level": message.redaction_level,
+        }
+        for message in messages
+    ]
+
+
+def _canonical_synthetic_message_timestamp(value: str) -> str:
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except (AttributeError, ValueError) as exc:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "voice_lab_message_timestamp_invalid"},
+        ) from exc
+    if parsed.tzinfo is None:
+        raise HTTPException(
+            status_code=422,
+            detail={"code": "voice_lab_message_timestamp_invalid"},
+        )
+    return _canonical_utc_millis(parsed)
+
+
+def _canonical_synthetic_messages_json(
+    messages: list[SessionMessageRecord],
+) -> str:
+    return json.dumps(
+        _canonical_synthetic_messages(messages),
+        sort_keys=True,
+        separators=(",", ":"),
+        ensure_ascii=True,
+    )
+
+
+def _canonical_synthetic_messages_sha256(
+    messages: list[SessionMessageRecord],
+) -> str:
+    return hashlib.sha256(
+        _canonical_synthetic_messages_json(messages).encode("utf-8")
+    ).hexdigest()
+
+
+def _synthetic_transcript_evidence(
+    record: SessionRecord,
+    messages: list[SessionMessageRecord],
+    claims: VoiceLabClaims,
+) -> dict[str, Any]:
+    canonical_messages = _canonical_synthetic_messages(messages)
+    synthetic = record.metadata.get("synthetic_voice_lab", {})
+    turn_boundaries: list[dict[str, Any]] = []
+    for message in canonical_messages:
+        turn_id = message["turn_id"]
+        boundary = next(
+            (
+                candidate
+                for candidate in reversed(turn_boundaries)
+                if candidate["turn_id"] == turn_id
+                and candidate["last_sequence"] == message["sequence"] - 1
+            ),
+            None,
+        )
+        if boundary is None:
+            boundary = {
+                "turn_id": turn_id,
+                "first_sequence": message["sequence"],
+                "last_sequence": message["sequence"],
+                "input_message_count": 0,
+                "output_message_count": 0,
+            }
+            turn_boundaries.append(boundary)
+        boundary["last_sequence"] = message["sequence"]
+        boundary[
+            "input_message_count"
+            if message["role"] == "user"
+            else "output_message_count"
+        ] += 1
+    payload = {
+        "schema": "sophia_voice_lab_canonical_transcript_v1",
+        "source": "sophia_session_messages",
+        "synthetic": True,
+        "principal_id": claims.principal_id,
+        "test_run_id": claims.test_run_id,
+        "scenario_id": claims.scenario_id,
+        "scenario_version": claims.scenario_version,
+        "environment": claims.environment,
+        "session_id": record.session_id,
+        "thread_id": record.thread_id,
+        "expected_deployment": dict(claims.expected_deployment),
+        "message_revision": max(0, int(record.message_revision)),
+        "message_count": len(canonical_messages),
+        "input_message_count": sum(
+            1 for message in canonical_messages if message["role"] == "user"
+        ),
+        "output_message_count": sum(
+            1 for message in canonical_messages if message["role"] == "assistant"
+        ),
+        "turn_boundary_count": len(turn_boundaries),
+        "digest_algorithm": "sha-256",
+        "canonicalization": "utf8-json-sort-keys-compact-ascii-v1",
+        "sha256": _canonical_synthetic_messages_sha256(messages),
+        "finalized_at": synthetic.get("finalized_at"),
+        "retention_hours": synthetic.get("retention_hours"),
+        "retention_anchor": synthetic.get("retention_anchor"),
+        "retention_expires_at": synthetic.get("retention_expires_at"),
+        "provider_expires_at": claims.provider_expires_at,
+        "cleanup_obligation_id": claims.cleanup_obligation_id,
+        "raw_audio_excluded": True,
+        "messages": canonical_messages,
+        "turn_boundaries": turn_boundaries,
+    }
+    try:
+        return SyntheticCanonicalTranscript.model_validate(payload).model_dump(mode="json")
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "voice_lab_canonical_transcript_invalid"},
+        ) from exc
+
+
+def _synthetic_finalization_path(user_id: str, cleanup_obligation_id: str) -> Path:
+    return safe_user_path(
+        USERS_DIR,
+        user_id,
+        "synthetic_voice_lab",
+        "finalizations",
+        f"{cleanup_obligation_id}.json",
+    )
+
+
+def _synthetic_finalization_object_path(payload: dict[str, Any]) -> str:
+    return (
+        ".builder/voice_lab_evidence/finalizations/v2/"
+        f"{payload['cleanup_obligation_id']}.json"
+    )
+
+
+def _synthetic_finalization_identity(payload: dict[str, Any]) -> tuple[object, ...]:
+    transcript = payload.get("canonical_transcript")
+    transcript_identity = (
+        transcript.get("message_revision"),
+        transcript.get("message_count"),
+        transcript.get("sha256"),
+        transcript.get("finalized_at"),
+        transcript.get("retention_hours"),
+        transcript.get("retention_anchor"),
+        transcript.get("retention_expires_at"),
+        transcript.get("provider_expires_at"),
+    ) if isinstance(transcript, dict) else None
+    return (
+        payload.get("schema"),
+        payload.get("principal_id"),
+        payload.get("test_run_id"),
+        payload.get("cleanup_obligation_id"),
+        payload.get("scenario_id"),
+        payload.get("scenario_version"),
+        payload.get("environment"),
+        payload.get("session_id"),
+        payload.get("thread_id"),
+        payload.get("expected_deployment"),
+        transcript_identity,
+    )
+
+
+def _postgres_synthetic_finalization_payload(
+    claims: VoiceLabClaims,
+    record: SessionRecord,
+    canonical_transcript: dict[str, Any],
+    evidence_receipt: dict[str, str],
+) -> tuple[dict[str, Any], dict[str, str]]:
+    """Read back the immutable finalization projection committed by Postgres."""
+
+    synthetic = (
+        record.metadata.get("synthetic_voice_lab")
+        if isinstance(record.metadata, dict)
+        else None
+    )
+    stored = (
+        synthetic.get("finalization_receipt")
+        if isinstance(synthetic, dict)
+        else None
+    )
+    if (
+        not isinstance(stored, dict)
+        or stored.get("schema")
+        != "sophia_voice_lab_postgres_finalization_receipt_v1"
+        or stored.get("storage") != "postgres_session"
+        or stored.get("cleanup_obligation_id") != claims.cleanup_obligation_id
+        or stored.get("transcript_sha256") != canonical_transcript.get("sha256")
+        or stored.get("finalized_at") != canonical_transcript.get("finalized_at")
+        or stored.get("retention_expires_at")
+        != canonical_transcript.get("retention_expires_at")
+        or stored.get("provider_expires_at") != claims.provider_expires_at
+        or stored.get("message_revision")
+        != canonical_transcript.get("message_revision")
+        or stored.get("message_count") != canonical_transcript.get("message_count")
+        or not isinstance(stored.get("started_at"), str)
+        or not isinstance(stored.get("turn_count"), int)
+        or not isinstance(stored.get("capability_jti_sha256"), str)
+        or evidence_receipt
+        != {
+            "storage": "postgres_session",
+            "object_path": stored.get("object_path"),
+            "sha256": stored.get("sha256"),
+        }
+    ):
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "voice_lab_finalization_receipt_readback_conflict"},
+        )
+    payload: dict[str, Any] = {
+        "schema": "sophia_voice_lab_finalization_v1",
+        "status": "synthetic_isolated",
+        "synthetic": True,
+        "principal_id": claims.principal_id,
+        "test_run_id": claims.test_run_id,
+        "scenario_id": claims.scenario_id,
+        "scenario_version": claims.scenario_version,
+        "environment": claims.environment,
+        "session_id": record.session_id,
+        "thread_id": record.thread_id,
+        "started_at": stored["started_at"],
+        "ended_at": stored["finalized_at"],
+        "turn_count": stored["turn_count"],
+        "expected_deployment": dict(claims.expected_deployment),
+        "capability_jti_sha256": stored["capability_jti_sha256"],
+        "finalized_at": stored["finalized_at"],
+        "retention_hours": claims.retention_hours,
+        "retention_anchor": "finalized_at",
+        "retention_expires_at": stored["retention_expires_at"],
+        "provider_expires_at": stored["provider_expires_at"],
+        "cleanup_obligation_id": claims.cleanup_obligation_id,
+        "canonical_transcript": canonical_transcript,
+        "exclusions": dict(_SYNTHETIC_FINALIZATION_EXCLUSIONS),
+    }
+    return payload, evidence_receipt
+
+
+def _build_synthetic_finalization_response(
+    body: SessionEndRequest,
+    payload: dict[str, Any],
+    evidence_receipt: dict[str, str],
+) -> SessionEndResponse:
+    ended_at = payload.get("ended_at") if isinstance(payload.get("ended_at"), str) else body.ended_at
+    started_at = payload.get("started_at") if isinstance(payload.get("started_at"), str) else body.started_at
+    turn_count = payload.get("turn_count") if isinstance(payload.get("turn_count"), int) else 0
+    try:
+        canonical_transcript = SyntheticCanonicalTranscript.model_validate(
+            payload.get("canonical_transcript")
+        )
+        validated_receipt = SyntheticFinalizationEvidenceReceipt.model_validate(
+            evidence_receipt
+        )
+    except ValidationError as exc:
+        raise HTTPException(
+            status_code=503,
+            detail={"code": "voice_lab_finalization_evidence_invalid"},
+        ) from exc
+    return SessionEndResponse(
+        status="synthetic_isolated",
+        session_id=body.session_id,
+        ended_at=ended_at,
+        duration_minutes=_compute_duration_minutes(started_at, ended_at),
+        turn_count=turn_count,
+        recap_artifacts=None,
+        offer_debrief=False,
+        debrief_prompt=None,
+        synthetic_isolated=True,
+        test_run_id=str(payload["test_run_id"]),
+        finalized_at=str(payload["finalized_at"]),
+        retention_hours=int(payload["retention_hours"]),
+        retention_anchor="finalized_at",
+        retention_expires_at=str(payload["retention_expires_at"]),
+        provider_expires_at=str(payload["provider_expires_at"]),
+        cleanup_obligation_id=str(payload["cleanup_obligation_id"]),
+        exclusions=dict(_SYNTHETIC_FINALIZATION_EXCLUSIONS),
+        evidence_receipt=validated_receipt,
+        canonical_transcript=canonical_transcript,
+    )
 
 
 def _parse_iso_datetime(value: str | None) -> datetime | None:
@@ -874,10 +1698,12 @@ def _queue_offline_pipeline(user_id: str, session_id: str, thread_id: str, threa
     task.add_done_callback(_background_tasks.discard)
 
 
-def _mark_session_record_ended(user_id: str, session_id: str, ended_at: str) -> None:
+def _mark_session_record_ended(user_id: str, session_id: str, ended_at: str) -> bool:
     owner_user_id, record = _resolve_session_record_owner(user_id, session_id)
-    if record is None or record.status == "ended":
-        return
+    if record is None:
+        return False
+    if record.status == "ended":
+        return True
 
     ended_record = _session_store.update(
         owner_user_id,
@@ -891,6 +1717,8 @@ def _mark_session_record_ended(user_id: str, session_id: str, ended_at: str) -> 
             owner_user_id,
             session_id,
         )
+        return False
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -1987,9 +2815,106 @@ async def cancel_task(user_id: str, task_id: str) -> TaskCancelResponse:
     status_code=202,
     summary="Trigger offline pipeline for a completed session",
 )
-async def end_session(user_id: str, body: SessionEndRequest) -> SessionEndResponse:
+async def end_session(
+    user_id: str,
+    body: SessionEndRequest,
+    request: Request,
+) -> SessionEndResponse:
     _validate_user(user_id)
+    voice_lab_claims = capability_for_gateway_action(
+        request,
+        user_id,
+        required_operation="session:finalize",
+    )
     ended_at = body.ended_at or datetime.now(UTC).isoformat()
+
+    if voice_lab_claims is not None:
+        owner_user_id, session_record = _resolve_session_record_owner(
+            user_id,
+            body.session_id,
+        )
+        if session_record is None or owner_user_id != user_id:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_session_record_not_found"},
+            )
+        if session_record.thread_id != body.thread_id:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_session_thread_mismatch"},
+            )
+        assert_voice_lab_session_record(session_record, voice_lab_claims)
+        try:
+            cleanup_bound_record = (
+                _session_store.find_session_by_cleanup_obligation_id(
+                    voice_lab_claims.cleanup_obligation_id
+                )
+            )
+        except (OSError, RuntimeError, SessionStoreError) as exc:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_session_cleanup_binding_mismatch"},
+            ) from exc
+        if (
+            cleanup_bound_record is None
+            or cleanup_bound_record.session_id != session_record.session_id
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_session_cleanup_binding_mismatch"},
+            )
+        if session_record.status != "ended":
+            # This is deliberately before transcript parsing/persistence: an
+            # expired provisional session is cleanup-only and cannot allocate
+            # or extend canonical evidence.
+            _assert_synthetic_provisional_retention_open(session_record)
+        terminal_messages: list[SessionMessageRecord] | None = None
+        if session_record.status == "ended":
+            session_record, terminal_messages = (
+                _assert_synthetic_terminal_transcript_replay(
+                    user_id,
+                    body,
+                    session_record,
+                    voice_lab_claims,
+                )
+            )
+        (
+            canonical_record,
+            authoritative_messages,
+            _retention_fields,
+            evidence_receipt,
+        ) = _finalize_synthetic_session_atomically(
+            user_id,
+            body,
+            session_record,
+            voice_lab_claims,
+            authoritative_messages=terminal_messages,
+        )
+        try:
+            from app.gateway.inactivity_watcher import unregister_thread
+
+            unregister_thread(session_record.thread_id)
+        except ImportError:
+            pass
+        # The immutable receipt is already part of the same Postgres commit;
+        # this read-back only projects it into the response.
+        canonical_transcript = _synthetic_transcript_evidence(
+            canonical_record,
+            authoritative_messages,
+            voice_lab_claims,
+        )
+        isolated_payload, evidence_receipt = _postgres_synthetic_finalization_payload(
+            voice_lab_claims,
+            canonical_record,
+            canonical_transcript,
+            evidence_receipt,
+        )
+        logger.info(
+            "session.finalization synthetic_isolated test_run_id=%s session_id=%s",
+            voice_lab_claims.test_run_id,
+            body.session_id,
+        )
+        return _build_synthetic_finalization_response(body, isolated_payload, evidence_receipt)
 
     logger.info(
         "session.finalization end_session_request user_id=%s session_id=%s thread_id=%s message_count=%s has_recap_artifacts=%s",

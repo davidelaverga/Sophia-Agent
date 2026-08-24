@@ -29,10 +29,10 @@ describe("useChromeFade", () => {
     document.documentElement.classList.remove("dark")
   })
 
-  it("starts with chromeFaded=false and chromeOpacity=1.0", () => {
+  it("starts with chromeFaded=false and the resting chrome opacity", () => {
     const { result } = renderHook(() => useChromeFade())
     expect(result.current.chromeFaded).toBe(false)
-    expect(result.current.chromeOpacity).toBe(1.0)
+    expect(result.current.chromeOpacity).toBe(0.7)
   })
 
   it("fades after 500ms when presence enters 'listening'", () => {
@@ -51,7 +51,7 @@ describe("useChromeFade", () => {
     })
 
     expect(result.current.chromeFaded).toBe(true)
-    expect(result.current.chromeOpacity).toBe(0.08) // dark mode
+    expect(result.current.chromeOpacity).toBe(0.15)
   })
 
   it("unfades immediately when presence returns to 'resting'", () => {
@@ -72,7 +72,7 @@ describe("useChromeFade", () => {
     })
 
     expect(result.current.chromeFaded).toBe(false)
-    expect(result.current.chromeOpacity).toBe(1.0)
+    expect(result.current.chromeOpacity).toBe(0.7)
   })
 
   it("does not flicker on rapid listening→resting→listening within 500ms", () => {
@@ -120,7 +120,7 @@ describe("useChromeFade", () => {
     })
 
     expect(result.current.chromeFaded).toBe(false)
-    expect(result.current.chromeOpacity).toBe(1.0)
+    expect(result.current.chromeOpacity).toBe(0.7)
   })
 
   it("never fades in text mode", () => {
@@ -139,10 +139,10 @@ describe("useChromeFade", () => {
     })
 
     expect(result.current.chromeFaded).toBe(false)
-    expect(result.current.chromeOpacity).toBe(1.0)
+    expect(result.current.chromeOpacity).toBe(0.7)
   })
 
-  it("returns light theme opacity when not in dark mode", () => {
+  it("uses the same faded opacity when the document is not in dark mode", () => {
     document.documentElement.classList.remove("dark")
     const { result } = renderHook(() => useChromeFade())
 
@@ -154,7 +154,7 @@ describe("useChromeFade", () => {
     })
 
     expect(result.current.chromeFaded).toBe(true)
-    expect(result.current.chromeOpacity).toBe(0.12) // light mode
+    expect(result.current.chromeOpacity).toBe(0.15)
   })
 
   it("fades for all active presence states", () => {

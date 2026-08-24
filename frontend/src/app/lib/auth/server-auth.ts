@@ -10,6 +10,10 @@ import { cookies, headers } from 'next/headers'
 
 import { getSession } from '@/server/better-auth'
 import { buildLegacyBackendUser, issueLegacyBackendToken } from '@/server/legacy-backend-auth'
+import {
+  ordinaryProductAccessAllowed,
+  type VoiceLabProductAccess,
+} from '@/server/voice-lab/ordinary-route-isolation'
 
 import { debugWarn } from '../debug-logger'
 import { logger } from '../error-logger'
@@ -18,6 +22,14 @@ import { providerLogin } from './backend-auth'
 import { authBypassEnabled, authBypassUserId } from './dev-bypass'
 
 const COOKIE_NAME = 'sophia-backend-token'
+
+async function currentErrorRequest(): Promise<Pick<Request, 'headers'> | undefined> {
+  try {
+    return { headers: await headers() }
+  } catch {
+    return undefined
+  }
+}
 
 function normalizeUserId(value: string | null | undefined): string | null {
   if (typeof value !== 'string') {
@@ -41,13 +53,14 @@ async function readUserTokenFromCookie(): Promise<string> {
   }
 }
 
-function getFallbackServerToken(): string {
+function getFallbackServerToken(request?: Pick<Request, 'headers'>): string {
   const fallback = process.env.BACKEND_API_KEY || ''
 
   if (!fallback) {
     logger.logError(new Error('No backend token available (cookie or BACKEND_API_KEY)'), {
       component: 'Server Auth',
       action: 'get_server_auth_token',
+      request,
     })
     return ''
   }
@@ -100,6 +113,7 @@ async function tryHydrateUserScopedAuthToken(): Promise<string> {
       logger.logError(new Error('No backend token returned during user-scoped auth hydration'), {
         component: 'Server Auth',
         action: 'hydrate_user_scoped_auth_token',
+        request: { headers: requestHeaders },
       })
       return ''
     }
@@ -123,18 +137,20 @@ async function tryHydrateUserScopedAuthToken(): Promise<string> {
     logger.logError(error instanceof Error ? error : new Error('Backend token hydration failed'), {
       component: 'Server Auth',
       action: 'hydrate_user_scoped_auth_token',
+      request: await currentErrorRequest(),
     })
     return ''
   }
 }
 
-function issueBypassBackendToken(): string {
+function issueBypassBackendToken(request?: Pick<Request, 'headers'>): string {
   const bypassUserId = normalizeUserId(authBypassUserId)
 
   if (!bypassUserId) {
     logger.logError(new Error('Auth bypass enabled without a valid bypass user id'), {
       component: 'Server Auth',
       action: 'issue_bypass_backend_token',
+      request,
     })
     return ''
   }
@@ -151,32 +167,39 @@ function issueBypassBackendToken(): string {
     logger.logError(error instanceof Error ? error : new Error('Failed to issue bypass backend token'), {
       component: 'Server Auth',
       action: 'issue_bypass_backend_token',
+      request,
     })
     return ''
   }
 }
 
-export async function getAuthenticatedUserId(): Promise<string | null> {
+export async function getAuthenticatedUserId(options?: VoiceLabProductAccess): Promise<string | null> {
   if (authBypassEnabled) {
-    return normalizeUserId(authBypassUserId)
+    const userId = normalizeUserId(authBypassUserId)
+    return await ordinaryProductAccessAllowed(options, userId) ? userId : null
   }
 
   try {
     const session = await getSession()
-    return normalizeUserId(session?.user?.id ?? null)
+    const userId = normalizeUserId(session?.user?.id ?? null)
+    return await ordinaryProductAccessAllowed(options, userId) ? userId : null
   } catch {
     return null
   }
 }
 
-export async function getUserScopedAuthToken(): Promise<string> {
+export async function getUserScopedAuthToken(options?: VoiceLabProductAccess): Promise<string> {
+  if (!(await ordinaryProductAccessAllowed(options))) {
+    return ''
+  }
   const userToken = await readUserTokenFromCookie()
   if (userToken) {
     return userToken
   }
 
   if (authBypassEnabled) {
-    return getFallbackServerToken() || issueBypassBackendToken()
+    const request = await currentErrorRequest()
+    return getFallbackServerToken(request) || issueBypassBackendToken(request)
   }
 
   const hydratedToken = await tryHydrateUserScopedAuthToken()
@@ -187,25 +210,30 @@ export async function getUserScopedAuthToken(): Promise<string> {
   logger.logError(new Error('No user-scoped backend token available'), {
     component: 'Server Auth',
     action: 'get_user_scoped_auth_token',
+    request: await currentErrorRequest(),
   })
   return ''
 }
 
-export async function refreshUserScopedAuthToken(): Promise<string> {
+export async function refreshUserScopedAuthToken(options?: VoiceLabProductAccess): Promise<string> {
+  if (!(await ordinaryProductAccessAllowed(options))) {
+    return ''
+  }
   if (authBypassEnabled) {
-    return getFallbackServerToken() || issueBypassBackendToken()
+    const request = await currentErrorRequest()
+    return getFallbackServerToken(request) || issueBypassBackendToken(request)
   }
 
   return tryHydrateUserScopedAuthToken()
 }
 
-export async function getUserScopedAuthHeader(): Promise<string> {
-  const token = await getUserScopedAuthToken()
+export async function getUserScopedAuthHeader(options?: VoiceLabProductAccess): Promise<string> {
+  const token = await getUserScopedAuthToken(options)
   return token ? `Bearer ${token}` : ''
 }
 
-export async function refreshUserScopedAuthHeader(): Promise<string> {
-  const token = await refreshUserScopedAuthToken()
+export async function refreshUserScopedAuthHeader(options?: VoiceLabProductAccess): Promise<string> {
+  const token = await refreshUserScopedAuthToken(options)
   return token ? `Bearer ${token}` : ''
 }
 
@@ -218,17 +246,21 @@ export async function refreshUserScopedAuthHeader(): Promise<string> {
  * 
  * @returns The API token to use for backend calls
  */
-export async function getServerAuthToken(): Promise<string> {
+export async function getServerAuthToken(options?: VoiceLabProductAccess): Promise<string> {
+  if (!(await ordinaryProductAccessAllowed(options))) {
+    return ''
+  }
   const userToken = await readUserTokenFromCookie()
   if (userToken) {
     return userToken
   }
 
   if (authBypassEnabled) {
-    return getFallbackServerToken() || issueBypassBackendToken()
+    const request = await currentErrorRequest()
+    return getFallbackServerToken(request) || issueBypassBackendToken(request)
   }
 
-  return getFallbackServerToken()
+  return getFallbackServerToken(await currentErrorRequest())
 }
 
 /**
@@ -236,8 +268,8 @@ export async function getServerAuthToken(): Promise<string> {
  * 
  * @returns Authorization header value with Bearer prefix
  */
-export async function getServerAuthHeader(): Promise<string> {
-  const token = await getServerAuthToken()
+export async function getServerAuthHeader(options?: VoiceLabProductAccess): Promise<string> {
+  const token = await getServerAuthToken(options)
   return token ? `Bearer ${token}` : ''
 }
 

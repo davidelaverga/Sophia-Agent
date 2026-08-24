@@ -1,4 +1,5 @@
 import type { BuilderCompletionEventV1 } from './builder-completion';
+import type { GeminiSyntheticBuilderJoin } from '../lib/gemini-browser-live-websocket-dogfood';
 
 export type BuilderCanvasStatus = 'running' | 'completed' | 'failed' | 'timed_out' | 'cancelled';
 
@@ -60,6 +61,7 @@ export type BuilderCanvasEventV1 = {
   status: BuilderCanvasStatus;
   activity?: BuilderCanvasActivity;
   completion?: BuilderCompletionEventV1;
+  synthetic_builder_join?: GeminiSyntheticBuilderJoin | null;
 };
 
 export type BuilderCanvasTaskSnapshotV1 = {
@@ -69,6 +71,7 @@ export type BuilderCanvasTaskSnapshotV1 = {
   status: BuilderCanvasStatus;
   latest_activity?: BuilderCanvasActivity;
   completion?: BuilderCompletionEventV1;
+  synthetic_builder_join?: GeminiSyntheticBuilderJoin | null;
 };
 
 export type BuilderCanvasSnapshotV1 = {

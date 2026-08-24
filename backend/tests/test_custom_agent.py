@@ -352,9 +352,11 @@ def _make_test_app(tmp_path: Path):
     """Create a FastAPI app with the agents router, patching paths to tmp_path."""
     from fastapi import FastAPI
 
+    from app.gateway.auth import require_authenticated_user
     from app.gateway.routers.agents import router
 
     app = FastAPI()
+    app.dependency_overrides[require_authenticated_user] = lambda: "ordinary-user"
     app.include_router(router)
     return app
 

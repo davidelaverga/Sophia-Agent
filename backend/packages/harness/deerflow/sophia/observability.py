@@ -15,6 +15,11 @@ from weakref import WeakSet
 from langchain_core.runnables import Runnable
 
 from deerflow.config.tracing_config import get_tracing_config
+from deerflow.sophia.synthetic_builder import (
+    declares_synthetic_builder_run,
+    normalize_synthetic_builder_context,
+    synthetic_builder_projection,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -23,6 +28,17 @@ _BUILDER_BASE_TAG = "sophia_builder"
 _BUILDER_TRACING_ENV = "SOPHIA_BUILDER_LANGSMITH_TRACING"
 _startup_status_logged = False
 _ACTIVE_BUILDER_TRACERS: WeakSet[Any] = WeakSet()
+_SYNTHETIC_TRACE_STATUS = {
+    "langsmith_export_excluded": True,
+    "langsmith_trace_status": "trace_unavailable",
+    "langsmith_trace_unavailable_reason": "synthetic_isolation_policy",
+}
+
+
+def _synthetic_langsmith_excluded(*sources: object) -> bool:
+    """Detect the protected lane before any LangSmith client/run allocation."""
+
+    return declares_synthetic_builder_run(*sources)
 
 
 def _tracing_context_factory() -> Any | None:
@@ -220,6 +236,7 @@ def builder_trace_metadata(
         _merge_safe_metadata(metadata, "parent_trace_id", config_metadata.get("trace_id"))
     if "task_id" not in metadata and metadata.get("thread_id") is not None:
         metadata["task_id"] = metadata["thread_id"]
+    _add_synthetic_trace_metadata(metadata, runtime_config)
     return metadata
 
 
@@ -241,6 +258,8 @@ def _builder_langsmith_tracer(
     metadata: dict[str, Any],
     tags: list[str],
 ) -> Any | None:
+    if _synthetic_langsmith_excluded(metadata):
+        return None
     if not langsmith_builder_tracing_enabled():
         return None
     try:
@@ -274,6 +293,11 @@ def langsmith_builder_tracing_context(
 ) -> Any:
     """Context manager that enables tracing only for builder graph execution."""
 
+    if _synthetic_langsmith_excluded(metadata):
+        # Disable inherited/global tracing as well as the explicit Builder
+        # callback.  Returning a bare nullcontext could allow an outer Agent
+        # Server or Voice trace to capture the protected run.
+        return langsmith_tracing_disabled()
     if not langsmith_builder_tracing_enabled():
         return nullcontext()
     tracing_context = _tracing_context_factory()
@@ -372,7 +396,9 @@ def _is_langgraph_pregel(runnable: Any) -> bool:
         pass
 
     try:
-        from langgraph.pregel.remote import BaseRemotePregel
+        from langgraph.pregel.remote import (
+            BaseRemotePregel,  # ty: ignore[unresolved-import]
+        )
 
         return isinstance(runnable, BaseRemotePregel)
     except Exception:  # noqa: BLE001 - optional import/version guard.
@@ -450,6 +476,11 @@ def enable_langsmith_tracing_for_builder_runnable(
 ) -> Any:
     metadata = dict(metadata or {})
     tags = _safe_tags(tags)
+    if _synthetic_langsmith_excluded(metadata):
+        logger.info(
+            "Sophia builder LangSmith tracing excluded by synthetic isolation policy"
+        )
+        return LangSmithTraceDisabledRunnable(runnable)
     if not langsmith_builder_tracing_enabled():
         logger.info(
             "Sophia builder LangSmith tracing disabled: %s",
@@ -562,6 +593,21 @@ def _feedback_client() -> Any:
 
 def _as_dict(value: Any) -> dict[str, Any]:
     return value if isinstance(value, dict) else {}
+
+
+def _add_synthetic_trace_metadata(
+    metadata: dict[str, Any],
+    *sources: object,
+) -> None:
+    """Attach only the allowlisted VT00 identity/isolation projection."""
+
+    context = normalize_synthetic_builder_context(*sources)
+    projection = synthetic_builder_projection(context)
+    deployment = _as_dict(projection.pop("deployment_identity", None))
+    for key, value in projection.items():
+        _merge_safe_metadata(metadata, key, value)
+    for key, value in deployment.items():
+        _merge_safe_metadata(metadata, f"deployment_{key}", value)
 
 
 def _as_int(value: Any) -> int:
@@ -1297,6 +1343,13 @@ def builder_observability_payload(
         builder_task=builder_task,
         delegation_context=delegation_context,
     )
+    _add_synthetic_trace_metadata(
+        metadata,
+        state,
+        artifact,
+        builder_task,
+        delegation_context,
+    )
     _add_artifact_detail_metadata(
         metadata,
         state=state,
@@ -1312,6 +1365,8 @@ def builder_observability_payload(
         image_forward=image_forward,
         qc_invocations=qc_invocations,
     )
+    if metadata.get("synthetic_test") is True:
+        tags.append("synthetic_test")
     return metadata, tags, _qc_results(diagnostics)
 
 
@@ -1492,6 +1547,23 @@ def _create_terminal_feedback(run_tree: Any, artifact: dict[str, Any]) -> None:
 
 def annotate_builder_completion(state: dict[str, Any], artifact: dict[str, Any]) -> bool:
     """Attach builder completion metadata/tags/feedback to the active run."""
+
+    if _synthetic_langsmith_excluded(state, artifact):
+        # Never trust model/state-supplied trace identifiers for a protected
+        # run.  The canonical Builder/session planes retain exact provenance;
+        # supplemental LangSmith evidence is explicitly unavailable.
+        for key in (
+            "builder_trace_run_id",
+            "builder_trace_id",
+            "builder_parent_run_id",
+            "builder_local_root_run_id",
+            "builder_trace_root_run_id",
+            "builder_langsmith_project",
+        ):
+            artifact.pop(key, None)
+        artifact.update(_SYNTHETIC_TRACE_STATUS)
+        artifact["ordinary_analytics_excluded"] = True
+        return False
 
     identity = _completion_identity(state, artifact)
     run_tree = _completion_run_tree(state, artifact)

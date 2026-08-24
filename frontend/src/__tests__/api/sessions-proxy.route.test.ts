@@ -4,11 +4,32 @@ import { describe, expect, it, vi, beforeEach } from 'vitest';
 const getUserScopedAuthHeaderMock = vi.fn(() => 'Bearer test-token');
 const refreshUserScopedAuthHeaderMock = vi.fn(() => '');
 const getAuthenticatedUserIdMock = vi.fn(() => 'user-123');
+const voiceLabMocks = vi.hoisted(() => {
+  class CapabilityError extends Error {
+    constructor(readonly code: string, readonly status: number) {
+      super(code);
+    }
+  }
+  return {
+    getSessionCreateCapability: vi.fn(),
+    getSessionReadCapability: vi.fn(),
+    getEndSessionCapability: vi.fn(),
+    CapabilityError,
+  };
+});
 
 vi.mock('../../app/lib/auth/server-auth', () => ({
   getAuthenticatedUserId: () => getAuthenticatedUserIdMock(),
   getUserScopedAuthHeader: () => getUserScopedAuthHeaderMock(),
   refreshUserScopedAuthHeader: () => refreshUserScopedAuthHeaderMock(),
+}));
+
+vi.mock('../../server/voice-lab/capability', () => ({
+  getVoiceLabSessionCreateCapability: (...args: unknown[]) => voiceLabMocks.getSessionCreateCapability(...args),
+  getVoiceLabSessionReadCapability: (...args: unknown[]) => voiceLabMocks.getSessionReadCapability(...args),
+  getVoiceLabEndSessionCapability: (...args: unknown[]) => voiceLabMocks.getEndSessionCapability(...args),
+  VOICE_LAB_CAPABILITY_HEADER: 'X-Sophia-Voice-Lab-Capability',
+  VoiceLabCapabilityError: voiceLabMocks.CapabilityError,
 }));
 
 import { DELETE, GET, POST } from '../../app/api/sessions/[...path]/route';
@@ -19,6 +40,9 @@ describe('/api/sessions/[...path] proxy', () => {
     getAuthenticatedUserIdMock.mockReturnValue('user-123');
     getUserScopedAuthHeaderMock.mockReturnValue('Bearer test-token');
     refreshUserScopedAuthHeaderMock.mockReturnValue('');
+    voiceLabMocks.getSessionCreateCapability.mockResolvedValue(null);
+    voiceLabMocks.getSessionReadCapability.mockResolvedValue(null);
+    voiceLabMocks.getEndSessionCapability.mockResolvedValue(null);
   });
 
   it('forwards GET request with query params and auth header', async () => {
@@ -45,6 +69,7 @@ describe('/api/sessions/[...path] proxy', () => {
     expect(url).toContain('user_id=user-123');
     expect(options.method).toBe('GET');
     expect((options.headers as Record<string, string>).Authorization).toBe('Bearer test-token');
+    expect(voiceLabMocks.getSessionReadCapability).toHaveBeenCalledWith('user-123');
 
     expect(response.status).toBe(200);
     const data = await response.json();
@@ -73,6 +98,63 @@ describe('/api/sessions/[...path] proxy', () => {
     expect(options.method).toBe('POST');
     expect(options.body).toBe(JSON.stringify({ session_type: 'prepare', user_id: 'user-123' }));
     expect(response.status).toBe(200);
+  });
+
+  it('forwards the HttpOnly synthetic capability only on session creation', async () => {
+    voiceLabMocks.getSessionCreateCapability.mockResolvedValue('session-create-capability');
+    const fetchMock = vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ synthetic_test: true, test_run_id: 'run-001' }), { status: 200 }),
+    );
+    const response = await POST({
+      method: 'POST',
+      nextUrl: new URL('http://localhost:3000/api/sessions/start'),
+      text: async () => JSON.stringify({ session_type: 'open' }),
+    } as unknown as NextRequest, { params: Promise.resolve({ path: ['start'] }) });
+
+    expect(response.status).toBe(200);
+    expect(voiceLabMocks.getSessionCreateCapability).toHaveBeenCalledWith('user-123');
+    expect(getUserScopedAuthHeaderMock).not.toHaveBeenCalled();
+    expect(refreshUserScopedAuthHeaderMock).not.toHaveBeenCalled();
+    const [, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    const headers = options.headers as Record<string, string>;
+    expect(headers['X-Sophia-Voice-Lab-Capability'])
+      .toBe('session-create-capability');
+    expect(headers.Authorization).toBeUndefined();
+  });
+
+  it('rejects missing synthetic session authority before LangGraph allocation', async () => {
+    voiceLabMocks.getSessionCreateCapability.mockRejectedValue(
+      new voiceLabMocks.CapabilityError('voice_lab_capability_missing', 401),
+    );
+    const fetchMock = vi.spyOn(global, 'fetch');
+    const response = await POST({
+      method: 'POST',
+      nextUrl: new URL('http://localhost:3000/api/sessions/start'),
+      text: async () => JSON.stringify({ session_type: 'open' }),
+    } as unknown as NextRequest, { params: Promise.resolve({ path: ['start'] }) });
+
+    expect(response.status).toBe(401);
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('uses the narrow finalization capability for the session end route', async () => {
+    voiceLabMocks.getEndSessionCapability.mockResolvedValue('session-finalize-capability');
+    const fetchMock = vi.spyOn(global, 'fetch').mockResolvedValueOnce(
+      new Response(JSON.stringify({ synthetic_isolated: true }), { status: 200 }),
+    );
+
+    const response = await POST({
+      method: 'POST',
+      nextUrl: new URL('http://localhost:3000/api/sessions/end'),
+      text: async () => JSON.stringify({ session_id: 'session-lab' }),
+    } as unknown as NextRequest, { params: Promise.resolve({ path: ['end'] }) });
+
+    expect(response.status).toBe(200);
+    expect(voiceLabMocks.getEndSessionCapability).toHaveBeenCalledWith('user-123');
+    expect(voiceLabMocks.getSessionReadCapability).not.toHaveBeenCalled();
+    const [, options] = fetchMock.mock.calls[0] as [string, RequestInit];
+    expect((options.headers as Record<string, string>)['X-Sophia-Voice-Lab-Capability'])
+      .toBe('session-finalize-capability');
   });
 
   it('returns an empty active-session payload when auth is unavailable', async () => {

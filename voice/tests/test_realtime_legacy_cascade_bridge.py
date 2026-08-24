@@ -173,10 +173,22 @@ def test_cancellation_interruption_maps_to_terminal_diagnostic_shape() -> None:
     payloads = _payloads(provider_events)
 
     assert payloads == [
-        {"type": "sophia.turn", "data": {"phase": "agent_started"}},
         {
             "type": "sophia.turn",
-            "data": {"phase": "agent_ended", "reason": "interrupted"},
+            "data": {
+                "phase": "agent_started",
+                "response_id": "legacy-response-1",
+                "turn_id": "legacy-turn-1",
+            },
+        },
+        {
+            "type": "sophia.turn",
+            "data": {
+                "phase": "agent_ended",
+                "response_id": "legacy-response-1",
+                "turn_id": "legacy-turn-1",
+                "reason": "interrupted",
+            },
         },
         {
             "type": "sophia.turn_diagnostic",
@@ -208,10 +220,22 @@ def test_stage_error_maps_to_provider_error_and_public_terminal_events() -> None
     payloads = _payloads(provider_events)
 
     assert payloads == [
-        {"type": "sophia.turn", "data": {"phase": "agent_started"}},
         {
             "type": "sophia.turn",
-            "data": {"phase": "agent_ended", "reason": "provider_error"},
+            "data": {
+                "phase": "agent_started",
+                "response_id": "legacy-response-1",
+                "turn_id": "legacy-turn-1",
+            },
+        },
+        {
+            "type": "sophia.turn",
+            "data": {
+                "phase": "agent_ended",
+                "response_id": "legacy-response-1",
+                "turn_id": "legacy-turn-1",
+                "reason": "provider_error",
+            },
         },
         {
             "type": "sophia.turn_diagnostic",
@@ -244,8 +268,22 @@ def test_duplicate_legacy_lifecycle_markers_are_deduped_downstream() -> None:
     payloads = _payloads(provider_events)
 
     assert payloads == [
-        {"type": "sophia.turn", "data": {"phase": "agent_started"}},
-        {"type": "sophia.turn", "data": {"phase": "agent_ended"}},
+        {
+            "type": "sophia.turn",
+            "data": {
+                "phase": "agent_started",
+                "response_id": "legacy-response-1",
+                "turn_id": "legacy-turn-1",
+            },
+        },
+        {
+            "type": "sophia.turn",
+            "data": {
+                "phase": "agent_ended",
+                "response_id": "legacy-response-1",
+                "turn_id": "legacy-turn-1",
+            },
+        },
     ]
 
 

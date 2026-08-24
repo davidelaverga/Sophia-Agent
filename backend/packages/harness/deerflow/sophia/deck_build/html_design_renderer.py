@@ -98,7 +98,9 @@ h1 {{ margin: 0; font-family: {display_font}, Arial, sans-serif; font-size: 60px
 .system-diagram .node.c {{ right: 0; top: 120px; }}
 .system-diagram .connector {{ position: absolute; height: 3px; background: {accent}; top: 184px; left: 350px; width: 980px; }}
 .flow {{ position: absolute; left: 120px; top: 300px; width: 1680px; height: 430px; z-index: 2; }}
-.flow li {{ position: relative; display: inline-block; vertical-align: top; width: 330px; min-height: 170px; margin-right: 72px; padding: 28px; list-style: none; background: {surface}; border-top: 8px solid {accent}; color: {ink}; font-size: 24px; line-height: 1.26; }}
+.flow li {{ position: relative; display: inline-block; vertical-align: top; width: 330px; min-height: 170px;
+  margin-right: 72px; padding: 28px; list-style: none; background: {surface}; border-top: 8px solid {accent};
+  color: {ink}; font-size: 24px; line-height: 1.26; }}
 .comparison-table {{ position: absolute; left: 120px; top: 270px; width: 1680px; border-collapse: collapse; z-index: 2; }}
 .comparison-table th, .comparison-table td {{ border: 2px solid {accent}; padding: 26px 32px; font-size: 25px; line-height: 1.28; background: {surface}; color: {ink}; }}
 .comparison-table th {{ color: {accent}; font-family: {utility_font}, Arial, sans-serif; text-align: left; }}

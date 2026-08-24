@@ -24,6 +24,8 @@ export type GeminiRuntimeRelayClassification = "critical" | "summary" | "skip"
 
 export type GeminiRuntimeToolCallLedgerEntry = {
   toolCallId: string
+  effectId: string
+  providerConnectionEpoch: number
   toolName: string | null
   receivedAt: string | null
   cancelledAt: string | null
@@ -68,6 +70,10 @@ export type GeminiRuntimeTelemetry = {
   audioContextResumeSucceeded?: boolean | null
   audioContextResumeError?: string | null
   setupComplete: boolean
+  providerConnectionEpoch: number
+  langsmithTraceId: string | null
+  langsmithTraceStatus: "available" | "trace_unavailable"
+  langsmithTraceUnavailableReason: "not_provided" | "invalid" | "governed_synthetic_fault" | "synthetic_isolation_policy" | null
   providerEventCount: number
   lastProviderEventAt: string | null
   lastProviderEventType: string | null
@@ -85,6 +91,12 @@ export type GeminiRuntimeTelemetry = {
   firstPublicUserTranscriptAt?: string | null
   transcriptPromotionLatencyMs?: number | null
   outputAudioEventCount: number
+  outputAudioReceivedCount: number
+  outputAudioPlaybackScheduledCount: number
+  outputAudioPlaybackStartedCount: number
+  outputAudioPlaybackCompletedCount: number
+  outputAudioPlaybackFlushedCount: number
+  outputAudioPlaybackDroppedCount: number
   lastOutputAudioAt: string | null
   assistantTranscriptSource?: string | null
   assistantTranscriptFinalSeen?: boolean

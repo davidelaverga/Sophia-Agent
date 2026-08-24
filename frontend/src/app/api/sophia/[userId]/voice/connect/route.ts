@@ -1,11 +1,16 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
 import { fetchSophiaApi, resolveSophiaUserId } from '../../../../_lib/sophia';
+import {
+  getVoiceLabConnectCapability,
+  VOICE_LAB_CAPABILITY_HEADER,
+  VoiceLabCapabilityError,
+} from '@/server/voice-lab/capability';
 
 export const dynamic = 'force-dynamic';
 
 async function authorizeVoiceConnect(userId: string) {
-  const authenticatedUserId = await resolveSophiaUserId();
+  const authenticatedUserId = await resolveSophiaUserId({ voiceLabAccess: 'governed' });
 
   if (!authenticatedUserId) {
     return { response: NextResponse.json({ error: 'Not authenticated' }, { status: 401 }) };
@@ -29,12 +34,28 @@ export async function POST(
     return auth.response;
   }
 
+  let capability: string | null;
+  try {
+    capability = await getVoiceLabConnectCapability(userId);
+  } catch (error) {
+    if (error instanceof VoiceLabCapabilityError) {
+      return NextResponse.json({ error: error.code }, { status: error.status });
+    }
+    return NextResponse.json({ error: 'voice_lab_capability_validation_failed' }, { status: 500 });
+  }
+
+  const headers = capability
+    ? { [VOICE_LAB_CAPABILITY_HEADER]: capability }
+    : undefined;
+
   const backendResponse = await fetchSophiaApi(
     `/api/sophia/${encodeURIComponent(userId)}/voice/connect${req.nextUrl.search}`,
     {
-    method: 'POST',
-    body: await req.text(),
+      method: 'POST',
+      body: await req.text(),
+      headers,
     },
+    { voiceLabAccess: 'governed' },
   );
 
   const responseText = await backendResponse.text();

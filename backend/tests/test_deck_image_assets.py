@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import pytest
+from test_deck_build_service import _creative_plan, _runtime, _slides
 
 from deerflow.sophia.deck_build.creative_plan import CreativePlanValidationError, normalize_creative_plan
 from deerflow.sophia.deck_build.image_assets import (
@@ -10,7 +11,6 @@ from deerflow.sophia.deck_build.image_assets import (
     planned_asset_ref_basenames,
 )
 from deerflow.sophia.deck_build.models import DeckBuild
-from test_deck_build_service import _creative_plan, _runtime, _slides
 
 
 def _deck(tmp_path, *, include_asset: bool = True) -> DeckBuild:

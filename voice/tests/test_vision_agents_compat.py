@@ -3,6 +3,16 @@ from __future__ import annotations
 import importlib
 from types import SimpleNamespace
 
+import pytest
+
+
+@pytest.fixture(autouse=True)
+def _restore_real_compat_module() -> None:
+    yield
+    import voice.vision_agents_compat as compat
+
+    importlib.reload(compat)
+
 
 def _reload_compat_with_import_hook(import_hook):
     import voice.vision_agents_compat as compat
@@ -114,6 +124,18 @@ def test_compat_fallback_events_support_isinstance() -> None:
     assert audio_event.data == b"audio"
     assert isinstance(error_event, compat.TTSErrorEvent)
     assert error_event.error_message == "bad audio"
+
+
+def test_compat_fallback_event_identity_survives_reload() -> None:
+    def import_hook(name: str, package=None):  # noqa: ANN001
+        if name == "vision_agents.core.turn_detection.events":
+            raise ModuleNotFoundError("missing", name=name)
+        return SimpleNamespace()
+
+    first = _reload_compat_with_import_hook(import_hook).TurnEndedEvent
+    second = _reload_compat_with_import_hook(import_hook).TurnEndedEvent
+
+    assert second is first
 
 
 def test_compat_reraises_unrelated_module_errors() -> None:

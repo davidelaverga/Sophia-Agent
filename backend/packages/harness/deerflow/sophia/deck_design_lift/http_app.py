@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import json
+import os
+import re
 from collections.abc import Mapping
 from typing import Annotated, Any, Literal
 
@@ -30,6 +32,25 @@ from deerflow.sophia.deck_design_lift.runtime import (
     RuntimeTerminalCode,
     new_dq2_lease_owner,
 )
+
+_RENDER_COMMIT = re.compile(r"^[a-f0-9]{40}$")
+
+
+async def version(_request: Request) -> Response:
+    """Expose only the exact immutable Render source identity."""
+
+    commit_sha = (os.getenv("RENDER_GIT_COMMIT") or "").strip()
+    if not _RENDER_COMMIT.fullmatch(commit_sha):
+        return JSONResponse(
+            {"service": "sophia-langgraph", "status": "identity_unavailable"},
+            status_code=503,
+            headers={"Cache-Control": "no-store"},
+        )
+    return JSONResponse(
+        {"service": "sophia-langgraph", "commit_sha": commit_sha},
+        status_code=200,
+        headers={"Cache-Control": "no-store"},
+    )
 
 
 class _InvocationEnvelope(BaseModel):
@@ -155,6 +176,12 @@ async def invoke_deck_design_lift(request: Request) -> Response:
 app = Starlette(
     routes=[
         Route(
+            "/version",
+            version,
+            methods=["GET"],
+            name="sophia_langgraph_version",
+        ),
+        Route(
             DECK_DESIGN_LIFT_INVOCATION_PATH,
             invoke_deck_design_lift,
             methods=["POST"],
@@ -164,4 +191,4 @@ app = Starlette(
 )
 
 
-__all__ = ["app", "invoke_deck_design_lift"]
+__all__ = ["app", "invoke_deck_design_lift", "version"]

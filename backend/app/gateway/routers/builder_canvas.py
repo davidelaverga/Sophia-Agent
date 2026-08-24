@@ -22,9 +22,13 @@ from app.gateway.artifact_registry import (
     ArtifactRegistryFilters,
 )
 from app.gateway.auth import require_authorized_user_scope
+from app.gateway.voice_lab_capability import (
+    assert_voice_lab_session_record,
+    capability_for_gateway_action,
+)
 from app.gateway.workers.builder_canvas import DEFAULT_TERMINAL_TTL_SECONDS, get_builder_canvas_worker
 from deerflow.sophia.builder_failure_diagnostics import merge_builder_failure_diagnostics
-from deerflow.sophia.session_store import SessionStore
+from deerflow.sophia.session_store import SessionRecord, SessionStore
 
 router = APIRouter(
     prefix="/api/sophia",
@@ -85,20 +89,48 @@ def _langgraph_url() -> str:
     ).strip().rstrip("/")
 
 
-def _require_thread_owner(authenticated_user_id: str, parent_thread_id: str) -> None:
-    if _session_store.find_session_by_thread_id(authenticated_user_id, parent_thread_id) is not None:
+def _require_thread_owner(authenticated_user_id: str, parent_thread_id: str) -> SessionRecord:
+    record = _session_store.find_session_by_thread_id(authenticated_user_id, parent_thread_id)
+    if record is not None:
         logger.info(
             "Builder canvas route ownership accepted user_id=%s parent_thread_id=%s",
             _short_id(authenticated_user_id),
             _short_id(parent_thread_id),
         )
-        return
+        return record
     logger.warning(
         "Builder canvas route ownership rejected user_id=%s parent_thread_id=%s",
         _short_id(authenticated_user_id),
         _short_id(parent_thread_id),
     )
     raise HTTPException(status_code=404, detail="Thread not found")
+
+
+def _require_builder_canvas_capability(
+    request: Request,
+    authenticated_user_id: str,
+    parent_thread_id: str,
+    *,
+    required_operation: str,
+) -> SessionRecord:
+    """Authorize a canvas route before retained or native task state is read.
+
+    Ordinary sessions retain their exact-owner boundary. Canonical synthetic
+    sessions additionally require a short-lived capability bound to the same
+    principal, test run, scenario, environment, and deployment.
+    """
+
+    record = _require_thread_owner(authenticated_user_id, parent_thread_id)
+    metadata = getattr(record, "metadata", None)
+    if not isinstance(metadata, dict) or "synthetic_voice_lab" not in metadata:
+        return record
+    claims = capability_for_gateway_action(
+        request,
+        authenticated_user_id,
+        required_operation=required_operation,
+    )
+    assert_voice_lab_session_record(record, claims)
+    return record
 
 
 async def _parent_builder_tasks(parent_thread_id: str) -> list[dict[str, Any]]:
@@ -1032,7 +1064,12 @@ async def builder_canvas_snapshot(
     request: Request,
     authenticated_user_id: str = Depends(require_authorized_user_scope),
 ) -> BuilderCanvasSnapshot:
-    _require_thread_owner(authenticated_user_id, parent_thread_id)
+    _require_builder_canvas_capability(
+        request,
+        authenticated_user_id,
+        parent_thread_id,
+        required_operation="session:read",
+    )
     worker = get_builder_canvas_worker(request.app)
     recent_events = await worker.recent_events(parent_thread_id)
     task_from_events = not _is_langgraph_thread_id(parent_thread_id)
@@ -1193,7 +1230,12 @@ async def stream_builder_canvas_events(
     request: Request,
     authenticated_user_id: str = Depends(require_authorized_user_scope),
 ) -> StreamingResponse:
-    _require_thread_owner(authenticated_user_id, parent_thread_id)
+    _require_builder_canvas_capability(
+        request,
+        authenticated_user_id,
+        parent_thread_id,
+        required_operation="session:read",
+    )
     worker = get_builder_canvas_worker(request.app)
     last_event_id = request.headers.get("last-event-id")
     worker_summary = await worker.active_summary(parent_thread_id)
@@ -1254,7 +1296,12 @@ async def cancel_builder_canvas_task(
     request: Request,
     authenticated_user_id: str = Depends(require_authorized_user_scope),
 ) -> BuilderCanvasCancelResponse:
-    _require_thread_owner(authenticated_user_id, parent_thread_id)
+    _require_builder_canvas_capability(
+        request,
+        authenticated_user_id,
+        parent_thread_id,
+        required_operation="session:finalize",
+    )
     task = await _authorized_task(parent_thread_id, task_id, run_id)
     fallback_status = task.get("status") if isinstance(task.get("status"), str) else None
     return await _cancel_builder_run(parent_thread_id, task_id, run_id, request, fallback_status, task)
@@ -1271,7 +1318,12 @@ async def cancel_latest_builder_canvas_task_run(
     request: Request,
     authenticated_user_id: str = Depends(require_authorized_user_scope),
 ) -> BuilderCanvasCancelResponse:
-    _require_thread_owner(authenticated_user_id, parent_thread_id)
+    _require_builder_canvas_capability(
+        request,
+        authenticated_user_id,
+        parent_thread_id,
+        required_operation="session:finalize",
+    )
     task, run_id = await _authorized_latest_task(parent_thread_id, task_id)
     fallback_status = task.get("status") if isinstance(task.get("status"), str) else None
     return await _cancel_builder_run(parent_thread_id, task_id, run_id, request, fallback_status, task)

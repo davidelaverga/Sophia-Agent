@@ -7,6 +7,11 @@ import { useSessionStore } from '../stores/session-store';
 import { useVoiceStore } from '../stores/voice-store';
 
 import { getDebugSnapshot, type DebugSnapshot } from './debug-tools';
+import type { GeminiSyntheticTestContext } from './gemini-browser-live-websocket-dogfood';
+import {
+  getSyntheticIsolationPolicy,
+  syntheticAnalyticsExcluded,
+} from './synthetic-isolation-policy';
 
 const CAPTURE_FLAG_STORAGE_KEY = 'sophia.capture.enabled';
 const MAX_CAPTURE_EVENTS = 500;
@@ -24,12 +29,42 @@ const CAPTURED_STORAGE_KEYS = [
 const MICROPHONE_AUDIO_RMS_THRESHOLD = 0.002;
 const MICROPHONE_SAMPLE_INTERVAL_MS = 100;
 
-type SophiaCaptureEvent = {
+export type SophiaCaptureEvent = {
+  generation?: number;
   seq: number;
   recordedAt: string;
   category: string;
   name: string;
   payload?: unknown;
+  synthetic_test?: GeminiSyntheticTestContext;
+};
+
+export type SophiaCaptureCursor = {
+  generation: number;
+  seq: number;
+};
+
+export type SophiaCaptureGapReason =
+  | 'generation_mismatch'
+  | 'cursor_before_oldest'
+  | 'cursor_ahead'
+  | 'initial_cursor_after_drops';
+
+export type SophiaCaptureDrainMetadata = {
+  generation: number;
+  capacity: number;
+  oldestSeq: number | null;
+  latestSeq: number | null;
+  totalProduced: number;
+  droppedCount: number;
+  gap: boolean;
+  gapReason: SophiaCaptureGapReason | null;
+};
+
+export type SophiaCaptureReadResult = {
+  cursor: SophiaCaptureCursor;
+  events: SophiaCaptureEvent[];
+  metadata: SophiaCaptureDrainMetadata;
 };
 
 type SophiaCaptureMicrophoneConstraintSummary = {
@@ -96,8 +131,12 @@ export type SophiaCaptureMicrophoneSummary = {
 type SophiaCaptureState = {
   microphone: SophiaCaptureMicrophoneSummary;
   startedAt: string;
+  generation: number;
   seq: number;
+  totalProduced: number;
+  droppedCount: number;
   events: SophiaCaptureEvent[];
+  syntheticTest: GeminiSyntheticTestContext | null;
 };
 
 export type SophiaCaptureSnapshot = {
@@ -166,6 +205,7 @@ export type SophiaCaptureSnapshot = {
     currentThreadId: string | null;
     currentRunId: string | null;
     emotionalWeather: unknown;
+    synthetic_test?: GeminiSyntheticTestContext | null;
   };
   presence: {
     labels: string[];
@@ -178,6 +218,7 @@ export type SophiaCaptureBundle = {
   exportedAt: string;
   eventCount: number;
   events: SophiaCaptureEvent[];
+  capture?: SophiaCaptureDrainMetadata;
   snapshot: SophiaCaptureSnapshot;
 };
 
@@ -189,6 +230,7 @@ type SophiaCaptureApi = {
   snapshot: () => SophiaCaptureSnapshot;
   export: () => SophiaCaptureBundle;
   getEvents: () => SophiaCaptureEvent[];
+  readAfter: (cursor?: SophiaCaptureCursor | null, limit?: number) => SophiaCaptureReadResult;
 };
 
 declare global {
@@ -229,8 +271,12 @@ function createCaptureState(): SophiaCaptureState {
   return {
     microphone: createEmptyMicrophoneSummary(window.__sophiaCaptureMicProbeInstalled__ === true),
     startedAt: new Date().toISOString(),
+    generation: 1,
     seq: 0,
+    totalProduced: 0,
+    droppedCount: 0,
     events: [],
+    syntheticTest: null,
   };
 }
 
@@ -239,7 +285,22 @@ function getCaptureState(): SophiaCaptureState | null {
   if (!window.__sophiaCaptureState) {
     window.__sophiaCaptureState = createCaptureState();
   }
-  return window.__sophiaCaptureState;
+  const state = window.__sophiaCaptureState;
+  if (!Number.isInteger(state.generation) || state.generation < 1) {
+    state.generation = 1;
+  }
+  if (!Number.isInteger(state.totalProduced) || state.totalProduced < state.seq) {
+    state.totalProduced = state.seq;
+  }
+  if (!Number.isInteger(state.droppedCount) || state.droppedCount < 0) {
+    state.droppedCount = Math.max(0, state.seq - state.events.length);
+  }
+  state.events.forEach((event) => {
+    if (!Number.isInteger(event.generation) || event.generation < 1) {
+      event.generation = state.generation;
+    }
+  });
+  return state;
 }
 
 function setCaptureEnabled(enabled: boolean): void {
@@ -277,8 +338,12 @@ function clearCaptureState(): void {
   }
 
   state.startedAt = new Date().toISOString();
+  state.generation += 1;
   state.seq = 0;
+  state.totalProduced = 0;
+  state.droppedCount = 0;
   state.events = [];
+  state.syntheticTest = null;
   state.microphone = createEmptyMicrophoneSummary(window.__sophiaCaptureMicProbeInstalled__ === true);
 }
 
@@ -858,6 +923,7 @@ export function buildSophiaCaptureSnapshot(): SophiaCaptureSnapshot {
       currentThreadId: metadata.currentThreadId,
       currentRunId: metadata.currentRunId,
       emotionalWeather: metadata.emotionalWeather,
+      synthetic_test: clonePayload(getCaptureState()?.syntheticTest ?? null) as GeminiSyntheticTestContext | null,
     },
     presence: {
       labels: Array.from(document.querySelectorAll('[aria-label^="Sophia is "]'))
@@ -883,27 +949,109 @@ export function recordSophiaCaptureEvent({
   if (!state) return;
 
   state.seq += 1;
+  state.totalProduced += 1;
   state.events.push({
+    generation: state.generation,
     seq: state.seq,
     recordedAt: new Date().toISOString(),
     category,
     name,
     payload: clonePayload(payload),
+    ...(state.syntheticTest
+      ? { synthetic_test: clonePayload(state.syntheticTest) as GeminiSyntheticTestContext }
+      : {}),
   });
 
   if (state.events.length > MAX_CAPTURE_EVENTS) {
-    state.events.splice(0, state.events.length - MAX_CAPTURE_EVENTS);
+    const dropped = state.events.length - MAX_CAPTURE_EVENTS;
+    state.events.splice(0, dropped);
+    state.droppedCount += dropped;
   }
+}
+
+/** Bind product-authored, capability-verified run provenance to later capture output. */
+export function bindSophiaCaptureSyntheticTestContext(
+  context: GeminiSyntheticTestContext | null,
+): void {
+  if (!canUseCapture()) return;
+  const state = getCaptureState();
+  if (!state) return;
+  state.syntheticTest = context ? { ...context } : null;
+  if (context) {
+    recordSophiaCaptureEvent({
+      category: 'synthetic-isolation',
+      name: 'synthetic-analytics-isolation-policy',
+      payload: {
+        policy: getSyntheticIsolationPolicy(),
+        ordinary_sink_mutation_excluded: syntheticAnalyticsExcluded(),
+      },
+    });
+  }
+}
+
+/** Read the immutable product-authored provenance currently bound to capture. */
+export function readSophiaCaptureSyntheticTestContext(): GeminiSyntheticTestContext | null {
+  const context = getCaptureState()?.syntheticTest ?? null;
+  return context ? { ...context } : null;
+}
+
+export function readSophiaCaptureEventsAfter(
+  cursor: SophiaCaptureCursor | null = null,
+  limit = MAX_CAPTURE_EVENTS,
+): SophiaCaptureReadResult {
+  const state = getCaptureState() ?? createCaptureState();
+  const oldestSeq = state.events[0]?.seq ?? null;
+  const latestSeq = state.events.at(-1)?.seq ?? null;
+  let gapReason: SophiaCaptureGapReason | null = null;
+
+  if (cursor && cursor.generation !== state.generation) {
+    gapReason = 'generation_mismatch';
+  } else if (cursor && cursor.seq > state.seq) {
+    gapReason = 'cursor_ahead';
+  } else if (cursor && oldestSeq !== null && cursor.seq < oldestSeq - 1) {
+    gapReason = 'cursor_before_oldest';
+  } else if (!cursor && state.droppedCount > 0) {
+    gapReason = 'initial_cursor_after_drops';
+  }
+
+  const startingSeq = cursor?.generation === state.generation && gapReason !== 'cursor_ahead'
+    ? cursor.seq
+    : (oldestSeq ?? 1) - 1;
+  const boundedLimit = Number.isFinite(limit)
+    ? Math.max(1, Math.min(MAX_CAPTURE_EVENTS, Math.floor(limit)))
+    : MAX_CAPTURE_EVENTS;
+  const events = state.events
+    .filter((event) => event.seq > startingSeq)
+    .slice(0, boundedLimit)
+    .map((event) => ({ ...event, payload: clonePayload(event.payload) }));
+  const nextSeq = events.at(-1)?.seq ?? Math.min(Math.max(startingSeq, 0), state.seq);
+
+  return {
+    cursor: { generation: state.generation, seq: nextSeq },
+    events,
+    metadata: {
+      generation: state.generation,
+      capacity: MAX_CAPTURE_EVENTS,
+      oldestSeq,
+      latestSeq,
+      totalProduced: state.totalProduced,
+      droppedCount: state.droppedCount,
+      gap: gapReason !== null,
+      gapReason,
+    },
+  };
 }
 
 export function exportSophiaCaptureBundle(): SophiaCaptureBundle {
   const state = getCaptureState();
+  const capture = readSophiaCaptureEventsAfter(null).metadata;
 
   return {
     startedAt: state?.startedAt ?? new Date().toISOString(),
     exportedAt: new Date().toISOString(),
     eventCount: state?.events.length ?? 0,
     events: [...(state?.events ?? [])],
+    capture,
     snapshot: buildSophiaCaptureSnapshot(),
   };
 }
@@ -923,5 +1071,6 @@ export function registerSophiaCaptureBridge(): void {
     snapshot: () => buildSophiaCaptureSnapshot(),
     export: () => exportSophiaCaptureBundle(),
     getEvents: () => [...(getCaptureState()?.events ?? [])],
+    readAfter: (cursor, limit) => readSophiaCaptureEventsAfter(cursor, limit),
   };
 }

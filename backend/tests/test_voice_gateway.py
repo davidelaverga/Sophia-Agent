@@ -1588,6 +1588,7 @@ class TestGeminiBrowserDogfoodGateway:
                 "provider_primary_category": "inputTranscription",
                 "provider_categories": ["serverContent", "inputTranscription"],
             },
+            capability=None,
         )
 
     def test_production_relay_logs_safe_metadata_on_upstream_rejection(self, caplog):

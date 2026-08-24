@@ -124,6 +124,7 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     assert task["run_id"] == "run-1"
     assert task["task_type"] == "presentation"
     assert task["demo_mode"] is False
+    assert "synthetic_test" not in task
     # ToolMessage echoes the runtime's tool_call_id (test default = "tc-test";
     # production: LangGraph's tool executor populates ``runtime.tool_call_id``).
     tool_msg = update["messages"][0]
@@ -136,6 +137,7 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     # workspace/uploads/outputs directories. Without this propagation the
     # builder fails with "Thread ID is required" on its first turn.
     config_payload = captured["run_kwargs"]["config"]
+    fake_client.threads.create.assert_awaited_once_with()
     assert config_payload["configurable"]["thread_id"] == "asgi-1"
     # Codex P1 review 2026-05-22: configurable must also include
     # ``graph_id`` so tools running inside the builder run (notably
@@ -147,6 +149,9 @@ def test_start_builder_task_dispatches_via_asgi(monkeypatch):
     assert config_payload["configurable"]["task_type"] == "presentation"
     assert config_payload["configurable"]["artifact_target_ext"] == ".pptx"
     run_input = captured["run_kwargs"]["input"]
+    assert "synthetic_test" not in run_input
+    assert "synthetic" not in config_payload["metadata"]
+    assert "synthetic" not in config_payload["configurable"]
     assert config_payload["metadata"]["build_id"] == run_input["builder_build_id"]
     assert config_payload["metadata"]["operation_id"] == run_input["builder_operation_id"]
     assert config_payload["metadata"]["builder_thread_id"] == "asgi-1"

@@ -1,9 +1,11 @@
+import hmac
 import logging
 import os
+import re
 from collections.abc import AsyncGenerator
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI
+from fastapi import FastAPI, HTTPException
 
 from app.gateway.config import get_gateway_config
 from app.gateway.logging_security import install_gateway_logging_safety
@@ -23,6 +25,8 @@ from app.gateway.routers import (
     telegram_link,
     uploads,
     voice,
+    voice_lab_d02_settlement,
+    voice_lab_recovery,
 )
 from app.gateway.supabase_project import validate_expected_supabase_project
 from app.gateway.workers.builder_canvas import install_builder_canvas_worker
@@ -38,6 +42,12 @@ from app.gateway.workers.deck_quality_publication_worker import (
     get_deck_quality_publication_worker_or_none,
     install_deck_quality_publication_worker,
     stop_deck_quality_publication_worker,
+)
+from app.gateway.workers.voice_lab_retention import (
+    build_configured_voice_lab_retention_reaper,
+    get_voice_lab_retention_reaper_or_none,
+    install_voice_lab_retention_reaper,
+    voice_lab_retention_reaper_required,
 )
 from deerflow.config.app_config import get_app_config
 from deerflow.sophia.builder_event_auth import probe_builder_event_auth
@@ -60,6 +70,7 @@ install_gateway_logging_safety()
 logger = logging.getLogger(__name__)
 _ARTIFACT_UPSERT_AUTH_PATCH = "artifact_upsert_auth_v2"
 _DECK_QUALITY_READINESS_ATTR = "_deck_quality_readiness"
+_DEPLOYMENT_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 
 
 def _deck_quality_component(
@@ -97,11 +108,169 @@ def _initial_deck_quality_readiness(*, enabled: bool | None) -> dict[str, object
 
 
 def _gateway_version_metadata() -> dict[str, str | None]:
-    commit_sha = os.getenv("RENDER_GIT_COMMIT") or os.getenv("RENDER_GIT_COMMIT_SHA") or os.getenv("GIT_COMMIT_SHA") or os.getenv("SOURCE_COMMIT")
+    commit_sha = (
+        os.getenv("RENDER_GIT_COMMIT")
+        or os.getenv("RENDER_GIT_COMMIT_SHA")
+        or os.getenv("GIT_COMMIT_SHA")
+        or os.getenv("SOURCE_COMMIT")
+    )
     return {
         "commit_sha": commit_sha,
         "build_timestamp": os.getenv("RENDER_BUILD_TIMESTAMP") or os.getenv("BUILD_TIMESTAMP"),
+        "deployment_id": os.getenv("RENDER_DEPLOY_ID"),
+        "service_id": os.getenv("RENDER_SERVICE_ID"),
         "artifact_upsert_auth_patch": _ARTIFACT_UPSERT_AUTH_PATCH,
+    }
+
+
+def _gateway_protected_plane_readiness() -> dict[str, object]:
+    metadata = _gateway_version_metadata()
+    build = str(metadata.get("commit_sha") or "")
+    production = bool(
+        os.getenv("RENDER")
+        or os.getenv("RENDER_SERVICE_ID")
+        or (os.getenv("ENVIRONMENT") or "").strip().lower() == "production"
+    )
+    if production and not _DEPLOYMENT_SHA_PATTERN.fullmatch(build):
+        raise ValueError("gateway_deployment_identity_unavailable")
+    internal_secret = (os.getenv("SOPHIA_VOICE_INTERNAL_AUTH_SECRET") or "").strip()
+    if production and len(internal_secret.encode()) < 32:
+        raise ValueError("gateway_voice_internal_auth_configuration_invalid")
+
+    lab_enabled = (os.getenv("SOPHIA_VOICE_LAB_ENABLED") or "").strip().lower() == "true"
+    lab_kill_switch_engaged = (
+        (os.getenv("SOPHIA_VOICE_LAB_KILL_SWITCH") or "true").strip().lower()
+        != "false"
+    )
+    d02_required = (
+        "SOPHIA_VOICE_LAB_D02_GATEWAY_DATABASE_URL",
+        "SOPHIA_VOICE_LAB_D02_GATEWAY_CAPABILITY_SECRET",
+        "SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID",
+        "SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_SECRET",
+        "SOPHIA_VOICE_LAB_D02_SETTLEMENT_IDENTITY_HMAC_SECRET",
+        "SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PRIVATE_KEY_PKCS8_BASE64",
+        "SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEY_SPKI_BASE64",
+        "SOPHIA_VOICE_LAB_D02_SETTLEMENT_AUTHORITY_KEY_ID",
+        "SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEYRING_JSON",
+    )
+    def _d02_value_present(name: str) -> bool:
+        value = os.getenv(name)
+        if name == "SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_SECRET":
+            return value is not None and value != ""
+        return bool((value or "").strip())
+
+    def _d02_activation_material_present(name: str) -> bool:
+        value = os.getenv(name)
+        if (
+            name
+            == "SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEYRING_JSON"
+            and (value or "").strip() == "{}"
+        ):
+            return False
+        return _d02_value_present(name)
+
+    # Empty example-file placeholders and the documented non-secret default
+    # key id do not activate the plane in a local disabled checkout. Any
+    # material DSN/key/secret does, and then the whole bundle is mandatory.
+    d02_provisioned = production or lab_enabled or any(
+        _d02_activation_material_present(name)
+        for name in d02_required
+        if name != "SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID"
+    ) or (
+        (os.getenv("SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID") or "").strip()
+        not in ("", "d02-db-finalize-v1")
+    )
+    if lab_enabled:
+        required = (
+            "SOPHIA_VOICE_LAB_TEST_PRINCIPAL",
+            "SOPHIA_VOICE_LAB_ENVIRONMENT",
+            "SOPHIA_VOICE_LAB_CAPABILITY_SECRET",
+            "SOPHIA_VOICE_LAB_RECOVERY_INTERNAL_SECRET",
+            "SOPHIA_VOICE_LAB_AUTH_DATABASE_URL",
+            *d02_required,
+        )
+        if any(
+            not (_d02_value_present(name) if name in d02_required else (os.getenv(name) or "").strip())
+            for name in required
+        ):
+            raise ValueError("gateway_voice_lab_configuration_missing")
+
+    # D02 is a protected production authority even while campaign admission is
+    # disabled. A partially provisioned or schema-drifted D02 plane must stop
+    # startup/readiness rather than wait for SOPHIA_VOICE_LAB_ENABLED.
+    if d02_provisioned:
+        if any(not _d02_value_present(name) for name in d02_required):
+            raise ValueError("gateway_voice_lab_d02_configuration_missing")
+        from app.gateway.routers import voice_lab_recovery as voice_lab_recovery_router
+
+        try:
+            _active_tombstone_kid, tombstone_keys = (
+                voice_lab_recovery_router._auth_tombstone_keyring()
+            )
+        except RuntimeError as exc:
+            raise ValueError("gateway_voice_lab_auth_tombstone_keyring_invalid") from exc
+        secret_values = [
+            (os.getenv(name) or "").strip().encode()
+            for name in (
+                "SOPHIA_VOICE_LAB_RECOVERY_INTERNAL_SECRET",
+                "SOPHIA_VOICE_LAB_CAPABILITY_SECRET",
+                "SOPHIA_VOICE_LAB_GRANT_SECRET",
+                "SOPHIA_VOICE_INTERNAL_AUTH_SECRET",
+                "SOPHIA_BUILDER_EVENTS_HMAC_SECRET",
+                "SOPHIA_VOICE_LAB_D02_GATEWAY_CAPABILITY_SECRET",
+                "SOPHIA_VOICE_LAB_D02_SETTLEMENT_IDENTITY_HMAC_SECRET",
+            )
+            if (os.getenv(name) or "").strip()
+        ]
+        # The DB-finalize secret is deliberately byte-exact: edge spaces are
+        # valid and must hash identically in the operator, SQL, and Gateway.
+        finalize_secret = os.getenv(
+            "SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_SECRET"
+        )
+        if finalize_secret is not None:
+            secret_values.append(finalize_secret.encode())
+        secret_values.extend(tombstone_keys.values())
+        if any(len(secret) < 32 for secret in secret_values):
+            raise ValueError("gateway_voice_lab_configuration_invalid")
+        if any(
+            hmac.compare_digest(left, right)
+            for index, left in enumerate(secret_values)
+            for right in secret_values[index + 1 :]
+        ):
+            raise ValueError("gateway_voice_lab_secrets_not_distinct")
+        from app.gateway.routers import (
+            voice_lab_d02_settlement as voice_lab_d02_settlement_router,
+        )
+
+        try:
+            voice_lab_d02_settlement_router._receipt_private_key()
+            voice_lab_d02_settlement_router._receipt_public_keyring()
+            voice_lab_d02_settlement_router.assert_d02_gateway_database_ready()
+        except (HTTPException, KeyError, ValueError) as exc:
+            raise ValueError("gateway_voice_lab_d02_signing_configuration_invalid") from exc
+
+    if lab_enabled:
+        try:
+            ttl = int(os.getenv("SOPHIA_VOICE_LAB_MAX_TTL_SECONDS", "300"))
+        except ValueError as exc:
+            raise ValueError("gateway_voice_lab_configuration_invalid") from exc
+        if not 1 <= ttl <= 300:
+            raise ValueError("gateway_voice_lab_configuration_invalid")
+        if (os.getenv("SOPHIA_SESSION_STORE") or "").strip().lower() != "supabase":
+            raise ValueError("gateway_voice_lab_session_store_not_durable")
+        if (
+            (os.getenv("SOPHIA_VOICE_RUNTIME_MODE") or "").strip() != "gemini_live"
+            or (os.getenv("SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED") or "").strip().lower()
+            != "true"
+        ):
+            raise ValueError("gateway_voice_lab_provider_route_not_ready")
+    return {
+        "status": "ready",
+        "service": "deer-flow-gateway",
+        "voice_internal_auth_configured": bool(internal_secret),
+        "voice_lab_enabled": lab_enabled,
+        "voice_lab_kill_switch_engaged": lab_kill_switch_engaged,
+        **metadata,
     }
 
 
@@ -170,6 +339,33 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
         raise RuntimeError(error_msg) from e
     config = get_gateway_config()
     logger.info(f"Starting API Gateway on {config.host}:{config.port}")
+
+    # Protect deploys whose campaign gate remains closed: the D02 DSN,
+    # authority, keyring, and exact catalog must be ready before this process
+    # advertises health or starts background work.
+    try:
+        _gateway_protected_plane_readiness()
+    except Exception as exc:
+        raise RuntimeError("gateway protected-plane startup readiness failed") from exc
+
+    # Hard retention is an independent product obligation. It must keep
+    # running after admission is disabled or kill-switched because the runner
+    # intentionally destroys raw run identity at the signed deadline.
+    voice_lab_retention_reaper = build_configured_voice_lab_retention_reaper()
+    install_voice_lab_retention_reaper(app, voice_lab_retention_reaper)
+    initial_retention_cycle = await voice_lab_retention_reaper.probe()
+    # A false lease result is expected during a rolling deploy while the old
+    # healthy replica owns the global pass. Only inability to probe the lease
+    # or durable indexes is a startup failure; the new worker keeps retrying.
+    if (
+        voice_lab_retention_reaper_required()
+        and initial_retention_cycle.discovery_failed
+    ):
+        raise RuntimeError("gateway_voice_lab_retention_reaper_probe_failed")
+    voice_lab_retention_reaper.start()
+    logger.info(
+        "Voice Lab retention reaper started independentOfLabGates=true contentExcluded=true"
+    )
 
     deck_quality_readiness = _initial_deck_quality_readiness(enabled=app_config.deck_quality.enabled)
     setattr(app.state, _DECK_QUALITY_READINESS_ATTR, deck_quality_readiness)
@@ -471,6 +667,15 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
 
     yield
 
+    try:
+        await voice_lab_retention_reaper.stop()
+        logger.info("Voice Lab retention reaper stopped contentExcluded=true")
+    except Exception:
+        logger.error(
+            "Voice Lab retention reaper shutdown failed contentExcluded=true",
+            exc_info=False,
+        )
+
     if deck_quality_publication_worker is not None:
         try:
             await stop_deck_quality_publication_worker(deck_quality_publication_worker)
@@ -618,6 +823,40 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
     )
 
     @app.middleware("http")
+    async def voice_lab_principal_product_boundary(request, call_next):
+        """Fence the dedicated bearer even on routers missing dependencies.
+
+        Several legacy/global mutation routes predate user-scoped FastAPI
+        dependencies.  A browser can attach the same raw bearer to them, so
+        the product boundary must resolve it before routing/body parsing and
+        apply the deny-by-default Voice Lab policy.  The resolved identity is
+        cached on ``request.state`` for downstream dependencies, avoiding a
+        second auth bridge request on ordinary authenticated routes.
+        """
+
+        authorization = request.headers.get("authorization", "")
+        from app.gateway.voice_lab_capability import (
+            VOICE_LAB_CAPABILITY_HEADER,
+            VOICE_LAB_PROVIDER_CLEANUP_HEADER,
+        )
+
+        if (
+            authorization.lower().startswith("bearer ")
+            or request.headers.get(VOICE_LAB_CAPABILITY_HEADER)
+            or request.headers.get(VOICE_LAB_PROVIDER_CLEANUP_HEADER)
+        ):
+            from fastapi import HTTPException
+            from fastapi.responses import JSONResponse
+
+            from app.gateway.auth import resolve_bearer_user_id
+
+            try:
+                await resolve_bearer_user_id(request)
+            except HTTPException as exc:
+                return JSONResponse(status_code=exc.status_code, content={"detail": exc.detail})
+        return await call_next(request)
+
+    @app.middleware("http")
     async def migration_maintenance_mode(request, call_next):
         enabled = os.getenv("SOPHIA_MIGRATION_MAINTENANCE_MODE", "").strip().lower() in {
             "1",
@@ -668,6 +907,8 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
 
     # Voice API is mounted at /api/sophia/{user_id}/voice/*
     app.include_router(voice.router)
+    app.include_router(voice_lab_d02_settlement.router)
+    app.include_router(voice_lab_recovery.router)
 
     # Telegram link API is mounted at /api/sophia/{user_id}/telegram/*
     app.include_router(telegram_link.router)
@@ -720,6 +961,50 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
             "service": "deer-flow-gateway",
             **_gateway_version_metadata(),
         }
+
+    @app.get("/ready", tags=["health"])
+    async def readiness_check() -> dict[str, object]:
+        try:
+            result = _gateway_protected_plane_readiness()
+            retention_reaper = get_voice_lab_retention_reaper_or_none(app)
+            retention_readiness = (
+                retention_reaper.readiness()
+                if retention_reaper is not None
+                else {
+                    "status": "missing",
+                    "running": False,
+                    "raw_identity_excluded": True,
+                }
+            )
+            reaper_required = voice_lab_retention_reaper_required()
+            if reaper_required and retention_readiness.get("running") is not True:
+                raise ValueError("gateway_voice_lab_retention_reaper_not_running")
+            result["voice_lab_retention_reaper"] = retention_readiness
+            # Ordinary Gateway readiness remains healthy, but synthetic
+            # admission consumes this explicit plane-specific bit and fails
+            # closed after any persistent discovery/processing/purge debt.
+            protected_plane_ready = bool(
+                retention_readiness.get("running") is True
+                and retention_readiness.get("status") == "ready"
+            )
+            result["voice_lab_protected_plane_ready"] = protected_plane_ready
+            # Frontend principal provisioning consumes the retention/admission
+            # fence while product mutations are intentionally still disabled.
+            # Keep that bootstrap authority separate from the campaign gate.
+            result["voice_lab_admission_ready"] = protected_plane_ready
+            result["voice_lab_mutation_ready"] = bool(
+                protected_plane_ready
+                and result.get("voice_lab_enabled") is True
+                and result.get("voice_lab_kill_switch_engaged") is False
+            )
+            return result
+        except ValueError as exc:
+            from fastapi import HTTPException
+
+            raise HTTPException(
+                status_code=503,
+                detail={"code": str(exc)},
+            ) from exc
 
     return app
 

@@ -52,6 +52,68 @@ _processed_lock = threading.Lock()
 _LANGGRAPH_URL = os.getenv("LANGGRAPH_URL", "http://localhost:2024")
 
 
+def _synthetic_pipeline_exclusion(
+    user_id: str,
+    session_id: str,
+) -> dict[str, Any] | None:
+    """Fail closed for the dedicated principal before any consumer executes."""
+    dedicated_principal = (os.getenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL") or "").strip()
+    if not dedicated_principal or user_id != dedicated_principal:
+        return None
+    try:
+        record = SessionStore().get(user_id, session_id)
+    except Exception as exc:  # noqa: BLE001 - no storage/provider detail escapes.
+        return {
+            "status": "synthetic_excluded",
+            "reason": "canonical_isolation_check_unavailable",
+            "error_type": type(exc).__name__,
+            "session_id": session_id,
+        }
+    if record is None:
+        return {
+            "status": "synthetic_excluded",
+            "reason": "canonical_session_missing",
+            "session_id": session_id,
+        }
+    metadata = record.metadata if isinstance(record.metadata, dict) else {}
+    synthetic = metadata.get("synthetic_voice_lab")
+    exact_isolation = (
+        isinstance(synthetic, dict)
+        and synthetic.get("synthetic") is True
+        and synthetic.get("principal_id") == user_id
+        and synthetic.get("test_run_id") == record.run_id
+        and metadata.get("memory_retrieval_disabled") is True
+        and metadata.get("offline_pipeline_disabled") is True
+        and metadata.get("memory_learning_disabled") is True
+        and metadata.get("ordinary_analytics_disabled") is True
+        and metadata.get("ordinary_projects_disabled") is True
+        and metadata.get("shared_spaces_disabled") is True
+    )
+    return {
+        "status": "synthetic_excluded",
+        "reason": (
+            "voice_lab_ordinary_consumers_excluded"
+            if exact_isolation
+            else "canonical_isolation_binding_invalid"
+        ),
+        "session_id": session_id,
+        **(
+            {"test_run_id": record.run_id}
+            if exact_isolation and isinstance(record.run_id, str)
+            else {}
+        ),
+        "steps": {
+            "trace": "excluded",
+            "extraction": "excluded",
+            "smart_opener": "excluded",
+            "notification": "excluded",
+            "handoff": "excluded",
+            "identity_update": "excluded",
+            "visual_artifact": "excluded",
+        },
+    }
+
+
 def _fetch_thread_state(thread_id: str) -> dict[str, Any] | None:
     """Fetch thread state from the LangGraph server.
 
@@ -104,6 +166,16 @@ def run_offline_pipeline(
     """
     # --- Validate user_id at entry ---
     validate_user_id(user_id)
+
+    synthetic_exclusion = _synthetic_pipeline_exclusion(user_id, session_id)
+    if synthetic_exclusion is not None:
+        logger.info(
+            "session.finalization synthetic_pipeline_excluded user_id=%s session_id=%s reason=%s",
+            user_id,
+            session_id,
+            synthetic_exclusion["reason"],
+        )
+        return synthetic_exclusion
 
     logger.info(
         "session.finalization pipeline_start user_id=%s session_id=%s thread_id=%s has_thread_state=%s",

@@ -3,6 +3,7 @@
 import { useEffect, useRef } from "react"
 
 import { logger } from "../lib/error-logger"
+import { ordinaryAnalyticsSinkAllowed } from "../lib/synthetic-isolation-policy"
 import { useAuth } from "../providers"
 import { useUsageLimitStore } from "../stores/usage-limit-store"
 import type { UsageLimitInfo } from "../types/rate-limits"
@@ -33,6 +34,11 @@ export function useUsageMonitor() {
   const abortControllerRef = useRef<AbortController | null>(null)
 
   useEffect(() => {
+    if (!ordinaryAnalyticsSinkAllowed()) {
+      initialFetchDone.current = true
+      abortControllerRef.current?.abort()
+      return
+    }
     if (!user) {
       // Clear user context when logged out
       logger.setUser(null)

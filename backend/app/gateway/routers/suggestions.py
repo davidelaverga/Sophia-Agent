@@ -1,14 +1,19 @@
 import json
 import logging
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Depends
 from pydantic import BaseModel, Field
 
+from app.gateway.auth import require_authenticated_user
 from deerflow.models import create_chat_model
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/api", tags=["suggestions"])
+router = APIRouter(
+    prefix="/api",
+    tags=["suggestions"],
+    dependencies=[Depends(require_authenticated_user)],
+)
 
 
 class SuggestionMessage(BaseModel):
@@ -96,6 +101,7 @@ def _format_conversation(messages: list[SuggestionMessage]) -> str:
     response_model=SuggestionsResponse,
     summary="Generate Follow-up Questions",
     description="Generate short follow-up questions a user might ask next, based on recent conversation context.",
+    dependencies=[Depends(require_authenticated_user)],
 )
 async def generate_suggestions(thread_id: str, request: SuggestionsRequest) -> SuggestionsResponse:
     if not request.messages:

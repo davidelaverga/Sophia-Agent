@@ -8,6 +8,7 @@ const providerLoginMock = vi.fn()
 const logErrorMock = vi.fn()
 const debugWarnMock = vi.fn()
 const cookieGetMock = vi.fn()
+const cookieHasMock = vi.fn()
 const cookieSetMock = vi.fn()
 
 let authBypassEnabledMock = false
@@ -68,8 +69,10 @@ describe('server-auth helpers', () => {
     authBypassEnabledMock = false
     authBypassUserIdMock = 'dev-user'
     cookieGetMock.mockReturnValue(undefined)
+    cookieHasMock.mockReturnValue(false)
     cookiesMock.mockResolvedValue({
       get: cookieGetMock,
+      has: cookieHasMock,
       set: cookieSetMock,
     })
     headersMock.mockResolvedValue(new Headers({ cookie: 'better-auth.session=abc123' }))
@@ -88,6 +91,7 @@ describe('server-auth helpers', () => {
       api_token: 'synced-token-123',
     })
     process.env.BACKEND_API_KEY = 'server-fallback-token'
+    delete process.env.SOPHIA_VOICE_LAB_TEST_PRINCIPAL
   })
 
   it('resolves the authenticated user from the Better Auth session when bypass is disabled', async () => {
@@ -176,5 +180,39 @@ describe('server-auth helpers', () => {
 
     await expect(getServerAuthToken()).resolves.toBe('cookie-token-123')
     await expect(hasUserToken()).resolves.toBe(true)
+  })
+
+  it('denies every ordinary token/user helper when an HttpOnly Voice Lab marker is present', async () => {
+    cookieHasMock.mockImplementation((name: string) => name === '__Host-sophia-voice-lab-context')
+    cookieGetMock.mockImplementation((name: string) => (
+      name === 'sophia-backend-token' ? { value: 'must-not-leak' } : undefined
+    ))
+
+    await expect(getAuthenticatedUserId()).resolves.toBeNull()
+    await expect(getUserScopedAuthToken()).resolves.toBe('')
+    await expect(getServerAuthToken()).resolves.toBe('')
+    expect(providerLoginMock).not.toHaveBeenCalled()
+  })
+
+  it('denies the configured dedicated principal even when its HttpOnly marker is absent', async () => {
+    process.env.SOPHIA_VOICE_LAB_TEST_PRINCIPAL = 'session-user-123'
+    cookieGetMock.mockImplementation((name: string) => (
+      name === 'sophia-backend-token' ? { value: 'must-not-leak' } : undefined
+    ))
+
+    await expect(getAuthenticatedUserId()).resolves.toBeNull()
+    await expect(getUserScopedAuthToken()).resolves.toBe('')
+    expect(providerLoginMock).not.toHaveBeenCalled()
+  })
+
+  it('allows only an explicitly governed product proxy to use the lab session token', async () => {
+    process.env.SOPHIA_VOICE_LAB_TEST_PRINCIPAL = 'session-user-123'
+    cookieHasMock.mockImplementation((name: string) => name === '__Host-sophia-voice-lab-run-binding')
+    cookieGetMock.mockImplementation((name: string) => (
+      name === 'sophia-backend-token' ? { value: 'governed-token' } : undefined
+    ))
+
+    await expect(getAuthenticatedUserId({ voiceLabAccess: 'governed' })).resolves.toBe('session-user-123')
+    await expect(getUserScopedAuthToken({ voiceLabAccess: 'governed' })).resolves.toBe('governed-token')
   })
 })

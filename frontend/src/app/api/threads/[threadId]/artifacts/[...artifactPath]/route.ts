@@ -1,6 +1,13 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
 import {
+  getVoiceLabSessionReadCapability,
+  VOICE_LAB_CAPABILITY_HEADER,
+  VoiceLabCapabilityError,
+} from '@/server/voice-lab/capability';
+
+import {
+  getAuthenticatedUserId,
   getUserScopedAuthHeader,
   refreshUserScopedAuthHeader,
 } from '../../../../../lib/auth/server-auth';
@@ -57,8 +64,24 @@ async function proxyArtifactRequest(
   threadId: string,
   artifactPathSegments: string[],
 ): Promise<Response> {
-  const authHeader = await getUserScopedAuthHeader();
-  if (!authHeader) {
+  const authenticatedUserId = await getAuthenticatedUserId({ voiceLabAccess: 'governed' });
+  if (!authenticatedUserId) {
+    return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
+  }
+  let capability: string | null;
+  try {
+    capability = await getVoiceLabSessionReadCapability(authenticatedUserId);
+  } catch (error) {
+    if (error instanceof VoiceLabCapabilityError) {
+      return NextResponse.json({ error: error.code }, { status: error.status });
+    }
+    throw error;
+  }
+  const capabilityOnly = Boolean(capability);
+  const authHeader = capabilityOnly
+    ? ''
+    : await getUserScopedAuthHeader({ voiceLabAccess: 'governed' });
+  if (!capabilityOnly && !authHeader) {
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }
 
@@ -69,17 +92,18 @@ async function proxyArtifactRequest(
     url.searchParams.set(key, value);
   });
 
-  const execute = (authorization: string) => fetch(url.toString(), {
+  const execute = (authorization?: string) => fetch(url.toString(), {
     method: 'GET',
     headers: {
-      Authorization: authorization,
+      ...(authorization ? { Authorization: authorization } : {}),
+      ...(capability ? { [VOICE_LAB_CAPABILITY_HEADER]: capability } : {}),
     },
   });
 
-  let backendResponse = await execute(authHeader);
+  let backendResponse = await execute(authHeader || undefined);
 
-  if (backendResponse.status === 401) {
-    const refreshedAuthHeader = await refreshUserScopedAuthHeader();
+  if (!capabilityOnly && backendResponse.status === 401) {
+    const refreshedAuthHeader = await refreshUserScopedAuthHeader({ voiceLabAccess: 'governed' });
     if (refreshedAuthHeader && refreshedAuthHeader !== authHeader) {
       backendResponse = await execute(refreshedAuthHeader);
     }

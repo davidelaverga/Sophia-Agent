@@ -58,6 +58,7 @@ log/
 # Sophia local runtime data. Existing tracked fixtures remain tracked; these
 # patterns keep new local sessions, recaps, and traces out of normal status.
 users/**/recaps/*.json
+users/**/sessions/*.json
 users/**/traces/*.json
 backend/users/**/sessions/*.json
 backend/users/**/transcripts/*.json

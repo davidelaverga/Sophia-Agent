@@ -7,6 +7,7 @@ import { type NextRequest, NextResponse } from 'next/server';
 
 import { logger } from '../../../lib/error-logger';
 import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../_lib/sophia';
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation';
 
 interface SaveMemoryRequest {
   memory_text: string;
@@ -17,6 +18,9 @@ interface SaveMemoryRequest {
 }
 
 export async function POST(request: NextRequest) {
+  const voiceLabDenied = await voiceLabOrdinaryProductBoundaryResponse();
+  if (voiceLabDenied) return voiceLabDenied;
+
   try {
     const body = await request.json() as SaveMemoryRequest;
 
@@ -73,7 +77,7 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error) {
-    logger.logError(error, { component: 'api/memory/save', action: 'save_memory' });
+    logger.logError(error, { component: 'api/memory/save', action: 'save_memory', request });
     return NextResponse.json(
       { error: 'Failed to save memory' },
       { status: 500 }

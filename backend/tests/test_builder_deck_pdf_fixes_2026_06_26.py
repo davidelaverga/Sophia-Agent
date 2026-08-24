@@ -116,7 +116,7 @@ class _FakeClient:
     def __exit__(self, *a):
         return False
 
-    def post(self, url, json=None):  # noqa: A002
+    def post(self, url, *, content=None, headers=None):
         idx = len(self._calls)
         self._calls.append(url)
         status = self._statuses[min(idx, len(self._statuses) - 1)]
@@ -129,6 +129,10 @@ def _patch_webhook(monkeypatch, statuses: list) -> list:
     import deerflow.sophia.builder_events as be
 
     calls: list = []
+    monkeypatch.setenv(
+        "SOPHIA_BUILDER_EVENTS_HMAC_SECRET",
+        "builder-events-regression-test-secret",
+    )
     monkeypatch.setattr(be.httpx, "Client", lambda *a, **k: _FakeClient(calls, statuses))
     monkeypatch.setattr(be.time, "sleep", lambda *_a, **_k: None)
     monkeypatch.setattr(be, "_gateway_url", lambda: "http://gw")

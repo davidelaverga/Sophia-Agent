@@ -146,7 +146,7 @@ async def test_v4_smoke_counts_both_payloads_before_either_inference(
     assert result["fixture_id"] == FIXTURE_ID
     metrics = json.loads((tmp_path / "safe_metrics.json").read_text())
     assert metrics["schema_version"] == "deck-quality-smoke-metrics/v2"
-    assert metrics["evidence_preprocessor_version"] == "deck-evidence-v4"
+    assert metrics["evidence_preprocessor_version"] == "deck-evidence-v5"
     assert metrics["judge_invoker_version"] == "deck-judge-invoker-v4"
     assert metrics["cost_preflight"] == {
         "admitted": True,

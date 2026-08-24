@@ -20,6 +20,7 @@ import { getAuthenticatedUserId, getUserScopedAuthToken } from '../../lib/auth/s
 import { debugLog } from '../../lib/debug-logger';
 import { logger } from '../../lib/error-logger';
 import type { InterruptKind } from '../../lib/session-types';
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation';
 
 // ============================================================================
 // CONFIGURATION
@@ -145,6 +146,9 @@ async function createMockResumeStream(
 // ============================================================================
 
 export async function POST(req: NextRequest) {
+  const voiceLabDenied = await voiceLabOrdinaryProductBoundaryResponse();
+  if (voiceLabDenied) return voiceLabDenied;
+
   try {
     const payload = await req.json();
     
@@ -269,6 +273,7 @@ export async function POST(req: NextRequest) {
       logger.logError(new Error(`Backend error: ${upstream.status} ${upstream.statusText}`), {
         component: 'api/resume',
         action: 'backend_response',
+        request: req,
       });
 
       const upstreamErrorText = await upstream.text().catch(() => '');
@@ -344,7 +349,7 @@ export async function POST(req: NextRequest) {
     });
 
   } catch (error) {
-    logger.logError(error, { component: 'api/resume', action: 'resume_post' });
+    logger.logError(error, { component: 'api/resume', action: 'resume_post', request: req });
     
     return new Response(
       JSON.stringify({ 

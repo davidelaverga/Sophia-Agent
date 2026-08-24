@@ -1,5 +1,6 @@
 # Sophia MVP — Render Blueprint
-# Push this file to trigger automatic service creation on Render.
+# Sync this Blueprint manually only at an ordered, attested release boundary.
+# Git auto-deploy and Blueprint Auto Sync stay disabled for the VT00 rollout.
 # Set env vars in Render Dashboard → Environment tab (or use env groups).
 
 services:
@@ -13,6 +14,7 @@ services:
     branch: codex/sophia-observability-v1
     dockerfilePath: ./backend/Dockerfile.langgraph
     dockerContext: .
+    autoDeployTrigger: "off"
     plan: standard
     region: oregon
     healthCheckPath: /ok
@@ -60,13 +62,28 @@ services:
         value: sophia-builder-artifacts
       - key: SOPHIA_GATEWAY_URL
         sync: false
-      # Shared with sophia-gateway. Signs the content-free DQ-1 producer
-      # double-storage-failure fallback; baseline delivery stays independent.
+      # Shared with sophia-gateway. Authenticates exact-byte Builder progress,
+      # completion, cleanup, DQ failure, and content-free fallback delivery
+      # before any receiver-side mutation.
       - key: SOPHIA_BUILDER_EVENTS_HMAC_SECRET
         sync: false
-      # Keep global LangSmith autotracing off; Sophia builder tracing is attached
-      # explicitly via graph callbacks below. Secrets are set in the Render
-      # dashboard; non-secret routing values live in the blueprint.
+      # Exact same product/auth PostgreSQL target used by the Gateway retention
+      # reaper. Synthetic Builder admission takes the shared cleanup-obligation
+      # advisory barrier here before allocating a LangGraph task; ordinary
+      # Builder execution never reads this value.
+      - key: SOPHIA_VOICE_LAB_AUTH_DATABASE_URL
+        sync: false
+      # Exact dedicated synthetic identity. Offline/Builder pipelines use this
+      # value to exclude the campaign principal from ordinary memory, learning,
+      # analytics, and background-work paths before allocating those clients.
+      - key: SOPHIA_VOICE_LAB_TEST_PRINCIPAL
+        sync: false
+      # Keep global LangSmith autotracing off; ordinary Sophia Builder tracing
+      # is attached explicitly via graph callbacks below. Protected synthetic
+      # runs disable inherited/explicit tracing before client or subprocess
+      # allocation and emit a typed supplemental-unavailable projection.
+      # Secrets are set in the Render dashboard; non-secret routing values live
+      # in the blueprint.
       - key: LANGSMITH_TRACING
         value: "false"
       - key: LANGSMITH_ENDPOINT
@@ -131,9 +148,10 @@ services:
     branch: codex/sophia-observability-v1
     dockerfilePath: ./backend/Dockerfile.gateway
     dockerContext: .
+    autoDeployTrigger: "off"
     plan: starter
     region: oregon
-    healthCheckPath: /health
+    healthCheckPath: /ready
     envVars:
       - key: ANTHROPIC_API_KEY
         sync: false
@@ -173,12 +191,93 @@ services:
       # pre-campaign gateway environment remains otherwise unchanged.
       - key: SOPHIA_DECK_QUALITY_CANARY_USER_IDS
         sync: false
-      # Shared with sophia-langgraph for the authenticated content-free DQ-1
-      # producer-failure fallback; it never authenticates terminal delivery.
+      # Shared with sophia-langgraph. Authenticates exact-byte Builder progress,
+      # completion, cleanup, DQ failure, and content-free fallback delivery
+      # before any receiver-side mutation.
       - key: SOPHIA_BUILDER_EVENTS_HMAC_SECRET
         sync: false
       - key: SOPHIA_VOICE_SERVER_URL
         sync: false
+      # Mandatory service-to-service boundary for every voice session/resource
+      # route. Shared only with sophia-voice; production fails closed if absent.
+      - key: SOPHIA_VOICE_INTERNAL_AUTH_REQUIRED
+        value: "true"
+      - key: SOPHIA_VOICE_INTERNAL_AUTH_SECRET
+        sync: false
+      # Synthetic production dogfood is a separate, exact-principal plane.
+      # It remains disabled and kill-switched until an operator opens both gates.
+      - key: SOPHIA_VOICE_LAB_ENABLED
+        value: "false"
+      - key: SOPHIA_VOICE_LAB_KILL_SWITCH
+        value: "true"
+      - key: SOPHIA_VOICE_LAB_TEST_PRINCIPAL
+        sync: false
+      - key: SOPHIA_VOICE_LAB_ENVIRONMENT
+        value: production
+      - key: SOPHIA_VOICE_LAB_MAX_TTL_SECONDS
+        value: "300"
+      - key: SOPHIA_VOICE_LAB_CAPABILITY_SECRET
+        sync: false
+      # Owning Voice replicas heartbeat exact provider admissions through the
+      # shared Gateway CLOSED fence and acknowledge local close before cleanup.
+      - key: SOPHIA_GATEWAY_URL
+        sync: false
+      # Dedicated only to Voice Lab↔Gateway out-of-band recovery; it must be
+      # distinct from grant, capability, Builder, and Gateway↔Voice secrets.
+      - key: SOPHIA_VOICE_LAB_RECOVERY_INTERNAL_SECRET
+        sync: false
+      - key: SOPHIA_VOICE_LAB_AUTH_TOMBSTONE_ACTIVE_KID
+        value: v1
+      # Canonical JSON keyring shared with the frontend; previous kids remain
+      # configured until the auth-ledger readiness drain permits removal.
+      - key: SOPHIA_VOICE_LAB_AUTH_TOMBSTONE_KEYS
+        sync: false
+      # Gateway revokes only exact-run Better Auth sessions during recovery.
+      - key: SOPHIA_VOICE_LAB_AUTH_DATABASE_URL
+        sync: false
+      # V-D02 hard browser-worker settlement uses a separately provisioned,
+      # least-privilege database role. It must never fall back to the frontend
+      # Better Auth role or the service_role credential.
+      - key: SOPHIA_VOICE_LAB_D02_GATEWAY_DATABASE_URL
+        sync: false
+      # Distinct database-finalize authority shared only with the owner
+      # migration operator; never copy either value to Voice Lab web/worker.
+      - key: SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID
+        sync: false
+      - key: SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_SECRET
+        sync: false
+      # Product-service -> Gateway freeze/settlement capability. This exact
+      # secret is also configured on the Voice Lab web service, never its
+      # browser worker or the external deployment controller.
+      - key: SOPHIA_VOICE_LAB_D02_GATEWAY_CAPABILITY_SECRET
+        sync: false
+      # Gateway-only receipt authorities. Only the current public key and key
+      # ID are copied to Voice Lab web for verification.
+      - key: SOPHIA_VOICE_LAB_D02_SETTLEMENT_IDENTITY_HMAC_SECRET
+        sync: false
+      - key: SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PRIVATE_KEY_PKCS8_BASE64
+        sync: false
+      - key: SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEY_SPKI_BASE64
+        sync: false
+      - key: SOPHIA_VOICE_LAB_D02_SETTLEMENT_AUTHORITY_KEY_ID
+        sync: false
+      # Retained public verification keys keep immutable response-loss replay
+      # valid across key rotation until every signed receipt is purged.
+      - key: SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEYRING_JSON
+        sync: false
+      # Product-owned hard-retention cleanup is mandatory and independent of
+      # the lab enable/kill switches. These values bound each lease-fenced
+      # discovery cycle without changing signed per-run retention.
+      - key: SOPHIA_VOICE_LAB_RETENTION_REAPER_REQUIRED
+        value: "true"
+      - key: SOPHIA_VOICE_LAB_RETENTION_REAPER_INTERVAL_SECONDS
+        value: "60"
+      - key: SOPHIA_VOICE_LAB_RETENTION_REAPER_BATCH_SIZE
+        value: "25"
+      # Render disks are ephemeral; a synthetic finalization succeeds only
+      # after an immutable receipt is written to the configured Supabase bucket.
+      - key: SOPHIA_VOICE_LAB_DURABLE_EVIDENCE_REQUIRED
+        value: "true"
       # Keep gateway route selection aligned with the voice service. The
       # production promotion flag is the fast rollback switch to legacy voice.
       - key: SOPHIA_VOICE_RUNTIME_MODE
@@ -209,9 +308,15 @@ services:
     branch: codex/sophia-observability-v1
     dockerfilePath: ./voice/Dockerfile
     dockerContext: .
+    autoDeployTrigger: "off"
     plan: standard
     region: oregon
+    healthCheckPath: /ready
     envVars:
+      # Disable ONNX Runtime's native POSIX telemetry before smart-turn import;
+      # this also prevents a native telemetry mutex race during shutdown.
+      - key: ORT_DISABLE_TELEMETRY
+        value: "1"
       - key: STREAM_API_KEY
         sync: false
       - key: STREAM_API_SECRET
@@ -221,6 +326,28 @@ services:
       - key: CARTESIA_API_KEY
         sync: false
       - key: SOPHIA_VOICE_ID
+        sync: false
+      # Must match the gateway value. All direct provider-bearing and session
+      # resource routes reject missing/mismatched internal auth in production.
+      - key: SOPHIA_VOICE_INTERNAL_AUTH_REQUIRED
+        value: "true"
+      - key: SOPHIA_VOICE_INTERNAL_AUTH_SECRET
+        sync: false
+      - key: SOPHIA_VOICE_LAB_ENABLED
+        value: "false"
+      - key: SOPHIA_VOICE_LAB_KILL_SWITCH
+        value: "true"
+      - key: SOPHIA_VOICE_LAB_TEST_PRINCIPAL
+        sync: false
+      - key: SOPHIA_VOICE_LAB_ENVIRONMENT
+        value: production
+      - key: SOPHIA_VOICE_LAB_MAX_TTL_SECONDS
+        value: "300"
+      - key: SOPHIA_VOICE_LAB_CAPABILITY_SECRET
+        sync: false
+      # Owning Voice replicas heartbeat exact provider admissions through the
+      # shared Gateway CLOSED fence and acknowledge local close before cleanup.
+      - key: SOPHIA_GATEWAY_URL
         sync: false
       - key: SOPHIA_BACKEND_MODE
         value: deerflow
@@ -246,7 +373,9 @@ services:
         value: "true"
       - key: GOOGLE_API_KEY
         sync: false
-      # Gemini Live traces are manual RunTree traces; the legacy route remains
+      # Ordinary-user Gemini Live traces are manual RunTree traces; protected
+      # Voice Lab runs are structurally excluded from LangSmith and report a
+      # typed supplemental-unavailable status. The legacy route remains
       # available as the flag-controlled rollback. API key/workspace are dashboard-managed.
       - key: SOPHIA_GEMINI_LIVE_LANGSMITH_TRACING
         value: "true"

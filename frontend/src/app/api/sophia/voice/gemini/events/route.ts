@@ -1,7 +1,11 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
 import { fetchSophiaApi } from '../../../../_lib/sophia';
-import { authorizeGeminiProductionUser } from '../_lib';
+import {
+  authorizeGeminiProductionUser,
+  geminiProductionVoiceLabFailure,
+  geminiProductionVoiceLabHeaders,
+} from '../_lib';
 
 export const dynamic = 'force-dynamic';
 
@@ -14,16 +18,26 @@ export async function GET(req: NextRequest) {
 
   const lastEventId = req.headers?.get('last-event-id');
 
-  const backendResponse = await fetchSophiaApi(
-    `/api/sophia/${encodeURIComponent(auth.userId)}/voice/gemini/events${req.nextUrl.search}`,
-    {
-      method: 'GET',
-      headers: {
-        Accept: 'text/event-stream',
-        ...(lastEventId ? { 'Last-Event-ID': lastEventId } : {}),
+  let backendResponse: Response;
+  try {
+    const voiceLabHeaders = await geminiProductionVoiceLabHeaders(auth.userId, 'finalize');
+    backendResponse = await fetchSophiaApi(
+      `/api/sophia/${encodeURIComponent(auth.userId)}/voice/gemini/events${req.nextUrl.search}`,
+      {
+        method: 'GET',
+        headers: {
+          Accept: 'text/event-stream',
+          ...(lastEventId ? { 'Last-Event-ID': lastEventId } : {}),
+          ...voiceLabHeaders,
+        },
       },
-    },
-  );
+      { voiceLabAccess: 'governed' },
+    );
+  } catch (error) {
+    const failure = geminiProductionVoiceLabFailure(error);
+    if (failure) return failure;
+    throw error;
+  }
 
   if (!backendResponse.body) {
     const responseText = await backendResponse.text();

@@ -11,6 +11,7 @@ import { type NextRequest, NextResponse } from 'next/server';
 
 import { logger } from '../../../lib/error-logger';
 import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../_lib/sophia';
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation';
 
 // =============================================================================
 // TYPES
@@ -45,6 +46,9 @@ interface CommitResponse {
 }
 
 export async function POST(request: NextRequest) {
+  const voiceLabDenied = await voiceLabOrdinaryProductBoundaryResponse();
+  if (voiceLabDenied) return voiceLabDenied;
+
   try {
     const body = await request.json() as CommitRequest;
     
@@ -173,7 +177,7 @@ export async function POST(request: NextRequest) {
     return NextResponse.json(result);
     
   } catch (error) {
-    logger.logError(error, { component: 'api/memory/commit-candidates', action: 'commit_candidates' });
+    logger.logError(error, { component: 'api/memory/commit-candidates', action: 'commit_candidates', request });
     
     return NextResponse.json(
       { 

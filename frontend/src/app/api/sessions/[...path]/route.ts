@@ -6,6 +6,14 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
 import {
+  getVoiceLabSessionReadCapability,
+  getVoiceLabSessionCreateCapability,
+  getVoiceLabEndSessionCapability,
+  VOICE_LAB_CAPABILITY_HEADER,
+  VoiceLabCapabilityError,
+} from '@/server/voice-lab/capability';
+
+import {
   getAuthenticatedUserId,
   getUserScopedAuthHeader,
   refreshUserScopedAuthHeader,
@@ -74,10 +82,29 @@ function scopeBodyToAuthenticatedUser(rawBody: string | undefined, authenticated
 async function proxyRequest(req: NextRequest, pathSegments: string[]) {
   const path = pathSegments.join('/');
   const url = new URL(`${BACKEND_URL}/api/v1/sessions/${path}`);
-  const authenticatedUserId = await getAuthenticatedUserId();
-  const authHeader = await getUserScopedAuthHeader();
+  const method = req.method.toUpperCase();
+  const authenticatedUserId = await getAuthenticatedUserId({ voiceLabAccess: 'governed' });
+  let voiceLabCapability: string | null = null;
+  try {
+    if (authenticatedUserId) {
+      voiceLabCapability = method === 'GET'
+        ? await getVoiceLabSessionReadCapability(authenticatedUserId)
+        : method === 'POST' && path === 'end'
+          ? await getVoiceLabEndSessionCapability(authenticatedUserId)
+          : await getVoiceLabSessionCreateCapability(authenticatedUserId);
+    }
+  } catch (error) {
+    if (error instanceof VoiceLabCapabilityError) {
+      return NextResponse.json({ error: error.code }, { status: error.status });
+    }
+    throw error;
+  }
+  const capabilityOnly = Boolean(voiceLabCapability);
+  const authHeader = capabilityOnly
+    ? ''
+    : await getUserScopedAuthHeader({ voiceLabAccess: 'governed' });
 
-  if (!authHeader) {
+  if (!capabilityOnly && !authHeader) {
     if (req.method === 'GET' && path === 'active') {
       return createAnonymousActiveSessionResponse();
     }
@@ -95,24 +122,23 @@ async function proxyRequest(req: NextRequest, pathSegments: string[]) {
     url.searchParams.set('user_id', authenticatedUserId);
   }
 
-  // 🔒 SECURITY: Read token from httpOnly cookie server-side
-  const method = req.method.toUpperCase();
   const rawBody = method === 'GET' || method === 'HEAD' ? undefined : await req.text();
   const body = scopeBodyToAuthenticatedUser(rawBody, authenticatedUserId);
 
-  const execute = (authorization: string) => fetch(url.toString(), {
+  const execute = (authorization?: string) => fetch(url.toString(), {
     method,
     headers: {
       'Content-Type': 'application/json',
-      'Authorization': authorization,
+      ...(authorization ? { Authorization: authorization } : {}),
+      ...(voiceLabCapability ? { [VOICE_LAB_CAPABILITY_HEADER]: voiceLabCapability } : {}),
     },
     body,
   });
 
-  let backendResponse = await execute(authHeader);
+  let backendResponse = await execute(authHeader || undefined);
 
-  if (backendResponse.status === 401) {
-    const refreshedAuthHeader = await refreshUserScopedAuthHeader();
+  if (!capabilityOnly && backendResponse.status === 401) {
+    const refreshedAuthHeader = await refreshUserScopedAuthHeader({ voiceLabAccess: 'governed' });
     if (refreshedAuthHeader && refreshedAuthHeader !== authHeader) {
       backendResponse = await execute(refreshedAuthHeader);
     }

@@ -16,19 +16,24 @@
  * - This is the accepted pattern for WS auth with httpOnly cookies
  */
 
-import { NextResponse } from 'next/server';
+import { type NextRequest, NextResponse } from 'next/server';
 
 import { getUserScopedAuthToken } from '../../lib/auth/server-auth';
 import { logger } from '../../lib/error-logger';
 import { apiLimiters } from '../../lib/rate-limiter';
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation';
 
-export async function POST() {
+export async function POST(request: NextRequest) {
+  const voiceLabDenied = await voiceLabOrdinaryProductBoundaryResponse();
+  if (voiceLabDenied) return voiceLabDenied;
+
   if (!apiLimiters.wsTicket.checkSync()) {
     const waitMs = apiLimiters.wsTicket.getState().waitTime;
     logger.warn('WS ticket rate limited', {
       component: 'api/ws-ticket',
       action: 'rate_limit',
       metadata: { waitMs },
+      request,
     });
 
     return NextResponse.json(
@@ -48,6 +53,7 @@ export async function POST() {
     logger.warn('WS ticket auth missing', {
       component: 'api/ws-ticket',
       action: 'auth_missing',
+      request,
     });
     return NextResponse.json({ error: 'Not authenticated' }, { status: 401 });
   }

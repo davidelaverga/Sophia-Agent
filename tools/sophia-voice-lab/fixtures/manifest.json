@@ -1,0 +1,40 @@
+{
+  "version": 1,
+  "fixtures": [
+    {
+      "id": "a02_short_command", "fixture_version": "2.0.0", "family": "vt00-a02", "fixture_class": "short_command", "file": "a02_short_command.wav", "sha256": "afc32d8b821fa6ba0effedb17892e815e940fc014bdcfe265d14644c85edd208", "sample_rate": 16000, "channels": 1, "duration_ms": 2169,
+      "source_text": { "status": "available", "sha256": "4bbb8da6289bf4d9554f2e6e7862ba89976be7d199ef2b4e16394fcd1a966fb2", "governed_source_id": "short_command", "expected_tokens": ["create", "blue", "page", "calm", "harbor"], "expected_slots": { "intent": "create_page", "color": "blue", "title": "calm harbor" } },
+      "synthesis": { "engine": "apple-speech-synthesis", "engine_version": "macOS-26.5-build-25F71", "voice": "Samantha-en_US", "rate": "155-wpm" },
+      "provenance": { "kind": "committed-pinned-synthetic-tts", "suite": "VT00-V-A02", "manifest_version": 2 },
+      "assertion_policy": { "expect_transcript": true, "semantic_threshold": "command_slots_preserved" }
+    },
+    {
+      "id": "a02_long_brief", "fixture_version": "2.0.0", "family": "vt00-a02", "fixture_class": "long_brief", "file": "a02_long_brief.wav", "sha256": "1ca0600fdfad1693294423c08485e9f8d621700a531bf84d1b1481e061ef7035", "sample_rate": 16000, "channels": 1, "duration_ms": 10343,
+      "source_text": { "status": "available", "sha256": "12247d25304aba57c1896e5a7eb890f77a80b33163cb561d3c8da15e7ed311ee", "governed_source_id": "long_brief", "expected_tokens": ["accessible", "workspace", "north", "star", "navy", "header", "prepare", "review", "publish", "draft", "sophia", "voice", "lab"], "expected_slots": { "intent": "create_workspace", "title": "north star", "header_color": "navy", "checklist": ["prepare", "review", "publish"], "footer": "draft for sophia voice lab" } },
+      "synthesis": { "engine": "apple-speech-synthesis", "engine_version": "macOS-26.5-build-25F71", "voice": "Samantha-en_US", "rate": "155-wpm" },
+      "provenance": { "kind": "committed-pinned-synthetic-tts", "suite": "VT00-V-A02", "manifest_version": 2 },
+      "assertion_policy": { "expect_transcript": true, "semantic_threshold": "bounded_long_brief_semantics" }
+    },
+    {
+      "id": "a02_silence", "fixture_version": "2.0.0", "family": "vt00-a02", "fixture_class": "silence", "file": "a02_silence.wav", "sha256": "20eaebffe1816e0ffa6f7f854f5ef4ea80d5349faaf0ce1fec1b713e7fde58fa", "sample_rate": 16000, "channels": 1, "duration_ms": 2000,
+      "source_text": { "status": "available", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855", "governed_source_id": "silence", "expected_tokens": [], "expected_slots": {} },
+      "synthesis": { "engine": "deterministic-zero-pcm", "engine_version": "1", "voice": "none", "rate": "16000hz" },
+      "provenance": { "kind": "committed-deterministic-generation", "suite": "VT00-V-A02", "manifest_version": 2 },
+      "assertion_policy": { "expect_transcript": false, "semantic_threshold": "no_fabricated_injected_or_product_turn" }
+    },
+    {
+      "id": "a02_trailing_pause", "fixture_version": "2.0.0", "family": "vt00-a02", "fixture_class": "trailing_pause", "file": "a02_trailing_pause.wav", "sha256": "718c4e99d10862167ae91878a65823531eceb551e3695bcc9fd34f56487cc6b0", "sample_rate": 16000, "channels": 1, "duration_ms": 3669,
+      "source_text": { "status": "available", "sha256": "4bbb8da6289bf4d9554f2e6e7862ba89976be7d199ef2b4e16394fcd1a966fb2", "governed_source_id": "short_command", "expected_tokens": ["create", "blue", "page", "calm", "harbor"], "expected_slots": { "intent": "create_page", "color": "blue", "title": "calm harbor" } },
+      "synthesis": { "engine": "apple-speech-synthesis+trailing-silence", "engine_version": "macOS-26.5-build-25F71+transform-v1", "voice": "Samantha-en_US", "rate": "155-wpm" },
+      "provenance": { "kind": "committed-pinned-synthetic-tts-transform", "suite": "VT00-V-A02", "manifest_version": 2 },
+      "assertion_policy": { "expect_transcript": true, "semantic_threshold": "command_before_pause_preserved", "trailing_silence_ms": 1500 }
+    },
+    {
+      "id": "a02_noisy_command", "fixture_version": "2.0.0", "family": "vt00-a02", "fixture_class": "noisy_command", "file": "a02_noisy_command.wav", "sha256": "4e74ee0571e46e1f9cf453c7698a55559d7181570f87bfac55f21ecafe27df6b", "sample_rate": 16000, "channels": 1, "duration_ms": 2169,
+      "source_text": { "status": "available", "sha256": "4bbb8da6289bf4d9554f2e6e7862ba89976be7d199ef2b4e16394fcd1a966fb2", "governed_source_id": "short_command", "expected_tokens": ["create", "blue", "page", "calm", "harbor"], "expected_slots": { "intent": "create_page", "color": "blue", "title": "calm harbor" } },
+      "synthesis": { "engine": "apple-speech-synthesis+seeded-noise", "engine_version": "macOS-26.5-build-25F71+transform-v1", "voice": "Samantha-en_US", "rate": "155-wpm" },
+      "provenance": { "kind": "committed-pinned-synthetic-tts-transform", "suite": "VT00-V-A02", "manifest_version": 2 },
+      "assertion_policy": { "expect_transcript": true, "semantic_threshold": "safety_critical_slots_preserved", "noise_seed": "index-hash-9e3779b1" }
+    }
+  ]
+}

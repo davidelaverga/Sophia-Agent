@@ -43,6 +43,10 @@ import {
   getBuilderCompletionFallbackBody,
   getBuilderCompletionFallbackLabel,
 } from '../components/session/BuilderCompletionCard';
+import {
+  exactActiveArtifactMatchesBuilderCompletion,
+  recordSyntheticBuilderCanvasProjection,
+} from '../lib/synthetic-builder-evidence';
 import { BuilderTaskNotice } from '../components/session/BuilderTaskNotice';
 import { SessionLayout } from '../components/SessionLayout';
 import { SessionExpiredModal, MultiTabModal } from '../components/ui';
@@ -476,6 +480,7 @@ function SessionPageContent() {
     setVoiceStatusCompat,
     // PR-B: completion-card surface
     builderCompletion,
+    builderCanvasEvents,
     handleBuilderRetry,
     handleBuilderCompletionDismiss,
   } = useSessionRouteExperience({
@@ -1788,6 +1793,8 @@ function SessionPageContent() {
         ? 'builder_canvas'
         : 'builder_completion',
       artifactId: builderCompletionForDisplay.artifact_id ?? null,
+      logicalArtifactId: builderCompletionForDisplay.logical_artifact_id ?? null,
+      versionId: builderCompletionForDisplay.current_artifact_version_id ?? null,
       title: builderCompletionForDisplay.artifact_title
         ?? builderCompletionForDisplay.artifact_filename
         ?? getBuilderArtifactFilename(completionPath),
@@ -1808,6 +1815,39 @@ function SessionPageContent() {
       createdAt: builderCompletionForDisplay.completed_at ?? null,
     });
   }, [builderCompletionForDisplay, registerSessionArtifactByPath]);
+
+  useEffect(() => {
+    const activeArtifact = sessionArtifactIndex.artifacts.find(
+      (artifact) => artifact.artifactId === sessionArtifactIndex.activeArtifactId,
+    );
+    if (
+      builderCompletionForDisplay?.status !== 'success'
+      || !showArtifacts
+      || !effectiveShowArtifactsUi
+      || !exactActiveArtifactMatchesBuilderCompletion(
+        activeArtifact,
+        builderCompletionForDisplay,
+      )
+    ) return;
+    const terminalEvent = [...builderCanvasEvents].reverse().find((event) => (
+      event.kind === 'terminal'
+      && event.task_id === builderCompletionForDisplay.task_id
+      && event.run_id === builderCompletionForDisplay.run_id
+    ));
+    if (terminalEvent) {
+      void recordSyntheticBuilderCanvasProjection(
+        terminalEvent,
+        'artifact_visible_current',
+      );
+    }
+  }, [
+    builderCanvasEvents,
+    builderCompletionForDisplay,
+    effectiveShowArtifactsUi,
+    sessionArtifactIndex.activeArtifactId,
+    sessionArtifactIndex.artifacts,
+    showArtifacts,
+  ]);
 
   useEffect(() => {
     if (!showArtifacts || !effectiveShowArtifactsUi) {

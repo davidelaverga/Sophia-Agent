@@ -1,5 +1,11 @@
 import { type NextRequest, NextResponse } from 'next/server';
 
+import {
+  getVoiceLabSessionReadCapability,
+  VOICE_LAB_CAPABILITY_HEADER,
+  VoiceLabCapabilityError,
+} from '@/server/voice-lab/capability';
+
 import { fetchSophiaApi, resolveSophiaUserId } from '../../../../../../_lib/sophia';
 
 function shortId(value: string | null | undefined): string | null {
@@ -16,7 +22,7 @@ export async function GET(
 ) {
   const { parentThreadId } = await params;
   const requestId = correlationId();
-  const userId = await resolveSophiaUserId();
+  const userId = await resolveSophiaUserId({ voiceLabAccess: 'governed' });
   if (!userId) {
     console.warn('[builder-canvas-proxy] snapshot auth failed', {
       route: 'snapshot',
@@ -33,9 +39,25 @@ export async function GET(
     user_id: shortId(userId),
     auth_present: true,
   });
+  let capability: string | null;
+  try {
+    capability = await getVoiceLabSessionReadCapability(userId);
+  } catch (error) {
+    if (error instanceof VoiceLabCapabilityError) {
+      return NextResponse.json({ error: error.code }, { status: error.status });
+    }
+    throw error;
+  }
   const response = await fetchSophiaApi(
     `/api/sophia/${encodeURIComponent(userId)}/threads/${encodeURIComponent(parentThreadId)}/builder-canvas/snapshot`,
-    { method: 'GET', cache: 'no-store' },
+    {
+      method: 'GET',
+      cache: 'no-store',
+      headers: capability
+        ? { [VOICE_LAB_CAPABILITY_HEADER]: capability }
+        : undefined,
+    },
+    { voiceLabAccess: 'governed' },
   );
   const payload = await response.json().catch(() => ({}));
   console.log('[builder-canvas-proxy] snapshot response', {

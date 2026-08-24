@@ -16,6 +16,7 @@ from deerflow.sandbox.exceptions import (
 from deerflow.sandbox.sandbox import Sandbox
 from deerflow.sandbox.sandbox_provider import get_sandbox_provider
 from deerflow.sophia.storage import supabase_mirror
+from deerflow.sophia.synthetic_builder import declares_synthetic_builder_run
 
 logger = logging.getLogger(__name__)
 
@@ -810,11 +811,17 @@ def bash_tool(runtime: ToolRuntime[ContextT, ThreadState], description: str, com
             output: str
             telemetry: dict[str, object]
             if hasattr(sandbox, "execute_command_with_metadata"):
+                synthetic_trace_excluded = declares_synthetic_builder_run(
+                    getattr(runtime, "state", None),
+                    getattr(runtime, "config", None),
+                    getattr(runtime, "context", None),
+                )
                 output, telemetry = sandbox.execute_command_with_metadata(
                     command,
                     workspace_root=(thread_data or {}).get("workspace_path"),
                     outputs_root=(thread_data or {}).get("outputs_path"),
                     uploads_root=(thread_data or {}).get("uploads_path"),
+                    allow_langsmith=not synthetic_trace_excluded,
                 )
             else:
                 output = sandbox.execute_command(command)

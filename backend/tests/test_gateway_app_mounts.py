@@ -9,7 +9,7 @@ import pytest
 from fastapi.testclient import TestClient
 
 import app.gateway.routers.sessions as sessions_router
-from app.gateway.auth import require_authorized_user_scope
+from app.gateway.auth import require_authenticated_user, require_authorized_user_scope
 from deerflow.config.app_config import AppConfig, reset_app_config, set_app_config
 from deerflow.config.deck_quality_config import DeckQualityConfig
 from deerflow.config.sandbox_config import SandboxConfig
@@ -18,6 +18,18 @@ from deerflow.sophia.deck_quality.producer_failure_signal import (
     ProducerFailureSignalReadiness,
 )
 from deerflow.sophia.session_store import SessionStore
+
+D02_REQUIRED_ENV = (
+    "SOPHIA_VOICE_LAB_D02_GATEWAY_DATABASE_URL",
+    "SOPHIA_VOICE_LAB_D02_GATEWAY_CAPABILITY_SECRET",
+    "SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID",
+    "SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_SECRET",
+    "SOPHIA_VOICE_LAB_D02_SETTLEMENT_IDENTITY_HMAC_SECRET",
+    "SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PRIVATE_KEY_PKCS8_BASE64",
+    "SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEY_SPKI_BASE64",
+    "SOPHIA_VOICE_LAB_D02_SETTLEMENT_AUTHORITY_KEY_ID",
+    "SOPHIA_VOICE_LAB_D02_SETTLEMENT_ED25519_PUBLIC_KEYRING_JSON",
+)
 
 
 @pytest.fixture(autouse=True)
@@ -42,6 +54,7 @@ def test_gateway_app_mounts_sessions_and_bootstrap_routes(tmp_path, monkeypatch)
     monkeypatch.setattr(sessions_router, "_store", SessionStore(tmp_path / "users"))
 
     app = create_app()
+    app.dependency_overrides[require_authenticated_user] = lambda: "dev-user"
     with TestClient(app) as client:
         active_response = client.get("/api/v1/sessions/active")
         opener_response = client.get("/api/v1/bootstrap/opener")
@@ -58,14 +71,231 @@ def test_gateway_app_mounts_sessions_and_bootstrap_routes(tmp_path, monkeypatch)
     }
 
 
-def test_gateway_mounts_legacy_public_builder_completion_stream_for_compatibility():
+def test_gateway_version_exposes_safe_render_deployment_identity(monkeypatch):
+    gateway_app = importlib.import_module("app.gateway.app")
+
+    create_app = gateway_app.create_app
+
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
+    monkeypatch.setenv("RENDER_BUILD_TIMESTAMP", "2026-08-23T12:00:00Z")
+    monkeypatch.setenv("RENDER_DEPLOY_ID", "dep-voice-lab-test")
+    monkeypatch.setenv("RENDER_SERVICE_ID", "srv-gateway-test")
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_RETENTION_REAPER_REQUIRED", "false")
+    fake_reaper = SimpleNamespace(
+        run_once=AsyncMock(return_value=SimpleNamespace(discovery_failed=0)),
+        probe=AsyncMock(return_value=SimpleNamespace(discovery_failed=0)),
+        start=lambda: None,
+        stop=AsyncMock(),
+        running=True,
+        readiness=lambda: {"status": "ready"},
+    )
+    monkeypatch.setattr(
+        gateway_app,
+        "build_configured_voice_lab_retention_reaper",
+        lambda: fake_reaper,
+    )
+    monkeypatch.setattr(
+        gateway_app,
+        "_gateway_protected_plane_readiness",
+        lambda: {"status": "ready"},
+    )
+
+    app = create_app()
+    with TestClient(app) as client:
+        response = client.get("/version")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "service": "deer-flow-gateway",
+        "commit_sha": "a" * 40,
+        "build_timestamp": "2026-08-23T12:00:00Z",
+        "deployment_id": "dep-voice-lab-test",
+        "service_id": "srv-gateway-test",
+        "artifact_upsert_auth_patch": "artifact_upsert_auth_v2",
+    }
+
+
+@pytest.mark.parametrize(
+    ("lab_enabled", "kill_switch_engaged", "mutation_ready"),
+    [(False, True, False), (True, True, False), (True, False, True)],
+)
+def test_gateway_readiness_separates_protected_plane_health_from_mutation_gate(
+    monkeypatch: pytest.MonkeyPatch,
+    lab_enabled: bool,
+    kill_switch_engaged: bool,
+    mutation_ready: bool,
+) -> None:
+    gateway_app = importlib.import_module("app.gateway.app")
+    fake_reaper = SimpleNamespace(
+        run_once=AsyncMock(return_value=SimpleNamespace(discovery_failed=0)),
+        probe=AsyncMock(return_value=SimpleNamespace(discovery_failed=0)),
+        start=lambda: None,
+        stop=AsyncMock(),
+        running=True,
+        readiness=lambda: {
+            "status": "ready",
+            "running": True,
+            "raw_identity_excluded": True,
+        },
+    )
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_RETENTION_REAPER_REQUIRED", "false")
+    monkeypatch.setattr(
+        gateway_app,
+        "build_configured_voice_lab_retention_reaper",
+        lambda: fake_reaper,
+    )
+    monkeypatch.setattr(
+        gateway_app,
+        "get_voice_lab_retention_reaper_or_none",
+        lambda _app: fake_reaper,
+    )
+    monkeypatch.setattr(
+        gateway_app,
+        "_gateway_protected_plane_readiness",
+        lambda: {
+            "status": "ready",
+            "voice_lab_enabled": lab_enabled,
+            "voice_lab_kill_switch_engaged": kill_switch_engaged,
+        },
+    )
+
+    with TestClient(gateway_app.create_app()) as client:
+        response = client.get("/ready")
+
+    assert response.status_code == 200
+    assert response.json() == {
+        "status": "ready",
+        "voice_lab_enabled": lab_enabled,
+        "voice_lab_kill_switch_engaged": kill_switch_engaged,
+        "voice_lab_retention_reaper": {
+            "status": "ready",
+            "running": True,
+            "raw_identity_excluded": True,
+        },
+        "voice_lab_protected_plane_ready": True,
+        "voice_lab_admission_ready": True,
+        "voice_lab_mutation_ready": mutation_ready,
+    }
+
+
+def test_gateway_startup_rejects_disabled_production_without_d02_bundle(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway_app = importlib.import_module("app.gateway.app")
+
+    for name in D02_REQUIRED_ENV:
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.delenv("RENDER_SERVICE_ID", raising=False)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
+    monkeypatch.setenv(
+        "SOPHIA_VOICE_INTERNAL_AUTH_SECRET",
+        "gateway-internal-secret-at-least-thirty-two-bytes",
+    )
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_ENABLED", "false")
+    monkeypatch.setenv(
+        "SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID",
+        "d02-db-finalize-v1",
+    )
+    monkeypatch.setattr(gateway_app, "validate_expected_supabase_project", lambda: None)
+
+    app = gateway_app.create_app()
+    with pytest.raises(RuntimeError, match="protected-plane startup readiness failed"):
+        with TestClient(app):
+            pass
+
+
+def test_gateway_mounts_legacy_builder_completion_stream_behind_authentication():
     from app.gateway.app import create_app
 
     app = create_app()
     with TestClient(app) as client:
         response = client.get("/api/threads/thread-1/builder-events/last")
 
-    assert response.status_code == 204
+    assert response.status_code == 401
+
+
+def test_gateway_mounts_d02_authorities_internal_only_without_browser_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+):
+    gateway_app = importlib.import_module("app.gateway.app")
+
+    monkeypatch.setenv(
+        "SOPHIA_VOICE_LAB_D02_GATEWAY_CAPABILITY_SECRET",
+        "mounted-d02-capability-secret-at-least-thirty-two-bytes",
+    )
+    monkeypatch.setattr(
+        gateway_app,
+        "_gateway_protected_plane_readiness",
+        lambda: {"status": "ready"},
+    )
+
+    cleanup_id = "123e4567-e89b-42d3-a456-426614174000"
+    test_run_id = "223e4567-e89b-42d3-a456-426614174000"
+    termination_id = "323e4567-e89b-42d3-a456-426614174000"
+    freeze = {
+        "schema": (
+            "sophia_voice_lab_gateway_browser_worker_termination_"
+            "freeze_request_v1"
+        ),
+        "termination_request_id": termination_id,
+        "voice_lab_run_id_sha256": "1" * 64,
+        "test_run_id": test_run_id,
+        "cleanup_obligation_id": cleanup_id,
+        "provider_session_id": "provider-session-d02-mounted-test",
+        "provider_admission_id_sha256": "2" * 64,
+        "provider_connection_epoch": 1,
+        "frozen_provider_connection_epochs": [1],
+        "browser_worker_id_sha256": "3" * 64,
+        "browser_lease_epoch": 1,
+        "browser_context_id_sha256": "4" * 64,
+        "render_action_request_sha256": "5" * 64,
+        "requested_at": "2033-05-18T04:00:00.000Z",
+    }
+    settlement = {
+        **freeze,
+        "schema": (
+            "sophia_voice_lab_gateway_browser_worker_termination_"
+            "settlement_request_v1"
+        ),
+        "render_action_accepted_response_sha256": "6" * 64,
+        "render_action_settled_snapshot_sha256": "7" * 64,
+        "loss_event_seq": 1,
+        "loss_observed_at": "2033-05-18T04:00:01.000Z",
+    }
+    settlement.pop("requested_at")
+    continuity = {
+        "schema": "sophia_voice_lab_d02_product_continuity_observation_request_v1",
+        "restart_request_id": "423e4567-e89b-42d3-a456-426614174000",
+        "cleanup_obligation_id": cleanup_id,
+        "phase": "before_api_restart",
+        "product_service_boot_id_sha256": "8" * 64,
+        "render_action_request_sha256": "9" * 64,
+        "prior_observation_receipt_sha256": None,
+        "observed_at": "2033-05-18T03:59:59.000Z",
+    }
+
+    app = gateway_app.create_app()
+    with TestClient(app) as client:
+        responses = (
+            client.post(
+                "/internal/voice-lab/d02/browser-worker-termination-freezes",
+                json=freeze,
+            ),
+            client.post(
+                "/internal/voice-lab/d02/browser-worker-termination-settlements",
+                json=settlement,
+            ),
+            client.post(
+                "/internal/voice-lab/d02/product-continuity-observations",
+                json=continuity,
+            ),
+        )
+
+    assert [response.status_code for response in responses] == [401, 401, 401]
+    assert {
+        response.json()["detail"]["code"] for response in responses
+    } == {"voice_lab_d02_capability_required"}
 
 
 def test_gateway_exposes_no_public_deck_quality_route():

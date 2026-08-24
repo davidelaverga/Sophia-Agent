@@ -1,0 +1,64 @@
+{
+  "schema": "sophia_voice_lab_recovery_v1",
+  "request": {
+    "method": "POST",
+    "path_template": "/internal/voice-lab/runs/{test_run_id}/recover",
+    "body": null,
+    "capability_audience": "sophia-voice-lab-recovery",
+    "capability_issuer": "sophia-voice-lab",
+    "required_operation": "session:recover",
+    "internal_auth_header": "X-Sophia-Voice-Lab-Recovery-Auth",
+    "capability_header": "X-Sophia-Voice-Lab-Capability"
+  },
+  "responses": {
+    "complete": {
+      "status_code": 200,
+      "ok": true,
+      "complete": true,
+      "live_cleanup_complete": true
+    },
+    "pending": {
+      "status_code": 202,
+      "ok": true,
+      "complete": false
+    },
+    "auth_failure": {
+      "status_code": 401,
+      "body": {
+        "detail": {
+          "code": "voice_lab_recovery_internal_auth_required"
+        }
+      }
+    }
+  },
+  "required_response_keys": [
+    "ok",
+    "complete",
+    "live_cleanup_complete",
+    "live_resources_zero",
+    "retention_maintenance_complete",
+    "retention_purge_pending",
+    "retention_purged",
+    "retention_purge_due_at",
+    "test_run_id",
+    "recovery_id",
+    "attempt_id",
+    "attempt_issued_at",
+    "recovered_at",
+    "components",
+    "receipt"
+  ],
+  "required_builder_component_keys": [
+    "status",
+    "discovery_complete",
+    "authoritative_zero_tasks",
+    "discovered_task_count",
+    "cleanup_complete",
+    "receipt"
+  ],
+  "identity_patterns": {
+    "recovery_id": "^[a-f0-9]{64}$",
+    "attempt_id": "^[a-f0-9]{64}$",
+    "receipt_sha256": "^[a-f0-9]{64}$"
+  }
+}

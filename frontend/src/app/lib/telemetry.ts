@@ -3,6 +3,7 @@
 import { useConsentStore } from "../stores/consent-store"
 
 import { debugLog, debugWarn } from "./debug-logger"
+import { ordinaryAnalyticsSinkAllowed } from "./synthetic-isolation-policy"
 
 type TelemetryEvent = {
   name: string
@@ -19,6 +20,10 @@ let flushTimer: number | null = null
 
 const flushQueue = (opts?: { sync?: boolean }) => {
   if (!queue.length) return
+  if (!ordinaryAnalyticsSinkAllowed()) {
+    queue.length = 0
+    return
+  }
   if (!TELEMETRY_ENDPOINT) {
     if (process.env.NODE_ENV !== "production") {
       debugLog("telemetry", "queued events", queue)
@@ -83,6 +88,7 @@ if (typeof window !== "undefined") {
 
 export const emitTelemetry = (name: string, payload?: Record<string, unknown>) => {
   if (typeof window === "undefined") return
+  if (!ordinaryAnalyticsSinkAllowed()) return
   // 🔒 PRIVACY: Respect user's analytics consent preference
   if (!useConsentStore.getState().analytics) return
   queue.push({
@@ -105,4 +111,3 @@ export const emitTiming = (
     duration_ms: durationMs,
   })
 }
-

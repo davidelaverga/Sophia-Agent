@@ -42,7 +42,10 @@ test('voice route accepts fake mic audio and emits transcript plus artifact', as
   let captureExport: unknown = null;
   let events: CaptureEvent[] = [];
 
-  await seedSophiaBrowserState(page, { enableCapture: true });
+  await seedSophiaBrowserState(page, {
+    enableCapture: true,
+    completeDashboardSpotlight: false,
+  });
   await openDashboard(page);
   await startSessionFromDashboard(page);
   await enableCaptureBridge(page);

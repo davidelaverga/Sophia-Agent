@@ -51,20 +51,9 @@ function expectFileToExclude(source: string, forbidden: string[]) {
 }
 
 describe('runtime ownership contract', () => {
-  it('keeps /chat as a thin route shell over the chat route experience', () => {
-    const source = readAppFile('src/app/chat/page.tsx');
-
-    expectFileToInclude(source, ['useChatRouteExperience', 'ConversationView']);
-    expectFileToExclude(source, [
-      'useCompanionRuntime',
-      'useCompanionChatRuntime',
-      'useCompanionStreamContract',
-      'useCompanionArtifactsRuntime',
-      'useCompanionVoiceRuntime',
-      'useChatAiRuntime',
-      'useStreamVoiceSession',
-      'useInterrupt',
-    ]);
+  it('keeps the removed /chat route shell absent', () => {
+    expect(repoPathExists('frontend/src/app/chat/page.tsx')).toBe(false);
+    expect(repoPathExists('frontend/src/app/chat/useChatRouteExperience.ts')).toBe(false);
   });
 
   it('keeps /session wired through the session route experience instead of deleted runtime owners', () => {
@@ -85,11 +74,7 @@ describe('runtime ownership contract', () => {
   });
 
   it('keeps conversation runtime ownership in the canonical companion runtime namespace', () => {
-    const chatRouteSource = readAppFile('src/app/chat/useChatRouteExperience.ts');
     const sessionRouteSource = readAppFile('src/app/session/useSessionRouteExperience.ts');
-
-    expectFileToInclude(chatRouteSource, ['useCompanionRuntime']);
-    expectFileToExclude(chatRouteSource, ['useChatAiRuntime']);
 
     expectFileToInclude(sessionRouteSource, [
       'useCompanionArtifactsRuntime',
@@ -105,10 +90,10 @@ describe('runtime ownership contract', () => {
     ]);
   });
 
-  it('keeps ConversationView presentation-only', () => {
-    const source = readAppFile('src/app/components/ConversationView.tsx');
+  it('keeps the session conversation pane presentation-only', () => {
+    const source = readAppFile('src/app/components/session/SessionConversationPane.tsx');
 
-    expectFileToInclude(source, ['ChatRouteExperience']);
+    expectFileToInclude(source, ['SessionConversationPane']);
     expectFileToExclude(source, [
       'useCompanionRuntime',
       'useCompanionChatRuntime',
@@ -122,6 +107,7 @@ describe('runtime ownership contract', () => {
       'useBackendTokenSync',
       'useUsageMonitor',
     ]);
+    expect(repoPathExists('frontend/src/app/components/ConversationView.tsx')).toBe(false);
   });
 
   it('keeps forbidden duplicate Sophia surfaces absent from the repo', () => {

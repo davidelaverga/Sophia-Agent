@@ -4,6 +4,7 @@ import { NextResponse } from 'next/server'
 import { providerLogin } from '@/app/lib/auth/backend-auth'
 import { authBypassEnabled } from '@/app/lib/auth/dev-bypass'
 import { getSession } from '@/server/better-auth'
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation'
 
 function isLegacyBridgeUnavailable(error: unknown): boolean {
   if (typeof error === 'object' && error !== null && 'status' in error && error.status === 404) {
@@ -22,6 +23,9 @@ function isLegacyBridgeUnavailable(error: unknown): boolean {
  * sophia-backend-token httpOnly cookie.
  */
 export async function POST() {
+  const voiceLabDenied = await voiceLabOrdinaryProductBoundaryResponse()
+  if (voiceLabDenied) return voiceLabDenied
+
   if (authBypassEnabled) {
     return NextResponse.json({
       ok: true,

@@ -63,6 +63,67 @@ describe('Sophia API helper', () => {
     expect(headers.get('Content-Type')).toBe('application/json')
   })
 
+  it('uses the exact governed capability directly without legacy token hydration', async () => {
+    const response = await fetchSophiaApi(
+      '/api/sophia/voice-lab-user-1/voice/connect',
+      {
+        method: 'POST',
+        headers: { 'X-Sophia-Voice-Lab-Capability': 'signed-gateway-capability' },
+        body: JSON.stringify({ session_id: 'session-lab' }),
+      },
+      { voiceLabAccess: 'governed' },
+    )
+
+    expect(response.status).toBe(200)
+    expect(getUserScopedAuthHeaderMock).not.toHaveBeenCalled()
+    expect(refreshUserScopedAuthHeaderMock).not.toHaveBeenCalled()
+    const headers = (global.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1].headers as Headers
+    expect(headers.get('X-Sophia-Voice-Lab-Capability')).toBe('signed-gateway-capability')
+    expect(headers.has('Authorization')).toBe(false)
+  })
+
+  it('never falls back to legacy refresh when governed capability auth is rejected', async () => {
+    global.fetch = vi.fn().mockResolvedValueOnce(
+      new Response(JSON.stringify({ detail: { code: 'voice_lab_cleanup_obligation_closed' } }), {
+        status: 409,
+        headers: { 'Content-Type': 'application/json' },
+      }),
+    ) as unknown as typeof fetch
+
+    const response = await fetchSophiaApi(
+      '/api/v1/sessions/start',
+      {
+        method: 'POST',
+        headers: { 'X-Sophia-Voice-Lab-Capability': 'signed-gateway-capability' },
+      },
+      { voiceLabAccess: 'governed' },
+    )
+
+    expect(response.status).toBe(409)
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    expect(getUserScopedAuthHeaderMock).not.toHaveBeenCalled()
+    expect(refreshUserScopedAuthHeaderMock).not.toHaveBeenCalled()
+  })
+
+  it('forwards provider cleanup authority without legacy hydration or refresh', async () => {
+    const token = `${'a'.repeat(32)}.${'b'.repeat(43)}`
+    const response = await fetchSophiaApi(
+      '/api/sophia/voice-lab-user-1/voice/gemini/disconnect',
+      {
+        method: 'POST',
+        headers: { 'X-Sophia-Voice-Lab-Provider-Cleanup': token },
+      },
+      { voiceLabAccess: 'governed' },
+    )
+
+    expect(response.status).toBe(200)
+    expect(getUserScopedAuthHeaderMock).not.toHaveBeenCalled()
+    expect(refreshUserScopedAuthHeaderMock).not.toHaveBeenCalled()
+    const headers = (global.fetch as unknown as ReturnType<typeof vi.fn>).mock.calls[0][1].headers as Headers
+    expect(headers.get('X-Sophia-Voice-Lab-Provider-Cleanup')).toBe(token)
+    expect(headers.has('Authorization')).toBe(false)
+  })
+
   it('retries once with a refreshed auth header when the gateway returns 403', async () => {
     refreshUserScopedAuthHeaderMock.mockResolvedValue('Bearer refreshed-token')
     global.fetch = vi.fn()

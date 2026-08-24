@@ -23,6 +23,8 @@ import { coreviewFlagDiagnostics } from "../lib/co-review-flags"
 import { logger } from "../lib/error-logger"
 import {
   connectGeminiBrowserLiveFromBootstrap,
+  readGeminiLangSmithTraceContext,
+  readGeminiSyntheticTestContext,
   readGeminiConfiguredToolNames,
   type GeminiAudioContextDiagnostic,
   type GeminiBrowserLiveDogfoodConnection,
@@ -32,8 +34,17 @@ import {
   type GeminiArtifactFrameSendResult,
   type GeminiArtifactFrameTransportStatusSnapshot,
   type GeminiBrowserLiveSessionBootstrap,
+  type GeminiProviderCleanupSettlementAcknowledgement,
+  type GeminiSyntheticInteractionBinding,
 } from "../lib/gemini-browser-live-websocket-dogfood"
-import { recordSophiaCaptureEvent } from "../lib/session-capture"
+import {
+  bindSophiaCaptureSyntheticTestContext,
+  recordSophiaCaptureEvent,
+} from "../lib/session-capture"
+import {
+  recordSyntheticAcceptedBuilderTurn,
+  recordSyntheticBuilderToolLedger,
+} from "../lib/synthetic-builder-evidence"
 import type { ContextMode, PresetType } from "../lib/session-types"
 import { reconcileVoiceTranscript } from "../lib/voice-transcript-reconciliation"
 import type {
@@ -94,9 +105,34 @@ type GeminiProductionVoiceCredentials = GeminiBrowserLiveSessionBootstrap & {
   preconnect?: boolean
   preconnect_ttl_ms?: number | null
   preconnect_expires_at?: string | null
+  langsmith_trace_id?: string | null
 }
 
 type VoiceConnectCredentials = StreamVoiceCredentials | GeminiProductionVoiceCredentials
+
+export type D02BrowserWorkerProductCleanupControl = {
+  schema: "sophia_voice_lab_d02_browser_worker_product_cleanup_control_v1"
+  voice_lab_run_id_sha256: string
+  test_run_id: string
+  cleanup_obligation_id: string
+  browser_worker_id_sha256: string
+  browser_lease_epoch: number
+  browser_context_id_sha256: string
+  provider_session_id: string
+  frozen_provider_connection_epochs: number[]
+}
+
+type D02BrowserWorkerProductCleanupBridge = Readonly<{
+  close: (
+    control: D02BrowserWorkerProductCleanupControl,
+  ) => Promise<GeminiProviderCleanupSettlementAcknowledgement>
+}>
+
+declare global {
+  interface Window {
+    __sophiaVoiceLabD02WorkerCleanup?: D02BrowserWorkerProductCleanupBridge
+  }
+}
 
 type VoicePreconnectSkippedReason =
   | "already_active"
@@ -204,6 +240,22 @@ const GEMINI_COREVIEW_REQUEST_ARTIFACT_UPDATE_TOOL_NAME = "coreview_request_arti
 const GEMINI_COREVIEW_CANCEL_BUILDER_TASK_TOOL_NAME = "coreview_cancel_builder_task"
 const GEMINI_COREVIEW_GET_BUILDER_STATUS_TOOL_NAME = "coreview_get_builder_status"
 const RECENT_ANNOTATION_INTENT_WINDOW_MS = 20_000
+const D02_WORKER_PRODUCT_CLEANUP_CONTROL_KEYS = [
+  "schema",
+  "voice_lab_run_id_sha256",
+  "test_run_id",
+  "cleanup_obligation_id",
+  "browser_worker_id_sha256",
+  "browser_lease_epoch",
+  "browser_context_id_sha256",
+  "provider_session_id",
+  "frozen_provider_connection_epochs",
+] as const
+const D02_SHA256 = /^[a-f0-9]{64}$/
+const D02_CLEANUP_ID = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const D02_SAFE_ID = /^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$/
+const D02_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/
+const D02_UTC_MILLIS = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/
 const GEMINI_REVIEW_TOOL_NAMES = new Set([
   GEMINI_READ_ARTIFACT_TEXT_TOOL_NAME,
   "coreview_set_view",
@@ -224,6 +276,138 @@ const GEMINI_BUILDER_TOOL_NAMES = new Set([
   "cancel_async_task",
   "list_async_tasks",
 ])
+
+function hasExactD02Keys(value: unknown, keys: readonly string[]): value is Record<string, unknown> {
+  if (value === null || typeof value !== "object" || Array.isArray(value)) return false
+  const actual = Object.keys(value).sort()
+  const expected = [...keys].sort()
+  return actual.length === expected.length && actual.every((key, index) => key === expected[index])
+}
+
+function isCanonicalD02Timestamp(value: unknown): value is string {
+  if (typeof value !== "string" || !D02_UTC_MILLIS.test(value)) return false
+  const parsed = new Date(value)
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString() === value
+}
+
+function sameD02Epochs(left: readonly number[], right: readonly number[]): boolean {
+  return left.length === right.length && left.every((epoch, index) => epoch === right[index])
+}
+
+function readD02BrowserWorkerProductCleanupControl(
+  value: unknown,
+): D02BrowserWorkerProductCleanupControl {
+  if (!hasExactD02Keys(value, D02_WORKER_PRODUCT_CLEANUP_CONTROL_KEYS)) {
+    throw new Error("D02 browser-worker product cleanup control is malformed.")
+  }
+  const epochs = value.frozen_provider_connection_epochs
+  if (
+    value.schema !== "sophia_voice_lab_d02_browser_worker_product_cleanup_control_v1"
+    || typeof value.voice_lab_run_id_sha256 !== "string"
+    || !D02_SHA256.test(value.voice_lab_run_id_sha256)
+    || typeof value.test_run_id !== "string"
+    || !D02_SAFE_ID.test(value.test_run_id)
+    || typeof value.cleanup_obligation_id !== "string"
+    || !D02_CLEANUP_ID.test(value.cleanup_obligation_id)
+    || typeof value.browser_worker_id_sha256 !== "string"
+    || !D02_SHA256.test(value.browser_worker_id_sha256)
+    || !Number.isSafeInteger(value.browser_lease_epoch)
+    || Number(value.browser_lease_epoch) <= 0
+    || typeof value.browser_context_id_sha256 !== "string"
+    || !D02_SHA256.test(value.browser_context_id_sha256)
+    || typeof value.provider_session_id !== "string"
+    || !D02_SAFE_ID.test(value.provider_session_id)
+    || !Array.isArray(epochs)
+    || epochs.length === 0
+    || epochs.length > 64
+    || epochs.some((epoch) => !Number.isSafeInteger(epoch) || Number(epoch) <= 0)
+    || epochs.some((epoch, index) => index > 0 && Number(epoch) <= Number(epochs[index - 1]))
+  ) {
+    throw new Error("D02 browser-worker product cleanup control is malformed.")
+  }
+  return value as D02BrowserWorkerProductCleanupControl
+}
+
+export function validateD02ProductCleanupAcknowledgement(
+  value: unknown,
+  providerSessionId: string,
+  frozenEpochs: readonly number[],
+): GeminiProviderCleanupSettlementAcknowledgement {
+  if (!hasExactD02Keys(value, [
+    "browser_provider_close_receipts",
+    "browser_provider_activation_abort_receipts",
+  ])) {
+    throw new Error("D02 product cleanup acknowledgement is malformed.")
+  }
+  const closeReceipts = value.browser_provider_close_receipts
+  const abortReceipts = value.browser_provider_activation_abort_receipts
+  if (!Array.isArray(closeReceipts) || !Array.isArray(abortReceipts)) {
+    throw new Error("D02 product cleanup acknowledgement is malformed.")
+  }
+  const closeEpochs: number[] = []
+  for (const receipt of closeReceipts) {
+    if (
+      !hasExactD02Keys(receipt, [
+        "schema", "receipt_id", "session_id", "provider_connection_epoch",
+        "websocket_close_observed", "websocket_close_code", "websocket_closed_at",
+      ])
+      || receipt.schema !== "sophia_gemini_browser_provider_close_v1"
+      || typeof receipt.receipt_id !== "string"
+      || !D02_UUID.test(receipt.receipt_id)
+      || receipt.session_id !== providerSessionId
+      || !Number.isSafeInteger(receipt.provider_connection_epoch)
+      || Number(receipt.provider_connection_epoch) <= 0
+      || receipt.websocket_close_observed !== true
+      || !Number.isSafeInteger(receipt.websocket_close_code)
+      || Number(receipt.websocket_close_code) < 1000
+      || Number(receipt.websocket_close_code) > 4999
+      || !isCanonicalD02Timestamp(receipt.websocket_closed_at)
+    ) {
+      throw new Error("D02 product close receipt is malformed.")
+    }
+    closeEpochs.push(Number(receipt.provider_connection_epoch))
+  }
+  const abortEpochs: number[] = []
+  for (const receipt of abortReceipts) {
+    if (
+      !hasExactD02Keys(receipt, [
+        "schema", "receipt_id", "session_id", "previous_activated_epoch",
+        "candidate_epoch", "websocket_created", "aborted_at",
+      ])
+      || receipt.schema !== "sophia_gemini_browser_provider_activation_abort_v1"
+      || typeof receipt.receipt_id !== "string"
+      || !D02_UUID.test(receipt.receipt_id)
+      || receipt.session_id !== providerSessionId
+      || !Number.isSafeInteger(receipt.previous_activated_epoch)
+      || Number(receipt.previous_activated_epoch) < 0
+      || !Number.isSafeInteger(receipt.candidate_epoch)
+      || Number(receipt.candidate_epoch) <= 0
+      || Number(receipt.candidate_epoch) !== Number(receipt.previous_activated_epoch) + 1
+      || receipt.websocket_created !== false
+      || !isCanonicalD02Timestamp(receipt.aborted_at)
+    ) {
+      throw new Error("D02 product activation-abort receipt is malformed.")
+    }
+    abortEpochs.push(Number(receipt.candidate_epoch))
+  }
+  if (
+    closeEpochs.some((epoch, index) => index > 0 && epoch <= closeEpochs[index - 1])
+    || abortEpochs.some((epoch, index) => index > 0 && epoch <= abortEpochs[index - 1])
+  ) {
+    throw new Error("D02 product cleanup receipt arrays are noncanonical.")
+  }
+  const acceptedEpochs = [...closeEpochs, ...abortEpochs].sort((left, right) => left - right)
+  if (
+    new Set(acceptedEpochs).size !== acceptedEpochs.length
+    || !sameD02Epochs(acceptedEpochs, frozenEpochs)
+  ) {
+    throw new Error("D02 product cleanup acknowledgement epoch union drifted.")
+  }
+  return {
+    browser_provider_close_receipts: closeReceipts.map((receipt) => ({ ...receipt })),
+    browser_provider_activation_abort_receipts: abortReceipts.map((receipt) => ({ ...receipt })),
+  }
+}
 
 function withVoiceEventCursor(streamUrl: string, lastEventId: string | null): string {
   if (!lastEventId) return streamUrl
@@ -271,6 +455,10 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     audioContextResumeSucceeded: params.audioContextResumeSucceeded ?? null,
     audioContextResumeError: params.audioContextResumeError ?? null,
     setupComplete: params.setupComplete ?? false,
+    providerConnectionEpoch: params.providerConnectionEpoch ?? 1,
+    langsmithTraceId: params.langsmithTraceId ?? null,
+    langsmithTraceStatus: params.langsmithTraceStatus ?? "trace_unavailable",
+    langsmithTraceUnavailableReason: params.langsmithTraceUnavailableReason ?? "not_provided",
     providerEventCount: params.providerEventCount ?? 0,
     lastProviderEventAt: params.lastProviderEventAt ?? null,
     lastProviderEventType: params.lastProviderEventType ?? null,
@@ -288,6 +476,12 @@ function createGeminiRuntimeTelemetry(params: Partial<Extract<VoiceRuntimeTeleme
     firstPublicUserTranscriptAt: params.firstPublicUserTranscriptAt ?? null,
     transcriptPromotionLatencyMs: params.transcriptPromotionLatencyMs ?? null,
     outputAudioEventCount: params.outputAudioEventCount ?? 0,
+    outputAudioReceivedCount: params.outputAudioReceivedCount ?? 0,
+    outputAudioPlaybackScheduledCount: params.outputAudioPlaybackScheduledCount ?? 0,
+    outputAudioPlaybackStartedCount: params.outputAudioPlaybackStartedCount ?? 0,
+    outputAudioPlaybackCompletedCount: params.outputAudioPlaybackCompletedCount ?? 0,
+    outputAudioPlaybackFlushedCount: params.outputAudioPlaybackFlushedCount ?? 0,
+    outputAudioPlaybackDroppedCount: params.outputAudioPlaybackDroppedCount ?? 0,
     lastOutputAudioAt: params.lastOutputAudioAt ?? null,
     assistantTranscriptSource: params.assistantTranscriptSource ?? null,
     assistantTranscriptFinalSeen: params.assistantTranscriptFinalSeen ?? false,
@@ -994,6 +1188,7 @@ export function useStreamVoiceSession(
   const isSophiaReadyRef = useRef(false)
   const credentialsRef = useRef<StreamVoiceCredentials | null>(null)
   const geminiConnectionRef = useRef<GeminiBrowserLiveDogfoodConnection | null>(null)
+  const syntheticInteractionByResponseRef = useRef<Map<string, GeminiSyntheticInteractionBinding>>(new Map())
   const assistantTranscriptPacingRef = useRef(createAssistantTranscriptPacingState())
   const assistantTranscriptStaleGuardRef = useRef(createAssistantTranscriptStaleGuardState())
   const disconnectRequestKeyRef = useRef<string | null>(null)
@@ -1046,6 +1241,81 @@ export function useStreamVoiceSession(
   useEffect(() => { onAssistantResponseRef.current = onAssistantResponse }, [onAssistantResponse])
   useEffect(() => { sessionIdRef.current = sessionId }, [sessionId])
   useEffect(() => { isSophiaReadyRef.current = isSophiaReady }, [isSophiaReady])
+  useEffect(() => {
+    const activeConnection = geminiConnection
+    const synthetic = activeConnection?.syntheticTest
+    if (
+      !activeConnection
+      || !synthetic
+      || synthetic.scenario_id !== "V-D02"
+      || typeof synthetic.voice_lab_run_id_sha256 !== "string"
+      || !D02_SHA256.test(synthetic.voice_lab_run_id_sha256)
+      || typeof synthetic.browser_worker_id_sha256 !== "string"
+      || !D02_SHA256.test(synthetic.browser_worker_id_sha256)
+      || !Number.isSafeInteger(synthetic.browser_lease_epoch)
+      || Number(synthetic.browser_lease_epoch) <= 0
+      || typeof synthetic.browser_context_id_sha256 !== "string"
+      || !D02_SHA256.test(synthetic.browser_context_id_sha256)
+    ) {
+      return
+    }
+
+    const bridge: D02BrowserWorkerProductCleanupBridge = Object.freeze({
+      close: async (rawControl) => {
+        const control = readD02BrowserWorkerProductCleanupControl(rawControl)
+        const current = geminiConnectionRef.current
+        const currentSynthetic = current?.syntheticTest
+        const localEpochs = current?.getProviderSocketEpochs() ?? []
+        if (
+          current !== activeConnection
+          || currentSynthetic !== synthetic
+          || control.voice_lab_run_id_sha256 !== synthetic.voice_lab_run_id_sha256
+          || control.test_run_id !== synthetic.test_run_id
+          || control.cleanup_obligation_id !== synthetic.cleanup_obligation_id
+          || control.browser_worker_id_sha256 !== synthetic.browser_worker_id_sha256
+          || control.browser_lease_epoch !== synthetic.browser_lease_epoch
+          || control.browser_context_id_sha256 !== synthetic.browser_context_id_sha256
+          || control.provider_session_id !== activeConnection.sessionId
+          || localEpochs.length === 0
+          || localEpochs.some((epoch, index) => (
+            !Number.isSafeInteger(epoch)
+            || epoch <= 0
+            || (index > 0 && epoch <= localEpochs[index - 1])
+          ))
+          || !sameD02Epochs(localEpochs, control.frozen_provider_connection_epochs)
+        ) {
+          throw new Error("D02 browser-worker product cleanup binding mismatch.")
+        }
+        const rawAcknowledgement = await activeConnection.close({
+          providerConnectionEpochs: [...control.frozen_provider_connection_epochs],
+        })
+        const acknowledgement = validateD02ProductCleanupAcknowledgement(
+          rawAcknowledgement,
+          control.provider_session_id,
+          control.frozen_provider_connection_epochs,
+        )
+        // Keep the closed connection object and bridge addressable until the
+        // owning worker has received the acknowledgement. A lost Playwright
+        // response can then replay the exact control and read the already
+        // accepted canonical echo without reopening provider state.
+        return acknowledgement
+      },
+    })
+    if (Object.prototype.hasOwnProperty.call(window, "__sophiaVoiceLabD02WorkerCleanup")) {
+      return
+    }
+    Object.defineProperty(window, "__sophiaVoiceLabD02WorkerCleanup", {
+      configurable: true,
+      enumerable: false,
+      writable: false,
+      value: bridge,
+    })
+    return () => {
+      if (window.__sophiaVoiceLabD02WorkerCleanup === bridge) {
+        delete window.__sophiaVoiceLabD02WorkerCleanup
+      }
+    }
+  }, [geminiConnection])
   useEffect(() => {
     autoPreconnectEnabledRef.current = true
   }, [sessionId, threadId, userId])
@@ -1484,6 +1754,10 @@ export function useStreamVoiceSession(
     }
     rememberAnnotationIntentFromTranscript(reconciledTranscript.text, source)
     onUserTranscriptRef.current?.(reconciledTranscript.text)
+    geminiConnectionRef.current?.acknowledgeSyntheticPublicUserTurn?.({
+      publicUtteranceId: utteranceId,
+      transcriptLength: reconciledTranscript.text.length,
+    })
     return true
   }, [forgetBargeInTranscriptFingerprint, hasSeenBargeInTranscriptFingerprint, hasSeenUserTranscriptId, rememberAnnotationIntentFromTranscript, rememberBargeInTranscriptFingerprint, rememberUserTranscriptId])
 
@@ -2251,14 +2525,47 @@ export function useStreamVoiceSession(
     }
 
     if (type.startsWith("sophia.")) {
+      const responseId = type === "sophia.turn" && typeof data?.response_id === "string"
+        ? data.response_id
+        : null
+      const turnId = type === "sophia.turn" && typeof data?.turn_id === "string"
+        ? data.turn_id
+        : null
+      const syntheticInteraction = responseId
+        ? syntheticInteractionByResponseRef.current.get(responseId) ?? null
+        : null
       recordSophiaCaptureEvent({
         category: source === "sse" ? "voice-sse" : "stream-custom",
         name: type,
         payload: {
           data,
           sessionId: sessionIdRef.current ?? null,
+          ...(syntheticInteraction && turnId === syntheticInteraction.assistant_turn_id
+            ? { syntheticInteraction }
+            : {}),
         },
       })
+      if (syntheticInteraction && turnId !== syntheticInteraction.assistant_turn_id) {
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "gemini-synthetic-interaction-fault",
+          payload: {
+            schema: "sophia_gemini_interaction_fault_v1",
+            synthetic: true,
+            test_run_id: syntheticInteraction.test_run_id,
+            code: "interaction_turn_boundary_conflict",
+            operation_id: syntheticInteraction.operation_id,
+            utterance_id: syntheticInteraction.utterance_id,
+            response_id: responseId,
+            observed_at: new Date().toISOString(),
+            provider_connection_epoch: syntheticInteraction.provider_connection_epoch,
+            raw_audio_excluded: true,
+            raw_transcript_excluded: true,
+            secrets_excluded: true,
+          },
+        })
+        void geminiConnectionRef.current?.close()
+      }
     }
 
     if (type === "sophia.transcript") {
@@ -2347,6 +2654,60 @@ export function useStreamVoiceSession(
 
     if (type === "sophia.builder_task" && data) {
       onBuilderTaskRef.current?.(data)
+    }
+
+    if (type === "sophia.provider_cleanup") {
+      const activeConnection = geminiConnectionRef.current
+      const rawControlEpochs: unknown[] = Array.isArray(data?.provider_connection_epochs)
+        ? data.provider_connection_epochs
+        : []
+      const controlEpochs = rawControlEpochs.length > 0
+        ? rawControlEpochs.filter(
+          (epoch: unknown): epoch is number => Number.isSafeInteger(epoch) && Number(epoch) > 0,
+        )
+        : []
+      const localProviderEpochs = activeConnection?.getProviderSocketEpochs() ?? []
+      const validControl = (
+        activeConnection?.syntheticTest !== null
+        && data?.schema === "sophia_provider_cleanup_control_v1"
+        && data?.session_id === activeConnection?.sessionId
+        && data?.cleanup_obligation_id === activeConnection?.syntheticTest?.cleanup_obligation_id
+        && controlEpochs.length > 0
+        && controlEpochs.length === rawControlEpochs.length
+        && new Set(controlEpochs).size === controlEpochs.length
+        && controlEpochs.every((epoch: number) => localProviderEpochs.includes(epoch))
+        && data?.resource_expires_at === activeConnection?.syntheticTest?.provider_expires_at
+      )
+      recordSophiaCaptureEvent({
+        category: "voice-session",
+        name: validControl
+          ? "gemini-provider-cleanup-control-accepted"
+          : "gemini-provider-cleanup-control-rejected",
+        payload: {
+          sessionId: sessionIdRef.current ?? null,
+          voiceAgentSessionId: activeConnection?.sessionId ?? null,
+          validControl,
+        },
+      })
+      if (activeConnection?.syntheticTest && validControl) {
+        void activeConnection.close({ providerConnectionEpochs: controlEpochs }).then(() => {
+          if (geminiConnectionRef.current === activeConnection) {
+            geminiConnectionRef.current = null
+            setGeminiConnection(null)
+          }
+        }).catch((error: unknown) => {
+          logger.warn("Governed Gemini provider cleanup remains pending", {
+            component: "StreamVoiceSession",
+            action: "providerCleanupControl",
+            metadata: {
+              voiceAgentSessionId: activeConnection.sessionId,
+              validControl: true,
+              error: error instanceof Error ? error.message : String(error),
+            },
+          })
+        })
+      }
+      return
     }
 
     if (type === "sophia.turn") {
@@ -2651,6 +3012,7 @@ export function useStreamVoiceSession(
       "sophia.builder_task",
       "sophia.turn",
       "sophia.turn_diagnostic",
+      "sophia.provider_cleanup",
     ] as const
 
     const eventListeners = eventTypes.map((eventType) => {
@@ -2821,6 +3183,7 @@ export function useStreamVoiceSession(
     isSophiaReadyRef.current = false
     recentUserTranscriptIdsRef.current = []
     recentBargeInTranscriptFingerprintsRef.current = []
+    syntheticInteractionByResponseRef.current.clear()
     currentTurnUserTranscriptRef.current = null
     userMicMutedRef.current = false
     setIsSophiaReady(false)
@@ -2829,6 +3192,7 @@ export function useStreamVoiceSession(
     setIsMuted(false)
     setPartialReply("")
     setFinalReply("")
+    bindSophiaCaptureSyntheticTestContext(null)
     recordSophiaCaptureEvent({
       category: "voice-session",
       name: "start-talking-requested",
@@ -2915,6 +3279,11 @@ export function useStreamVoiceSession(
       }
 
       if (isGeminiProductionCredentials(creds)) {
+        const syntheticTest = readGeminiSyntheticTestContext(
+          creds.synthetic_test,
+          "Gemini production voice connect",
+        )
+        bindSophiaCaptureSyntheticTestContext(syntheticTest)
         logger.debug("StreamVoiceSession", "Starting Gemini production voice runtime", {
           userId,
           voiceAgentSessionId: creds.session_id,
@@ -2922,6 +3291,12 @@ export function useStreamVoiceSession(
         resetAssistantTranscriptPacingState(assistantTranscriptPacingRef.current)
         resetAssistantTranscriptStaleGuardState(assistantTranscriptStaleGuardRef.current)
         resetGeminiOpeningGreetingLatch(creds.session_id)
+        const langsmithTrace = readGeminiLangSmithTraceContext(creds)
+        const bootstrapProviderConnectionEpoch = (
+          typeof creds.provider_connection_epoch === "number"
+          && Number.isInteger(creds.provider_connection_epoch)
+          && creds.provider_connection_epoch > 0
+        ) ? creds.provider_connection_epoch : 1
 
         setRuntimeTelemetry(createGeminiRuntimeTelemetry({
           source: "voice-connect",
@@ -2932,6 +3307,8 @@ export function useStreamVoiceSession(
               ? creds.provider_event_relay_url
               : null,
           publicSseState: "connecting",
+          providerConnectionEpoch: bootstrapProviderConnectionEpoch,
+          ...langsmithTrace,
         }))
         const coreviewDiagnostics = coreviewFlagDiagnostics()
         recordSophiaCaptureEvent({
@@ -2943,6 +3320,8 @@ export function useStreamVoiceSession(
             runtime: "gemini_live",
             sessionId: sessionIdRef.current ?? null,
             voiceAgentSessionId: creds.session_id,
+            providerConnectionEpoch: bootstrapProviderConnectionEpoch,
+            ...langsmithTrace,
             ...coreviewDiagnostics,
             backendCoreviewFlagParsed: typeof creds.backendCoreviewFlagParsed === "boolean" ? creds.backendCoreviewFlagParsed : null,
             backendStillFrameFlagParsed: typeof creds.backendStillFrameFlagParsed === "boolean" ? creds.backendStillFrameFlagParsed : null,
@@ -2960,7 +3339,6 @@ export function useStreamVoiceSession(
             backendStillFrameFlagParsed: typeof creds.backendStillFrameFlagParsed === "boolean" ? creds.backendStillFrameFlagParsed : null,
           },
         })
-
         const connection = await connectGeminiBrowserLiveFromBootstrap({
           userId,
           sessionId: creds.session_id,
@@ -3017,32 +3395,95 @@ export function useStreamVoiceSession(
               shutdownTerminalGeminiSession(creds.session_id, creds)
             }
           },
-          onOutputAudio: () => {
-            const timestamp = new Date().toISOString()
+          onOutputAudioReceived: (diagnostic) => {
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? {
                   ...current,
-                  remoteAudioState: "active",
                   outputAudioEventCount: current.outputAudioEventCount + 1,
-                  lastOutputAudioAt: timestamp,
+                  outputAudioReceivedCount: current.outputAudioReceivedCount + 1,
+                  lastOutputAudioAt: diagnostic.timestamp,
+                  providerConnectionEpoch: diagnostic.providerConnectionEpoch ?? current.providerConnectionEpoch,
                 }
               : current)
             recordSophiaCaptureEvent({
               category: "voice-session",
-              name: "gemini-output-audio-started",
+              name: "gemini-output-audio-received",
               payload: {
                 runtime: "gemini_live",
                 sessionId: sessionIdRef.current ?? null,
                 voiceAgentSessionId: creds.session_id,
-                timestamp,
+                diagnostic,
               },
             })
-            if (!softBargeInActiveRef.current) {
+          },
+          onOutputAudioPlaybackReceipt: (receipt) => {
+            setRuntimeTelemetry((current) => {
+              if (current.runtime !== "gemini_live") return current
+              return {
+                ...current,
+                providerConnectionEpoch: receipt.providerConnectionEpoch ?? current.providerConnectionEpoch,
+                playbackGeneration: Math.max(
+                  current.playbackGeneration,
+                  receipt.invalidatedByPlaybackGeneration ?? receipt.playbackGeneration,
+                ),
+                remoteAudioState: receipt.phase === "started" ? "active" : current.remoteAudioState,
+                outputAudioPlaybackScheduledCount: current.outputAudioPlaybackScheduledCount + (receipt.phase === "scheduled" ? 1 : 0),
+                outputAudioPlaybackStartedCount: current.outputAudioPlaybackStartedCount + (receipt.phase === "started" ? 1 : 0),
+                outputAudioPlaybackCompletedCount: current.outputAudioPlaybackCompletedCount + (receipt.phase === "completed" ? 1 : 0),
+                outputAudioPlaybackFlushedCount: current.outputAudioPlaybackFlushedCount + (receipt.phase === "flushed" ? 1 : 0),
+                outputAudioPlaybackDroppedCount: current.outputAudioPlaybackDroppedCount + (receipt.phase === "dropped" ? 1 : 0),
+              }
+            })
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: `gemini-output-audio-playback-${receipt.phase}`,
+              payload: {
+                runtime: "gemini_live",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
+                receipt,
+              },
+            })
+            if (receipt.phase === "started" && !softBargeInActiveRef.current) {
               setStage("speaking")
               setListeningPresence(false)
               setSpeakingPresence(true)
               setMetaPresence("speaking")
             }
+          },
+          onOutputLegMonitorReceipt: (receipt) => {
+            if (!syntheticTest) return
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "gemini-output-leg-receipt",
+              payload: {
+                runtime: "gemini_live",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
+                receipt,
+              },
+            })
+          },
+          onProviderConnectionEpoch: (receipt) => {
+            setRuntimeTelemetry((current) => current.runtime === "gemini_live"
+              ? {
+                  ...current,
+                  providerConnectionEpoch: receipt.providerConnectionEpoch,
+                  langsmithTraceId: receipt.langsmithTraceId,
+                  langsmithTraceStatus: receipt.langsmithTraceStatus,
+                  langsmithTraceUnavailableReason: receipt.langsmithTraceUnavailableReason,
+                }
+              : current)
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "gemini-provider-connection-epoch",
+              payload: {
+                runtime: "gemini_live",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
+                receipt,
+              },
+            })
           },
           onOutputAudioChunk: (diagnostic) => {
             recordSophiaCaptureEvent({
@@ -3113,6 +3554,127 @@ export function useStreamVoiceSession(
                 sessionId: sessionIdRef.current ?? null,
                 voiceAgentSessionId: creds.session_id,
                 diagnostic,
+              },
+            })
+          },
+          onSyntheticInputLegReceipt: (receipt) => {
+            if (!syntheticTest) return
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "gemini-input-leg-receipt",
+              payload: {
+                runtime: "gemini_live",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
+                receipt,
+              },
+            })
+          },
+          onSyntheticInputTurnReceipt: (receipt) => {
+            if (!syntheticTest) return
+            recordSyntheticAcceptedBuilderTurn(receipt)
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "gemini-input-turn-receipt",
+              payload: {
+                runtime: "gemini_live",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
+                receipt,
+              },
+            })
+          },
+          onSyntheticInputFaultReceipt: (receipt) => {
+            if (!syntheticTest) return
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "gemini-input-evidence-fault",
+              payload: {
+                runtime: "gemini_live",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
+                receipt,
+              },
+            })
+          },
+          onSyntheticInteractionReceipt: (receipt) => {
+            if (!syntheticTest) return
+            const binding: GeminiSyntheticInteractionBinding = {
+              schema: "sophia_gemini_interaction_binding_v1",
+              synthetic: true,
+              test_run_id: receipt.test_run_id,
+              scenario_id: receipt.scenario_id,
+              scenario_version: receipt.scenario_version,
+              interaction_id: receipt.interaction_id,
+              operation_id: receipt.operation_id,
+              utterance_id: receipt.utterance_id,
+              frame_window_id: receipt.frame_window_id,
+              provider_input_sequence: receipt.provider_input_sequence,
+              public_utterance_id: receipt.public_utterance_id,
+              public_user_turn_accepted_at: receipt.public_user_turn_accepted_at,
+              response_id: receipt.response_id,
+              assistant_turn_id: receipt.assistant_turn_id,
+              assistant_started_at: receipt.assistant_started_at,
+              provider_connection_epoch: receipt.provider_connection_epoch,
+            }
+            const existing = syntheticInteractionByResponseRef.current.get(binding.response_id)
+            if (existing && JSON.stringify(existing) !== JSON.stringify(binding)) {
+              recordSophiaCaptureEvent({
+                category: "voice-session",
+                name: "gemini-synthetic-interaction-fault",
+                payload: {
+                  schema: "sophia_gemini_interaction_fault_v1",
+                  synthetic: true,
+                  test_run_id: binding.test_run_id,
+                  code: "interaction_response_rebind",
+                  operation_id: binding.operation_id,
+                  utterance_id: binding.utterance_id,
+                  response_id: binding.response_id,
+                  observed_at: new Date().toISOString(),
+                  provider_connection_epoch: binding.provider_connection_epoch,
+                  raw_audio_excluded: true,
+                  raw_transcript_excluded: true,
+                  secrets_excluded: true,
+                },
+              })
+              void geminiConnectionRef.current?.close()
+              return
+            }
+            syntheticInteractionByResponseRef.current.set(binding.response_id, binding)
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "gemini-synthetic-interaction-receipt",
+              payload: {
+                runtime: "gemini_live",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
+                receipt,
+              },
+            })
+          },
+          onSyntheticInteractionFaultReceipt: (receipt) => {
+            if (!syntheticTest) return
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "gemini-synthetic-interaction-fault",
+              payload: {
+                runtime: "gemini_live",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
+                receipt,
+              },
+            })
+          },
+          onSyntheticTraceFaultReceipt: (receipt) => {
+            if (!syntheticTest) return
+            recordSophiaCaptureEvent({
+              category: "voice-session",
+              name: "gemini-trace-fault-receipt",
+              payload: {
+                runtime: "gemini_live",
+                sessionId: sessionIdRef.current ?? null,
+                voiceAgentSessionId: creds.session_id,
+                receipt,
               },
             })
           },
@@ -3296,6 +3858,7 @@ export function useStreamVoiceSession(
           onProviderEventTelemetry: (telemetry) => {
             setRuntimeTelemetry((current) => current.runtime === "gemini_live"
               ? applyGeminiTranscriptReadiness(current, {
+                  providerConnectionEpoch: telemetry.providerConnectionEpoch ?? current.providerConnectionEpoch,
                   providerCategoryCounts: telemetry.categoryCounts,
                   relayClassificationCounts: telemetry.relayClassificationCounts,
                   providerInputTranscriptCount: telemetry.categoryCounts.inputTranscription?.count ?? current.providerInputTranscriptCount ?? 0,
@@ -3389,6 +3952,7 @@ export function useStreamVoiceSession(
             })
           },
           onToolCallLedgerUpdate: (entry) => {
+            recordSyntheticBuilderToolLedger(entry)
             setRuntimeTelemetry((current) => {
               if (current.runtime !== "gemini_live") {
                 return current
@@ -3824,12 +4388,29 @@ export function useStreamVoiceSession(
               relayUrl: connection.relayUrl,
               transport: connection.transport,
               publicEventBoundary: connection.publicEventBoundary,
+              providerConnectionEpoch: connection.providerConnectionEpoch,
+              langsmithTraceId: connection.langsmithTraceId,
+              langsmithTraceStatus: connection.langsmithTraceStatus,
+              langsmithTraceUnavailableReason: connection.langsmithTraceUnavailableReason,
               reviewToolsExposed,
               emitArtifactExposedDuringReview,
               coreviewBuilderToolsExposed,
               coreviewBuilderGenericToolsSuppressed,
             }
           : current)
+        recordSophiaCaptureEvent({
+          category: "voice-session",
+          name: "gemini-connection-observability",
+          payload: {
+            runtime: "gemini_live",
+            sessionId: sessionIdRef.current ?? null,
+            voiceAgentSessionId: creds.session_id,
+            providerConnectionEpoch: connection.providerConnectionEpoch,
+            langsmithTraceId: connection.langsmithTraceId,
+            langsmithTraceStatus: connection.langsmithTraceStatus,
+            langsmithTraceUnavailableReason: connection.langsmithTraceUnavailableReason,
+          },
+        })
         recordSophiaCaptureEvent({
           category: "voice-session",
           name: "gemini-setup-tools",

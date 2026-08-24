@@ -2,7 +2,6 @@
 
 import { useEffect, useState } from 'react';
 
-import { env } from '../../env';
 import type { BuilderCompletionEventV1 } from '../types/builder-completion';
 
 /**
@@ -31,9 +30,8 @@ export function useBuilderEvents(
       return;
     }
 
-    const baseUrl = env.NEXT_PUBLIC_GATEWAY_URL ?? '';
-    const lastUrl = `${baseUrl}/api/threads/${encodeURIComponent(threadId)}/builder-events/last`;
-    const streamUrl = `${baseUrl}/api/threads/${encodeURIComponent(threadId)}/builder-events`;
+    const lastUrl = `/api/threads/${encodeURIComponent(threadId)}/builder-events/last`;
+    const streamUrl = `/api/threads/${encodeURIComponent(threadId)}/builder-events`;
 
     let cancelled = false;
 

@@ -10,6 +10,7 @@ from urllib.parse import quote, unquote
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, HTMLResponse, PlainTextResponse, Response
+from langgraph_sdk import get_client
 from pydantic import BaseModel, Field
 
 from app.gateway.artifact_registry import (
@@ -31,8 +32,16 @@ from app.gateway.html_quick_patch import (
     stable_path_hash,
 )
 from app.gateway.path_utils import resolve_thread_virtual_path
+from app.gateway.voice_lab_capability import (
+    assert_voice_lab_session_record,
+    capability_for_gateway_action,
+)
 from deerflow.sophia.session_store import SessionStore
 from deerflow.sophia.storage import supabase_artifact_store
+from deerflow.sophia.synthetic_builder import (
+    SyntheticBuilderContextError,
+    normalize_synthetic_builder_context,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -156,7 +165,12 @@ async def upsert_user_artifact(
         request_body,
         authenticated_user_id,
     )
-    _require_thread_owner(authenticated_user_id, request_body.thread_id)
+    owner_record = _require_thread_owner(authenticated_user_id, request_body.thread_id)
+    if _synthetic_voice_lab_metadata(owner_record) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "synthetic_artifact_publication_excluded"},
+        )
     await _authorize_artifact_upsert_thread_references(request_body, authenticated_user_id)
     record = _artifact_registry.upsert(request_body, user_id=authenticated_user_id)
     return open_response_for_record(record)
@@ -199,7 +213,7 @@ async def delete_user_artifact(
     authenticated_user_id: str = Depends(require_authenticated_user),
 ) -> ArtifactOpenResponse:
     existing = _artifact_registry.get(artifact_id, user_id=authenticated_user_id)
-    if existing is None:
+    if existing is None or existing.synthetic_test:
         raise HTTPException(status_code=404, detail="Artifact not found")
     deleted = _artifact_registry.mark_deleted(artifact_id, user_id=authenticated_user_id) or existing
     return open_response_for_record(deleted)
@@ -528,11 +542,12 @@ async def _authorize_artifact_upsert_thread_references(
         )
 
 
-def _require_thread_owner(authenticated_user_id: str | None, thread_id: str) -> None:
+def _require_thread_owner(authenticated_user_id: str | None, thread_id: str) -> object | None:
     if not isinstance(authenticated_user_id, str) or not authenticated_user_id:
-        return
-    if _is_thread_owner(authenticated_user_id, thread_id):
-        return
+        return None
+    record = _session_store.find_session_by_thread_id(authenticated_user_id, thread_id)
+    if record is not None:
+        return record
     logger.warning(
         "Artifact route ownership rejected user_id=%s thread_id=%s",
         _short_id(authenticated_user_id),
@@ -547,11 +562,180 @@ def _is_thread_owner(authenticated_user_id: str | None, thread_id: str) -> bool:
     return _session_store.find_session_by_thread_id(authenticated_user_id, thread_id) is not None
 
 
+def _synthetic_voice_lab_metadata(record: object | None) -> dict[str, Any] | None:
+    metadata = getattr(record, "metadata", None)
+    if not isinstance(metadata, dict):
+        return None
+    synthetic = metadata.get("synthetic_voice_lab")
+    return synthetic if isinstance(synthetic, dict) else None
+
+
+def _synthetic_builder_child_matches_claims(
+    child_metadata: object,
+    claims: object,
+    *,
+    parent_thread_id: str,
+) -> bool:
+    """Verify the complete app-authored child projection before byte access."""
+
+    if not isinstance(child_metadata, dict):
+        return False
+    try:
+        context = normalize_synthetic_builder_context(child_metadata)
+    except SyntheticBuilderContextError:
+        return False
+    if context is None:
+        return False
+    deployment = context.get("deployment_identity")
+    expected_deployment = getattr(claims, "expected_deployment", None)
+    if not isinstance(deployment, dict) or not isinstance(expected_deployment, dict):
+        return False
+    exact_deployment = all(
+        deployment.get(f"{component}_sha") == expected_deployment.get(component)
+        for component in ("frontend", "backend", "voice")
+    )
+    exact_exclusions = all(
+        child_metadata.get(key) is True
+        for key in (
+            "memory_retrieval_excluded",
+            "memory_learning_excluded",
+            "ordinary_artifact_publication_excluded",
+            "ordinary_analytics_excluded",
+            "deck_quality_publication_excluded",
+            "langsmith_export_excluded",
+        )
+    )
+    return bool(
+        child_metadata.get("synthetic") is True
+        and child_metadata.get("synthetic_test") is True
+        and child_metadata.get("parent_thread_id") == parent_thread_id
+        and context.get("test_principal_id") == getattr(claims, "principal_id", None)
+        and context.get("test_run_id") == getattr(claims, "test_run_id", None)
+        and context.get("scenario_id") == getattr(claims, "scenario_id", None)
+        and context.get("scenario_version")
+        == getattr(claims, "scenario_version", None)
+        and context.get("environment") == getattr(claims, "environment", None)
+        and context.get("retention_hours")
+        == getattr(claims, "retention_hours", None)
+        and context.get("cleanup_obligation_id")
+        == getattr(claims, "cleanup_obligation_id", None)
+        and context.get("isolation_status") == "isolated"
+        and exact_deployment
+        and exact_exclusions
+    )
+
+
 def _has_sophia_session(thread_id: str) -> bool:
     finder = getattr(_session_store, "find_any_session_by_thread_id", None)
     if not callable(finder):
         return False
     return finder(thread_id) is not None
+
+
+def _artifact_langgraph_url() -> str:
+    return (
+        os.getenv("SOPHIA_LANGGRAPH_BASE_URL")
+        or os.getenv("LANGGRAPH_URL")
+        or os.getenv("SOPHIA_BACKEND_BASE_URL")
+        or "http://127.0.0.1:2024"
+    ).strip().rstrip("/")
+
+
+async def _require_synthetic_thread_capability(
+    request: Request,
+    authenticated_user_id: str,
+    thread_id: str,
+    *,
+    required_operation: str,
+) -> None:
+    """Capability-bind canonical synthetic thread access before data lookup."""
+
+    finder = getattr(_session_store, "find_any_session_by_thread_id", None)
+    record = finder(thread_id) if callable(finder) else None
+    if _synthetic_voice_lab_metadata(record) is None:
+        claims = capability_for_gateway_action(
+            request,
+            authenticated_user_id,
+            required_operation=required_operation,
+        )
+        if claims is None:
+            return
+        run_finder = getattr(_session_store, "find_session_by_run_id", None)
+        canonical_record = (
+            run_finder(authenticated_user_id, claims.test_run_id)
+            if callable(run_finder)
+            else None
+        )
+        if canonical_record is None:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_session_binding_mismatch"},
+            )
+        assert_voice_lab_session_record(canonical_record, claims)
+        parent_thread_id = getattr(canonical_record, "thread_id", None)
+        if not isinstance(parent_thread_id, str) or not parent_thread_id:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_session_binding_mismatch"},
+            )
+        associated_task_threads = await _associated_builder_task_thread_ids(
+            parent_thread_id
+        )
+        if thread_id not in associated_task_threads:
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_builder_parent_binding_mismatch"},
+            )
+        try:
+            child_thread = await get_client(url=_artifact_langgraph_url()).threads.get(thread_id)
+        except Exception as exc:
+            raise HTTPException(status_code=404, detail="Thread not found") from exc
+        child_metadata = child_thread.get("metadata") if isinstance(child_thread, dict) else None
+        if not _synthetic_builder_child_matches_claims(
+            child_metadata,
+            claims,
+            parent_thread_id=parent_thread_id,
+        ):
+            raise HTTPException(
+                status_code=409,
+                detail={"code": "voice_lab_session_binding_mismatch"},
+            )
+        return
+    owner_record = _session_store.find_session_by_thread_id(authenticated_user_id, thread_id)
+    if owner_record is None:
+        raise HTTPException(status_code=404, detail="Thread not found")
+    claims = capability_for_gateway_action(
+        request,
+        authenticated_user_id,
+        required_operation=required_operation,
+    )
+    assert_voice_lab_session_record(owner_record, claims)
+
+
+async def _require_thread_artifact_read_capability(
+    request: Request,
+    thread_id: str,
+    authenticated_user_id: str = Depends(require_authenticated_user),
+) -> None:
+    await _require_synthetic_thread_capability(
+        request,
+        authenticated_user_id,
+        thread_id,
+        required_operation="session:read",
+    )
+
+
+async def _require_thread_artifact_mutation_capability(
+    request: Request,
+    thread_id: str,
+    authenticated_user_id: str = Depends(require_authenticated_user),
+) -> None:
+    await _require_synthetic_thread_capability(
+        request,
+        authenticated_user_id,
+        thread_id,
+        required_operation="session:finalize",
+    )
 
 
 def is_text_file_by_content(path: Path, sample_size: int = 8192) -> bool:
@@ -1046,7 +1230,7 @@ async def _try_serve_registry_artifact_for_thread_path(
     path: str,
     request: Request,
     *,
-    authenticated_user_id: str,
+    authenticated_user_id: str | None,
 ) -> Response | None:
     """Resolve a legacy thread/path artifact URL through the durable registry.
 
@@ -1056,6 +1240,8 @@ async def _try_serve_registry_artifact_for_thread_path(
     registry rows for that same thread/path and let ``_serve_registry_artifact``
     enforce storage validation.
     """
+    if not isinstance(authenticated_user_id, str) or not authenticated_user_id:
+        return None
     normalized_path = _normalize_artifact_virtual_path(path)
     try:
         records = _artifact_registry.list(
@@ -1156,6 +1342,7 @@ def _supabase_inline_response(
     response_model=ThreadArtifactListResponse,
     summary="List Thread Artifacts",
     description="List files generated under the thread's outputs directory.",
+    dependencies=[Depends(_require_thread_artifact_read_capability)],
 )
 async def list_artifacts(
     thread_id: str,
@@ -1408,12 +1595,19 @@ def _mirror_quick_patch_revision(
     response_model=HtmlQuickPatchResponse,
     summary="Quick Patch HTML Artifact",
     description="Apply a conservative deterministic quick edit to a selected HTML artifact.",
+    dependencies=[Depends(_require_thread_artifact_mutation_capability)],
 )
 async def quick_patch_html_artifact(
     thread_id: str,
     request_body: HtmlQuickPatchRequest,
     authenticated_user_id: str | None = Depends(require_authenticated_user),
 ) -> HtmlQuickPatchResponse:
+    owner_record = _require_thread_owner(authenticated_user_id, thread_id)
+    if _synthetic_voice_lab_metadata(owner_record) is not None:
+        raise HTTPException(
+            status_code=409,
+            detail={"code": "synthetic_artifact_edit_excluded"},
+        )
     path = _normalize_artifact_virtual_path(request_body.artifact_path)
     _enforce_artifact_owner(authenticated_user_id, thread_id, path)
     original_path = path
@@ -1557,6 +1751,7 @@ def _upsert_quick_patch_revision_artifact(
     "/threads/{thread_id}/artifacts/{path:path}",
     summary="Get Artifact File",
     description="Retrieve an artifact file generated by the AI agent. Supports text, HTML, and binary files.",
+    dependencies=[Depends(_require_thread_artifact_read_capability)],
 )
 async def get_artifact(
     thread_id: str,

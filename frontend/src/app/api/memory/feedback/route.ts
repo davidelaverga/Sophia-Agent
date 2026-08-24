@@ -7,6 +7,7 @@ import { type NextRequest, NextResponse } from 'next/server';
 
 import { logger } from '../../../lib/error-logger';
 import { fetchSophiaApi, isSyntheticMemoryId, resolveSophiaUserId } from '../../_lib/sophia';
+import { voiceLabOrdinaryProductBoundaryResponse } from '@/server/voice-lab/ordinary-route-isolation';
 
 interface MemoryFeedbackRequest {
   action: 'approve' | 'reject';
@@ -19,6 +20,9 @@ interface MemoryFeedbackRequest {
 }
 
 export async function POST(request: NextRequest) {
+  const voiceLabDenied = await voiceLabOrdinaryProductBoundaryResponse();
+  if (voiceLabDenied) return voiceLabDenied;
+
   try {
     const body = await request.json() as MemoryFeedbackRequest;
 
@@ -109,7 +113,7 @@ export async function POST(request: NextRequest) {
       },
     });
   } catch (error) {
-    logger.logError(error, { component: 'api/memory/feedback', action: 'submit_feedback' });
+    logger.logError(error, { component: 'api/memory/feedback', action: 'submit_feedback', request });
     return NextResponse.json(
       { error: 'Failed to submit memory feedback' },
       { status: 500 }

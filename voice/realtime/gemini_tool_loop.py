@@ -7,7 +7,7 @@ import re
 import time
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from hashlib import sha256
 from pathlib import PurePosixPath
 from typing import Any
@@ -75,6 +75,9 @@ GEMINI_DOGFOOD_ALLOWED_TOOL_NAMES = frozenset(
 )
 
 DEFAULT_LANGGRAPH_URL = "http://localhost:2024"
+_SYNTHETIC_BUILDER_MIN_RETENTION_HOURS = 1
+_SYNTHETIC_BUILDER_MAX_RETENTION_HOURS = 168
+_SYNTHETIC_BUILDER_MAX_RETENTION_SECONDS = 7 * 24 * 60 * 60
 DEFAULT_REALTIME_MEMORY_RETRIEVAL_TIMEOUT_SECONDS = 8.0
 REALTIME_MEMORY_GATEWAY_RESPONSE_SCHEMA = "sophia_realtime_memory_retrieve_response_v1"
 REALTIME_MEMORY_GATEWAY_ALLOWED_STATUSES = frozenset(
@@ -296,6 +299,7 @@ class GeminiBuilderLifecycleHttpBackend:
                 validated,
                 async_tasks=async_tasks,
                 trace_headers=trace_headers,
+                trace_context=trace_context,
             )
         if tool_name == GEMINI_UPDATE_ASYNC_TASK_TOOL_NAME:
             return await self._update_async_task(
@@ -312,12 +316,14 @@ class GeminiBuilderLifecycleHttpBackend:
                 validated,
                 async_tasks=async_tasks,
                 trace_headers=trace_headers,
+                trace_context=trace_context,
             )
         if tool_name == GEMINI_LIST_ASYNC_TASKS_TOOL_NAME:
             return await self._list_async_tasks(
                 validated,
                 async_tasks=async_tasks,
                 trace_headers=trace_headers,
+                trace_context=trace_context,
             )
         raise GeminiDogfoodToolError(f"Unsupported builder lifecycle tool {tool_name!r}.")
 
@@ -368,22 +374,39 @@ class GeminiBuilderLifecycleHttpBackend:
         artifact_target_path = _voice_builder_artifact_target_path(description, task_type)
         contract = builder_lifecycle_contract()
 
+        voice_trace_id = _string_value((trace_context or {}).get("voice_trace_id"))
+        voice_tool_call_id = _string_value((trace_context or {}).get("voice_tool_call_id"))
+        voice_tool_run_id = _string_value((trace_context or {}).get("voice_tool_run_id"))
+        relay_correlation_id = _string_value((trace_context or {}).get("relay_correlation_id"))
+        provider_receive_sequence = (trace_context or {}).get("provider_receive_sequence")
+        synthetic_test = _synthetic_test_context(trace_context)
+        _synthetic_tool_evidence(
+            trace_context,
+            tool_name=GEMINI_START_BUILDER_TASK_TOOL_NAME,
+        )
         thread = await self._request_json(
             "POST",
             "/threads",
-            json_body={},
+            json_body=_synthetic_builder_thread_create_body(synthetic_test),
             headers=trace_headers,
         )
         thread_id = _required_string(thread.get("thread_id"), "LangGraph thread response omitted thread_id.")
         now = _utcnow_iso()
         build_id = f"build_gemini_{thread_id}"
         operation_id = f"op_gemini_{thread_id}"
-        voice_trace_id = _string_value((trace_context or {}).get("voice_trace_id"))
-        voice_tool_call_id = _string_value((trace_context or {}).get("voice_tool_call_id"))
-        voice_tool_run_id = _string_value((trace_context or {}).get("voice_tool_run_id"))
-        relay_correlation_id = _string_value((trace_context or {}).get("relay_correlation_id"))
-        provider_receive_sequence = (trace_context or {}).get("provider_receive_sequence")
         kickoff_ms = int(time.time() * 1000)
+        backend_accepted_at = _utcnow_iso()
+        synthetic_builder_join = _synthetic_builder_join(
+            trace_context,
+            tool_name=GEMINI_START_BUILDER_TASK_TOOL_NAME,
+            builder_operation_id=operation_id,
+            parent_thread_id=parent_thread_id,
+            task_id=thread_id,
+            thread_id=thread_id,
+            run_id=None,
+            build_id=build_id,
+            backend_accepted_at=backend_accepted_at,
+        )
         timeout_seconds = int((builder_budget or {}).get("max_wall_clock_seconds", 0) or 0)
         delegation_context = {
             "task": description,
@@ -406,6 +429,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "artifact_target_path": artifact_target_path,
             "build_id": build_id,
             "operation_id": operation_id,
+            **({"synthetic_test": synthetic_test} if synthetic_test else {}),
+            **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
             "handoff_resolution": {
                 "user_id_source": "trusted_gemini_dogfood_session_user_id",
                 "tool_arg_user_id_present": bool(args.get("user_id")),
@@ -423,6 +448,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "builder_deadline_epoch_ms": kickoff_ms + (timeout_seconds * 1000) if timeout_seconds else 0,
             "builder_build_id": build_id,
             "builder_operation_id": operation_id,
+            **({"synthetic_test": synthetic_test} if synthetic_test else {}),
+            **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
             "builder_artifact_target_path": artifact_target_path,
         }
         if builder_budget is not None:
@@ -448,6 +475,8 @@ class GeminiBuilderLifecycleHttpBackend:
                         "voice_tool_run_id": voice_tool_run_id,
                         "relay_correlation_id": relay_correlation_id,
                         "provider_receive_sequence": provider_receive_sequence,
+                        **(synthetic_test or {}),
+                        **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
                     },
                     "configurable": {
                         "thread_id": thread_id,
@@ -463,12 +492,16 @@ class GeminiBuilderLifecycleHttpBackend:
                         "voice_tool_call_id": voice_tool_call_id,
                         "voice_tool_run_id": voice_tool_run_id,
                         "relay_correlation_id": relay_correlation_id,
+                        **(synthetic_test or {}),
+                        **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
                     }
                 },
             },
             headers=trace_headers,
         )
         run_id = _required_string(run.get("run_id"), "LangGraph run response omitted run_id.")
+        if synthetic_builder_join is not None:
+            synthetic_builder_join = {**synthetic_builder_join, "run_id": run_id}
         async_task = {
             "task_id": thread_id,
             "agent_name": contract.ASYNC_BUILDER_AGENT_NAME,
@@ -491,6 +524,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "voice_tool_run_id": voice_tool_run_id,
             "relay_correlation_id": relay_correlation_id,
             "provider_receive_sequence": provider_receive_sequence,
+            **({"synthetic_test": synthetic_test} if synthetic_test else {}),
+            **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
         }
         parent_state_persisted = await self._persist_parent_async_task(
             parent_thread_id,
@@ -518,6 +553,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "runtime": runtime_mode.value,
             "provider": provider,
             "parent_state_persisted": parent_state_persisted,
+            **({"synthetic_test": synthetic_test} if synthetic_test else {}),
+            **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
             "result_summary": f"Launched builder task. task_id: {thread_id}.",
         }
         logger.info(
@@ -602,21 +639,47 @@ class GeminiBuilderLifecycleHttpBackend:
         builder_budget = _voice_builder_budget(task_type)
         contract = builder_lifecycle_contract()
 
+        voice_trace_id = _string_value((trace_context or {}).get("voice_trace_id"))
+        voice_tool_call_id = _string_value((trace_context or {}).get("voice_tool_call_id"))
+        voice_tool_run_id = _string_value((trace_context or {}).get("voice_tool_run_id"))
+        relay_correlation_id = _string_value((trace_context or {}).get("relay_correlation_id"))
+        provider_receive_sequence = (trace_context or {}).get("provider_receive_sequence")
+        synthetic_test = _synthetic_test_context(trace_context)
+        if synthetic_test is not None:
+            source_synthetic_test = _record_value(source.get("synthetic_test"))
+            if (
+                source_synthetic_test is None
+                or source_synthetic_test.get("test_run_id")
+                != synthetic_test.get("test_run_id")
+            ):
+                raise GeminiDogfoodToolError(
+                    "Synthetic Builder edit conflicted with the owned source run binding."
+                )
+        _synthetic_tool_evidence(
+            trace_context,
+            tool_name=GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
+        )
         thread = await self._request_json(
             "POST",
             "/threads",
-            json_body={},
+            json_body=_synthetic_builder_thread_create_body(synthetic_test),
             headers=trace_headers,
         )
         thread_id = _required_string(thread.get("thread_id"), "LangGraph thread response omitted thread_id.")
         now = _utcnow_iso()
         build_id = f"build_gemini_{thread_id}"
         operation_id = f"op_gemini_{thread_id}"
-        voice_trace_id = _string_value((trace_context or {}).get("voice_trace_id"))
-        voice_tool_call_id = _string_value((trace_context or {}).get("voice_tool_call_id"))
-        voice_tool_run_id = _string_value((trace_context or {}).get("voice_tool_run_id"))
-        relay_correlation_id = _string_value((trace_context or {}).get("relay_correlation_id"))
-        provider_receive_sequence = (trace_context or {}).get("provider_receive_sequence")
+        synthetic_builder_join = _synthetic_builder_join(
+            trace_context,
+            tool_name=GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME,
+            builder_operation_id=operation_id,
+            parent_thread_id=parent_thread_id,
+            task_id=thread_id,
+            thread_id=thread_id,
+            run_id=None,
+            build_id=build_id,
+            backend_accepted_at=_utcnow_iso(),
+        )
         kickoff_ms = int(time.time() * 1000)
         timeout_seconds = int((builder_budget or {}).get("max_wall_clock_seconds", 0) or 0)
         edit_context = {
@@ -651,6 +714,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "build_id": build_id,
             "operation_id": operation_id,
             "edit_context": edit_context,
+            **({"synthetic_test": synthetic_test} if synthetic_test else {}),
+            **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
             "handoff_resolution": {
                 "user_id_source": "trusted_gemini_dogfood_session_user_id",
                 "tool_arg_user_id_present": bool(args.get("user_id")),
@@ -670,6 +735,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "builder_deadline_epoch_ms": kickoff_ms + (timeout_seconds * 1000) if timeout_seconds else 0,
             "builder_build_id": build_id,
             "builder_operation_id": operation_id,
+            **({"synthetic_test": synthetic_test} if synthetic_test else {}),
+            **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
         }
         if builder_budget is not None:
             run_input["builder_budget"] = builder_budget
@@ -694,6 +761,8 @@ class GeminiBuilderLifecycleHttpBackend:
                         "voice_tool_run_id": voice_tool_run_id,
                         "relay_correlation_id": relay_correlation_id,
                         "provider_receive_sequence": provider_receive_sequence,
+                        **(synthetic_test or {}),
+                        **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
                     },
                     "configurable": {
                         "thread_id": thread_id,
@@ -709,12 +778,16 @@ class GeminiBuilderLifecycleHttpBackend:
                         "voice_tool_call_id": voice_tool_call_id,
                         "voice_tool_run_id": voice_tool_run_id,
                         "relay_correlation_id": relay_correlation_id,
+                        **(synthetic_test or {}),
+                        **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
                     }
                 },
             },
             headers=trace_headers,
         )
         run_id = _required_string(run.get("run_id"), "LangGraph run response omitted run_id.")
+        if synthetic_builder_join is not None:
+            synthetic_builder_join = {**synthetic_builder_join, "run_id": run_id}
         async_task = {
             "task_id": thread_id,
             "agent_name": contract.ASYNC_BUILDER_AGENT_NAME,
@@ -740,6 +813,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "provider_receive_sequence": provider_receive_sequence,
             "source_artifact_path": source_path,
             "revision_of_artifact_path": source_path,
+            **({"synthetic_test": synthetic_test} if synthetic_test else {}),
+            **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
         }
         parent_state_persisted = await self._persist_parent_async_task(
             parent_thread_id,
@@ -769,6 +844,8 @@ class GeminiBuilderLifecycleHttpBackend:
             "runtime": runtime_mode.value,
             "provider": provider,
             "parent_state_persisted": parent_state_persisted,
+            **({"synthetic_test": synthetic_test} if synthetic_test else {}),
+            **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
             "result_summary": f"Launched builder artifact edit. task_id: {thread_id}.",
         }
         logger.info(
@@ -791,8 +868,38 @@ class GeminiBuilderLifecycleHttpBackend:
         *,
         async_tasks: Mapping[str, dict[str, Any]],
         trace_headers: Mapping[str, str] | None,
+        trace_context: Mapping[str, Any] | None,
     ) -> GeminiBuilderLifecycleResult:
         task = _tracked_task(str(args["task_id"]), async_tasks)
+        synthetic_test = _synthetic_test_context(trace_context)
+        if synthetic_test is not None:
+            owned_context = _record_value(task.get("synthetic_test"))
+            if (
+                owned_context is None
+                or owned_context.get("test_run_id") != synthetic_test.get("test_run_id")
+            ):
+                raise GeminiDogfoodToolError(
+                    "Synthetic Builder status check conflicted with the owned task run binding."
+                )
+        synthetic_builder_join = _synthetic_builder_join(
+            trace_context,
+            tool_name=GEMINI_CHECK_ASYNC_TASK_TOOL_NAME,
+            builder_operation_id=(
+                _string_value(task.get("operation_id"))
+                or f"op_gemini_{task['thread_id']}"
+            ),
+            parent_thread_id=(
+                _string_value(task.get("parent_thread_id")) or str(task["thread_id"])
+            ),
+            task_id=str(task["task_id"]),
+            thread_id=str(task["thread_id"]),
+            run_id=str(task["run_id"]),
+            build_id=(
+                _string_value(task.get("build_id"))
+                or f"build_gemini_{task['thread_id']}"
+            ),
+            backend_accepted_at=_utcnow_iso(),
+        )
         run = await self._request_json(
             "GET",
             f"/threads/{task['thread_id']}/runs/{task['run_id']}",
@@ -804,6 +911,33 @@ class GeminiBuilderLifecycleHttpBackend:
             trace_headers=trace_headers,
         )
         status = str(result.get("status") or updated_task.get("status") or "unknown")
+        if synthetic_builder_join is not None:
+            cancel_count = task.get("synthetic_cancel_count", 0)
+            cancel_settled = (
+                isinstance(cancel_count, int)
+                and not isinstance(cancel_count, bool)
+                and cancel_count > 0
+                and status.strip().lower()
+                in {"cancelled", "canceled", "interrupted"}
+            )
+            if cancel_settled:
+                settled_at = _utcnow_iso()
+                synthetic_builder_join.update(
+                    {
+                        "tool_state": "terminal_settled",
+                        "cancel_count": cancel_count,
+                        "source_builder_event_id": (
+                            f"langgraph-run-terminal:{task['run_id']}:{status.strip().lower()}"
+                        ),
+                        "source_builder_event_at": settled_at,
+                        "scenario_assertions": {
+                            **synthetic_builder_join["scenario_assertions"],
+                            "cancel_request_count": cancel_count,
+                            "cancel_terminal_settled": True,
+                        },
+                    }
+                )
+            updated_task["synthetic_builder_join"] = synthetic_builder_join
         response = {
             "ok": True,
             "tool": GEMINI_CHECK_ASYNC_TASK_TOOL_NAME,
@@ -815,6 +949,7 @@ class GeminiBuilderLifecycleHttpBackend:
             "task_brief": updated_task.get("task_brief") or updated_task.get("description"),
             "result": result,
             "async_task": updated_task,
+            **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
             "result_summary": _status_summary(task["task_id"], status, result),
         }
         return GeminiBuilderLifecycleResult(
@@ -933,6 +1068,29 @@ class GeminiBuilderLifecycleHttpBackend:
         build_id = _string_value(task.get("build_id")) or f"build_gemini_{task['thread_id']}"
         operation_id = _string_value(task.get("operation_id")) or f"op_gemini_{task['thread_id']}"
         task_type = _string_value(task.get("task_type")) or "document"
+        synthetic_test = _record_value(task.get("synthetic_test"))
+        backend_accepted_at = _utcnow_iso()
+        synthetic_builder_join = _synthetic_builder_join(
+            trace_context,
+            tool_name=GEMINI_UPDATE_ASYNC_TASK_TOOL_NAME,
+            builder_operation_id=operation_id,
+            parent_thread_id=resolved_parent_thread_id,
+            task_id=str(task["task_id"]),
+            thread_id=str(task["thread_id"]),
+            run_id=None,
+            build_id=build_id,
+            backend_accepted_at=backend_accepted_at,
+        )
+        if synthetic_builder_join is not None:
+            if (
+                synthetic_test is None
+                or synthetic_test.get("test_run_id") != synthetic_builder_join["test_run_id"]
+            ):
+                raise GeminiDogfoodToolError(
+                    "Synthetic Builder update conflicted with the owned task run binding."
+                )
+            run_input["synthetic_test"] = synthetic_test
+            run_input["synthetic_builder_join"] = synthetic_builder_join
         voice_trace_id = (
             _string_value((trace_context or {}).get("voice_trace_id"))
             or _string_value(task.get("voice_trace_id"))
@@ -961,6 +1119,8 @@ class GeminiBuilderLifecycleHttpBackend:
                         "relay_correlation_id": _string_value((trace_context or {}).get("relay_correlation_id")),
                         "provider_receive_sequence": (trace_context or {}).get("provider_receive_sequence"),
                         "update_operation": True,
+                        **(synthetic_test or {}),
+                        **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
                     },
                     "configurable": {
                         "thread_id": task["thread_id"],
@@ -976,16 +1136,22 @@ class GeminiBuilderLifecycleHttpBackend:
                         "voice_tool_call_id": _string_value((trace_context or {}).get("voice_tool_call_id")),
                         "voice_tool_run_id": voice_tool_run_id,
                         "relay_correlation_id": _string_value((trace_context or {}).get("relay_correlation_id")),
+                        **(synthetic_test or {}),
+                        **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
                     },
                 },
             },
             headers=trace_headers,
         )
         run_id = _required_string(run.get("run_id"), "LangGraph update run response omitted run_id.")
+        if synthetic_builder_join is not None:
+            synthetic_builder_join = {**synthetic_builder_join, "run_id": run_id}
         updated_task = _updated_task(task, status="running", run_id=run_id, updated=True)
         updated_task["parent_thread_id"] = resolved_parent_thread_id
         if voice_tool_run_id:
             updated_task["voice_tool_run_id"] = voice_tool_run_id
+        if synthetic_builder_join is not None:
+            updated_task["synthetic_builder_join"] = synthetic_builder_join
         response = {
             "ok": True,
             "tool": GEMINI_UPDATE_ASYNC_TASK_TOOL_NAME,
@@ -994,6 +1160,7 @@ class GeminiBuilderLifecycleHttpBackend:
             "run_id": run_id,
             "status": "running",
             "async_task": updated_task,
+            **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
             "result_summary": f"Updated builder task. task_id: {task['task_id']}.",
         }
         return GeminiBuilderLifecycleResult(
@@ -1008,8 +1175,64 @@ class GeminiBuilderLifecycleHttpBackend:
         *,
         async_tasks: Mapping[str, dict[str, Any]],
         trace_headers: Mapping[str, str] | None,
+        trace_context: Mapping[str, Any] | None,
     ) -> GeminiBuilderLifecycleResult:
         task = _tracked_task(str(args["task_id"]), async_tasks)
+        prior_cancel_count = task.get("synthetic_cancel_count", 0)
+        if not isinstance(prior_cancel_count, int) or isinstance(prior_cancel_count, bool):
+            prior_cancel_count = 0
+        cancel_count = prior_cancel_count if prior_cancel_count > 0 else 1
+        synthetic_builder_join = _synthetic_builder_join(
+            trace_context,
+            tool_name=GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME,
+            builder_operation_id=(
+                _string_value(task.get("operation_id"))
+                or f"op_gemini_{task['thread_id']}"
+            ),
+            parent_thread_id=(
+                _string_value(task.get("parent_thread_id")) or str(task["thread_id"])
+            ),
+            task_id=str(task["task_id"]),
+            thread_id=str(task["thread_id"]),
+            run_id=str(task["run_id"]),
+            build_id=(
+                _string_value(task.get("build_id"))
+                or f"build_gemini_{task['thread_id']}"
+            ),
+            backend_accepted_at=_utcnow_iso(),
+            cancel_count=cancel_count,
+        )
+        if synthetic_builder_join is not None:
+            owned_context = _record_value(task.get("synthetic_test"))
+            if (
+                owned_context is None
+                or owned_context.get("test_run_id") != synthetic_builder_join["test_run_id"]
+            ):
+                raise GeminiDogfoodToolError(
+                    "Synthetic Builder cancel conflicted with the owned task run binding."
+                )
+        if prior_cancel_count > 0:
+            repeated_task = dict(task)
+            if synthetic_builder_join is not None:
+                repeated_task["synthetic_builder_join"] = synthetic_builder_join
+            response = {
+                "ok": True,
+                "tool": GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME,
+                "task_id": task["task_id"],
+                "thread_id": task["thread_id"],
+                "run_id": task["run_id"],
+                "status": str(task.get("status") or "cancel_requested"),
+                "duplicate_guard": True,
+                "cancel_count": prior_cancel_count,
+                "async_task": repeated_task,
+                **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
+                "result_summary": f"Builder task {task['task_id']} was already cancelled; no second cancel was sent.",
+            }
+            return GeminiBuilderLifecycleResult(
+                response=response,
+                result_summary=str(response["result_summary"]),
+                updated_async_tasks={task["task_id"]: repeated_task},
+            )
         await self._request_json(
             "POST",
             f"/threads/{task['thread_id']}/runs/{task['run_id']}/cancel",
@@ -1018,16 +1241,80 @@ class GeminiBuilderLifecycleHttpBackend:
             allow_empty=True,
             headers=trace_headers,
         )
-        updated_task = _updated_task(task, status="cancelled", checked=True, updated=True)
+        terminal_result: dict[str, Any] | None = None
+        terminal_status: str | None = None
+        if synthetic_builder_join is None:
+            # Preserve the ordinary lifecycle response contract. The stricter
+            # owning terminal read is evidence-only for the protected plane.
+            updated_task = _updated_task(
+                task,
+                status="cancelled",
+                checked=True,
+                updated=True,
+            )
+        else:
+            try:
+                observed_run = await self._request_json(
+                    "GET",
+                    f"/threads/{task['thread_id']}/runs/{task['run_id']}",
+                    headers=trace_headers,
+                )
+                observed_status = str(observed_run.get("status") or "").strip().lower()
+                if observed_status in {"cancelled", "canceled", "interrupted"}:
+                    updated_task, terminal_result = await self._reconcile_task_for_run(
+                        observed_run,
+                        task,
+                        trace_headers=trace_headers,
+                    )
+                    terminal_status = observed_status
+                else:
+                    updated_task = _updated_task(
+                        task,
+                        status="cancel_requested",
+                        checked=True,
+                        updated=True,
+                    )
+            except GeminiDogfoodToolError:
+                updated_task = _updated_task(
+                    task,
+                    status="cancel_requested",
+                    checked=True,
+                    updated=True,
+                )
+        updated_task["synthetic_cancel_count"] = cancel_count
+        if synthetic_builder_join is not None:
+            if terminal_status is not None:
+                settled_at = _utcnow_iso()
+                synthetic_builder_join.update(
+                    {
+                        "tool_state": "terminal_settled",
+                        "source_builder_event_id": (
+                            f"langgraph-run-terminal:{task['run_id']}:{terminal_status}"
+                        ),
+                        "source_builder_event_at": settled_at,
+                        "scenario_assertions": {
+                            **synthetic_builder_join["scenario_assertions"],
+                            "cancel_terminal_settled": True,
+                        },
+                    }
+                )
+            updated_task["synthetic_builder_join"] = synthetic_builder_join
         response = {
             "ok": True,
             "tool": GEMINI_CANCEL_ASYNC_TASK_TOOL_NAME,
             "task_id": task["task_id"],
             "thread_id": task["thread_id"],
             "run_id": task["run_id"],
-            "status": "cancelled",
+            "status": terminal_status or str(updated_task.get("status") or "cancel_requested"),
+            "terminal_result": terminal_result,
             "async_task": updated_task,
-            "result_summary": f"Cancelled builder task. task_id: {task['task_id']}.",
+            "cancel_count": cancel_count,
+            **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
+            "result_summary": (
+                f"Builder cancellation settled. task_id: {task['task_id']}."
+                if terminal_status is not None
+                else f"Builder cancellation accepted and awaiting terminal settlement. task_id: {task['task_id']}."
+            ),
         }
         return GeminiBuilderLifecycleResult(
             response=response,
@@ -1041,11 +1328,51 @@ class GeminiBuilderLifecycleHttpBackend:
         *,
         async_tasks: Mapping[str, dict[str, Any]],
         trace_headers: Mapping[str, str] | None,
+        trace_context: Mapping[str, Any] | None,
     ) -> GeminiBuilderLifecycleResult:
         status_filter = args.get("status_filter") or "all"
         tasks = [dict(task) for task in async_tasks.values() if isinstance(task, Mapping)]
         if status_filter != "all":
             tasks = [task for task in tasks if task.get("status") == status_filter]
+        synthetic_test = _synthetic_test_context(trace_context)
+        synthetic_builder_join: dict[str, Any] | None = None
+        if synthetic_test is not None:
+            _synthetic_tool_evidence(
+                trace_context,
+                tool_name=GEMINI_LIST_ASYNC_TASKS_TOOL_NAME,
+            )
+            for task in tasks:
+                owned_context = _record_value(task.get("synthetic_test"))
+                if (
+                    owned_context is None
+                    or owned_context.get("test_run_id")
+                    != synthetic_test.get("test_run_id")
+                ):
+                    raise GeminiDogfoodToolError(
+                        "Synthetic Builder task list conflicted with an owned task run binding."
+                    )
+            if len(tasks) == 1:
+                task = tasks[0]
+                synthetic_builder_join = _synthetic_builder_join(
+                    trace_context,
+                    tool_name=GEMINI_LIST_ASYNC_TASKS_TOOL_NAME,
+                    builder_operation_id=(
+                        _string_value(task.get("operation_id"))
+                        or f"op_gemini_{task['thread_id']}"
+                    ),
+                    parent_thread_id=(
+                        _string_value(task.get("parent_thread_id"))
+                        or str(task["thread_id"])
+                    ),
+                    task_id=str(task["task_id"]),
+                    thread_id=str(task["thread_id"]),
+                    run_id=str(task["run_id"]),
+                    build_id=(
+                        _string_value(task.get("build_id"))
+                        or f"build_gemini_{task['thread_id']}"
+                    ),
+                    backend_accepted_at=_utcnow_iso(),
+                )
         updated_tasks: dict[str, dict[str, Any]] = {}
         summaries: list[dict[str, Any]] = []
         for task in tasks:
@@ -1071,6 +1398,11 @@ class GeminiBuilderLifecycleHttpBackend:
                     native_status=status,
                 )
                 status = str(status_result.get("status") or task.get("status") or "unknown")
+            if (
+                synthetic_builder_join is not None
+                and task.get("task_id") == synthetic_builder_join.get("task_id")
+            ):
+                task["synthetic_builder_join"] = synthetic_builder_join
             updated_tasks[str(task["task_id"])] = task
             summary = {
                 "task_id": task.get("task_id"),
@@ -1103,6 +1435,7 @@ class GeminiBuilderLifecycleHttpBackend:
             "tasks": summaries,
             "task_count": len(summaries),
             "status_filter": status_filter,
+            **({"synthetic_builder_join": synthetic_builder_join} if synthetic_builder_join else {}),
             "result_summary": f"{len(summaries)} tracked builder task(s).",
         }
         return GeminiBuilderLifecycleResult(
@@ -1906,6 +2239,265 @@ def _string_value(value: Any) -> str | None:
     return None
 
 
+def _synthetic_test_context(trace_context: Mapping[str, Any] | None) -> dict[str, Any] | None:
+    if not isinstance(trace_context, Mapping) or trace_context.get("synthetic") is not True:
+        return None
+    principal_id = _string_value(trace_context.get("principal_id"))
+    test_run_id = _string_value(trace_context.get("test_run_id"))
+    environment = _string_value(trace_context.get("environment"))
+    scenario_id = _string_value(trace_context.get("scenario_id"))
+    scenario_version = _string_value(trace_context.get("scenario_version"))
+    cleanup_obligation_id = _string_value(
+        trace_context.get("cleanup_obligation_id")
+    )
+    provider_expires_at = _string_value(
+        trace_context.get("provider_expires_at")
+    )
+    retention_hours = trace_context.get("retention_hours")
+    if (
+        not principal_id
+        or not test_run_id
+        or not environment
+        or not scenario_id
+        or not scenario_version
+        or not cleanup_obligation_id
+        or not _is_uuid_string(cleanup_obligation_id)
+        or str(UUID(cleanup_obligation_id)) != cleanup_obligation_id
+        or UUID(cleanup_obligation_id).version != 4
+    ):
+        raise GeminiDogfoodToolError("Synthetic builder context is missing required correlation identity.")
+    if (
+        not isinstance(retention_hours, int)
+        or isinstance(retention_hours, bool)
+        or not _SYNTHETIC_BUILDER_MIN_RETENTION_HOURS
+        <= retention_hours
+        <= _SYNTHETIC_BUILDER_MAX_RETENTION_HOURS
+    ):
+        raise GeminiDogfoodToolError("Synthetic builder retention policy is missing or invalid.")
+    task_created_at = datetime.now(UTC)
+    provider_deadline = _parse_exact_utc_millis(provider_expires_at)
+    retention_deadline = task_created_at + timedelta(hours=retention_hours)
+    if (
+        provider_deadline is None
+        or provider_deadline <= task_created_at
+        or provider_deadline > retention_deadline
+    ):
+        raise GeminiDogfoodToolError(
+            "Synthetic builder provider deadline is missing or invalid."
+        )
+    payload: dict[str, Any] = {
+        "synthetic": True,
+        "principal_id": principal_id,
+        "test_principal_id": principal_id,
+        "test_run_id": test_run_id,
+        "scenario_id": scenario_id,
+        "scenario_version": scenario_version,
+        "environment": environment,
+        "cleanup_obligation_id": cleanup_obligation_id,
+        "provider_expires_at": _canonical_utc_millis(provider_deadline),
+        "retention_hours": retention_hours,
+        "retention_anchor": "builder_task_created_at_provisional",
+        "retention_anchor_at": _canonical_utc_millis(task_created_at),
+        "retention_expires_at": _canonical_utc_millis(
+            retention_deadline
+        ),
+    }
+    return payload
+
+
+_SYNTHETIC_TOOL_EVIDENCE_KEYS = frozenset(
+    {
+        "schema",
+        "test_run_id",
+        "scenario_id",
+        "scenario_version",
+        "operation_id",
+        "utterance_id",
+        "provider_input_sequence",
+        "public_utterance_id",
+        "tool_call_id",
+        "effect_id",
+        "provider_connection_epoch",
+        "relay_correlation_id",
+        "tool_name",
+        "received_at",
+    }
+)
+
+
+def _synthetic_tool_evidence(
+    trace_context: Mapping[str, Any] | None,
+    *,
+    tool_name: str,
+) -> dict[str, Any] | None:
+    synthetic = _synthetic_test_context(trace_context)
+    if synthetic is None:
+        return None
+    evidence = _record_value((trace_context or {}).get("synthetic_tool_evidence"))
+    if evidence is None or set(evidence) != _SYNTHETIC_TOOL_EVIDENCE_KEYS:
+        raise GeminiDogfoodToolError(
+            "Synthetic Builder tool call is missing exact app-authored effect evidence."
+        )
+    required = (
+        "test_run_id",
+        "scenario_id",
+        "scenario_version",
+        "operation_id",
+        "utterance_id",
+        "tool_call_id",
+        "effect_id",
+        "relay_correlation_id",
+        "tool_name",
+        "received_at",
+    )
+    if (
+        evidence.get("schema") != "sophia_synthetic_tool_evidence_v1"
+        or any(_string_value(evidence.get(key)) is None for key in required)
+        or evidence.get("test_run_id") != synthetic.get("test_run_id")
+        or evidence.get("scenario_id") != synthetic.get("scenario_id")
+        or evidence.get("scenario_version") != synthetic.get("scenario_version")
+        or evidence.get("tool_name") != tool_name
+        or not isinstance(evidence.get("provider_input_sequence"), int)
+        or isinstance(evidence.get("provider_input_sequence"), bool)
+        or int(evidence["provider_input_sequence"]) <= 0
+        or not isinstance(evidence.get("provider_connection_epoch"), int)
+        or isinstance(evidence.get("provider_connection_epoch"), bool)
+        or int(evidence["provider_connection_epoch"]) <= 0
+    ):
+        raise GeminiDogfoodToolError(
+            "Synthetic Builder tool evidence conflicts with the exact run binding."
+        )
+    return evidence
+
+
+def _synthetic_builder_join(
+    trace_context: Mapping[str, Any] | None,
+    *,
+    tool_name: str,
+    builder_operation_id: str,
+    parent_thread_id: str,
+    task_id: str,
+    thread_id: str,
+    run_id: str | None,
+    build_id: str,
+    backend_accepted_at: str,
+    cancel_count: int = 0,
+) -> dict[str, Any] | None:
+    synthetic = _synthetic_test_context(trace_context)
+    if synthetic is None:
+        return None
+    evidence = _synthetic_tool_evidence(trace_context, tool_name=tool_name)
+    assert evidence is not None
+    return {
+        "schema": "sophia_synthetic_builder_join_v1",
+        "test_run_id": evidence["test_run_id"],
+        "scenario_id": evidence["scenario_id"],
+        "scenario_version": evidence["scenario_version"],
+        "operation_id": evidence["operation_id"],
+        "utterance_id": evidence["utterance_id"],
+        "provider_input_sequence": evidence["provider_input_sequence"],
+        "tool_call_id": evidence["tool_call_id"],
+        "effect_id": evidence["effect_id"],
+        "provider_connection_epoch": evidence["provider_connection_epoch"],
+        "relay_correlation_id": evidence["relay_correlation_id"],
+        "tool_name": tool_name,
+        "tool_state": "backend_accepted",
+        "builder_operation_id": builder_operation_id,
+        "parent_thread_id": parent_thread_id,
+        "task_id": task_id,
+        "thread_id": thread_id,
+        "run_id": run_id,
+        "build_id": build_id,
+        "artifact_id": None,
+        "artifact_path_sha256": None,
+        "ui_projection_state": None,
+        "cancel_count": cancel_count,
+        "no_post_cancel_publication": True,
+        "source_tool_received_at": evidence["received_at"],
+        "source_backend_accepted_at": backend_accepted_at,
+        "source_tool_response_sent_at": None,
+        "source_builder_event_id": None,
+        "source_builder_event_at": None,
+        "source_ui_projected_at": None,
+        "scenario_assertions": {
+            "artifact_created": False,
+            "artifact_visible_current": False,
+            "accepted_turn_count": 1,
+            "tool_dispatch_count": 1,
+            "owned_task_count": 1,
+            "stable_task_identity": True,
+            "revision_updated_same_task": tool_name
+            in {GEMINI_UPDATE_ASYNC_TASK_TOOL_NAME, GEMINI_EDIT_BUILDER_ARTIFACT_TOOL_NAME},
+            # Only the browser's post-commit projection receipt may assert
+            # that an updated artifact is the currently rendered behavior.
+            "current_behavior_result": False,
+            "cancel_request_count": cancel_count,
+            "cancel_terminal_settled": False,
+            "no_post_cancel_publication": True,
+        },
+    }
+
+
+def _canonical_utc_millis(value: datetime) -> str:
+    return (
+        value.astimezone(UTC)
+        .isoformat(timespec="milliseconds")
+        .replace("+00:00", "Z")
+    )
+
+
+def _parse_exact_utc_millis(value: object) -> datetime | None:
+    text = _string_value(value)
+    if text is None:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        return None
+    normalized = parsed.astimezone(UTC)
+    return normalized if _canonical_utc_millis(normalized) == text else None
+
+
+def _synthetic_builder_thread_create_body(
+    synthetic_test: Mapping[str, Any] | None,
+) -> dict[str, Any]:
+    if synthetic_test is None:
+        return {}
+    retention_hours = synthetic_test.get("retention_hours")
+    anchor = synthetic_test.get("retention_anchor")
+    anchor_at = _parse_exact_utc_millis(synthetic_test.get("retention_anchor_at"))
+    expiry = _parse_exact_utc_millis(synthetic_test.get("retention_expires_at"))
+    provider_deadline = _parse_exact_utc_millis(
+        synthetic_test.get("provider_expires_at")
+    )
+    if (
+        not isinstance(retention_hours, int)
+        or isinstance(retention_hours, bool)
+        or not _SYNTHETIC_BUILDER_MIN_RETENTION_HOURS
+        <= retention_hours
+        <= _SYNTHETIC_BUILDER_MAX_RETENTION_HOURS
+        or anchor != "builder_task_created_at_provisional"
+        or anchor_at is None
+        or expiry is None
+        or provider_deadline is None
+        or expiry != anchor_at + timedelta(hours=retention_hours)
+        or not anchor_at < provider_deadline <= expiry
+    ):
+        raise GeminiDogfoodToolError("Synthetic builder retention is invalid.")
+    now = datetime.now(UTC)
+    remaining_seconds = (expiry.astimezone(UTC) - now).total_seconds()
+    if not 0 < remaining_seconds <= _SYNTHETIC_BUILDER_MAX_RETENTION_SECONDS:
+        raise GeminiDogfoodToolError("Synthetic builder retention is invalid.")
+    if provider_deadline <= now:
+        raise GeminiDogfoodToolError("Synthetic builder provider deadline is invalid.")
+    # LangGraph TTL is minute-granular. Floor so the resource can never live
+    # beyond the authenticated evidence-retention boundary.
+    ttl_minutes = max(1, int(remaining_seconds // 60))
+    return {"metadata": dict(synthetic_test), "ttl": ttl_minutes}
+
+
 def _is_uuid_string(value: str) -> bool:
     try:
         UUID(value)
@@ -2160,6 +2752,7 @@ def _resolve_edit_builder_source(
             task = async_tasks[explicit_task_id]
             source["task_type"] = task.get("task_type")
             source["source_run_id"] = task.get("run_id")
+            source["synthetic_test"] = task.get("synthetic_test")
         return source
 
     candidates: list[Mapping[str, Any]] = []

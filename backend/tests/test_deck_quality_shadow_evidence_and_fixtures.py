@@ -428,17 +428,17 @@ def test_v4_evidence_bundle_preserves_source_bytes_and_locks_new_render_geometry
     assert manifest["source_fixture_id"] == "clean_underdesigned_psi_v1"
     assert manifest["evidence_preprocessor_version"] == "deck-evidence-v4"
     assert manifest["direct_evidence_budget_version"] == "dq1-direct-evidence-v2"
-    assert manifest["raster_max_dimension"] == 2200
+    assert manifest["raster_max_dimension"] == 2048
     assert manifest["contact_sheet_max_dimension"] == 2048
     assert file_sha256(paths["artifact_path"]) == file_sha256(
         historical / "artifact.pptx"
     )
-    assert {item.width for item in snapshot.renders.slides} == {2200}
-    assert {item.height for item in snapshot.renders.slides} == {1238}
+    assert {item.width for item in snapshot.renders.slides} == {2048}
+    assert {item.height for item in snapshot.renders.slides} == {1152}
     assert (
         snapshot.renders.contact_sheet.width,
         snapshot.renders.contact_sheet.height,
-    ) == (2048, 792)
+    ) == (2048, 794)
     assert {
         path.name: file_sha256(path)
         for path in sorted(paths["render_dir"].glob("*.png"))

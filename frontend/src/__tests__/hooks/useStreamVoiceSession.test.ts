@@ -6,6 +6,17 @@ import { describe, it, expect, vi, beforeEach } from "vitest"
 import { useStreamVoiceSession } from "../../app/hooks/useStreamVoiceSession"
 import type { ContextMode, PresetType } from "../../app/lib/session-types"
 
+const { mockBindSophiaCaptureSyntheticTestContext, mockRecordSophiaCaptureEvent, mockGeminiModuleState } = vi.hoisted(() => ({
+  mockBindSophiaCaptureSyntheticTestContext: vi.fn(),
+  mockRecordSophiaCaptureEvent: vi.fn(),
+  mockGeminiModuleState: { syntheticTest: null as Record<string, unknown> | null },
+}))
+
+vi.mock("../../app/lib/session-capture", () => ({
+  bindSophiaCaptureSyntheticTestContext: mockBindSophiaCaptureSyntheticTestContext,
+  recordSophiaCaptureEvent: mockRecordSophiaCaptureEvent,
+}))
+
 // ---------------------------------------------------------------------------
 // Mock: useStreamVoice (Unit 2)
 // ---------------------------------------------------------------------------
@@ -47,7 +58,21 @@ const mockGeminiConnection = {
     getAudioTracks: () => [mockGeminiTrack],
     getTracks: () => [mockGeminiTrack],
   },
+  microphoneAudioSettings: { timestamp: "2026-08-23T10:00:00.000Z", requested: {}, tracks: [] },
+  providerConnectionEpoch: 3,
+  getProviderConnectionEpoch: () => 3,
+  getProviderSocketEpochs: () => [3],
+  continuityState: "active",
+  langsmithTraceId: "trace-hook-1",
+  langsmithTraceStatus: "available",
+  langsmithTraceUnavailableReason: null,
+  syntheticTest: null,
+  syntheticTraceFault: null,
   sendText: vi.fn(),
+  sendArtifactFrame: vi.fn(),
+  getArtifactFrameTransportStatus: vi.fn(),
+  setMicrophoneMuted: vi.fn(),
+  flushOutputAudio: vi.fn(),
   close: mockGeminiClose,
 }
 const mockConnectGeminiBrowserLiveFromBootstrap = vi.fn().mockResolvedValue(mockGeminiConnection)
@@ -55,6 +80,23 @@ const mockConnectGeminiBrowserLiveFromBootstrap = vi.fn().mockResolvedValue(mock
 vi.mock("../../app/lib/gemini-browser-live-websocket-dogfood", () => ({
   connectGeminiBrowserLiveFromBootstrap: (...args: unknown[]) => mockConnectGeminiBrowserLiveFromBootstrap(...args),
   readGeminiConfiguredToolNames: () => [],
+  readGeminiSyntheticTestContext: () => mockGeminiModuleState.syntheticTest,
+  readGeminiLangSmithTraceContext: (payload: { langsmith_trace_id?: unknown }) => {
+    const traceId = typeof payload.langsmith_trace_id === "string"
+      ? payload.langsmith_trace_id.trim()
+      : ""
+    return traceId
+      ? {
+          langsmithTraceId: traceId,
+          langsmithTraceStatus: "available",
+          langsmithTraceUnavailableReason: null,
+        }
+      : {
+          langsmithTraceId: null,
+          langsmithTraceStatus: "trace_unavailable",
+          langsmithTraceUnavailableReason: payload.langsmith_trace_id == null ? "not_provided" : "invalid",
+        }
+  },
 }))
 
 // ---------------------------------------------------------------------------
@@ -211,8 +253,58 @@ function makeGeminiBootstrap(sessionId = "gemini-prod-session-1") {
     event_stream_url: `/api/sophia/voice/gemini/events?session_id=${sessionId}`,
     provider_event_relay_url: "/api/sophia/voice/gemini/relay",
     disconnect_url: "/api/sophia/voice/gemini/disconnect",
+    provider_connection_epoch: 3,
+    langsmith_trace_id: "trace-hook-1",
     preconnect_ttl_ms: 30_000,
     preconnect_expires_at: "2026-05-25T12:00:30Z",
+  }
+}
+
+function makeD02SyntheticTest() {
+  return {
+    synthetic: true,
+    principal_id: "voice-lab-user-1",
+    test_run_id: "run-v-d02",
+    scenario_id: "V-D02",
+    scenario_version: "vt00.scenarios.v1",
+    voice_lab_run_id_sha256: "a".repeat(64),
+    browser_worker_id_sha256: "b".repeat(64),
+    browser_lease_epoch: 3,
+    browser_context_id_sha256: "c".repeat(64),
+    environment: "production",
+    retention_hours: 24,
+    cleanup_obligation_id: "123e4567-e89b-42d3-a456-426614174000",
+    provider_expires_at: "2033-05-18T04:03:20.000Z",
+  }
+}
+
+function makeD02CleanupAcknowledgement() {
+  return {
+    browser_provider_close_receipts: [{
+      schema: "sophia_gemini_browser_provider_close_v1",
+      receipt_id: "123e4567-e89b-42d3-a456-426614174010",
+      session_id: "gemini-prod-d02",
+      provider_connection_epoch: 3,
+      websocket_close_observed: true,
+      websocket_close_code: 1000,
+      websocket_closed_at: "2026-08-23T12:30:03.000Z",
+    }],
+    browser_provider_activation_abort_receipts: [],
+  }
+}
+
+function makeD02CleanupControl() {
+  const synthetic = makeD02SyntheticTest()
+  return {
+    schema: "sophia_voice_lab_d02_browser_worker_product_cleanup_control_v1" as const,
+    voice_lab_run_id_sha256: synthetic.voice_lab_run_id_sha256,
+    test_run_id: synthetic.test_run_id,
+    cleanup_obligation_id: synthetic.cleanup_obligation_id,
+    browser_worker_id_sha256: synthetic.browser_worker_id_sha256,
+    browser_lease_epoch: synthetic.browser_lease_epoch,
+    browser_context_id_sha256: synthetic.browser_context_id_sha256,
+    provider_session_id: "gemini-prod-d02",
+    frozen_provider_connection_epochs: [3],
   }
 }
 
@@ -233,6 +325,8 @@ describe("useStreamVoiceSession", () => {
     MockEventSource.latest = null
     MockEventSource.instances = []
     mockGeminiTrack.enabled = true
+    mockGeminiModuleState.syntheticTest = null
+    delete window.__sophiaVoiceLabD02WorkerCleanup
     mockGeminiClose.mockClear()
     mockSetListeningPresence.mockClear()
     mockSetSpeakingPresence.mockClear()
@@ -241,6 +335,7 @@ describe("useStreamVoiceSession", () => {
     mockResetPresence.mockClear()
     mockConnectGeminiBrowserLiveFromBootstrap.mockClear()
     mockConnectGeminiBrowserLiveFromBootstrap.mockResolvedValue(mockGeminiConnection)
+    mockGeminiModuleState.syntheticTest = null
     vi.useRealTimers()
 
     mockFetch.mockResolvedValue({
@@ -316,6 +411,8 @@ describe("useStreamVoiceSession", () => {
         event_stream_url: "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-1",
         provider_event_relay_url: "/api/sophia/voice/gemini/relay",
         disconnect_url: "/api/sophia/voice/gemini/disconnect",
+        provider_connection_epoch: 3,
+        langsmith_trace_id: "trace-hook-1",
       }),
       text: () => Promise.resolve(""),
     })
@@ -342,6 +439,10 @@ describe("useStreamVoiceSession", () => {
     if (telemetry.runtime !== "gemini_live") throw new Error("Expected Gemini telemetry")
     expect(telemetry.sessionId).toBe("gemini-prod-session-1")
     expect(telemetry.setupComplete).toBe(true)
+    expect(telemetry.providerConnectionEpoch).toBe(3)
+    expect(telemetry.langsmithTraceId).toBe("trace-hook-1")
+    expect(telemetry.langsmithTraceStatus).toBe("available")
+    expect(telemetry.langsmithTraceUnavailableReason).toBeNull()
     expect(telemetry.publicSseState).toBe("connecting")
     expect(result.current.hasLiveCall).toBe(true)
     await waitFor(() => {
@@ -349,6 +450,211 @@ describe("useStreamVoiceSession", () => {
         "/api/sophia/voice/gemini/events?session_id=gemini-prod-session-1",
       )
     })
+    expect(mockRecordSophiaCaptureEvent).toHaveBeenCalledWith(expect.objectContaining({
+      name: "credentials-received",
+      payload: expect.objectContaining({
+        providerConnectionEpoch: 3,
+        langsmithTraceId: "trace-hook-1",
+        langsmithTraceStatus: "available",
+      }),
+    }))
+    expect(mockRecordSophiaCaptureEvent).toHaveBeenCalledWith(expect.objectContaining({
+      name: "gemini-connection-observability",
+      payload: expect.objectContaining({
+        providerConnectionEpoch: 3,
+        langsmithTraceId: "trace-hook-1",
+        langsmithTraceStatus: "available",
+      }),
+    }))
+    expect(window.__sophiaVoiceLabD02WorkerCleanup).toBeUndefined()
+  })
+
+  it("awaits exact V-D02 product cleanup through the private browser-worker bridge", async () => {
+    const syntheticTest = makeD02SyntheticTest()
+    const acknowledgement = makeD02CleanupAcknowledgement()
+    const close = vi.fn().mockResolvedValue(acknowledgement)
+    const connection = {
+      ...mockGeminiConnection,
+      sessionId: "gemini-prod-d02",
+      streamUrl: "/api/sophia/voice/gemini/events?session_id=gemini-prod-d02",
+      syntheticTest,
+      close,
+    }
+    mockGeminiModuleState.syntheticTest = syntheticTest
+    mockConnectGeminiBrowserLiveFromBootstrap.mockResolvedValue(
+      connection as unknown as typeof mockGeminiConnection,
+    )
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        ...makeGeminiBootstrap("gemini-prod-d02"),
+        synthetic_test: syntheticTest,
+      }),
+      text: () => Promise.resolve(""),
+    })
+
+    const { result } = renderHook(() => useStreamVoiceSession("voice-lab-user-1"))
+    await act(async () => {
+      await result.current.startTalking()
+    })
+    await waitFor(() => {
+      expect(window.__sophiaVoiceLabD02WorkerCleanup).toBeDefined()
+    })
+
+    let received: unknown
+    await act(async () => {
+      received = await window.__sophiaVoiceLabD02WorkerCleanup?.close(
+        makeD02CleanupControl(),
+      )
+    })
+
+    expect(close).toHaveBeenCalledTimes(1)
+    expect(close).toHaveBeenCalledWith({ providerConnectionEpochs: [3] })
+    expect(received).toEqual(acknowledgement)
+  })
+
+  it("rejects a drifted V-D02 browser-worker cleanup binding without closing product state", async () => {
+    const syntheticTest = makeD02SyntheticTest()
+    const close = vi.fn().mockResolvedValue(makeD02CleanupAcknowledgement())
+    const connection = {
+      ...mockGeminiConnection,
+      sessionId: "gemini-prod-d02",
+      syntheticTest,
+      close,
+    }
+    mockGeminiModuleState.syntheticTest = syntheticTest
+    mockConnectGeminiBrowserLiveFromBootstrap.mockResolvedValue(
+      connection as unknown as typeof mockGeminiConnection,
+    )
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        ...makeGeminiBootstrap("gemini-prod-d02"),
+        synthetic_test: syntheticTest,
+      }),
+      text: () => Promise.resolve(""),
+    })
+
+    const { result } = renderHook(() => useStreamVoiceSession("voice-lab-user-1"))
+    await act(async () => {
+      await result.current.startTalking()
+    })
+    await waitFor(() => {
+      expect(window.__sophiaVoiceLabD02WorkerCleanup).toBeDefined()
+    })
+    const driftedControl = {
+      ...makeD02CleanupControl(),
+      browser_context_id_sha256: "d".repeat(64),
+    }
+
+    await expect(
+      window.__sophiaVoiceLabD02WorkerCleanup?.close(driftedControl),
+    ).rejects.toThrow("binding mismatch")
+    expect(close).not.toHaveBeenCalled()
+  })
+
+  it("keeps the V-D02 cleanup bridge replayable after an ambiguous first response", async () => {
+    const syntheticTest = makeD02SyntheticTest()
+    const acknowledgement = makeD02CleanupAcknowledgement()
+    const close = vi.fn().mockResolvedValue(acknowledgement)
+      .mockRejectedValueOnce(new Error("cleanup acknowledgement response lost"))
+      .mockResolvedValueOnce(acknowledgement)
+    const connection = {
+      ...mockGeminiConnection,
+      sessionId: "gemini-prod-d02",
+      syntheticTest,
+      close,
+    }
+    mockGeminiModuleState.syntheticTest = syntheticTest
+    mockConnectGeminiBrowserLiveFromBootstrap.mockResolvedValue(
+      connection as unknown as typeof mockGeminiConnection,
+    )
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        ...makeGeminiBootstrap("gemini-prod-d02"),
+        synthetic_test: syntheticTest,
+      }),
+      text: () => Promise.resolve(""),
+    })
+
+    const { result } = renderHook(() => useStreamVoiceSession("voice-lab-user-1"))
+    await act(async () => {
+      await result.current.startTalking()
+    })
+    await waitFor(() => {
+      expect(window.__sophiaVoiceLabD02WorkerCleanup).toBeDefined()
+    })
+    const bridge = window.__sophiaVoiceLabD02WorkerCleanup
+    const control = makeD02CleanupControl()
+
+    await expect(bridge?.close(control)).rejects.toThrow("response lost")
+    expect(window.__sophiaVoiceLabD02WorkerCleanup).toBe(bridge)
+    await expect(bridge?.close(control)).resolves.toEqual(acknowledgement)
+    expect(close).toHaveBeenNthCalledWith(1, { providerConnectionEpochs: [3] })
+    expect(close).toHaveBeenNthCalledWith(2, { providerConnectionEpochs: [3] })
+  })
+
+  it("captures governed trace-fault receipts under the exact app-authenticated run binding", async () => {
+    const syntheticTest = {
+      synthetic: true,
+      principal_id: "voice-lab-user-1",
+      test_run_id: "run-v-l01",
+      scenario_id: "V-L01",
+      scenario_version: "vt00.scenarios.v1",
+      environment: "production",
+      retention_hours: 24,
+      cleanup_obligation_id: '123e4567-e89b-42d3-a456-426614174000',
+      provider_expires_at: '2033-05-18T04:03:20.000Z',
+    }
+    mockGeminiModuleState.syntheticTest = syntheticTest
+    mockFetch.mockResolvedValueOnce({
+      ok: true,
+      json: () => Promise.resolve({
+        runtime: "gemini_live",
+        voice_runtime: "gemini_live",
+        production_route: true,
+        session_id: "gemini-prod-v-l01",
+        websocket_url: "wss://gemini.example/live",
+        ephemeral_token: { value: "auth_tokens/test" },
+        setup: { model: "models/gemini-live" },
+        stream_url: "/api/sophia/voice/gemini/events?session_id=gemini-prod-v-l01",
+        provider_event_relay_url: "/api/sophia/voice/gemini/relay",
+        disconnect_url: "/api/sophia/voice/gemini/disconnect",
+        synthetic_test: syntheticTest,
+        trace_fault: { schema: "sophia_voice_lab_trace_fault_v1" },
+      }),
+      text: () => Promise.resolve(""),
+    })
+    const { result } = renderHook(() => useStreamVoiceSession("voice-lab-user-1"))
+    await act(async () => {
+      await result.current.startTalking()
+    })
+    const options = mockConnectGeminiBrowserLiveFromBootstrap.mock.calls[0]?.[0] as {
+      onSyntheticTraceFaultReceipt?: (receipt: Record<string, unknown>) => void
+    }
+    const receipt = {
+      schema: "sophia_voice_lab_trace_fault_v1",
+      fault: "langsmith_unavailable",
+      phase: "applied",
+      principal_id: syntheticTest.principal_id,
+      test_run_id: syntheticTest.test_run_id,
+      scenario_id: syntheticTest.scenario_id,
+      scenario_version: syntheticTest.scenario_version,
+      environment: syntheticTest.environment,
+      trace_unavailable: true,
+      canonical_behavior_unchanged: true,
+    }
+    act(() => options.onSyntheticTraceFaultReceipt?.(receipt))
+
+    expect(mockBindSophiaCaptureSyntheticTestContext).toHaveBeenCalledWith(syntheticTest)
+    expect(mockRecordSophiaCaptureEvent).toHaveBeenCalledWith(expect.objectContaining({
+      name: "gemini-trace-fault-receipt",
+      payload: expect.objectContaining({
+        voiceAgentSessionId: "gemini-prod-v-l01",
+        receipt,
+      }),
+    }))
   })
 
   it("promotes Gemini barge-in transcript handoffs and ignores duplicate public echoes", async () => {
@@ -461,7 +767,8 @@ describe("useStreamVoiceSession", () => {
         toolCall: { name: string | null }
         success: boolean | null
       }) => void
-      onOutputAudio?: () => void
+      onOutputAudioReceived?: (diagnostic: Record<string, unknown>) => void
+      onOutputAudioPlaybackReceipt?: (receipt: Record<string, unknown>) => void
     }) => {
       options.onStage?.("opening_websocket")
       options.onProviderEvent?.({ setupComplete: {} })
@@ -489,7 +796,16 @@ describe("useStreamVoiceSession", () => {
         toolCall: { name: "emit_artifact" },
         success: true,
       })
-      options.onOutputAudio?.()
+      options.onOutputAudioReceived?.({
+        timestamp: "2026-04-07T12:00:00.370Z",
+        providerConnectionEpoch: 3,
+      })
+      options.onOutputAudioPlaybackReceipt?.({
+        phase: "started",
+        providerConnectionEpoch: 3,
+        playbackGeneration: 0,
+        invalidatedByPlaybackGeneration: null,
+      })
       return mockGeminiConnection
     })
 
@@ -510,7 +826,15 @@ describe("useStreamVoiceSession", () => {
     expect(telemetry.toolCallCount).toBe(1)
     expect(telemetry.toolResponseCount).toBe(1)
     expect(telemetry.outputAudioEventCount).toBe(1)
+    expect(telemetry.outputAudioReceivedCount).toBe(1)
+    expect(telemetry.outputAudioPlaybackStartedCount).toBe(1)
     expect(telemetry.lastToolName).toBe("emit_artifact")
+    expect(mockRecordSophiaCaptureEvent).toHaveBeenCalledWith(expect.objectContaining({
+      name: "gemini-output-audio-received",
+    }))
+    expect(mockRecordSophiaCaptureEvent).toHaveBeenCalledWith(expect.objectContaining({
+      name: "gemini-output-audio-playback-started",
+    }))
   })
 
   it("includes session_id and thread_id when the voice session is bound to an active session", async () => {

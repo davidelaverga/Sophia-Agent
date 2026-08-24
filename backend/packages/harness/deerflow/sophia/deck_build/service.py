@@ -95,6 +95,7 @@ from deerflow.sophia.image_subprocess import (
     run_trusted_image_request,
 )
 from deerflow.sophia.subprocess_env import trusted_subprocess_env
+from deerflow.sophia.synthetic_builder import declares_synthetic_builder_run
 from deerflow.sophia.tools.prepare_pptx_image_manifest import create_pptx_image_manifest_core
 from deerflow.sophia.tools.render_markdown_to_pdf import _ensure_relative_to_outputs
 
@@ -2989,16 +2990,31 @@ def _current_image_trace_env(runtime: ToolRuntime) -> dict[str, str]:
 
 
 def _image_subprocess_env(runtime: ToolRuntime) -> dict[str, str]:
+    synthetic = declares_synthetic_builder_run(
+        getattr(runtime, "state", None),
+        getattr(runtime, "config", None),
+        getattr(runtime, "context", None),
+    )
     env = trusted_subprocess_env(
         allow_openai=True,
-        allow_langsmith=True,
+        allow_langsmith=not synthetic,
     )
+    if synthetic:
+        env.update(
+            {
+                "LANGSMITH_TRACING": "false",
+                "LANGCHAIN_TRACING_V2": "false",
+                "LANGCHAIN_TRACING": "false",
+                "SOPHIA_BUILDER_LANGSMITH_TRACING": "false",
+            }
+        )
     thread_data = get_thread_data(runtime) or {}
     if thread_data.get("outputs_path"):
         env["SOPHIA_OUTPUTS_HOST_PATH"] = str(thread_data["outputs_path"])
     if thread_data.get("workspace_path"):
         env["SOPHIA_WORKSPACE_HOST_PATH"] = str(thread_data["workspace_path"])
-    env.update(_current_image_trace_env(runtime))
+    if not synthetic:
+        env.update(_current_image_trace_env(runtime))
     return env
 
 

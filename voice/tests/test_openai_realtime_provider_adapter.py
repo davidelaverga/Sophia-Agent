@@ -219,7 +219,14 @@ def test_response_done_can_carry_full_function_call_payload_without_delta_events
     ]
     assert _payloads(events) == [
         {"type": "sophia.artifact", "data": _artifact()},
-        {"type": "sophia.turn", "data": {"phase": "agent_ended"}},
+        {
+            "type": "sophia.turn",
+            "data": {
+                "phase": "agent_ended",
+                "response_id": "resp-openai-1",
+                "turn_id": "resp-openai-1",
+            },
+        },
     ]
 
 
@@ -349,10 +356,22 @@ def test_cancelled_response_maps_to_existing_turn_diagnostic_shape() -> None:
         ProviderEventType.RESPONSE_CANCELLED,
     ]
     assert _payloads(provider_events) == [
-        {"type": "sophia.turn", "data": {"phase": "agent_started"}},
         {
             "type": "sophia.turn",
-            "data": {"phase": "agent_ended", "reason": "cancelled"},
+            "data": {
+                "phase": "agent_started",
+                "response_id": "resp-openai-1",
+                "turn_id": "resp-openai-1",
+            },
+        },
+        {
+            "type": "sophia.turn",
+            "data": {
+                "phase": "agent_ended",
+                "response_id": "resp-openai-1",
+                "turn_id": "resp-openai-1",
+                "reason": "cancelled",
+            },
         },
         {
             "type": "sophia.turn_diagnostic",

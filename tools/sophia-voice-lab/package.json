@@ -1,0 +1,39 @@
+{
+  "name": "@sophia/voice-lab",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=22 <23"
+  },
+  "packageManager": "pnpm@10.26.2",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "vitest run",
+    "test:postgres": "vitest run test/postgres-integration.test.ts",
+    "test:watch": "vitest",
+    "migrate": "node dist/bin/migrate.js",
+    "start:web": "node dist/bin/migrate.js && node dist/bin/web.js",
+    "start:worker": "node dist/bin/migrate.js && node dist/bin/worker.js",
+    "dev:web": "tsx src/bin/web.ts",
+    "dev:worker": "tsx src/bin/worker.ts"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.30.0",
+    "express": "5.2.1",
+    "pg": "8.23.0",
+    "pino": "10.3.1",
+    "playwright": "1.62.1",
+    "yaml": "2.9.0",
+    "zod": "4.4.3"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.6",
+    "@types/node": "^22.19.11",
+    "@types/pg": "^8.15.6",
+    "tsx": "^4.21.0",
+    "typescript": "^5.9.3",
+    "vitest": "4.1.11"
+  }
+}

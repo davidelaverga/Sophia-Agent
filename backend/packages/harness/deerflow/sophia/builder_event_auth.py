@@ -2,12 +2,10 @@
 
 The LangGraph and gateway services are separate production processes, but the
 gateway route is reachable through the public service.  Each request to the
-dedicated ``/internal/deck-quality-producer-failures`` endpoint is therefore
-signed over its exact JSON bytes with a shared, dashboard-managed secret. The baseline
-``/internal/builder-events`` delivery remains unsigned and independent so a
-shadow-only configuration issue cannot gate user delivery. The gateway verifies
-timestamp freshness, signature equality, and a bounded nonce replay cache before
-any failure-evidence side effect.
+internal Builder webhook endpoints is therefore signed over its exact JSON
+bytes with a shared, dashboard-managed secret. The gateway verifies timestamp
+freshness, signature equality, and a bounded nonce replay cache before any
+completion, progress, cleanup, or failure-evidence side effect.
 
 This module never logs, returns, or embeds the secret in an exception.
 """

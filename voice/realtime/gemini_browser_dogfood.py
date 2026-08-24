@@ -132,10 +132,12 @@ class GeminiBrowserRelayError(GeminiBrowserDogfoodError):
 class GeminiRelaySourceMetadata:
     provider_receive_sequence: int
     provider_relay_sequence: int | None = None
+    provider_connection_epoch: int | None = None
     provider_received_at: str | None = None
     relay_correlation_id: str | None = None
     provider_primary_category: str | None = None
     provider_categories: tuple[str, ...] = ()
+    synthetic_tool_evidence: tuple[dict[str, Any], ...] = ()
 
     @classmethod
     def from_relay_fields(
@@ -143,10 +145,12 @@ class GeminiRelaySourceMetadata:
         *,
         provider_receive_sequence: int | None,
         provider_relay_sequence: int | None = None,
+        provider_connection_epoch: int | None = None,
         provider_received_at: str | None = None,
         relay_correlation_id: str | None = None,
         provider_primary_category: str | None = None,
         provider_categories: list[str] | tuple[str, ...] | None = None,
+        synthetic_tool_evidence: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
     ) -> GeminiRelaySourceMetadata | None:
         if provider_receive_sequence is None:
             return None
@@ -156,6 +160,11 @@ class GeminiRelaySourceMetadata:
             not isinstance(provider_relay_sequence, int) or provider_relay_sequence <= 0
         ):
             raise ValueError("provider_relay_sequence must be a positive integer when provided.")
+        if provider_connection_epoch is not None and (
+            not isinstance(provider_connection_epoch, int)
+            or provider_connection_epoch <= 0
+        ):
+            raise ValueError("provider_connection_epoch must be a positive integer when provided.")
         if provider_received_at is not None and not isinstance(provider_received_at, str):
             raise ValueError("provider_received_at must be an ISO timestamp string when provided.")
         if relay_correlation_id is not None and not isinstance(relay_correlation_id, str):
@@ -165,24 +174,70 @@ class GeminiRelaySourceMetadata:
             for category in (provider_categories or ())
             if isinstance(category, str) and category
         )
+        evidence_items: list[dict[str, Any]] = []
+        evidence_ids: set[str] = set()
+        expected_evidence_keys = {
+            "schema",
+            "test_run_id",
+            "scenario_id",
+            "scenario_version",
+            "operation_id",
+            "utterance_id",
+            "provider_input_sequence",
+            "public_utterance_id",
+            "tool_call_id",
+            "effect_id",
+            "provider_connection_epoch",
+            "relay_correlation_id",
+            "tool_name",
+            "received_at",
+        }
+        for raw_item in synthetic_tool_evidence or ():
+            item = dict(raw_item) if isinstance(raw_item, Mapping) else {}
+            if set(item) != expected_evidence_keys:
+                raise ValueError("synthetic_tool_evidence field set was malformed.")
+            tool_call_id = item.get("tool_call_id")
+            if (
+                item.get("schema") != "sophia_synthetic_tool_evidence_v1"
+                or not isinstance(tool_call_id, str)
+                or not tool_call_id
+                or tool_call_id in evidence_ids
+                or item.get("relay_correlation_id") != relay_correlation_id
+            ):
+                raise ValueError("synthetic_tool_evidence binding was malformed or duplicated.")
+            evidence_ids.add(tool_call_id)
+            evidence_items.append(item)
         return cls(
             provider_receive_sequence=provider_receive_sequence,
             provider_relay_sequence=provider_relay_sequence,
+            provider_connection_epoch=provider_connection_epoch,
             provider_received_at=provider_received_at,
             relay_correlation_id=relay_correlation_id,
             provider_primary_category=provider_primary_category if isinstance(provider_primary_category, str) else None,
             provider_categories=categories,
+            synthetic_tool_evidence=tuple(evidence_items),
         )
 
     def as_event_context(self) -> dict[str, Any]:
         return {
             "provider_receive_sequence": self.provider_receive_sequence,
             "provider_relay_sequence": self.provider_relay_sequence,
+            "provider_connection_epoch": self.provider_connection_epoch,
             "provider_received_at": self.provider_received_at,
             "relay_correlation_id": self.relay_correlation_id,
             "provider_primary_category": self.provider_primary_category,
             "provider_categories": list(self.provider_categories),
         }
+
+    def tool_evidence(self, tool_call_id: str) -> dict[str, Any] | None:
+        matches = [
+            item
+            for item in self.synthetic_tool_evidence
+            if item.get("tool_call_id") == tool_call_id
+        ]
+        if len(matches) > 1:
+            raise ValueError("synthetic_tool_evidence binding was ambiguous.")
+        return dict(matches[0]) if matches else None
 
     @property
     def ordering_sequence(self) -> int:
@@ -422,11 +477,13 @@ class GeminiBrowserDogfoodSession:
     websocket_url: str = GEMINI_LIVE_WEBSOCKET_URL
     memory_context_diagnostics: dict[str, Any] = field(default_factory=dict)
     langsmith_trace_id: str | None = None
+    langsmith_trace_unavailable_reason: str | None = None
     audio_capture_enabled: bool = False
     provider_connection_epoch: int = 1
     continuation_bootstrap_url: str | None = None
     logical_session_id: str | None = None
     voice_runtime_session_id: str | None = None
+    trace_fault_receipt: dict[str, object] | None = None
 
     def as_public_payload(self) -> dict[str, Any]:
         session_metadata = self.dogfood_session.metadata()
@@ -448,11 +505,23 @@ class GeminiBrowserDogfoodSession:
             "backendCoreviewFlagParsed": is_coreview_enabled(),
             "backendStillFrameFlagParsed": is_coreview_still_frame_enabled(),
             "langsmith_trace_id": self.langsmith_trace_id,
+            **(
+                {
+                    "langsmith_trace_unavailable_reason": self.langsmith_trace_unavailable_reason
+                }
+                if self.langsmith_trace_unavailable_reason is not None
+                else {}
+            ),
             "audio_capture_enabled": self.audio_capture_enabled,
             "provider_connection_epoch": self.provider_connection_epoch,
             "continuation_bootstrap_url": self.continuation_bootstrap_url,
             "logical_session_id": self.logical_session_id,
             "voice_runtime_session_id": self.voice_runtime_session_id or self.dogfood_session.session_id,
+            **(
+                {"trace_fault": dict(self.trace_fault_receipt)}
+                if self.trace_fault_receipt is not None
+                else {}
+            ),
         }
 
 
@@ -473,6 +542,7 @@ class GeminiLiveEphemeralTokenMinter:
         setup: Mapping[str, Any],
         uses: int = 1,
         field_mask: str | None = None,
+        expire_time: str | None = None,
     ) -> GeminiLiveEphemeralToken:
         token_setup = dict(setup)
         if field_mask:
@@ -490,6 +560,8 @@ class GeminiLiveEphemeralTokenMinter:
             "uses": uses,
             "bidiGenerateContentSetup": token_setup,
         }
+        if expire_time is not None:
+            body["expireTime"] = expire_time
         if field_mask:
             body["fieldMask"] = field_mask
         headers = {
@@ -531,7 +603,18 @@ class GeminiLiveEphemeralTokenMinter:
                 "Gemini auth token response omitted the ephemeral token name."
             )
 
-        return GeminiLiveEphemeralToken(value=value, response=dict(payload))
+        response_payload = dict(payload)
+        if expire_time is not None:
+            provider_expire_time = response_payload.get("expireTime")
+            if provider_expire_time not in {None, expire_time}:
+                raise GeminiEphemeralTokenMintError(
+                    "Gemini auth token response changed the governed expiration."
+                )
+            # CreateToken succeeded with this immutable input-only constraint;
+            # retain the exact request as the product-owned expiry receipt even
+            # when the provider omits input-only fields in its response.
+            response_payload["expireTime"] = expire_time
+        return GeminiLiveEphemeralToken(value=value, response=response_payload)
 
 
 def _token_owned_setup_fields(setup: Mapping[str, Any]) -> tuple[str, ...]:
@@ -600,8 +683,43 @@ class GeminiBrowserDogfoodSessionManager:
         self._preconnect_cleanup_tasks_by_session: dict[str, asyncio.Task[None]] = {}
         self._traces_by_session: dict[str, GeminiLiveTraceRecorder] = {}
         self._continuation_epoch_by_session: dict[str, int] = {}
+        self._pending_continuation_by_session: dict[
+            str,
+            tuple[int, bool, int, GeminiBrowserDogfoodSession],
+        ] = {}
         self._continuation_locks_by_session: dict[str, asyncio.Lock] = {}
         self._logical_session_id_by_session: dict[str, str] = {}
+        self._synthetic_context_by_session: dict[str, dict[str, Any]] = {}
+        self._trace_fault_by_session: dict[str, dict[str, object]] = {}
+
+    def synthetic_context_for_session(self, session_id: str) -> dict[str, Any] | None:
+        context = self._synthetic_context_by_session.get(session_id)
+        return dict(context) if context is not None else None
+
+    def session_exists(self, session_id: str) -> bool:
+        return self._realtime_sessions.get_session(session_id) is not None
+
+    def provider_epoch_snapshot(self, session_id: str) -> tuple[int, ...]:
+        activated_epoch = self._continuation_epoch_by_session.get(session_id)
+        pending = self._pending_continuation_by_session.get(session_id)
+        pending_epoch = (
+            pending[3].provider_connection_epoch if pending is not None else None
+        )
+        return tuple(
+            sorted(
+                {
+                    epoch
+                    for epoch in (activated_epoch, pending_epoch)
+                    if isinstance(epoch, int)
+                    and not isinstance(epoch, bool)
+                    and epoch > 0
+                }
+            )
+        )
+
+    def trace_fault_for_session(self, session_id: str) -> dict[str, object] | None:
+        receipt = self._trace_fault_by_session.get(session_id)
+        return dict(receipt) if receipt is not None else None
 
     def _record_trace_failure(
         self,
@@ -650,6 +768,7 @@ class GeminiBrowserDogfoodSessionManager:
         thread_id: str | None,
         setup: Mapping[str, Any],
         provider_epoch: int,
+        synthetic_context: Mapping[str, Any] | None = None,
     ) -> GeminiLiveTraceRecorder | None:
         try:
             trace = GeminiLiveTraceRecorder(
@@ -661,6 +780,7 @@ class GeminiBrowserDogfoodSessionManager:
                     setup,
                     provider_epoch=provider_epoch,
                 ),
+                synthetic_context=synthetic_context,
                 failure_callback=lambda operation, exc: self._record_trace_failure(
                     session_id,
                     operation,
@@ -689,6 +809,9 @@ class GeminiBrowserDogfoodSessionManager:
         thread_id: str | None = None,
         logical_session_id: str | None = None,
         continuation_bootstrap_url: str | None = None,
+        synthetic_context: Mapping[str, Any] | None = None,
+        trace_fault_receipt: Mapping[str, object] | None = None,
+        token_expire_time: str | None = None,
     ) -> GeminiBrowserDogfoodSession:
         gate = validate_gemini_browser_dogfood_settings(settings)
         resolved_context_mode = context_mode or str(getattr(settings, "context_mode", "life"))
@@ -709,10 +832,15 @@ class GeminiBrowserDogfoodSessionManager:
         )
         try:
             setup = _setup_from_dogfood_session(dogfood_session)
+            token_kwargs: dict[str, Any] = {
+                "api_key": gate.api_key,
+                "setup": setup,
+                "field_mask": _server_owned_token_field_mask(setup),
+            }
+            if token_expire_time is not None:
+                token_kwargs["expire_time"] = token_expire_time
             ephemeral_token = await self._token_minter.mint_ephemeral_token(
-                api_key=gate.api_key,
-                setup=setup,
-                field_mask=_server_owned_token_field_mask(setup),
+                **token_kwargs,
             )
         except Exception:
             await self._realtime_sessions.close_session(dogfood_session.session_id)
@@ -723,11 +851,42 @@ class GeminiBrowserDogfoodSessionManager:
             memory_context=dict(memory_context_diagnostics or {}),
         )
         self._diagnostics_by_session[dogfood_session.session_id] = diagnostics
-        self._continuation_epoch_by_session[dogfood_session.session_id] = 1
+        synthetic_provider = (
+            isinstance(synthetic_context, Mapping)
+            and synthetic_context.get("synthetic") is True
+        )
+        self._continuation_epoch_by_session[dogfood_session.session_id] = (
+            0 if synthetic_provider else 1
+        )
         self._continuation_locks_by_session[dogfood_session.session_id] = asyncio.Lock()
         if logical_session_id:
             self._logical_session_id_by_session[dogfood_session.session_id] = logical_session_id
         self._context_mode_by_session[dogfood_session.session_id] = resolved_context_mode
+        if isinstance(synthetic_context, Mapping) and synthetic_context.get("synthetic") is True:
+            self._synthetic_context_by_session[dogfood_session.session_id] = {
+                key: value
+                for key in (
+                    "synthetic",
+                    "principal_id",
+                    "test_run_id",
+                    "scenario_id",
+                    "scenario_version",
+                    "environment",
+                    "retention_hours",
+                    "cleanup_obligation_id",
+                    "provider_expires_at",
+                )
+                if (value := synthetic_context.get(key)) is not None
+            }
+        if trace_fault_receipt is not None:
+            if not isinstance(synthetic_context, Mapping) or synthetic_context.get("synthetic") is not True:
+                await self._realtime_sessions.close_session(dogfood_session.session_id)
+                raise RealtimeDogfoodConfigurationError(
+                    "Synthetic trace fault requires an authenticated synthetic session."
+                )
+            self._trace_fault_by_session[dogfood_session.session_id] = dict(
+                trace_fault_receipt
+            )
         resolved_parent_thread_id = _string_value(thread_id)
         if resolved_parent_thread_id:
             self._parent_thread_id_by_session[dogfood_session.session_id] = resolved_parent_thread_id
@@ -739,31 +898,57 @@ class GeminiBrowserDogfoodSessionManager:
         mapping_observer = getattr(dogfood_session.bundle.provider_session, "set_mapping_observer", None)
         if callable(mapping_observer):
             mapping_observer(lambda _raw_event, provider_events: diagnostics.record_mapping_outputs(provider_events))
-        trace = self._create_trace_recorder(
-            session_id=dogfood_session.session_id,
-            user_id=user_id,
-            model=str(getattr(settings, "gemini_live_model", DEFAULT_GEMINI_LIVE_MODEL)),
-            thread_id=thread_id,
-            setup=setup,
-            provider_epoch=1,
+        trace = None
+        if trace_fault_receipt is None:
+            trace = self._create_trace_recorder(
+                session_id=dogfood_session.session_id,
+                user_id=user_id,
+                model=str(getattr(settings, "gemini_live_model", DEFAULT_GEMINI_LIVE_MODEL)),
+                thread_id=thread_id,
+                setup=setup,
+                provider_epoch=1,
+                synthetic_context=self._synthetic_context_by_session.get(dogfood_session.session_id),
+            )
+        synthetic_trace_unavailable_reason = (
+            "governed_synthetic_fault"
+            if trace_fault_receipt is not None
+            else (
+                "synthetic_isolation_policy"
+                if dogfood_session.session_id in self._synthetic_context_by_session
+                else None
+            )
         )
         self._schedule_preconnect_cleanup(
             dogfood_session.session_id,
             preconnect_ttl_seconds,
         )
 
-        return GeminiBrowserDogfoodSession(
+        result = GeminiBrowserDogfoodSession(
             dogfood_session=dogfood_session,
             ephemeral_token=ephemeral_token,
             setup=setup,
             memory_context_diagnostics=dict(memory_context_diagnostics or {}),
             langsmith_trace_id=trace.trace_id if trace is not None else None,
+            langsmith_trace_unavailable_reason=synthetic_trace_unavailable_reason,
             audio_capture_enabled=trace.audio_capture_enabled if trace is not None else False,
             provider_connection_epoch=1,
             continuation_bootstrap_url=continuation_bootstrap_url,
             logical_session_id=logical_session_id,
             voice_runtime_session_id=dogfood_session.session_id,
+            trace_fault_receipt=(
+                dict(trace_fault_receipt)
+                if trace_fault_receipt is not None
+                else None
+            ),
         )
+        if synthetic_provider:
+            self._pending_continuation_by_session[dogfood_session.session_id] = (
+                0,
+                False,
+                0,
+                result,
+            )
+        return result
 
     async def continue_browser_session(
         self,
@@ -774,6 +959,7 @@ class GeminiBrowserDogfoodSessionManager:
         handle_present: bool,
         secret_generation: int,
         continuation_bootstrap_url: str | None = None,
+        token_expire_time: str | None = None,
     ) -> GeminiBrowserDogfoodSession:
         """Mint a next-segment credential while keeping the handle browser-local."""
 
@@ -794,6 +980,28 @@ class GeminiBrowserDogfoodSessionManager:
         )
         async with lock:
             current_epoch = self._continuation_epoch_by_session.get(dogfood_session_id, 1)
+            pending = self._pending_continuation_by_session.get(dogfood_session_id)
+            if pending is not None:
+                (
+                    pending_previous,
+                    pending_handle_present,
+                    pending_secret_generation,
+                    pending_session,
+                ) = pending
+                if (
+                    pending_previous == expected_epoch
+                    and pending_handle_present == bool(handle_present)
+                    and pending_secret_generation == secret_generation
+                ):
+                    return pending_session
+                diagnostics = self._diagnostics_by_session.get(dogfood_session_id)
+                if diagnostics is not None:
+                    diagnostics.record_provider_metric(
+                        "continuation_bootstrap_pending_conflict"
+                    )
+                raise GeminiBrowserRelayError(
+                    "Continuation credential activation is still pending."
+                )
             if current_epoch != expected_epoch:
                 diagnostics = self._diagnostics_by_session.get(dogfood_session_id)
                 if diagnostics is not None:
@@ -804,13 +1012,15 @@ class GeminiBrowserDogfoodSessionManager:
 
             gate = validate_gemini_browser_dogfood_settings(settings)
             setup = _setup_from_dogfood_session(dogfood_session)
-            token = await self._token_minter.mint_ephemeral_token(
-                api_key=gate.api_key,
-                setup=setup,
-                field_mask=_server_owned_token_field_mask(setup),
-            )
+            token_kwargs: dict[str, Any] = {
+                "api_key": gate.api_key,
+                "setup": setup,
+                "field_mask": _server_owned_token_field_mask(setup),
+            }
+            if token_expire_time is not None:
+                token_kwargs["expire_time"] = token_expire_time
+            token = await self._token_minter.mint_ephemeral_token(**token_kwargs)
             next_epoch = current_epoch + 1
-            self._continuation_epoch_by_session[dogfood_session_id] = next_epoch
             diagnostics = self._diagnostics_by_session.setdefault(
                 dogfood_session_id,
                 GeminiReliabilityDiagnostics(session_id=dogfood_session_id),
@@ -822,32 +1032,252 @@ class GeminiBrowserDogfoodSessionManager:
                 resume_secret_generation=int(secret_generation),
             )
             trace = self._traces_by_session.get(dogfood_session_id)
+            if trace is not None and not bool(getattr(trace, "enabled", False)):
+                self._traces_by_session.pop(dogfood_session_id, None)
+                trace = None
+            result = GeminiBrowserDogfoodSession(
+                dogfood_session=dogfood_session,
+                ephemeral_token=token,
+                setup=setup,
+                memory_context_diagnostics={},
+                langsmith_trace_id=trace.trace_id if trace is not None else None,
+                langsmith_trace_unavailable_reason=(
+                    "governed_synthetic_fault"
+                    if self.trace_fault_for_session(dogfood_session_id) is not None
+                    else (
+                        "synthetic_isolation_policy"
+                        if dogfood_session_id in self._synthetic_context_by_session
+                        else None
+                    )
+                ),
+                audio_capture_enabled=trace.audio_capture_enabled if trace is not None else False,
+                provider_connection_epoch=next_epoch,
+                continuation_bootstrap_url=continuation_bootstrap_url,
+                logical_session_id=self._logical_session_id_by_session.get(dogfood_session_id),
+                voice_runtime_session_id=dogfood_session_id,
+                trace_fault_receipt=self.trace_fault_for_session(dogfood_session_id),
+            )
+            if dogfood_session_id in self._synthetic_context_by_session:
+                self._pending_continuation_by_session[dogfood_session_id] = (
+                    expected_epoch,
+                    bool(handle_present),
+                    secret_generation,
+                    result,
+                )
+            else:
+                self._continuation_epoch_by_session[dogfood_session_id] = next_epoch
+                # Ordinary browser sessions have no product-side activation
+                # handshake, so their minted continuation becomes current
+                # immediately. Keep observability aligned with that committed
+                # epoch; synthetic sessions update only after the separate
+                # durable activation acknowledgement below.
+                self._trace_operation(
+                    dogfood_session_id,
+                    trace,
+                    "update_setup_fingerprint",
+                    lambda recorder: recorder.update_setup_fingerprint(
+                        _effective_setup_fingerprint(
+                            result.setup,
+                            provider_epoch=next_epoch,
+                        )
+                    ),
+                )
+            return result
+
+    async def activate_browser_session_epoch(
+        self,
+        *,
+        dogfood_session_id: str,
+        previous_activated_epoch: int,
+        candidate_epoch: int,
+    ) -> int:
+        """Commit exactly one previously minted browser-open provider epoch."""
+
+        lock = self._continuation_locks_by_session.setdefault(
+            dogfood_session_id,
+            asyncio.Lock(),
+        )
+        async with lock:
+            current_epoch = self._continuation_epoch_by_session.get(
+                dogfood_session_id
+            )
+            if current_epoch is None:
+                raise GeminiBrowserRelayError("Provider session was not found.")
+            if current_epoch == candidate_epoch:
+                if previous_activated_epoch != candidate_epoch - 1:
+                    raise GeminiBrowserRelayError(
+                        "Provider activation epoch binding conflicts."
+                    )
+                return current_epoch
+            pending = self._pending_continuation_by_session.get(
+                dogfood_session_id
+            )
+            if (
+                pending is None
+                or pending[0] != previous_activated_epoch
+                or pending[3].provider_connection_epoch != candidate_epoch
+                or current_epoch != previous_activated_epoch
+                or candidate_epoch != previous_activated_epoch + 1
+            ):
+                raise GeminiBrowserRelayError(
+                    "Provider activation epoch binding conflicts."
+                )
+            self._continuation_epoch_by_session[dogfood_session_id] = candidate_epoch
+            self._pending_continuation_by_session.pop(dogfood_session_id, None)
+            trace = self._traces_by_session.get(dogfood_session_id)
             self._trace_operation(
                 dogfood_session_id,
                 trace,
                 "update_setup_fingerprint",
                 lambda recorder: recorder.update_setup_fingerprint(
                     _effective_setup_fingerprint(
-                        setup,
-                        provider_epoch=next_epoch,
+                        pending[3].setup,
+                        provider_epoch=candidate_epoch,
                     )
                 ),
             )
-            if trace is not None and not bool(getattr(trace, "enabled", False)):
-                self._traces_by_session.pop(dogfood_session_id, None)
-                trace = None
-            return GeminiBrowserDogfoodSession(
-                dogfood_session=dogfood_session,
-                ephemeral_token=token,
-                setup=setup,
-                memory_context_diagnostics={},
-                langsmith_trace_id=trace.trace_id if trace is not None else None,
-                audio_capture_enabled=trace.audio_capture_enabled if trace is not None else False,
-                provider_connection_epoch=next_epoch,
-                continuation_bootstrap_url=continuation_bootstrap_url,
-                logical_session_id=self._logical_session_id_by_session.get(dogfood_session_id),
-                voice_runtime_session_id=dogfood_session_id,
+            diagnostics = self._diagnostics_by_session.get(dogfood_session_id)
+            if diagnostics is not None:
+                diagnostics.record_provider_metric(
+                    "provider_browser_activated",
+                    provider_connection_epoch=candidate_epoch,
+                )
+            return candidate_epoch
+
+    async def publish_provider_cleanup_control(
+        self,
+        dogfood_session_id: str,
+        *,
+        admission_id: str,
+        cleanup_obligation_id: str,
+        resource_expires_at: str,
+    ) -> bool:
+        """Signal the owning browser without closing its authenticated SSE."""
+
+        dogfood_session = self._realtime_sessions.get_session(dogfood_session_id)
+        if dogfood_session is None:
+            return False
+        activated_epoch = self._continuation_epoch_by_session.get(
+            dogfood_session_id, 1
+        )
+        pending = self._pending_continuation_by_session.get(dogfood_session_id)
+        pending_epoch = (
+            pending[3].provider_connection_epoch if pending is not None else None
+        )
+        provider_epochs = sorted(
+            {
+                epoch
+                for epoch in (activated_epoch, pending_epoch)
+                if isinstance(epoch, int) and epoch > 0
+            }
+        )
+        if not provider_epochs:
+            return False
+        await dogfood_session._publish_public_payload(  # noqa: SLF001 - governed internal event.
+            {
+                "type": "sophia.provider_cleanup",
+                "data": {
+                    "schema": "sophia_provider_cleanup_control_v1",
+                    "session_id": dogfood_session_id,
+                    "admission_id": admission_id,
+                    "cleanup_obligation_id": cleanup_obligation_id,
+                    "activated_provider_connection_epoch": activated_epoch,
+                    "pending_provider_connection_epoch": pending_epoch,
+                    "provider_connection_epochs": provider_epochs,
+                    "resource_expires_at": resource_expires_at,
+                },
+            }
+        )
+        return True
+
+    async def freeze_and_close_provider_epochs(
+        self,
+        dogfood_session_id: str,
+        *,
+        expected_epochs: tuple[int, ...],
+    ) -> bool:
+        """CAS the exact current/pending epoch set and remove every owner locator."""
+
+        lock = self._continuation_locks_by_session.setdefault(
+            dogfood_session_id, asyncio.Lock()
+        )
+        async with lock:
+            if self._realtime_sessions.get_session(dogfood_session_id) is None:
+                return False
+            activated_epoch = self._continuation_epoch_by_session.get(
+                dogfood_session_id, 1
             )
+            pending = self._pending_continuation_by_session.get(
+                dogfood_session_id
+            )
+            pending_epoch = (
+                pending[3].provider_connection_epoch
+                if pending is not None
+                else None
+            )
+            actual_epochs = tuple(
+                sorted(
+                    {
+                        epoch
+                        for epoch in (activated_epoch, pending_epoch)
+                        if isinstance(epoch, int)
+                        and not isinstance(epoch, bool)
+                        and epoch > 0
+                    }
+                )
+            )
+            if (
+                not set(actual_epochs).issubset(expected_epochs)
+                or (
+                    isinstance(activated_epoch, int)
+                    and activated_epoch > 0
+                    and activated_epoch not in expected_epochs
+                )
+                or any(
+                    epoch
+                    not in {
+                        value
+                        for value in (activated_epoch, activated_epoch + 1)
+                        if isinstance(value, int) and value > 0
+                    }
+                    for epoch in expected_epochs
+                )
+            ):
+                return False
+            await self.close_session(dogfood_session_id)
+            return self.terminal_state_absent(dogfood_session_id)
+
+    def terminal_state_absent(self, dogfood_session_id: str) -> bool:
+        """Prove the owning manager and underlying runtime retain no session state."""
+
+        maps: tuple[Mapping[str, object], ...] = (
+            self._cancelled_tool_call_ids_by_session,
+            self._inflight_tool_call_ids_by_session,
+            self._completed_tool_call_ids_by_session,
+            self._public_artifact_tool_call_ids_by_session,
+            self._async_tasks_by_session,
+            self._latest_user_transcript_by_session,
+            self._user_transcript_turn_open_by_session,
+            self._parent_thread_id_by_session,
+            self._diagnostics_by_session,
+            self._context_mode_by_session,
+            self._memory_retrieval_config_by_session,
+            self._source_order_locks_by_session,
+            self._last_applied_source_sequence_by_session,
+            self._source_order_buffers_by_session,
+            self._preconnect_cleanup_tasks_by_session,
+            self._traces_by_session,
+            self._continuation_epoch_by_session,
+            self._pending_continuation_by_session,
+            self._continuation_locks_by_session,
+            self._logical_session_id_by_session,
+            self._synthetic_context_by_session,
+            self._trace_fault_by_session,
+        )
+        return (
+            self._realtime_sessions.get_session(dogfood_session_id) is None
+            and all(dogfood_session_id not in values for values in maps)
+        )
 
     def _schedule_preconnect_cleanup(
         self,
@@ -1273,7 +1703,44 @@ class GeminiBrowserDogfoodSessionManager:
                 )
             tool_span = None
             trace_headers: Mapping[str, str] | None = None
-            trace_context: dict[str, Any] | None = None
+            synthetic_context = self._synthetic_context_by_session.get(
+                dogfood_session.session_id
+            )
+            trace_context: dict[str, Any] | None = (
+                dict(synthetic_context) if synthetic_context else None
+            )
+            synthetic_tool_evidence = (
+                source_metadata.tool_evidence(function_call.call_id)
+                if source_metadata is not None
+                else None
+            )
+            if synthetic_context is not None and function_call.name in _BUILDER_LIFECYCLE_TOOL_NAMES:
+                if synthetic_tool_evidence is None:
+                    raise GeminiBrowserRelayError(
+                        "Synthetic Builder tool call omitted exact browser effect/input evidence."
+                    )
+                if (
+                    synthetic_tool_evidence.get("test_run_id")
+                    != synthetic_context.get("test_run_id")
+                    or synthetic_tool_evidence.get("scenario_id")
+                    != synthetic_context.get("scenario_id")
+                    or synthetic_tool_evidence.get("scenario_version")
+                    != synthetic_context.get("scenario_version")
+                    or synthetic_tool_evidence.get("tool_name") != function_call.name
+                    or synthetic_tool_evidence.get("provider_connection_epoch")
+                    != source_metadata.provider_connection_epoch
+                ):
+                    raise GeminiBrowserRelayError(
+                        "Synthetic Builder tool evidence conflicted with the exact run or provider epoch."
+                    )
+                trace_context = {
+                    **(trace_context or {}),
+                    "voice_session_id": dogfood_session.session_id,
+                    "voice_tool_call_id": function_call.call_id,
+                    "relay_correlation_id": source_metadata.relay_correlation_id,
+                    "provider_receive_sequence": source_metadata.provider_receive_sequence,
+                    "synthetic_tool_evidence": synthetic_tool_evidence,
+                }
             if trace is not None:
                 tool_span = self._trace_operation(
                     dogfood_session.session_id,
@@ -1306,6 +1773,7 @@ class GeminiBrowserDogfoodSessionManager:
                 )
                 if trace_id is not None:
                     trace_context = {
+                        **(trace_context or {}),
                         "voice_session_id": dogfood_session.session_id,
                         "voice_trace_id": trace_id,
                         "voice_tool_call_id": function_call.call_id,
@@ -1540,8 +2008,11 @@ class GeminiBrowserDogfoodSessionManager:
         self._latest_user_transcript_by_session.pop(dogfood_session_id, None)
         self._user_transcript_turn_open_by_session.pop(dogfood_session_id, None)
         self._continuation_epoch_by_session.pop(dogfood_session_id, None)
+        self._pending_continuation_by_session.pop(dogfood_session_id, None)
         self._continuation_locks_by_session.pop(dogfood_session_id, None)
         self._logical_session_id_by_session.pop(dogfood_session_id, None)
+        self._synthetic_context_by_session.pop(dogfood_session_id, None)
+        self._trace_fault_by_session.pop(dogfood_session_id, None)
         self._parent_thread_id_by_session.pop(dogfood_session_id, None)
         self._context_mode_by_session.pop(dogfood_session_id, None)
         self._memory_retrieval_config_by_session.pop(dogfood_session_id, None)

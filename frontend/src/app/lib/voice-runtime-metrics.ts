@@ -1273,13 +1273,15 @@ function countSelectedStageArtifacts(events: NormalizedVoiceCaptureEvent[]): num
 
 function hasRenderedArtifactSnapshot(snapshot: SophiaCaptureSnapshot | null | undefined): boolean {
   if (!snapshot) return false
-  if (hasArtifactContent(snapshot.artifacts.sessionArtifacts)) return true
+  const artifacts = asRecord(snapshot.artifacts)
+  if (!artifacts) return false
+  if (hasArtifactContent(artifacts.sessionArtifacts)) return true
 
-  const dom = snapshot.artifacts.dom
+  const dom = asRecord(artifacts.dom)
   return Boolean(
-    asRealArtifactString(dom.takeawayText)
-      || asRealArtifactString(dom.reflectionText)
-      || asRealArtifactString(dom.memoriesText),
+    asRealArtifactString(dom?.takeawayText)
+      || asRealArtifactString(dom?.reflectionText)
+      || asRealArtifactString(dom?.memoriesText),
   )
 }
 

@@ -337,6 +337,13 @@ class SophiaState(AgentState):
     builder_build_id: NotRequired[str]
     builder_operation_id: NotRequired[str]
     builder_run_id: NotRequired[str]
+    # VT00: complete, server-issued isolation identity for a dedicated
+    # synthetic voice-lab run. Ordinary Builder runs leave this absent.
+    # Keeping the mapping in the root graph state prevents LangGraph's schema
+    # projection from dropping it before memory, progress, artifact, and
+    # terminal middleware can enforce isolation.
+    synthetic_test: NotRequired[dict[str, Any] | None]
+    synthetic_builder_join: NotRequired[dict[str, Any] | None]
     builder_presentation_phase: NotRequired[str]
     builder_presentation_preflight_started_at_ms: NotRequired[int]
     builder_boundary_sequence: NotRequired[int]

@@ -2,7 +2,13 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
+import hmac
 import json
+import time
+import uuid
+from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import httpx
@@ -11,6 +17,125 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
 from deerflow.sophia.session_store import SessionMessageRecord, SessionRecord, SessionStore
+
+VOICE_LAB_BUILD = "41a9b127af780bbe9d88acf34566a6aaf443e6b0"
+VOICE_LAB_SECRET = "capability-secret-at-least-thirty-two-bytes"
+VOICE_LAB_SESSION_CREATED_AT = datetime.now(UTC).replace(microsecond=0)
+VOICE_LAB_PROVIDER_EXPIRES_AT = (
+    VOICE_LAB_SESSION_CREATED_AT + timedelta(minutes=30)
+).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _cleanup_id(test_run_id: str) -> str:
+    return str(uuid.UUID(bytes=hashlib.sha256(test_run_id.encode()).digest()[:16], version=4))
+
+
+def _voice_lab_finalization_token(**overrides: object) -> str:
+    now = int(time.time())
+    claims: dict[str, object] = {
+        "v": 1,
+        "iss": "sophia-frontend",
+        "aud": "sophia-voice-gateway",
+        "sub": "voice-lab-user-1",
+        "principal_id": "voice-lab-user-1",
+        "test_run_id": "run-finalize-001",
+        "scenario_id": "vt00-finalization-001",
+        "scenario_version": "v1",
+        "synthetic": True,
+        "environment": "production",
+        "retention_hours": 24,
+        "provider_expires_at": VOICE_LAB_PROVIDER_EXPIRES_AT,
+        "allowed_ops": ["session:finalize"],
+        "expected_deployment": {
+            "frontend": VOICE_LAB_BUILD,
+            "backend": VOICE_LAB_BUILD,
+            "voice": VOICE_LAB_BUILD,
+        },
+        "iat": now,
+        "nbf": now,
+        "exp": now + 120,
+        "jti": "jti-finalize-001",
+        "nonce": "nonce-finalize-001",
+    }
+    claims.update(overrides)
+    claims.setdefault("cleanup_obligation_id", _cleanup_id(str(claims["test_run_id"])))
+    encoded = base64.urlsafe_b64encode(
+        json.dumps(claims, separators=(",", ":")).encode("utf-8")
+    ).rstrip(b"=")
+    signature = hmac.new(
+        VOICE_LAB_SECRET.encode("utf-8"),
+        encoded,
+        hashlib.sha256,
+    ).digest()
+    return f"{encoded.decode('ascii')}.{base64.urlsafe_b64encode(signature).rstrip(b'=').decode('ascii')}"
+
+
+def _configure_voice_lab_finalization(monkeypatch: pytest.MonkeyPatch) -> None:
+    from deerflow.sophia import cleanup_fence
+
+    cleanup_fence._reset_local_cleanup_fences_for_tests()
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_ENABLED", "true")
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_KILL_SWITCH", "false")
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_TEST_PRINCIPAL", "voice-lab-user-1")
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_ENVIRONMENT", "production")
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_CAPABILITY_SECRET", VOICE_LAB_SECRET)
+    monkeypatch.setenv("RENDER_GIT_COMMIT", VOICE_LAB_BUILD)
+
+
+def _synthetic_voice_lab_session_record(
+    session_id: str,
+    thread_id: str,
+    *,
+    test_run_id: str = "run-finalize-001",
+    scenario_id: str = "vt00-finalization-001",
+) -> SessionRecord:
+    from deerflow.sophia.cleanup_fence import assert_cleanup_obligation_open
+
+    created_at = VOICE_LAB_SESSION_CREATED_AT
+    retention_expires_at = (created_at + timedelta(days=1)).isoformat(
+        timespec="milliseconds"
+    ).replace("+00:00", "Z")
+    cleanup_obligation_id = _cleanup_id(test_run_id)
+    assert_cleanup_obligation_open(
+        cleanup_obligation_id,
+        retention_expires_at,
+        VOICE_LAB_PROVIDER_EXPIRES_AT,
+    )
+    return SessionRecord(
+        session_id=session_id,
+        thread_id=thread_id,
+        user_id="voice-lab-user-1",
+        status="open",
+        run_id=test_run_id,
+        created_at=created_at.isoformat(),
+        metadata={
+            "synthetic_voice_lab": {
+                "synthetic": True,
+                "principal_id": "voice-lab-user-1",
+                "test_run_id": test_run_id,
+                "cleanup_obligation_id": cleanup_obligation_id,
+                "environment": "production",
+                "scenario_id": scenario_id,
+                "scenario_version": "v1",
+                "retention_hours": 24,
+                "retention_anchor": "session_created_at_provisional",
+                "retention_expires_at": retention_expires_at,
+                "provider_expires_at": VOICE_LAB_PROVIDER_EXPIRES_AT,
+            },
+            "expected_deployment": {
+                "frontend": VOICE_LAB_BUILD,
+                "backend": VOICE_LAB_BUILD,
+                "voice": VOICE_LAB_BUILD,
+            },
+            "memory_retrieval_disabled": True,
+            "inactivity_finalization_disabled": True,
+            "offline_pipeline_disabled": True,
+            "memory_learning_disabled": True,
+            "ordinary_analytics_disabled": True,
+            "ordinary_projects_disabled": True,
+            "shared_spaces_disabled": True,
+        },
+    )
 
 # ---------------------------------------------------------------------------
 # Fixtures
@@ -1597,6 +1722,567 @@ class TestTaskStatus:
 # ---------------------------------------------------------------------------
 
 class TestSessionEnd:
+    def test_synthetic_missing_capability_rejects_before_every_finalization_side_effect(
+        self,
+        client,
+        monkeypatch,
+    ):
+        _configure_voice_lab_finalization(monkeypatch)
+        with (
+            patch("app.gateway.routers.sophia._read_session_recap") as mock_read_recap,
+            patch("app.gateway.routers.sophia._persist_end_session_transcript") as mock_transcript,
+            patch("app.gateway.routers.sophia._write_session_recap") as mock_write_recap,
+            patch(
+                "app.gateway.routers.sophia._finalize_synthetic_session_atomically"
+            ) as mock_synthetic_record,
+            patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue,
+        ):
+            response = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                json={"session_id": "sess-lab", "thread_id": "thread-lab"},
+            )
+
+        assert response.status_code == 401
+        assert response.json()["detail"] == {"code": "voice_lab_capability_missing"}
+        mock_read_recap.assert_not_called()
+        mock_transcript.assert_not_called()
+        mock_write_recap.assert_not_called()
+        mock_synthetic_record.assert_not_called()
+        mock_queue.assert_not_called()
+
+    def test_synthetic_wrong_audience_rejects_before_every_finalization_side_effect(
+        self,
+        client,
+        monkeypatch,
+    ):
+        _configure_voice_lab_finalization(monkeypatch)
+        with (
+            patch(
+                "app.gateway.routers.sophia._finalize_synthetic_session_atomically"
+            ) as mock_synthetic_record,
+            patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue,
+        ):
+            response = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers={
+                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token(
+                        aud="sophia-voice-runtime"
+                    )
+                },
+                json={"session_id": "sess-lab", "thread_id": "thread-lab"},
+            )
+
+        assert response.status_code == 403
+        assert response.json()["detail"] == {"code": "voice_lab_capability_wrong_audience"}
+        mock_synthetic_record.assert_not_called()
+        mock_queue.assert_not_called()
+
+    def test_synthetic_finalization_persists_only_isolated_correlation_record(
+        self,
+        client,
+        tmp_path,
+        monkeypatch,
+    ):
+        _configure_voice_lab_finalization(monkeypatch)
+        monkeypatch.setenv("SOPHIA_VOICE_LAB_KILL_SWITCH", "true")
+        store = SessionStore(tmp_path / "session-store")
+        store.create(_synthetic_voice_lab_session_record("sess-lab", "thread-lab"))
+        payload = {
+            "session_id": "sess-lab",
+            "thread_id": "thread-lab",
+            "started_at": "2026-08-23T10:00:00+00:00",
+            "ended_at": "2026-08-23T10:02:00+00:00",
+            "turn_count": 2,
+            "base_revision": 0,
+            "offer_debrief": True,
+            "messages": [
+                {
+                    "id": "synthetic-input-1",
+                    "role": "user",
+                    "content": "private synthetic transcript marker",
+                    "turn_id": "turn-1",
+                    "provider_event_id": "input-final-1",
+                    "source": "voice",
+                },
+                {
+                    "id": "synthetic-output-1",
+                    "role": "assistant",
+                    "content": "private synthetic reply marker",
+                    "turn_id": "turn-1",
+                    "provider_event_id": "output-final-1",
+                    "source": "voice",
+                },
+            ],
+            "recap_artifacts": {
+                "takeaway": "must not be persisted",
+                "memory_candidates": [{"text": "must not reach memory"}],
+            },
+        }
+        with (
+            patch("app.gateway.routers.sophia.USERS_DIR", tmp_path),
+            patch("app.gateway.routers.sophia._session_store", store),
+            patch("app.gateway.routers.sophia._read_session_recap") as mock_read_recap,
+            patch("app.gateway.routers.sophia._persist_end_session_transcript") as mock_transcript,
+            patch("app.gateway.routers.sophia._write_session_recap") as mock_write_recap,
+            patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue,
+            patch("app.gateway.inactivity_watcher.unregister_thread") as mock_unregister,
+        ):
+            response = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers={
+                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
+                },
+                json=payload,
+            )
+
+        assert response.status_code == 202
+        response_payload = response.json()
+        assert response_payload["status"] == "synthetic_isolated"
+        assert response_payload["session_id"] == "sess-lab"
+        assert response_payload["ended_at"] == response_payload["finalized_at"]
+        finalized_at = datetime.fromisoformat(
+            response_payload["finalized_at"].replace("Z", "+00:00")
+        )
+        retention_expires_at = datetime.fromisoformat(
+            response_payload["retention_expires_at"].replace("Z", "+00:00")
+        )
+        assert response_payload["finalized_at"].endswith("Z")
+        assert response_payload["retention_hours"] == 24
+        assert response_payload["retention_anchor"] == "finalized_at"
+        assert retention_expires_at - finalized_at == timedelta(hours=24)
+        assert response_payload["test_run_id"] == "run-finalize-001"
+        assert response_payload["exclusions"]["memory"] is True
+        assert "transcript_content" not in response_payload["exclusions"]
+        canonical = response_payload["canonical_transcript"]
+        assert canonical["message_revision"] == 1
+        assert canonical["message_count"] == 2
+        assert canonical["input_message_count"] == 1
+        assert canonical["output_message_count"] == 1
+        assert canonical["raw_audio_excluded"] is True
+        assert canonical["finalized_at"] == response_payload["finalized_at"]
+        assert canonical["retention_hours"] == 24
+        assert canonical["retention_anchor"] == "finalized_at"
+        assert canonical["retention_expires_at"] == response_payload["retention_expires_at"]
+        assert [message["content"] for message in canonical["messages"]] == [
+            "private synthetic transcript marker",
+            "private synthetic reply marker",
+        ]
+        assert len(canonical["sha256"]) == 64
+        assert response_payload["evidence_receipt"] == {
+            "storage": "postgres_session",
+            "object_path": (
+                "public.sophia_sessions/sess-lab/metadata/"
+                "synthetic_voice_lab/finalization_receipt"
+            ),
+            "sha256": response_payload["evidence_receipt"]["sha256"],
+        }
+        mock_read_recap.assert_not_called()
+        mock_transcript.assert_not_called()
+        mock_write_recap.assert_not_called()
+        mock_queue.assert_not_called()
+        mock_unregister.assert_called_once_with("thread-lab")
+        ended_record = store.get("voice-lab-user-1", "sess-lab")
+        assert ended_record is not None
+        assert ended_record.status == "ended"
+        assert ended_record.ended_at == response_payload["finalized_at"]
+        ended_synthetic = ended_record.metadata["synthetic_voice_lab"]
+        assert ended_synthetic["retention_anchor"] == "finalized_at"
+        assert ended_synthetic["finalized_at"] == response_payload["finalized_at"]
+        assert (
+            ended_synthetic["retention_expires_at"]
+            == response_payload["retention_expires_at"]
+        )
+        assert ended_synthetic["provider_expires_at"] == VOICE_LAB_PROVIDER_EXPIRES_AT
+        stored_receipt = ended_synthetic["finalization_receipt"]
+        assert stored_receipt["schema"] == (
+            "sophia_voice_lab_postgres_finalization_receipt_v1"
+        )
+        assert stored_receipt["sha256"] == response_payload["evidence_receipt"][
+            "sha256"
+        ]
+        assert stored_receipt["transcript_sha256"] == canonical["sha256"]
+        assert stored_receipt["capability_jti_sha256"] == hashlib.sha256(
+            b"jti-finalize-001"
+        ).hexdigest()
+        assert not (
+            tmp_path / "voice-lab-user-1" / "synthetic_voice_lab" / "finalizations"
+        ).exists()
+        assert not (tmp_path / "voice-lab-user-1" / "recaps").exists()
+        stored_messages = store.list_messages("voice-lab-user-1", "sess-lab")
+        assert len(stored_messages) == 2
+        assert stored_messages[0].metadata["test_run_id"] == "run-finalize-001"
+        assert stored_messages[0].metadata["offline_pipeline_excluded"] is True
+        assert stored_messages[0].metadata["finalized_at"] == response_payload["finalized_at"]
+        assert stored_messages[0].metadata["retention_expires_at"] == response_payload["retention_expires_at"]
+
+    def test_synthetic_finalization_rejects_elapsed_provisional_deadline_before_transcript_write(
+        self,
+        client,
+        tmp_path,
+        monkeypatch,
+    ):
+        _configure_voice_lab_finalization(monkeypatch)
+        store = SessionStore(tmp_path / "session-store")
+        record = _synthetic_voice_lab_session_record("sess-lab", "thread-lab")
+        created_at = datetime.now(UTC) - timedelta(
+            hours=24,
+            milliseconds=1,
+        )
+        synthetic = dict(record.metadata["synthetic_voice_lab"])
+        synthetic["retention_expires_at"] = (
+            created_at + timedelta(hours=24)
+        ).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+        record = record.model_copy(
+            update={
+                "created_at": created_at.isoformat(),
+                "metadata": {
+                    **record.metadata,
+                    "synthetic_voice_lab": synthetic,
+                }
+            }
+        )
+        store.create(record)
+        payload = {
+            "session_id": "sess-lab",
+            "thread_id": "thread-lab",
+            "base_revision": 0,
+            "messages": [
+                {
+                    "id": "expired-input",
+                    "role": "user",
+                    "content": "must never be persisted after provisional expiry",
+                    "turn_id": "turn-expired",
+                }
+            ],
+        }
+        with (
+            patch("app.gateway.routers.sophia.USERS_DIR", tmp_path),
+            patch("app.gateway.routers.sophia._session_store", store),
+            patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue,
+        ):
+            response = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers={
+                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
+                },
+                json=payload,
+            )
+
+        assert response.status_code == 410
+        assert response.json()["detail"] == {
+            "code": "voice_lab_provisional_retention_expired"
+        }
+        unchanged = store.get("voice-lab-user-1", "sess-lab")
+        assert unchanged is not None
+        assert unchanged.status == "open"
+        assert unchanged.message_revision == 0
+        assert store.list_messages("voice-lab-user-1", "sess-lab") == []
+        assert not (
+            tmp_path
+            / "voice-lab-user-1"
+            / "synthetic_voice_lab"
+            / "finalizations"
+        ).exists()
+        mock_queue.assert_not_called()
+
+    def test_synthetic_finalization_is_idempotent_and_conflicting_run_reuse_is_rejected(
+        self,
+        client,
+        tmp_path,
+        monkeypatch,
+    ):
+        _configure_voice_lab_finalization(monkeypatch)
+        store = SessionStore(tmp_path / "session-store")
+        original_record = _synthetic_voice_lab_session_record(
+            "sess-lab", "thread-lab"
+        )
+        store.create(original_record)
+        headers = {
+            "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
+        }
+        payload = {
+            "session_id": "sess-lab",
+            "thread_id": "thread-lab",
+            "ended_at": "2026-08-23T10:02:00+00:00",
+        }
+        with (
+            patch("app.gateway.routers.sophia.USERS_DIR", tmp_path),
+            patch("app.gateway.routers.sophia._session_store", store),
+            patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue,
+            patch("app.gateway.inactivity_watcher.unregister_thread"),
+        ):
+            first = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers=headers,
+                json=payload,
+            )
+            duplicate = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers=headers,
+                json={**payload, "ended_at": "2026-08-23T10:03:00+00:00"},
+            )
+            store.create(
+                original_record.model_copy(
+                    update={"session_id": "different-session"}
+                )
+            )
+            conflict = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers=headers,
+                json={**payload, "session_id": "different-session"},
+            )
+
+        assert first.status_code == 202
+        assert duplicate.status_code == 202
+        assert duplicate.json()["ended_at"] == first.json()["ended_at"]
+        assert duplicate.json()["canonical_transcript"] == first.json()["canonical_transcript"]
+        assert duplicate.json()["retention_expires_at"] == first.json()["retention_expires_at"]
+        assert conflict.status_code == 409
+        assert conflict.json()["detail"] == {
+            "code": "voice_lab_session_cleanup_binding_mismatch"
+        }
+        mock_queue.assert_not_called()
+
+    def test_synthetic_terminal_retry_cannot_mutate_canonical_transcript(
+        self,
+        client,
+        tmp_path,
+        monkeypatch,
+    ):
+        _configure_voice_lab_finalization(monkeypatch)
+        store = SessionStore(tmp_path / "session-store")
+        store.create(_synthetic_voice_lab_session_record("sess-lab", "thread-lab"))
+        headers = {
+            "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
+        }
+        payload = {
+            "session_id": "sess-lab",
+            "thread_id": "thread-lab",
+            "base_revision": 0,
+            "messages": [
+                {
+                    "id": "input-1",
+                    "role": "user",
+                    "content": "original synthetic input",
+                    "turn_id": "turn-1",
+                },
+                {
+                    "id": "output-1",
+                    "role": "assistant",
+                    "content": "original synthetic output",
+                    "turn_id": "turn-1",
+                },
+            ],
+        }
+        with (
+            patch("app.gateway.routers.sophia.USERS_DIR", tmp_path),
+            patch("app.gateway.routers.sophia._session_store", store),
+            patch("app.gateway.inactivity_watcher.unregister_thread"),
+        ):
+            first = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers=headers,
+                json=payload,
+            )
+            exact_replay = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers=headers,
+                json={**payload, "base_revision": 1},
+            )
+            before_conflict = store.get("voice-lab-user-1", "sess-lab")
+            before_messages = store.list_messages("voice-lab-user-1", "sess-lab")
+            changed = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers=headers,
+                json={
+                    **payload,
+                    "base_revision": 1,
+                    "messages": [
+                        {
+                            **payload["messages"][0],
+                            "content": "mutated after terminal finalization",
+                        },
+                        payload["messages"][1],
+                    ],
+                },
+            )
+
+        assert first.status_code == 202
+        assert exact_replay.status_code == 202
+        assert exact_replay.json()["canonical_transcript"]["sha256"] == first.json()[
+            "canonical_transcript"
+        ]["sha256"]
+        assert changed.status_code == 409
+        assert changed.json()["detail"] == {
+            "code": "voice_lab_finalization_transcript_conflict"
+        }
+        after_conflict = store.get("voice-lab-user-1", "sess-lab")
+        after_messages = store.list_messages("voice-lab-user-1", "sess-lab")
+        assert before_conflict is not None and after_conflict is not None
+        assert after_conflict.message_revision == before_conflict.message_revision == 1
+        assert [message.model_dump() for message in after_messages] == [
+            message.model_dump() for message in before_messages
+        ]
+
+    def test_synthetic_finalization_rejects_cross_run_session_before_receipt_or_lifecycle(
+        self,
+        client,
+        tmp_path,
+        monkeypatch,
+    ):
+        _configure_voice_lab_finalization(monkeypatch)
+        store = SessionStore(tmp_path / "session-store")
+        store.create(
+            _synthetic_voice_lab_session_record(
+                "sess-run-b",
+                "thread-run-b",
+                test_run_id="run-B",
+            )
+        )
+        with (
+            patch("app.gateway.routers.sophia.USERS_DIR", tmp_path),
+            patch("app.gateway.routers.sophia._session_store", store),
+            patch(
+                "app.gateway.routers.sophia._finalize_synthetic_session_atomically"
+            ) as mock_persist,
+            patch("app.gateway.inactivity_watcher.unregister_thread") as mock_unregister,
+        ):
+            response = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers={
+                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token(
+                        test_run_id="run-A"
+                    )
+                },
+                json={"session_id": "sess-run-b", "thread_id": "thread-run-b"},
+            )
+
+        assert response.status_code == 409
+        assert response.json()["detail"] == {
+            "code": "voice_lab_session_binding_mismatch"
+        }
+        mock_persist.assert_not_called()
+        mock_unregister.assert_not_called()
+        record = store.get("voice-lab-user-1", "sess-run-b")
+        assert record is not None and record.status == "open"
+
+    def test_synthetic_finalization_does_not_claim_success_when_lifecycle_update_fails(
+        self,
+        client,
+        tmp_path,
+        monkeypatch,
+    ):
+        _configure_voice_lab_finalization(monkeypatch)
+        store = SessionStore(tmp_path / "session-store")
+        store.create(_synthetic_voice_lab_session_record("sess-lab", "thread-lab"))
+        with (
+            patch("app.gateway.routers.sophia.USERS_DIR", tmp_path),
+            patch("app.gateway.routers.sophia._session_store", store),
+            patch.object(
+                store,
+                "finalize_synthetic_session",
+                side_effect=RuntimeError("injected atomic finalization failure"),
+            ),
+            patch("app.gateway.inactivity_watcher.unregister_thread") as mock_unregister,
+            patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue,
+        ):
+            response = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers={
+                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
+                },
+                json={"session_id": "sess-lab", "thread_id": "thread-lab"},
+            )
+
+        assert response.status_code == 503
+        assert response.json()["detail"] == {
+            "code": "voice_lab_finalization_transaction_failed"
+        }
+        mock_unregister.assert_not_called()
+        mock_queue.assert_not_called()
+        record = store.get("voice-lab-user-1", "sess-lab")
+        assert record is not None and record.status == "open"
+
+    def test_synthetic_finalization_uses_postgres_when_object_storage_is_unavailable(
+        self,
+        client,
+        tmp_path,
+        monkeypatch,
+    ):
+        _configure_voice_lab_finalization(monkeypatch)
+        monkeypatch.setenv("SOPHIA_VOICE_LAB_DURABLE_EVIDENCE_REQUIRED", "true")
+        store = SessionStore(tmp_path / "session-store")
+        store.create(_synthetic_voice_lab_session_record("sess-lab", "thread-lab"))
+        with (
+            patch("app.gateway.routers.sophia.USERS_DIR", tmp_path),
+            patch("app.gateway.routers.sophia._session_store", store),
+            patch(
+                "deerflow.sophia.storage.supabase_artifact_store.is_configured",
+                return_value=False,
+            ),
+            patch("app.gateway.routers.sophia._queue_offline_pipeline") as mock_queue,
+            patch("app.gateway.inactivity_watcher.unregister_thread") as mock_unregister,
+        ):
+            response = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers={
+                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
+                },
+                json={"session_id": "sess-lab", "thread_id": "thread-lab"},
+            )
+
+        assert response.status_code == 202
+        assert response.json()["evidence_receipt"]["storage"] == "postgres_session"
+        record = store.get("voice-lab-user-1", "sess-lab")
+        assert record is not None
+        assert record.status == "ended"
+        assert not (
+            tmp_path / "voice-lab-user-1" / "synthetic_voice_lab" / "finalizations"
+        ).exists()
+        mock_queue.assert_not_called()
+        mock_unregister.assert_called_once_with("thread-lab")
+
+    def test_synthetic_production_finalization_returns_immutable_postgres_receipt(
+        self,
+        client,
+        tmp_path,
+        monkeypatch,
+    ):
+        _configure_voice_lab_finalization(monkeypatch)
+        monkeypatch.setenv("SOPHIA_VOICE_LAB_DURABLE_EVIDENCE_REQUIRED", "true")
+        store = SessionStore(tmp_path / "session-store")
+        store.create(_synthetic_voice_lab_session_record("sess-lab", "thread-lab"))
+        with (
+            patch("app.gateway.routers.sophia.USERS_DIR", tmp_path),
+            patch("app.gateway.routers.sophia._session_store", store),
+            patch(
+                "deerflow.sophia.storage.supabase_artifact_store.is_configured",
+                return_value=True,
+            ),
+            patch(
+                "deerflow.sophia.storage.supabase_artifact_store.create_artifact_object_if_absent",
+                return_value="created",
+            ) as mock_create_receipt,
+            patch("app.gateway.inactivity_watcher.unregister_thread"),
+        ):
+            response = client.post(
+                "/api/sophia/voice-lab-user-1/end-session",
+                headers={
+                    "X-Sophia-Voice-Lab-Capability": _voice_lab_finalization_token()
+                },
+                json={"session_id": "sess-lab", "thread_id": "thread-lab"},
+            )
+
+        assert response.status_code == 202
+        receipt = response.json()["evidence_receipt"]
+        assert receipt["storage"] == "postgres_session"
+        assert receipt["object_path"] == (
+            "public.sophia_sessions/sess-lab/metadata/"
+            "synthetic_voice_lab/finalization_receipt"
+        )
+        assert len(receipt["sha256"]) == 64
+        mock_create_receipt.assert_not_called()
+
     def test_returns_202(self, client, tmp_path):
         store = SessionStore(tmp_path)
         store.create(

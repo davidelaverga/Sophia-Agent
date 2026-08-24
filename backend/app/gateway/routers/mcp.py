@@ -3,13 +3,18 @@ import logging
 from pathlib import Path
 from typing import Literal
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel, Field
 
+from app.gateway.auth import require_authenticated_user
 from deerflow.config.extensions_config import ExtensionsConfig, get_extensions_config, reload_extensions_config
 
 logger = logging.getLogger(__name__)
-router = APIRouter(prefix="/api", tags=["mcp"])
+router = APIRouter(
+    prefix="/api",
+    tags=["mcp"],
+    dependencies=[Depends(require_authenticated_user)],
+)
 
 
 class McpOAuthConfigResponse(BaseModel):
@@ -100,6 +105,7 @@ async def get_mcp_configuration() -> McpConfigResponse:
     response_model=McpConfigResponse,
     summary="Update MCP Configuration",
     description="Update Model Context Protocol (MCP) server configurations and save to file.",
+    dependencies=[Depends(require_authenticated_user)],
 )
 async def update_mcp_configuration(request: McpConfigUpdateRequest) -> McpConfigResponse:
     """Update the MCP configuration.

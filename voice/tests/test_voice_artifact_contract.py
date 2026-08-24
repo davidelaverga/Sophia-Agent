@@ -336,8 +336,12 @@ async def test_create_agent_wires_llm_to_stream_custom_events(monkeypatch) -> No
     assert agent.sent_events == [payload]
 
 
-def test_start_session_binds_runtime_context_to_agent_llm() -> None:
+def test_start_session_binds_runtime_context_to_agent_llm(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     bound_context: dict[str, object] = {}
+
+    monkeypatch.setattr(server, "get_settings", lambda: make_settings())
 
     class FakeLLM:
         def attach_call_emitter(self, emitter) -> None:  # noqa: ANN001
