@@ -10,12 +10,17 @@ const ADVISORY_LOCK_SQL = `SELECT pg_catalog.pg_advisory_xact_lock(
   pg_catalog.hashtextextended('sophia-voice-lab-d02-role-v1', 731946)
 )`;
 
+const SUPABASE_PLATFORM_SCHEMA_NAMES = `
+  'auth', 'extensions', 'graphql', 'graphql_public', 'net', 'pgbouncer',
+  'realtime', 'storage', 'supabase_functions', 'vault'`;
+
 const APPLICATION_SCHEMAS = `
   SELECT namespace.oid, namespace.nspname
     FROM pg_catalog.pg_namespace namespace
    WHERE namespace.nspname <> 'public'
      AND namespace.nspname <> 'information_schema'
      AND namespace.nspname !~ '^pg_'
+     AND namespace.nspname NOT IN (${SUPABASE_PLATFORM_SCHEMA_NAMES})
      AND (
        NOT EXISTS (
          SELECT 1 FROM pg_catalog.pg_extension extension_row
@@ -49,6 +54,11 @@ const APPLICATION_SCHEMAS = `
             )
        )
      )`;
+
+const SUPABASE_PLATFORM_SCHEMAS = `
+  SELECT namespace.oid, namespace.nspname
+    FROM pg_catalog.pg_namespace namespace
+   WHERE namespace.nspname IN (${SUPABASE_PLATFORM_SCHEMA_NAMES})`;
 
 const ROLE_CATALOG_SQL = `
   SELECT /* voice_lab_d02_role_catalog */
@@ -274,6 +284,14 @@ const REVOKE_DIRECT_AUTHORITY_SQL = `
 
 const AUTHORITY_ATTESTATION_SQL = `
   WITH application_schemas AS (${APPLICATION_SCHEMAS}),
+  platform_schemas AS (${SUPABASE_PLATFORM_SCHEMAS}),
+  platform_schema_authority AS (
+    SELECT schema_row.oid
+      FROM platform_schemas schema_row
+     WHERE pg_catalog.has_schema_privilege(
+             pg_catalog.to_regrole($1), schema_row.oid, 'USAGE,CREATE'
+           )
+  ),
   cross_schema_authority AS (
     SELECT schema_row.oid
       FROM application_schemas schema_row
@@ -381,6 +399,10 @@ const AUTHORITY_ATTESTATION_SQL = `
   SELECT /* voice_lab_d02_role_authority_attestation */
          (SELECT count(*)::integer FROM application_schemas)
            AS application_schema_count,
+         (SELECT count(*)::integer FROM platform_schemas)
+           AS platform_schema_count,
+         NOT EXISTS (SELECT 1 FROM platform_schema_authority)
+           AS platform_schema_authority_denied,
          NOT EXISTS (SELECT 1 FROM cross_schema_authority)
            AS cross_schema_authority_denied,
          NOT EXISTS (SELECT 1 FROM public_raw_authority)
@@ -539,6 +561,9 @@ function exactAuthority(result) {
     result.rows.length !== 1
     || !Number.isInteger(Number(row.application_schema_count))
     || Number(row.application_schema_count) < 0
+    || !Number.isInteger(Number(row.platform_schema_count))
+    || Number(row.platform_schema_count) < 0
+    || row.platform_schema_authority_denied !== true
     || row.cross_schema_authority_denied !== true
     || row.public_raw_authority_denied !== true
     || row.public_effective_routine_authority_denied !== true
@@ -730,6 +755,8 @@ export async function provisionVoiceLabD02Role(
       created,
       credential_action: created ? 'created' : 'preserved',
       application_schema_count: Number(authority.application_schema_count),
+      platform_schema_count: Number(authority.platform_schema_count),
+      platform_schema_authority_denied: true,
       authority_attested: true,
       login_attested: true,
       membership_attested: !supportRequired,

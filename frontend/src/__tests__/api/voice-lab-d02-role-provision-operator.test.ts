@@ -59,6 +59,8 @@ class FakeClient {
     private readonly roleResponses: Array<Array<Record<string, unknown>>>,
     private readonly authority = {
       application_schema_count: 3,
+      platform_schema_count: 7,
+      platform_schema_authority_denied: true,
       cross_schema_authority_denied: true,
       public_raw_authority_denied: true,
       public_effective_routine_authority_denied: true,
@@ -188,6 +190,8 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
       created: true,
       credential_action: 'created',
       application_schema_count: 3,
+      platform_schema_count: 7,
+      platform_schema_authority_denied: true,
       authority_attested: true,
       login_attested: true,
     });
@@ -227,6 +231,9 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
     expect(sql).toContain("acl.privilege_type = 'EXECUTE'");
     expect(sql).toContain('acl.grantee = pg_catalog.to_regrole($1)');
     expect(sql).toContain('voice_lab_d02_role_pre_migration_footprint');
+    expect(sql).toContain("namespace.nspname NOT IN (");
+    expect(sql).toContain("'auth', 'extensions', 'graphql'");
+    expect(sql).toContain('platform_schema_authority_denied');
     expect(sql).toContain('membership.member = role.oid');
     expect(sql).toContain('membership.roleid = role.oid');
     expect(sql).toContain("grantor_role.rolname = 'supabase_admin'");
@@ -382,6 +389,8 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
       [[{ ...exactRole }], [{ ...exactRole }]],
       {
         application_schema_count: 4,
+        platform_schema_count: 7,
+        platform_schema_authority_denied: true,
         cross_schema_authority_denied: false,
         public_raw_authority_denied: true,
         public_effective_routine_authority_denied: true,
@@ -410,6 +419,8 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
         [roleRowsBeforeDdl],
         {
           application_schema_count: 4,
+          platform_schema_count: 7,
+          platform_schema_authority_denied: true,
           cross_schema_authority_denied: true,
           public_raw_authority_denied: true,
           public_effective_routine_authority_denied: false,
@@ -437,6 +448,31 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
         .toBe(false);
       expect(client.calls.flatMap(({ values }) => values)).not.toContain(ROLE_PASSWORD);
     }
+  });
+
+  it('fails closed when the role can use a Supabase platform schema', async () => {
+    const client = new FakeClient(
+      [[{ ...exactRole }], [{ ...exactRole }]],
+      {
+        application_schema_count: 0,
+        platform_schema_count: 7,
+        platform_schema_authority_denied: false,
+        cross_schema_authority_denied: true,
+        public_raw_authority_denied: true,
+        public_effective_routine_authority_denied: true,
+        future_direct_authority_denied: true,
+      },
+    );
+
+    await expect(provisionVoiceLabD02Role(
+      loadD02RoleProvisionConfig(env()),
+      {
+        pool: new FakePool(client),
+        gatewayPoolFactory: () => new FakeGatewayPool(),
+      },
+    )).rejects.toMatchObject({ code: 'd02_role_authority_drift' });
+
+    expect(client.calls.map(({ text }) => text)).toContain('ROLLBACK');
   });
 
   it('fails typed when the supplied password cannot open an exact Gateway session', async () => {
