@@ -11,6 +11,7 @@ vi.mock('@/server/better-auth', () => ({ getSession: serverContext.getSession })
 import goldenVector from '../../../../testdata/voice_lab_capability_v1.json';
 
 import {
+  assertNoVoiceLabRequestBody,
   assertVoiceLabEnabled,
   getVoiceLabControlGates,
   getVoiceLabSyntheticIsolationPolicy,
@@ -95,6 +96,37 @@ describe('voice lab capability contract', () => {
 
   afterEach(() => {
     process.env = { ...originalEnv };
+  });
+
+  it('accepts an inbound server stream only when the wire length is explicitly zero', () => {
+    const serverWrappedEmptyRequest = new Request('https://www.sophia-ei.com/control', {
+      method: 'POST',
+      headers: { 'content-length': '0' },
+      body: new ReadableStream(),
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+
+    expect(serverWrappedEmptyRequest.body).not.toBeNull();
+    expect(() => assertNoVoiceLabRequestBody(serverWrappedEmptyRequest)).not.toThrow();
+  });
+
+  it('rejects nonzero and transfer-encoded control request bodies', () => {
+    expectCode(
+      () => assertNoVoiceLabRequestBody(new Request('https://www.sophia-ei.com/control', {
+        method: 'POST',
+        headers: { 'content-length': '1' },
+        body: 'x',
+      })),
+      'voice_lab_request_body_not_allowed',
+    );
+    expectCode(
+      () => assertNoVoiceLabRequestBody(new Request('https://www.sophia-ei.com/control', {
+        method: 'POST',
+        headers: { 'transfer-encoding': 'chunked' },
+        body: 'x',
+      })),
+      'voice_lab_request_body_not_allowed',
+    );
   });
 
   it('accepts a valid short-lived grant and mints a narrower gateway token', () => {

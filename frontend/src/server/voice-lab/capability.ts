@@ -122,9 +122,10 @@ export class VoiceLabCapabilityError extends Error {
 export function assertNoVoiceLabRequestBody(request: Request): void {
   const contentLength = request.headers.get('content-length');
   if (
-    request.body !== null
-    || request.headers.has('transfer-encoding')
-    || (contentLength !== null && contentLength.trim() !== '0')
+    request.headers.has('transfer-encoding')
+    || (contentLength === null
+      ? request.body !== null
+      : contentLength.trim() !== '0')
   ) {
     throw new VoiceLabCapabilityError('voice_lab_request_body_not_allowed', 400);
   }
