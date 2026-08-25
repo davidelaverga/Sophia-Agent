@@ -490,7 +490,11 @@ export async function probeTestAuth(config: VoiceLabConfig): Promise<Record<stri
     const codec = new CapabilityCodec(config.grantSecret, config.capabilityIssuer, config.capabilityTtlSeconds);
     const providerExpiresAt = new Date(Date.now() + config.maxRunSeconds * 1_000).toISOString();
     const minted = codec.mint({ aud: "sophia-voice-lab-frontend", sub: config.principalId, principal_id: config.principalId, test_run_id: testRunId, cleanup_obligation_id: cleanupObligationId, synthetic: true, environment: config.environment, retention_hours: 24, provider_expires_at: providerExpiresAt, allowed_ops: ["auth:readiness"], expected_deployment: target.expectedDeployment });
-    const response = await fetch(endpoint, { method: "POST", redirect: "error", signal: AbortSignal.timeout(5_000), headers: { accept: "application/json", "X-Sophia-Voice-Lab-Capability": minted.token } });
+    // The protected frontend performs a database-backed, signed readiness
+    // attestation. A fresh cross-region serverless invocation can exceed five
+    // seconds even when the bounded response is healthy, so use the same
+    // fifteen-second ceiling as the other authenticated frontend operations.
+    const response = await fetch(endpoint, { method: "POST", redirect: "error", signal: AbortSignal.timeout(15_000), headers: { accept: "application/json", "X-Sophia-Voice-Lab-Capability": minted.token } });
     const payload = response.ok ? await response.json() as Record<string, unknown> : {};
     const readinessKeys = new Set(['schema', 'ok', 'ready', 'provisioned', 'principal_record_present', 'principal_record_provisioned', 'provider_account_provisioned', 'provider_account_count', 'active_session_count', 'voice_lab_enabled', 'kill_switch_engaged', 'provisioning_enabled', 'auth_ledger_ready', 'auth_ledger_migration_sha256', 'frontend_build', 'test_run_id', 'cleanup_obligation_id', 'environment', 'expected_deployment', 'deployment_identity', 'capability_jti_sha256', 'principal_id_sha256']);
     const exactShape = Object.keys(payload).length === readinessKeys.size && Object.keys(payload).every((key) => readinessKeys.has(key));
