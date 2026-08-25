@@ -470,6 +470,16 @@ describe('principal bootstrap readiness', () => {
     }
   });
 
+  it('keeps the signed cross-region readiness probe bounded at fifteen seconds', async () => {
+    const config = targetConfig({ SOPHIA_VOICE_LAB_PROVISIONING_ENABLED: 'false' });
+    const timeout = vi.spyOn(AbortSignal, 'timeout');
+    vi.stubGlobal('fetch', readinessFetch(config, 'provisioned'));
+
+    await expect(probeTestAuth(config)).resolves.toMatchObject({ ok: true, status: 'verified' });
+    expect(timeout).toHaveBeenCalledWith(15_000);
+    vi.unstubAllGlobals();
+  });
+
   it.each([
     ['closed bootstrap while disabled', true, true, 'unprovisioned', false, 'provisioning_required', false],
     ['closed provisioned while disabled', true, false, 'provisioned', false, 'verified', false],
