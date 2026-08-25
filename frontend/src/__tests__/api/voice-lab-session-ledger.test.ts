@@ -1316,6 +1316,12 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
       expect(sql).toContain('membership.set_option = false');
       expect(sql).toContain('WITH RECURSIVE inherited_roles');
     }
+    const d02GlobalFunctionAuthorityQuery = database.query.mock.calls
+      .map(([sql]) => String(sql))
+      .find((sql) => sql.includes('voice_lab_d02_global_function_authority'));
+    expect(d02GlobalFunctionAuthorityQuery).toMatch(
+      /NOT EXISTS[\s\S]*dependency\.classid = 'pg_proc'::regclass[\s\S]*dependency\.deptype = 'e'/,
+    );
   });
 
   it('rejects every D02 catalog, authority-role, and least-ACL drift seam', async () => {
