@@ -260,10 +260,29 @@ def _gateway_protected_plane_readiness() -> dict[str, object]:
 
         try:
             voice_lab_d02_settlement_router._receipt_private_key()
-            voice_lab_d02_settlement_router._receipt_public_keyring()
-            voice_lab_d02_settlement_router.assert_d02_gateway_database_ready()
         except (HTTPException, KeyError, ValueError) as exc:
-            raise ValueError("gateway_voice_lab_d02_signing_configuration_invalid") from exc
+            raise ValueError(
+                "gateway_voice_lab_d02_private_signing_configuration_invalid"
+            ) from exc
+        try:
+            voice_lab_d02_settlement_router._receipt_public_keyring()
+        except (HTTPException, KeyError, ValueError) as exc:
+            raise ValueError(
+                "gateway_voice_lab_d02_public_signing_configuration_invalid"
+            ) from exc
+        try:
+            voice_lab_d02_settlement_router.assert_d02_gateway_database_ready()
+        except HTTPException as exc:
+            detail_code = _gateway_startup_failure_code(exc)
+            if detail_code.startswith("voice_lab_d02_gateway_database_"):
+                raise ValueError(f"gateway_{detail_code}") from exc
+            raise ValueError(
+                "gateway_voice_lab_d02_gateway_database_configuration_invalid"
+            ) from exc
+        except (KeyError, ValueError) as exc:
+            raise ValueError(
+                "gateway_voice_lab_d02_gateway_database_configuration_invalid"
+            ) from exc
 
     if lab_enabled:
         try:

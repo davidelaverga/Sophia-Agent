@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 import app.gateway.routers.sessions as sessions_router
@@ -209,6 +210,75 @@ def test_gateway_startup_rejects_disabled_production_without_d02_bundle(
     ):
         with TestClient(app):
             pass
+
+
+def _configure_production_d02_readiness(monkeypatch: pytest.MonkeyPatch) -> None:
+    recovery = importlib.import_module("app.gateway.routers.voice_lab_recovery")
+    monkeypatch.setenv("RENDER", "true")
+    monkeypatch.setenv("RENDER_GIT_COMMIT", "a" * 40)
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_ENABLED", "false")
+    monkeypatch.setenv(
+        "SOPHIA_VOICE_INTERNAL_AUTH_SECRET",
+        "gateway-internal-secret-at-least-thirty-two-bytes",
+    )
+    for index, name in enumerate(D02_REQUIRED_ENV):
+        monkeypatch.setenv(name, f"d02-readiness-value-{index}-" + chr(97 + index) * 40)
+    monkeypatch.setattr(
+        recovery,
+        "_auth_tombstone_keyring",
+        lambda: ("v1", {"v1": b"test-tombstone-key-" + b"z" * 40}),
+    )
+
+
+def test_gateway_startup_reports_private_d02_signing_failure(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway_app = importlib.import_module("app.gateway.app")
+    settlement = importlib.import_module(
+        "app.gateway.routers.voice_lab_d02_settlement"
+    )
+    _configure_production_d02_readiness(monkeypatch)
+    monkeypatch.setattr(gateway_app, "validate_expected_supabase_project", lambda: None)
+    monkeypatch.setattr(
+        settlement,
+        "_receipt_private_key",
+        lambda: (_ for _ in ()).throw(ValueError("private key detail")),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="^gateway_voice_lab_d02_private_signing_configuration_invalid$",
+    ):
+        gateway_app._gateway_protected_plane_readiness()
+
+
+def test_gateway_startup_preserves_safe_d02_database_failure_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    gateway_app = importlib.import_module("app.gateway.app")
+    settlement = importlib.import_module(
+        "app.gateway.routers.voice_lab_d02_settlement"
+    )
+    _configure_production_d02_readiness(monkeypatch)
+    monkeypatch.setattr(gateway_app, "validate_expected_supabase_project", lambda: None)
+    monkeypatch.setattr(settlement, "_receipt_private_key", lambda: (object(), "kid"))
+    monkeypatch.setattr(settlement, "_receipt_public_keyring", lambda: {"kid": object()})
+    monkeypatch.setattr(
+        settlement,
+        "assert_d02_gateway_database_ready",
+        lambda: (_ for _ in ()).throw(
+            HTTPException(
+                status_code=503,
+                detail={"code": "voice_lab_d02_gateway_database_catalog_invalid"},
+            )
+        ),
+    )
+
+    with pytest.raises(
+        ValueError,
+        match="^gateway_voice_lab_d02_gateway_database_catalog_invalid$",
+    ):
+        gateway_app._gateway_protected_plane_readiness()
 
 
 def test_gateway_mounts_legacy_builder_completion_stream_behind_authentication():
