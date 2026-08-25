@@ -71,6 +71,7 @@ logger = logging.getLogger(__name__)
 _ARTIFACT_UPSERT_AUTH_PATCH = "artifact_upsert_auth_v2"
 _DECK_QUALITY_READINESS_ATTR = "_deck_quality_readiness"
 _DEPLOYMENT_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
+_SAFE_STARTUP_FAILURE_CODE = re.compile(r"^[a-z0-9_]{1,96}$")
 
 
 def _deck_quality_component(
@@ -121,6 +122,21 @@ def _gateway_version_metadata() -> dict[str, str | None]:
         "service_id": os.getenv("RENDER_SERVICE_ID"),
         "artifact_upsert_auth_patch": _ARTIFACT_UPSERT_AUTH_PATCH,
     }
+
+
+def _gateway_startup_failure_code(exc: Exception) -> str:
+    """Return a content-free startup code suitable for deployment logs."""
+
+    if isinstance(exc, HTTPException) and isinstance(exc.detail, dict):
+        detail_code = exc.detail.get("code")
+        if isinstance(detail_code, str) and _SAFE_STARTUP_FAILURE_CODE.fullmatch(
+            detail_code
+        ):
+            return detail_code
+    message = str(exc)
+    if _SAFE_STARTUP_FAILURE_CODE.fullmatch(message):
+        return message
+    return type(exc).__name__
 
 
 def _gateway_protected_plane_readiness() -> dict[str, object]:
@@ -346,7 +362,10 @@ async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     try:
         _gateway_protected_plane_readiness()
     except Exception as exc:
-        raise RuntimeError("gateway protected-plane startup readiness failed") from exc
+        failure_code = _gateway_startup_failure_code(exc)
+        raise RuntimeError(
+            "gateway protected-plane startup readiness failed: " + failure_code
+        ) from exc
 
     # Hard retention is an independent product obligation. It must keep
     # running after admission is disabled or kill-switched because the runner

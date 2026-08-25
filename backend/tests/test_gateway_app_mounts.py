@@ -200,7 +200,13 @@ def test_gateway_startup_rejects_disabled_production_without_d02_bundle(
     monkeypatch.setattr(gateway_app, "validate_expected_supabase_project", lambda: None)
 
     app = gateway_app.create_app()
-    with pytest.raises(RuntimeError, match="protected-plane startup readiness failed"):
+    with pytest.raises(
+        RuntimeError,
+        match=(
+            "protected-plane startup readiness failed: "
+            "gateway_voice_lab_d02_configuration_missing"
+        ),
+    ):
         with TestClient(app):
             pass
 
