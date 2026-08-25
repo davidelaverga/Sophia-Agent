@@ -13,9 +13,9 @@
     "test": "vitest run",
     "test:postgres": "vitest run test/postgres-integration.test.ts",
     "test:watch": "vitest",
-    "migrate": "node dist/bin/migrate.js",
-    "start:web": "node dist/bin/migrate.js && node dist/bin/web.js",
-    "start:worker": "node dist/bin/migrate.js && node dist/bin/worker.js",
+    "migrate": "node dist/src/bin/migrate.js",
+    "start:web": "node dist/src/bin/migrate.js && node dist/src/bin/web.js",
+    "start:worker": "node dist/src/bin/migrate.js && node dist/src/bin/worker.js",
     "dev:web": "tsx src/bin/web.ts",
     "dev:worker": "tsx src/bin/worker.ts"
   },

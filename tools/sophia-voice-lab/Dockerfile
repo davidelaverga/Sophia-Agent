@@ -43,4 +43,4 @@ EXPOSE 8787
 # localhost probe into this shared image would make every worker container
 # report unhealthy even while its evaluation loop is live.
 ENTRYPOINT ["dumb-init", "--"]
-CMD ["sh", "-c", "node dist/bin/migrate.js && node dist/bin/web.js"]
+CMD ["sh", "-c", "node dist/src/bin/migrate.js && node dist/src/bin/web.js"]

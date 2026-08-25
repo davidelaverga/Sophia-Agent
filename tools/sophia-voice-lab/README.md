@@ -102,8 +102,8 @@ pnpm dev:worker
 The production image runs as a non-root user. The intended commands are:
 
 ```text
-web:    node dist/bin/migrate.js && node dist/bin/web.js
-worker: node dist/bin/migrate.js && node dist/bin/worker.js
+web:    node dist/src/bin/migrate.js && node dist/src/bin/web.js
+worker: node dist/src/bin/migrate.js && node dist/src/bin/worker.js
 ```
 
 The web service owns the public health check. `/readyz` requires Postgres, a live durable worker heartbeat with browser/fixtures ready, exact target build identity plus Gateway/Voice `/ready`, and a signed no-session frontend auth readiness receipt. A 503 is intentional if an execution prerequisite is unavailable.
