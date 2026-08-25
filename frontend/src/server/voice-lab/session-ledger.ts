@@ -1935,12 +1935,19 @@ async function assertVoiceLabAuthLedgerReadyOnClient(
                 procedure.proname,
                 pg_get_function_identity_arguments(procedure.oid)
                   AS identity_arguments
-           FROM pg_proc procedure
-           JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
-          WHERE namespace.nspname = 'public'
-            AND CASE WHEN to_regrole($1) IS NULL THEN false ELSE
-              has_function_privilege(to_regrole($1), procedure.oid, 'EXECUTE')
-            END
+          FROM pg_proc procedure
+          JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
+         WHERE namespace.nspname = 'public'
+           AND NOT EXISTS (
+             SELECT 1
+               FROM pg_depend dependency
+              WHERE dependency.classid = 'pg_proc'::regclass
+                AND dependency.objid = procedure.oid
+                AND dependency.deptype = 'e'
+           )
+           AND CASE WHEN to_regrole($1) IS NULL THEN false ELSE
+             has_function_privilege(to_regrole($1), procedure.oid, 'EXECUTE')
+           END
           ORDER BY procedure.proname, identity_arguments`,
         [EXPECTED_D02_DATABASE_ROLE],
       ),
