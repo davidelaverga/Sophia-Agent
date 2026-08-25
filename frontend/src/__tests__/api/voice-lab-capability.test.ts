@@ -98,8 +98,13 @@ describe('voice lab capability contract', () => {
     process.env = { ...originalEnv };
   });
 
-  it('accepts an inbound server stream only when the wire length is explicitly zero', () => {
+  it('accepts explicit zero-length and normalized empty inbound streams', async () => {
     const serverWrappedEmptyRequest = new Request('https://www.sophia-ei.com/control', {
+      method: 'POST',
+      body: new ReadableStream({ start: (controller) => controller.close() }),
+      duplex: 'half',
+    } as RequestInit & { duplex: 'half' });
+    const explicitZeroRequest = new Request('https://www.sophia-ei.com/control', {
       method: 'POST',
       headers: { 'content-length': '0' },
       body: new ReadableStream(),
@@ -107,26 +112,31 @@ describe('voice lab capability contract', () => {
     } as RequestInit & { duplex: 'half' });
 
     expect(serverWrappedEmptyRequest.body).not.toBeNull();
-    expect(() => assertNoVoiceLabRequestBody(serverWrappedEmptyRequest)).not.toThrow();
+    await expect(assertNoVoiceLabRequestBody(serverWrappedEmptyRequest)).resolves.toBeUndefined();
+    await expect(assertNoVoiceLabRequestBody(explicitZeroRequest)).resolves.toBeUndefined();
   });
 
-  it('rejects nonzero and transfer-encoded control request bodies', () => {
-    expectCode(
-      () => assertNoVoiceLabRequestBody(new Request('https://www.sophia-ei.com/control', {
+  it('rejects nonzero, normalized, and transfer-encoded control request bodies', async () => {
+    await expect(
+      assertNoVoiceLabRequestBody(new Request('https://www.sophia-ei.com/control', {
         method: 'POST',
         headers: { 'content-length': '1' },
         body: 'x',
       })),
-      'voice_lab_request_body_not_allowed',
-    );
-    expectCode(
-      () => assertNoVoiceLabRequestBody(new Request('https://www.sophia-ei.com/control', {
+    ).rejects.toMatchObject({ code: 'voice_lab_request_body_not_allowed' });
+    await expect(
+      assertNoVoiceLabRequestBody(new Request('https://www.sophia-ei.com/control', {
+        method: 'POST',
+        body: 'x',
+      })),
+    ).rejects.toMatchObject({ code: 'voice_lab_request_body_not_allowed' });
+    await expect(
+      assertNoVoiceLabRequestBody(new Request('https://www.sophia-ei.com/control', {
         method: 'POST',
         headers: { 'transfer-encoding': 'chunked' },
         body: 'x',
       })),
-      'voice_lab_request_body_not_allowed',
-    );
+    ).rejects.toMatchObject({ code: 'voice_lab_request_body_not_allowed' });
   });
 
   it('accepts a valid short-lived grant and mints a narrower gateway token', () => {

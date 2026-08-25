@@ -118,16 +118,33 @@ export class VoiceLabCapabilityError extends Error {
   }
 }
 
-/** Reject body-bearing control requests without materializing their payload. */
-export function assertNoVoiceLabRequestBody(request: Request): void {
+/** Reject body-bearing control requests without parsing or buffering their payload. */
+export async function assertNoVoiceLabRequestBody(request: Request): Promise<void> {
   const contentLength = request.headers.get('content-length');
   if (
     request.headers.has('transfer-encoding')
-    || (contentLength === null
-      ? request.body !== null
-      : contentLength.trim() !== '0')
+    || (contentLength !== null && contentLength.trim() !== '0')
   ) {
     throw new VoiceLabCapabilityError('voice_lab_request_body_not_allowed', 400);
+  }
+  if (request.body === null || contentLength?.trim() === '0') return;
+
+  // Vercel strips Content-Length: 0 before constructing the NextRequest and
+  // still exposes an empty stream. Peek only for a first byte so normalized
+  // empty POSTs pass while any payload fails before parsing or allocation.
+  const reader = request.body.getReader();
+  try {
+    const first = await reader.read();
+    if (!first.done) {
+      await reader.cancel();
+      throw new VoiceLabCapabilityError('voice_lab_request_body_not_allowed', 400);
+    }
+  } catch (error) {
+    if (error instanceof VoiceLabCapabilityError) throw error;
+    await reader.cancel().catch(() => undefined);
+    throw new VoiceLabCapabilityError('voice_lab_request_body_not_allowed', 400);
+  } finally {
+    reader.releaseLock();
   }
 }
 

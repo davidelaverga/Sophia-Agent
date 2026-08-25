@@ -55,7 +55,7 @@ function requestCookie(request: NextRequest, name: string): string | undefined {
 
 export async function POST(request: NextRequest) {
   try {
-    assertNoVoiceLabRequestBody(request);
+    await assertNoVoiceLabRequestBody(request);
     const grant = verifyFrontendCapability(
       request.headers.get(VOICE_LAB_CAPABILITY_HEADER),
       'session:cleanup',

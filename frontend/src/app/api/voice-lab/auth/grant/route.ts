@@ -57,7 +57,7 @@ function deterministicSessionToken(
 
 export async function POST(request: NextRequest) {
   try {
-    assertNoVoiceLabRequestBody(request);
+    await assertNoVoiceLabRequestBody(request);
 
     const grant = verifyFrontendGrant(request.headers.get(VOICE_LAB_CAPABILITY_HEADER));
     await assertVoiceLabRetentionAdmissionReady();

@@ -43,7 +43,7 @@ function assertProvisioningEnabled(): void {
 export async function POST(request: NextRequest) {
   try {
     assertProvisioningEnabled();
-    assertNoVoiceLabRequestBody(request);
+    await assertNoVoiceLabRequestBody(request);
     const capability = verifyFrontendCapability(
       request.headers.get(VOICE_LAB_CAPABILITY_HEADER),
       'auth:provision',
