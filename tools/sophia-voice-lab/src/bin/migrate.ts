@@ -1,7 +1,6 @@
 import { createHash, randomBytes } from "node:crypto";
 import { readFile, realpath } from "node:fs/promises";
 import path from "node:path";
-import { fileURLToPath } from "node:url";
 
 import pg from "pg";
 
@@ -12,7 +11,7 @@ const { Client } = pg;
 const databaseUrl = process.env.DATABASE_URL?.trim();
 if (!databaseUrl) throw new Error("DATABASE_URL is required to migrate Sophia Voice Lab.");
 
-const defaultPath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "../../../../backend/migrations/2026_08_23_sophia_voice_lab.sql");
+const defaultPath = path.resolve(process.cwd(), "../../backend/migrations/2026_08_23_sophia_voice_lab.sql");
 const configuredPath = process.env.SOPHIA_VOICE_LAB_MIGRATION_PATH?.trim();
 if (configuredPath && process.env.NODE_ENV === "production" && await realpath(configuredPath) !== await realpath(defaultPath)) throw new Error("Production migration path must be the immutable bundled Voice Lab migration.");
 const migrationPath = configuredPath || defaultPath;
