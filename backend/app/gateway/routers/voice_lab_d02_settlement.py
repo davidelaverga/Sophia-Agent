@@ -1326,7 +1326,10 @@ def assert_d02_gateway_database_ready() -> None:
                     FROM pg_catalog.pg_namespace namespace
                    WHERE namespace.nspname <> 'public'
                      AND namespace.nspname <> 'information_schema'
+                     AND namespace.nspname <> 'extensions'
                      AND namespace.nspname !~ '^pg_'
+                     AND pg_catalog.pg_get_userbyid(namespace.nspowner)
+                         NOT LIKE 'supabase_%'
                      AND (
                        NOT EXISTS (
                          SELECT 1

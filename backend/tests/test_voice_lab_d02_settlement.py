@@ -579,6 +579,9 @@ def test_gateway_database_readiness_rejects_public_authority_in_hostile_schema(
     assert "has_sequence_privilege" in cross_schema_sql
     assert "has_function_privilege" in cross_schema_sql
     assert "pg_catalog.pg_extension" in cross_schema_sql
+    assert "namespace.nspname <> 'extensions'" in cross_schema_sql
+    assert "pg_catalog.pg_get_userbyid(namespace.nspowner)" in cross_schema_sql
+    assert "NOT LIKE 'supabase_%'" in cross_schema_sql
 
 
 def test_gateway_database_readiness_excludes_extension_owned_public_functions() -> None:
