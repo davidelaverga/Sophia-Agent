@@ -36,6 +36,8 @@ const PACKAGE_ROOT = fileURLToPath(new URL("../", import.meta.url));
 const REPOSITORY_ROOT = path.resolve(PACKAGE_ROOT, "../..");
 const BLUEPRINT_PATH = path.join(REPOSITORY_ROOT, "render.voice-lab.yaml");
 const DOCKERFILE_PATH = path.join(PACKAGE_ROOT, "Dockerfile");
+const PACKAGE_JSON_PATH = path.join(PACKAGE_ROOT, "package.json");
+const MIGRATE_SOURCE_PATH = path.join(PACKAGE_ROOT, "src/bin/migrate.ts");
 
 async function deploymentContract(): Promise<{ blueprint: Blueprint; dockerfile: string }> {
   const [blueprintSource, dockerfile] = await Promise.all([
@@ -101,6 +103,24 @@ describe("Voice Lab deployment health contract", () => {
     });
     expect(worker.healthCheckPath).toBeUndefined();
     expect(dockerfile).not.toMatch(/^\s*HEALTHCHECK\b/im);
+  });
+
+  it("starts the compiled entrypoints at the paths emitted by the production TypeScript build", async () => {
+    const [{ scripts }, { dockerfile }] = await Promise.all([
+      readFile(PACKAGE_JSON_PATH, "utf8").then((source) => JSON.parse(source) as { scripts: Record<string, string> }),
+      deploymentContract(),
+    ]);
+
+    expect(scripts.migrate).toBe("node dist/src/bin/migrate.js");
+    expect(scripts["start:web"]).toBe("node dist/src/bin/migrate.js && node dist/src/bin/web.js");
+    expect(scripts["start:worker"]).toBe("node dist/src/bin/migrate.js && node dist/src/bin/worker.js");
+    expect(dockerfile).toContain('CMD ["sh", "-c", "node dist/src/bin/migrate.js && node dist/src/bin/web.js"]');
+  });
+
+  it("resolves the immutable migration from the package working directory in source and compiled builds", async () => {
+    const source = await readFile(MIGRATE_SOURCE_PATH, "utf8");
+    expect(source).toContain('path.resolve(process.cwd(), "../../backend/migrations/2026_08_23_sophia_voice_lab.sql")');
+    expect(source).not.toContain('path.dirname(fileURLToPath(import.meta.url))');
   });
 
   it("keeps dashboard-managed values directly on both services instead of unsupported sync-false environment groups", async () => {
