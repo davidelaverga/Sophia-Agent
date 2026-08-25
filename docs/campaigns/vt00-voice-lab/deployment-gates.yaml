@@ -372,6 +372,18 @@ environment_ownership:
     keys:
       - SOPHIA_VOICE_LAB_AUTH_DATABASE_URL
     database_role: better_auth_app
+    membership_contract:
+      version: supabase_pg17.directional_membership.v1
+      touching_rows_allowed: zero_or_one
+      canonical_inbound_edge:
+        roleid: better_auth_app
+        member: postgres
+        grantor: supabase_admin
+        admin_option: true
+        inherit_option: false
+        set_option: false
+      outbound_edges: []
+      transitive_authority: []
     exact_voice_lab_table_privileges:
       sophia_voice_lab_auth_grants: [SELECT, INSERT, UPDATE, DELETE]
       sophia_sessions: [SELECT, UPDATE]
@@ -401,6 +413,8 @@ environment_ownership:
     unset_after_operation: true
     keys:
       - BETTER_AUTH_DATABASE_URL
+      - BETTER_AUTH_DATABASE_SSL_MODE
+      - BETTER_AUTH_DATABASE_SSL_CA
       - BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF
       - SOPHIA_VOICE_LAB_AUTH_MIGRATION_DATABASE_URL
       - SOPHIA_VOICE_LAB_D02_ROLE_PROVISION_APPROVED
@@ -409,6 +423,17 @@ environment_ownership:
       - SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_KEY_ID
       - SOPHIA_VOICE_LAB_D02_DATABASE_FINALIZE_HMAC_SECRET
       - SOPHIA_VOICE_LAB_D02_FINALIZE_AUTHORITY_ROTATION_APPROVED
+  frontend_database_tls:
+    owner: frontend_security_operator
+    values_committed: false
+    service: vercel_frontend
+    keys:
+      - BETTER_AUTH_DATABASE_SSL_MODE
+      - BETTER_AUTH_DATABASE_SSL_CA
+    production_mode: verify-full
+    ca_source: supabase_database_settings_server_root_ca
+    hostname_verification: required
+    url_tls_parameters_removed_before_pool_construction: true
   voice_lab_web_service_secret:
     owner: frontend_security_operator
     values_committed: false
@@ -504,7 +529,18 @@ provisioning:
     createrole: false
     replication: false
     bypassrls: false
-    memberships: []
+    membership_contract:
+      version: supabase_pg17.directional_membership.v1
+      touching_rows_allowed: zero_or_one
+      canonical_inbound_edge:
+        roleid: sophia_voice_lab_gateway
+        member: postgres
+        grantor: supabase_admin
+        admin_option: true
+        inherit_option: false
+        set_option: false
+      outbound_edges: []
+      transitive_authority: []
     public_schema_create: false
     raw_table_privileges: []
     external_function_execute_only: true

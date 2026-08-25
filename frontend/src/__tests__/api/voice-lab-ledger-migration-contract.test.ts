@@ -32,7 +32,14 @@ describe('Voice Lab auth-ledger operated migration contract', () => {
     );
     expect(runner).toContain('SOPHIA_VOICE_LAB_AUTH_MIGRATION_DATABASE_URL');
     expect(runner).toContain("const EXPECTED_RUNTIME_DATABASE_ROLE = 'better_auth_app'");
-    expect(runner.match(/membership\.roleid = role\.oid/g)).toHaveLength(3);
+    expect(runner).toContain('supabase_pg17.directional_membership.v1');
+    expect(runner.match(/roleMembershipAttestationSql\(\)/g)).toHaveLength(4);
+    expect(runner).toContain("member_role.rolname = 'postgres'");
+    expect(runner).toContain("grantor_role.rolname = 'supabase_admin'");
+    expect(runner).toContain('membership.admin_option = true');
+    expect(runner).toContain('membership.inherit_option = false');
+    expect(runner).toContain('membership.set_option = false');
+    expect(runner).toContain('WITH RECURSIVE inherited_roles');
     expect(sql.match(/__SOPHIA_VOICE_LAB_AUTH_LEDGER_MIGRATION_SHA256__/g)).toHaveLength(1);
     expect(sql.toLowerCase()).toContain(
       'revoke all on public.sophia_voice_lab_auth_grants from public',

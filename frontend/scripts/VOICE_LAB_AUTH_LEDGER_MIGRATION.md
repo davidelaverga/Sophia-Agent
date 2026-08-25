@@ -19,9 +19,14 @@ owner-only operator. It creates only the fixed
 `sophia_voice_lab_gateway` role, requires the exact `postgres` owner session and
 Supabase project ref, and passes the new password only as a bound value into a
 transaction-local setting. It never places the password in SQL or output. An
-already exact role is preserved without password rotation; attribute,
-membership, public raw-object, future-default, or cross-schema effective
-authority drift is a hard stop before repair. The operator accepts only a
+already exact role is preserved without password rotation. The versioned
+`supabase_pg17.directional_membership.v1` contract accepts either no touching
+membership row or the single Supabase PostgreSQL 17 inbound creator edge where
+`roleid` is the restricted role, `member` is `postgres`, `grantor` is
+`supabase_admin`, and the options are exactly `admin=true`, `inherit=false`,
+`set=false`. Any outbound, transitive, duplicate, reversed, or otherwise
+noncanonical edge, attribute drift, public raw-object, future-default, or
+cross-schema effective authority is a hard stop before repair. The operator accepts only a
 pre-migration database with no D02 relation or routine footprint, then applies
 its explicit direct-grant revocations to the newly created or already-attested
 role. It deliberately refuses to rewrite a grant to `PUBLIC` or another owner's

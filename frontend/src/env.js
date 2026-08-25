@@ -15,8 +15,9 @@ export const env = createEnv({
     BETTER_AUTH_URL: z.string().url().optional(),
     BETTER_AUTH_DATABASE_URL: z.string().url().optional(),
     BETTER_AUTH_DATABASE_SSL_MODE: z
-      .enum(["auto", "disable", "require", "no-verify"])
+      .enum(["auto", "disable", "require", "verify-full", "no-verify"])
       .optional(),
+    BETTER_AUTH_DATABASE_SSL_CA: z.string().min(64).optional(),
     BETTER_AUTH_DATABASE_POOL_MAX: z.coerce.number().int().positive().optional(),
     BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF: z.string().min(10).optional(),
     BACKEND_API_URL: z.string().url().optional(),
@@ -59,6 +60,7 @@ export const env = createEnv({
     BETTER_AUTH_URL: process.env.BETTER_AUTH_URL,
     BETTER_AUTH_DATABASE_URL: process.env.BETTER_AUTH_DATABASE_URL,
     BETTER_AUTH_DATABASE_SSL_MODE: process.env.BETTER_AUTH_DATABASE_SSL_MODE,
+    BETTER_AUTH_DATABASE_SSL_CA: process.env.BETTER_AUTH_DATABASE_SSL_CA,
     BETTER_AUTH_DATABASE_POOL_MAX: process.env.BETTER_AUTH_DATABASE_POOL_MAX,
     BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF: process.env.BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF,
     BACKEND_API_URL: process.env.BACKEND_API_URL,

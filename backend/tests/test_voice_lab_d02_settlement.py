@@ -429,6 +429,10 @@ def test_gateway_database_readiness_rejects_unsafe_session_settings(
         False,
         False,
         False,
+        "supabase_pg17.directional_membership.v1",
+        True,
+        0,
+        0,
         True,
         True,
         *settings,
@@ -455,8 +459,70 @@ def test_gateway_database_readiness_rejects_unsafe_session_settings(
     assert "pg_is_in_recovery" in connection.readiness_cursor.statement
 
 
+@pytest.mark.parametrize(
+    "membership_slice",
+    [
+        ("stale.v0", True, 0, 0, True, True),
+        ("supabase_pg17.directional_membership.v1", False, 0, 0, True, True),
+        ("supabase_pg17.directional_membership.v1", True, -1, 0, True, True),
+        ("supabase_pg17.directional_membership.v1", True, 0.5, 0, True, True),
+        ("supabase_pg17.directional_membership.v1", True, 2, 0, True, True),
+        ("supabase_pg17.directional_membership.v1", True, 0, 1, True, True),
+        ("supabase_pg17.directional_membership.v1", True, 0, 0, False, True),
+    ],
+)
+def test_gateway_database_readiness_rejects_membership_contract_drift(
+    monkeypatch: pytest.MonkeyPatch,
+    membership_slice: tuple[object, ...],
+) -> None:
+    import psycopg
+
+    row = (
+        "sophia_voice_lab_gateway",
+        "sophia_voice_lab_gateway",
+        True,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        False,
+        *membership_slice,
+        True,
+        True,
+        True,
+        True,
+    )
+    connection = _ReadinessConnection(row)
+
+    monkeypatch.setenv(
+        "SOPHIA_VOICE_LAB_D02_GATEWAY_DATABASE_URL",
+        "postgresql://gateway-readiness-test",
+    )
+    monkeypatch.setattr(
+        psycopg,
+        "connect",
+        lambda _dsn, *, connect_timeout: connection,
+    )
+    with pytest.raises(HTTPException) as rejected:
+        d02.assert_d02_gateway_database_ready()
+    assert rejected.value.detail["code"] == (
+        "voice_lab_d02_gateway_database_role_invalid"
+    )
+    statement = connection.readiness_cursor.statement
+    assert "member_role.rolname = 'postgres'" in statement
+    assert "grantor_role.rolname = 'supabase_admin'" in statement
+    assert "membership.admin_option = true" in statement
+    assert "membership.inherit_option = false" in statement
+    assert "membership.set_option = false" in statement
+    assert "WITH RECURSIVE inherited_roles" in statement
+
+
+@pytest.mark.parametrize("canonical_inbound_count", [0, 1])
 def test_gateway_database_readiness_rejects_public_authority_in_hostile_schema(
     monkeypatch: pytest.MonkeyPatch,
+    canonical_inbound_count: int,
 ) -> None:
     import psycopg
 
@@ -471,6 +537,10 @@ def test_gateway_database_readiness_rejects_public_authority_in_hostile_schema(
         False,
         False,
         False,
+        "supabase_pg17.directional_membership.v1",
+        True,
+        canonical_inbound_count,
+        0,
         True,
         True,
         True,

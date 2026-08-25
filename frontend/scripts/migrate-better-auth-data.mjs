@@ -1,6 +1,8 @@
 import { Pool } from "pg";
 import { createHash } from "node:crypto";
 
+import { resolveDatabaseTls } from "../src/server/better-auth/database-tls.mjs";
+
 const TABLES = ["user", "account", "session", "verification"];
 const SOURCE_REF = "qtyqgvdkbhjfmnfkxyvm";
 const TARGET_REF = "vlxnwmyvhchwbousrdzc";
@@ -37,8 +39,18 @@ function rowsHash(rows) {
   return createHash("sha256").update(JSON.stringify(normalized)).digest("hex");
 }
 
-function pool(databaseUrl) {
-  return new Pool({ connectionString: databaseUrl, max: 1, ssl: { rejectUnauthorized: false } });
+function pool(databaseUrl, caPemRaw) {
+  const tls = resolveDatabaseTls({
+    databaseUrl,
+    modeRaw: process.env.BETTER_AUTH_DATABASE_SSL_MODE ?? "verify-full",
+    caPemRaw,
+    environmentRaw: "production",
+  });
+  return new Pool({
+    connectionString: tls.connectionString,
+    max: 1,
+    ...(tls.ssl === undefined ? {} : { ssl: tls.ssl }),
+  });
 }
 
 function quoteIdentifier(value) {
@@ -89,8 +101,8 @@ if (projectRef(targetUrl) !== targetRef || targetRef !== TARGET_REF) {
   throw new Error("Better Auth copy target is not the required production target project.");
 }
 const apply = process.argv.includes("--apply");
-const source = pool(sourceUrl);
-const target = pool(targetUrl);
+const source = pool(sourceUrl, process.env.BETTER_AUTH_DATABASE_SSL_CA);
+const target = pool(targetUrl, process.env.BETTER_AUTH_DATABASE_SSL_CA);
 
 try {
   await target.query("BEGIN");

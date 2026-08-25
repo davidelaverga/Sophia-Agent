@@ -5,6 +5,7 @@ import { fileURLToPath } from 'node:url';
 
 import { Pool } from 'pg';
 
+import { resolveDatabaseTls } from '../src/server/better-auth/database-tls.mjs';
 import { transactionBody } from './voice-lab-migration-contract.mjs';
 
 const EXPECTED_MIGRATION_SHA256 = '42e6f2b3bf083675bcdd7b2f29c66b400c6fca9771b76f866e6c55f8513b514c';
@@ -18,6 +19,64 @@ const CLEANUP_HASH_PLACEHOLDER = '__SOPHIA_VOICE_LAB_CLEANUP_INDEX_MIGRATION_SHA
 const TABLE = 'sophia_voice_lab_auth_grants';
 const EXPECTED_DATABASE_OWNER_ROLE = 'postgres';
 const EXPECTED_RUNTIME_DATABASE_ROLE = 'better_auth_app';
+const ROLE_MEMBERSHIP_CONTRACT_VERSION =
+  'supabase_pg17.directional_membership.v1';
+
+function roleMembershipAttestationSql() {
+  return `
+    '${ROLE_MEMBERSHIP_CONTRACT_VERSION}' AS membership_contract_version,
+    (
+      SELECT count(*) <= 1
+         AND count(*) FILTER (
+           WHERE NOT (
+             membership.roleid = role.oid
+             AND member_role.rolname = 'postgres'
+             AND grantor_role.rolname = 'supabase_admin'
+             AND membership.admin_option = true
+             AND membership.inherit_option = false
+             AND membership.set_option = false
+           )
+         ) = 0
+        FROM pg_catalog.pg_auth_members membership
+        JOIN pg_catalog.pg_roles member_role
+          ON member_role.oid = membership.member
+        JOIN pg_catalog.pg_roles grantor_role
+          ON grantor_role.oid = membership.grantor
+       WHERE membership.member = role.oid
+          OR membership.roleid = role.oid
+    ) AS membership_direction_attested,
+    (
+      SELECT count(*)
+        FROM pg_catalog.pg_auth_members membership
+        JOIN pg_catalog.pg_roles member_role
+          ON member_role.oid = membership.member
+        JOIN pg_catalog.pg_roles grantor_role
+          ON grantor_role.oid = membership.grantor
+       WHERE membership.roleid = role.oid
+         AND member_role.rolname = 'postgres'
+         AND grantor_role.rolname = 'supabase_admin'
+         AND membership.admin_option = true
+         AND membership.inherit_option = false
+         AND membership.set_option = false
+    ) AS canonical_inbound_membership_count,
+    (
+      SELECT count(*) FROM pg_catalog.pg_auth_members membership
+       WHERE membership.member = role.oid
+    ) AS outbound_membership_count,
+    NOT EXISTS (
+      WITH RECURSIVE inherited_roles(role_oid) AS (
+        SELECT membership.roleid
+          FROM pg_catalog.pg_auth_members membership
+         WHERE membership.member = role.oid
+        UNION
+        SELECT membership.roleid
+          FROM pg_catalog.pg_auth_members membership
+          JOIN inherited_roles inherited
+            ON membership.member = inherited.role_oid
+      )
+      SELECT 1 FROM inherited_roles
+    ) AS transitive_authority_free`;
+}
 const scriptRoot = dirname(fileURLToPath(import.meta.url));
 const AUTH_MIGRATION_PATH = resolve(
   scriptRoot,
@@ -652,25 +711,6 @@ function approvedDedicatedTestDatabase(databaseUrl) {
     && database === 'voice_lab_test';
 }
 
-function sslConfig(databaseUrl) {
-  const parsed = new URL(databaseUrl);
-  const mode = process.env.BETTER_AUTH_DATABASE_SSL_MODE?.trim().toLowerCase() ?? 'auto';
-  const queryMode = parsed.searchParams.get('sslmode')?.trim().toLowerCase();
-  const explicit = parsed.searchParams.get('ssl')?.trim().toLowerCase();
-  if (mode === 'disable' || queryMode === 'disable' || explicit === 'false') return false;
-  if (mode === 'no-verify') return { rejectUnauthorized: false };
-  if (mode === 'require') return { rejectUnauthorized: true };
-  if (queryMode === 'require' || queryMode === 'verify-ca' || queryMode === 'verify-full') {
-    return parsed.hostname.includes('supabase.')
-      ? { rejectUnauthorized: false }
-      : { rejectUnauthorized: true };
-  }
-  if (explicit === 'true' || parsed.hostname.includes('supabase.')) {
-    return { rejectUnauthorized: false };
-  }
-  return undefined;
-}
-
 async function loadPinnedMigration(
   path,
   expectedHash,
@@ -1035,11 +1075,7 @@ async function assertD02Catalog(
             role.rolsuper, role.rolinherit, role.rolcreaterole,
             role.rolcreatedb, role.rolcanlogin, role.rolreplication,
             role.rolbypassrls,
-            NOT EXISTS (
-              SELECT 1 FROM pg_auth_members membership
-               WHERE membership.member = role.oid
-                  OR membership.roleid = role.oid
-            ) AS membership_free,
+            ${roleMembershipAttestationSql()},
             NOT has_schema_privilege(role.oid, 'public', 'CREATE')
               AS public_schema_create_denied,
             EXISTS (
@@ -1094,6 +1130,7 @@ async function assertD02Catalog(
     [D02_DATABASE_ROLE],
   );
   const role = roleResult.rows[0];
+  const canonicalInboundCount = Number(role?.canonical_inbound_membership_count);
   if (
     roleResult.rows.length !== 1
     || role.rolname !== D02_DATABASE_ROLE
@@ -1104,7 +1141,13 @@ async function assertD02Catalog(
     || role.rolcanlogin !== true
     || role.rolreplication !== false
     || role.rolbypassrls !== false
-    || role.membership_free !== true
+    || role.membership_contract_version !== ROLE_MEMBERSHIP_CONTRACT_VERSION
+    || role.membership_direction_attested !== true
+    || !Number.isInteger(canonicalInboundCount)
+    || canonicalInboundCount < 0
+    || canonicalInboundCount > 1
+    || Number(role.outbound_membership_count) !== 0
+    || role.transitive_authority_free !== true
     || role.public_schema_create_denied !== true
     || role.future_function_public_execute_denied !== true
   ) throw new Error('Voice Lab D02 Gateway database role is missing or overprivileged.');
@@ -2061,11 +2104,7 @@ async function preflight(
       `SELECT role.rolname, role.rolsuper, role.rolinherit,
               role.rolcreaterole, role.rolcreatedb, role.rolcanlogin,
               role.rolreplication, role.rolbypassrls,
-              NOT EXISTS (
-                SELECT 1 FROM pg_auth_members membership
-                 WHERE membership.member = role.oid
-                    OR membership.roleid = role.oid
-              ) AS membership_free,
+              ${roleMembershipAttestationSql()},
               NOT has_schema_privilege(role.oid, 'public', 'CREATE')
                 AS public_schema_create_denied
          FROM pg_roles role
@@ -2085,6 +2124,9 @@ async function preflight(
     ),
   ]);
 
+  const runtimeCanonicalInboundCount = Number(
+    runtimeRole.rows[0]?.canonical_inbound_membership_count,
+  );
   if (
     runtimeRole.rows.length !== 1
     || runtimeRole.rows[0].rolname !== EXPECTED_RUNTIME_DATABASE_ROLE
@@ -2095,7 +2137,14 @@ async function preflight(
     || runtimeRole.rows[0].rolcanlogin !== true
     || runtimeRole.rows[0].rolreplication !== false
     || runtimeRole.rows[0].rolbypassrls !== false
-    || runtimeRole.rows[0].membership_free !== true
+    || runtimeRole.rows[0].membership_contract_version
+      !== ROLE_MEMBERSHIP_CONTRACT_VERSION
+    || runtimeRole.rows[0].membership_direction_attested !== true
+    || !Number.isInteger(runtimeCanonicalInboundCount)
+    || runtimeCanonicalInboundCount < 0
+    || runtimeCanonicalInboundCount > 1
+    || Number(runtimeRole.rows[0].outbound_membership_count) !== 0
+    || runtimeRole.rows[0].transitive_authority_free !== true
     || runtimeRole.rows[0].public_schema_create_denied !== true
   ) {
     throw new Error('Voice Lab runtime database role is missing or overprivileged.');
@@ -2647,11 +2696,7 @@ async function assertD02GatewayRoleReady(client) {
     `SELECT role.rolname, role.rolsuper, role.rolinherit,
             role.rolcreaterole, role.rolcreatedb, role.rolcanlogin,
             role.rolreplication, role.rolbypassrls,
-            NOT EXISTS (
-              SELECT 1 FROM pg_auth_members membership
-               WHERE membership.member = role.oid
-                  OR membership.roleid = role.oid
-            ) AS membership_free,
+            ${roleMembershipAttestationSql()},
             NOT has_schema_privilege(role.oid, 'public', 'CREATE')
               AS public_schema_create_denied
        FROM pg_roles role
@@ -2659,6 +2704,7 @@ async function assertD02GatewayRoleReady(client) {
     [D02_DATABASE_ROLE],
   );
   const role = result.rows[0];
+  const canonicalInboundCount = Number(role?.canonical_inbound_membership_count);
   if (
     result.rows.length !== 1
     || role.rolname !== D02_DATABASE_ROLE
@@ -2669,7 +2715,13 @@ async function assertD02GatewayRoleReady(client) {
     || role.rolcanlogin !== true
     || role.rolreplication !== false
     || role.rolbypassrls !== false
-    || role.membership_free !== true
+    || role.membership_contract_version !== ROLE_MEMBERSHIP_CONTRACT_VERSION
+    || role.membership_direction_attested !== true
+    || !Number.isInteger(canonicalInboundCount)
+    || canonicalInboundCount < 0
+    || canonicalInboundCount > 1
+    || Number(role.outbound_membership_count) !== 0
+    || role.transitive_authority_free !== true
     || role.public_schema_create_denied !== true
   ) throw new Error('Voice Lab D02 Gateway database role is missing or overprivileged.');
   const rawAuthority = await client.query(
@@ -3132,12 +3184,18 @@ if (!approvedDedicatedTestDatabase(databaseUrl)) {
   }
 }
 
-const ssl = sslConfig(databaseUrl);
+const tls = resolveDatabaseTls({
+  databaseUrl,
+  modeRaw: process.env.BETTER_AUTH_DATABASE_SSL_MODE,
+  caPemRaw: process.env.BETTER_AUTH_DATABASE_SSL_CA,
+  environmentRaw:
+    process.env.SOPHIA_VOICE_LAB_ENVIRONMENT ?? process.env.NODE_ENV,
+});
 const pool = new Pool({
-  connectionString: databaseUrl,
+  connectionString: tls.connectionString,
   max: 1,
   options: '-c search_path=pg_catalog,public,pg_temp',
-  ...(ssl === undefined ? {} : { ssl }),
+  ...(tls.ssl === undefined ? {} : { ssl: tls.ssl }),
 });
 try {
   let rotatedFinalizeAuthorityFrom;

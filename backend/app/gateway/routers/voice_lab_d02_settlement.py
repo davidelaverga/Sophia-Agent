@@ -1158,10 +1158,58 @@ def assert_d02_gateway_database_ready() -> None:
                        role.rolcreaterole,
                        role.rolcreatedb, role.rolreplication, role.rolbypassrls,
                        has_schema_privilege(current_user, 'public', 'CREATE'),
-                       NOT EXISTS (
-                         SELECT 1 FROM pg_catalog.pg_auth_members membership
+                       'supabase_pg17.directional_membership.v1',
+                       (
+                         SELECT count(*) <= 1
+                            AND count(*) FILTER (
+                              WHERE NOT (
+                                membership.roleid = role.oid
+                                AND member_role.rolname = 'postgres'
+                                AND grantor_role.rolname = 'supabase_admin'
+                                AND membership.admin_option = true
+                                AND membership.inherit_option = false
+                                AND membership.set_option = false
+                              )
+                            ) = 0
+                           FROM pg_catalog.pg_auth_members membership
+                           JOIN pg_catalog.pg_roles member_role
+                             ON member_role.oid = membership.member
+                           JOIN pg_catalog.pg_roles grantor_role
+                             ON grantor_role.oid = membership.grantor
                           WHERE membership.member = role.oid
                              OR membership.roleid = role.oid
+                       ),
+                       (
+                         SELECT count(*)
+                           FROM pg_catalog.pg_auth_members membership
+                           JOIN pg_catalog.pg_roles member_role
+                             ON member_role.oid = membership.member
+                           JOIN pg_catalog.pg_roles grantor_role
+                             ON grantor_role.oid = membership.grantor
+                          WHERE membership.roleid = role.oid
+                            AND member_role.rolname = 'postgres'
+                            AND grantor_role.rolname = 'supabase_admin'
+                            AND membership.admin_option = true
+                            AND membership.inherit_option = false
+                            AND membership.set_option = false
+                       ),
+                       (
+                         SELECT count(*)
+                           FROM pg_catalog.pg_auth_members membership
+                          WHERE membership.member = role.oid
+                       ),
+                       NOT EXISTS (
+                         WITH RECURSIVE inherited_roles(role_oid) AS (
+                           SELECT membership.roleid
+                             FROM pg_catalog.pg_auth_members membership
+                            WHERE membership.member = role.oid
+                           UNION
+                           SELECT membership.roleid
+                             FROM pg_catalog.pg_auth_members membership
+                             JOIN inherited_roles inherited
+                               ON membership.member = inherited.role_oid
+                         )
+                         SELECT 1 FROM inherited_roles
                        ),
                        EXISTS (
                          SELECT 1
@@ -1247,7 +1295,7 @@ def assert_d02_gateway_database_ready() -> None:
                 """
             )
             row = cursor.fetchone()
-            if row is None or len(row) != 16 or tuple(row[:12]) != (
+            if row is None or len(row) != 20 or tuple(row[:10]) != (
                 "sophia_voice_lab_gateway",
                 "sophia_voice_lab_gateway",
                 True,
@@ -1258,11 +1306,18 @@ def assert_d02_gateway_database_ready() -> None:
                 False,
                 False,
                 False,
-                True,
-                True,
             ):
                 raise _failure("voice_lab_d02_gateway_database_role_invalid", 503)
-            if tuple(row[12:]) != (True, True, True, True):
+            if (
+                row[10] != "supabase_pg17.directional_membership.v1"
+                or row[11] is not True
+                or row[12] not in (0, 1)
+                or row[13] != 0
+                or row[14] is not True
+                or row[15] is not True
+            ):
+                raise _failure("voice_lab_d02_gateway_database_role_invalid", 503)
+            if tuple(row[16:]) != (True, True, True, True):
                 raise _failure("voice_lab_d02_gateway_database_session_unsafe", 503)
             cursor.execute(
                 """

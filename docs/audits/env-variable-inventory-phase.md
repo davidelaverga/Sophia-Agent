@@ -58,7 +58,8 @@ Local env files were parsed for variable names only. No values are included in t
 | `BETTER_AUTH_SECRET` | frontend | Required in production | `frontend/src/env.js`, `frontend/src/server/legacy-backend-auth.ts`, `frontend/package.json` | ACTIVE_REQUIRED | high | Must be >=32 chars in production builds. |
 | `BETTER_AUTH_URL` | frontend | Optional, recommended for auth | `frontend/src/env.js`, Better Auth config/migration script | ACTIVE_OPTIONAL | high | Canonical frontend app URL for Better Auth. |
 | `BETTER_AUTH_DATABASE_URL` | frontend | Required when Better Auth DB is used and no `DATABASE_URL` fallback | `frontend/src/env.js`, Better Auth database/migration code | ACTIVE_REQUIRED | high | Preferred frontend DB var. |
-| `BETTER_AUTH_DATABASE_SSL_MODE` | frontend | Optional | `frontend/src/env.js`, Better Auth database/migration code | ACTIVE_OPTIONAL | high | Valid values: `auto`, `disable`, `require`, `no-verify`. |
+| `BETTER_AUTH_DATABASE_SSL_MODE` | frontend | Optional | `frontend/src/env.js`, Better Auth database/migration code | ACTIVE_OPTIONAL | high | Valid values: `auto`, `disable`, `require`, `verify-full`, `no-verify`; insecure modes are rejected in production. |
+| `BETTER_AUTH_DATABASE_SSL_CA` | frontend and database operators | Required for production Supabase | Better Auth database/migration TLS resolver | ACTIVE_REQUIRED_PRODUCTION | high | Supabase server root CA PEM used with hostname verification; never overridden by URL SSL parameters. |
 | `BETTER_AUTH_DATABASE_POOL_MAX` | frontend | Optional | `frontend/src/env.js`, Better Auth database/migration code | ACTIVE_OPTIONAL | high | Pool tuning. |
 | `GOOGLE_CLIENT_ID` | frontend | Optional; required for Google OAuth | `frontend/src/env.js`, `frontend/src/server/better-auth/config.ts` | ACTIVE_REQUIRED | high | Required if social login is enabled. |
 | `GOOGLE_CLIENT_SECRET` | frontend | Optional; required for Google OAuth | `frontend/src/env.js`, `frontend/src/server/better-auth/config.ts` | ACTIVE_REQUIRED | high | Server-side only. |
@@ -218,7 +219,7 @@ Local env files were parsed for variable names only. No values are included in t
 | `backend/.env` | yes | many; see groups below |
 | `voice/.env` | yes | `CARTESIA_API_KEY`, `DEEPGRAM_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `SOPHIA_ASSISTANT_ID`, `SOPHIA_BACKEND_MODE`, `SOPHIA_BUFFER_IN_SECONDS`, `SOPHIA_CONFIDENCE_THRESHOLD`, `SOPHIA_CONTEXT_MODE`, `SOPHIA_DEEPGRAM_MODEL`, `SOPHIA_LANGGRAPH_BASE_URL`, `SOPHIA_OPENAI_REALTIME_MODEL`, `SOPHIA_PLATFORM`, `SOPHIA_RITUAL`, `SOPHIA_VOICE_EXPERIMENTAL_RUNTIME_ENABLED`, `SOPHIA_VOICE_GEMINI_LIVE_ADAPTER_ENABLED`, `SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED`, `SOPHIA_VOICE_ID`, `SOPHIA_VOICE_OPENAI_REALTIME_ADAPTER_ENABLED`, `SOPHIA_VOICE_RUNTIME_MODE`, `STREAM_API_KEY`, `STREAM_API_SECRET` |
 | `frontend/.env.local` | no | n/a |
-| `frontend/.env` | yes | `BACKEND_API_URL`, `BETTER_AUTH_DATABASE_POOL_MAX`, `BETTER_AUTH_DATABASE_SSL_MODE`, `BETTER_AUTH_DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_DEV_BYPASS_AUTH`, `NEXT_PUBLIC_GATEWAY_URL`, `NEXT_PUBLIC_LANGGRAPH_BASE_URL`, `NEXT_PUBLIC_SOPHIA_AUTH_BYPASS`, `NEXT_PUBLIC_SOPHIA_USER_ID`, `SOPHIA_LANGGRAPH_BASE_URL` |
+| `frontend/.env` | yes | `BACKEND_API_URL`, `BETTER_AUTH_DATABASE_POOL_MAX`, `BETTER_AUTH_DATABASE_SSL_CA`, `BETTER_AUTH_DATABASE_SSL_MODE`, `BETTER_AUTH_DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_DEV_BYPASS_AUTH`, `NEXT_PUBLIC_GATEWAY_URL`, `NEXT_PUBLIC_LANGGRAPH_BASE_URL`, `NEXT_PUBLIC_SOPHIA_AUTH_BYPASS`, `NEXT_PUBLIC_SOPHIA_USER_ID`, `SOPHIA_LANGGRAPH_BASE_URL` |
 
 `backend/.env` active names found in code/config include: `ANTHROPIC_API_KEY`, `CORS_ORIGINS`, `DATABASE_URL`, `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT`, `LANGCHAIN_TRACING_V2`, `MEM0_API_KEY`, `OPENAI_API_KEY`, `SUPABASE_BUILDER_BUCKET`, `SUPABASE_URL`.
 
@@ -238,7 +239,7 @@ Local env files were parsed for variable names only. No values are included in t
 | --- | --- |
 | `backend/.env` | `ANTHROPIC_API_KEY`, `CORS_ORIGINS`, `DATABASE_URL`, `LANGCHAIN_API_KEY`, `LANGCHAIN_PROJECT`, `LANGCHAIN_TRACING_V2`, `MEM0_API_KEY`, `OPENAI_API_KEY`, `SUPABASE_BUILDER_BUCKET`, `SUPABASE_URL` |
 | `voice/.env` | `CARTESIA_API_KEY`, `DEEPGRAM_API_KEY`, `GEMINI_API_KEY`, `OPENAI_API_KEY`, `SOPHIA_ASSISTANT_ID`, `SOPHIA_BACKEND_MODE`, `SOPHIA_BUFFER_IN_SECONDS`, `SOPHIA_CONFIDENCE_THRESHOLD`, `SOPHIA_CONTEXT_MODE`, `SOPHIA_DEEPGRAM_MODEL`, `SOPHIA_LANGGRAPH_BASE_URL`, `SOPHIA_OPENAI_REALTIME_MODEL`, `SOPHIA_PLATFORM`, `SOPHIA_RITUAL`, `SOPHIA_VOICE_EXPERIMENTAL_RUNTIME_ENABLED`, `SOPHIA_VOICE_GEMINI_LIVE_ADAPTER_ENABLED`, `SOPHIA_VOICE_GEMINI_PRODUCTION_ROUTE_ENABLED`, `SOPHIA_VOICE_ID`, `SOPHIA_VOICE_OPENAI_REALTIME_ADAPTER_ENABLED`, `SOPHIA_VOICE_RUNTIME_MODE`, `STREAM_API_KEY`, `STREAM_API_SECRET` |
-| `frontend/.env` | `BACKEND_API_URL`, `BETTER_AUTH_DATABASE_POOL_MAX`, `BETTER_AUTH_DATABASE_SSL_MODE`, `BETTER_AUTH_DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_DEV_BYPASS_AUTH`, `NEXT_PUBLIC_GATEWAY_URL`, `NEXT_PUBLIC_LANGGRAPH_BASE_URL`, `NEXT_PUBLIC_SOPHIA_AUTH_BYPASS`, `NEXT_PUBLIC_SOPHIA_USER_ID`, `SOPHIA_LANGGRAPH_BASE_URL` |
+| `frontend/.env` | `BACKEND_API_URL`, `BETTER_AUTH_DATABASE_POOL_MAX`, `BETTER_AUTH_DATABASE_SSL_CA`, `BETTER_AUTH_DATABASE_SSL_MODE`, `BETTER_AUTH_DATABASE_URL`, `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `NEXT_PUBLIC_API_URL`, `NEXT_PUBLIC_DEV_BYPASS_AUTH`, `NEXT_PUBLIC_GATEWAY_URL`, `NEXT_PUBLIC_LANGGRAPH_BASE_URL`, `NEXT_PUBLIC_SOPHIA_AUTH_BYPASS`, `NEXT_PUBLIC_SOPHIA_USER_ID`, `SOPHIA_LANGGRAPH_BASE_URL` |
 
 ### Present In Env Files But Not Found In Code
 
@@ -350,6 +351,7 @@ Recommended example coverage:
 | `BETTER_AUTH_SECRET` | Required production build/runtime auth. |
 | `BETTER_AUTH_URL` | Canonical frontend app origin. |
 | `BETTER_AUTH_DATABASE_URL` or `DATABASE_URL` | Required if auth DB is active. |
+| `BETTER_AUTH_DATABASE_SSL_MODE`, `BETTER_AUTH_DATABASE_SSL_CA` | Set `verify-full` and the Supabase server root CA PEM for production. |
 | `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET` | Required if Google OAuth is active. |
 | `NEXT_PUBLIC_GATEWAY_URL` | Frontend gateway access. |
 | `NEXT_PUBLIC_LANGGRAPH_BASE_URL` | Public LangGraph/proxy path if chat route requires it. |
@@ -366,7 +368,7 @@ Minimal local full-stack voice with legacy cascade:
 
 - Backend/LangGraph: `ANTHROPIC_API_KEY`, `MEM0_API_KEY` if memory is enabled, optional `TAVILY_API_KEY`, optional `OPENAI_API_KEY` for builder image deliverables.
 - Voice: `STREAM_API_KEY`, `STREAM_API_SECRET`, `DEEPGRAM_API_KEY`, `CARTESIA_API_KEY`, `SOPHIA_VOICE_ID`, `SOPHIA_BACKEND_MODE=deerflow`, `SOPHIA_LANGGRAPH_BASE_URL`.
-- Frontend: `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `BETTER_AUTH_DATABASE_URL` or `DATABASE_URL` when auth bypass is disabled, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `NEXT_PUBLIC_GATEWAY_URL`, `SOPHIA_LANGGRAPH_BASE_URL`, `NEXT_PUBLIC_LANGGRAPH_BASE_URL`, `NEXT_PUBLIC_SOPHIA_AUTH_BYPASS`, `NEXT_PUBLIC_SOPHIA_USER_ID`.
+- Frontend: `BETTER_AUTH_SECRET`, `BETTER_AUTH_URL`, `BETTER_AUTH_DATABASE_URL` or `DATABASE_URL` when auth bypass is disabled, `BETTER_AUTH_DATABASE_SSL_MODE=auto` for local PostgreSQL or `verify-full` plus `BETTER_AUTH_DATABASE_SSL_CA` for Supabase, `GOOGLE_CLIENT_ID`, `GOOGLE_CLIENT_SECRET`, `NEXT_PUBLIC_GATEWAY_URL`, `SOPHIA_LANGGRAPH_BASE_URL`, `NEXT_PUBLIC_LANGGRAPH_BASE_URL`, `NEXT_PUBLIC_SOPHIA_AUTH_BYPASS`, `NEXT_PUBLIC_SOPHIA_USER_ID`.
 
 ### Ask Davide / Human Confirmation
 

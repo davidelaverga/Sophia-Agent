@@ -19,6 +19,64 @@ const AUTH_TOMBSTONE_DOMAIN = 'sophia-voice-lab-auth-tombstone-v1';
 const REDACTED_SHA256 = '0'.repeat(64);
 const EXPECTED_DATABASE_OWNER_ROLE = 'postgres';
 const EXPECTED_RUNTIME_DATABASE_ROLE = 'better_auth_app';
+const ROLE_MEMBERSHIP_CONTRACT_VERSION =
+  'supabase_pg17.directional_membership.v1';
+
+function roleMembershipAttestationSql(): string {
+  return `
+    '${ROLE_MEMBERSHIP_CONTRACT_VERSION}' AS membership_contract_version,
+    (
+      SELECT count(*) <= 1
+         AND count(*) FILTER (
+           WHERE NOT (
+             membership.roleid = role.oid
+             AND member_role.rolname = 'postgres'
+             AND grantor_role.rolname = 'supabase_admin'
+             AND membership.admin_option = true
+             AND membership.inherit_option = false
+             AND membership.set_option = false
+           )
+         ) = 0
+        FROM pg_catalog.pg_auth_members membership
+        JOIN pg_catalog.pg_roles member_role
+          ON member_role.oid = membership.member
+        JOIN pg_catalog.pg_roles grantor_role
+          ON grantor_role.oid = membership.grantor
+       WHERE membership.member = role.oid
+          OR membership.roleid = role.oid
+    ) AS membership_direction_attested,
+    (
+      SELECT count(*)
+        FROM pg_catalog.pg_auth_members membership
+        JOIN pg_catalog.pg_roles member_role
+          ON member_role.oid = membership.member
+        JOIN pg_catalog.pg_roles grantor_role
+          ON grantor_role.oid = membership.grantor
+       WHERE membership.roleid = role.oid
+         AND member_role.rolname = 'postgres'
+         AND grantor_role.rolname = 'supabase_admin'
+         AND membership.admin_option = true
+         AND membership.inherit_option = false
+         AND membership.set_option = false
+    ) AS canonical_inbound_membership_count,
+    (
+      SELECT count(*) FROM pg_catalog.pg_auth_members membership
+       WHERE membership.member = role.oid
+    ) AS outbound_membership_count,
+    NOT EXISTS (
+      WITH RECURSIVE inherited_roles(role_oid) AS (
+        SELECT membership.roleid
+          FROM pg_catalog.pg_auth_members membership
+         WHERE membership.member = role.oid
+        UNION
+        SELECT membership.roleid
+          FROM pg_catalog.pg_auth_members membership
+          JOIN inherited_roles inherited
+            ON membership.member = inherited.role_oid
+      )
+      SELECT 1 FROM inherited_roles
+    ) AS transitive_authority_free`;
+}
 export const VOICE_LAB_AUTH_LEDGER_MIGRATION_SHA256 =
   '42e6f2b3bf083675bcdd7b2f29c66b400c6fca9771b76f866e6c55f8513b514c';
 export const VOICE_LAB_CLEANUP_INDEX_MIGRATION_SHA256 =
@@ -1805,7 +1863,11 @@ async function assertVoiceLabAuthLedgerReadyOnClient(
         rolcanlogin: boolean;
         rolreplication: boolean;
         rolbypassrls: boolean;
-        membership_free: boolean;
+        membership_contract_version: string;
+        membership_direction_attested: boolean;
+        canonical_inbound_membership_count: string | number;
+        outbound_membership_count: string | number;
+        transitive_authority_free: boolean;
         public_schema_create_denied: boolean;
         future_function_public_execute_denied: boolean;
       }>(
@@ -1813,11 +1875,7 @@ async function assertVoiceLabAuthLedgerReadyOnClient(
                 role.rolsuper, role.rolinherit, role.rolcreaterole,
                 role.rolcreatedb, role.rolcanlogin, role.rolreplication,
                 role.rolbypassrls,
-                NOT EXISTS (
-                  SELECT 1 FROM pg_auth_members membership
-                   WHERE membership.member = role.oid
-                      OR membership.roleid = role.oid
-                ) AS membership_free,
+                ${roleMembershipAttestationSql()},
                 NOT has_schema_privilege(role.oid, 'public', 'CREATE')
                   AS public_schema_create_denied,
                 EXISTS (
@@ -1962,7 +2020,11 @@ async function assertVoiceLabAuthLedgerReadyOnClient(
         rolcanlogin: boolean;
         rolreplication: boolean;
         rolbypassrls: boolean;
-        membership_free: boolean;
+        membership_contract_version: string;
+        membership_direction_attested: boolean;
+        canonical_inbound_membership_count: string | number;
+        outbound_membership_count: string | number;
+        transitive_authority_free: boolean;
         public_schema_create_denied: boolean;
         session_replication_role: string;
         search_path: string;
@@ -1976,11 +2038,7 @@ async function assertVoiceLabAuthLedgerReadyOnClient(
                 role.rolsuper, role.rolinherit, role.rolcreaterole,
                 role.rolcreatedb, role.rolcanlogin, role.rolreplication,
                 role.rolbypassrls,
-                NOT EXISTS (
-                  SELECT 1 FROM pg_auth_members membership
-                   WHERE membership.member = role.oid
-                      OR membership.roleid = role.oid
-                ) AS membership_free,
+                ${roleMembershipAttestationSql()},
                 NOT has_schema_privilege(role.oid, 'public', 'CREATE')
                   AS public_schema_create_denied,
                 current_setting('session_replication_role')
@@ -1994,6 +2052,9 @@ async function assertVoiceLabAuthLedgerReadyOnClient(
       ),
     ]);
 
+    const runtimeCanonicalInboundCount = Number(
+      sessionSettings.rows[0]?.canonical_inbound_membership_count,
+    );
     if (
       sessionSettings.rows.length !== 1
       || sessionSettings.rows[0].session_user_name !== EXPECTED_RUNTIME_DATABASE_ROLE
@@ -2006,7 +2067,14 @@ async function assertVoiceLabAuthLedgerReadyOnClient(
       || sessionSettings.rows[0].rolcanlogin !== true
       || sessionSettings.rows[0].rolreplication !== false
       || sessionSettings.rows[0].rolbypassrls !== false
-      || sessionSettings.rows[0].membership_free !== true
+      || sessionSettings.rows[0].membership_contract_version
+        !== ROLE_MEMBERSHIP_CONTRACT_VERSION
+      || sessionSettings.rows[0].membership_direction_attested !== true
+      || !Number.isInteger(runtimeCanonicalInboundCount)
+      || runtimeCanonicalInboundCount < 0
+      || runtimeCanonicalInboundCount > 1
+      || Number(sessionSettings.rows[0].outbound_membership_count) !== 0
+      || sessionSettings.rows[0].transitive_authority_free !== true
       || sessionSettings.rows[0].public_schema_create_denied !== true
       || sessionSettings.rows[0].session_replication_role !== 'origin'
       || sessionSettings.rows[0].search_path.replace(/\s/g, '')
@@ -2638,6 +2706,9 @@ async function assertVoiceLabAuthLedgerReadyOnClient(
     if (d02NonInternalTriggers.rows.length !== 0) throw ledgerNotReady();
 
     const gatewayRole = d02Role.rows[0];
+    const gatewayCanonicalInboundCount = Number(
+      gatewayRole?.canonical_inbound_membership_count,
+    );
     if (
       d02Role.rows.length !== 1
       || gatewayRole.rolname !== EXPECTED_D02_DATABASE_ROLE
@@ -2648,7 +2719,13 @@ async function assertVoiceLabAuthLedgerReadyOnClient(
       || gatewayRole.rolcanlogin !== true
       || gatewayRole.rolreplication !== false
       || gatewayRole.rolbypassrls !== false
-      || gatewayRole.membership_free !== true
+      || gatewayRole.membership_contract_version !== ROLE_MEMBERSHIP_CONTRACT_VERSION
+      || gatewayRole.membership_direction_attested !== true
+      || !Number.isInteger(gatewayCanonicalInboundCount)
+      || gatewayCanonicalInboundCount < 0
+      || gatewayCanonicalInboundCount > 1
+      || Number(gatewayRole.outbound_membership_count) !== 0
+      || gatewayRole.transitive_authority_free !== true
       || gatewayRole.public_schema_create_denied !== true
       || gatewayRole.future_function_public_execute_denied !== true
     ) throw ledgerNotReady();

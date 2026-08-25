@@ -3,7 +3,10 @@ export interface D02RoleProvisionConfig {
   readonly expectedDatabase: string;
   readonly password: string;
   readonly gatewayDsn: string;
-  readonly ssl: false | { readonly rejectUnauthorized: boolean } | undefined;
+  readonly ssl:
+    | false
+    | { readonly ca?: string; readonly rejectUnauthorized: boolean }
+    | undefined;
 }
 
 export interface D02RoleProvisionClient {
@@ -45,6 +48,11 @@ export function provisionVoiceLabD02Role(
   application_schema_count: number;
   authority_attested: true;
   login_attested: true;
+  membership_contract_version: 'supabase_pg17.directional_membership.v1';
+  canonical_inbound_membership_count: 0 | 1;
+  membership_attested: true;
+  support_required: false;
+  support_action: null;
 }>>;
 
 export function main(env?: NodeJS.ProcessEnv): Promise<void>;

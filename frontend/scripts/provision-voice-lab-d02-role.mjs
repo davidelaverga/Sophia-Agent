@@ -3,8 +3,12 @@ import { pathToFileURL } from 'node:url';
 
 import { Pool } from 'pg';
 
+import { resolveDatabaseTls } from '../src/server/better-auth/database-tls.mjs';
+
 const D02_ROLE = 'sophia_voice_lab_gateway';
 const OWNER_ROLE = 'postgres';
+const ROLE_MEMBERSHIP_CONTRACT_VERSION =
+  'supabase_pg17.directional_membership.v1';
 const PASSWORD_GUC = 'sophia.voice_lab_d02_gateway_password';
 const ADVISORY_LOCK_SQL = `SELECT pg_catalog.pg_advisory_xact_lock(
   pg_catalog.hashtextextended('sophia-voice-lab-d02-role-v1', 731946)
@@ -66,22 +70,19 @@ const ROLE_CATALOG_SQL = `
          role.rolcreaterole, role.rolcreatedb, role.rolcanlogin,
          role.rolreplication, role.rolbypassrls, role.rolconnlimit,
          role.rolvaliduntil IS NULL AS password_no_expiry,
-         NOT EXISTS (
-           SELECT 1
-             FROM pg_catalog.pg_auth_members membership
-            WHERE membership.member = role.oid
-               OR membership.roleid = role.oid
-         ) AS membership_free,
-         COALESCE((
-           SELECT count(*) = 1
-              AND bool_and(
-                membership.roleid = role.oid
-                AND member_role.rolname = 'postgres'
-                AND grantor_role.rolname = 'supabase_admin'
-                AND membership.admin_option = true
-                AND membership.inherit_option = false
-                AND membership.set_option = false
-              )
+         '${ROLE_MEMBERSHIP_CONTRACT_VERSION}' AS membership_contract_version,
+         (
+           SELECT count(*) <= 1
+              AND count(*) FILTER (
+                WHERE NOT (
+                  membership.roleid = role.oid
+                  AND member_role.rolname = 'postgres'
+                  AND grantor_role.rolname = 'supabase_admin'
+                  AND membership.admin_option = true
+                  AND membership.inherit_option = false
+                  AND membership.set_option = false
+                )
+              ) = 0
              FROM pg_catalog.pg_auth_members membership
              JOIN pg_catalog.pg_roles member_role
                ON member_role.oid = membership.member
@@ -89,7 +90,38 @@ const ROLE_CATALOG_SQL = `
                ON grantor_role.oid = membership.grantor
             WHERE membership.member = role.oid
                OR membership.roleid = role.oid
-         ), false) AS supabase_pg17_creator_membership_only,
+         ) AS membership_direction_attested,
+         (
+           SELECT count(*)
+             FROM pg_catalog.pg_auth_members membership
+             JOIN pg_catalog.pg_roles member_role
+               ON member_role.oid = membership.member
+             JOIN pg_catalog.pg_roles grantor_role
+               ON grantor_role.oid = membership.grantor
+            WHERE membership.roleid = role.oid
+              AND member_role.rolname = 'postgres'
+              AND grantor_role.rolname = 'supabase_admin'
+              AND membership.admin_option = true
+              AND membership.inherit_option = false
+              AND membership.set_option = false
+         ) AS canonical_inbound_membership_count,
+         (
+           SELECT count(*) FROM pg_catalog.pg_auth_members membership
+            WHERE membership.member = role.oid
+         ) AS outbound_membership_count,
+         NOT EXISTS (
+           WITH RECURSIVE inherited_roles(role_oid) AS (
+             SELECT membership.roleid
+               FROM pg_catalog.pg_auth_members membership
+              WHERE membership.member = role.oid
+             UNION
+             SELECT membership.roleid
+               FROM pg_catalog.pg_auth_members membership
+               JOIN inherited_roles inherited
+                 ON membership.member = inherited.role_oid
+           )
+           SELECT 1 FROM inherited_roles
+         ) AS transitive_authority_free,
          NOT pg_catalog.has_schema_privilege(role.oid, 'public', 'CREATE')
            AS public_schema_create_denied
     FROM pg_catalog.pg_roles role
@@ -443,23 +475,6 @@ function projectRef(databaseUrl) {
   return null;
 }
 
-function sslConfig(databaseUrl, modeRaw) {
-  const parsed = new URL(databaseUrl);
-  const mode = modeRaw?.trim().toLowerCase() ?? 'auto';
-  const queryMode = parsed.searchParams.get('sslmode')?.trim().toLowerCase();
-  if (mode === 'disable' || queryMode === 'disable') return false;
-  if (mode === 'no-verify') return { rejectUnauthorized: false };
-  if (mode === 'require') return { rejectUnauthorized: true };
-  if (queryMode === 'require' || queryMode === 'verify-ca' || queryMode === 'verify-full') {
-    return parsed.hostname.includes('supabase.')
-      ? { rejectUnauthorized: false }
-      : { rejectUnauthorized: true };
-  }
-  return parsed.hostname.includes('supabase.')
-    ? { rejectUnauthorized: false }
-    : undefined;
-}
-
 export function loadD02RoleProvisionConfig(env = process.env) {
   if (env.SOPHIA_VOICE_LAB_D02_ROLE_PROVISION_APPROVED !== 'YES') {
     fail('d02_role_provision_approval_required');
@@ -511,24 +526,35 @@ export function loadD02RoleProvisionConfig(env = process.env) {
   ) {
     fail('d02_role_password_invalid');
   }
+  const ownerTls = resolveDatabaseTls({
+    databaseUrl: ownerDsn,
+    modeRaw: env.BETTER_AUTH_DATABASE_SSL_MODE,
+    caPemRaw: env.BETTER_AUTH_DATABASE_SSL_CA,
+    environmentRaw: env.SOPHIA_VOICE_LAB_ENVIRONMENT,
+  });
+  const gatewayUrl = new URL(ownerDsn);
+  gatewayUrl.username = gatewayUrl.hostname.toLowerCase().includes('.pooler.supabase.')
+    ? `${D02_ROLE}.${expectedProjectRef}`
+    : D02_ROLE;
+  gatewayUrl.password = password;
+  const gatewayTls = resolveDatabaseTls({
+    databaseUrl: gatewayUrl.toString(),
+    modeRaw: env.BETTER_AUTH_DATABASE_SSL_MODE,
+    caPemRaw: env.BETTER_AUTH_DATABASE_SSL_CA,
+    environmentRaw: env.SOPHIA_VOICE_LAB_ENVIRONMENT,
+  });
   return Object.freeze({
-    ownerDsn,
+    ownerDsn: ownerTls.connectionString,
     expectedDatabase,
     password,
-    gatewayDsn: (() => {
-      const gatewayUrl = new URL(ownerDsn);
-      gatewayUrl.username = gatewayUrl.hostname.toLowerCase().includes('.pooler.supabase.')
-        ? `${D02_ROLE}.${expectedProjectRef}`
-        : D02_ROLE;
-      gatewayUrl.password = password;
-      return gatewayUrl.toString();
-    })(),
-    ssl: sslConfig(ownerDsn, env.BETTER_AUTH_DATABASE_SSL_MODE),
+    gatewayDsn: gatewayTls.connectionString,
+    ssl: ownerTls.ssl,
     supportPreparationApproved: supportPreparationRaw === 'YES',
   });
 }
 
-function exactRole(row, { allowSupabasePg17CreatorMembership = false } = {}) {
+function exactRole(row) {
+  const canonicalInboundCount = Number(row?.canonical_inbound_membership_count);
   return row
     && row.rolname === D02_ROLE
     && row.rolsuper === false
@@ -540,13 +566,13 @@ function exactRole(row, { allowSupabasePg17CreatorMembership = false } = {}) {
     && row.rolbypassrls === false
     && Number(row.rolconnlimit) === -1
     && row.password_no_expiry === true
-    && (
-      row.membership_free === true
-      || (
-        allowSupabasePg17CreatorMembership
-        && row.supabase_pg17_creator_membership_only === true
-      )
-    )
+    && row.membership_contract_version === ROLE_MEMBERSHIP_CONTRACT_VERSION
+    && row.membership_direction_attested === true
+    && Number.isInteger(canonicalInboundCount)
+    && canonicalInboundCount >= 0
+    && canonicalInboundCount <= 1
+    && Number(row.outbound_membership_count) === 0
+    && row.transitive_authority_free === true
     && row.public_schema_create_denied === true;
 }
 
@@ -698,9 +724,7 @@ export async function provisionVoiceLabD02Role(
       before.length > 1
       || (
         before.length === 1
-        && !exactRole(before[0], {
-          allowSupabasePg17CreatorMembership: supportPreparation,
-        })
+        && !exactRole(before[0])
       )
     ) {
       fail('d02_role_catalog_drift');
@@ -734,9 +758,7 @@ export async function provisionVoiceLabD02Role(
     const after = await roleRows(client);
     if (
       after.length !== 1
-      || !exactRole(after[0], {
-        allowSupabasePg17CreatorMembership: supportPreparation,
-      })
+      || !exactRole(after[0])
     ) {
       fail('d02_role_catalog_drift');
     }
@@ -746,9 +768,8 @@ export async function provisionVoiceLabD02Role(
     await client.query('COMMIT');
     committed = true;
     await attestGatewayLogin(config, gatewayPoolFactory);
-    const supportRequired = after[0].membership_free !== true;
     return Object.freeze({
-      ok: !supportRequired,
+      ok: true,
       role: D02_ROLE,
       role_sha256: createHash('sha256').update(D02_ROLE).digest('hex'),
       database_sha256: createHash('sha256').update(target.database_name).digest('hex'),
@@ -759,11 +780,12 @@ export async function provisionVoiceLabD02Role(
       platform_schema_authority_denied: true,
       authority_attested: true,
       login_attested: true,
-      membership_attested: !supportRequired,
-      support_required: supportRequired,
-      support_action: supportRequired
-        ? 'remove_supabase_pg17_creator_membership'
-        : null,
+      membership_contract_version: ROLE_MEMBERSHIP_CONTRACT_VERSION,
+      canonical_inbound_membership_count:
+        Number(after[0].canonical_inbound_membership_count),
+      membership_attested: true,
+      support_required: false,
+      support_action: null,
     });
   } catch (error) {
     if (client && !committed) await client.query('ROLLBACK').catch(() => undefined);
@@ -778,7 +800,6 @@ export async function provisionVoiceLabD02Role(
 export async function main(env = process.env) {
   const result = await provisionVoiceLabD02Role(loadD02RoleProvisionConfig(env));
   process.stdout.write(`${JSON.stringify(result)}\n`);
-  if (result.support_required === true) process.exitCode = 2;
 }
 
 if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {

@@ -10,6 +10,7 @@ const PROJECT_REF = 'abcdefghijklmnopqrst';
 const OWNER_DSN =
   `postgresql://postgres:owner-only-password@db.${PROJECT_REF}.supabase.co:5432/postgres`;
 const ROLE_PASSWORD = 'd02-role-password-with-more-than-thirty-two-bytes';
+const TEST_CA = '-----BEGIN CERTIFICATE-----\nvoice-lab-test-ca\n-----END CERTIFICATE-----';
 
 function env(
   overrides: Record<string, string | undefined> = {},
@@ -21,6 +22,8 @@ function env(
     SOPHIA_VOICE_LAB_AUTH_MIGRATION_DATABASE_URL: OWNER_DSN,
     SOPHIA_VOICE_LAB_D02_GATEWAY_DATABASE_PASSWORD: ROLE_PASSWORD,
     BETTER_AUTH_EXPECTED_SUPABASE_PROJECT_REF: PROJECT_REF,
+    BETTER_AUTH_DATABASE_SSL_MODE: 'verify-full',
+    BETTER_AUTH_DATABASE_SSL_CA: TEST_CA,
     ...overrides,
   };
 }
@@ -36,15 +39,17 @@ const exactRole = Object.freeze({
   rolbypassrls: false,
   rolconnlimit: -1,
   password_no_expiry: true,
-  membership_free: true,
-  supabase_pg17_creator_membership_only: false,
+  membership_contract_version: 'supabase_pg17.directional_membership.v1',
+  membership_direction_attested: true,
+  canonical_inbound_membership_count: 0,
+  outbound_membership_count: 0,
+  transitive_authority_free: true,
   public_schema_create_denied: true,
 });
 
-const supabasePg17PreparedRole = Object.freeze({
+const supabasePg17CanonicalRole = Object.freeze({
   ...exactRole,
-  membership_free: false,
-  supabase_pg17_creator_membership_only: true,
+  canonical_inbound_membership_count: 1,
 });
 
 type QueryCall = { text: string; values: unknown[] };
@@ -236,6 +241,8 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
     expect(sql).toContain('platform_schema_authority_denied');
     expect(sql).toContain('membership.member = role.oid');
     expect(sql).toContain('membership.roleid = role.oid');
+    expect(sql).toContain('supabase_pg17.directional_membership.v1');
+    expect(sql).toContain("member_role.rolname = 'postgres'");
     expect(sql).toContain("grantor_role.rolname = 'supabase_admin'");
     expect(sql).toContain('membership.admin_option = true');
     expect(sql).toContain('membership.inherit_option = false');
@@ -278,8 +285,8 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
     expect(gatewayPool.client.calls).toHaveLength(1);
   });
 
-  it('commits only the exact Supabase PostgreSQL 17 creator edge in explicit support-preparation mode', async () => {
-    const client = new FakeClient([[], [{ ...supabasePg17PreparedRole }]]);
+  it('commits the exact Supabase PostgreSQL 17 inbound creator edge and records its cardinality', async () => {
+    const client = new FakeClient([[], [{ ...supabasePg17CanonicalRole }]]);
     const pool = new FakePool(client);
     const gatewayPool = new FakeGatewayPool();
     const config = loadD02RoleProvisionConfig(env({
@@ -292,13 +299,15 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
     });
 
     expect(result).toMatchObject({
-      ok: false,
+      ok: true,
       created: true,
       authority_attested: true,
       login_attested: true,
-      membership_attested: false,
-      support_required: true,
-      support_action: 'remove_supabase_pg17_creator_membership',
+      membership_contract_version: 'supabase_pg17.directional_membership.v1',
+      canonical_inbound_membership_count: 1,
+      membership_attested: true,
+      support_required: false,
+      support_action: null,
     });
     const publicRepair = client.calls.find(({ text }) =>
       text.includes('$voice_lab_d02_public_routine_acl$'));
@@ -315,8 +324,11 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
     expect(JSON.stringify(result)).not.toContain(OWNER_DSN);
   });
 
-  it('does not accept the Supabase PostgreSQL 17 creator edge without explicit support preparation', async () => {
-    const client = new FakeClient([[{ ...supabasePg17PreparedRole }]]);
+  it('accepts the canonical inbound creator edge without waiting for support', async () => {
+    const client = new FakeClient([
+      [{ ...supabasePg17CanonicalRole }],
+      [{ ...supabasePg17CanonicalRole }],
+    ]);
 
     await expect(provisionVoiceLabD02Role(
       loadD02RoleProvisionConfig(env()),
@@ -324,9 +336,13 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
         pool: new FakePool(client),
         gatewayPoolFactory: () => new FakeGatewayPool(),
       },
-    )).rejects.toMatchObject({ code: 'd02_role_catalog_drift' });
+    )).resolves.toMatchObject({
+      ok: true,
+      canonical_inbound_membership_count: 1,
+      support_required: false,
+    });
 
-    expect(client.calls.map(({ text }) => text)).toContain('ROLLBACK');
+    expect(client.calls.map(({ text }) => text)).toContain('COMMIT');
     expect(client.calls.flatMap(({ values }) => values)).not.toContain(ROLE_PASSWORD);
   });
 
@@ -345,11 +361,11 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
       text.includes('$voice_lab_d02_public_routine_acl$'))).toBe(false);
   });
 
-  it('rejects any non-exact membership even in support-preparation mode', async () => {
+  it('rejects a noncanonical membership even in ACL-preparation mode', async () => {
     const client = new FakeClient([[
       {
-        ...supabasePg17PreparedRole,
-        supabase_pg17_creator_membership_only: false,
+        ...supabasePg17CanonicalRole,
+        membership_direction_attested: false,
       },
     ]]);
 
@@ -366,8 +382,18 @@ describe('Voice Lab D02 database-role provisioning operator', () => {
     expect(client.calls.map(({ text }) => text)).toContain('ROLLBACK');
   });
 
-  it('rejects attribute or either-direction membership drift before sending the password', async () => {
-    const drifted = { ...exactRole, rolinherit: true, membership_free: false };
+  it.each([
+    ['contract version drift', { membership_contract_version: 'stale.v0' }],
+    ['duplicate or noncanonical touching row', { membership_direction_attested: false }],
+    ['missing canonical inbound cardinality', { canonical_inbound_membership_count: undefined }],
+    ['noninteger canonical inbound cardinality', { canonical_inbound_membership_count: 0.5 }],
+    ['negative canonical inbound cardinality', { canonical_inbound_membership_count: -1 }],
+    ['canonical inbound cardinality overflow', { canonical_inbound_membership_count: 2 }],
+    ['outbound membership', { outbound_membership_count: 1 }],
+    ['transitive authority', { transitive_authority_free: false }],
+    ['attribute drift', { rolinherit: true }],
+  ])('rejects %s before sending the password', async (_label, drift) => {
+    const drifted = { ...exactRole, ...drift };
     const client = new FakeClient([[drifted]]);
     const pool = new FakePool(client);
 

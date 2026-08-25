@@ -1,8 +1,12 @@
 import { Pool, type PoolConfig } from "pg";
 
+import { resolveDatabaseTls } from "./database-tls.mjs";
 import { validateBetterAuthDatabaseProject } from "./project-ref";
 
-type BetterAuthSslMode = "auto" | "disable" | "require" | "no-verify";
+export {
+  normalizeDatabaseUrlForExplicitTls,
+  resolveDatabaseTls,
+} from "./database-tls.mjs";
 
 declare global {
   var __sophiaBetterAuthPool: Pool | undefined;
@@ -26,79 +30,6 @@ function getBetterAuthDatabaseUrl() {
   return databaseUrl;
 }
 
-function getBetterAuthSslMode(): BetterAuthSslMode {
-  const sslMode = process.env.BETTER_AUTH_DATABASE_SSL_MODE?.trim().toLowerCase();
-
-  if (
-    sslMode === "auto" ||
-    sslMode === "disable" ||
-    sslMode === "require" ||
-    sslMode === "no-verify"
-  ) {
-    return sslMode;
-  }
-
-  return "auto";
-}
-
-export function applyBetterAuthSslModeToDatabaseUrl(
-  databaseUrl: string,
-  sslMode: BetterAuthSslMode,
-) {
-  if (sslMode !== "no-verify") {
-    return databaseUrl;
-  }
-
-  const normalizedUrl = new URL(databaseUrl);
-
-  // node-postgres reparses connectionString after the surrounding Pool config
-  // and lets URL SSL parameters replace the explicit `ssl` object. Encode the
-  // approved no-verify mode into the connection string as well so an existing
-  // `sslmode=require` value cannot silently restore certificate validation.
-  normalizedUrl.searchParams.delete("sslmode");
-  normalizedUrl.searchParams.delete("sslcert");
-  normalizedUrl.searchParams.delete("sslkey");
-  normalizedUrl.searchParams.delete("sslrootcert");
-  normalizedUrl.searchParams.set("ssl", "no-verify");
-
-  return normalizedUrl.toString();
-}
-
-function isSupabaseHost(hostname: string) {
-  return hostname.includes("supabase.co") || hostname.includes("supabase.com");
-}
-
-function getBetterAuthSslConfig(databaseUrl: string): PoolConfig["ssl"] {
-  const normalizedUrl = new URL(databaseUrl);
-  const sslMode = getBetterAuthSslMode();
-  const querySslMode = normalizedUrl.searchParams.get("sslmode")?.trim().toLowerCase();
-  const explicitSsl = normalizedUrl.searchParams.get("ssl")?.trim().toLowerCase();
-
-  if (sslMode === "disable" || querySslMode === "disable" || explicitSsl === "false") {
-    return false;
-  }
-
-  if (sslMode === "require") {
-    return { rejectUnauthorized: true };
-  }
-
-  if (sslMode === "no-verify") {
-    return { rejectUnauthorized: false };
-  }
-
-  if (querySslMode === "require" || querySslMode === "verify-ca" || querySslMode === "verify-full") {
-    return isSupabaseHost(normalizedUrl.hostname)
-      ? { rejectUnauthorized: false }
-      : { rejectUnauthorized: true };
-  }
-
-  if (explicitSsl === "true" || isSupabaseHost(normalizedUrl.hostname)) {
-    return { rejectUnauthorized: false };
-  }
-
-  return undefined;
-}
-
 function getBetterAuthPoolMax() {
   const poolMax = Number.parseInt(process.env.BETTER_AUTH_DATABASE_POOL_MAX ?? "", 10);
 
@@ -111,17 +42,21 @@ function getBetterAuthPoolMax() {
 
 function createBetterAuthPool() {
   const databaseUrl = getBetterAuthDatabaseUrl();
-  const sslMode = getBetterAuthSslMode();
-  const ssl = getBetterAuthSslConfig(databaseUrl);
+  const tls = resolveDatabaseTls({
+    databaseUrl,
+    modeRaw: process.env.BETTER_AUTH_DATABASE_SSL_MODE,
+    caPemRaw: process.env.BETTER_AUTH_DATABASE_SSL_CA,
+    environmentRaw: process.env.NODE_ENV,
+  });
 
   return new Pool({
-    connectionString: applyBetterAuthSslModeToDatabaseUrl(databaseUrl, sslMode),
+    connectionString: tls.connectionString,
     max: getBetterAuthPoolMax(),
     // Explicit pg_temp placement matters: when it is omitted PostgreSQL searches
     // the temporary schema before the listed path, which would let Better Auth's
     // library-owned unqualified session/user queries resolve to a temp shadow.
     options: "-c search_path=pg_catalog,public,pg_temp",
-    ...(ssl === undefined ? {} : { ssl }),
+    ...(tls.ssl === undefined ? {} : { ssl: tls.ssl as PoolConfig["ssl"] }),
   });
 }
 

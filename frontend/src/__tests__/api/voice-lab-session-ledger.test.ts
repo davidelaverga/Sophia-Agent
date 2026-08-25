@@ -776,7 +776,11 @@ const database = vi.hoisted(() => {
       rolcanlogin: true,
       rolreplication: false,
       rolbypassrls: false,
-      membership_free: true,
+      membership_contract_version: 'supabase_pg17.directional_membership.v1',
+      membership_direction_attested: true,
+      canonical_inbound_membership_count: 0,
+      outbound_membership_count: 0,
+      transitive_authority_free: true,
       public_schema_create_denied: true,
       future_function_public_execute_denied: true,
     }],
@@ -838,7 +842,11 @@ const database = vi.hoisted(() => {
       rolcanlogin: true,
       rolreplication: false,
       rolbypassrls: false,
-      membership_free: true,
+      membership_contract_version: 'supabase_pg17.directional_membership.v1',
+      membership_direction_attested: true,
+      canonical_inbound_membership_count: 0,
+      outbound_membership_count: 0,
+      transitive_authority_free: true,
       public_schema_create_denied: true,
       session_replication_role: 'origin',
       search_path: 'pg_catalog,public,pg_temp',
@@ -1254,7 +1262,11 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
       rolcanlogin: true,
       rolreplication: false,
       rolbypassrls: false,
-      membership_free: true,
+      membership_contract_version: 'supabase_pg17.directional_membership.v1',
+      membership_direction_attested: true,
+      canonical_inbound_membership_count: 0,
+      outbound_membership_count: 0,
+      transitive_authority_free: true,
       public_schema_create_denied: true,
       session_replication_role: 'origin',
       search_path: 'pg_catalog,public,pg_temp',
@@ -1292,6 +1304,18 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
       migrationSha256: VOICE_LAB_AUTH_LEDGER_MIGRATION_SHA256,
       requiredPrivileges: ['SELECT', 'INSERT', 'UPDATE', 'DELETE'],
     });
+    const membershipQueries = database.query.mock.calls
+      .map(([sql]) => String(sql))
+      .filter((sql) => sql.includes('supabase_pg17.directional_membership.v1'));
+    expect(membershipQueries).toHaveLength(2);
+    for (const sql of membershipQueries) {
+      expect(sql).toContain("member_role.rolname = 'postgres'");
+      expect(sql).toContain("grantor_role.rolname = 'supabase_admin'");
+      expect(sql).toContain('membership.admin_option = true');
+      expect(sql).toContain('membership.inherit_option = false');
+      expect(sql).toContain('membership.set_option = false');
+      expect(sql).toContain('WITH RECURSIVE inherited_roles');
+    }
   });
 
   it('rejects every D02 catalog, authority-role, and least-ACL drift seam', async () => {
@@ -1556,12 +1580,62 @@ describe('dedicated Voice Lab Better Auth session ledger', () => {
     });
     database.preflight.sessionSettings[0].rolsuper = false;
 
-    database.preflight.sessionSettings[0].membership_free = false;
+    database.preflight.sessionSettings[0].membership_direction_attested = false;
     await expect(assertVoiceLabAuthLedgerReady()).rejects.toMatchObject({
       code: 'voice_lab_auth_ledger_not_ready',
       status: 503,
     });
-    database.preflight.sessionSettings[0].membership_free = true;
+    database.preflight.sessionSettings[0].membership_direction_attested = true;
+
+    database.preflight.sessionSettings[0].membership_contract_version = 'stale.v0';
+    await expect(assertVoiceLabAuthLedgerReady()).rejects.toMatchObject({
+      code: 'voice_lab_auth_ledger_not_ready',
+      status: 503,
+    });
+    database.preflight.sessionSettings[0].membership_contract_version =
+      'supabase_pg17.directional_membership.v1';
+
+    database.preflight.sessionSettings[0].canonical_inbound_membership_count = 2;
+    await expect(assertVoiceLabAuthLedgerReady()).rejects.toMatchObject({
+      code: 'voice_lab_auth_ledger_not_ready',
+      status: 503,
+    });
+    database.preflight.sessionSettings[0].canonical_inbound_membership_count = Number.NaN;
+    await expect(assertVoiceLabAuthLedgerReady()).rejects.toMatchObject({
+      code: 'voice_lab_auth_ledger_not_ready',
+      status: 503,
+    });
+    database.preflight.sessionSettings[0].canonical_inbound_membership_count = 1;
+    await expect(assertVoiceLabAuthLedgerReady()).resolves.toMatchObject({
+      ready: true,
+    });
+    database.preflight.sessionSettings[0].canonical_inbound_membership_count = 0;
+
+    database.preflight.sessionSettings[0].outbound_membership_count = 1;
+    await expect(assertVoiceLabAuthLedgerReady()).rejects.toMatchObject({
+      code: 'voice_lab_auth_ledger_not_ready',
+      status: 503,
+    });
+    database.preflight.sessionSettings[0].outbound_membership_count = 0;
+
+    database.preflight.sessionSettings[0].transitive_authority_free = false;
+    await expect(assertVoiceLabAuthLedgerReady()).rejects.toMatchObject({
+      code: 'voice_lab_auth_ledger_not_ready',
+      status: 503,
+    });
+    database.preflight.sessionSettings[0].transitive_authority_free = true;
+
+    database.preflight.d02Role[0].canonical_inbound_membership_count = 1;
+    await expect(assertVoiceLabAuthLedgerReady()).resolves.toMatchObject({
+      ready: true,
+    });
+    database.preflight.d02Role[0].canonical_inbound_membership_count = 0;
+    database.preflight.d02Role[0].outbound_membership_count = 1;
+    await expect(assertVoiceLabAuthLedgerReady()).rejects.toMatchObject({
+      code: 'voice_lab_auth_ledger_not_ready',
+      status: 503,
+    });
+    database.preflight.d02Role[0].outbound_membership_count = 0;
 
     database.preflight.sessionSettings[0].public_schema_create_denied = false;
     await expect(assertVoiceLabAuthLedgerReady()).rejects.toMatchObject({
