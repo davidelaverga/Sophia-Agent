@@ -1182,7 +1182,8 @@ async function assertD02Catalog(
   ) throw new Error('Voice Lab D02 Gateway effective ACL drifted.');
 
   const globalEffective = await client.query(
-    `(SELECT relation.relname AS table_name, privilege_type,
+    `(SELECT /* voice_lab_d02_global_effective_privileges */
+            relation.relname AS table_name, privilege_type,
             has_table_privilege(
               to_regrole($1), relation.oid, privilege_type
             ) AS table_permitted,
@@ -1199,6 +1200,13 @@ async function assertD02Catalog(
        ) privilege_type
       WHERE namespace.nspname = 'public'
         AND relation.relkind IN ('r', 'p', 'v', 'm', 'f')
+        AND NOT EXISTS (
+          SELECT 1
+            FROM pg_depend dependency
+           WHERE dependency.classid = 'pg_class'::regclass
+             AND dependency.objid = relation.oid
+             AND dependency.deptype = 'e'
+        )
     ) UNION ALL (
       SELECT relation.relname AS table_name, privilege_type,
              has_sequence_privilege(
@@ -1209,6 +1217,13 @@ async function assertD02Catalog(
         JOIN pg_namespace namespace ON namespace.oid = relation.relnamespace
         CROSS JOIN unnest(ARRAY['USAGE', 'SELECT', 'UPDATE']) privilege_type
        WHERE namespace.nspname = 'public' AND relation.relkind = 'S'
+         AND NOT EXISTS (
+           SELECT 1
+             FROM pg_depend dependency
+            WHERE dependency.classid = 'pg_class'::regclass
+              AND dependency.objid = relation.oid
+              AND dependency.deptype = 'e'
+         )
     ) ORDER BY table_name, privilege_type`,
     [D02_DATABASE_ROLE],
   );
@@ -1220,12 +1235,20 @@ async function assertD02Catalog(
   ) throw new Error('Voice Lab D02 Gateway has raw public relation authority.');
 
   const globalFunctions = await client.query(
-    `SELECT procedure.proname,
+    `SELECT /* voice_lab_d02_global_function_authority */
+            procedure.proname,
             pg_get_function_identity_arguments(procedure.oid)
               AS identity_arguments
        FROM pg_proc procedure
        JOIN pg_namespace namespace ON namespace.oid = procedure.pronamespace
       WHERE namespace.nspname = 'public'
+        AND NOT EXISTS (
+          SELECT 1
+            FROM pg_depend dependency
+           WHERE dependency.classid = 'pg_proc'::regclass
+             AND dependency.objid = procedure.oid
+             AND dependency.deptype = 'e'
+        )
         AND has_function_privilege(to_regrole($1), procedure.oid, 'EXECUTE')
       ORDER BY procedure.proname, identity_arguments`,
     [D02_DATABASE_ROLE],

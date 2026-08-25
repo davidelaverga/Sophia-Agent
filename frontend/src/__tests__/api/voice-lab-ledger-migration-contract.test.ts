@@ -40,6 +40,14 @@ describe('Voice Lab auth-ledger operated migration contract', () => {
     expect(runner).toContain('membership.inherit_option = false');
     expect(runner).toContain('membership.set_option = false');
     expect(runner).toContain('WITH RECURSIVE inherited_roles');
+    expect(runner).toContain('voice_lab_d02_global_effective_privileges');
+    expect(runner).toContain('voice_lab_d02_global_function_authority');
+    expect(runner).toMatch(
+      /voice_lab_d02_global_function_authority[\s\S]*dependency\.classid = 'pg_proc'::regclass[\s\S]*dependency\.deptype = 'e'/,
+    );
+    expect(runner).toMatch(
+      /voice_lab_d02_global_effective_privileges[\s\S]*dependency\.classid = 'pg_class'::regclass[\s\S]*dependency\.deptype = 'e'/,
+    );
     expect(sql.match(/__SOPHIA_VOICE_LAB_AUTH_LEDGER_MIGRATION_SHA256__/g)).toHaveLength(1);
     expect(sql.toLowerCase()).toContain(
       'revoke all on public.sophia_voice_lab_auth_grants from public',
