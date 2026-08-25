@@ -581,6 +581,17 @@ def test_gateway_database_readiness_rejects_public_authority_in_hostile_schema(
     assert "pg_catalog.pg_extension" in cross_schema_sql
 
 
+def test_gateway_database_readiness_excludes_extension_owned_public_functions() -> None:
+    runtime_source = inspect.getsource(d02.assert_d02_gateway_database_ready)
+    public_function_authority = runtime_source.split(
+        "actual_function_authority =", 1
+    )[0].rsplit("cursor.execute(", 1)[-1]
+
+    assert "pg_catalog.pg_depend dependency" in public_function_authority
+    assert "dependency.objid = procedure.oid" in public_function_authority
+    assert "dependency.deptype = 'e'" in public_function_authority
+
+
 @pytest.fixture
 def d02_local(monkeypatch: pytest.MonkeyPatch) -> tuple[_LocalStore, Ed25519PrivateKey]:
     cleanup_fence._reset_local_cleanup_fences_for_tests()

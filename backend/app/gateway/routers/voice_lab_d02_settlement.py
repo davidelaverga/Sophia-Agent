@@ -1485,6 +1485,14 @@ def assert_d02_gateway_database_ready() -> None:
                   JOIN pg_catalog.pg_namespace namespace
                     ON namespace.oid = procedure.pronamespace
                  WHERE namespace.nspname = 'public'
+                   AND NOT EXISTS (
+                     SELECT 1
+                       FROM pg_catalog.pg_depend dependency
+                      WHERE dependency.classid =
+                            pg_catalog.to_regclass('pg_catalog.pg_proc')
+                        AND dependency.objid = procedure.oid
+                        AND dependency.deptype = 'e'
+                   )
                    AND has_function_privilege(
                      current_user, procedure.oid, 'EXECUTE'
                    )
