@@ -868,15 +868,15 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         await client.query(`update ${SCHEMA}.suite_runs set run_ids=run_ids-$1,updated_at=$2 where run_ids ? $1`, [row.id, now]);
         await client.query(`delete from ${SCHEMA}.runs where id=$1`, [row.id]);
       }
-      await client.query(`delete from ${SCHEMA}.worker_heartbeats where observed_at < $1 - interval '1 hour'`, [now]);
+      await client.query(`delete from ${SCHEMA}.worker_heartbeats where observed_at < $1::timestamptz - interval '1 hour'`, [now]);
       await client.query(`delete from ${SCHEMA}.suite_runs where state in ('completed','failed','cancelled') and jsonb_array_length(run_ids)=0 and updated_at <= $1`, [now]);
       await client.query(
         `delete from ${SCHEMA}.auth_audit audit
-          where audit.run_id is null and audit.observed_at < $1 - interval '7 days'
+          where audit.run_id is null and audit.observed_at < $1::timestamptz - interval '7 days'
             and not exists (select 1 from ${SCHEMA}.principal_provisions provision where provision.auth_audit_id=audit.id)`,
         [now],
       );
-      await client.query(`delete from ${SCHEMA}.admission_reservations where observed_at < $1 - interval '8 days'`, [now]);
+      await client.query(`delete from ${SCHEMA}.admission_reservations where observed_at < $1::timestamptz - interval '8 days'`, [now]);
       await client.query(`delete from ${SCHEMA}.retention_tombstones where control_expires_at <= $1`, [now]);
       await client.query("commit");
       return ids;
