@@ -8,10 +8,19 @@ import { CHATGPT_CLIENT_METADATA_URL, CHATGPT_STABLE_REDIRECT_URI, OAuthAuthoriz
 import { PostgresOAuthLedgerStore } from "../oauth-postgres-store.js";
 import { OAuthMaintenanceLoop } from "../oauth-maintenance.js";
 
+function logWebBootStage(stage: string): void {
+  console.log(JSON.stringify({ event: "voice_lab_web_boot_stage", stage }));
+}
+
 const config = loadConfig();
+logWebBootStage("config_loaded");
 const ledger = createLedger(config);
+logWebBootStage("ledger_initializing");
 await ledger.initialize();
+logWebBootStage("ledger_initialized");
+logWebBootStage("audio_initializing");
 const audio = await createAudioResolver(config);
+logWebBootStage("audio_initialized");
 const service = new VoiceLabService(ledger, config, async () => audio.summaries(), async () => audio.ttsInfo(), async () => {
   if (!config.readinessTarget) return { ok: false, status: "unconfigured", builds: null, reason: "target_configuration_missing" };
   return probeTarget(config);
@@ -46,7 +55,9 @@ const attestationBearer = new StaticAttestationAuthenticator(Object.fromEntries(
 const authenticator = new CompositeRequestAuthenticator([oauth, directBearer, attestationBearer]);
 const oauthMaintenance = new OAuthMaintenanceLoop(oauthStore, config.oauth.purgeBatchSize);
 oauthMaintenance.start();
+logWebBootStage("oauth_maintenance_started");
 const webBoot = createWebBootIdentity(config);
+logWebBootStage("boot_audit_recording");
 await ledger.recordAuthAudit({
   runId: null,
   callerId: "system.web",
@@ -56,7 +67,9 @@ await ledger.recordAuthAudit({
   detail: { service_version: config.serviceVersion, instance_id_sha256: webBoot.instanceIdSha256, version_response_sha256: webBoot.versionResponseSha256, raw_instance_identifier_excluded: true },
   observedAt: webBoot.observedAt,
 });
+logWebBootStage("boot_audit_recorded");
 const server = await listen(createHttpApp(config, service, ledger, authenticator, oauth, oauthMaintenance, webBoot), config.port);
+logWebBootStage("http_listening");
 
 async function shutdown(): Promise<void> {
   await new Promise<void>((resolve) => server.close(() => resolve()));
