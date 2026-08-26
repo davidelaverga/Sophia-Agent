@@ -153,6 +153,24 @@ describe("ordinary dashboard consent route", () => {
     expect(now).toBe(25_000);
     expect(result).toBe("accepted");
   });
+
+  it("reloads the exact recoverable Next.js error shell once before continuing", async () => {
+    let now = 0;
+    let reloads = 0;
+    const result = await establishDashboardMicRoute({
+      isMicVisible: async () => reloads === 1,
+      isConsentVisible: async () => false,
+      isConsentEnabled: async () => false,
+      acceptConsent: async () => undefined,
+      isRecoverableLoadErrorVisible: async () => reloads === 0,
+      reload: async () => { reloads += 1; },
+      wait: async () => { now += 100; },
+      timeoutMs: 1_000,
+      now: () => now,
+    });
+    expect(result).toBe("already_consented");
+    expect(reloads).toBe(1);
+  });
 });
 
 describe("D02 product provider-cleanup acknowledgement", () => {

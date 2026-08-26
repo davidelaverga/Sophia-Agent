@@ -112,12 +112,15 @@ export async function establishDashboardMicRoute(input: {
   isConsentVisible: () => Promise<boolean>;
   isConsentEnabled: () => Promise<boolean>;
   acceptConsent: () => Promise<void>;
+  isRecoverableLoadErrorVisible?: () => Promise<boolean>;
+  reload?: () => Promise<void>;
   wait: () => Promise<void>;
   timeoutMs: number;
   now?: () => number;
 }): Promise<"already_consented" | "accepted"> {
   const now = input.now ?? Date.now;
   const deadline = now() + input.timeoutMs;
+  let reloadAttempted = false;
   while (now() < deadline) {
     if (await input.isMicVisible()) return "already_consented";
     if (await input.isConsentVisible() && await input.isConsentEnabled()) {
@@ -127,6 +130,16 @@ export async function establishDashboardMicRoute(input: {
         await input.wait();
       }
       throw new Error("The ordinary privacy-consent UI did not release the dashboard microphone route.");
+    }
+    // Next.js can render its same-origin, recoverable navigation error shell
+    // even though the document request itself returned HTTP 200. Honor that
+    // ordinary UI's Reload affordance exactly once, then continue the same
+    // bounded route wait. Never reload an unknown page or loop indefinitely.
+    if (!reloadAttempted && input.isRecoverableLoadErrorVisible && input.reload
+      && await input.isRecoverableLoadErrorVisible()) {
+      reloadAttempted = true;
+      await input.reload();
+      continue;
     }
     await input.wait();
   }
@@ -216,12 +229,18 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       assertPageLocation(page.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
       const micAnchor = page.locator(this.config.onboardingMicSelector).first();
       const consentAccept = page.locator(CONSENT_ACCEPT_SELECTOR).first();
+      const recoverableLoadError = page.getByText("This page couldn’t load", { exact: true }).first();
       ordinaryRouteStage = "dashboard_privacy_consent";
       await establishDashboardMicRoute({
         isMicVisible: () => micAnchor.isVisible(),
         isConsentVisible: () => consentAccept.isVisible(),
         isConsentEnabled: () => consentAccept.isEnabled(),
         acceptConsent: () => consentAccept.click({ timeout: 20_000 }),
+        isRecoverableLoadErrorVisible: () => recoverableLoadError.isVisible(),
+        reload: async () => {
+          await page.reload({ waitUntil: "domcontentloaded", timeout: 30_000 });
+          assertPageLocation(page.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
+        },
         wait: () => page.waitForTimeout(100),
         timeoutMs: DASHBOARD_ROUTE_TIMEOUT_MS,
       });
