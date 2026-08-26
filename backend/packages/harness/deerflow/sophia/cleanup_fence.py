@@ -2810,6 +2810,88 @@ def close_existing_cleanup_obligation(
             )
 
 
+def close_or_seed_auth_provisional_cleanup_obligation(
+    cleanup_obligation_id: str,
+    provider_expires_at: str | datetime,
+) -> CleanupFenceStatus:
+    """Close an existing fence or atomically seed a rejected-auth fence CLOSED.
+
+    The frontend grant transaction creates the auth-provisional obligation
+    before it creates any Better Auth session or grant row. A rejection before
+    that boundary rolls the entire transaction back, so recovery can observe no
+    row at all. Serializing on the same cleanup advisory lock lets the private,
+    signed recovery boundary publish CLOSED for that allocation-free case. A
+    concurrent grant exchange either commits first and is closed here, or sees
+    CLOSED afterward and cannot allocate.
+    """
+
+    cleanup_id = _validated_cleanup_id(cleanup_obligation_id)
+    provider_deadline = _parsed_deadline(provider_expires_at)
+    connection = _connect()
+    if connection is None:
+        with _LOCAL_LOCK:
+            row = _LOCAL_OBLIGATIONS.get(cleanup_id)
+            if row is None:
+                observed_at = datetime.now(UTC)
+                _LOCAL_OBLIGATIONS[cleanup_id] = {
+                    "state": "closed",
+                    "lifecycle_phase": "auth_provisional",
+                    "retention_expires_at": provider_deadline,
+                    "provider_expires_at": provider_deadline,
+                    "live_cleanup_completed_at": None,
+                    "created_at": observed_at,
+                    "updated_at": observed_at,
+                    "closed_at": observed_at,
+                }
+                return CleanupFenceStatus(
+                    "closed",
+                    0,
+                    0,
+                    provider_deadline,
+                    provider_deadline,
+                )
+            return close_cleanup_obligation(
+                cleanup_id,
+                row["retention_expires_at"],
+                row["provider_expires_at"],
+            )
+    with connection:
+        with connection.cursor() as cursor:
+            _lock_cursor(cursor, cleanup_id)
+            cursor.execute(
+                """
+                INSERT INTO public.sophia_voice_lab_cleanup_obligations (
+                    cleanup_obligation_id, state, lifecycle_phase,
+                    retention_expires_at, provider_expires_at, closed_at
+                )
+                VALUES (%s, 'closed', 'auth_provisional', %s, %s,
+                        clock_timestamp())
+                ON CONFLICT (cleanup_obligation_id) DO NOTHING
+                """,
+                (cleanup_id, provider_deadline, provider_deadline),
+            )
+            cursor.execute(
+                """
+                SELECT retention_expires_at, provider_expires_at
+                  FROM public.sophia_voice_lab_cleanup_obligations
+                 WHERE cleanup_obligation_id = %s
+                 FOR UPDATE
+                """,
+                (cleanup_id,),
+            )
+            row = cursor.fetchone()
+            if row is None or row[0] is None or row[1] is None:
+                raise CleanupFenceError(
+                    "cleanup deadline authority is unavailable"
+                )
+            return close_cleanup_obligation_with_cursor(
+                cursor,
+                cleanup_id,
+                row[0],
+                row[1],
+            )
+
+
 def close_cleanup_obligation_if_retention_due(
     cleanup_obligation_id: str,
     retention_expires_at: str | datetime,
@@ -4412,6 +4494,7 @@ __all__ = [
     "close_cleanup_obligation_if_provider_due",
     "close_cleanup_obligation_with_cursor",
     "close_existing_cleanup_obligation",
+    "close_or_seed_auth_provisional_cleanup_obligation",
     "cleanup_retention_expired",
     "cleanup_retention_expired_with_cursor",
     "cleanup_retention_due_before_close_with_cursor",

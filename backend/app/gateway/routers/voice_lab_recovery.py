@@ -2756,6 +2756,7 @@ def _close_live_cleanup_admission(
         from deerflow.sophia.cleanup_fence import (
             CleanupFenceError,
             close_existing_cleanup_obligation,
+            close_or_seed_auth_provisional_cleanup_obligation,
         )
 
         result = close_existing_cleanup_obligation(claims.cleanup_obligation_id)
@@ -2767,8 +2768,12 @@ def _close_live_cleanup_admission(
         if str(exc) == "cleanup deadline authority is unavailable":
             try:
                 tombstone = _load_recovery_purge_tombstone(claims)
-            except (OSError, RuntimeError):
-                tombstone = None
+            except (OSError, RuntimeError) as tombstone_exc:
+                return _component(
+                    "pending",
+                    code="cleanup_admission_fence_unavailable",
+                    error_type=type(tombstone_exc).__name__,
+                )
             if tombstone is not None:
                 return _component(
                     "already_terminal",
@@ -2776,11 +2781,30 @@ def _close_live_cleanup_admission(
                     cleanup_admissions_pending=0,
                     cleanup_fence_tombstone_verified=True,
                 )
-        return _component(
-            "pending",
-            code="cleanup_admission_fence_unavailable",
-            error_type=type(exc).__name__,
-        )
+            if record is None:
+                try:
+                    result = close_or_seed_auth_provisional_cleanup_obligation(
+                        claims.cleanup_obligation_id,
+                        claims.provider_expires_at,
+                    )
+                except Exception as seed_exc:  # noqa: BLE001 - typed fail-closed seed.
+                    return _component(
+                        "pending",
+                        code="cleanup_admission_fence_unavailable",
+                        error_type=type(seed_exc).__name__,
+                    )
+            else:
+                return _component(
+                    "pending",
+                    code="cleanup_admission_fence_unavailable",
+                    error_type=type(exc).__name__,
+                )
+        else:
+            return _component(
+                "pending",
+                code="cleanup_admission_fence_unavailable",
+                error_type=type(exc).__name__,
+            )
     except Exception as exc:  # noqa: BLE001 - typed fail-closed component.
         return _component(
             "pending",

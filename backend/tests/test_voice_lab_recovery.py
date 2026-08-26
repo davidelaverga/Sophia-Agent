@@ -528,6 +528,76 @@ def test_cleanup_admission_accepts_only_exact_post_retention_tombstone(
     }
 
 
+def test_cleanup_admission_seeds_closed_fence_for_rejected_auth_without_resources(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.sophia import cleanup_fence
+
+    monkeypatch.setattr(
+        cleanup_fence,
+        "close_existing_cleanup_obligation",
+        Mock(
+            side_effect=cleanup_fence.CleanupFenceError(
+                "cleanup deadline authority is unavailable"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        voice_lab_recovery,
+        "_load_recovery_purge_tombstone",
+        Mock(return_value=None),
+    )
+
+    result = voice_lab_recovery._close_live_cleanup_admission(_claims(), None)
+
+    assert result == {
+        "status": "completed",
+        "admission_closed": True,
+        "cleanup_admissions_pending": 0,
+    }
+    obligation = cleanup_fence._LOCAL_OBLIGATIONS[
+        _claims().cleanup_obligation_id
+    ]
+    assert obligation["state"] == "closed"
+    assert obligation["lifecycle_phase"] == "auth_provisional"
+    assert obligation["retention_expires_at"] == datetime(
+        2033, 5, 18, 4, 3, 20, tzinfo=UTC
+    )
+    assert obligation["provider_expires_at"] == datetime(
+        2033, 5, 18, 4, 3, 20, tzinfo=UTC
+    )
+
+
+def test_cleanup_admission_does_not_seed_when_tombstone_read_is_uncertain(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.sophia import cleanup_fence
+
+    monkeypatch.setattr(
+        cleanup_fence,
+        "close_existing_cleanup_obligation",
+        Mock(
+            side_effect=cleanup_fence.CleanupFenceError(
+                "cleanup deadline authority is unavailable"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        voice_lab_recovery,
+        "_load_recovery_purge_tombstone",
+        Mock(side_effect=RuntimeError("read unavailable")),
+    )
+
+    result = voice_lab_recovery._close_live_cleanup_admission(_claims(), None)
+
+    assert result == {
+        "status": "pending",
+        "code": "cleanup_admission_fence_unavailable",
+        "error_type": "RuntimeError",
+    }
+    assert _claims().cleanup_obligation_id not in cleanup_fence._LOCAL_OBLIGATIONS
+
+
 def test_cleanup_admission_keeps_other_fence_errors_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
