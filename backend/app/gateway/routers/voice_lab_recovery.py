@@ -1334,6 +1334,9 @@ def _cleanup_auth_obligation_sources_by_id(
                         or marker.get("test_run_id") != test_run_id
                         or marker.get("tombstone_kid") != tombstone_kid
                         or marker.get("cleanup_obligation_id") != cleanup_id
+                        or marker.get("provider_expires_at")
+                        != _canonical_utc_millis(row[7])
+                        or marker.get("retention_hours") != row[8]
                         or marker.get("issued_at") != row[5]
                         or not hmac.compare_digest(
                             str(marker.get("jti_sha256")), str(row[9])
@@ -2578,6 +2581,8 @@ def _parse_session_marker(value: object) -> dict[str, object] | None:
         "test_run_id",
         "tombstone_kid",
         "cleanup_obligation_id",
+        "provider_expires_at",
+        "retention_hours",
         "issued_at",
         "jti_sha256",
         "nonce_sha256",
@@ -2594,6 +2599,11 @@ def _parse_session_marker(value: object) -> dict[str, object] | None:
             r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}",
             marker["cleanup_obligation_id"],
         )
+        or not isinstance(marker.get("provider_expires_at"), str)
+        or _parse_canonical_utc_millis(marker["provider_expires_at"]) is None
+        or not isinstance(marker.get("retention_hours"), int)
+        or isinstance(marker.get("retention_hours"), bool)
+        or not 1 <= marker["retention_hours"] <= 168
         or not isinstance(marker.get("issued_at"), int)
         or isinstance(marker.get("issued_at"), bool)
         or not isinstance(marker.get("jti_sha256"), str)
@@ -3595,8 +3605,9 @@ def _recover_auth_sessions_sync(claims: VoiceLabClaims) -> dict[str, object]:
 
                 cursor.execute(
                     'SELECT "grant_fingerprint", "test_run_id", "tombstone_kid", '
-                    '"cleanup_obligation_id", "issued_at", "jti_sha256", '
-                    '"nonce_sha256", "session_token_sha256", "status" '
+                    '"cleanup_obligation_id", "issued_at", "provider_expires_at", '
+                    '"retention_hours", "jti_sha256", "nonce_sha256", '
+                    '"session_token_sha256", "status" '
                     'FROM public."sophia_voice_lab_auth_grants" '
                     'WHERE "principal_id" = ANY(%s) '
                     'OR "cleanup_obligation_id" = ANY(%s) FOR UPDATE',
@@ -3620,7 +3631,7 @@ def _recover_auth_sessions_sync(claims: VoiceLabClaims) -> dict[str, object]:
                         "pending", code="auth_tombstone_key_unavailable"
                     )
                 if any(
-                    row[8] == "active"
+                    row[10] == "active"
                     and (
                         row[1] != claims.test_run_id
                         or row[3] != claims.cleanup_obligation_id
@@ -3637,13 +3648,20 @@ def _recover_auth_sessions_sync(claims: VoiceLabClaims) -> dict[str, object]:
                         return _component("pending", code="auth_tombstone_key_unavailable")
                     token_hash = hashlib.sha256(token.encode()).hexdigest()
                     bound = any(
-                        row[8] == "active"
+                        row[10] == "active"
                         and row[2] == marker_kid
                         and row[3] == marker.get("cleanup_obligation_id")
                         and row[4] == marker.get("issued_at")
-                        and hmac.compare_digest(str(row[5]), str(marker.get("jti_sha256")))
-                        and hmac.compare_digest(str(row[6]), str(marker.get("nonce_sha256")))
-                        and hmac.compare_digest(str(row[7]), token_hash)
+                        and marker.get("provider_expires_at")
+                        == claims.provider_expires_at
+                        and marker.get("provider_expires_at")
+                        == _canonical_utc_millis(row[5])
+                        and marker.get("retention_hours")
+                        == claims.retention_hours
+                        and marker.get("retention_hours") == row[6]
+                        and hmac.compare_digest(str(row[7]), str(marker.get("jti_sha256")))
+                        and hmac.compare_digest(str(row[8]), str(marker.get("nonce_sha256")))
+                        and hmac.compare_digest(str(row[9]), token_hash)
                         for row in exact_grants
                     )
                     if not bound:
@@ -3651,7 +3669,7 @@ def _recover_auth_sessions_sync(claims: VoiceLabClaims) -> dict[str, object]:
 
                 grants_revoked = 0
                 for row in exact_grants:
-                    if row[8] != "active":
+                    if row[10] != "active":
                         continue
                     tombstone_kid = str(row[2])
                     cursor.execute(

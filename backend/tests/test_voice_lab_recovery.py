@@ -1476,6 +1476,10 @@ def test_auth_provisional_expiry_cleans_live_auth_and_marks_before_retention(
         "test_run_id": test_run_id,
         "tombstone_kid": "v1",
         "cleanup_obligation_id": cleanup_id,
+        "provider_expires_at": provider.isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z"),
+        "retention_hours": 1,
         "issued_at": issued_at,
         "jti_sha256": jti_hash,
         "nonce_sha256": nonce_hash,
@@ -1862,12 +1866,16 @@ def _session_marker(*, run_id: str, token: str, issued_at: int = 2_000_000_000) 
         if run_id == "run-B"
         else "123e4567-e89b-42d3-a456-426614174000"
     )
+    provider_expires_at = "2033-05-18T04:03:20.000Z"
+    retention_hours = 24
     marker = {
         "v": 1,
         "principal_id": "voice-lab-user-1",
         "test_run_id": run_id,
         "tombstone_kid": "v1",
         "cleanup_obligation_id": cleanup_obligation_id,
+        "provider_expires_at": provider_expires_at,
+        "retention_hours": retention_hours,
         "issued_at": issued_at,
         "jti_sha256": jti_hash,
         "nonce_sha256": nonce_hash,
@@ -1881,12 +1889,48 @@ def _session_marker(*, run_id: str, token: str, issued_at: int = 2_000_000_000) 
         "v1",
         cleanup_obligation_id,
         issued_at,
+        datetime.fromisoformat(provider_expires_at.replace("Z", "+00:00")),
+        retention_hours,
         jti_hash,
         nonce_hash,
         hashlib.sha256(token.encode()).hexdigest(),
         "active",
     )
     return f"sophia-voice-lab-session-v1.{encoded}", ledger
+
+
+def test_session_marker_parser_matches_frontend_schema_exactly() -> None:
+    marker_value, _ledger = _session_marker(run_id="run-001", token="token-001")
+    parsed = voice_lab_recovery._parse_session_marker(marker_value)
+
+    assert parsed is not None
+    assert parsed["provider_expires_at"] == "2033-05-18T04:03:20.000Z"
+    assert parsed["retention_hours"] == 24
+
+    payload = json.loads(
+        base64.urlsafe_b64decode(
+            marker_value.split(".", 1)[1]
+            + "=" * (-len(marker_value.split(".", 1)[1]) % 4)
+        )
+    )
+
+    def encoded(candidate: dict[str, object]) -> str:
+        value = base64.urlsafe_b64encode(
+            json.dumps(candidate, separators=(",", ":")).encode()
+        ).rstrip(b"=").decode()
+        return f"sophia-voice-lab-session-v1.{value}"
+
+    for missing in ("provider_expires_at", "retention_hours"):
+        invalid = dict(payload)
+        invalid.pop(missing)
+        assert voice_lab_recovery._parse_session_marker(encoded(invalid)) is None
+
+    noncanonical = dict(payload)
+    noncanonical["provider_expires_at"] = "2033-05-18T04:03:20Z"
+    assert voice_lab_recovery._parse_session_marker(encoded(noncanonical)) is None
+    boolean_retention = dict(payload)
+    boolean_retention["retention_hours"] = True
+    assert voice_lab_recovery._parse_session_marker(encoded(boolean_retention)) is None
 
 
 class _FakeCursor:
@@ -1911,10 +1955,13 @@ class _FakeCursor:
             self._rows = list(self.grants)
         elif sql.startswith('UPDATE public."sophia_voice_lab_auth_grants"'):
             self.mutations += 1
+            self.rowcount = 1
         elif sql.startswith('DELETE FROM public."session"'):
             self.mutations += 1
+            self.rowcount = 1
         elif sql.startswith('DELETE FROM public."sophia_voice_lab_auth_grants"'):
             self.mutations += 1
+            self.rowcount = 1
         else:
             self._rows = []
 
@@ -1972,6 +2019,10 @@ def test_opaque_auth_only_cleanup_tombstones_and_deletes_by_cleanup_id(
         "test_run_id": test_run_id,
         "tombstone_kid": "v1",
         "cleanup_obligation_id": cleanup_id,
+        "provider_expires_at": provider_deadline.isoformat(
+            timespec="milliseconds"
+        ).replace("+00:00", "Z"),
+        "retention_hours": 1,
         "issued_at": issued_at,
         "jti_sha256": jti_hash,
         "nonce_sha256": nonce_hash,
@@ -2168,6 +2219,34 @@ def test_delayed_run_a_recovery_cannot_revoke_active_run_b(
     assert cursor.sessions == [("token-B", marker_b)]
     assert cursor.grants == [ledger_b]
     assert cursor.mutations == 0
+
+
+def test_exact_frontend_marker_binds_and_recovers_auth_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    marker, ledger = _session_marker(run_id="run-001", token="token-001")
+    cursor = _FakeCursor([("token-001", marker)], [ledger])
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_AUTH_DATABASE_URL", "postgres://safe-test")
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_AUTH_TOMBSTONE_ACTIVE_KID", "v1")
+    monkeypatch.setenv(
+        "SOPHIA_VOICE_LAB_AUTH_TOMBSTONE_KEYS",
+        json.dumps({"v1": AUTH_TOMBSTONE_SECRET}),
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "psycopg",
+        SimpleNamespace(connect=lambda *_args, **_kwargs: _FakeConnection(cursor)),
+    )
+
+    result = voice_lab_recovery._recover_auth_sessions_sync(_claims())
+
+    assert result == {
+        "status": "completed",
+        "sessions_revoked": 1,
+        "grants_tombstoned": 1,
+        "ordinary_sessions_preserved": 0,
+    }
+    assert cursor.mutations == 3
 
 
 def test_allocation_free_recovery_preserves_ordinary_auth_session(

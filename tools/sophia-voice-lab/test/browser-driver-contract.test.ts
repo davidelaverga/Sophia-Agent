@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { assertPageLocation, closeContextWithProof, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, requestBoundJson, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
+import { assertPageLocation, closeContextWithProof, DASHBOARD_ROUTE_TIMEOUT_MS, drainProductCapture, establishDashboardMicRoute, isExactFinalizationResponse, PlaywrightVoiceDriver, requestBoundJson, validateAppSyntheticBinding, validateD02BrowserContextBinding, validateD02ProductCleanupEcho } from "../src/browser-driver.js";
 import { sha256 } from "../src/security.js";
 import { SHA, SHA_B, SHA_C, SHA_D, testConfig, testRun } from "./helpers.js";
 
@@ -135,6 +135,23 @@ describe("ordinary dashboard consent route", () => {
     });
     expect(result).toBe("already_consented");
     expect(accepted).toBe(false);
+  });
+
+  it("allows bounded cold auth hydration beyond the former 20-second limit", async () => {
+    let now = 0;
+    let accepted = false;
+    const result = await establishDashboardMicRoute({
+      isMicVisible: async () => accepted,
+      isConsentVisible: async () => now >= 25_000 && !accepted,
+      isConsentEnabled: async () => now >= 25_000,
+      acceptConsent: async () => { accepted = true; },
+      wait: async () => { now += 100; },
+      timeoutMs: DASHBOARD_ROUTE_TIMEOUT_MS,
+      now: () => now,
+    });
+    expect(DASHBOARD_ROUTE_TIMEOUT_MS).toBe(60_000);
+    expect(now).toBe(25_000);
+    expect(result).toBe("accepted");
   });
 });
 

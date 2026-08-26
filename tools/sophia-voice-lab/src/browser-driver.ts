@@ -105,6 +105,7 @@ interface BrowserSession {
 }
 
 const CONSENT_ACCEPT_SELECTOR = '[data-voice-lab="consent-accept"]';
+export const DASHBOARD_ROUTE_TIMEOUT_MS = 60_000;
 
 export async function establishDashboardMicRoute(input: {
   isMicVisible: () => Promise<boolean>;
@@ -222,7 +223,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         isConsentEnabled: () => consentAccept.isEnabled(),
         acceptConsent: () => consentAccept.click({ timeout: 20_000 }),
         wait: () => page.waitForTimeout(100),
-        timeoutMs: 20_000,
+        timeoutMs: DASHBOARD_ROUTE_TIMEOUT_MS,
       });
       ordinaryRouteStage = "dashboard_microphone_cta";
       const anchoredButton = micAnchor.locator("xpath=ancestor::button[1]");
