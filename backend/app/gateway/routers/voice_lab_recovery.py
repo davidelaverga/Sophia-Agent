@@ -2753,9 +2753,34 @@ def _close_live_cleanup_admission(
     """Commit content-free CLOSED before live cleanup can report success."""
 
     try:
-        from deerflow.sophia.cleanup_fence import close_existing_cleanup_obligation
+        from deerflow.sophia.cleanup_fence import (
+            CleanupFenceError,
+            close_existing_cleanup_obligation,
+        )
 
         result = close_existing_cleanup_obligation(claims.cleanup_obligation_id)
+    except CleanupFenceError as exc:
+        # COMPLETE obligations are retired only after the retention reaper
+        # verifies the immutable recovery tombstone, zero admissions, and zero
+        # D02 sources. Recognize only that exact post-retention absence; every
+        # other fence error remains pending and fail-closed.
+        if str(exc) == "cleanup deadline authority is unavailable":
+            try:
+                tombstone = _load_recovery_purge_tombstone(claims)
+            except (OSError, RuntimeError):
+                tombstone = None
+            if tombstone is not None:
+                return _component(
+                    "already_terminal",
+                    admission_closed=True,
+                    cleanup_admissions_pending=0,
+                    cleanup_fence_tombstone_verified=True,
+                )
+        return _component(
+            "pending",
+            code="cleanup_admission_fence_unavailable",
+            error_type=type(exc).__name__,
+        )
     except Exception as exc:  # noqa: BLE001 - typed fail-closed component.
         return _component(
             "pending",

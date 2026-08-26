@@ -482,6 +482,61 @@ def test_recovery_identity_is_stable_per_run_and_attempt_is_capability_bound() -
     assert voice_lab_recovery._attempt_id(first) != voice_lab_recovery._attempt_id(later_attempt)
 
 
+def test_cleanup_admission_accepts_only_exact_post_retention_tombstone(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.sophia import cleanup_fence
+
+    monkeypatch.setattr(
+        cleanup_fence,
+        "close_existing_cleanup_obligation",
+        Mock(
+            side_effect=cleanup_fence.CleanupFenceError(
+                "cleanup deadline authority is unavailable"
+            )
+        ),
+    )
+    monkeypatch.setattr(
+        voice_lab_recovery,
+        "_load_recovery_purge_tombstone",
+        Mock(return_value=({"strict": "tombstone"}, {"storage": "supabase"})),
+    )
+
+    assert voice_lab_recovery._close_live_cleanup_admission(_claims(), None) == {
+        "status": "already_terminal",
+        "admission_closed": True,
+        "cleanup_admissions_pending": 0,
+        "cleanup_fence_tombstone_verified": True,
+    }
+
+
+def test_cleanup_admission_keeps_other_fence_errors_fail_closed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from deerflow.sophia import cleanup_fence
+
+    monkeypatch.setattr(
+        cleanup_fence,
+        "close_existing_cleanup_obligation",
+        Mock(side_effect=cleanup_fence.CleanupFenceError("database unavailable")),
+    )
+    tombstone = Mock(return_value=({"strict": "tombstone"}, {}))
+    monkeypatch.setattr(
+        voice_lab_recovery,
+        "_load_recovery_purge_tombstone",
+        tombstone,
+    )
+
+    result = voice_lab_recovery._close_live_cleanup_admission(_claims(), None)
+
+    assert result == {
+        "status": "pending",
+        "code": "cleanup_admission_fence_unavailable",
+        "error_type": "CleanupFenceError",
+    }
+    tombstone.assert_not_called()
+
+
 @pytest.mark.anyio
 async def test_provider_terminal_readback_is_a_noop_after_admission_consumption(
     monkeypatch: pytest.MonkeyPatch,
