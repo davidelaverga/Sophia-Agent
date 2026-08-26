@@ -4,10 +4,10 @@ import path from "node:path";
 
 import pg from "pg";
 
+import { acquireMigrationLock, configureMigrationSession, createMigrationClient, logMigrationStage } from "../migration-runtime.js";
 import { canonicalRequestHash } from "../security.js";
 import { attestVoiceLabSchema, inspectMigrationPreflight, readVoiceLabCatalog, VOICE_LAB_MIGRATION_SHA256, VOICE_LAB_SCHEMA_VERSION, VOICE_LAB_TABLES, writeReleaseSchemaSeal } from "../schema-attestation.js";
 
-const { Client } = pg;
 const databaseUrl = process.env.DATABASE_URL?.trim();
 if (!databaseUrl) throw new Error("DATABASE_URL is required to migrate Sophia Voice Lab.");
 
@@ -18,18 +18,26 @@ const migrationPath = configuredPath || defaultPath;
 const sqlBytes = await readFile(migrationPath);
 const migrationSha256 = createHash("sha256").update(sqlBytes).digest("hex");
 if (migrationSha256 !== VOICE_LAB_MIGRATION_SHA256) throw new Error("Voice Lab migration bytes do not match the compiled release checksum.");
-const client = new Client({ connectionString: databaseUrl, application_name: "sophia-voice-lab-migrate" });
+const client = createMigrationClient(databaseUrl);
+logMigrationStage("database_connecting");
 await client.connect();
+logMigrationStage("database_connected");
 let locked = false;
 try {
-  await client.query("select pg_advisory_lock(hashtext('sophia_voice_lab_schema_v3'))");
+  await configureMigrationSession(client);
+  logMigrationStage("migration_lock_waiting");
+  await acquireMigrationLock(client);
   locked = true;
+  logMigrationStage("migration_lock_acquired");
   // Build the release expectation in a fresh isolated schema from the exact
   // checksum-pinned migration bytes. This is deliberately independent of the
   // target schema, so IF NOT EXISTS can never bless pre-existing drift.
   const expectedCatalogSha256 = await buildReferenceCatalog(client, sqlBytes.toString("utf8"));
+  logMigrationStage("reference_catalog_built");
   await inspectMigrationPreflight(client, expectedCatalogSha256);
+  logMigrationStage("target_preflight_passed");
   await client.query(sqlBytes.toString("utf8"));
+  logMigrationStage("migration_applied");
   const catalogSha256 = canonicalRequestHash(await readVoiceLabCatalog(client));
   if (catalogSha256 !== expectedCatalogSha256) throw new Error("Voice Lab migration postflight differs from the release reference catalog.");
   const updated = await client.query(
@@ -40,6 +48,7 @@ try {
   const attestation = await attestVoiceLabSchema(client, true, expectedCatalogSha256);
   if (!attestation.ok) throw new Error(`Voice Lab migration postflight failed: ${attestation.detail}`);
   await writeReleaseSchemaSeal(expectedCatalogSha256);
+  logMigrationStage("release_schema_sealed");
 } catch (error) {
   await client.query("rollback").catch(() => undefined);
   throw error;
