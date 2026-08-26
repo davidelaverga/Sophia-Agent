@@ -65,6 +65,9 @@ describe("service and durable memory-ledger contracts", () => {
     });
     await ledger.createRunWithOperation(run, startOperation(run), { global: 1, caller: 1 });
     await ledger.cancelPendingRunOperations(run.id, null, terminalError);
+    for (let index = 0; index < 3; index += 1) {
+      await ledger.appendEvent(run.id, "cleanup.recovery", "canonical", { complete: true, diagnostic: `${index}${"r".repeat(700_000)}` }, `large-recovery-${index}`);
+    }
 
     const originalSaveEvidence = ledger.saveEvidence.bind(ledger);
     let injectCrash = true;
