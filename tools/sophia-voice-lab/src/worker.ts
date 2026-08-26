@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { promisify } from "node:util";
 import { gzip } from "node:zlib";
 
@@ -1642,7 +1642,7 @@ export class VoiceLabWorker {
       this.ledger.listAuthAudit(run.id),
       this.ledger.listArtifacts(run.id),
     ]);
-    const publicationRevisionHash = canonicalRequestHash({
+    const publicationRevisionHash = evidenceProjectionHash({
       purpose: input.purpose,
       terminal_state: input.terminalState,
       terminal_reason: input.terminalReason,
@@ -1662,8 +1662,8 @@ export class VoiceLabWorker {
         state: operation.state,
         attempt_count: operation.attemptCount,
         request_hash: operation.requestHash,
-        result_sha256: operation.result === null ? null : canonicalRequestHash(operation.result),
-        error_sha256: operation.error === null ? null : canonicalRequestHash(operation.error),
+        result_sha256: operation.result === null ? null : evidenceProjectionHash(operation.result),
+        error_sha256: operation.error === null ? null : evidenceProjectionHash(operation.error),
         updated_at: operation.updatedAt.toISOString(),
       })),
       authorization_audit: publicationAuthAudit.map((audit) => ({
@@ -1672,7 +1672,7 @@ export class VoiceLabWorker {
         capability_jti_hash: audit.capabilityJtiHash,
         argument_hash: audit.argumentHash,
         outcome: audit.outcome,
-        detail_sha256: canonicalRequestHash(audit.detail),
+        detail_sha256: evidenceProjectionHash(audit.detail),
         observed_at: audit.observedAt.toISOString(),
       })),
       durable_artifacts: publicationArtifacts.map((artifact) => ({
@@ -1712,6 +1712,10 @@ export class VoiceLabWorker {
     refs.push(...eventEvidence.refs);
 
     const manifestId = deterministicUuid(run.id, `${input.purpose}:${input.terminalState}:${eventPage.latest}`);
+    const projectionOverflowId = deterministicUuid(run.id, `${input.purpose}:${input.terminalState}:${eventPage.latest}:projection-overflow`);
+    const projectionOverflow: EvidenceProjectionOverflowRecord[] = [];
+    const projectEvidence = (path: string, value: unknown): unknown => projectEvidenceValue(path, value, projectionOverflowId, projectionOverflow);
+    const projectedTerminalError = input.terminalError === null ? null : projectEvidence("terminal_error", input.terminalError);
     const acquiredBrowser = eventPage.events.find((event) => event.kind === "harness.browser_runtime_acquired" && event.source === "canonical");
     const productEvents = eventPage.events.filter((event) => isExactBoundProductEvent(run, event));
     const taskCleanup = deriveTaskCleanup(eventPage.events, run);
@@ -1779,7 +1783,7 @@ export class VoiceLabWorker {
       },
       terminal_state: input.terminalState,
       terminal_reason: input.terminalReason,
-      terminal_error: input.terminalError,
+      terminal_error: projectedTerminalError,
       deployment_identity: {
         expected: run.target.expectedDeployment,
         observed: run.observedDeployment,
@@ -1843,14 +1847,22 @@ export class VoiceLabWorker {
         retention_purge_pending: run.retentionPurgePending,
         retention_purged: run.retentionPurgeVerifiedAt !== null,
       },
-      failure: input.terminalError === null ? { owner: null, classification: null, detail: null } : { owner: failureOwner, classification: input.terminalError.code, detail: input.terminalError },
-      operations: operations.map((item) => ({ operation_id: item.id, type: item.type, state: item.state, attempt_count: item.attemptCount, idempotency_key_hash: sha256(item.idempotencyKey), request_hash: item.requestHash, result: item.result, error: item.error, created_at: item.createdAt.toISOString(), updated_at: item.updatedAt.toISOString() })),
-      authorization_audit: authAudit.map((item) => ({ action: item.action, capability_jti_hash: item.capabilityJtiHash ?? null, argument_hash: item.argumentHash, outcome: item.outcome, detail: item.detail, observed_at: item.observedAt.toISOString() })),
+      failure: input.terminalError === null ? { owner: null, classification: null, detail: null } : { owner: failureOwner, classification: input.terminalError.code, detail: projectedTerminalError },
+      operations: operations.map((item) => ({ operation_id: item.id, type: item.type, state: item.state, attempt_count: item.attemptCount, idempotency_key_hash: sha256(item.idempotencyKey), request_hash: item.requestHash, result: projectEvidence(`operations/${item.id}/result`, item.result), error: projectEvidence(`operations/${item.id}/error`, item.error), created_at: item.createdAt.toISOString(), updated_at: item.updatedAt.toISOString() })),
+      authorization_audit: authAudit.map((item) => ({ action: item.action, capability_jti_hash: item.capabilityJtiHash ?? null, argument_hash: item.argumentHash, outcome: item.outcome, detail: projectEvidence(`authorization_audit/${item.id}/detail`, item.detail), observed_at: item.observedAt.toISOString() })),
       external_attestations: eventPage.events.filter((event) => event.source === "canonical" && event.kind.startsWith("external.attestation.") && event.kind !== "external.attestation_nonce_claimed").map((event) => ({ kind: event.kind.slice("external.attestation.".length), event_seq: event.seq, content_sha256: event.payload.content_sha256, authority: (event.payload.evidence as Record<string, unknown> | undefined)?.authority ?? null, issuer: event.payload.issuer, authority_key_id: event.payload.authority_key_id, jti_sha256: sha256(String(event.payload.jti)), request_argument_sha256: event.payload.request_argument_sha256 })),
       event_stream: eventEvidence.index,
       assertions,
       human_summary: assertions.summary,
     };
+    if (projectionOverflow.length > 0) {
+      const overflowPayload = { schema_version: "sophia.voice-lab.evidence-projection-overflow.v1", run_id: run.id, records: projectionOverflow };
+      assertNoSecret(overflowPayload);
+      const overflowBytes = await gzipAsync(Buffer.from(JSON.stringify(overflowPayload), "utf8"), { level: 9 });
+      if (overflowBytes.byteLength > 2_000_000) throw new VoiceLabError(labError("EVIDENCE_PROJECTION_OVERFLOW_TOO_LARGE", "Compressed evidence projection overflow exceeded its durable row cap.", "evidence"));
+      const savedOverflow = await this.ledger.saveArtifact({ id: projectionOverflowId, runId: run.id, kind: "evidence_projection_overflow", contentType: "application/gzip", sha256: sha256(overflowBytes), bytes: overflowBytes, createdAt: input.createdAt });
+      refs.push({ kind: "evidence_projection_overflow", resource_id: `voice-lab://artifact/${savedOverflow.id}`, sha256: savedOverflow.sha256, content_type: savedOverflow.contentType, byte_length: savedOverflow.bytes.byteLength, expires_at: evidenceExpiresAt });
+    }
     assertNoSecret(manifest);
     const bytes = Buffer.from(JSON.stringify(manifest), "utf8");
     if (bytes.byteLength > 2_000_000) throw new VoiceLabError(labError("EVIDENCE_MANIFEST_TOO_LARGE", "Terminal evidence manifest exceeded its durable Postgres cap.", "evidence"));
@@ -4230,6 +4242,80 @@ function deterministicUuid(runId: string, purpose: string): string {
   source[16] = (["8", "9", "a", "b"] as const)[Number.parseInt(source[16]!, 16) % 4]!;
   const hex = source.join("");
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+/**
+ * Hash immutable, already-persisted evidence without reusing the public request
+ * hash's one-megabyte admission bound. The projection can legitimately contain
+ * a browser diagnostic larger than that bound. Feed canonical JSON directly to
+ * the digest so advancing an evidence revision remains deterministic without
+ * allocating another full serialized copy of the retained evidence.
+ */
+function evidenceProjectionHash(input: unknown): string {
+  const digest = createHash("sha256");
+  const seen = new WeakSet<object>();
+  const write = (value: unknown): void => {
+    if (value === null || typeof value === "boolean" || typeof value === "number" || typeof value === "string") {
+      digest.update(JSON.stringify(value));
+      return;
+    }
+    if (Array.isArray(value)) {
+      if (seen.has(value)) throw new VoiceLabError(labError("EVIDENCE_PROJECTION_INVALID", "Evidence revision projection contains a cycle.", "internal", false));
+      seen.add(value);
+      digest.update("[");
+      value.forEach((child, index) => {
+        if (index > 0) digest.update(",");
+        write(child);
+      });
+      digest.update("]");
+      seen.delete(value);
+      return;
+    }
+    if (value && typeof value === "object") {
+      if (seen.has(value)) throw new VoiceLabError(labError("EVIDENCE_PROJECTION_INVALID", "Evidence revision projection contains a cycle.", "internal", false));
+      seen.add(value);
+      digest.update("{");
+      const entries = Object.entries(value as Record<string, unknown>)
+        .filter(([, child]) => child !== undefined && typeof child !== "function" && typeof child !== "symbol")
+        .sort(([left], [right]) => left.localeCompare(right));
+      entries.forEach(([key, child], index) => {
+        if (index > 0) digest.update(",");
+        digest.update(JSON.stringify(key));
+        digest.update(":");
+        write(child);
+      });
+      digest.update("}");
+      seen.delete(value);
+      return;
+    }
+    digest.update("null");
+  };
+  write(input);
+  return digest.digest("hex");
+}
+
+interface EvidenceProjectionOverflowRecord {
+  path: string;
+  content_sha256: string;
+  byte_length: number;
+  value: unknown;
+}
+
+function projectEvidenceValue(path: string, value: unknown, overflowId: string, overflow: EvidenceProjectionOverflowRecord[]): unknown {
+  if (value === null) return null;
+  const serialized = JSON.stringify(value);
+  if (serialized === undefined) return null;
+  const byteLength = Buffer.byteLength(serialized);
+  if (byteLength <= 64_000) return value;
+  const contentSha256 = evidenceProjectionHash(value);
+  overflow.push({ path, content_sha256: contentSha256, byte_length: byteLength, value });
+  return {
+    status: "available_in_projection_overflow",
+    resource_id: `voice-lab://artifact/${overflowId}`,
+    path,
+    content_sha256: contentSha256,
+    byte_length: byteLength,
+  };
 }
 
 export function deriveD02BrowserContextBinding(run: RunRecord, workerId: string, leaseEpoch: number): D02BrowserContextBinding {

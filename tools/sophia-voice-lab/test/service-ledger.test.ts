@@ -54,6 +54,8 @@ describe("service and durable memory-ledger contracts", () => {
       "ORDINARY_UI_ROUTE_FAILED",
       "The ordinary deployed Sophia voice route could not be established.",
       "harness",
+      false,
+      { browser_diagnostic: "x".repeat(1_000_100) },
     );
     const run = testRun({
       state: "failed_harness",
