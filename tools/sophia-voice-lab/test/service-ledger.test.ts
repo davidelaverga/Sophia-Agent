@@ -33,6 +33,75 @@ describe("service and durable memory-ledger contracts", () => {
     service = new VoiceLabService(ledger, testConfig(), async () => audio.summaries());
   });
 
+  it("normalizes U+0000 from harness error detail before jsonb persistence", () => {
+    const error = labError(
+      "ORDINARY_UI_ROUTE_FAILED",
+      "The ordinary deployed Sophia voice route could not be established.",
+      "harness",
+      false,
+      { cause: "locator failed\u0000after navigation", nested: ["safe\u0000detail"] },
+    );
+
+    expect(error.details).toEqual({
+      cause: "locator failed\uFFFDafter navigation",
+      nested: ["safe\uFFFDdetail"],
+    });
+    expect(JSON.stringify(error)).not.toContain("\\u0000");
+  });
+
+  it("advances the evidence revision after an orphan manifest and changed run projection", async () => {
+    const terminalError = labError(
+      "ORDINARY_UI_ROUTE_FAILED",
+      "The ordinary deployed Sophia voice route could not be established.",
+      "harness",
+    );
+    const run = testRun({
+      state: "failed_harness",
+      cleanupComplete: true,
+      terminalError,
+      verdicts: { ...initialVerdicts(), harness: "fail", evidence: "fail" },
+    });
+    await ledger.createRunWithOperation(run, startOperation(run), { global: 1, caller: 1 });
+    await ledger.cancelPendingRunOperations(run.id, null, terminalError);
+
+    const originalSaveEvidence = ledger.saveEvidence.bind(ledger);
+    let injectCrash = true;
+    ledger.saveEvidence = async (evidence) => {
+      if (injectCrash) {
+        injectCrash = false;
+        throw new Error("simulated crash after immutable manifest insert");
+      }
+      return originalSaveEvidence(evidence);
+    };
+    const config = testConfig();
+    const driver = {
+      hasSession: () => false,
+      readiness: async () => ({ ok: true, detail: "test-browser", engine: "chromium", version: "test" }),
+      close: async () => undefined,
+    } as any;
+    const worker = new VoiceLabWorker(
+      "worker-orphan-manifest",
+      ledger,
+      config,
+      audio,
+      driver,
+      new CapabilityCodec(config.capabilitySecret, config.capabilityIssuer, config.capabilityTtlSeconds),
+    );
+
+    await expect(worker.maintainSessions()).rejects.toThrow("simulated crash");
+    expect(await ledger.getEvidence(run.id)).toBeNull();
+    expect((await ledger.listArtifacts(run.id)).filter((artifact) => artifact.kind === "manifest_attachment")).toHaveLength(1);
+
+    const stale = await ledger.getRun(run.id);
+    await ledger.updateRun(run.id, stale!.version, { observedDeployment: { frontend: SHA } });
+    await expect(worker.maintainSessions()).resolves.toBeUndefined();
+
+    const evidence = await ledger.getEvidence(run.id);
+    expect(evidence).not.toBeNull();
+    expect((await ledger.listArtifacts(run.id)).filter((artifact) => artifact.kind === "manifest_attachment")).toHaveLength(2);
+    expect((await ledger.listEvents(run.id, 0, 100)).events.filter((event) => event.kind === "evidence.publication_revision")).toHaveLength(2);
+  });
+
   it("reports the exact 21-scenario catalog, governed fixture classes, limits, and caller scope", async () => {
     const result = await service.getCapabilities(caller, {});
     expect(result.status).toBe("ok");

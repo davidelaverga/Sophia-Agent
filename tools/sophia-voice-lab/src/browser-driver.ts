@@ -153,6 +153,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
     const browser = await this.#ensureBrowser();
     const context = await browser.newContext({ ...(storageState === undefined ? {} : { storageState: storageState as any }), serviceWorkers: "block" });
     this.#pendingContexts.set(run.id, context);
+    let ordinaryRouteStage = "frontend_auth_grant";
     try {
       // No OS/browser microphone permission is granted. The init script's
       // page-owned MediaStreamDestination is the only accepted audio stream;
@@ -171,16 +172,20 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         throw new VoiceLabError(labError("AUTH_GRANT_BINDING_INVALID", "Frontend grant receipt did not prove the exact run, bounded expiry, conflict-free session admission, and cleanup verification.", "authorization"));
       }
       const authSessionUrl = new URL(this.config.authSessionPath, frontendOrigin).toString();
+      ordinaryRouteStage = "frontend_auth_session";
       const { response: authSession, payload: authIdentity } = await requestBoundJson(context.request, "GET", authSessionUrl, 10_000);
       const authUser = authIdentity?.user as Record<string, unknown> | undefined;
       if (!authSession.ok() || authUser?.id !== run.principalId) throw new VoiceLabError(labError("AUTH_PRINCIPAL_MISMATCH", "The browser session is not bound to the exact dedicated Voice Lab principal.", "authorization", false, { observed_principal_sha256: typeof authUser?.id === "string" ? sha256(authUser.id) : null }));
+      ordinaryRouteStage = "browser_init_script";
       await context.addInitScript({ content: buildVoiceLabInitScript({ pageOrigin: frontendOrigin, websocketOrigins: [...this.config.websocketOrigins], maxAudioBytes: this.config.maxAudioBytes, testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId }) });
+      ordinaryRouteStage = "frontend_home_navigation";
       const page = await context.newPage();
       const session: BrowserSession = { context, page, harnessCursor: 0, productCursor: null, latestProviderReceipt: null, contextExpiresAt: Number(grantReceipt.expires_at), expectedBinding: { testRunId: run.testRunId, cleanupObligationId: run.cleanupObligationId, principalId: run.principalId, scenarioId: run.scenarioId, scenarioVersion: run.scenarioVersion, environment: run.environment, retentionHours: run.capturePolicy.retentionHours, providerExpiresAt: run.expiresAt.toISOString(), ...(exactBrowserContextBinding === undefined ? {} : { browserContextBinding: exactBrowserContextBinding }) } };
       this.#sessions.set(run.id, session);
       this.#pendingContexts.delete(run.id);
       await page.goto(new URL("/", frontendOrigin).toString(), { waitUntil: "domcontentloaded", timeout: 30_000 });
       assertPageLocation(page.url(), frontendOrigin, (pathname) => pathname === "/", "ORDINARY_UI_ORIGIN_DRIFT");
+      ordinaryRouteStage = "dashboard_microphone_cta";
       const micAnchor = page.locator(this.config.onboardingMicSelector).first();
       await micAnchor.waitFor({ state: "visible", timeout: 20_000 });
       const anchoredButton = micAnchor.locator("xpath=ancestor::button[1]");
@@ -189,15 +194,20 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
         : page.getByRole("button", { name: /^Start (?:open session|prepare|debrief|reset|vent)$/i }).first();
       await dashboardButton.waitFor({ state: "visible", timeout: 5_000 });
       await dashboardButton.click();
+      ordinaryRouteStage = "fresh_session_choice";
       const fresh = page.getByRole("button", { name: new RegExp(`^${escapeRegex(this.config.freshButtonName)}$`, "i") }).first();
       if (await fresh.isVisible({ timeout: 1_200 }).catch(() => false)) await fresh.click();
+      ordinaryRouteStage = "session_navigation";
       await page.waitForURL((url) => url.origin === frontendOrigin && /^\/session(?:\/|$)/.test(url.pathname) && url.hash === "", { timeout: 20_000 });
       assertPageLocation(page.url(), frontendOrigin, (pathname) => /^\/session(?:\/|$)/.test(pathname), "ORDINARY_UI_ORIGIN_DRIFT");
+      ordinaryRouteStage = "voice_tab_selection";
       const voiceTab = page.getByRole("tab", { name: /^voice$/i }).first();
       if (await voiceTab.isVisible({ timeout: 2_000 }).catch(() => false) && await voiceTab.getAttribute("aria-selected") !== "true") await voiceTab.click();
+      ordinaryRouteStage = "voice_start_button";
       const startButton = page.getByRole("button", { name: this.config.startButtonName, exact: true }).first();
       await startButton.waitFor({ state: "visible", timeout: 20_000 });
       await startButton.click();
+      ordinaryRouteStage = "voice_startup_readiness";
       const events = await this.#waitForStartupReadiness(run.id, session, 45_000);
       events.push(...await this.drain(run.id));
       events.push({ kind: "deployment.verified", source: "canonical", payload: deployment.components, dedupeKey: `deployment:${run.id}:startup` });
@@ -208,7 +218,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       if (closed.closed) { this.#sessions.delete(run.id); this.#pendingContexts.delete(run.id); }
       else throw new VoiceLabError(labError("BROWSER_CONTEXT_CLOSE_FAILED", "Failed start left a browser context that could not be proven closed.", "harness", true, { original_error_class: error instanceof VoiceLabError ? error.detail.code : error instanceof Error ? error.name : "Error", close_error_class: closed.errorClass }));
       if (error instanceof VoiceLabError) throw error;
-      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { cause: error instanceof Error ? error.message : String(error) }));
+      throw new VoiceLabError(labError("ORDINARY_UI_ROUTE_FAILED", "The ordinary deployed Sophia voice route could not be established.", "harness", false, { stage: ordinaryRouteStage, cause: error instanceof Error ? error.message : String(error) }));
     }
   }
 

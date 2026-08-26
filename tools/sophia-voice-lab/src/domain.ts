@@ -357,5 +357,23 @@ export function labError(
   retryable = false,
   details?: Record<string, unknown>,
 ): LabError {
-  return { code, message, category, retryable, ...(details === undefined ? {} : { details }) };
+  return {
+    code,
+    message,
+    category,
+    retryable,
+    ...(details === undefined ? {} : { details: postgresJsonSafe(details) }),
+  };
+}
+
+/** PostgreSQL jsonb rejects U+0000 even when it is validly JSON-escaped. */
+function postgresJsonSafe<T>(value: T): T {
+  if (typeof value === "string") return value.replace(/\u0000/g, "\uFFFD") as T;
+  if (Array.isArray(value)) return value.map((item) => postgresJsonSafe(item)) as T;
+  if (value && typeof value === "object") {
+    return Object.fromEntries(
+      Object.entries(value as Record<string, unknown>).map(([key, item]) => [key, postgresJsonSafe(item)]),
+    ) as T;
+  }
+  return value;
 }

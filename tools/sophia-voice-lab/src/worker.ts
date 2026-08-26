@@ -1637,6 +1637,47 @@ export class VoiceLabWorker {
   }): Promise<void> {
     const run = await this.#freshRun(input.runId);
     const evidenceExpiresAt = (run.retentionPurgeDueAt ?? new Date(input.createdAt.getTime() + run.capturePolicy.retentionHours * 3_600_000)).toISOString();
+    const [publicationOperations, publicationAuthAudit, publicationArtifacts] = await Promise.all([
+      this.ledger.listOperations(run.id),
+      this.ledger.listAuthAudit(run.id),
+      this.ledger.listArtifacts(run.id),
+    ]);
+    const publicationRevisionHash = canonicalRequestHash({
+      purpose: input.purpose,
+      terminal_state: input.terminalState,
+      terminal_reason: input.terminalReason,
+      terminal_error: input.terminalError,
+      verdicts: input.verdicts,
+      created_at: input.createdAt.toISOString(),
+      run_projection: {
+        observed_deployment: run.observedDeployment,
+        cleanup_complete: run.cleanupComplete,
+        retention_purge_due_at: run.retentionPurgeDueAt?.toISOString() ?? null,
+        retention_purge_pending: run.retentionPurgePending,
+        retention_purge_verified_at: run.retentionPurgeVerifiedAt?.toISOString() ?? null,
+      },
+      operations: publicationOperations,
+      authorization_audit: publicationAuthAudit,
+      durable_artifacts: publicationArtifacts.map((artifact) => ({
+        id: artifact.id,
+        kind: artifact.kind,
+        content_type: artifact.contentType,
+        sha256: artifact.sha256,
+      })),
+      incoming_artifacts: input.artifacts.map((artifact) => ({
+        id: artifact.id,
+        kind: artifact.kind,
+        content_type: artifact.contentType,
+        sha256: sha256(artifact.bytes),
+      })),
+    });
+    await this.ledger.appendEvent(
+      run.id,
+      "evidence.publication_revision",
+      "worker",
+      { publication_revision_sha256: publicationRevisionHash, purpose: input.purpose },
+      `evidence:${run.id}:publication:${input.purpose}:${publicationRevisionHash}`,
+    );
     for (const artifact of input.artifacts) {
       if (artifact.bytes.byteLength > 2_000_000) {
         await this.ledger.appendEvent(run.id, "evidence.artifact_dropped", "worker", { kind: artifact.kind, reason: "size_limit", byte_length: artifact.bytes.byteLength }, `evidence:${run.id}:${sha256(artifact.id)}:dropped`);

@@ -72,6 +72,9 @@ _ARTIFACT_UPSERT_AUTH_PATCH = "artifact_upsert_auth_v2"
 _DECK_QUALITY_READINESS_ATTR = "_deck_quality_readiness"
 _DEPLOYMENT_SHA_PATTERN = re.compile(r"^[a-f0-9]{40}$")
 _SAFE_STARTUP_FAILURE_CODE = re.compile(r"^[a-z0-9_]{1,96}$")
+_VOICE_LAB_RECOVERY_PATH = re.compile(
+    r"^/internal/voice-lab/runs/[^/]+/recover$"
+)
 
 
 def _deck_quality_component(
@@ -876,9 +879,21 @@ This gateway provides custom endpoints for models, MCP configuration, skills, an
         from app.gateway.voice_lab_capability import (
             VOICE_LAB_CAPABILITY_HEADER,
             VOICE_LAB_PROVIDER_CLEANUP_HEADER,
+            VOICE_LAB_RECOVERY_INTERNAL_AUTH_HEADER,
         )
 
-        if (
+        # The exact private recovery route carries a recovery capability as
+        # well as an independent internal secret.  Its router verifies both
+        # credentials.  Do not feed that capability through the ordinary
+        # product-route fence first or recovery is categorically denied before
+        # the stronger dual-auth handler can run.
+        private_recovery = (
+            request.method.upper() == "POST"
+            and _VOICE_LAB_RECOVERY_PATH.fullmatch(request.url.path) is not None
+            and bool(request.headers.get(VOICE_LAB_RECOVERY_INTERNAL_AUTH_HEADER))
+        )
+
+        if not private_recovery and (
             authorization.lower().startswith("bearer ")
             or request.headers.get(VOICE_LAB_CAPABILITY_HEADER)
             or request.headers.get(VOICE_LAB_PROVIDER_CLEANUP_HEADER)

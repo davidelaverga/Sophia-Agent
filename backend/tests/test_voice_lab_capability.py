@@ -29,6 +29,7 @@ from app.gateway.voice_lab_capability import (
     VOICE_INTERNAL_AUTH_HEADER,
     VOICE_LAB_CAPABILITY_HEADER,
     VOICE_LAB_PROVIDER_CLEANUP_HEADER,
+    VOICE_LAB_RECOVERY_INTERNAL_AUTH_HEADER,
     capability_for_gateway_action,
     capability_for_voice_connect,
     mint_provider_cleanup_token,
@@ -1910,6 +1911,55 @@ def test_gateway_middleware_denies_synthetic_authority_on_ungoverned_route(
     assert response.json()["detail"] == {"code": expected_code}
     health_read.assert_not_called()
     legacy_auth.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    ("method", "path"),
+    [
+        ("GET", "/internal/voice-lab/runs/run-001/recover"),
+        ("POST", "/internal/voice-lab/runs/run-001/recover/extra"),
+    ],
+)
+def test_gateway_middleware_does_not_bypass_near_match_recovery_routes(
+    method: str,
+    path: str,
+    voice_lab_env: None,
+) -> None:
+    from app.gateway.app import create_app
+
+    response = TestClient(create_app()).request(
+        method,
+        path,
+        headers={
+            VOICE_LAB_CAPABILITY_HEADER: "opaque-authority",
+            VOICE_LAB_RECOVERY_INTERNAL_AUTH_HEADER: "opaque-recovery-authority",
+        },
+    )
+
+    assert response.status_code == 403
+    assert response.json()["detail"] == {
+        "code": "voice_lab_ordinary_product_route_forbidden"
+    }
+
+
+def test_gateway_middleware_delegates_exact_private_recovery_to_dual_auth_handler(
+    voice_lab_env: None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from app.gateway.app import create_app
+
+    recovery_secret = "recovery-secret-that-is-at-least-thirty-two-bytes"
+    monkeypatch.setenv("SOPHIA_VOICE_LAB_RECOVERY_INTERNAL_SECRET", recovery_secret)
+    response = TestClient(create_app()).post(
+        "/internal/voice-lab/runs/run-001/recover",
+        headers={
+            VOICE_LAB_CAPABILITY_HEADER: "opaque-authority",
+            VOICE_LAB_RECOVERY_INTERNAL_AUTH_HEADER: recovery_secret,
+        },
+    )
+
+    assert response.status_code == 401
+    assert response.json()["detail"] == {"code": "voice_lab_capability_malformed"}
 
 
 @pytest.mark.anyio
