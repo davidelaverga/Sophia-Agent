@@ -361,6 +361,25 @@ describe("OAuth 2.1 authorization server", () => {
     expect(() => new OAuthAuthorizationServer({ ...config(), tokenPepper: STATIC_BEARER }, new DurableTestStore())).toThrow(VoiceLabError);
   });
 
+  it("accepts ChatGPT's bounded ui_locales hint without persisting it as authorization state", async () => {
+    const localized = authorizationParams();
+    localized.set("ui_locales", "en-US it-IT");
+    const authorization = await server.handleAuthorizationRequest(localized);
+    expect(authorization.status).toBe(200);
+    expect(store.authorizationRequests.size).toBe(1);
+    expect(JSON.stringify([...store.authorizationRequests.values()])).not.toContain("en-US");
+
+    for (const invalid of ["en-US en-US", "en_US", "en-US <script>", "x".repeat(36), Array.from({ length: 11 }, (_, index) => `en-${index}`).join(" ")]) {
+      const malformed = authorizationParams(`state-ui-locales-${createHash("sha256").update(invalid).digest("hex").slice(0, 16)}`);
+      malformed.set("ui_locales", invalid);
+      const denied = await errorResult(server, () => server.handleAuthorizationRequest(malformed));
+      expect(denied.status).toBe(400);
+      expect(JSON.parse(denied.body)).toMatchObject({ error: "invalid_request" });
+      expect(denied.body).not.toContain(invalid);
+    }
+    expect(store.authorizationRequests.size).toBe(1);
+  });
+
   it("durably rate-fences public OAuth endpoints before request allocation and purges expired rows", async () => {
     const limitedStore = new DurableTestStore();
     const limitedServer = new OAuthAuthorizationServer({ ...config(), authorizeRequestsPerWindow: 1 }, limitedStore);

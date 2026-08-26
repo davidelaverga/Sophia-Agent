@@ -579,9 +579,10 @@ export class OAuthAuthorizationServer implements RequestAuthenticator, OAuthToke
 
   async handleAuthorizationRequest(params: URLSearchParams, admissionSubject = "direct-client"): Promise<OAuthHttpResult> {
     await this.#admitEndpoint("authorize_get", admissionSubject);
-    rejectDuplicateOrUnknownParameters(params, ["response_type", "response_mode", "client_id", "redirect_uri", "scope", "state", "code_challenge", "code_challenge_method", "resource"]);
+    rejectDuplicateOrUnknownParameters(params, ["response_type", "response_mode", "client_id", "redirect_uri", "scope", "state", "code_challenge", "code_challenge_method", "resource", "ui_locales"]);
     if (single(params, "response_type", 20) !== "code") throw new OAuthProtocolError("unsupported_response_type");
     if (params.has("response_mode") && single(params, "response_mode", 20) !== "query") throw new OAuthProtocolError("invalid_request");
+    if (params.has("ui_locales")) validateUiLocales(single(params, "ui_locales", 256));
     const clientId = single(params, "client_id", 500);
     if (clientId !== this.#config.clientMetadataUrl) throw new OAuthProtocolError("unauthorized_client");
     const client = await this.#loadClientMetadata();
@@ -1391,6 +1392,19 @@ function single(params: URLSearchParams, name: string, maxBytes: number): string
 
 function serializedFormBytes(params: URLSearchParams): number {
   return Buffer.byteLength(params.toString());
+}
+
+function validateUiLocales(value: string): void {
+  const locales = value.split(" ");
+  if (locales.length === 0 || locales.length > 10 || new Set(locales).size !== locales.length
+    || locales.some((locale) => locale.length === 0 || locale.length > 35 || !/^[A-Za-z0-9-]+$/.test(locale))) {
+    throw new OAuthProtocolError("invalid_request");
+  }
+  try {
+    for (const locale of locales) new Intl.Locale(locale);
+  } catch {
+    throw new OAuthProtocolError("invalid_request");
+  }
 }
 
 function parseCookie(header: string | undefined, name: string): string | null {
