@@ -882,7 +882,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         const remoteStatus = row.retention_purge_verified_at !== null && row.retention_purge_pending === false ? "confirmed" : "unconfirmed";
         await client.query(
           `insert into ${SCHEMA}.retention_tombstones (lookup_id_hmac,recovery_id_hmac,remote_purge_status,purged_at,control_expires_at)
-           values ($1,$2,$3,$4,$4+interval '30 days')
+           values ($1,$2,$3,$4::timestamptz,$4::timestamptz+interval '30 days')
            on conflict (lookup_id_hmac) do update set remote_purge_status=excluded.remote_purge_status,purged_at=excluded.purged_at,control_expires_at=excluded.control_expires_at`,
           [retentionHmac(this.#retentionKey, "lookup", `${row.id}\u0000${row.caller_id}`), retentionHmac(this.#retentionKey, "recovery", row.cleanup_obligation_id), remoteStatus, now],
         );
