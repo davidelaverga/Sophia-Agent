@@ -113,6 +113,7 @@ describe("ordinary dashboard consent route", () => {
     const result = await establishDashboardMicRoute({
       isMicVisible: async () => consentAccepted && waits > 0,
       isConsentVisible: async () => !consentAccepted,
+      isConsentEnabled: async () => waits > 0,
       acceptConsent: async () => { consentAccepted = true; },
       wait: async () => { waits += 1; now += 100; },
       timeoutMs: 1_000,
@@ -127,6 +128,7 @@ describe("ordinary dashboard consent route", () => {
     const result = await establishDashboardMicRoute({
       isMicVisible: async () => true,
       isConsentVisible: async () => true,
+      isConsentEnabled: async () => true,
       acceptConsent: async () => { accepted = true; },
       wait: async () => undefined,
       timeoutMs: 1_000,

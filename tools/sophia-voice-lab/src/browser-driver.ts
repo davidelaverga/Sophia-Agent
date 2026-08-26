@@ -109,6 +109,7 @@ const CONSENT_ACCEPT_SELECTOR = '[data-voice-lab="consent-accept"]';
 export async function establishDashboardMicRoute(input: {
   isMicVisible: () => Promise<boolean>;
   isConsentVisible: () => Promise<boolean>;
+  isConsentEnabled: () => Promise<boolean>;
   acceptConsent: () => Promise<void>;
   wait: () => Promise<void>;
   timeoutMs: number;
@@ -118,7 +119,7 @@ export async function establishDashboardMicRoute(input: {
   const deadline = now() + input.timeoutMs;
   while (now() < deadline) {
     if (await input.isMicVisible()) return "already_consented";
-    if (await input.isConsentVisible()) {
+    if (await input.isConsentVisible() && await input.isConsentEnabled()) {
       await input.acceptConsent();
       while (now() < deadline) {
         if (await input.isMicVisible()) return "accepted";
@@ -218,6 +219,7 @@ export class PlaywrightVoiceDriver implements VoiceBrowserDriver {
       await establishDashboardMicRoute({
         isMicVisible: () => micAnchor.isVisible(),
         isConsentVisible: () => consentAccept.isVisible(),
+        isConsentEnabled: () => consentAccept.isEnabled(),
         acceptConsent: () => consentAccept.click({ timeout: 20_000 }),
         wait: () => page.waitForTimeout(100),
         timeoutMs: 20_000,
