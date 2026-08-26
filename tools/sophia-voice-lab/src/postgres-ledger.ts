@@ -467,7 +467,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         await client.query("commit");
         return existing;
       }
-      const inserted = await client.query(`insert into ${SCHEMA}.suite_evidence_manifests (suite_id,manifest_id,manifest_sha256,schema_version,bytes,artifact_refs,created_at) values ($1,$2,$3,$4,$5,$6,$7) returning *`, [evidence.suiteId, evidence.manifestId, evidence.manifestSha256, evidence.schemaVersion, evidence.bytes, evidence.artifactRefs, evidence.createdAt]);
+      const inserted = await client.query(`insert into ${SCHEMA}.suite_evidence_manifests (suite_id,manifest_id,manifest_sha256,schema_version,bytes,artifact_refs,created_at) values ($1,$2,$3,$4,$5,$6,$7) returning *`, [evidence.suiteId, evidence.manifestId, evidence.manifestSha256, evidence.schemaVersion, evidence.bytes, JSON.stringify(evidence.artifactRefs), evidence.createdAt]);
       await client.query("commit");
       return mapSuiteEvidence(inserted.rows[0]);
     } catch (error) { await client.query("rollback"); throw translatePgError(error); }
@@ -491,7 +491,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
       const insertedRevision = await client.query(
         `insert into ${SCHEMA}.evidence_manifest_revisions (manifest_id,run_id,revision_seq,manifest_sha256,schema_version,artifact_refs,created_at)
          values ($1,$2,$3,$4,$5,$6,$7) on conflict (manifest_id) do nothing returning *`,
-        [evidence.manifestId, evidence.runId, evidence.revisionSeq, evidence.manifestSha256, evidence.schemaVersion, evidence.artifactRefs, evidence.createdAt],
+        [evidence.manifestId, evidence.runId, evidence.revisionSeq, evidence.manifestSha256, evidence.schemaVersion, JSON.stringify(evidence.artifactRefs), evidence.createdAt],
       );
       if (!insertedRevision.rows[0]) {
         const priorRevision = await client.query(`select * from ${SCHEMA}.evidence_manifest_revisions where manifest_id=$1`, [evidence.manifestId]);
@@ -506,7 +506,7 @@ export class PostgresVoiceLabLedger implements VoiceLabLedger {
         `insert into ${SCHEMA}.evidence_manifests (run_id,manifest_id,manifest_sha256,schema_version,revision_seq,artifact_refs,created_at)
          values ($1,$2,$3,$4,$5,$6,$7)
          on conflict (run_id) do update set manifest_id=excluded.manifest_id,manifest_sha256=excluded.manifest_sha256,schema_version=excluded.schema_version,revision_seq=excluded.revision_seq,artifact_refs=excluded.artifact_refs,created_at=excluded.created_at returning *`,
-        [evidence.runId, evidence.manifestId, evidence.manifestSha256, evidence.schemaVersion, evidence.revisionSeq, evidence.artifactRefs, evidence.createdAt],
+        [evidence.runId, evidence.manifestId, evidence.manifestSha256, evidence.schemaVersion, evidence.revisionSeq, JSON.stringify(evidence.artifactRefs), evidence.createdAt],
       );
       await client.query("commit");
       return mapEvidence(result.rows[0]);
